@@ -1062,6 +1062,241 @@ fn evaluate_expr(
                             .unwrap_or(Value::Nil);
                         return Ok(Value::Bool(arr.contains(&needle)));
                     }
+                    // Functional methods that return new arrays
+                    "push" | "append" => {
+                        let item = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        let mut new_arr = arr.clone();
+                        new_arr.push(item);
+                        return Ok(Value::Array(new_arr));
+                    }
+                    "pop" => {
+                        let mut new_arr = arr.clone();
+                        new_arr.pop();
+                        return Ok(Value::Array(new_arr));
+                    }
+                    "concat" | "extend" => {
+                        let other = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Array(vec![]));
+                        if let Value::Array(other_arr) = other {
+                            let mut new_arr = arr.clone();
+                            new_arr.extend(other_arr);
+                            return Ok(Value::Array(new_arr));
+                        }
+                        return Err(CompileError::Semantic("concat expects array argument".into()));
+                    }
+                    "insert" => {
+                        let idx = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Int(0))
+                            .as_int()? as usize;
+                        let item = args.get(1)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        let mut new_arr = arr.clone();
+                        if idx <= new_arr.len() {
+                            new_arr.insert(idx, item);
+                        }
+                        return Ok(Value::Array(new_arr));
+                    }
+                    "remove" => {
+                        let idx = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Int(0))
+                            .as_int()? as usize;
+                        let mut new_arr = arr.clone();
+                        if idx < new_arr.len() {
+                            new_arr.remove(idx);
+                        }
+                        return Ok(Value::Array(new_arr));
+                    }
+                    "reverse" => {
+                        let mut new_arr = arr.clone();
+                        new_arr.reverse();
+                        return Ok(Value::Array(new_arr));
+                    }
+                    "slice" => {
+                        let start = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Int(0))
+                            .as_int()? as usize;
+                        let end = args.get(1)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .map(|v| v.as_int().unwrap_or(arr.len() as i64) as usize)
+                            .unwrap_or(arr.len());
+                        let end = end.min(arr.len());
+                        let start = start.min(end);
+                        return Ok(Value::Array(arr[start..end].to_vec()));
+                    }
+                    "map" => {
+                        let func = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        if let Value::Lambda { params, body, env: captured } = func {
+                            let mut result = Vec::new();
+                            for item in arr {
+                                let mut local_env = captured.clone();
+                                if let Some(param) = params.first() {
+                                    local_env.insert(param.clone(), item.clone());
+                                }
+                                result.push(evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?);
+                            }
+                            return Ok(Value::Array(result));
+                        }
+                        return Err(CompileError::Semantic("map expects lambda argument".into()));
+                    }
+                    "filter" => {
+                        let func = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        if let Value::Lambda { params, body, env: captured } = func {
+                            let mut result = Vec::new();
+                            for item in arr {
+                                let mut local_env = captured.clone();
+                                if let Some(param) = params.first() {
+                                    local_env.insert(param.clone(), item.clone());
+                                }
+                                let keep = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                                if keep.truthy() {
+                                    result.push(item.clone());
+                                }
+                            }
+                            return Ok(Value::Array(result));
+                        }
+                        return Err(CompileError::Semantic("filter expects lambda argument".into()));
+                    }
+                    "reduce" | "fold" => {
+                        let init = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Int(0));
+                        let func = args.get(1)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        if let Value::Lambda { params, body, env: captured } = func {
+                            let mut acc = init;
+                            for item in arr {
+                                let mut local_env = captured.clone();
+                                if params.len() >= 2 {
+                                    local_env.insert(params[0].clone(), acc.clone());
+                                    local_env.insert(params[1].clone(), item.clone());
+                                }
+                                acc = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                            }
+                            return Ok(acc);
+                        }
+                        return Err(CompileError::Semantic("reduce expects lambda argument".into()));
+                    }
+                    "find" => {
+                        let func = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        if let Value::Lambda { params, body, env: captured } = func {
+                            for item in arr {
+                                let mut local_env = captured.clone();
+                                if let Some(param) = params.first() {
+                                    local_env.insert(param.clone(), item.clone());
+                                }
+                                let matches = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                                if matches.truthy() {
+                                    return Ok(Value::Enum {
+                                        enum_name: "Option".into(),
+                                        variant: "Some".into(),
+                                        payload: Some(Box::new(item.clone())),
+                                    });
+                                }
+                            }
+                            return Ok(Value::Enum {
+                                enum_name: "Option".into(),
+                                variant: "None".into(),
+                                payload: None,
+                            });
+                        }
+                        return Err(CompileError::Semantic("find expects lambda argument".into()));
+                    }
+                    "any" => {
+                        let func = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        if let Value::Lambda { params, body, env: captured } = func {
+                            for item in arr {
+                                let mut local_env = captured.clone();
+                                if let Some(param) = params.first() {
+                                    local_env.insert(param.clone(), item.clone());
+                                }
+                                let matches = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                                if matches.truthy() {
+                                    return Ok(Value::Bool(true));
+                                }
+                            }
+                            return Ok(Value::Bool(false));
+                        }
+                        return Err(CompileError::Semantic("any expects lambda argument".into()));
+                    }
+                    "all" => {
+                        let func = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        if let Value::Lambda { params, body, env: captured } = func {
+                            for item in arr {
+                                let mut local_env = captured.clone();
+                                if let Some(param) = params.first() {
+                                    local_env.insert(param.clone(), item.clone());
+                                }
+                                let matches = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                                if !matches.truthy() {
+                                    return Ok(Value::Bool(false));
+                                }
+                            }
+                            return Ok(Value::Bool(true));
+                        }
+                        return Err(CompileError::Semantic("all expects lambda argument".into()));
+                    }
+                    "join" => {
+                        let sep = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Str("".into()))
+                            .to_display_string();
+                        let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
+                        return Ok(Value::Str(parts.join(&sep)));
+                    }
+                    "sum" => {
+                        let mut total: i64 = 0;
+                        for item in arr {
+                            if let Value::Int(n) = item {
+                                total += n;
+                            }
+                        }
+                        return Ok(Value::Int(total));
+                    }
+                    "index_of" => {
+                        let needle = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        for (i, item) in arr.iter().enumerate() {
+                            if item == &needle {
+                                return Ok(Value::Int(i as i64));
+                            }
+                        }
+                        return Ok(Value::Int(-1));
+                    }
                     _ => {}
                 }
             }
@@ -1108,6 +1343,104 @@ fn evaluate_expr(
                     "values" => {
                         let vals: Vec<Value> = map.values().cloned().collect();
                         return Ok(Value::Array(vals));
+                    }
+                    // Functional methods that return new dicts
+                    "set" | "insert" => {
+                        let key = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil)
+                            .to_key_string();
+                        let value = args.get(1)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        let mut new_map = map.clone();
+                        new_map.insert(key, value);
+                        return Ok(Value::Dict(new_map));
+                    }
+                    "remove" | "delete" => {
+                        let key = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil)
+                            .to_key_string();
+                        let mut new_map = map.clone();
+                        new_map.remove(&key);
+                        return Ok(Value::Dict(new_map));
+                    }
+                    "merge" | "extend" => {
+                        let other = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Dict(HashMap::new()));
+                        if let Value::Dict(other_map) = other {
+                            let mut new_map = map.clone();
+                            new_map.extend(other_map);
+                            return Ok(Value::Dict(new_map));
+                        }
+                        return Err(CompileError::Semantic("merge expects dict argument".into()));
+                    }
+                    "get_or" => {
+                        let key = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil)
+                            .to_key_string();
+                        let default = args.get(1)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        return Ok(map.get(&key).cloned().unwrap_or(default));
+                    }
+                    "entries" | "items" => {
+                        let entries: Vec<Value> = map.iter()
+                            .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+                            .collect();
+                        return Ok(Value::Array(entries));
+                    }
+                    "map_values" => {
+                        let func = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        if let Value::Lambda { params, body, env: captured } = func {
+                            let mut new_map = HashMap::new();
+                            for (k, v) in map {
+                                let mut local_env = captured.clone();
+                                if let Some(param) = params.first() {
+                                    local_env.insert(param.clone(), v.clone());
+                                }
+                                let new_val = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                                new_map.insert(k.clone(), new_val);
+                            }
+                            return Ok(Value::Dict(new_map));
+                        }
+                        return Err(CompileError::Semantic("map_values expects lambda argument".into()));
+                    }
+                    "filter" => {
+                        let func = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        if let Value::Lambda { params, body, env: captured } = func {
+                            let mut new_map = HashMap::new();
+                            for (k, v) in map {
+                                let mut local_env = captured.clone();
+                                if params.len() >= 2 {
+                                    local_env.insert(params[0].clone(), Value::Str(k.clone()));
+                                    local_env.insert(params[1].clone(), v.clone());
+                                } else if let Some(param) = params.first() {
+                                    local_env.insert(param.clone(), v.clone());
+                                }
+                                let keep = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                                if keep.truthy() {
+                                    new_map.insert(k.clone(), v.clone());
+                                }
+                            }
+                            return Ok(Value::Dict(new_map));
+                        }
+                        return Err(CompileError::Semantic("filter expects lambda argument".into()));
                     }
                     _ => {}
                 }

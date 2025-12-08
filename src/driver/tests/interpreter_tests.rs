@@ -871,3 +871,161 @@ main = add(1, \
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 6);
 }
+
+// ============= Array Functional Methods =============
+
+#[test]
+fn interpreter_array_push() {
+    let code = r#"
+arr = [1, 2, 3]
+arr = arr.push(4)
+main = arr[3]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 4);
+}
+
+#[test]
+fn interpreter_array_concat() {
+    let code = r#"
+a = [1, 2]
+b = [3, 4]
+c = a.concat(b)
+main = c.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 4);
+}
+
+#[test]
+fn interpreter_array_slice() {
+    let code = r#"
+arr = [0, 1, 2, 3, 4, 5]
+sliced = arr.slice(2, 5)
+main = sliced.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 3);
+}
+
+#[test]
+fn interpreter_array_map() {
+    let code = r#"
+arr = [1, 2, 3]
+doubled = arr.map(\x: x * 2)
+main = doubled[1]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 4);
+}
+
+#[test]
+fn interpreter_array_filter() {
+    let code = r#"
+arr = [1, 2, 3, 4, 5]
+evens = arr.filter(\x: x % 2 == 0)
+main = evens.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2);
+}
+
+#[test]
+fn interpreter_array_reduce() {
+    let code = r#"
+arr = [1, 2, 3, 4, 5]
+sum = arr.reduce(0, \acc, x: acc + x)
+main = sum
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15);
+}
+
+#[test]
+fn interpreter_array_any_all() {
+    let code = r#"
+arr = [2, 4, 6]
+all_even = arr.all(\x: x % 2 == 0)
+main = if all_even: 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_array_join() {
+    let code = r#"
+arr = [1, 2, 3]
+s = arr.join("-")
+main = if s == "1-2-3": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_array_sum() {
+    let code = r#"
+arr = [1, 2, 3, 4, 5]
+main = arr.sum()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15);
+}
+
+#[test]
+fn interpreter_array_reverse() {
+    let code = r#"
+arr = [1, 2, 3]
+rev = arr.reverse()
+main = rev[0]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 3);
+}
+
+// ============= Dict Functional Methods =============
+
+#[test]
+fn interpreter_dict_set() {
+    let code = r#"
+d = {"a": 1}
+d = d.set("b", 2)
+main = d["b"]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2);
+}
+
+#[test]
+fn interpreter_dict_remove() {
+    let code = r#"
+d = {"a": 1, "b": 2}
+d = d.remove("a")
+main = d.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_dict_merge() {
+    let code = r#"
+d1 = {"a": 1}
+d2 = {"b": 2}
+d = d1.merge(d2)
+main = d.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2);
+}
+
+#[test]
+fn interpreter_dict_get_or() {
+    let code = r#"
+d = {"a": 10}
+main = d.get_or("b", 99)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 99);
+}
