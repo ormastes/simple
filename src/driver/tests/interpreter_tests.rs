@@ -1088,3 +1088,53 @@ main = arr.len()
     assert_eq!(result.exit_code, 2); // [2,3,4] -> [3,4]
 }
 
+// ============= No-Parentheses Calls (statement level only) =============
+// Note: No-parens calls only work for direct statement-level calls,
+// NOT inside expressions like assignments.
+
+#[test]
+fn interpreter_no_paren_call_simple_statement() {
+    // No-parens call at statement level with an argument
+    // Call result is ignored, main is set separately
+    let code = r#"
+fn process(x):
+    return x * 2
+
+# Call without parens at statement level (result ignored)
+process 10
+main = 42
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_no_paren_call_with_string_arg() {
+    // No-parens call with a string argument
+    let code = r#"
+fn get_len(s):
+    return len(s)
+
+# len is called via no-parens then we use print for side effect
+get_len "hello"
+main = 5
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5);
+}
+
+#[test]
+fn interpreter_no_paren_call_with_int_arg() {
+    // No-parens call with an integer argument
+    let code = r#"
+fn double(x):
+    return x * 2
+
+# This won't affect main since result is ignored
+double 21
+main = 42
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+

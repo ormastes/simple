@@ -1068,8 +1068,108 @@ impl<'a> Parser<'a> {
                 value,
             }))
         } else {
+            // Check for no-parentheses call at statement level
+            // Only for identifiers or field access followed by argument-starting tokens
+            if self.is_callable_expr(&expr) && self.can_start_argument() {
+                let args = self.parse_no_paren_arguments()?;
+                if !args.is_empty() {
+                    let call_expr = match expr {
+                        Expr::Identifier(_) => Expr::Call {
+                            callee: Box::new(expr),
+                            args,
+                        },
+                        Expr::FieldAccess { receiver, field } => Expr::MethodCall {
+                            receiver,
+                            method: field,
+                            args,
+                        },
+                        _ => Expr::Call {
+                            callee: Box::new(expr),
+                            args,
+                        },
+                    };
+                    return Ok(Node::Expression(call_expr));
+                }
+            }
             Ok(Node::Expression(expr))
         }
+    }
+
+    /// Check if an expression can be a callee for no-parens calls
+    fn is_callable_expr(&self, expr: &Expr) -> bool {
+        matches!(expr, Expr::Identifier(_) | Expr::FieldAccess { .. } | Expr::Path(_))
+    }
+
+    /// Check if current token can start an argument (for no-parens calls)
+    fn can_start_argument(&self) -> bool {
+        matches!(
+            self.current.kind,
+            TokenKind::Integer(_)
+                | TokenKind::Float(_)
+                | TokenKind::String(_)
+                | TokenKind::FString(_)
+                | TokenKind::Bool(_)
+                | TokenKind::Nil
+                | TokenKind::Symbol(_)
+                | TokenKind::Identifier(_)
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::LBrace
+                | TokenKind::Backslash
+                | TokenKind::Colon  // for named args like name: "value"
+        )
+    }
+
+    /// Parse arguments without parentheses (comma-separated on same line)
+    fn parse_no_paren_arguments(&mut self) -> Result<Vec<Argument>, ParseError> {
+        let mut args = Vec::new();
+
+        // Parse first argument
+        if let Ok(arg) = self.parse_single_argument() {
+            args.push(arg);
+        } else {
+            return Ok(args);
+        }
+
+        // Parse remaining comma-separated arguments
+        while self.check(&TokenKind::Comma) {
+            self.advance();
+            if let Ok(arg) = self.parse_single_argument() {
+                args.push(arg);
+            } else {
+                break;
+            }
+        }
+
+        Ok(args)
+    }
+
+    /// Parse a single argument (possibly named)
+    fn parse_single_argument(&mut self) -> Result<Argument, ParseError> {
+        // Check for named argument: name: value
+        if let TokenKind::Identifier(name) = &self.current.kind {
+            let name_clone = name.clone();
+            // Peek ahead to check for colon
+            if self.peek_is(&TokenKind::Colon) {
+                self.advance(); // consume identifier
+                self.advance(); // consume colon
+                let value = self.parse_expression()?;
+                return Ok(Argument {
+                    name: Some(name_clone),
+                    value,
+                });
+            }
+        }
+        // Positional argument
+        let value = self.parse_expression()?;
+        Ok(Argument { name: None, value })
+    }
+
+    /// Peek at the next token kind
+    fn peek_is(&self, kind: &TokenKind) -> bool {
+        // This is a simple implementation - we'd need to look at the next token
+        // For now, we'll handle this differently
+        false
     }
 
     // Binary expression parsing with precedence
