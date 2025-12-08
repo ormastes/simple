@@ -9,10 +9,11 @@ use simple_loader::smf::{
     SMF_FLAG_EXECUTABLE, SMF_MAGIC, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
 };
 use simple_parser::ast::{
-    AssignOp, BinOp, Block, ClassDef, ConstStmt, Expr, FStringPart, FunctionDef, IfStmt, LambdaParam,
-    MatchStmt, Node, Pattern, StaticStmt, Type, UnaryOp,
+    AssignOp, BinOp, Block, ClassDef, ConstStmt, ContextStmt, Expr, ExternDef, FStringPart, FunctionDef, IfStmt, LambdaParam,
+    MatchStmt, Node, Pattern, PointerKind, StaticStmt, Type, UnaryOp,
 };
 use simple_common::gc::GcAllocator;
+use simple_common::manual::{ManualGc, Unique as ManualUnique};
 use simple_runtime::concurrency::{self, ActorHandle, Message};
 use simple_type::check as type_check;
 // Type checking lives in the separate crate simple-type
@@ -22,7 +23,11 @@ use thiserror::Error;
 /// Variable environment for compile-time evaluation
 type Env = HashMap<String, Value>;
 
-#[derive(Debug, Clone, PartialEq)]
+thread_local! {
+    static MANUAL_GC: ManualGc = ManualGc::new();
+}
+
+#[derive(Debug)]
 enum Value {
     Int(i64),
     Bool(bool),
@@ -35,6 +40,7 @@ enum Value {
     Object { class: String, fields: HashMap<String, Value> },
     Enum { enum_name: String, variant: String, payload: Option<Box<Value>> },
     Actor(ActorHandle),
+    Unique(ManualUniqueValue),
     Nil,
 }
 
@@ -43,6 +49,7 @@ impl Value {
         match self {
             Value::Int(i) => Ok(*i),
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::Unique(u) => u.inner().as_int(),
             Value::Str(_) => Err(CompileError::Semantic("expected int, got string".into())),
             Value::Symbol(_) => Err(CompileError::Semantic("expected int, got symbol".into())),
             Value::Nil => Ok(0),
@@ -58,6 +65,7 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Str(s) => s.clone(),
             Value::Symbol(s) => s.clone(),
+            Value::Unique(u) => u.inner().to_key_string(),
             Value::Nil => "nil".to_string(),
             other => format!("{other:?}"),
         }
@@ -73,6 +81,7 @@ impl Value {
             Value::Tuple(t) => !t.is_empty(),
             Value::Dict(d) => !d.is_empty(),
             Value::Nil => false,
+            Value::Unique(u) => u.inner().truthy(),
             Value::Object { .. } | Value::Enum { .. } | Value::Lambda { .. } | Value::Actor(_) => true,
         }
     }
@@ -96,7 +105,101 @@ impl Value {
                 format!("{{{}}}", parts.join(", "))
             }
             Value::Nil => "nil".into(),
+            Value::Unique(u) => format!("&{}", u.inner().to_display_string()),
             other => format!("{other:?}"),
+        }
+    }
+
+    /// Convert a unique pointer into its inner value (clone) for read-only operations.
+    fn deref_unique(self) -> Value {
+        match self {
+            Value::Unique(u) => u.into_inner(),
+            other => other,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ManualUniqueValue {
+    ptr: ManualUnique<Value>,
+}
+
+impl ManualUniqueValue {
+    fn new(value: Value) -> Self {
+        MANUAL_GC.with(|gc| Self { ptr: gc.alloc(value) })
+    }
+
+    fn inner(&self) -> &Value {
+        &self.ptr
+    }
+
+    fn into_inner(self) -> Value {
+        self.ptr.into_inner()
+    }
+}
+
+impl Clone for ManualUniqueValue {
+    fn clone(&self) -> Self {
+        // Cloning a unique pointer duplicates the underlying value into a fresh unique owner.
+        Self::new((*self.ptr).clone())
+    }
+}
+
+impl PartialEq for ManualUniqueValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner() == other.inner()
+    }
+}
+
+impl Clone for Value {
+    fn clone(&self) -> Self {
+        match self {
+            Value::Int(i) => Value::Int(*i),
+            Value::Bool(b) => Value::Bool(*b),
+            Value::Str(s) => Value::Str(s.clone()),
+            Value::Symbol(s) => Value::Symbol(s.clone()),
+            Value::Array(a) => Value::Array(a.clone()),
+            Value::Tuple(t) => Value::Tuple(t.clone()),
+            Value::Dict(d) => Value::Dict(d.clone()),
+            Value::Lambda { params, body, env } => Value::Lambda {
+                params: params.clone(),
+                body: body.clone(),
+                env: env.clone(),
+            },
+            Value::Object { class, fields } => Value::Object { class: class.clone(), fields: fields.clone() },
+            Value::Enum { enum_name, variant, payload } => Value::Enum {
+                enum_name: enum_name.clone(),
+                variant: variant.clone(),
+                payload: payload.clone(),
+            },
+            Value::Actor(handle) => Value::Actor(handle.clone()),
+            Value::Unique(u) => Value::Unique(u.clone()),
+            Value::Nil => Value::Nil,
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Symbol(a), Value::Symbol(b)) => a == b,
+            (Value::Array(a), Value::Array(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
+            (Value::Dict(a), Value::Dict(b)) => a == b,
+            (Value::Lambda { params: pa, body: ba, env: ea }, Value::Lambda { params: pb, body: bb, env: eb }) => {
+                pa == pb && ba == bb && ea == eb
+            }
+            (Value::Object { class: ca, fields: fa }, Value::Object { class: cb, fields: fb }) => ca == cb && fa == fb,
+            (Value::Enum { enum_name: ea, variant: va, payload: pa }, Value::Enum { enum_name: eb, variant: vb, payload: pb }) => {
+                ea == eb && va == vb && pa == pb
+            }
+            (Value::Actor(_), Value::Actor(_)) => true,
+            (Value::Unique(a), Value::Unique(b)) => a == b,
+            (Value::Nil, Value::Nil) => true,
+            _ => false,
         }
     }
 }
@@ -105,6 +208,9 @@ thread_local! {
     static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
     static ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = RefCell::new(None);
     static CONST_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    static EXTERN_FUNCTIONS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// Current context object for context blocks (DSL support)
+    static CONTEXT_OBJECT: RefCell<Option<Value>> = RefCell::new(None);
 }
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
@@ -151,17 +257,22 @@ type Enums = HashMap<String, Vec<String>>;
 /// Stores impl block methods: type_name -> list of methods
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
+/// Stores extern function declarations: name -> definition
+type ExternFunctions = HashMap<String, ExternDef>;
+
 /// Evaluate the module and return the `main` binding as an i32.
 #[instrument(skip(items))]
 fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
-    // Clear const names from previous runs
+    // Clear const names and extern functions from previous runs
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+    EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().clear());
 
     let mut env = Env::new();
     let mut functions: HashMap<String, FunctionDef> = HashMap::new();
     let mut classes: HashMap<String, ClassDef> = HashMap::new();
     let mut enums: Enums = HashMap::new();
     let mut impl_methods: ImplMethods = HashMap::new();
+    let mut extern_functions: ExternFunctions = HashMap::new();
 
     for item in items {
         match item {
@@ -200,7 +311,13 @@ fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                     methods.push(method.clone());
                 }
             }
-            Node::Let(_) | Node::Const(_) | Node::Static(_) | Node::Assignment(_) | Node::If(_) | Node::For(_) | Node::While(_) | Node::Loop(_) | Node::Match(_) => {
+            Node::Extern(ext) => {
+                // Store extern function declaration
+                extern_functions.insert(ext.name.clone(), ext.clone());
+                // Register in thread-local for call resolution
+                EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().insert(ext.name.clone()));
+            }
+            Node::Let(_) | Node::Const(_) | Node::Static(_) | Node::Assignment(_) | Node::If(_) | Node::For(_) | Node::While(_) | Node::Loop(_) | Node::Match(_) | Node::Context(_) => {
                 if let Control::Return(val) = exec_node(item, &mut env, &functions, &classes, &enums, &impl_methods)? {
                     // Early return sets main implicitly
                     return val.as_int().map(|v| v as i32);
@@ -388,11 +505,23 @@ fn exec_node(
                 let value = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
                 if let Pattern::Identifier(name) = &let_stmt.pattern {
                     env.insert(name.clone(), value);
+                    // Track immutable bindings (let without mut)
+                    if !let_stmt.is_mutable {
+                        CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                    }
+                } else if let Pattern::MutIdentifier(name) = &let_stmt.pattern {
+                    // Mutable binding via pattern
+                    env.insert(name.clone(), value);
                 } else if let Pattern::Tuple(patterns) = &let_stmt.pattern {
                     // Destructure tuple
                     if let Value::Tuple(values) = value {
                         for (pat, val) in patterns.iter().zip(values.into_iter()) {
                             if let Pattern::Identifier(name) = pat {
+                                env.insert(name.clone(), val);
+                                if !let_stmt.is_mutable {
+                                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                                }
+                            } else if let Pattern::MutIdentifier(name) = pat {
                                 env.insert(name.clone(), val);
                             }
                         }
@@ -402,6 +531,11 @@ fn exec_node(
                     if let Value::Array(values) = value {
                         for (pat, val) in patterns.iter().zip(values.into_iter()) {
                             if let Pattern::Identifier(name) = pat {
+                                env.insert(name.clone(), val);
+                                if !let_stmt.is_mutable {
+                                    CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+                                }
+                            } else if let Pattern::MutIdentifier(name) = pat {
                                 env.insert(name.clone(), val);
                             }
                         }
@@ -461,6 +595,7 @@ fn exec_node(
         }
         Node::Continue(_) => Ok(Control::Continue),
         Node::Match(match_stmt) => exec_match(match_stmt, env, functions, classes, enums, impl_methods),
+        Node::Context(ctx_stmt) => exec_context(ctx_stmt, env, functions, classes, enums, impl_methods),
         Node::Expression(expr) => {
             // Handle functional update operator: obj->method(args) desugars to obj = obj.method(args)
             if let Expr::FunctionalUpdate { target, method, args } = expr {
@@ -583,6 +718,33 @@ fn exec_loop(
         }
     }
     Ok(Control::Next)
+}
+
+/// Execute a context block - sets implicit receiver for method calls
+fn exec_context(
+    ctx_stmt: &ContextStmt,
+    env: &mut Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Control, CompileError> {
+    // Evaluate the context expression
+    let context_obj = evaluate_expr(&ctx_stmt.context, env, functions, classes, enums, impl_methods)?;
+
+    // Save the previous context (if any) for nesting
+    let prev_context = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
+
+    // Set the new context
+    CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(context_obj));
+
+    // Execute the body
+    let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
+
+    // Restore previous context
+    CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = prev_context);
+
+    result
 }
 
 fn exec_for(
@@ -851,6 +1013,7 @@ fn evaluate_expr(
     match expr {
         Expr::Integer(value) => Ok(Value::Int(*value)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
+        Expr::Nil => Ok(Value::Nil),
         Expr::String(s) => Ok(Value::Str(s.clone())),
         Expr::FString(parts) => {
             let mut out = String::new();
@@ -879,6 +1042,13 @@ fn evaluate_expr(
                 .cloned()
                 .ok_or_else(|| CompileError::Semantic(format!("undefined variable: {name}")))
         },
+        Expr::New { kind, expr } => {
+            if *kind != PointerKind::Unique {
+                return Err(CompileError::Semantic("only unique (&) allocation is supported right now".into()));
+            }
+            let inner = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
+            Ok(Value::Unique(ManualUniqueValue::new(inner)))
+        }
         Expr::Binary { op, left, right } => {
             let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
             let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
@@ -1072,6 +1242,16 @@ fn evaluate_expr(
                         if let Some(func) = functions.get(name) {
                             return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
                         }
+                        // Check for extern functions
+                        let is_extern = EXTERN_FUNCTIONS.with(|cell| cell.borrow().contains(name));
+                        if is_extern {
+                            return call_extern_function(name, args, env, functions, classes, enums, impl_methods);
+                        }
+                        // Check for context block - dispatch to context object as method call
+                        let context_obj = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
+                        if let Some(ctx) = context_obj {
+                            return dispatch_context_method(&ctx, name, args, env, functions, classes, enums, impl_methods);
+                        }
                     }
                 }
             }
@@ -1108,7 +1288,7 @@ fn evaluate_expr(
             }
         }
         Expr::MethodCall { receiver, method, args } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?;
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_unique();
             // Built-in methods for Array
             if let Value::Array(ref arr) = recv_val {
                 match method.as_str() {
@@ -1651,12 +1831,71 @@ fn evaluate_expr(
                         );
                     }
                 }
+                // Check for method_missing hook
+                if let Some(class_def) = classes.get(&class) {
+                    if let Some(mm_func) = class_def.methods.iter().find(|m| m.name == "method_missing") {
+                        // Call method_missing with (name: Symbol, args: Array, block: Nil)
+                        let mm_args = vec![
+                            simple_parser::ast::Argument {
+                                name: None,
+                                value: Expr::Symbol(method.clone()),
+                            },
+                            simple_parser::ast::Argument {
+                                name: None,
+                                value: Expr::Array(args.iter().map(|a| a.value.clone()).collect()),
+                            },
+                            simple_parser::ast::Argument {
+                                name: None,
+                                value: Expr::Nil,
+                            },
+                        ];
+                        return exec_function(
+                            mm_func,
+                            &mm_args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                            Some((&class, &fields)),
+                        );
+                    }
+                }
+                // Also check impl blocks for method_missing
+                if let Some(methods) = impl_methods.get(&class) {
+                    if let Some(mm_func) = methods.iter().find(|m| m.name == "method_missing") {
+                        let mm_args = vec![
+                            simple_parser::ast::Argument {
+                                name: None,
+                                value: Expr::Symbol(method.clone()),
+                            },
+                            simple_parser::ast::Argument {
+                                name: None,
+                                value: Expr::Array(args.iter().map(|a| a.value.clone()).collect()),
+                            },
+                            simple_parser::ast::Argument {
+                                name: None,
+                                value: Expr::Nil,
+                            },
+                        ];
+                        return exec_function(
+                            mm_func,
+                            &mm_args,
+                            env,
+                            functions,
+                            classes,
+                            enums,
+                            impl_methods,
+                            Some((&class, &fields)),
+                        );
+                    }
+                }
                 return Err(CompileError::Semantic(format!("unknown method {method} on {class}")));
             }
             Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))
         }
         Expr::FieldAccess { receiver, field } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?;
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_unique();
             if let Value::Object { fields, .. } = recv_val {
                 fields
                     .get(field)
@@ -1750,7 +1989,7 @@ fn evaluate_expr(
             Ok(Value::Tuple(tup))
         }
         Expr::Index { receiver, index } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?;
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_unique();
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
             match recv_val {
                 Value::Array(arr) => {
@@ -1943,4 +2182,215 @@ fn exec_function(
         Control::Return(v) => Ok(v),
         _ => Ok(Value::Nil),
     }
+}
+
+/// Call an extern function with built-in implementation
+fn call_extern_function(
+    name: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    // Evaluate all arguments first
+    let evaluated: Vec<Value> = args
+        .iter()
+        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    match name {
+        // I/O functions
+        "print" => {
+            for val in &evaluated {
+                print!("{}", val.to_display_string());
+            }
+            Ok(Value::Nil)
+        }
+        "println" => {
+            for val in &evaluated {
+                print!("{}", val.to_display_string());
+            }
+            println!();
+            Ok(Value::Nil)
+        }
+        "input" => {
+            use std::io::{self, BufRead};
+            let stdin = io::stdin();
+            let line = stdin.lock().lines().next()
+                .transpose()
+                .map_err(|e| CompileError::Semantic(format!("input error: {e}")))?
+                .unwrap_or_default();
+            Ok(Value::Str(line))
+        }
+
+        // Math functions
+        "abs" => {
+            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("abs expects 1 argument".into()))?;
+            match val {
+                Value::Int(i) => Ok(Value::Int(i.abs())),
+                _ => Err(CompileError::Semantic("abs expects integer".into())),
+            }
+        }
+        "min" => {
+            let a = evaluated.get(0).ok_or_else(|| CompileError::Semantic("min expects 2 arguments".into()))?.as_int()?;
+            let b = evaluated.get(1).ok_or_else(|| CompileError::Semantic("min expects 2 arguments".into()))?.as_int()?;
+            Ok(Value::Int(a.min(b)))
+        }
+        "max" => {
+            let a = evaluated.get(0).ok_or_else(|| CompileError::Semantic("max expects 2 arguments".into()))?.as_int()?;
+            let b = evaluated.get(1).ok_or_else(|| CompileError::Semantic("max expects 2 arguments".into()))?.as_int()?;
+            Ok(Value::Int(a.max(b)))
+        }
+        "sqrt" => {
+            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("sqrt expects 1 argument".into()))?.as_int()?;
+            Ok(Value::Int((val as f64).sqrt() as i64))
+        }
+        "floor" => {
+            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("floor expects 1 argument".into()))?.as_int()?;
+            Ok(Value::Int(val))  // Integer floor is identity
+        }
+        "ceil" => {
+            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("ceil expects 1 argument".into()))?.as_int()?;
+            Ok(Value::Int(val))  // Integer ceil is identity
+        }
+        "pow" => {
+            let base = evaluated.get(0).ok_or_else(|| CompileError::Semantic("pow expects 2 arguments".into()))?.as_int()?;
+            let exp = evaluated.get(1).ok_or_else(|| CompileError::Semantic("pow expects 2 arguments".into()))?.as_int()?;
+            Ok(Value::Int(base.pow(exp as u32)))
+        }
+
+        // Conversion functions
+        "to_string" => {
+            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("to_string expects 1 argument".into()))?;
+            Ok(Value::Str(val.to_display_string()))
+        }
+        "to_int" => {
+            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("to_int expects 1 argument".into()))?;
+            match val {
+                Value::Int(i) => Ok(Value::Int(*i)),
+                Value::Str(s) => s.parse::<i64>()
+                    .map(Value::Int)
+                    .map_err(|_| CompileError::Semantic(format!("cannot convert '{}' to int", s))),
+                Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
+                _ => Err(CompileError::Semantic("to_int expects string, int, or bool".into())),
+            }
+        }
+
+        // Process control
+        "exit" => {
+            let code = evaluated.first()
+                .map(|v| v.as_int())
+                .transpose()?
+                .unwrap_or(0) as i32;
+            std::process::exit(code);
+        }
+
+        // Unknown extern function
+        _ => Err(CompileError::Semantic(format!("unknown extern function: {}", name))),
+    }
+}
+
+/// Dispatch a method call to the context object
+fn dispatch_context_method(
+    ctx: &Value,
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    // For objects with class, look up the method in class or impl blocks
+    if let Value::Object { class, fields } = ctx {
+        // Check for class methods
+        if let Some(class_def) = classes.get(class) {
+            for method_def in &class_def.methods {
+                if method_def.name == method {
+                    return exec_function(method_def, args, env, functions, classes, enums, impl_methods, Some((class, fields)));
+                }
+            }
+        }
+        // Check impl methods
+        if let Some(methods) = impl_methods.get(class) {
+            for method_def in methods {
+                if method_def.name == method {
+                    return exec_function(method_def, args, env, functions, classes, enums, impl_methods, Some((class, fields)));
+                }
+            }
+        }
+        // Check for method_missing hook
+        if let Some(class_def) = classes.get(class) {
+            if let Some(mm_func) = class_def.methods.iter().find(|m| m.name == "method_missing") {
+                let mm_args = vec![
+                    simple_parser::ast::Argument {
+                        name: None,
+                        value: Expr::Symbol(method.to_string()),
+                    },
+                    simple_parser::ast::Argument {
+                        name: None,
+                        value: Expr::Array(args.iter().map(|a| a.value.clone()).collect()),
+                    },
+                    simple_parser::ast::Argument {
+                        name: None,
+                        value: Expr::Nil,
+                    },
+                ];
+                return exec_function(mm_func, &mm_args, env, functions, classes, enums, impl_methods, Some((class, fields)));
+            }
+        }
+        // Also check impl blocks for method_missing
+        if let Some(methods) = impl_methods.get(class) {
+            if let Some(mm_func) = methods.iter().find(|m| m.name == "method_missing") {
+                let mm_args = vec![
+                    simple_parser::ast::Argument {
+                        name: None,
+                        value: Expr::Symbol(method.to_string()),
+                    },
+                    simple_parser::ast::Argument {
+                        name: None,
+                        value: Expr::Array(args.iter().map(|a| a.value.clone()).collect()),
+                    },
+                    simple_parser::ast::Argument {
+                        name: None,
+                        value: Expr::Nil,
+                    },
+                ];
+                return exec_function(mm_func, &mm_args, env, functions, classes, enums, impl_methods, Some((class, fields)));
+            }
+        }
+        return Err(CompileError::Semantic(format!("context object has no method '{}'", method)));
+    }
+
+    // For arrays, dicts, etc. - delegate to the standard method handling
+    // by creating a method call expression and evaluating it
+    let recv_expr = value_to_expr(ctx)?;
+    let method_call = Expr::MethodCall {
+        receiver: Box::new(recv_expr),
+        method: method.to_string(),
+        args: args.to_vec(),
+    };
+    evaluate_expr(&method_call, env, functions, classes, enums, impl_methods)
+}
+
+/// Convert a Value back to an Expr for evaluation purposes
+fn value_to_expr(val: &Value) -> Result<Expr, CompileError> {
+    Ok(match val {
+        Value::Int(i) => Expr::Integer(*i),
+        Value::Bool(b) => Expr::Bool(*b),
+        Value::Str(s) => Expr::String(s.clone()),
+        Value::Symbol(s) => Expr::Symbol(s.clone()),
+        Value::Nil => Expr::Nil,
+        Value::Array(items) => {
+            let exprs: Result<Vec<_>, _> = items.iter().map(value_to_expr).collect();
+            Expr::Array(exprs?)
+        }
+        Value::Tuple(items) => {
+            let exprs: Result<Vec<_>, _> = items.iter().map(value_to_expr).collect();
+            Expr::Tuple(exprs?)
+        }
+        _ => return Err(CompileError::Semantic("cannot convert value to expression".into())),
+    })
 }

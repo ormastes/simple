@@ -148,6 +148,13 @@ main = Point.value()
 }
 
 #[test]
+fn runner_supports_unique_new() {
+    let runner = Runner::new();
+    let exit = runner.run_source("main = new & 21").expect("run ok");
+    assert_eq!(exit, 21);
+}
+
+#[test]
 fn runner_can_use_system_term_lib() {
     let term = TermNative::load().expect("term native loads");
     assert_eq!(term.add(10, 5), Some(15));

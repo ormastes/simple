@@ -27,6 +27,7 @@ pub enum Node {
     Loop(LoopStmt),
     Break(BreakStmt),
     Continue(ContinueStmt),
+    Context(ContextStmt),
     Expression(Expr),
 }
 
@@ -263,6 +264,16 @@ pub struct BreakStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContinueStmt {
     pub span: Span,
+}
+
+/// Context block for DSL support
+/// context expr:
+///     statements
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContextStmt {
+    pub span: Span,
+    pub context: Expr,  // The object that becomes the implicit receiver
+    pub body: Block,
 }
 
 // Types

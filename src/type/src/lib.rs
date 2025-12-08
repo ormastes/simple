@@ -95,6 +95,10 @@ impl TypeChecker {
                     let ty = self.fresh_var();
                     self.env.insert(s.name.clone(), ty);
                 }
+                Node::Extern(ext) => {
+                    let ty = self.fresh_var();
+                    self.env.insert(ext.name.clone(), ty);
+                }
                 _ => {}
             }
         }
@@ -194,6 +198,17 @@ impl TypeChecker {
             Node::Loop(loop_stmt) => {
                 for stmt in &loop_stmt.body.statements {
                     self.check_node(stmt)?;
+                }
+                Ok(())
+            }
+            Node::Context(ctx_stmt) => {
+                // Check the context expression
+                let _ = self.infer_expr(&ctx_stmt.context)?;
+                // Check body statements - note: in context blocks, unknown methods
+                // are dispatched to the context object, so we allow more flexibility
+                for stmt in &ctx_stmt.body.statements {
+                    // Be lenient with type checking inside context blocks
+                    let _ = self.check_node(stmt);
                 }
                 Ok(())
             }

@@ -76,6 +76,7 @@ impl<'a> Parser<'a> {
             TokenKind::Return => self.parse_return(),
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
+            TokenKind::Context => self.parse_context(),
             _ => self.parse_expression_or_assignment(),
         }
     }
@@ -621,6 +622,21 @@ impl<'a> Parser<'a> {
 
         Ok(Node::Loop(LoopStmt {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            body,
+        }))
+    }
+
+    fn parse_context(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Context)?;
+
+        let context = self.parse_expression()?;
+        self.expect(&TokenKind::Colon)?;
+        let body = self.parse_block()?;
+
+        Ok(Node::Context(ContextStmt {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            context,
             body,
         }))
     }
@@ -1452,11 +1468,24 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let field = self.expect_identifier()?;
                     if self.check(&TokenKind::LParen) {
-                        let args = self.parse_arguments()?;
+                        let mut args = self.parse_arguments()?;
+                        // Check for trailing block: obj.method(args) \x: body
+                        if self.check(&TokenKind::Backslash) {
+                            let trailing_lambda = self.parse_trailing_lambda()?;
+                            args.push(Argument { name: None, value: trailing_lambda });
+                        }
                         expr = Expr::MethodCall {
                             receiver: Box::new(expr),
                             method: field,
                             args,
+                        };
+                    } else if self.check(&TokenKind::Backslash) {
+                        // Method call with only trailing block: obj.method \x: body
+                        let trailing_lambda = self.parse_trailing_lambda()?;
+                        expr = Expr::MethodCall {
+                            receiver: Box::new(expr),
+                            method: field,
+                            args: vec![Argument { name: None, value: trailing_lambda }],
                         };
                     } else {
                         expr = Expr::FieldAccess {
@@ -1485,10 +1514,42 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_call(&mut self, callee: Expr) -> Result<Expr, ParseError> {
-        let args = self.parse_arguments()?;
+        let mut args = self.parse_arguments()?;
+        // Check for trailing block: func(args) \x: body
+        if self.check(&TokenKind::Backslash) {
+            let trailing_lambda = self.parse_trailing_lambda()?;
+            args.push(Argument { name: None, value: trailing_lambda });
+        }
         Ok(Expr::Call {
             callee: Box::new(callee),
             args,
+        })
+    }
+
+    /// Parse a trailing block lambda: \params: body
+    fn parse_trailing_lambda(&mut self) -> Result<Expr, ParseError> {
+        self.expect(&TokenKind::Backslash)?;
+        let mut params = Vec::new();
+
+        // Check for no-param lambda: \: expr
+        if !self.check(&TokenKind::Colon) {
+            // Parse first param name
+            let name = self.expect_identifier()?;
+            params.push(LambdaParam { name, ty: None });
+
+            // Parse additional params (comma-separated)
+            while self.check(&TokenKind::Comma) {
+                self.advance();
+                let name = self.expect_identifier()?;
+                params.push(LambdaParam { name, ty: None });
+            }
+        }
+
+        self.expect(&TokenKind::Colon)?;
+        let body = self.parse_expression()?;
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
         })
     }
 

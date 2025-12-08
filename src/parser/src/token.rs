@@ -78,6 +78,7 @@ pub enum TokenKind {
     Static,
     Type,
     Extern,
+    Context,
 
     // Operators
     Plus,           // +

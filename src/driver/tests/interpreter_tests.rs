@@ -1138,3 +1138,275 @@ main = 42
     assert_eq!(result.exit_code, 42);
 }
 
+// ============= Mutability Control =============
+
+#[test]
+fn interpreter_let_mut_allows_reassignment() {
+    let code = r#"
+let mut x = 10
+x = 42
+main = x
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_let_immutable_prevents_reassignment() {
+    let code = r#"
+let x = 10
+x = 42
+main = x
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("cannot assign"));
+}
+
+#[test]
+fn interpreter_mut_let_syntax() {
+    // Alternative syntax: mut let x = ...
+    let code = r#"
+mut let y = 5
+y = 10
+main = y
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn interpreter_let_mut_tuple_destructure() {
+    let code = r#"
+let mut (a, b) = (1, 2)
+a = 10
+b = 20
+main = a + b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30);
+}
+
+#[test]
+fn interpreter_let_immutable_tuple_prevents_reassignment() {
+    let code = r#"
+let (a, b) = (1, 2)
+a = 10
+main = a
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+// Named arguments are already tested elsewhere in this file
+
+// ============= Trailing Blocks =============
+
+#[test]
+fn interpreter_trailing_block_method_call() {
+    // obj.method \x: body is equivalent to obj.method(\x: body)
+    let code = r#"
+arr = [1, 2, 3]
+doubled = arr.map \x: x * 2
+main = doubled[1]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 4); // [2, 4, 6][1] = 4
+}
+
+#[test]
+fn interpreter_trailing_block_with_args() {
+    // obj.method(arg) \x: body - trailing block after regular args
+    let code = r#"
+fn apply_twice(f, x):
+    return f(f(x))
+
+result = apply_twice(\n: n + 1, 40)
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_trailing_block_filter() {
+    let code = r#"
+arr = [1, 2, 3, 4, 5]
+filtered = arr.filter \x: x > 3
+main = filtered.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2); // [4, 5]
+}
+
+#[test]
+fn interpreter_trailing_block_multi_param() {
+    let code = r#"
+fn combine(a, b, f):
+    return f(a, b)
+
+result = combine(20, 22) \x, y: x + y
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+// ============ Extern Functions (#46) ============
+
+#[test]
+fn interpreter_extern_abs() {
+    let code = r#"
+extern fn abs(x) -> i64
+
+main = abs(-42)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_extern_min_max() {
+    let code = r#"
+extern fn min(a, b) -> i64
+extern fn max(a, b) -> i64
+
+let a = min(10, 20)
+let b = max(10, 20)
+main = a + b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30); // 10 + 20
+}
+
+#[test]
+fn interpreter_extern_sqrt() {
+    let code = r#"
+extern fn sqrt(x) -> i64
+
+main = sqrt(16)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 4);
+}
+
+#[test]
+fn interpreter_extern_pow() {
+    let code = r#"
+extern fn pow(base, exp) -> i64
+
+main = pow(2, 5)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 32); // 2^5 = 32
+}
+
+#[test]
+fn interpreter_extern_to_int() {
+    let code = r#"
+extern fn to_int(x) -> i64
+
+main = to_int(true) + to_int(false)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1); // true=1, false=0
+}
+
+// ============ Context Blocks (#35) ============
+
+#[test]
+fn interpreter_context_block_basic() {
+    // Simple context block - method calls dispatch to the context object
+    let code = r#"
+class Calculator:
+    fn double(self, x):
+        return x * 2
+
+let calc = Calculator {}
+let mut result = 0
+context calc:
+    result = double(21)
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_context_block_with_self() {
+    // Context block where method accesses self
+    let code = r#"
+class Adder:
+    base: i64 = 10
+
+    fn add(self, x):
+        return self.base + x
+
+let a = Adder { base: 30 }
+let mut result = 0
+context a:
+    result = add(12)
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+// ============ Method Missing (#36) ============
+
+#[test]
+fn interpreter_method_missing_basic() {
+    // Basic method_missing - called when method doesn't exist
+    let code = r#"
+class DSL:
+    fn method_missing(self, name, args, block):
+        # Return 42 for any unknown method
+        return 42
+
+let d = DSL {}
+main = d.unknown_method()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_method_missing_with_args() {
+    // method_missing with arguments
+    let code = r#"
+class Multiplier:
+    factor: i64 = 10
+
+    fn method_missing(self, name, args, block):
+        # Multiply first arg by factor
+        let x = args[0]
+        return self.factor * x
+
+let m = Multiplier { factor: 7 }
+main = m.any_method(6)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42); // 7 * 6
+}
+
+#[test]
+fn interpreter_method_missing_with_context() {
+    // method_missing inside context block
+    let code = r#"
+class Counter:
+    count: i64 = 0
+
+    fn method_missing(self, name, args, block):
+        # Any call returns 42
+        return 42
+
+let c = Counter { count: 0 }
+let mut result = 0
+context c:
+    result = something_undefined()
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+

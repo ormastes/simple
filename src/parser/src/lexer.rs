@@ -689,6 +689,7 @@ impl<'a> Lexer<'a> {
             "static" => TokenKind::Static,
             "type" => TokenKind::Type,
             "extern" => TokenKind::Extern,
+            "context" => TokenKind::Context,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
         }
