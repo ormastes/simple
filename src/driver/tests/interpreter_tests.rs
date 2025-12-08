@@ -560,3 +560,314 @@ main = add(5, b=20)
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 25); // 5 + 20 = 25
 }
+
+// ============= Array Tests =============
+
+#[test]
+fn interpreter_array_literal() {
+    let code = r#"
+arr = [1, 2, 3, 4, 5]
+main = arr[2]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 3);
+}
+
+#[test]
+fn interpreter_array_len() {
+    let code = r#"
+arr = [10, 20, 30]
+main = arr.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 3);
+}
+
+#[test]
+fn interpreter_array_first_last() {
+    let code = r#"
+arr = [5, 10, 15, 20]
+main = arr.first() + arr.last()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 25); // 5 + 20
+}
+
+#[test]
+fn interpreter_array_contains() {
+    let code = r#"
+arr = [1, 2, 3]
+main = if arr.contains(2): 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_array_is_empty() {
+    let code = r#"
+arr = []
+main = if arr.is_empty(): 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+// ============= Tuple Tests =============
+
+#[test]
+fn interpreter_tuple_literal() {
+    let code = r#"
+t = (10, 20, 30)
+main = t[1]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 20);
+}
+
+#[test]
+fn interpreter_tuple_len() {
+    let code = r#"
+t = (1, 2, 3, 4)
+main = t.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 4);
+}
+
+#[test]
+fn interpreter_tuple_destructure() {
+    let code = r#"
+let (a, b, c) = (10, 20, 30)
+main = a + b + c
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 60);
+}
+
+// ============= Dictionary Tests =============
+
+#[test]
+fn interpreter_dict_literal() {
+    let code = r#"
+d = {"a": 10, "b": 20}
+main = d["a"] + d["b"]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30);
+}
+
+#[test]
+fn interpreter_dict_len() {
+    let code = r#"
+d = {"x": 1, "y": 2, "z": 3}
+main = d.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 3);
+}
+
+#[test]
+fn interpreter_dict_contains_key() {
+    let code = r#"
+d = {"name": 42}
+main = if d.contains_key("name"): 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_dict_get() {
+    let code = r#"
+d = {"value": 99}
+main = d.get("value")
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 99);
+}
+
+// ============= Const/Static Tests =============
+
+#[test]
+fn interpreter_const_declaration() {
+    let code = r#"
+const MAX = 100
+main = MAX
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 100);
+}
+
+#[test]
+fn interpreter_static_declaration() {
+    let code = r#"
+static counter = 42
+main = counter
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_const_in_expression() {
+    let code = r#"
+const BASE = 10
+const MULTIPLIER = 5
+main = BASE * MULTIPLIER
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 50);
+}
+
+// ============= Option Type Tests =============
+
+#[test]
+fn interpreter_option_some() {
+    let code = r#"
+opt = Some(42)
+main = opt.unwrap()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_option_none_unwrap_or() {
+    let code = r#"
+opt = None
+main = opt.unwrap_or(99)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 99);
+}
+
+#[test]
+fn interpreter_option_is_some() {
+    let code = r#"
+opt = Some(1)
+main = if opt.is_some(): 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_option_is_none() {
+    let code = r#"
+opt = None
+main = if opt.is_none(): 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_option_map() {
+    let code = r#"
+opt = Some(10)
+result = opt.map(\x: x * 2)
+main = result.unwrap()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 20);
+}
+
+// ============= String Methods Tests =============
+
+#[test]
+fn interpreter_string_len() {
+    let code = r#"
+s = "hello"
+main = s.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5);
+}
+
+#[test]
+fn interpreter_string_contains() {
+    let code = r#"
+s = "hello world"
+main = if s.contains("world"): 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_string_index() {
+    // String indexing returns single character
+    let code = r#"
+s = "abc"
+main = if s[1] == "b": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+// ============= Pattern Matching with Collections =============
+
+#[test]
+fn interpreter_match_tuple() {
+    let code = r#"
+t = (1, 2)
+match t:
+    (1, x) =>
+        main = x * 10
+    _ =>
+        main = 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 20);
+}
+
+#[test]
+fn interpreter_match_array() {
+    let code = r#"
+arr = [5, 10]
+match arr:
+    [a, b] =>
+        main = a + b
+    _ =>
+        main = 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15);
+}
+
+// ============= Global len() Function =============
+
+#[test]
+fn interpreter_global_len_function() {
+    let code = r#"
+arr = [1, 2, 3, 4, 5]
+main = len(arr)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5);
+}
+
+// ============= Line Continuation Tests =============
+
+#[test]
+fn interpreter_line_continuation_expression() {
+    // Backslash at end of line continues to next line
+    let code = "main = 1 + 2 + \\\n    3 + 4";
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn interpreter_line_continuation_function_call() {
+    let code = r#"
+fn add(a, b, c):
+    return a + b + c
+
+main = add(1, \
+    2, \
+    3)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 6);
+}

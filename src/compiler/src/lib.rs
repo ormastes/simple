@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex, mpsc};
@@ -9,8 +9,8 @@ use simple_loader::smf::{
     SMF_FLAG_EXECUTABLE, SMF_MAGIC, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
 };
 use simple_parser::ast::{
-    AssignOp, BinOp, Block, ClassDef, Expr, FStringPart, FunctionDef, IfStmt, LambdaParam, MatchStmt, Node,
-    Pattern, Type, UnaryOp,
+    AssignOp, BinOp, Block, ClassDef, ConstStmt, Expr, FStringPart, FunctionDef, IfStmt, LambdaParam,
+    MatchStmt, Node, Pattern, StaticStmt, Type, UnaryOp,
 };
 use simple_common::gc::GcAllocator;
 use simple_runtime::concurrency::{self, ActorHandle, Message};
@@ -28,6 +28,9 @@ enum Value {
     Bool(bool),
     Str(String),
     Symbol(String),
+    Array(Vec<Value>),
+    Tuple(Vec<Value>),
+    Dict(HashMap<String, Value>),
     Lambda { params: Vec<String>, body: Box<Expr>, env: Env },
     Object { class: String, fields: HashMap<String, Value> },
     Enum { enum_name: String, variant: String, payload: Option<Box<Value>> },
@@ -60,25 +63,40 @@ impl Value {
         }
     }
 
-    fn to_display_string(&self) -> String {
-        match self {
-            Value::Str(s) => s.clone(),
-            Value::Symbol(s) => format!(":{s}"),
-            Value::Int(i) => i.to_string(),
-            Value::Bool(b) => b.to_string(),
-            Value::Nil => "nil".into(),
-            other => format!("{other:?}"),
-        }
-    }
-
     fn truthy(&self) -> bool {
         match self {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
             Value::Str(s) => !s.is_empty(),
             Value::Symbol(_) => true,
+            Value::Array(a) => !a.is_empty(),
+            Value::Tuple(t) => !t.is_empty(),
+            Value::Dict(d) => !d.is_empty(),
             Value::Nil => false,
             Value::Object { .. } | Value::Enum { .. } | Value::Lambda { .. } | Value::Actor(_) => true,
+        }
+    }
+
+    fn to_display_string(&self) -> String {
+        match self {
+            Value::Str(s) => s.clone(),
+            Value::Symbol(s) => format!(":{s}"),
+            Value::Int(i) => i.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Array(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Value::Tuple(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.to_display_string()).collect();
+                format!("({})", parts.join(", "))
+            }
+            Value::Dict(map) => {
+                let parts: Vec<String> = map.iter().map(|(k, v)| format!("{}: {}", k, v.to_display_string())).collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+            Value::Nil => "nil".into(),
+            other => format!("{other:?}"),
         }
     }
 }
@@ -86,6 +104,7 @@ impl Value {
 thread_local! {
     static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
     static ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = RefCell::new(None);
+    static CONST_NAMES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
@@ -135,6 +154,9 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 /// Evaluate the module and return the `main` binding as an i32.
 #[instrument(skip(items))]
 fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
+    // Clear const names from previous runs
+    CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+
     let mut env = Env::new();
     let mut functions: HashMap<String, FunctionDef> = HashMap::new();
     let mut classes: HashMap<String, ClassDef> = HashMap::new();
@@ -178,7 +200,7 @@ fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                     methods.push(method.clone());
                 }
             }
-            Node::Let(_) | Node::Assignment(_) | Node::If(_) | Node::For(_) | Node::While(_) | Node::Loop(_) | Node::Match(_) => {
+            Node::Let(_) | Node::Const(_) | Node::Static(_) | Node::Assignment(_) | Node::If(_) | Node::For(_) | Node::While(_) | Node::Loop(_) | Node::Match(_) => {
                 if let Control::Return(val) = exec_node(item, &mut env, &functions, &classes, &enums, &impl_methods)? {
                     // Early return sets main implicitly
                     return val.as_int().map(|v| v as i32);
@@ -333,12 +355,50 @@ fn exec_node(
                 let value = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
                 if let Pattern::Identifier(name) = &let_stmt.pattern {
                     env.insert(name.clone(), value);
+                } else if let Pattern::Tuple(patterns) = &let_stmt.pattern {
+                    // Destructure tuple
+                    if let Value::Tuple(values) = value {
+                        for (pat, val) in patterns.iter().zip(values.into_iter()) {
+                            if let Pattern::Identifier(name) = pat {
+                                env.insert(name.clone(), val);
+                            }
+                        }
+                    }
+                } else if let Pattern::Array(patterns) = &let_stmt.pattern {
+                    // Destructure array
+                    if let Value::Array(values) = value {
+                        for (pat, val) in patterns.iter().zip(values.into_iter()) {
+                            if let Pattern::Identifier(name) = pat {
+                                env.insert(name.clone(), val);
+                            }
+                        }
+                    }
                 }
+            }
+            Ok(Control::Next)
+        }
+        Node::Const(const_stmt) => {
+            let value = evaluate_expr(&const_stmt.value, env, functions, classes, enums, impl_methods)?;
+            env.insert(const_stmt.name.clone(), value);
+            CONST_NAMES.with(|cell| cell.borrow_mut().insert(const_stmt.name.clone()));
+            Ok(Control::Next)
+        }
+        Node::Static(static_stmt) => {
+            let value = evaluate_expr(&static_stmt.value, env, functions, classes, enums, impl_methods)?;
+            env.insert(static_stmt.name.clone(), value);
+            // Static without mut is also immutable
+            if !static_stmt.is_mutable {
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(static_stmt.name.clone()));
             }
             Ok(Control::Next)
         }
         Node::Assignment(assign) if assign.op == AssignOp::Assign => {
             if let Expr::Identifier(name) = &assign.target {
+                // Check if this is a const (immutable) name
+                let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
+                if is_const {
+                    return Err(CompileError::Semantic(format!("cannot assign to const '{name}'")));
+                }
                 let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
                 env.insert(name.clone(), value);
                 Ok(Control::Next)
@@ -639,38 +699,31 @@ fn pattern_matches(
         }
 
         Pattern::Tuple(patterns) => {
-            // For now, just check if it's an object with matching fields
-            if let Value::Object { class, fields } = value {
-                if class == "__tuple__" {
-                    for (i, pat) in patterns.iter().enumerate() {
-                        if let Some(field_val) = fields.get(&i.to_string()) {
-                            if !pattern_matches(pat, field_val, bindings, enums)? {
-                                return Ok(false);
-                            }
-                        } else {
-                            return Ok(false);
-                        }
-                    }
-                    return Ok(true);
+            if let Value::Tuple(values) = value {
+                if patterns.len() != values.len() {
+                    return Ok(false);
                 }
+                for (pat, val) in patterns.iter().zip(values.iter()) {
+                    if !pattern_matches(pat, val, bindings, enums)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
             }
             Ok(false)
         }
 
         Pattern::Array(patterns) => {
-            if let Value::Object { class, fields } = value {
-                if class == "__array__" {
-                    for (i, pat) in patterns.iter().enumerate() {
-                        if let Some(field_val) = fields.get(&i.to_string()) {
-                            if !pattern_matches(pat, field_val, bindings, enums)? {
-                                return Ok(false);
-                            }
-                        } else {
-                            return Ok(false);
-                        }
-                    }
-                    return Ok(true);
+            if let Value::Array(values) = value {
+                if patterns.len() != values.len() {
+                    return Ok(false);
                 }
+                for (pat, val) in patterns.iter().zip(values.iter()) {
+                    if !pattern_matches(pat, val, bindings, enums)? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
             }
             Ok(false)
         }
@@ -744,10 +797,19 @@ fn evaluate_expr(
             Ok(Value::Str(out))
         }
         Expr::Symbol(s) => Ok(Value::Symbol(s.clone())),
-        Expr::Identifier(name) => env
-            .get(name)
-            .cloned()
-            .ok_or_else(|| CompileError::Semantic(format!("undefined variable: {name}"))),
+        Expr::Identifier(name) => {
+            // Handle built-in constants
+            if name == "None" {
+                return Ok(Value::Enum {
+                    enum_name: "Option".into(),
+                    variant: "None".into(),
+                    payload: None,
+                });
+            }
+            env.get(name)
+                .cloned()
+                .ok_or_else(|| CompileError::Semantic(format!("undefined variable: {name}")))
+        },
         Expr::Binary { op, left, right } => {
             let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
             let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
@@ -827,6 +889,37 @@ fn evaluate_expr(
                             class: "__range__".into(),
                             fields,
                         });
+                    }
+                    "Some" => {
+                        let val = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        return Ok(Value::Enum {
+                            enum_name: "Option".into(),
+                            variant: "Some".into(),
+                            payload: Some(Box::new(val)),
+                        });
+                    }
+                    "None" => {
+                        return Ok(Value::Enum {
+                            enum_name: "Option".into(),
+                            variant: "None".into(),
+                            payload: None,
+                        });
+                    }
+                    "len" => {
+                        let val = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        return match val {
+                            Value::Array(a) => Ok(Value::Int(a.len() as i64)),
+                            Value::Tuple(t) => Ok(Value::Int(t.len() as i64)),
+                            Value::Dict(d) => Ok(Value::Int(d.len() as i64)),
+                            Value::Str(s) => Ok(Value::Int(s.len() as i64)),
+                            _ => Err(CompileError::Semantic("len expects array, tuple, dict, or string".into())),
+                        };
                     }
                     "send" => {
                         let target = args.get(0).ok_or_else(|| CompileError::Semantic("send expects actor handle".into()))?;
@@ -947,6 +1040,184 @@ fn evaluate_expr(
         }
         Expr::MethodCall { receiver, method, args } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?;
+            // Built-in methods for Array
+            if let Value::Array(ref arr) = recv_val {
+                match method.as_str() {
+                    "len" => return Ok(Value::Int(arr.len() as i64)),
+                    "is_empty" => return Ok(Value::Bool(arr.is_empty())),
+                    "first" => return Ok(arr.first().cloned().unwrap_or(Value::Nil)),
+                    "last" => return Ok(arr.last().cloned().unwrap_or(Value::Nil)),
+                    "get" => {
+                        let idx = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Int(0))
+                            .as_int()? as usize;
+                        return Ok(arr.get(idx).cloned().unwrap_or(Value::Nil));
+                    }
+                    "contains" => {
+                        let needle = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil);
+                        return Ok(Value::Bool(arr.contains(&needle)));
+                    }
+                    _ => {}
+                }
+            }
+            // Built-in methods for Tuple
+            if let Value::Tuple(ref tup) = recv_val {
+                match method.as_str() {
+                    "len" => return Ok(Value::Int(tup.len() as i64)),
+                    "get" => {
+                        let idx = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Int(0))
+                            .as_int()? as usize;
+                        return Ok(tup.get(idx).cloned().unwrap_or(Value::Nil));
+                    }
+                    _ => {}
+                }
+            }
+            // Built-in methods for Dict
+            if let Value::Dict(ref map) = recv_val {
+                match method.as_str() {
+                    "len" => return Ok(Value::Int(map.len() as i64)),
+                    "is_empty" => return Ok(Value::Bool(map.is_empty())),
+                    "contains_key" => {
+                        let key = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil)
+                            .to_key_string();
+                        return Ok(Value::Bool(map.contains_key(&key)));
+                    }
+                    "get" => {
+                        let key = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Nil)
+                            .to_key_string();
+                        return Ok(map.get(&key).cloned().unwrap_or(Value::Nil));
+                    }
+                    "keys" => {
+                        let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
+                        return Ok(Value::Array(keys));
+                    }
+                    "values" => {
+                        let vals: Vec<Value> = map.values().cloned().collect();
+                        return Ok(Value::Array(vals));
+                    }
+                    _ => {}
+                }
+            }
+            // Built-in methods for String
+            if let Value::Str(ref s) = recv_val {
+                match method.as_str() {
+                    "len" => return Ok(Value::Int(s.len() as i64)),
+                    "is_empty" => return Ok(Value::Bool(s.is_empty())),
+                    "chars" => {
+                        let chars: Vec<Value> = s.chars().map(|c| Value::Str(c.to_string())).collect();
+                        return Ok(Value::Array(chars));
+                    }
+                    "contains" => {
+                        let needle = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Str(String::new()))
+                            .to_key_string();
+                        return Ok(Value::Bool(s.contains(&needle)));
+                    }
+                    "starts_with" => {
+                        let prefix = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Str(String::new()))
+                            .to_key_string();
+                        return Ok(Value::Bool(s.starts_with(&prefix)));
+                    }
+                    "ends_with" => {
+                        let suffix = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Str(String::new()))
+                            .to_key_string();
+                        return Ok(Value::Bool(s.ends_with(&suffix)));
+                    }
+                    "to_upper" => return Ok(Value::Str(s.to_uppercase())),
+                    "to_lower" => return Ok(Value::Str(s.to_lowercase())),
+                    "trim" => return Ok(Value::Str(s.trim().to_string())),
+                    "split" => {
+                        let sep = args.get(0)
+                            .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                            .transpose()?
+                            .unwrap_or(Value::Str(" ".into()))
+                            .to_key_string();
+                        let parts: Vec<Value> = s.split(&sep).map(|p| Value::Str(p.to_string())).collect();
+                        return Ok(Value::Array(parts));
+                    }
+                    _ => {}
+                }
+            }
+            // Built-in methods for Option (Enum with enum_name == "Option")
+            if let Value::Enum { enum_name, variant, payload } = &recv_val {
+                if enum_name == "Option" {
+                    match method.as_str() {
+                        "is_some" => return Ok(Value::Bool(variant == "Some")),
+                        "is_none" => return Ok(Value::Bool(variant == "None")),
+                        "unwrap" => {
+                            if variant == "Some" {
+                                if let Some(val) = payload {
+                                    return Ok(val.as_ref().clone());
+                                }
+                            }
+                            return Err(CompileError::Semantic("called unwrap on None".into()));
+                        }
+                        "unwrap_or" => {
+                            if variant == "Some" {
+                                if let Some(val) = payload {
+                                    return Ok(val.as_ref().clone());
+                                }
+                            }
+                            let default = args.get(0)
+                                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                                .transpose()?
+                                .unwrap_or(Value::Nil);
+                            return Ok(default);
+                        }
+                        "map" => {
+                            if variant == "Some" {
+                                if let Some(val) = payload {
+                                    let func_arg = args.get(0)
+                                        .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                                        .transpose()?
+                                        .unwrap_or(Value::Nil);
+                                    if let Value::Lambda { params, body, env: captured } = func_arg {
+                                        let mut local_env = captured.clone();
+                                        if let Some(param) = params.first() {
+                                            local_env.insert(param.clone(), val.as_ref().clone());
+                                        }
+                                        let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                                        return Ok(Value::Enum {
+                                            enum_name: "Option".into(),
+                                            variant: "Some".into(),
+                                            payload: Some(Box::new(result)),
+                                        });
+                                    }
+                                }
+                            }
+                            return Ok(Value::Enum {
+                                enum_name: "Option".into(),
+                                variant: "None".into(),
+                                payload: None,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            // Object methods (class/struct)
             if let Value::Object { class, fields } = recv_val.clone() {
                 // First check class methods
                 if let Some(class_def) = classes.get(&class) {
@@ -978,10 +1249,9 @@ fn evaluate_expr(
                         );
                     }
                 }
-                Err(CompileError::Semantic(format!("unknown method {method} on {class}")))
-            } else {
-                Err(CompileError::Semantic("method call on non-object".into()))
+                return Err(CompileError::Semantic(format!("unknown method {method} on {class}")));
             }
+            Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))
         }
         Expr::FieldAccess { receiver, field } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?;
@@ -1039,10 +1309,7 @@ fn evaluate_expr(
                 let val = evaluate_expr(v, env, functions, classes, enums, impl_methods)?;
                 map.insert(key_val.to_key_string(), val);
             }
-            Ok(Value::Object {
-                class: "__dict__".into(),
-                fields: map,
-            })
+            Ok(Value::Dict(map))
         }
         Expr::Range { start, end, inclusive } => {
             let start = start
@@ -1067,57 +1334,56 @@ fn evaluate_expr(
             })
         }
         Expr::Array(items) => {
-            let mut fields = HashMap::new();
-            for (idx, item) in items.iter().enumerate() {
-                fields.insert(idx.to_string(), evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
+            let mut arr = Vec::new();
+            for item in items {
+                arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
             }
-            Ok(Value::Object {
-                class: "__array__".into(),
-                fields,
-            })
+            Ok(Value::Array(arr))
         }
         Expr::Tuple(items) => {
-            let mut fields = HashMap::new();
-            for (idx, item) in items.iter().enumerate() {
-                fields.insert(idx.to_string(), evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
+            let mut tup = Vec::new();
+            for item in items {
+                tup.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
             }
-            Ok(Value::Object {
-                class: "__tuple__".into(),
-                fields,
-            })
+            Ok(Value::Tuple(tup))
         }
         Expr::Index { receiver, index } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?;
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
-            if let Value::Object { class, fields } = recv_val {
-                if class == "__array__" {
-                    let key = idx_val.as_int()?.to_string();
-                    fields
-                        .get(&key)
+            match recv_val {
+                Value::Array(arr) => {
+                    let idx = idx_val.as_int()? as usize;
+                    arr.get(idx)
                         .cloned()
-                        .ok_or_else(|| CompileError::Semantic(format!("array index out of bounds: {}", idx_val.to_key_string())))
-                } else if class == "__tuple__" {
-                    let key = idx_val.as_int()?.to_string();
-                    fields
-                        .get(&key)
+                        .ok_or_else(|| CompileError::Semantic(format!("array index out of bounds: {idx}")))
+                }
+                Value::Tuple(tup) => {
+                    let idx = idx_val.as_int()? as usize;
+                    tup.get(idx)
                         .cloned()
-                        .ok_or_else(|| CompileError::Semantic(format!("tuple index out of bounds: {}", idx_val.to_key_string())))
-                } else if class == "__dict__" {
+                        .ok_or_else(|| CompileError::Semantic(format!("tuple index out of bounds: {idx}")))
+                }
+                Value::Dict(map) => {
                     let key = idx_val.to_key_string();
-                    fields
-                        .get(&key)
+                    map.get(&key)
                         .cloned()
                         .ok_or_else(|| CompileError::Semantic(format!("dict key not found: {key}")))
-                } else {
-                    // Support generic object indexing by string key
+                }
+                Value::Str(s) => {
+                    let idx = idx_val.as_int()? as usize;
+                    s.chars()
+                        .nth(idx)
+                        .map(|c| Value::Str(c.to_string()))
+                        .ok_or_else(|| CompileError::Semantic(format!("string index out of bounds: {idx}")))
+                }
+                Value::Object { fields, .. } => {
                     let key = idx_val.to_key_string();
                     fields
                         .get(&key)
                         .cloned()
                         .ok_or_else(|| CompileError::Semantic(format!("key not found: {key}")))
                 }
-            } else {
-                Err(CompileError::Semantic("index access on non-array/object".into()))
+                _ => Err(CompileError::Semantic("index access on non-indexable type".into())),
             }
         }
         Expr::Spawn(inner) => {

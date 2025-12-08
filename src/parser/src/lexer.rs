@@ -101,7 +101,17 @@ impl<'a> Lexer<'a> {
             '@' => TokenKind::At,
             '#' => self.skip_comment(),
             '$' => TokenKind::Dollar,
-            '\\' => TokenKind::Backslash,
+            '\\' => {
+                // Line continuation: backslash followed by newline
+                if self.peek() == Some('\n') {
+                    self.advance(); // consume the newline
+                    self.line += 1;
+                    self.column = 1;
+                    // Return next meaningful token instead of backslash
+                    return self.next_token();
+                }
+                TokenKind::Backslash
+            }
             '^' => TokenKind::Caret,
             '~' => TokenKind::Tilde,
             '?' => TokenKind::Question,

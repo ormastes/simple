@@ -57,6 +57,11 @@ impl TypeChecker {
         self.env.insert("join".to_string(), join_ty);
         let spawn_ty = self.fresh_var();
         self.env.insert("spawn".to_string(), spawn_ty);
+        // Option type constructors
+        let some_ty = self.fresh_var();
+        self.env.insert("Some".to_string(), some_ty);
+        let none_ty = self.fresh_var();
+        self.env.insert("None".to_string(), none_ty);
 
         // First pass: register all function, class, struct, const, static names
         for item in items {
@@ -104,10 +109,9 @@ impl TypeChecker {
         match node {
             Node::Let(let_stmt) => {
                 if let Some(expr) = &let_stmt.value {
-                    let ty = self.infer_expr(expr)?;
-                    if let Pattern::Identifier(name) = &let_stmt.pattern {
-                        self.env.insert(name.clone(), ty);
-                    }
+                    let _ty = self.infer_expr(expr)?;
+                    // Bind all identifiers in the pattern
+                    self.bind_pattern(&let_stmt.pattern);
                 }
                 Ok(())
             }
