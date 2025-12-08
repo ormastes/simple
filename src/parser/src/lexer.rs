@@ -390,6 +390,90 @@ impl<'a> Lexer<'a> {
         TokenKind::Error("Unterminated string".to_string())
     }
 
+    fn scan_fstring(&mut self) -> TokenKind {
+        use crate::token::FStringToken;
+        let mut parts: Vec<FStringToken> = Vec::new();
+        let mut current_literal = String::new();
+
+        while let Some(ch) = self.peek() {
+            if ch == '"' {
+                // End of f-string
+                self.advance();
+                if !current_literal.is_empty() {
+                    parts.push(FStringToken::Literal(current_literal));
+                }
+                return TokenKind::FString(parts);
+            } else if ch == '{' {
+                self.advance();
+                // Check for escaped {{ -> literal {
+                if self.check('{') {
+                    self.advance();
+                    current_literal.push('{');
+                    continue;
+                }
+                // Save current literal if any
+                if !current_literal.is_empty() {
+                    parts.push(FStringToken::Literal(current_literal));
+                    current_literal = String::new();
+                }
+                // Read expression until }
+                let mut expr = String::new();
+                let mut brace_depth = 1;
+                while let Some(c) = self.peek() {
+                    if c == '}' {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            self.advance();
+                            break;
+                        }
+                    } else if c == '{' {
+                        brace_depth += 1;
+                    }
+                    expr.push(c);
+                    self.advance();
+                }
+                if brace_depth != 0 {
+                    return TokenKind::Error("Unclosed { in f-string".to_string());
+                }
+                parts.push(FStringToken::Expr(expr));
+            } else if ch == '}' {
+                self.advance();
+                // Check for escaped }} -> literal }
+                if self.check('}') {
+                    self.advance();
+                    current_literal.push('}');
+                } else {
+                    return TokenKind::Error("Single } in f-string (use }} to escape)".to_string());
+                }
+            } else if ch == '\\' {
+                self.advance();
+                match self.peek() {
+                    Some('n') => { self.advance(); current_literal.push('\n'); }
+                    Some('t') => { self.advance(); current_literal.push('\t'); }
+                    Some('r') => { self.advance(); current_literal.push('\r'); }
+                    Some('\\') => { self.advance(); current_literal.push('\\'); }
+                    Some('"') => { self.advance(); current_literal.push('"'); }
+                    Some('0') => { self.advance(); current_literal.push('\0'); }
+                    Some('{') => { self.advance(); current_literal.push('{'); }
+                    Some('}') => { self.advance(); current_literal.push('}'); }
+                    Some(c) => {
+                        return TokenKind::Error(format!("Invalid escape sequence: \\{}", c));
+                    }
+                    None => {
+                        return TokenKind::Error("Unterminated f-string".to_string());
+                    }
+                }
+            } else if ch == '\n' {
+                return TokenKind::Error("Unterminated f-string".to_string());
+            } else {
+                self.advance();
+                current_literal.push(ch);
+            }
+        }
+
+        TokenKind::Error("Unterminated f-string".to_string())
+    }
+
     fn scan_number(&mut self, first: char) -> TokenKind {
         let mut num_str = String::from(first);
         let mut is_float = false;
@@ -533,6 +617,12 @@ impl<'a> Lexer<'a> {
     }
 
     fn scan_identifier(&mut self, first: char) -> TokenKind {
+        // Check for f-string: f"..."
+        if first == 'f' && self.check('"') {
+            self.advance(); // consume the opening "
+            return self.scan_fstring();
+        }
+
         let mut name = String::from(first);
 
         while let Some(ch) = self.peek() {
@@ -585,6 +675,10 @@ impl<'a> Lexer<'a> {
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
             "waitless" => TokenKind::Waitless,
+            "const" => TokenKind::Const,
+            "static" => TokenKind::Static,
+            "type" => TokenKind::Type,
+            "extern" => TokenKind::Extern,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
         }

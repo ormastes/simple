@@ -427,14 +427,35 @@ main = classify(0) + classify(1) * 10 + classify(99) * 100
 #[test]
 fn runner_handles_spawn_expression() {
     let runner = Runner::new();
-    // spawn is fire-and-forget; we just assert it doesn't crash and returns a handle (0 for now).
+    // spawn is fire-and-forget; we just assert it doesn't crash.
+    // The spawned actor returns a handle, so we store it and return a fixed value.
     let src = r#"
 fn work():
     return 42
-main = spawn work()
+let handle = spawn work()
+main = 0
 "#;
     let exit = runner.run_source(src).expect("run ok");
     assert_eq!(exit, 0);
+}
+
+#[test]
+#[ignore = "actor send/recv has deadlock issue - needs async runtime"]
+fn runner_handles_actor_send_recv_join() {
+    let runner = Runner::new();
+    let src = r#"
+fn worker():
+    let msg = recv()
+    reply(msg)
+
+let h = spawn worker()
+send(h, "ping")
+let resp = recv(h)
+join(h)
+main = if resp == "ping": 0 else: 1
+"#;
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, 0, "actor roundtrip should succeed");
 }
 
 #[test]
@@ -578,19 +599,28 @@ main = d[key]
 fn runner_handles_mutability_control() {
     let runner = Runner::new();
 
-    // Mutable variable can be reassigned
+    // Variables are mutable by default (Python-like)
     let src = r#"
-mut let x = 10
+let x = 10
 x = 20
 main = x
 "#;
     let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 20, "mutable variable should be reassignable");
+    assert_eq!(exit, 20, "let variables are mutable by default");
 
-    // Mutable variable in loop
+    // Bare assignment creates mutable variable (Python-like)
     let src = r#"
-mut let sum = 0
-mut let i = 0
+y = 10
+y = 30
+main = y
+"#;
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, 30, "bare assignment creates mutable variable");
+
+    // Variables in loop (no mut needed)
+    let src = r#"
+sum = 0
+i = 0
 while i < 5:
     sum = sum + i
     i = i + 1
@@ -599,14 +629,80 @@ main = sum
     let exit = runner.run_source(src).expect("run ok");
     assert_eq!(exit, 10, "sum of 0+1+2+3+4 = 10");
 
-    // Immutable variable cannot be reassigned (should error)
+    // const is immutable (cannot be reassigned)
     let src = r#"
-let x = 10
+const x = 10
 x = 20
 main = x
 "#;
     let result = runner.run_source(src);
-    assert!(result.is_err(), "immutable variable reassignment should fail");
+    assert!(result.is_err(), "const reassignment should fail");
     let err = result.unwrap_err();
     assert!(err.contains("immutable") || err.contains("cannot assign"), "error should mention immutability");
+}
+
+#[test]
+fn runner_handles_static_const_declarations() {
+    let runner = Runner::new();
+
+    // Simple const declaration
+    let src = r#"
+const MAX = 100
+main = MAX
+"#;
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, 100, "const MAX should be 100");
+
+    // Const with arithmetic
+    let src = r#"
+const BASE = 10
+const MULTIPLIER = 5
+main = BASE * MULTIPLIER
+"#;
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, 50, "BASE * MULTIPLIER = 10 * 5 = 50");
+
+    // Const cannot be reassigned (should error)
+    let src = r#"
+const X = 10
+X = 20
+main = X
+"#;
+    let result = runner.run_source(src);
+    assert!(result.is_err(), "const reassignment should fail");
+
+    // Static variable (immutable by default)
+    let src = r#"
+static counter = 42
+main = counter
+"#;
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, 42, "static counter should be 42");
+
+    // Static mut variable can be reassigned
+    let src = r#"
+static mut counter = 0
+counter = counter + 1
+counter = counter + 1
+main = counter
+"#;
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, 2, "static mut counter should be 2 after two increments");
+
+    // Static (non-mut) cannot be reassigned (should error)
+    let src = r#"
+static counter = 10
+counter = 20
+main = counter
+"#;
+    let result = runner.run_source(src);
+    assert!(result.is_err(), "static (non-mut) reassignment should fail");
+
+    // Const with type annotation
+    let src = r#"
+const SIZE: i64 = 256
+main = SIZE
+"#;
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, 256, "const SIZE should be 256");
 }

@@ -30,6 +30,15 @@ In the example above, `each` is a method that takes a block. The block is introd
 
 - **Literals**: Numbers (`42`, `3.14`), strings (`"hello"` or `'single quotes'`), booleans (`true`, `false`), and `nil` for "null" are supported. Underscores can be used in numeric literals for readability (e.g. `1_000_000`).
 
+- **F-strings (String Interpolation)**: Prefix a string with `f` to create an interpolated string where `{expr}` embeds the value of any expression:
+  ```simple
+  let name = "world"
+  let count = 42
+  let msg = f"Hello, {name}! Count is {count + 1}"
+  # Result: "Hello, world! Count is 43"
+  ```
+  Use `{{` and `}}` for literal braces.
+
 - **Line Continuation**: A line ending with a backslash `\` followed immediately by a newline will continue on the next line (though in many cases, indentation or parentheses make this unnecessary). Note: This is unambiguous with lambda syntax since line continuation requires `\` at line end, while lambda params have `\` followed by identifiers.
 
 - **Operators**: Standard arithmetic and comparison operators (`+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>` etc.), logical operators (`and`, `or`, `not`), and the method chaining arrow operator (`->`, explained below) are available.
@@ -125,21 +134,23 @@ Here, `Person` is a regular mutable class (you can change a Person's name or age
 
 ### Variables
 
-Variables in Simple follow similar principles. By default, a local variable bound to a value cannot be re-bound (no assignment to it after initialization), unless it is explicitly marked `mut`. For example:
+Variables in Simple are **mutable by default** (like Python) for ease of use. The `let` keyword is optional. Use `const` for immutable bindings:
 
 ```simple
-let x = 10
-x = 20            # compile error, x is not mutable
+x = 10            # mutable variable (let is optional)
+let y = 20        # also mutable (let is explicit but optional)
+x = 30            # ok, x is mutable
+y = 40            # ok, y is mutable
 
-mut let y = 5
-y = 7             # ok, y is mutable
+const MAX = 100   # immutable constant
+MAX = 200         # compile error, const cannot be reassigned
 ```
 
-This approach (immutable by default, opt-in mutability) prevents unintended side-effects and makes code easier to reason about.
+This Python-like approach makes the language easy to learn and use. For cases where immutability is desired, use `const` for compile-time constants or `static` for global variables.
 
 The compiler enforces that only mutable variables or fields can be assigned to, and that immutable data cannot be modified. Attempting to modify an immutable struct or an `immut` class's field results in a compile-time error. You can freely copy or pass around immutable values without worrying that they will change underfoot, which is especially important in concurrent and functional patterns.
 
-Type inference works in tandem with these rules. For example, if you write `let p = Point(3,4)` and `Point` is immutable, the type of `p` is inferred as `Point` and you simply can't call any mutating method on it (since none exist for an immutable struct). If you had `mut let cur = Cursor(0,0)`, the compiler infers `cur` as type `Cursor` and allows `cur.x = 5` because `Cursor` was declared mutable.
+Type inference works in tandem with these rules. For example, if you write `p = Point(3,4)` and `Point` is immutable, the type of `p` is inferred as `Point` and you simply can't call any mutating method on it (since none exist for an immutable struct). If you had `cur = Cursor(0,0)`, the compiler infers `cur` as type `Cursor` and allows `cur.x = 5` because variables are mutable by default.
 
 ---
 
@@ -156,8 +167,8 @@ struct Point:
     x: f64
     y: f64
 
-let a = Point(x: 1, y: 2)
-let b = a          # copies the values x=1, y=2 into b
+a = Point(x: 1, y: 2)
+b = a              # copies the values x=1, y=2 into b
 # a.x = 5          # Error: Point is immutable by default
 ```
 

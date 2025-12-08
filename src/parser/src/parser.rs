@@ -62,7 +62,12 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_pub_item()
             }
+            TokenKind::Mut => self.parse_mut_let(),
             TokenKind::Let => self.parse_let(),
+            TokenKind::Const => self.parse_const(),
+            TokenKind::Static => self.parse_static(),
+            TokenKind::Type => self.parse_type_alias(),
+            TokenKind::Extern => self.parse_extern(),
             TokenKind::If => self.parse_if(),
             TokenKind::Match => self.parse_match_stmt(),
             TokenKind::For => self.parse_for(),
@@ -119,8 +124,36 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            TokenKind::Const => {
+                let mut node = self.parse_const()?;
+                if let Node::Const(ref mut c) = node {
+                    c.is_public = true;
+                }
+                Ok(node)
+            }
+            TokenKind::Static => {
+                let mut node = self.parse_static()?;
+                if let Node::Static(ref mut s) = node {
+                    s.is_public = true;
+                }
+                Ok(node)
+            }
+            TokenKind::Type => {
+                let mut node = self.parse_type_alias()?;
+                if let Node::TypeAlias(ref mut t) = node {
+                    t.is_public = true;
+                }
+                Ok(node)
+            }
+            TokenKind::Extern => {
+                let mut node = self.parse_extern()?;
+                if let Node::Extern(ref mut e) = node {
+                    e.is_public = true;
+                }
+                Ok(node)
+            }
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, trait, or actor after 'pub'",
+                "fn, struct, class, enum, trait, actor, const, static, type, or extern after 'pub'",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),
@@ -249,26 +282,43 @@ impl<'a> Parser<'a> {
     // === Type Parsing ===
 
     fn parse_type(&mut self) -> Result<Type, ParseError> {
+        // Parse the first type
+        let first = self.parse_single_type()?;
+
+        // Check for union types (A | B | C)
+        if self.check(&TokenKind::Pipe) {
+            let mut types = vec![first];
+            while self.check(&TokenKind::Pipe) {
+                self.advance();
+                types.push(self.parse_single_type()?);
+            }
+            return Ok(Type::Union(types));
+        }
+
+        Ok(first)
+    }
+
+    fn parse_single_type(&mut self) -> Result<Type, ParseError> {
         // Handle pointer types
         match &self.current.kind {
             TokenKind::Ampersand => {
                 self.advance();
-                let inner = self.parse_type()?;
+                let inner = self.parse_single_type()?;
                 return Ok(Type::Pointer { kind: PointerKind::Unique, inner: Box::new(inner) });
             }
             TokenKind::Star => {
                 self.advance();
-                let inner = self.parse_type()?;
+                let inner = self.parse_single_type()?;
                 return Ok(Type::Pointer { kind: PointerKind::Shared, inner: Box::new(inner) });
             }
             TokenKind::Minus => {
                 self.advance();
-                let inner = self.parse_type()?;
+                let inner = self.parse_single_type()?;
                 return Ok(Type::Pointer { kind: PointerKind::Weak, inner: Box::new(inner) });
             }
             TokenKind::Plus => {
                 self.advance();
-                let inner = self.parse_type()?;
+                let inner = self.parse_single_type()?;
                 return Ok(Type::Pointer { kind: PointerKind::Handle, inner: Box::new(inner) });
             }
             _ => {}
@@ -332,6 +382,36 @@ impl<'a> Parser<'a> {
 
     // === Statement Parsing ===
 
+    fn parse_mut_let(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Mut)?;
+        self.expect(&TokenKind::Let)?;
+
+        let pattern = self.parse_pattern()?;
+
+        let ty = if self.check(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        let value = if self.check(&TokenKind::Assign) {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+
+        Ok(Node::Let(LetStmt {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            pattern,
+            ty,
+            value,
+            is_mutable: true,
+        }))
+    }
+
     fn parse_let(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Let)?;
@@ -365,6 +445,104 @@ impl<'a> Parser<'a> {
             ty,
             value,
             is_mutable,
+        }))
+    }
+
+    fn parse_const(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Const)?;
+
+        let name = self.expect_identifier()?;
+
+        let ty = if self.check(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::Assign)?;
+        let value = self.parse_expression()?;
+
+        Ok(Node::Const(ConstStmt {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            name,
+            ty,
+            value,
+            is_public: false,
+        }))
+    }
+
+    fn parse_static(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Static)?;
+
+        let is_mutable = if self.check(&TokenKind::Mut) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        let name = self.expect_identifier()?;
+
+        let ty = if self.check(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        self.expect(&TokenKind::Assign)?;
+        let value = self.parse_expression()?;
+
+        Ok(Node::Static(StaticStmt {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            name,
+            ty,
+            value,
+            is_mutable,
+            is_public: false,
+        }))
+    }
+
+    fn parse_type_alias(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Type)?;
+
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Assign)?;
+        let ty = self.parse_type()?;
+
+        Ok(Node::TypeAlias(TypeAliasDef {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            name,
+            ty,
+            is_public: false,
+        }))
+    }
+
+    fn parse_extern(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Extern)?;
+        self.expect(&TokenKind::Fn)?;
+
+        let name = self.expect_identifier()?;
+        let params = self.parse_parameters()?;
+
+        let return_type = if self.check(&TokenKind::Arrow) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        Ok(Node::Extern(ExternDef {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            name,
+            params,
+            return_type,
+            is_public: false,
         }))
     }
 
@@ -1211,15 +1389,15 @@ impl<'a> Parser<'a> {
             let mut name = None;
             if let TokenKind::Identifier(id) = &self.current.kind {
                 let id_clone = id.clone();
-                // Peek ahead for '='
-                let next = self.lexer.next_token();
+                // Peek ahead for '=' without consuming the stream
+                let next = self.pending_token.clone().unwrap_or_else(|| self.lexer.next_token());
+                self.pending_token = Some(next.clone());
                 if next.kind == TokenKind::Assign {
                     name = Some(id_clone);
                     self.advance(); // consume identifier
-                    self.advance(); // consume '='
+                    self.expect(&TokenKind::Assign)?; // consume '='
                 } else {
-                    // Put the token back by not advancing
-                    self.pending_token = Some(next);
+                    // leave current untouched; pending_token already holds the peeked token
                 }
             }
 
@@ -1251,6 +1429,29 @@ impl<'a> Parser<'a> {
                 let s = s.clone();
                 self.advance();
                 Ok(Expr::String(s))
+            }
+            TokenKind::FString(parts) => {
+                use crate::token::FStringToken;
+                use crate::ast::FStringPart;
+                let parts = parts.clone();
+                self.advance();
+                let mut result_parts = Vec::new();
+                for part in parts {
+                    match part {
+                        FStringToken::Literal(s) => {
+                            result_parts.push(FStringPart::Literal(s));
+                        }
+                        FStringToken::Expr(expr_str) => {
+                            // Parse the expression string
+                            let mut sub_parser = Parser::new(&expr_str);
+                            match sub_parser.parse_expression() {
+                                Ok(expr) => result_parts.push(FStringPart::Expr(expr)),
+                                Err(e) => return Err(e),
+                            }
+                        }
+                    }
+                }
+                Ok(Expr::FString(result_parts))
             }
             TokenKind::Bool(b) => {
                 let b = *b;
@@ -1301,6 +1502,32 @@ impl<'a> Parser<'a> {
             TokenKind::Self_ => {
                 self.advance();
                 Ok(Expr::Identifier("self".to_string()))
+            }
+            TokenKind::Backslash => {
+                // Lambda: \x: expr or \x, y: expr or \: expr
+                self.advance();
+                let mut params = Vec::new();
+
+                // Check for no-param lambda: \: expr
+                if !self.check(&TokenKind::Colon) {
+                    // Parse first param name
+                    let name = self.expect_identifier()?;
+                    params.push(LambdaParam { name, ty: None });
+
+                    // Parse additional params (comma-separated)
+                    while self.check(&TokenKind::Comma) {
+                        self.advance();
+                        let name = self.expect_identifier()?;
+                        params.push(LambdaParam { name, ty: None });
+                    }
+                }
+
+                self.expect(&TokenKind::Colon)?;
+                let body = self.parse_expression()?;
+                Ok(Expr::Lambda {
+                    params,
+                    body: Box::new(body),
+                })
             }
             TokenKind::LParen => {
                 self.advance();

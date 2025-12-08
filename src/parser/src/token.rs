@@ -13,6 +13,13 @@ impl Span {
     }
 }
 
+/// Part of an f-string token (for interpolated strings)
+#[derive(Debug, Clone, PartialEq)]
+pub enum FStringToken {
+    Literal(String),
+    Expr(String),  // The expression text to be parsed later
+}
+
 /// Token types for the Simple language
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -20,6 +27,7 @@ pub enum TokenKind {
     Integer(i64),
     Float(f64),
     String(String),
+    FString(Vec<FStringToken>),  // f"hello {expr}" interpolated strings
     Bool(bool),
     Nil,
     Symbol(String),      // :symbol
@@ -66,6 +74,10 @@ pub enum TokenKind {
     Async,
     Await,
     Waitless,
+    Const,
+    Static,
+    Type,
+    Extern,
 
     // Operators
     Plus,           // +

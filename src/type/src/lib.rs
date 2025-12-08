@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use simple_parser::ast::{Node, Expr, BinOp, Pattern};
+use simple_parser::ast::{Node, Expr, Pattern};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -47,8 +47,18 @@ impl TypeChecker {
         self.env.insert("print".to_string(), print_ty);
         let len_ty = self.fresh_var();
         self.env.insert("len".to_string(), len_ty);
+        let send_ty = self.fresh_var();
+        self.env.insert("send".to_string(), send_ty);
+        let recv_ty = self.fresh_var();
+        self.env.insert("recv".to_string(), recv_ty);
+        let reply_ty = self.fresh_var();
+        self.env.insert("reply".to_string(), reply_ty);
+        let join_ty = self.fresh_var();
+        self.env.insert("join".to_string(), join_ty);
+        let spawn_ty = self.fresh_var();
+        self.env.insert("spawn".to_string(), spawn_ty);
 
-        // First pass: register all function, class, struct names
+        // First pass: register all function, class, struct, const, static names
         for item in items {
             match item {
                 Node::Function(func) => {
@@ -66,6 +76,19 @@ impl TypeChecker {
                 Node::Enum(e) => {
                     let ty = self.fresh_var();
                     self.env.insert(e.name.clone(), ty);
+                }
+                Node::Trait(t) => {
+                    // Register trait as a type for now
+                    let ty = self.fresh_var();
+                    self.env.insert(t.name.clone(), ty);
+                }
+                Node::Const(c) => {
+                    let ty = self.fresh_var();
+                    self.env.insert(c.name.clone(), ty);
+                }
+                Node::Static(s) => {
+                    let ty = self.fresh_var();
+                    self.env.insert(s.name.clone(), ty);
                 }
                 _ => {}
             }
@@ -88,8 +111,22 @@ impl TypeChecker {
                 }
                 Ok(())
             }
+            Node::Const(const_stmt) => {
+                let ty = self.infer_expr(&const_stmt.value)?;
+                self.env.insert(const_stmt.name.clone(), ty);
+                Ok(())
+            }
+            Node::Static(static_stmt) => {
+                let ty = self.infer_expr(&static_stmt.value)?;
+                self.env.insert(static_stmt.name.clone(), ty);
+                Ok(())
+            }
             Node::Assignment(assign) => {
-                let _ = self.infer_expr(&assign.value)?;
+                let ty = self.infer_expr(&assign.value)?;
+                // Python-like: assignment can create new variables
+                if let Expr::Identifier(name) = &assign.target {
+                    self.env.insert(name.clone(), ty);
+                }
                 Ok(())
             }
             Node::Function(func) => {
@@ -169,6 +206,41 @@ impl TypeChecker {
                 }
                 Ok(())
             }
+            Node::Trait(trait_def) => {
+                // Check all trait methods
+                for method in &trait_def.methods {
+                    let old_env = self.env.clone();
+                    for param in &method.params {
+                        let ty = self.fresh_var();
+                        self.env.insert(param.name.clone(), ty);
+                    }
+                    for stmt in &method.body.statements {
+                        self.check_node(stmt)?;
+                    }
+                    self.env = old_env;
+                }
+                Ok(())
+            }
+            Node::Impl(impl_block) => {
+                // Check all impl methods
+                for method in &impl_block.methods {
+                    let old_env = self.env.clone();
+                    // Add self to environment
+                    let self_ty = self.fresh_var();
+                    self.env.insert("self".to_string(), self_ty);
+                    for param in &method.params {
+                        if param.name != "self" {
+                            let ty = self.fresh_var();
+                            self.env.insert(param.name.clone(), ty);
+                        }
+                    }
+                    for stmt in &method.body.statements {
+                        self.check_node(stmt)?;
+                    }
+                    self.env = old_env;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -217,6 +289,15 @@ impl TypeChecker {
             Expr::Integer(_) => Ok(Type::Int),
             Expr::Float(_) => Ok(Type::Float),
             Expr::String(_) => Ok(Type::Str),
+            Expr::FString(parts) => {
+                use simple_parser::ast::FStringPart;
+                for part in parts {
+                    if let FStringPart::Expr(e) = part {
+                        let _ = self.infer_expr(e)?;
+                    }
+                }
+                Ok(Type::Str)
+            }
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::Nil => Ok(Type::Nil),
             Expr::Identifier(name) => {

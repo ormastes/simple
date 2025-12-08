@@ -11,9 +11,13 @@ pub enum Node {
     Trait(TraitDef),
     Impl(ImplBlock),
     Actor(ActorDef),
+    TypeAlias(TypeAliasDef),
+    Extern(ExternDef),
 
     // Statements
     Let(LetStmt),
+    Const(ConstStmt),
+    Static(StaticStmt),
     Assignment(AssignmentStmt),
     Return(ReturnStmt),
     If(IfStmt),
@@ -129,6 +133,23 @@ pub struct ActorDef {
     pub is_public: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeAliasDef {
+    pub span: Span,
+    pub name: String,
+    pub ty: Type,
+    pub is_public: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternDef {
+    pub span: Span,
+    pub name: String,
+    pub params: Vec<Parameter>,
+    pub return_type: Option<Type>,
+    pub is_public: bool,
+}
+
 // Statements
 
 #[derive(Debug, Clone, PartialEq)]
@@ -138,6 +159,31 @@ pub struct LetStmt {
     pub ty: Option<Type>,
     pub value: Option<Expr>,
     pub is_mutable: bool,
+}
+
+/// Compile-time constant declaration
+/// const PI = 3.14159
+/// const MAX_SIZE: i64 = 100
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConstStmt {
+    pub span: Span,
+    pub name: String,
+    pub ty: Option<Type>,
+    pub value: Expr,  // Required - must be evaluable at compile time
+    pub is_public: bool,
+}
+
+/// Static variable declaration (global, initialized once)
+/// static counter = 0
+/// static mut config = {}
+#[derive(Debug, Clone, PartialEq)]
+pub struct StaticStmt {
+    pub span: Span,
+    pub name: String,
+    pub ty: Option<Type>,
+    pub value: Expr,  // Required
+    pub is_mutable: bool,
+    pub is_public: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -255,6 +301,7 @@ pub enum Expr {
     Integer(i64),
     Float(f64),
     String(String),
+    FString(Vec<FStringPart>),  // f"hello {name}!" interpolated strings
     Bool(bool),
     Nil,
     Symbol(String),
@@ -285,6 +332,13 @@ pub enum Expr {
 pub struct Argument {
     pub name: Option<String>,  // for named arguments
     pub value: Expr,
+}
+
+/// Part of an f-string (interpolated string)
+#[derive(Debug, Clone, PartialEq)]
+pub enum FStringPart {
+    Literal(String),
+    Expr(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

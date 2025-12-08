@@ -1,17 +1,19 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::Arc;
-use std::thread;
+use std::sync::{Arc, Mutex, mpsc};
 
 use simple_loader::smf::{
     hash_name, Arch, SectionType, SmfHeader, SmfSection, SmfSymbol, SymbolBinding, SymbolType,
     SMF_FLAG_EXECUTABLE, SMF_MAGIC, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
 };
 use simple_parser::ast::{
-    AssignOp, BinOp, Block, ClassDef, Expr, FunctionDef, IfStmt, MatchStmt, Node, Pattern, Type, UnaryOp,
+    AssignOp, BinOp, Block, ClassDef, Expr, FStringPart, FunctionDef, IfStmt, LambdaParam, MatchStmt, Node,
+    Pattern, Type, UnaryOp,
 };
 use simple_common::gc::GcAllocator;
+use simple_runtime::concurrency::{self, ActorHandle, Message};
 use simple_type::check as type_check;
 // Type checking lives in the separate crate simple-type
 use tracing::instrument;
@@ -25,8 +27,11 @@ enum Value {
     Int(i64),
     Bool(bool),
     Str(String),
+    Symbol(String),
+    Lambda { params: Vec<String>, body: Box<Expr>, env: Env },
     Object { class: String, fields: HashMap<String, Value> },
     Enum { enum_name: String, variant: String, payload: Option<Box<Value>> },
+    Actor(ActorHandle),
     Nil,
 }
 
@@ -36,6 +41,7 @@ impl Value {
             Value::Int(i) => Ok(*i),
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
             Value::Str(_) => Err(CompileError::Semantic("expected int, got string".into())),
+            Value::Symbol(_) => Err(CompileError::Semantic("expected int, got symbol".into())),
             Value::Nil => Ok(0),
             other => Err(CompileError::Semantic(format!(
                 "expected int, got {other:?}"
@@ -48,7 +54,19 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::Bool(b) => b.to_string(),
             Value::Str(s) => s.clone(),
+            Value::Symbol(s) => s.clone(),
             Value::Nil => "nil".to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
+    fn to_display_string(&self) -> String {
+        match self {
+            Value::Str(s) => s.clone(),
+            Value::Symbol(s) => format!(":{s}"),
+            Value::Int(i) => i.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Nil => "nil".into(),
             other => format!("{other:?}"),
         }
     }
@@ -58,11 +76,16 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Int(i) => *i != 0,
             Value::Str(s) => !s.is_empty(),
+            Value::Symbol(_) => true,
             Value::Nil => false,
-            Value::Object { .. } => true,
-            Value::Enum { .. } => true,
+            Value::Object { .. } | Value::Enum { .. } | Value::Lambda { .. } | Value::Actor(_) => true,
         }
     }
+}
+
+thread_local! {
+    static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
+    static ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = RefCell::new(None);
 }
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
@@ -564,6 +587,20 @@ fn pattern_matches(
                         Ok(false)
                     }
                 }
+                Expr::String(s) => {
+                    if let Value::Str(v) = value {
+                        Ok(v == s)
+                    } else {
+                        Ok(false)
+                    }
+                }
+                Expr::Symbol(sym) => {
+                    if let Value::Symbol(v) = value {
+                        Ok(v == sym)
+                    } else {
+                        Ok(false)
+                    }
+                }
                 Expr::Bool(b) => {
                     if let Value::Bool(v) = value {
                         Ok(*v == *b)
@@ -693,6 +730,20 @@ fn evaluate_expr(
         Expr::Integer(value) => Ok(Value::Int(*value)),
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::String(s) => Ok(Value::Str(s.clone())),
+        Expr::FString(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                match part {
+                    FStringPart::Literal(lit) => out.push_str(lit),
+                    FStringPart::Expr(e) => {
+                        let v = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                        out.push_str(&v.to_display_string());
+                    }
+                }
+            }
+            Ok(Value::Str(out))
+        }
+        Expr::Symbol(s) => Ok(Value::Symbol(s.clone())),
         Expr::Identifier(name) => env
             .get(name)
             .cloned()
@@ -701,7 +752,12 @@ fn evaluate_expr(
             let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
             let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
             match op {
-                BinOp::Add => Ok(Value::Int(left_val.as_int()? + right_val.as_int()?)),
+                BinOp::Add => match (left_val, right_val) {
+                    (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
+                    (Value::Str(a), b) => Ok(Value::Str(format!("{a}{}", b.to_display_string()))),
+                    (a, Value::Str(b)) => Ok(Value::Str(format!("{}{}", a.to_display_string(), b))),
+                    (l, r) => Ok(Value::Int(l.as_int()? + r.as_int()?)),
+                },
                 BinOp::Sub => Ok(Value::Int(left_val.as_int()? - right_val.as_int()?)),
                 BinOp::Mul => Ok(Value::Int(left_val.as_int()? * right_val.as_int()?)),
                 BinOp::Div => {
@@ -720,21 +776,13 @@ fn evaluate_expr(
                         Ok(Value::Int(left_val.as_int()? % r))
                     }
                 }
-                BinOp::Eq => Ok(Value::Bool(left_val.as_int()? == right_val.as_int()?)),
-                BinOp::NotEq => Ok(Value::Bool(left_val.as_int()? != right_val.as_int()?)),
+                BinOp::Eq => Ok(Value::Bool(left_val == right_val)),
+                BinOp::NotEq => Ok(Value::Bool(left_val != right_val)),
                 BinOp::Lt => Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?)),
                 BinOp::Gt => Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?)),
                 BinOp::LtEq => Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?)),
                 BinOp::GtEq => Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?)),
-                BinOp::Is => {
-                    // For enums, compare both enum_name and variant (ignoring payload for `is` check)
-                    match (&left_val, &right_val) {
-                        (Value::Enum { enum_name: en1, variant: v1, .. }, Value::Enum { enum_name: en2, variant: v2, .. }) => {
-                            Ok(Value::Bool(en1 == en2 && v1 == v2))
-                        }
-                        _ => Ok(Value::Bool(std::mem::discriminant(&left_val) == std::mem::discriminant(&right_val)))
-                    }
-                }
+                BinOp::Is => Ok(Value::Bool(left_val == right_val)),
                 BinOp::And => Ok(Value::Bool(left_val.truthy() && right_val.truthy())),
                 BinOp::Or => Ok(Value::Bool(left_val.truthy() || right_val.truthy())),
                 _ => Err(CompileError::Semantic(format!(
@@ -751,6 +799,10 @@ fn evaluate_expr(
                 _ => Err(CompileError::Semantic("unsupported unary op".into())),
             }
         }
+        Expr::Lambda { params, body } => {
+            let names: Vec<String> = params.iter().map(|LambdaParam { name, .. }| name.clone()).collect();
+            Ok(Value::Lambda { params: names, body: body.clone(), env: env.clone() })
+        }
         Expr::If { condition, then_branch, else_branch } => {
             if evaluate_expr(condition, env, functions, classes, enums, impl_methods)?.truthy() {
                 evaluate_expr(then_branch, env, functions, classes, enums, impl_methods)
@@ -762,24 +814,106 @@ fn evaluate_expr(
         }
         Expr::Call { callee, args } => {
             if let Expr::Identifier(name) = callee.as_ref() {
-                if let Some(func) = functions.get(name) {
-                    exec_function(func, args, env, functions, classes, enums, impl_methods, None)
-                } else if name == "range" {
-                    let start = args.get(0).map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)).transpose()?.unwrap_or(Value::Int(0)).as_int()?;
-                    let end = args.get(1).map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)).transpose()?.unwrap_or(Value::Int(0)).as_int()?;
-                    let inclusive = args.get(2).map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)).transpose()?.unwrap_or(Value::Bool(false)).truthy();
-                    let mut fields = HashMap::new();
-                    fields.insert("start".into(), Value::Int(start));
-                    fields.insert("end".into(), Value::Int(end));
-                    fields.insert("inclusive".into(), Value::Bool(inclusive));
-                    return Ok(Value::Object {
-                        class: "__range__".into(),
-                        fields,
-                    });
-                } else {
-                    Err(CompileError::Semantic(format!("unknown function: {name}")))
+                match name.as_str() {
+                    "range" => {
+                        let start = args.get(0).map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)).transpose()?.unwrap_or(Value::Int(0)).as_int()?;
+                        let end = args.get(1).map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)).transpose()?.unwrap_or(Value::Int(0)).as_int()?;
+                        let inclusive = args.get(2).map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)).transpose()?.unwrap_or(Value::Bool(false)).truthy();
+                        let mut fields = HashMap::new();
+                        fields.insert("start".into(), Value::Int(start));
+                        fields.insert("end".into(), Value::Int(end));
+                        fields.insert("inclusive".into(), Value::Bool(inclusive));
+                        return Ok(Value::Object {
+                            class: "__range__".into(),
+                            fields,
+                        });
+                    }
+                    "send" => {
+                        let target = args.get(0).ok_or_else(|| CompileError::Semantic("send expects actor handle".into()))?;
+                        let msg_arg = args.get(1).ok_or_else(|| CompileError::Semantic("send expects message".into()))?;
+                        let target_val = evaluate_expr(&target.value, env, functions, classes, enums, impl_methods)?;
+                        let msg_val = evaluate_expr(&msg_arg.value, env, functions, classes, enums, impl_methods)?;
+                        if let Value::Actor(handle) = target_val {
+                            handle
+                                .send(Message::Value(msg_val.to_display_string()))
+                                .map_err(|e| CompileError::Semantic(e))?;
+                            return Ok(Value::Nil);
+                        }
+                        return Err(CompileError::Semantic("send target must be actor".into()));
+                    }
+                    "recv" => {
+                        if !args.is_empty() {
+                            return Err(CompileError::Semantic("recv takes no arguments".into()));
+                        }
+                        let msg = ACTOR_INBOX.with(|cell| {
+                            cell.borrow()
+                                .as_ref()
+                                .ok_or_else(|| CompileError::Semantic("recv called outside actor".into()))
+                                .and_then(|rx| {
+                                    rx.lock()
+                                        .map_err(|_| CompileError::Semantic("actor inbox lock poisoned".into()))
+                                        .and_then(|receiver| {
+                                            receiver
+                                                .recv()
+                                                .map_err(|e| CompileError::Semantic(format!("recv failed: {e}")))
+                                        })
+                                })
+                        })?;
+                        return Ok(match msg {
+                            Message::Value(s) => Value::Str(s),
+                            Message::Bytes(b) => Value::Str(String::from_utf8_lossy(&b).to_string()),
+                        });
+                    }
+                    "reply" => {
+                        let msg_arg = args.get(0).ok_or_else(|| CompileError::Semantic("reply expects message".into()))?;
+                        let msg_val = evaluate_expr(&msg_arg.value, env, functions, classes, enums, impl_methods)?;
+                        ACTOR_OUTBOX.with(|cell| {
+                            cell.borrow()
+                                .as_ref()
+                                .ok_or_else(|| CompileError::Semantic("reply called outside actor".into()))
+                                .and_then(|tx| {
+                                    tx.send(Message::Value(msg_val.to_display_string()))
+                                        .map_err(|e| CompileError::Semantic(format!("reply failed: {e}")))
+                                })
+                        })?;
+                        return Ok(Value::Nil);
+                    }
+                    "join" => {
+                        let handle_arg = args.get(0).ok_or_else(|| CompileError::Semantic("join expects actor handle".into()))?;
+                        let handle_val = evaluate_expr(&handle_arg.value, env, functions, classes, enums, impl_methods)?;
+                        if let Value::Actor(handle) = handle_val {
+                            handle.join().map_err(|e| CompileError::Semantic(e))?;
+                            return Ok(Value::Nil);
+                        }
+                        return Err(CompileError::Semantic("join target must be actor".into()));
+                    }
+                    "spawn" => {
+                        // Spawn a new actor evaluating the first argument expression.
+                        let inner_expr = args.get(0).ok_or_else(|| CompileError::Semantic("spawn expects a thunk".into()))?;
+                        let expr_clone = inner_expr.value.clone();
+                        let env_clone = env.clone();
+                        let funcs = functions.clone();
+                        let classes_clone = classes.clone();
+                        let enums_clone = enums.clone();
+                        let impls_clone = impl_methods.clone();
+                        let handle = concurrency::spawn_actor(move |inbox, outbox| {
+                            let inbox = Arc::new(Mutex::new(inbox));
+                            ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));
+                            ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = Some(outbox.clone()));
+                            let _ = evaluate_expr(&expr_clone, &env_clone, &funcs, &classes_clone, &enums_clone, &impls_clone);
+                            ACTOR_INBOX.with(|cell| *cell.borrow_mut() = None);
+                            ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
+                        });
+                        return Ok(Value::Actor(handle));
+                    }
+                    _ => {
+                        if let Some(func) = functions.get(name) {
+                            return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                        }
+                    }
                 }
-            } else if let Expr::Path(segments) = callee.as_ref() {
+            }
+            if let Expr::Path(segments) = callee.as_ref() {
                 // Handle enum variant constructor: EnumName::Variant(payload)
                 if segments.len() == 2 {
                     let enum_name = &segments[0];
@@ -800,9 +934,15 @@ fn evaluate_expr(
                         }
                     }
                 }
-                Err(CompileError::Semantic(format!("unsupported path call: {:?}", segments)))
-            } else {
-                Err(CompileError::Semantic("unsupported callee".into()))
+                return Err(CompileError::Semantic(format!("unsupported path call: {:?}", segments)));
+            }
+
+            let callee_val = evaluate_expr(callee, env, functions, classes, enums, impl_methods)?;
+            match callee_val {
+                Value::Lambda { params, body, env: captured } => {
+                    exec_lambda(&params, &body, args, env, &captured, functions, classes, enums, impl_methods)
+                }
+                _ => Err(CompileError::Semantic("unsupported callee".into())),
             }
         }
         Expr::MethodCall { receiver, method, args } => {
@@ -987,17 +1127,105 @@ fn evaluate_expr(
             let enums_clone = enums.clone();
             let impls_clone = impl_methods.clone();
             let inner_expr = (*inner).clone();
-            thread::spawn(move || {
+            let handle = concurrency::spawn_actor(move |inbox, outbox| {
+                let inbox = Arc::new(Mutex::new(inbox));
+                ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));
+                ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = Some(outbox.clone()));
                 let _ = evaluate_expr(&inner_expr, &env_clone, &funcs, &classes_clone, &enums_clone, &impls_clone);
+                ACTOR_INBOX.with(|cell| *cell.borrow_mut() = None);
+                ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
             });
-            // Fire-and-forget spawn; returns deterministic handle until full actor runtime lands.
-            Ok(Value::Int(0))
+            Ok(Value::Actor(handle))
         }
         _ => Err(CompileError::Semantic(format!(
             "unsupported expression type: {:?}",
             expr
         ))),
     }
+}
+
+fn bind_args(
+    params: &[simple_parser::ast::Parameter],
+    args: &[simple_parser::ast::Argument],
+    outer_env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    skip_self: bool,
+) -> Result<HashMap<String, Value>, CompileError> {
+    let params_to_bind: Vec<_> = params
+        .iter()
+        .filter(|p| !(skip_self && p.name == "self"))
+        .collect();
+
+    let mut bound = HashMap::new();
+    let mut positional_idx = 0usize;
+    for arg in args {
+        let val = evaluate_expr(&arg.value, outer_env, functions, classes, enums, impl_methods)?;
+        if let Some(name) = &arg.name {
+            if !params_to_bind.iter().any(|p| &p.name == name) {
+                return Err(CompileError::Semantic(format!("unknown argument {name}")));
+            }
+            bound.insert(name.clone(), val);
+        } else {
+            if positional_idx >= params_to_bind.len() {
+                return Err(CompileError::Semantic("too many arguments".into()));
+            }
+            let param = params_to_bind[positional_idx];
+            bound.insert(param.name.clone(), val);
+            positional_idx += 1;
+        }
+    }
+
+    for param in params_to_bind {
+        if !bound.contains_key(&param.name) {
+            if let Some(default_expr) = &param.default {
+                let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
+                bound.insert(param.name.clone(), v);
+            } else {
+                return Err(CompileError::Semantic(format!("missing argument {}", param.name)));
+            }
+        }
+    }
+
+    Ok(bound)
+}
+
+fn exec_lambda(
+    params: &[String],
+    body: &Expr,
+    args: &[simple_parser::ast::Argument],
+    call_env: &Env,
+    captured_env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let mut local_env = captured_env.clone();
+    let mut positional_idx = 0usize;
+
+    for arg in args {
+        let val = evaluate_expr(&arg.value, call_env, functions, classes, enums, impl_methods)?;
+        if let Some(name) = &arg.name {
+            local_env.insert(name.clone(), val);
+        } else {
+            if positional_idx >= params.len() {
+                return Err(CompileError::Semantic("too many arguments to lambda".into()));
+            }
+            local_env.insert(params[positional_idx].clone(), val);
+            positional_idx += 1;
+        }
+    }
+
+    for param in params {
+        if !local_env.contains_key(param) {
+            local_env.insert(param.clone(), Value::Nil);
+        }
+    }
+
+    evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)
 }
 
 fn exec_function(
@@ -1011,7 +1239,6 @@ fn exec_function(
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
     let mut local_env = Env::new();
-    // bring self if available
     if let Some((class_name, fields)) = self_ctx {
         local_env.insert(
             "self".into(),
@@ -1021,15 +1248,18 @@ fn exec_function(
             },
         );
     }
-    // Skip 'self' parameter when binding arguments (self is bound from self_ctx)
-    let params_to_bind: Vec<_> = func.params.iter()
-        .filter(|p| p.name != "self")
-        .collect();
-    for (idx, param) in params_to_bind.iter().enumerate() {
-        if let Some(arg) = args.get(idx) {
-            let val = evaluate_expr(&arg.value, outer_env, functions, classes, enums, impl_methods)?;
-            local_env.insert(param.name.clone(), val);
-        }
+    let bound = bind_args(
+        &func.params,
+        args,
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_ctx.is_some(),
+    )?;
+    for (name, val) in bound {
+        local_env.insert(name, val);
     }
     match exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods)? {
         Control::Return(v) => Ok(v),
