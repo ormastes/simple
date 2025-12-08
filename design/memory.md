@@ -22,9 +22,9 @@
   - `GcAllocator` (alloc/collect)
   - `GcHandle<T>` opaque handle token
   - `GcRoot` for pinning (future)
-- `common::manual` (planned) defines:
-  - `Unique<T>`, `Shared<T>`, `Weak<T>`, `Handle<T>` marker types
-  - Conversion functions (noop for now; runtime fills in)
+- `common::manual` defines:
+  - `ManualGc` + `Unique<T>` RAII owners with tracking (shared/weak/handle pointers still TODO)
+  - Conversion helpers to be added alongside shared/weak/handle support
 - Compiler lowers allocations:
   - Default: `GcAllocator::alloc_bytes`
   - Unique: stack or heap malloc/free

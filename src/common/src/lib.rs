@@ -3,6 +3,9 @@ use std::path::Path;
 pub mod config_env;
 pub use config_env::ConfigEnv;
 
+pub mod manual;
+pub use manual::{ManualGc, Unique};
+
 /// Common interface for dynamically loaded modules.
 pub trait DynModule {
     /// Lookup a function symbol by name.

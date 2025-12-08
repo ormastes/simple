@@ -326,6 +326,8 @@ pub enum Expr {
     Await(Box<Expr>),
     New { kind: PointerKind, expr: Box<Expr> },
     Range { start: Option<Box<Expr>>, end: Option<Box<Expr>>, inclusive: bool },
+    /// Functional update operator: obj->method(args) desugars to obj = obj.method(args)
+    FunctionalUpdate { target: Box<Expr>, method: String, args: Vec<Argument> },
 }
 
 #[derive(Debug, Clone, PartialEq)]

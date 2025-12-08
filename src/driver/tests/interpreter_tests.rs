@@ -1029,3 +1029,62 @@ main = d.get_or("b", 99)
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 99);
 }
+
+// ============= Functional Update Operator (->)  =============
+
+#[test]
+fn interpreter_functional_update_array_concat() {
+    let code = r#"
+arr = [1, 2]
+arr->concat([3, 4])
+main = arr.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 4);
+}
+
+#[test]
+fn interpreter_functional_update_array_map() {
+    let code = r#"
+arr = [1, 2, 3]
+arr->map(\x: x * 2)
+main = arr[1]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 4); // [2, 4, 6][1] = 4
+}
+
+#[test]
+fn interpreter_functional_update_array_filter() {
+    let code = r#"
+arr = [1, 2, 3, 4, 5]
+arr->filter(\x: x > 2)
+main = arr.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 3); // [3, 4, 5]
+}
+
+#[test]
+fn interpreter_functional_update_dict_set() {
+    let code = r#"
+d = {"a": 1}
+d->set("b", 2)
+main = d.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2);
+}
+
+#[test]
+fn interpreter_functional_update_chained() {
+    let code = r#"
+arr = [1, 2, 3]
+arr->map(\x: x + 1)
+arr->filter(\x: x > 2)
+main = arr.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2); // [2,3,4] -> [3,4]
+}
+

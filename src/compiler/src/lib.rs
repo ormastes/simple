@@ -214,6 +214,39 @@ fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 return Ok(0);
             }
             Node::Expression(expr) => {
+                // Handle functional update operator at top level
+                if let Expr::FunctionalUpdate { target, method, args } = expr {
+                    if let Expr::Identifier(name) = target.as_ref() {
+                        // Check if this is a const (immutable) name
+                        let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
+                        if is_const {
+                            return Err(CompileError::Semantic(format!("cannot use functional update on const '{name}'")));
+                        }
+                        // Get current value
+                        let recv_val = env.get(name).cloned().ok_or_else(|| {
+                            CompileError::Semantic(format!("undefined variable: {name}"))
+                        })?;
+                        // Call the method
+                        let method_call = Expr::MethodCall {
+                            receiver: Box::new(Expr::Identifier(name.clone())),
+                            method: method.clone(),
+                            args: args.clone(),
+                        };
+                        let result = evaluate_expr(&method_call, &env, &functions, &classes, &enums, &impl_methods)?;
+                        // Assign result back if same type
+                        let new_value = match (&recv_val, &result) {
+                            (Value::Array(_), Value::Array(_)) => result,
+                            (Value::Dict(_), Value::Dict(_)) => result,
+                            (Value::Str(_), Value::Str(_)) => result,
+                            (Value::Tuple(_), Value::Tuple(_)) => result,
+                            (Value::Object { .. }, Value::Object { .. }) => result,
+                            _ => env.get(name).cloned().unwrap_or(recv_val),
+                        };
+                        env.insert(name.clone(), new_value);
+                        continue;
+                    }
+                    return Err(CompileError::Semantic("functional update target must be an identifier".into()));
+                }
                 let _ = evaluate_expr(expr, &env, &functions, &classes, &enums, &impl_methods)?;
             }
             _ => {}
@@ -429,6 +462,42 @@ fn exec_node(
         Node::Continue(_) => Ok(Control::Continue),
         Node::Match(match_stmt) => exec_match(match_stmt, env, functions, classes, enums, impl_methods),
         Node::Expression(expr) => {
+            // Handle functional update operator: obj->method(args) desugars to obj = obj.method(args)
+            if let Expr::FunctionalUpdate { target, method, args } = expr {
+                if let Expr::Identifier(name) = target.as_ref() {
+                    // Check if this is a const (immutable) name
+                    let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
+                    if is_const {
+                        return Err(CompileError::Semantic(format!("cannot use functional update on const '{name}'")));
+                    }
+                    // Get current value
+                    let recv_val = env.get(name).cloned().ok_or_else(|| {
+                        CompileError::Semantic(format!("undefined variable: {name}"))
+                    })?;
+                    // Call the method - create a temporary MethodCall expression
+                    let method_call = Expr::MethodCall {
+                        receiver: Box::new(Expr::Identifier(name.clone())),
+                        method: method.clone(),
+                        args: args.clone(),
+                    };
+                    let result = evaluate_expr(&method_call, env, functions, classes, enums, impl_methods)?;
+                    // For mutating methods that return the modified collection, use the result
+                    // For methods that modify in place and return something else, use the new value
+                    // Check if the result is the same type as original - if so, assign it
+                    let new_value = match (&recv_val, &result) {
+                        (Value::Array(_), Value::Array(_)) => result,
+                        (Value::Dict(_), Value::Dict(_)) => result,
+                        (Value::Str(_), Value::Str(_)) => result,
+                        (Value::Tuple(_), Value::Tuple(_)) => result,
+                        (Value::Object { .. }, Value::Object { .. }) => result,
+                        // For other cases, re-fetch the variable as it may have been mutated
+                        _ => env.get(name).cloned().unwrap_or(recv_val),
+                    };
+                    env.insert(name.clone(), new_value);
+                    return Ok(Control::Next);
+                }
+                return Err(CompileError::Semantic("functional update target must be an identifier".into()));
+            }
             let _ = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
             Ok(Control::Next)
         }
@@ -1735,6 +1804,16 @@ fn evaluate_expr(
                 ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
             });
             Ok(Value::Actor(handle))
+        }
+        Expr::FunctionalUpdate { target, method, args } => {
+            // When used as an expression (not statement), just evaluate as method call
+            // The assignment semantics are handled at the statement level
+            let method_call = Expr::MethodCall {
+                receiver: target.clone(),
+                method: method.clone(),
+                args: args.clone(),
+            };
+            evaluate_expr(&method_call, env, functions, classes, enums, impl_methods)
         }
         _ => Err(CompileError::Semantic(format!(
             "unsupported expression type: {:?}",

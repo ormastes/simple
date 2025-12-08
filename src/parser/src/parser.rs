@@ -1365,6 +1365,18 @@ impl<'a> Parser<'a> {
                         };
                     }
                 }
+                TokenKind::Arrow => {
+                    // Functional update operator: obj->method(args)
+                    // Desugars to: obj = obj.method(args)
+                    self.advance();
+                    let method = self.expect_identifier()?;
+                    let args = self.parse_arguments()?;
+                    expr = Expr::FunctionalUpdate {
+                        target: Box::new(expr),
+                        method,
+                        args,
+                    };
+                }
                 _ => break,
             }
         }
