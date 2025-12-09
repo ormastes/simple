@@ -17,6 +17,7 @@ fn init() {
 }
 
 // Local unit test modules for this crate
+mod lexer_tests;
 mod parser_tests;
 mod compiler_tests;
 mod loader_tests;
