@@ -23,6 +23,10 @@ struct SmfBuilder {
     code_bytes: Vec<u8>,
     relocations: Vec<SmfRelocation>,
     exported_count: u32,
+    flags: u32,
+    sym_type: SymbolType,
+    sym_binding: SymbolBinding,
+    source_hash: u64,
 }
 
 impl SmfBuilder {
@@ -33,6 +37,10 @@ impl SmfBuilder {
             code_bytes: vec![0xC3u8], // ret
             relocations: Vec::new(),
             exported_count: 1,
+            flags: SMF_FLAG_EXECUTABLE,
+            sym_type: SymbolType::Function,
+            sym_binding: SymbolBinding::Global,
+            source_hash: 0,
         }
     }
 
@@ -49,6 +57,42 @@ impl SmfBuilder {
     fn with_exported_count(mut self, count: u32) -> Self {
         self.exported_count = count;
         self
+    }
+
+    fn with_flags(mut self, flags: u32) -> Self {
+        self.flags = flags;
+        self
+    }
+
+    fn with_sym_type(mut self, sym_type: SymbolType) -> Self {
+        self.sym_type = sym_type;
+        self
+    }
+
+    fn with_sym_binding(mut self, binding: SymbolBinding) -> Self {
+        self.sym_binding = binding;
+        self
+    }
+
+    fn with_source_hash(mut self, hash: u64) -> Self {
+        self.source_hash = hash;
+        self
+    }
+
+    fn reloadable(self) -> Self {
+        self.with_flags(SMF_FLAG_EXECUTABLE | SMF_FLAG_RELOADABLE)
+    }
+
+    fn library(self) -> Self {
+        self.with_flags(0)
+    }
+
+    fn data_symbol(self) -> Self {
+        self.with_sym_type(SymbolType::Data)
+    }
+
+    fn local_symbol(self) -> Self {
+        self.with_sym_binding(SymbolBinding::Local).with_exported_count(0)
     }
 
     fn build(self) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -70,7 +114,7 @@ impl SmfBuilder {
             version_minor: 1,
             platform: Platform::Any as u8,
             arch: Arch::X86_64 as u8,
-            flags: SMF_FLAG_EXECUTABLE,
+            flags: self.flags,
             section_count,
             section_table_offset,
             symbol_table_offset,
@@ -78,7 +122,7 @@ impl SmfBuilder {
             exported_count: self.exported_count,
             entry_point: 0,
             module_hash: 0,
-            source_hash: 0,
+            source_hash: self.source_hash,
             reserved: [0; 8],
         };
 
@@ -90,8 +134,8 @@ impl SmfBuilder {
         let symbol = SmfSymbol {
             name_offset: 0,
             name_hash: hash_name(&self.symbol_name),
-            sym_type: SymbolType::Function,
-            binding: SymbolBinding::Global,
+            sym_type: self.sym_type,
+            binding: self.sym_binding,
             visibility: 0,
             flags: 0,
             value: 0,
@@ -337,59 +381,10 @@ fn section_flags_correctly_identify_permissions() {
 
 #[test]
 fn module_get_function_returns_none_for_data_symbol() {
-    // Create module with data symbol instead of function
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("data.smf");
-
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-    let code_bytes = vec![0xC3u8];
-    let symbol_table_offset = code_offset + code_bytes.len() as u64;
-
-    let header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: SMF_FLAG_EXECUTABLE,
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 1,
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 12345,
-        reserved: [0; 8],
-    };
-
-    let code_section = SmfBuilder::make_section(b"code", SectionType::Code,
-        SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset, code_bytes.len() as u64, 16);
-
-    let string_table = b"data_sym\0".to_vec();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name("data_sym"),
-        sym_type: SymbolType::Data, // Data symbol, not function
-        binding: SymbolBinding::Global,
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(&code_bytes);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    std::fs::write(&path, &buf).unwrap();
+    let (_dir, path) = SmfBuilder::new("data.smf", "data_sym")
+        .data_symbol()
+        .with_source_hash(12345)
+        .build();
 
     let loader = ModuleLoader::new();
     let module = loader.load(&path).expect("should load");
@@ -404,59 +399,9 @@ fn module_get_function_returns_none_for_data_symbol() {
 
 #[test]
 fn module_entry_point_returns_none_for_non_executable() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lib.smf");
-
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-    let code_bytes = vec![0xC3u8];
-    let symbol_table_offset = code_offset + code_bytes.len() as u64;
-
-    // Non-executable header (library)
-    let header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: 0, // NOT executable
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 1,
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 0,
-        reserved: [0; 8],
-    };
-
-    let code_section = SmfBuilder::make_section(b"code", SectionType::Code,
-        SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset, code_bytes.len() as u64, 16);
-
-    let string_table = b"func\0".to_vec();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name("func"),
-        sym_type: SymbolType::Function,
-        binding: SymbolBinding::Global,
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(&code_bytes);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    std::fs::write(&path, &buf).unwrap();
+    let (_dir, path) = SmfBuilder::new("lib.smf", "func")
+        .library()
+        .build();
 
     let loader = ModuleLoader::new();
     let module = loader.load(&path).expect("should load");
@@ -490,58 +435,9 @@ fn module_is_reloadable_checks_flag() {
     assert!(!module1.is_reloadable());
 
     // Reloadable module
-    let dir2 = tempfile::tempdir().unwrap();
-    let path2 = dir2.path().join("reloadable.smf");
-
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-    let code_bytes = vec![0xC3u8];
-    let symbol_table_offset = code_offset + code_bytes.len() as u64;
-
-    let header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: SMF_FLAG_EXECUTABLE | SMF_FLAG_RELOADABLE,
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 1,
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 0,
-        reserved: [0; 8],
-    };
-
-    let code_section = SmfBuilder::make_section(b"code", SectionType::Code,
-        SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset, code_bytes.len() as u64, 16);
-
-    let string_table = b"entry\0".to_vec();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name("entry"),
-        sym_type: SymbolType::Function,
-        binding: SymbolBinding::Global,
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(&code_bytes);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    std::fs::write(&path2, &buf).unwrap();
+    let (_dir2, path2) = SmfBuilder::new("reloadable.smf", "entry")
+        .reloadable()
+        .build();
 
     let module2 = loader.load(&path2).expect("should load");
     assert!(module2.is_reloadable());
@@ -656,59 +552,9 @@ fn registry_resolve_symbol_returns_none_for_unknown() {
 
 #[test]
 fn registry_resolve_symbol_ignores_local_symbols() {
-    // Create module with local symbol
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("local.smf");
-
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-    let code_bytes = vec![0xC3u8];
-    let symbol_table_offset = code_offset + code_bytes.len() as u64;
-
-    let header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: SMF_FLAG_EXECUTABLE,
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 0, // No exports
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 0,
-        reserved: [0; 8],
-    };
-
-    let code_section = SmfBuilder::make_section(b"code", SectionType::Code,
-        SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset, code_bytes.len() as u64, 16);
-
-    let string_table = b"local_fn\0".to_vec();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name("local_fn"),
-        sym_type: SymbolType::Function,
-        binding: SymbolBinding::Local, // Local, not Global
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(&code_bytes);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    std::fs::write(&path, &buf).unwrap();
+    let (_dir, path) = SmfBuilder::new("local.smf", "local_fn")
+        .local_symbol()
+        .build();
 
     let registry = ModuleRegistry::new();
     registry.load(&path).unwrap();

@@ -3,15 +3,9 @@
 //! This module provides a clean API for embedding Simple as a scripting language,
 //! system testing, and REPL implementation.
 
-use std::fs;
-use std::sync::Arc;
-use tempfile::TempDir;
-use simple_compiler::CompilerPipeline;
-use simple_loader::loader::ModuleLoader as SmfLoader;
-use simple_loader::LoadedModule;
-use simple_common::gc::GcAllocator;
 use simple_runtime::gc::GcRuntime;
-use simple_runtime::memory::no_gc::NoGcAllocator;
+
+use crate::exec_core::ExecCore;
 
 /// Result of running Simple code
 #[derive(Debug, Clone, Default)]
@@ -37,29 +31,18 @@ pub struct RunConfig {
 
 /// Interpreter for running Simple code with I/O capture
 pub struct Interpreter {
-    loader: SmfLoader,
-    gc_alloc: Arc<dyn GcAllocator>,
-    gc_runtime: Option<Arc<GcRuntime>>,
+    core: ExecCore,
 }
 
 impl Interpreter {
     /// Create a new interpreter instance
     pub fn new() -> Self {
-        let gc = Arc::new(GcRuntime::new());
-        Self {
-            loader: SmfLoader::new(),
-            gc_alloc: gc.clone(),
-            gc_runtime: Some(gc),
-        }
+        Self { core: ExecCore::new() }
     }
 
     /// Create an interpreter that uses the no-GC allocator.
     pub fn new_no_gc() -> Self {
-        Self {
-            loader: SmfLoader::new(),
-            gc_alloc: Arc::new(NoGcAllocator::new()),
-            gc_runtime: None,
-        }
+        Self { core: ExecCore::new_no_gc() }
     }
 
     /// Run Simple source code with configuration
@@ -74,33 +57,7 @@ impl Interpreter {
     pub fn run(&self, code: &str, config: RunConfig) -> Result<RunResult, String> {
         let _ = config; // TODO: use args, stdin, timeout when I/O is implemented
 
-        // Create temp directory for compilation
-        let tmp = TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
-        let src_path = tmp.path().join("input.spl");
-        let out_path = tmp.path().join("output.smf");
-
-        // Write source
-        fs::write(&src_path, code).map_err(|e| format!("write source: {e}"))?;
-
-        // Compile
-        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone())
-            .map_err(|e| format!("{e:?}"))?;
-        compiler.compile(&src_path, &out_path)
-            .map_err(|e| format!("compile failed: {e}"))?;
-
-        // Load
-        let module = self.loader.load(&out_path)
-            .map_err(|e| format!("load failed: {e}"))?;
-
-        // Run
-        let exit_code = run_main(&module)?;
-
-        // Collect GC
-        if let Some(gc) = &self.gc_runtime {
-            let _ = gc.collect("post-run");
-        } else {
-            self.gc_alloc.collect();
-        }
+        let exit_code = self.core.run_source(code)?;
 
         Ok(RunResult {
             exit_code,
@@ -131,7 +88,7 @@ impl Interpreter {
 
     /// Access the underlying GC runtime if present.
     pub fn gc(&self) -> Option<&GcRuntime> {
-        self.gc_runtime.as_deref()
+        self.core.gc_runtime.as_deref()
     }
 }
 
@@ -139,12 +96,6 @@ impl Default for Interpreter {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn run_main(module: &LoadedModule) -> Result<i32, String> {
-    type MainFn = extern "C" fn() -> i32;
-    let main: MainFn = module.entry_point().ok_or("no main entry found")?;
-    Ok(main())
 }
 
 /// Convenience function: Run Simple code and return result

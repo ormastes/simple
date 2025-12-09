@@ -79,13 +79,19 @@ pub struct ClassCoverage {
     pub methods: Vec<MethodCoverage>,
 }
 
+/// Calculate coverage percentage from covered/total counts.
+/// Returns 100.0 if total is 0 (nothing to cover = fully covered).
+fn calc_coverage_percent(covered: usize, total: usize) -> f64 {
+    if total == 0 {
+        100.0
+    } else {
+        (covered as f64) * 100.0 / (total as f64)
+    }
+}
+
 impl ClassCoverage {
     pub fn coverage_percent(&self) -> f64 {
-        if self.total_methods == 0 {
-            100.0
-        } else {
-            (self.covered_methods as f64) * 100.0 / (self.total_methods as f64)
-        }
+        calc_coverage_percent(self.covered_methods, self.total_methods)
     }
 }
 
@@ -262,11 +268,7 @@ impl CoverageSummary {
 
     /// Get coverage percentage.
     pub fn coverage_percent(&self) -> f64 {
-        if self.total_methods == 0 {
-            100.0
-        } else {
-            (self.covered_methods as f64) * 100.0 / (self.total_methods as f64)
-        }
+        calc_coverage_percent(self.covered_methods, self.total_methods)
     }
 
     /// Check if coverage meets a threshold.
@@ -278,6 +280,23 @@ impl CoverageSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Helper to create ClassCoverage for tests
+    fn make_class_coverage(name: &str, covered: usize, total: usize) -> ClassCoverage {
+        ClassCoverage {
+            type_name: name.to_string(),
+            total_methods: total,
+            covered_methods: covered,
+            methods: vec![],
+        }
+    }
+
+    /// Helper to compute coverage from JSON/YAML strings
+    fn compute_coverage(cov_json: &str, api_yaml: &str) -> Vec<ClassCoverage> {
+        let cov = parse_llvm_cov_export(cov_json).unwrap();
+        let api = parse_public_api_spec(api_yaml).unwrap();
+        compute_class_coverage(&cov, &api)
+    }
 
     #[test]
     fn test_split_type_method() {
@@ -308,35 +327,17 @@ mod tests {
 
     #[test]
     fn test_class_coverage_percent() {
-        let cc = ClassCoverage {
-            type_name: "Test".to_string(),
-            total_methods: 4,
-            covered_methods: 2,
-            methods: vec![],
-        };
-        assert!((cc.coverage_percent() - 50.0).abs() < 0.001);
+        assert!((make_class_coverage("Test", 2, 4).coverage_percent() - 50.0).abs() < 0.001);
     }
 
     #[test]
     fn test_class_coverage_percent_zero_methods() {
-        let cc = ClassCoverage {
-            type_name: "Empty".to_string(),
-            total_methods: 0,
-            covered_methods: 0,
-            methods: vec![],
-        };
-        assert!((cc.coverage_percent() - 100.0).abs() < 0.001);
+        assert!((make_class_coverage("Empty", 0, 0).coverage_percent() - 100.0).abs() < 0.001);
     }
 
     #[test]
     fn test_class_coverage_percent_full() {
-        let cc = ClassCoverage {
-            type_name: "Full".to_string(),
-            total_methods: 5,
-            covered_methods: 5,
-            methods: vec![],
-        };
-        assert!((cc.coverage_percent() - 100.0).abs() < 0.001);
+        assert!((make_class_coverage("Full", 5, 5).coverage_percent() - 100.0).abs() < 0.001);
     }
 
     #[test]
@@ -402,36 +403,20 @@ types:
 
     #[test]
     fn test_compute_class_coverage_basic() {
-        let cov_json = r#"{
-            "data": [{
-                "functions": [
-                    {"name": "MyType::method1", "count": 5},
-                    {"name": "MyType::method2", "count": 0},
-                    {"name": "OtherType::run", "count": 10}
-                ]
-            }]
-        }"#;
-
-        let api_yaml = r#"
-types:
-  MyType:
-    methods: [method1, method2, method3]
-  OtherType:
-    methods: [run, stop]
-"#;
-
-        let cov = parse_llvm_cov_export(cov_json).unwrap();
-        let api = parse_public_api_spec(api_yaml).unwrap();
-
-        let results = compute_class_coverage(&cov, &api);
+        let results = compute_coverage(
+            r#"{"data": [{"functions": [
+                {"name": "MyType::method1", "count": 5},
+                {"name": "MyType::method2", "count": 0},
+                {"name": "OtherType::run", "count": 10}
+            ]}]}"#,
+            "types:\n  MyType:\n    methods: [method1, method2, method3]\n  OtherType:\n    methods: [run, stop]"
+        );
         assert_eq!(results.len(), 2);
 
-        // Find MyType results
         let my_type = results.iter().find(|r| r.type_name == "MyType").unwrap();
         assert_eq!(my_type.total_methods, 3);
         assert_eq!(my_type.covered_methods, 1); // only method1 is covered
 
-        // Find OtherType results
         let other_type = results.iter().find(|r| r.type_name == "OtherType").unwrap();
         assert_eq!(other_type.total_methods, 2);
         assert_eq!(other_type.covered_methods, 1); // only run is covered
@@ -439,25 +424,10 @@ types:
 
     #[test]
     fn test_compute_class_coverage_all_covered() {
-        let cov_json = r#"{
-            "data": [{
-                "functions": [
-                    {"name": "Type::a", "count": 1},
-                    {"name": "Type::b", "count": 2}
-                ]
-            }]
-        }"#;
-
-        let api_yaml = r#"
-types:
-  Type:
-    methods: [a, b]
-"#;
-
-        let cov = parse_llvm_cov_export(cov_json).unwrap();
-        let api = parse_public_api_spec(api_yaml).unwrap();
-
-        let results = compute_class_coverage(&cov, &api);
+        let results = compute_coverage(
+            r#"{"data": [{"functions": [{"name": "Type::a", "count": 1}, {"name": "Type::b", "count": 2}]}]}"#,
+            "types:\n  Type:\n    methods: [a, b]"
+        );
         let type_result = &results[0];
         assert_eq!(type_result.covered_methods, 2);
         assert!((type_result.coverage_percent() - 100.0).abs() < 0.001);
@@ -465,25 +435,10 @@ types:
 
     #[test]
     fn test_compute_class_coverage_none_covered() {
-        let cov_json = r#"{
-            "data": [{
-                "functions": [
-                    {"name": "Type::a", "count": 0},
-                    {"name": "Type::b", "count": 0}
-                ]
-            }]
-        }"#;
-
-        let api_yaml = r#"
-types:
-  Type:
-    methods: [a, b]
-"#;
-
-        let cov = parse_llvm_cov_export(cov_json).unwrap();
-        let api = parse_public_api_spec(api_yaml).unwrap();
-
-        let results = compute_class_coverage(&cov, &api);
+        let results = compute_coverage(
+            r#"{"data": [{"functions": [{"name": "Type::a", "count": 0}, {"name": "Type::b", "count": 0}]}]}"#,
+            "types:\n  Type:\n    methods: [a, b]"
+        );
         let type_result = &results[0];
         assert_eq!(type_result.covered_methods, 0);
         assert!((type_result.coverage_percent() - 0.0).abs() < 0.001);
@@ -491,23 +446,10 @@ types:
 
     #[test]
     fn test_compute_class_coverage_multiple_data_entries() {
-        let cov_json = r#"{
-            "data": [
-                {"functions": [{"name": "Type::a", "count": 1}]},
-                {"functions": [{"name": "Type::b", "count": 2}]}
-            ]
-        }"#;
-
-        let api_yaml = r#"
-types:
-  Type:
-    methods: [a, b, c]
-"#;
-
-        let cov = parse_llvm_cov_export(cov_json).unwrap();
-        let api = parse_public_api_spec(api_yaml).unwrap();
-
-        let results = compute_class_coverage(&cov, &api);
+        let results = compute_coverage(
+            r#"{"data": [{"functions": [{"name": "Type::a", "count": 1}]}, {"functions": [{"name": "Type::b", "count": 2}]}]}"#,
+            "types:\n  Type:\n    methods: [a, b, c]"
+        );
         let type_result = &results[0];
         assert_eq!(type_result.total_methods, 3);
         assert_eq!(type_result.covered_methods, 2); // a and b from different data entries
@@ -516,18 +458,8 @@ types:
     #[test]
     fn test_coverage_summary() {
         let results = vec![
-            ClassCoverage {
-                type_name: "A".to_string(),
-                total_methods: 4,
-                covered_methods: 2,
-                methods: vec![],
-            },
-            ClassCoverage {
-                type_name: "B".to_string(),
-                total_methods: 6,
-                covered_methods: 3,
-                methods: vec![],
-            },
+            make_class_coverage("A", 2, 4),
+            make_class_coverage("B", 3, 6),
         ];
 
         let summary = CoverageSummary::from_results(&results);

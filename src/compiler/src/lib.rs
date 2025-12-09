@@ -23,7 +23,7 @@ use simple_common::manual::{
     Handle as ManualHandle, HandlePool as ManualHandlePool, ManualGc, Shared as ManualShared,
     Unique as ManualUnique, WeakPtr as ManualWeak,
 };
-use simple_runtime::concurrency::{self, ActorHandle, Message};
+use simple_common::actor::{ActorHandle, ActorSpawner, Message, ThreadSpawner};
 use simple_type::check as type_check;
 // Type checking lives in the separate crate simple-type
 use tracing::instrument;
@@ -34,6 +34,7 @@ type Env = HashMap<String, Value>;
 
 thread_local! {
     static MANUAL_GC: ManualGc = ManualGc::new();
+    static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
 }
 
 #[derive(Debug)]
@@ -1801,14 +1802,14 @@ fn evaluate_expr(
                         let classes_clone = classes.clone();
                         let enums_clone = enums.clone();
                         let impls_clone = impl_methods.clone();
-                        let handle = concurrency::spawn_actor(move |inbox, outbox| {
+                        let handle = ACTOR_SPAWNER.with(|s| s.spawn(move |inbox, outbox| {
                             let inbox = Arc::new(Mutex::new(inbox));
                             ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));
                             ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = Some(outbox.clone()));
                             let _ = evaluate_expr(&expr_clone, &env_clone, &funcs, &classes_clone, &enums_clone, &impls_clone);
                             ACTOR_INBOX.with(|cell| *cell.borrow_mut() = None);
                             ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
-                        });
+                        }));
                         return Ok(Value::Actor(handle));
                     }
                     "async" | "future" => {
@@ -2674,14 +2675,14 @@ fn evaluate_expr(
             let enums_clone = enums.clone();
             let impls_clone = impl_methods.clone();
             let inner_expr = (*inner).clone();
-            let handle = concurrency::spawn_actor(move |inbox, outbox| {
+            let handle = ACTOR_SPAWNER.with(|s| s.spawn(move |inbox, outbox| {
                 let inbox = Arc::new(Mutex::new(inbox));
                 ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));
                 ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = Some(outbox.clone()));
                 let _ = evaluate_expr(&inner_expr, &env_clone, &funcs, &classes_clone, &enums_clone, &impls_clone);
                 ACTOR_INBOX.with(|cell| *cell.borrow_mut() = None);
                 ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
-            });
+            }));
             Ok(Value::Actor(handle))
         }
         Expr::Await(inner) => {

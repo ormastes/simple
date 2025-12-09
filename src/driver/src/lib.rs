@@ -1,3 +1,4 @@
+pub mod exec_core;
 pub mod runner;
 pub mod dependency_cache;
 pub mod watcher;

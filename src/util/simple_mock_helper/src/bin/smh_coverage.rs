@@ -11,7 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use simple_mock_helper::api_scanner::{scan_directory, write_yaml};
+use simple_mock_helper::api_scanner::{scan_directory, write_yaml, ScannedApi};
 use simple_mock_helper::coverage::{load_llvm_cov_export, LlvmCovExport};
 
 #[derive(Debug, Parser)]
@@ -116,22 +116,67 @@ fn cmd_scan(source: &PathBuf, output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// Show class/struct touch coverage for System Tests
-/// Shows how many classes/structs were touched (at least one method called)
-fn cmd_class_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<&str>) -> Result<()> {
+// =============================================================================
+// Shared coverage analysis infrastructure
+// =============================================================================
+
+/// Load coverage data and API, returning both with touched functions map
+fn load_coverage_data(coverage_json: &PathBuf, source: &PathBuf) -> Result<(ScannedApi, HashMap<String, u64>)> {
     let cov = load_llvm_cov_export(coverage_json)
         .with_context(|| format!("Failed to load coverage JSON: {}", coverage_json.display()))?;
 
     let api = scan_directory(source)
         .with_context(|| format!("Failed to scan source: {}", source.display()))?;
 
-    // Extract touched functions from coverage
     let touched = extract_touched_functions(&cov);
 
+    Ok((api, touched))
+}
+
+/// Print header box for coverage reports
+fn print_header(title: &str) {
     println!("╔══════════════════════════════════════════════════════════════════════════════╗");
-    println!("║              SYSTEM TEST - Class/Struct Touch Coverage                       ║");
+    println!("║{:^78}║", title);
     println!("╚══════════════════════════════════════════════════════════════════════════════╝");
     println!();
+}
+
+/// Print coverage summary line
+fn print_summary(touched: usize, total: usize, label: &str) {
+    let pct = if total > 0 { (touched as f64 / total as f64) * 100.0 } else { 100.0 };
+    println!("TOTAL: {}/{} {} ({:.1}%)", touched, total, label, pct);
+}
+
+/// Check if a class/struct was touched by checking its methods
+fn is_class_touched(type_name: &str, methods: &[String], touched: &HashMap<String, u64>) -> bool {
+    // Check if any method was touched
+    for method in methods {
+        let key = format!("{}::{}", type_name, method);
+        if is_function_touched(touched, &key) {
+            return true;
+        }
+    }
+
+    // Check if type name appears in any touched function (e.g., constructors)
+    let normalized_name = type_name.replace("::", "");
+    for name in touched.keys() {
+        if name.contains(&normalized_name) {
+            return true;
+        }
+    }
+
+    false
+}
+
+// =============================================================================
+// Coverage commands
+// =============================================================================
+
+/// Show class/struct touch coverage for System Tests
+fn cmd_class_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<&str>) -> Result<()> {
+    let (api, touched) = load_coverage_data(coverage_json, source)?;
+
+    print_header("SYSTEM TEST - Class/Struct Touch Coverage");
     println!("{:<50} {:>10}", "Class/Struct", "Status");
     println!("{}", "─".repeat(62));
 
@@ -147,25 +192,7 @@ fn cmd_class_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<
             }
         }
 
-        // Check if ANY method of this class was touched
-        let mut class_touched = false;
-        for method in &type_spec.methods {
-            let key = format!("{}::{}", type_name, method);
-            if is_function_touched(&touched, &key) {
-                class_touched = true;
-                break;
-            }
-        }
-
-        // Also check if the type itself appears in touched functions (e.g., constructors)
-        if !class_touched {
-            for (name, _) in &touched {
-                if name.contains(&type_name.replace("::", "")) {
-                    class_touched = true;
-                    break;
-                }
-            }
-        }
+        let class_touched = is_class_touched(type_name, &type_spec.methods, &touched);
 
         total_classes += 1;
         if class_touched {
@@ -177,28 +204,16 @@ fn cmd_class_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<
     }
 
     println!("{}", "─".repeat(62));
-    let total_pct = if total_classes > 0 { (touched_classes as f64 / total_classes as f64) * 100.0 } else { 100.0 };
-    println!("TOTAL: {}/{} classes/structs touched ({:.1}%)", touched_classes, total_classes, total_pct);
+    print_summary(touched_classes, total_classes, "classes/structs touched");
 
     Ok(())
 }
 
 /// Show public function touch coverage for Integration Tests
-/// Shows ALL public functions (standalone + methods) touch count
 fn cmd_func_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<&str>) -> Result<()> {
-    let cov = load_llvm_cov_export(coverage_json)
-        .with_context(|| format!("Failed to load coverage JSON: {}", coverage_json.display()))?;
+    let (api, touched) = load_coverage_data(coverage_json, source)?;
 
-    let api = scan_directory(source)
-        .with_context(|| format!("Failed to scan source: {}", source.display()))?;
-
-    // Extract touched functions from coverage
-    let touched = extract_touched_functions(&cov);
-
-    println!("╔══════════════════════════════════════════════════════════════════════════════╗");
-    println!("║          INTEGRATION TEST - Public Function Touch Coverage                   ║");
-    println!("╚══════════════════════════════════════════════════════════════════════════════╝");
-    println!();
+    print_header("INTEGRATION TEST - Public Function Touch Coverage");
 
     // Collect ALL public functions (methods + standalone)
     let mut all_functions: Vec<(String, bool)> = Vec::new();
@@ -255,8 +270,7 @@ fn cmd_func_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<&
     }
 
     println!("{}", "─".repeat(72));
-    let total_pct = if total_funcs > 0 { (total_touched as f64 / total_funcs as f64) * 100.0 } else { 100.0 };
-    println!("TOTAL: {}/{} public functions/methods touched ({:.1}%)", total_touched, total_funcs, total_pct);
+    print_summary(total_touched, total_funcs, "public functions/methods touched");
 
     Ok(())
 }
@@ -274,6 +288,10 @@ fn cmd_report(coverage_json: &PathBuf, public_api: &PathBuf, type_filter: Option
     Ok(())
 }
 
+// =============================================================================
+// Helper functions
+// =============================================================================
+
 /// Extract touched functions from coverage data.
 /// Returns a map of demangled function names to their execution counts.
 fn extract_touched_functions(cov: &LlvmCovExport) -> HashMap<String, u64> {
@@ -282,8 +300,7 @@ fn extract_touched_functions(cov: &LlvmCovExport) -> HashMap<String, u64> {
     for data in &cov.data {
         for func in &data.functions {
             if func.count > 0 {
-                // Try to demangle the function name
-                let demangled = demangle_rust_symbol(&func.name);
+                let demangled = rustc_demangle::demangle(&func.name).to_string();
                 touched.insert(demangled, func.count);
             }
         }
@@ -300,18 +317,17 @@ fn is_function_touched(touched: &HashMap<String, u64>, key: &str) -> bool {
     }
 
     // Check if any touched function contains this pattern
-    // e.g., "simple_driver::Runner::new" might appear as part of a longer mangled name
     let parts: Vec<&str> = key.split("::").collect();
     if parts.len() >= 2 {
         let type_name = parts[parts.len() - 2];
         let method_name = parts[parts.len() - 1];
 
-        for (name, _count) in touched {
-            // Check for pattern like "Type::method" in demangled name
+        for name in touched.keys() {
+            // Check for "Type::method" pattern in demangled name
             if name.contains(&format!("{}::{}", type_name, method_name)) {
                 return true;
             }
-            // Check for pattern in mangled name (has type and method as substrings)
+            // Check for pattern in mangled name
             if name.contains(type_name) && name.contains(method_name) {
                 return true;
             }
@@ -319,9 +335,4 @@ fn is_function_touched(touched: &HashMap<String, u64>, key: &str) -> bool {
     }
 
     false
-}
-
-/// Demangle Rust symbol using rustc-demangle
-fn demangle_rust_symbol(mangled: &str) -> String {
-    rustc_demangle::demangle(mangled).to_string()
 }
