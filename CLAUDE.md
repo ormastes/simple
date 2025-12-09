@@ -7,17 +7,33 @@ simple/
 ├── Cargo.toml                     # Workspace definition
 ├── Makefile                       # Build automation (test, coverage, lint, etc.)
 ├── .jscpd.json                    # Code duplication detection config
-├── feature.md                     # Feature list with importance/difficulty ratings
-├── architecture.md                # Design principles and dependency rules
-├── simple_language_spec.md        # Language specification
-├── simple_lexer_parser_spec.md    # Parser/lexer specification
-├── test.md                        # Test policy (mock control, coverage, test levels)
-├── status/                        # Feature implementation status tracking
-│   ├── basic_types_integer_literals.md
-│   ├── operators_arithmetic.md
-│   ├── variables_let_bindings.md
-│   ├── config_env.md
-│   └── code_quality_tools.md
+├── CLAUDE.md                      # This file - development guide
+├── public_api.yml                 # Public API definitions for coverage
+│
+├── doc/                           # Documentation
+│   ├── architecture.md            # Design principles and dependency rules
+│   ├── feature.md                 # Feature list with importance/difficulty ratings
+│   ├── formal_verification.md     # Lean 4 formal verification docs
+│   ├── test.md                    # Test policy (mock control, coverage, test levels)
+│   ├── spec/                      # Language specifications
+│   │   ├── language.md            # Language specification
+│   │   └── lexer_parser.md        # Parser/lexer specification
+│   ├── design/                    # Design documents
+│   │   ├── memory.md              # Memory management design
+│   │   ├── type_inference.md      # Type inference design
+│   │   └── concurrency.md         # Concurrency design
+│   ├── status/                    # Feature implementation status
+│   ├── plans/                     # Implementation plans
+│   └── research/                  # Research notes
+│
+├── verification/                  # Lean 4 formal verification projects
+│   ├── manual_pointer_borrow/     # Borrow checker model
+│   ├── gc_manual_borrow/          # GC safety model
+│   ├── waitless_compile/          # Effect tracking model
+│   ├── nogc_compile/              # NoGC instruction model
+│   └── type_inference_compile/    # Type inference model
+│
+├── tests/                         # Integration/system tests
 │
 └── src/
     ├── common/                    # Shared contracts (no dependencies)
@@ -141,7 +157,7 @@ Source Code (.spl)
 
 ## Test Strategy
 
-See `test.md` for the complete test policy. Tests use `simple_mock_helper` for mock control and coverage tracking.
+See `doc/test.md` for the complete test policy. Tests use `simple_mock_helper` for mock control and coverage tracking.
 
 **Current Test Count: 631+ tests**
 
@@ -357,7 +373,7 @@ Optional (requires npm): `npm install -g jscpd`
 
 ## How to Write System Tests (CLI/TUI)
 - Add `shadow-terminal` to the crate hosting the CLI tests (likely `src/driver`) so tests can spawn the binary in a fake PTY, send keys, and assert the screen/output without a real terminal.
-- Follow the flow in `test.md`:
+- Follow the flow in `doc/test.md`:
   - Create a temp dir and write a `main.spl` (and any imports) to exercise dependency analysis and SMF emission.
   - Spawn the CLI via `shadow_terminal::Command::new([...])` with `rows/cols` set; wait for banners or diagnostics with `wait_for_stdout`.
   - Assert exit code (`wait_for_exit_success`), artifact existence (`.with_extension("smf")` non-empty), and readable buffers (no ANSI errors or wrapped lines).

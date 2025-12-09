@@ -209,7 +209,7 @@ fn cli_flag_emits_gc_logs() {
     let src_path = dir.path().join("main.spl");
     std::fs::write(&src_path, "main = 0").unwrap();
 
-    let mut cmd = Command::cargo_bin("simple-driver").expect("binary exists");
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("run").arg(&src_path).arg("--gc-log");
 
     cmd.assert()
@@ -734,13 +734,15 @@ main = if d.contains_key("hello"): 1 else: 0
 "#, 1);
 }
 
-// Bitwise operations not yet implemented in interpreter
-// #[test]
-// fn runner_handles_bitwise_operations() {
-//     run_expect("main = 12 & 10", 8);
-//     run_expect("main = 12 | 10", 14);
-//     run_expect("main = 12 ^ 10", 6);
-// }
+#[test]
+fn runner_handles_bitwise_operations() {
+    run_expect("main = 12 & 10", 8);   // 1100 & 1010 = 1000
+    run_expect("main = 12 | 10", 14);  // 1100 | 1010 = 1110
+    run_expect("main = 12 ^ 10", 6);   // 1100 ^ 1010 = 0110
+    run_expect("main = 1 << 4", 16);   // shift left
+    run_expect("main = 16 >> 2", 4);   // shift right
+    run_expect("main = ~0", -1);       // bitwise not
+}
 
 #[test]
 fn runner_handles_comparison_operators() {
@@ -760,6 +762,33 @@ fn runner_handles_logical_operators() {
     run_expect("main = if false or false: 1 else: 0", 0);
     run_expect("main = if not false: 1 else: 0", 1);
     run_expect("main = if not true: 1 else: 0", 0);
+}
+
+#[test]
+fn runner_handles_power_operator() {
+    run_expect("main = 2 ** 0", 1);    // any ** 0 = 1
+    run_expect("main = 2 ** 1", 2);    // x ** 1 = x
+    run_expect("main = 2 ** 3", 8);    // 2^3 = 8
+    run_expect("main = 2 ** 10", 1024); // 2^10 = 1024
+    run_expect("main = 3 ** 4", 81);   // 3^4 = 81
+}
+
+#[test]
+fn runner_handles_floor_division() {
+    run_expect("main = 7 // 2", 3);    // floor(7/2) = 3
+    run_expect("main = 10 // 3", 3);   // floor(10/3) = 3
+    run_expect("main = -7 // 2", -4);  // floor(-7/2) = -4 (rounds toward negative infinity)
+    run_expect("main = 8 // 4", 2);    // exact division
+}
+
+#[test]
+fn runner_handles_in_operator() {
+    // In array
+    run_expect("main = if 2 in [1, 2, 3]: 1 else: 0", 1);
+    run_expect("main = if 5 in [1, 2, 3]: 1 else: 0", 0);
+    // In string
+    run_expect(r#"main = if "ell" in "hello": 1 else: 0"#, 1);
+    run_expect(r#"main = if "xyz" in "hello": 1 else: 0"#, 0);
 }
 
 // Pointer types may have different syntax

@@ -15,9 +15,10 @@ pub struct SmfSymbol {
     pub version: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SymbolType {
+    None = 0,
     Function = 1,
     Data = 2,
     Type = 3,
@@ -26,7 +27,7 @@ pub enum SymbolType {
     Constant = 6,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum SymbolBinding {
     Local = 0,

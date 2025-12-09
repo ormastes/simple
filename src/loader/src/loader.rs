@@ -1,6 +1,6 @@
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
@@ -11,19 +11,13 @@ use crate::module::LoadedModule;
 use crate::smf::*;
 
 pub struct ModuleLoader {
-    #[cfg(unix)]
-    allocator: LinuxAllocator,
-    #[cfg(windows)]
-    allocator: WindowsAllocator,
+    allocator: PlatformAllocator,
 }
 
 impl ModuleLoader {
     pub fn new() -> Self {
         Self {
-            #[cfg(unix)]
-            allocator: LinuxAllocator::new(),
-            #[cfg(windows)]
-            allocator: WindowsAllocator::new(),
+            allocator: PlatformAllocator::new(),
         }
     }
 
@@ -43,14 +37,45 @@ impl ModuleLoader {
         F: Fn(&str) -> Option<usize>,
     {
         let mut file = File::open(path)?;
+        self.load_from_reader(&mut file, Some(path.to_path_buf()), resolver)
+    }
 
+    /// Load an SMF module from a memory buffer
+    pub fn load_from_memory(&self, bytes: &[u8]) -> Result<LoadedModule, LoadError> {
+        self.load_from_memory_with_resolver(bytes, |_name| None)
+    }
+
+    /// Load an SMF module from a memory buffer using a custom import resolver.
+    pub fn load_from_memory_with_resolver<F>(
+        &self,
+        bytes: &[u8],
+        resolver: F,
+    ) -> Result<LoadedModule, LoadError>
+    where
+        F: Fn(&str) -> Option<usize>,
+    {
+        let mut cursor = Cursor::new(bytes);
+        self.load_from_reader(&mut cursor, None, resolver)
+    }
+
+    /// Internal: Load from any Read+Seek source
+    fn load_from_reader<R, F>(
+        &self,
+        reader: &mut R,
+        path: Option<PathBuf>,
+        resolver: F,
+    ) -> Result<LoadedModule, LoadError>
+    where
+        R: Read + Seek,
+        F: Fn(&str) -> Option<usize>,
+    {
         // Read header
-        let header = SmfHeader::read(&mut file)?;
+        let header = SmfHeader::read(reader)?;
         self.validate_header(&header)?;
 
         // Read sections
-        file.seek(SeekFrom::Start(header.section_table_offset))?;
-        let sections = self.read_sections(&mut file, header.section_count)?;
+        reader.seek(SeekFrom::Start(header.section_table_offset))?;
+        let sections = self.read_sections(reader, header.section_count)?;
 
         // Calculate total memory needed
         let (code_size, data_size) = self.calculate_sizes(&sections);
@@ -70,14 +95,14 @@ impl ModuleLoader {
         for section in &sections {
             match section.section_type {
                 SectionType::Code => {
-                    file.seek(SeekFrom::Start(section.offset))?;
+                    reader.seek(SeekFrom::Start(section.offset))?;
                     let slice = unsafe {
                         std::slice::from_raw_parts_mut(
                             code_mem.as_mut_ptr().add(code_offset),
                             section.size as usize,
                         )
                     };
-                    file.read_exact(slice)?;
+                    reader.read_exact(slice)?;
 
                     // Zero any padding up to virtual size
                     if section.virtual_size > section.size {
@@ -96,14 +121,14 @@ impl ModuleLoader {
 
                 SectionType::Data | SectionType::RoData => {
                     if let Some(ref data_mem) = data_mem {
-                        file.seek(SeekFrom::Start(section.offset))?;
+                        reader.seek(SeekFrom::Start(section.offset))?;
                         let slice = unsafe {
                             std::slice::from_raw_parts_mut(
                                 data_mem.as_mut_ptr().add(data_offset),
                                 section.size as usize,
                             )
                         };
-                        file.read_exact(slice)?;
+                        reader.read_exact(slice)?;
 
                         if section.virtual_size > section.size {
                             let extra = section.virtual_size as usize - section.size as usize;
@@ -139,10 +164,10 @@ impl ModuleLoader {
         }
 
         // Read symbol table
-        let symbols = self.read_symbols(&mut file, &header)?;
+        let symbols = self.read_symbols(reader, &header)?;
 
         // Read relocations
-        let relocs = self.read_relocations(&mut file, &sections)?;
+        let relocs = self.read_relocations(reader, &sections)?;
 
         // Apply relocations
         let code_slice = unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), code_size) };
@@ -164,7 +189,7 @@ impl ModuleLoader {
         }
 
         Ok(LoadedModule {
-            path: path.to_path_buf(),
+            path: path.unwrap_or_else(|| PathBuf::from("<memory>")),
             header,
             code_mem,
             data_mem,
@@ -194,12 +219,12 @@ impl ModuleLoader {
         Ok(())
     }
 
-    fn read_sections(&self, file: &mut File, count: u32) -> Result<Vec<SmfSection>, LoadError> {
+    fn read_sections<R: Read>(&self, reader: &mut R, count: u32) -> Result<Vec<SmfSection>, LoadError> {
         let mut sections = Vec::with_capacity(count as usize);
 
         for _ in 0..count {
             let mut buf = [0u8; std::mem::size_of::<SmfSection>()];
-            file.read_exact(&mut buf)?;
+            reader.read_exact(&mut buf)?;
             let section: SmfSection = unsafe { std::ptr::read(buf.as_ptr() as *const SmfSection) };
             sections.push(section);
         }
@@ -231,39 +256,39 @@ impl ModuleLoader {
         (code_size, data_size)
     }
 
-    fn read_symbols(&self, file: &mut File, header: &SmfHeader) -> Result<SymbolTable, LoadError> {
-        file.seek(SeekFrom::Start(header.symbol_table_offset))?;
+    fn read_symbols<R: Read + Seek>(&self, reader: &mut R, header: &SmfHeader) -> Result<SymbolTable, LoadError> {
+        reader.seek(SeekFrom::Start(header.symbol_table_offset))?;
 
         let mut symbols = Vec::with_capacity(header.symbol_count as usize);
         for _ in 0..header.symbol_count {
             let mut buf = [0u8; std::mem::size_of::<SmfSymbol>()];
-            file.read_exact(&mut buf)?;
+            reader.read_exact(&mut buf)?;
             let sym: SmfSymbol = unsafe { std::ptr::read(buf.as_ptr() as *const SmfSymbol) };
             symbols.push(sym);
         }
 
         // Read string table (follows symbols)
         let mut string_table = Vec::new();
-        file.read_to_end(&mut string_table)?;
+        reader.read_to_end(&mut string_table)?;
 
         Ok(SymbolTable::new(symbols, string_table))
     }
 
-    fn read_relocations(
+    fn read_relocations<R: Read + Seek>(
         &self,
-        file: &mut File,
+        reader: &mut R,
         sections: &[SmfSection],
     ) -> Result<Vec<SmfRelocation>, LoadError> {
         let mut relocs = Vec::new();
 
         for section in sections {
             if section.section_type == SectionType::Reloc {
-                file.seek(SeekFrom::Start(section.offset))?;
+                reader.seek(SeekFrom::Start(section.offset))?;
 
                 let count = section.size as usize / std::mem::size_of::<SmfRelocation>();
                 for _ in 0..count {
                     let mut buf = [0u8; std::mem::size_of::<SmfRelocation>()];
-                    file.read_exact(&mut buf)?;
+                    reader.read_exact(&mut buf)?;
                     let reloc: SmfRelocation =
                         unsafe { std::ptr::read(buf.as_ptr() as *const SmfRelocation) };
                     relocs.push(reloc);

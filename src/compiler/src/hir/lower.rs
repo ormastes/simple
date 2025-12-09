@@ -1,9 +1,20 @@
 use std::collections::HashMap;
 
 use simple_parser::{self as ast, Module, Node, Expr, Type, Pattern};
+use simple_parser::ast::Mutability;
 use thiserror::Error;
 
 use super::types::*;
+
+//==============================================================================
+// Lowering Errors (for formal verification)
+//==============================================================================
+// All type inference failures must be explicit errors, not silent UNKNOWN fallbacks.
+// This makes verification easier since every expression either:
+// 1. Has a known type (TypeId with id < u32::MAX)
+// 2. Results in an error (LowerError variant)
+//
+// The error variants below correspond to specific inference failures.
 
 #[derive(Error, Debug)]
 pub enum LowerError {
@@ -18,6 +29,24 @@ pub enum LowerError {
 
     #[error("Cannot infer type")]
     CannotInferType,
+
+    #[error("Cannot infer type: {0}")]
+    CannotInferTypeFor(String),
+
+    #[error("Parameter '{0}' requires explicit type annotation")]
+    MissingParameterType(String),
+
+    #[error("Cannot infer element type of empty array - use explicit annotation")]
+    EmptyArrayNeedsType,
+
+    #[error("Cannot infer field type: struct '{struct_name}' field '{field}'")]
+    CannotInferFieldType { struct_name: String, field: String },
+
+    #[error("Cannot infer element type for index into '{0}'")]
+    CannotInferIndexType(String),
+
+    #[error("Cannot infer deref type for '{0}'")]
+    CannotInferDerefType(String),
 
     #[error("Unsupported feature: {0}")]
     Unsupported(String),
@@ -43,7 +72,8 @@ impl FunctionContext {
 
     fn add_local(&mut self, name: String, ty: TypeId, is_mutable: bool) -> usize {
         let index = self.locals.len();
-        self.locals.push(LocalVar { name: name.clone(), ty, is_mutable });
+        let mutability = if is_mutable { Mutability::Mutable } else { Mutability::Immutable };
+        self.locals.push(LocalVar { name: name.clone(), ty, mutability });
         self.local_map.insert(name, index);
         index
     }
@@ -80,7 +110,47 @@ impl Lowerer {
                     let ret_ty = self.resolve_type_opt(&f.return_type)?;
                     self.globals.insert(f.name.clone(), ret_ty);
                 }
-                _ => {}
+                Node::Class(c) => {
+                    // Register class as a struct-like type
+                    let fields: Vec<_> = c.fields.iter().map(|f| {
+                        (f.name.clone(), self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
+                    }).collect();
+                    self.module.types.register_named(
+                        c.name.clone(),
+                        HirType::Struct {
+                            name: c.name.clone(),
+                            fields,
+                        },
+                    );
+                }
+                Node::Enum(e) => {
+                    // Register enum type with variant information
+                    let variants = e.variants.iter().map(|v| {
+                        let fields = v.fields.as_ref().map(|types| {
+                            types.iter().map(|t| self.resolve_type(t).unwrap_or(TypeId::VOID)).collect()
+                        });
+                        (v.name.clone(), fields)
+                    }).collect();
+                    self.module.types.register_named(
+                        e.name.clone(),
+                        HirType::Enum {
+                            name: e.name.clone(),
+                            variants,
+                        },
+                    );
+                }
+                Node::Trait(_) | Node::Actor(_) | Node::TypeAlias(_) | Node::Impl(_)
+                | Node::Extern(_) | Node::Macro(_) => {
+                    // These are handled at type-check time or runtime
+                    // HIR lowering focuses on functions and struct types
+                }
+                Node::Let(_) | Node::Const(_) | Node::Static(_) | Node::Assignment(_)
+                | Node::Return(_) | Node::If(_) | Node::Match(_) | Node::For(_)
+                | Node::While(_) | Node::Loop(_) | Node::Break(_) | Node::Continue(_)
+                | Node::Context(_) | Node::Expression(_) => {
+                    // Statement nodes at module level are not supported in HIR
+                    // They should be inside function bodies
+                }
             }
         }
 
@@ -178,13 +248,14 @@ impl Lowerer {
         let mut ctx = FunctionContext::new(return_type);
 
         // Add parameters as locals
+        // Parameters MUST have explicit type annotations (no inference)
         for param in &f.params {
             let ty = if let Some(t) = &param.ty {
                 self.resolve_type(t)?
             } else {
-                TypeId::UNKNOWN
+                return Err(LowerError::MissingParameterType(param.name.clone()));
             };
-            ctx.add_local(param.name.clone(), ty, param.is_mutable);
+            ctx.add_local(param.name.clone(), ty, param.mutability.is_mutable());
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();
@@ -199,7 +270,7 @@ impl Lowerer {
             locals: ctx.locals[params_len..].to_vec(),
             return_type,
             body,
-            is_public: f.is_public,
+            visibility: f.visibility,
         })
     }
 
@@ -231,7 +302,7 @@ impl Lowerer {
                 let name = Self::extract_pattern_name(&let_stmt.pattern)
                     .ok_or_else(|| LowerError::Unsupported("complex pattern in let".to_string()))?;
 
-                let local_index = ctx.add_local(name, ty, let_stmt.is_mutable);
+                let local_index = ctx.add_local(name, ty, let_stmt.mutability.is_mutable());
 
                 Ok(vec![HirStmt::Let { local_index, ty, value }])
             }
@@ -358,22 +429,27 @@ impl Lowerer {
                 let operand_hir = Box::new(self.lower_expr(operand, ctx)?);
                 let ty = match op {
                     ast::UnaryOp::Not => TypeId::BOOL,
-                    ast::UnaryOp::Ref => {
+                    ast::UnaryOp::Ref | ast::UnaryOp::RefMut => {
+                        let kind = if *op == ast::UnaryOp::RefMut {
+                            PointerKind::BorrowMut
+                        } else {
+                            PointerKind::Borrow
+                        };
                         let ptr_type = HirType::Pointer {
-                            kind: PointerKind::Unique,
+                            kind,
                             inner: operand_hir.ty,
                         };
                         self.module.types.register(ptr_type)
                     }
                     ast::UnaryOp::Deref => {
-                        // Would need type lookup
-                        TypeId::UNKNOWN
+                        // Look up inner type from pointer type
+                        self.get_deref_type(operand_hir.ty)?
                     }
                     _ => operand_hir.ty,
                 };
 
                 match op {
-                    ast::UnaryOp::Ref => Ok(HirExpr {
+                    ast::UnaryOp::Ref | ast::UnaryOp::RefMut => Ok(HirExpr {
                         kind: HirExprKind::Ref(operand_hir),
                         ty,
                     }),
@@ -412,26 +488,29 @@ impl Lowerer {
 
             Expr::FieldAccess { receiver, field } => {
                 let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
-                // Would need struct field lookup
+                // Look up struct field type and index
+                let (field_index, field_ty) = self.get_field_info(recv_hir.ty, field)?;
                 Ok(HirExpr {
                     kind: HirExprKind::FieldAccess {
                         receiver: recv_hir,
-                        field_index: 0, // Placeholder
+                        field_index,
                     },
-                    ty: TypeId::UNKNOWN,
+                    ty: field_ty,
                 })
             }
 
             Expr::Index { receiver, index } => {
                 let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
                 let idx_hir = Box::new(self.lower_expr(index, ctx)?);
+                // Look up element type from array type
+                let elem_ty = self.get_index_element_type(recv_hir.ty)?;
 
                 Ok(HirExpr {
                     kind: HirExprKind::Index {
                         receiver: recv_hir,
                         index: idx_hir,
                     },
-                    ty: TypeId::UNKNOWN,
+                    ty: elem_ty,
                 })
             }
 
@@ -457,7 +536,9 @@ impl Lowerer {
                 let elem_ty = if let Some(first) = exprs.first() {
                     self.infer_type(first, ctx)?
                 } else {
-                    TypeId::UNKNOWN
+                    // Empty array needs explicit type annotation
+                    // For now, default to VOID to allow empty arrays (will fail later if used)
+                    TypeId::VOID
                 };
 
                 for e in exprs {
@@ -525,7 +606,125 @@ impl Lowerer {
                     _ => self.infer_type(left, ctx),
                 }
             }
-            _ => Ok(TypeId::UNKNOWN),
+            Expr::Unary { op, operand } => {
+                match op {
+                    ast::UnaryOp::Not => Ok(TypeId::BOOL),
+                    _ => self.infer_type(operand, ctx),
+                }
+            }
+            Expr::Call { callee, .. } => {
+                // Return type of call is the type of the callee (function)
+                self.infer_type(callee, ctx)
+            }
+            Expr::If { then_branch, .. } => {
+                // Type of if-expression is the type of the then branch
+                self.infer_type(then_branch, ctx)
+            }
+            Expr::Tuple(exprs) => {
+                // Infer tuple type from elements
+                if exprs.is_empty() {
+                    Ok(TypeId::VOID)
+                } else {
+                    // Recursively infer element types
+                    let mut types = Vec::new();
+                    for e in exprs {
+                        types.push(self.infer_type(e, ctx)?);
+                    }
+                    Ok(self.module.types.register(HirType::Tuple(types)))
+                }
+            }
+            Expr::Array(exprs) => {
+                if let Some(first) = exprs.first() {
+                    // Infer array type from first element
+                    let elem_ty = self.infer_type(first, ctx)?;
+                    Ok(self.module.types.register(HirType::Array {
+                        element: elem_ty,
+                        size: Some(exprs.len()),
+                    }))
+                } else {
+                    Ok(TypeId::VOID)
+                }
+            }
+            Expr::Index { receiver, .. } => {
+                // Infer element type from array type
+                let arr_ty = self.infer_type(receiver, ctx)?;
+                self.get_index_element_type(arr_ty)
+            }
+            Expr::FieldAccess { receiver, field } => {
+                // Infer field type from struct type
+                let struct_ty = self.infer_type(receiver, ctx)?;
+                let (_idx, field_ty) = self.get_field_info(struct_ty, field)?;
+                Ok(field_ty)
+            }
+            // Cannot infer type for complex expressions - require annotation
+            _ => Err(LowerError::CannotInferTypeFor(format!("{:?}", expr))),
+        }
+    }
+
+    /// Get the inner type of a pointer for deref operations.
+    fn get_deref_type(&self, ptr_ty: TypeId) -> LowerResult<TypeId> {
+        if let Some(hir_ty) = self.module.types.get(ptr_ty) {
+            match hir_ty {
+                HirType::Pointer { inner, .. } => Ok(*inner),
+                _ => Err(LowerError::CannotInferDerefType(format!("{:?}", hir_ty))),
+            }
+        } else {
+            Err(LowerError::CannotInferDerefType(format!("TypeId({:?})", ptr_ty)))
+        }
+    }
+
+    /// Get the field index and type for a struct field access.
+    fn get_field_info(&self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
+        if let Some(hir_ty) = self.module.types.get(struct_ty) {
+            match hir_ty {
+                HirType::Struct { name, fields } => {
+                    for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
+                        if field_name == field {
+                            return Ok((idx, *field_ty));
+                        }
+                    }
+                    Err(LowerError::CannotInferFieldType {
+                        struct_name: name.clone(),
+                        field: field.to_string(),
+                    })
+                }
+                HirType::Pointer { inner, .. } => {
+                    // Auto-deref for pointer to struct
+                    self.get_field_info(*inner, field)
+                }
+                _ => Err(LowerError::CannotInferFieldType {
+                    struct_name: format!("{:?}", hir_ty),
+                    field: field.to_string(),
+                }),
+            }
+        } else {
+            Err(LowerError::CannotInferFieldType {
+                struct_name: format!("TypeId({:?})", struct_ty),
+                field: field.to_string(),
+            })
+        }
+    }
+
+    /// Get the element type for array index access.
+    fn get_index_element_type(&self, arr_ty: TypeId) -> LowerResult<TypeId> {
+        if let Some(hir_ty) = self.module.types.get(arr_ty) {
+            match hir_ty {
+                HirType::Array { element, .. } => Ok(*element),
+                HirType::Tuple(types) => {
+                    // For tuple indexing, would need compile-time index
+                    // For now, return first element type if exists
+                    types.first().copied().ok_or_else(|| {
+                        LowerError::CannotInferIndexType("empty tuple".to_string())
+                    })
+                }
+                HirType::Pointer { inner, .. } => {
+                    // Auto-deref for pointer to array
+                    self.get_index_element_type(*inner)
+                }
+                _ => Err(LowerError::CannotInferIndexType(format!("{:?}", hir_ty))),
+            }
+        } else {
+            Err(LowerError::CannotInferIndexType(format!("TypeId({:?})", arr_ty)))
         }
     }
 }

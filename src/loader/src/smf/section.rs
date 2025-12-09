@@ -10,18 +10,20 @@ pub struct SmfSection {
     pub name: [u8; 16],
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum SectionType {
     Code = 1,
     Data = 2,
-    Bss = 3,
-    RoData = 4,
-    SymTab = 5,
-    Reloc = 6,
-    TypeInfo = 7,
-    Version = 8,
-    SrcMap = 9,
+    RoData = 3,
+    Bss = 4,
+    Reloc = 5,
+    SymTab = 6,
+    StrTab = 7,
+    Debug = 8,
+    TypeInfo = 9,
+    Version = 10,
+    SrcMap = 11,
 }
 
 impl SmfSection {

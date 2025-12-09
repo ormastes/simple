@@ -119,6 +119,7 @@ fn test_interpreter_with_config() {
         args: vec!["test".to_string()],
         stdin: "hello".to_string(),
         timeout_ms: 1000,
+        in_memory: false,
     };
     let result = interpreter.run("main = 99", config).expect("run ok");
     assert_eq!(result.exit_code, 99, "Should return 99");

@@ -1,5 +1,15 @@
 use crate::token::{Token, TokenKind, Span};
 
+/// Result of processing an escape sequence
+enum EscapeResult {
+    /// Successfully processed escape, push this char
+    Char(char),
+    /// Invalid escape sequence error
+    Error(String),
+    /// Unterminated string (EOF after backslash)
+    Unterminated,
+}
+
 pub struct Lexer<'a> {
     source: &'a str,
     chars: std::iter::Peekable<std::str::CharIndices<'a>>,
@@ -286,6 +296,24 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Process an escape sequence after a backslash.
+    /// The backslash has already been consumed. Call after seeing '\'.
+    /// If `allow_braces` is true, also handles \{ and \} escapes (for f-strings).
+    fn process_escape(&mut self, allow_braces: bool) -> EscapeResult {
+        match self.peek() {
+            Some('n') => { self.advance(); EscapeResult::Char('\n') }
+            Some('t') => { self.advance(); EscapeResult::Char('\t') }
+            Some('r') => { self.advance(); EscapeResult::Char('\r') }
+            Some('\\') => { self.advance(); EscapeResult::Char('\\') }
+            Some('"') => { self.advance(); EscapeResult::Char('"') }
+            Some('0') => { self.advance(); EscapeResult::Char('\0') }
+            Some('{') if allow_braces => { self.advance(); EscapeResult::Char('{') }
+            Some('}') if allow_braces => { self.advance(); EscapeResult::Char('}') }
+            Some(c) => EscapeResult::Error(format!("Invalid escape sequence: \\{}", c)),
+            None => EscapeResult::Unterminated,
+        }
+    }
+
     fn skip_comment(&mut self) -> TokenKind {
         // Skip until end of line
         while let Some(ch) = self.peek() {
@@ -398,19 +426,10 @@ impl<'a> Lexer<'a> {
                 return TokenKind::String(value);
             } else if ch == '\\' {
                 self.advance();
-                match self.peek() {
-                    Some('n') => { self.advance(); value.push('\n'); }
-                    Some('t') => { self.advance(); value.push('\t'); }
-                    Some('r') => { self.advance(); value.push('\r'); }
-                    Some('\\') => { self.advance(); value.push('\\'); }
-                    Some('"') => { self.advance(); value.push('"'); }
-                    Some('0') => { self.advance(); value.push('\0'); }
-                    Some(c) => {
-                        return TokenKind::Error(format!("Invalid escape sequence: \\{}", c));
-                    }
-                    None => {
-                        return TokenKind::Error("Unterminated string".to_string());
-                    }
+                match self.process_escape(false) {
+                    EscapeResult::Char(c) => value.push(c),
+                    EscapeResult::Error(msg) => return TokenKind::Error(msg),
+                    EscapeResult::Unterminated => return TokenKind::Error("Unterminated string".to_string()),
                 }
             } else if ch == '\n' {
                 return TokenKind::Error("Unterminated string".to_string());
@@ -480,21 +499,10 @@ impl<'a> Lexer<'a> {
                 }
             } else if ch == '\\' {
                 self.advance();
-                match self.peek() {
-                    Some('n') => { self.advance(); current_literal.push('\n'); }
-                    Some('t') => { self.advance(); current_literal.push('\t'); }
-                    Some('r') => { self.advance(); current_literal.push('\r'); }
-                    Some('\\') => { self.advance(); current_literal.push('\\'); }
-                    Some('"') => { self.advance(); current_literal.push('"'); }
-                    Some('0') => { self.advance(); current_literal.push('\0'); }
-                    Some('{') => { self.advance(); current_literal.push('{'); }
-                    Some('}') => { self.advance(); current_literal.push('}'); }
-                    Some(c) => {
-                        return TokenKind::Error(format!("Invalid escape sequence: \\{}", c));
-                    }
-                    None => {
-                        return TokenKind::Error("Unterminated f-string".to_string());
-                    }
+                match self.process_escape(true) {
+                    EscapeResult::Char(c) => current_literal.push(c),
+                    EscapeResult::Error(msg) => return TokenKind::Error(msg),
+                    EscapeResult::Unterminated => return TokenKind::Error("Unterminated f-string".to_string()),
                 }
             } else if ch == '\n' {
                 return TokenKind::Error("Unterminated f-string".to_string());

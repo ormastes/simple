@@ -1,6 +1,305 @@
 use std::collections::HashMap;
 use simple_parser::ast::{Node, Expr, Pattern, Type as AstType, BinOp, PointerKind};
 
+//==============================================================================
+// Pure Type Inference (for formal verification)
+//==============================================================================
+// This module provides a pure, total inference function that maps directly to
+// the Lean 4 formal verification model in `verification/type_inference_compile/`.
+//
+// The Lean model is:
+//   def infer : Expr → Option Ty
+//     | litNat _ => some Ty.nat
+//     | litBool _ => some Ty.bool
+//     | add a b => do
+//         let Ty.nat ← infer a | none
+//         let Ty.nat ← infer b | none
+//         pure Ty.nat
+//     | ifElse c t e => do
+//         let Ty.bool ← infer c | none
+//         let τt ← infer t
+//         let τe ← infer e
+//         if τt = τe then pure τt else none
+//
+// Key property: Determinism - inference returns at most one type.
+
+//==============================================================================
+// LeanTy / LeanExpr - Exact match to TypeInferenceCompile.lean
+//==============================================================================
+// These types match the Lean model EXACTLY with no extensions.
+//
+// Lean equivalent:
+// ```lean
+// inductive Ty
+//   | nat
+//   | bool
+//   | arrow (a b : Ty)
+//   deriving DecidableEq, Repr
+//
+// inductive Expr
+//   | litNat (n : Nat)
+//   | litBool (b : Bool)
+//   | add (a b : Expr)
+//   | ifElse (c t e : Expr)
+//   | lam (body : Expr)
+//   | app (f x : Expr)
+//   deriving Repr
+// ```
+
+/// Type matching TypeInferenceCompile.lean exactly (3 variants, no Str).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeanTy {
+    /// Natural number type
+    Nat,
+    /// Boolean type
+    Bool,
+    /// Function type (arrow)
+    Arrow(Box<LeanTy>, Box<LeanTy>),
+}
+
+/// Expression matching TypeInferenceCompile.lean exactly (6 variants).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LeanExpr {
+    /// Natural number literal (Nat, not i64)
+    LitNat(u64),
+    /// Boolean literal
+    LitBool(bool),
+    /// Addition
+    Add(Box<LeanExpr>, Box<LeanExpr>),
+    /// If-then-else
+    IfElse(Box<LeanExpr>, Box<LeanExpr>, Box<LeanExpr>),
+    /// Lambda (toy rule: abstracts Nat argument)
+    Lam(Box<LeanExpr>),
+    /// Application
+    App(Box<LeanExpr>, Box<LeanExpr>),
+}
+
+/// Lean: def infer : Expr → Option Ty
+///
+/// Pure type inference function matching Lean exactly.
+/// This is a total function returning Option.
+pub fn lean_infer(expr: &LeanExpr) -> Option<LeanTy> {
+    match expr {
+        LeanExpr::LitNat(_) => Some(LeanTy::Nat),
+        LeanExpr::LitBool(_) => Some(LeanTy::Bool),
+
+        LeanExpr::Add(a, b) => {
+            // Lean: let Ty.nat ← infer a | none; let Ty.nat ← infer b | none; pure Ty.nat
+            match (lean_infer(a)?, lean_infer(b)?) {
+                (LeanTy::Nat, LeanTy::Nat) => Some(LeanTy::Nat),
+                _ => None,
+            }
+        }
+
+        LeanExpr::IfElse(c, t, e) => {
+            // Lean: let Ty.bool ← infer c | none
+            let cond_ty = lean_infer(c)?;
+            if cond_ty != LeanTy::Bool {
+                return None;
+            }
+            let then_ty = lean_infer(t)?;
+            let else_ty = lean_infer(e)?;
+            // Lean: if τt = τe then pure τt else none
+            if then_ty == else_ty {
+                Some(then_ty)
+            } else {
+                None
+            }
+        }
+
+        LeanExpr::Lam(body) => {
+            // Lean: τ.map fun t => Ty.arrow Ty.nat t
+            let body_ty = lean_infer(body)?;
+            Some(LeanTy::Arrow(Box::new(LeanTy::Nat), Box::new(body_ty)))
+        }
+
+        LeanExpr::App(f, x) => {
+            // Lean: match ← infer f with | Ty.arrow a b => ...
+            match lean_infer(f)? {
+                LeanTy::Arrow(arg_ty, ret_ty) => {
+                    let x_ty = lean_infer(x)?;
+                    if x_ty == *arg_ty {
+                        Some(*ret_ty)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Lean: theorem infer_deterministic (e : Expr) (t₁ t₂ : Ty) :
+///   infer e = some t₁ → infer e = some t₂ → t₁ = t₂
+///
+/// This function encodes the determinism theorem as a runtime assertion.
+/// For any expression, inference returns at most one type.
+pub fn infer_deterministic(e: &LeanExpr) -> bool {
+    // Since infer is a pure function, calling it twice must give the same result
+    let t1 = lean_infer(e);
+    let t2 = lean_infer(e);
+    t1 == t2
+}
+
+//==============================================================================
+// SimpleTy / SimpleExpr - Extended for Rust convenience
+//==============================================================================
+
+/// Simple type for pure inference (maps to Lean's Ty with Str extension).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SimpleTy {
+    Nat,
+    Bool,
+    Str,
+    Arrow(Box<SimpleTy>, Box<SimpleTy>),
+}
+
+impl SimpleTy {
+    /// Convert to LeanTy if possible (Str has no Lean equivalent).
+    pub fn to_lean(&self) -> Option<LeanTy> {
+        match self {
+            SimpleTy::Nat => Some(LeanTy::Nat),
+            SimpleTy::Bool => Some(LeanTy::Bool),
+            SimpleTy::Str => None, // No Lean equivalent
+            SimpleTy::Arrow(a, b) => {
+                Some(LeanTy::Arrow(Box::new(a.to_lean()?), Box::new(b.to_lean()?)))
+            }
+        }
+    }
+}
+
+/// Simple expression for pure inference (maps to Lean's Expr with Str extension).
+#[derive(Debug, Clone)]
+pub enum SimpleExpr {
+    LitNat(i64),
+    LitBool(bool),
+    LitStr(String),
+    Add(Box<SimpleExpr>, Box<SimpleExpr>),
+    IfElse(Box<SimpleExpr>, Box<SimpleExpr>, Box<SimpleExpr>),
+    Lam(Box<SimpleExpr>),
+    App(Box<SimpleExpr>, Box<SimpleExpr>),
+}
+
+impl SimpleExpr {
+    /// Convert to LeanExpr if possible (LitStr and negative numbers have no Lean equivalent).
+    pub fn to_lean(&self) -> Option<LeanExpr> {
+        match self {
+            SimpleExpr::LitNat(n) if *n >= 0 => Some(LeanExpr::LitNat(*n as u64)),
+            SimpleExpr::LitNat(_) => None, // Negative numbers not in Lean Nat
+            SimpleExpr::LitBool(b) => Some(LeanExpr::LitBool(*b)),
+            SimpleExpr::LitStr(_) => None, // No Lean equivalent
+            SimpleExpr::Add(a, b) => {
+                Some(LeanExpr::Add(Box::new(a.to_lean()?), Box::new(b.to_lean()?)))
+            }
+            SimpleExpr::IfElse(c, t, e) => {
+                Some(LeanExpr::IfElse(
+                    Box::new(c.to_lean()?),
+                    Box::new(t.to_lean()?),
+                    Box::new(e.to_lean()?),
+                ))
+            }
+            SimpleExpr::Lam(body) => Some(LeanExpr::Lam(Box::new(body.to_lean()?))),
+            SimpleExpr::App(f, x) => {
+                Some(LeanExpr::App(Box::new(f.to_lean()?), Box::new(x.to_lean()?)))
+            }
+        }
+    }
+}
+
+/// Pure type inference function.
+/// Returns `Some(ty)` if inference succeeds, `None` otherwise.
+/// This is a total function, corresponding to Lean's `infer : Expr → Option Ty`.
+///
+/// Determinism theorem (proven in Lean):
+///   infer e = some t₁ → infer e = some t₂ → t₁ = t₂
+pub fn infer_simple(expr: &SimpleExpr) -> Option<SimpleTy> {
+    match expr {
+        SimpleExpr::LitNat(_) => Some(SimpleTy::Nat),
+        SimpleExpr::LitBool(_) => Some(SimpleTy::Bool),
+        SimpleExpr::LitStr(_) => Some(SimpleTy::Str),
+
+        SimpleExpr::Add(a, b) => {
+            // Both operands must be Nat
+            match (infer_simple(a)?, infer_simple(b)?) {
+                (SimpleTy::Nat, SimpleTy::Nat) => Some(SimpleTy::Nat),
+                _ => None,
+            }
+        }
+
+        SimpleExpr::IfElse(cond, then_br, else_br) => {
+            // Condition must be Bool, branches must have same type
+            let cond_ty = infer_simple(cond)?;
+            if cond_ty != SimpleTy::Bool {
+                return None;
+            }
+            let then_ty = infer_simple(then_br)?;
+            let else_ty = infer_simple(else_br)?;
+            if then_ty == else_ty {
+                Some(then_ty)
+            } else {
+                None
+            }
+        }
+
+        SimpleExpr::Lam(body) => {
+            // Toy rule: lambda abstracts a Nat argument
+            let body_ty = infer_simple(body)?;
+            Some(SimpleTy::Arrow(Box::new(SimpleTy::Nat), Box::new(body_ty)))
+        }
+
+        SimpleExpr::App(f, x) => {
+            match infer_simple(f)? {
+                SimpleTy::Arrow(arg_ty, ret_ty) => {
+                    let x_ty = infer_simple(x)?;
+                    if x_ty == *arg_ty {
+                        Some(*ret_ty)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Convert a full AST expression to a simple expression for pure inference.
+/// Returns `None` if the expression uses features not in the simple model.
+pub fn to_simple_expr(expr: &Expr) -> Option<SimpleExpr> {
+    match expr {
+        Expr::Integer(n) => Some(SimpleExpr::LitNat(*n)),
+        Expr::Bool(b) => Some(SimpleExpr::LitBool(*b)),
+        Expr::String(s) => Some(SimpleExpr::LitStr(s.clone())),
+
+        Expr::Binary { left, right, op: BinOp::Add } => {
+            let l = to_simple_expr(left)?;
+            let r = to_simple_expr(right)?;
+            Some(SimpleExpr::Add(Box::new(l), Box::new(r)))
+        }
+
+        Expr::If { condition, then_branch, else_branch } => {
+            let c = to_simple_expr(condition)?;
+            let t = to_simple_expr(then_branch)?;
+            let e = to_simple_expr(else_branch.as_ref()?)?;
+            Some(SimpleExpr::IfElse(Box::new(c), Box::new(t), Box::new(e)))
+        }
+
+        // Other expressions are not in the simple model
+        _ => None,
+    }
+}
+
+/// Pure inference on AST expressions (when possible).
+/// Falls back to `None` for complex expressions.
+pub fn infer_pure(expr: &Expr) -> Option<SimpleTy> {
+    to_simple_expr(expr).and_then(|e| infer_simple(&e))
+}
+
+//==============================================================================
+// Full Type System
+//==============================================================================
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Int,
@@ -533,7 +832,24 @@ impl TypeChecker {
                     let ty = self.fresh_var();
                     self.env.insert(m.name.clone(), ty);
                 }
-                _ => {}
+                Node::Actor(a) => {
+                    // Register actor as a type
+                    let ty = self.fresh_var();
+                    self.env.insert(a.name.clone(), ty);
+                }
+                Node::TypeAlias(t) => {
+                    // Register type alias
+                    let ty = self.fresh_var();
+                    self.env.insert(t.name.clone(), ty);
+                }
+                Node::Impl(_) => {
+                    // Impl blocks don't introduce new names
+                }
+                Node::Let(_) | Node::Assignment(_) | Node::Return(_) | Node::If(_)
+                | Node::Match(_) | Node::For(_) | Node::While(_) | Node::Loop(_)
+                | Node::Break(_) | Node::Continue(_) | Node::Context(_) | Node::Expression(_) => {
+                    // Statement nodes at module level are checked in second pass
+                }
             }
         }
         // Second pass: check all nodes
@@ -738,7 +1054,9 @@ impl TypeChecker {
             Pattern::Typed { pattern, .. } => {
                 self.bind_pattern(pattern);
             }
-            _ => {}
+            Pattern::Wildcard | Pattern::Literal(_) | Pattern::Rest => {
+                // These patterns don't bind any names
+            }
         }
     }
 

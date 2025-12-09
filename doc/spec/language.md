@@ -213,6 +213,467 @@ Type inference works in tandem with these rules. For example, if you write `p = 
 
 ---
 
+## Unit Types and Literal Suffixes
+
+Simple provides **unit types** for type-safe numeric values with physical dimensions or semantic meaning. Unit types wrap primitive types and support literal suffixes for convenient value creation.
+
+### Basic Unit Families
+
+A **unit family** defines related units with a common base type and automatic conversions:
+
+```simple
+# Syntax: unit name(base: BaseType): suffix = factor, ...
+unit length(base: f64):
+    mm = 0.001        # 1 mm = 0.001 meters
+    cm = 0.01         # 1 cm = 0.01 meters
+    m = 1.0           # base unit
+    km = 1000.0       # 1 km = 1000 meters
+    inch = 0.0254
+    ft = 0.3048
+    mile = 1609.34
+
+unit time(base: f64):
+    ns = 0.000000001
+    us = 0.000001
+    ms = 0.001
+    s = 1.0           # base unit
+    min = 60.0
+    hr = 3600.0
+
+unit mass(base: f64):
+    mg = 0.000001
+    g = 0.001
+    kg = 1.0          # base unit
+    lb = 0.453592
+```
+
+### Using Unit Literals
+
+Values are created using the `_suffix` notation:
+
+```simple
+let distance = 100_km         # length type, stored as 100000.0 (meters)
+let duration = 2_hr           # time type, stored as 7200.0 (seconds)
+let weight = 5_kg             # mass type, stored as 5.0 (kg)
+
+# Access value in specific unit
+distance.as_km()              # 100.0
+distance.as_m()               # 100000.0
+distance.as_mile()            # 62.137...
+
+# Operations within same family (auto-converts)
+let total = 1_km + 500_m      # 1500_m (stored as 1500.0)
+let diff = 1_hr - 30_min      # 30_min (stored as 1800.0 seconds)
+
+# Comparisons work across units
+1_km == 1000_m                # true
+100_cm == 1_m                 # true
+```
+
+### Composite Unit Types
+
+**Composite units** are derived from operations between unit families:
+
+```simple
+# Syntax: unit name(base: BaseType) = Type1 op Type2: suffix = factor, ...
+unit velocity(base: f64) = length / time:
+    mps = 1.0         # meters per second (base)
+    kmph = 0.277778   # km/hr in m/s (1000/3600)
+    mph = 0.44704     # miles/hr in m/s
+
+unit area(base: f64) = length * length:
+    sqmm = 0.000001
+    sqcm = 0.0001
+    sqm = 1.0         # base
+    sqkm = 1000000.0
+    sqft = 0.0929
+
+unit volume(base: f64) = length ^ 3:
+    cbmm = 0.000000001
+    cbcm = 0.000001
+    cbm = 1.0         # base (cubic meters)
+    L = 0.001         # liter
+    mL = 0.000001
+
+unit acceleration(base: f64) = velocity / time:
+    mps2 = 1.0        # m/s² (base)
+
+unit force(base: f64) = mass * acceleration:
+    N = 1.0           # Newton (base)
+    kN = 1000.0
+
+unit energy(base: f64) = force * length:
+    J = 1.0           # Joule (base)
+    kJ = 1000.0
+    cal = 4.184
+
+unit power(base: f64) = energy / time:
+    W = 1.0           # Watt (base)
+    kW = 1000.0
+    hp = 745.7
+```
+
+### Composite Type Inference
+
+When you perform operations between unit types, the compiler **infers the result type** from the composite unit definitions:
+
+```simple
+let distance = 100_km
+let duration = 2_hr
+
+# Compiler infers: length / time = velocity
+let speed = distance / duration    # velocity type, 50_kmph
+
+# Compiler infers: velocity * time = length
+let new_dist = speed * 3_hr        # length type, 150_km
+
+# Compiler infers: length / velocity = time
+let eta = 200_km / 50_kmph         # time type, 4_hr
+
+# Area and volume
+let width = 10_m
+let height = 5_m
+let area = width * height          # area type, 50_sqm
+
+let depth = 2_m
+let vol = area * depth             # volume type, 100_cbm
+```
+
+### Type Inference Rules for Composite Units
+
+The compiler maintains a **unit algebra** based on composite definitions:
+
+| Definition | Infers | And also |
+|------------|--------|----------|
+| `velocity = length / time` | `length / time → velocity` | `velocity * time → length`, `length / velocity → time` |
+| `area = length * length` | `length * length → area` | `area / length → length` |
+| `volume = length ^ 3` | `length * length * length → volume` | `volume / length → area` |
+| `force = mass * acceleration` | `mass * acceleration → force` | `force / mass → acceleration` |
+
+```simple
+# All these are inferred correctly
+let v: velocity = 100_km / 2_hr           # explicit type matches inferred
+let d = 50_kmph * 4_hr                    # inferred as length
+let t = 200_km / 100_kmph                 # inferred as time
+let a = 10_mps / 5_s                      # inferred as acceleration
+let f = 100_kg * 10_mps2                  # inferred as force
+let e = 1000_N * 10_m                     # inferred as energy
+let p = 5000_J / 10_s                     # inferred as power
+```
+
+### Standalone Unit Types
+
+For semantic types without physical dimensions, use standalone units:
+
+```simple
+# Syntax: unit Name: BaseType as suffix [= factor]
+unit UserId: i64 as uid
+unit Percentage: f64 as pct = 0.01        # 50_pct = 0.5 internally
+unit Celsius: f64 as c
+unit Fahrenheit: f64 as f
+unit Radians: f64 as rad
+unit Degrees: f64 as deg = 0.0174533      # convert to radians
+
+# Usage
+let user = 42_uid
+let discount = 20_pct                      # stored as 0.2
+let temp = 25_c
+let angle = 90_deg                         # stored as ~1.5708 radians
+```
+
+### Type Safety
+
+Unit types prevent mixing incompatible values:
+
+```simple
+let distance = 100_km
+let duration = 2_hr
+let temp = 25_c
+
+# ERROR: different unit families
+let bad1 = distance + duration    # Compile error: length + time
+let bad2 = distance + temp        # Compile error: length + Celsius
+
+# ERROR: different standalone units
+let user1 = 100_uid
+let user2 = 200_uid
+let pct = 50_pct
+let bad3 = user1 + pct            # Compile error: UserId + Percentage
+
+# OK: same family or type
+let ok1 = 1_km + 500_m            # OK: both length
+let ok2 = user1 + user2           # OK: both UserId (if + defined)
+```
+
+### Custom Operations on Units
+
+Define custom methods via impl blocks:
+
+```simple
+unit Celsius: f64 as c
+unit Fahrenheit: f64 as f
+
+impl Celsius:
+    fn to_fahrenheit(self) -> Fahrenheit:
+        return Fahrenheit(self.value * 9.0 / 5.0 + 32.0)
+
+    fn is_freezing(self) -> bool:
+        return self.value <= 0.0
+
+impl Fahrenheit:
+    fn to_celsius(self) -> Celsius:
+        return Celsius((self.value - 32.0) * 5.0 / 9.0)
+
+let temp = 0_c
+temp.is_freezing()                # true
+temp.to_fahrenheit()              # 32_f
+```
+
+### Accessing Raw Values
+
+Access the underlying primitive value:
+
+```simple
+let speed = 100_kmph
+
+speed.value                       # raw f64: 27.7778 (in base unit m/s)
+speed.as_kmph()                   # 100.0 (converted to km/h)
+speed.as_mps()                    # 27.7778 (base unit)
+
+# Shorthand for single-value units
+let id = 42_uid
+id.0                              # 42 (raw i64)
+```
+
+### Unit Type Summary
+
+| Declaration | Purpose | Example |
+|-------------|---------|---------|
+| `unit name(base: T): ...` | Unit family | `unit length(base: f64): m = 1.0, km = 1000.0` |
+| `unit name(base: T) = A op B: ...` | Composite unit | `unit velocity(base: f64) = length / time: mps = 1.0` |
+| `unit Name: T as suffix` | Standalone unit | `unit UserId: i64 as uid` |
+| `value_suffix` | Literal creation | `100_km`, `5_hr`, `42_uid` |
+
+---
+
+## Primitive Type Warnings
+
+Simple encourages using **user-defined types** (unit types, newtypes, enums) instead of raw primitives in public APIs. The compiler issues warnings when primitives are exposed in ways that reduce type safety.
+
+### Public Member Variable Warnings
+
+Public fields with primitive types generate warnings:
+
+```simple
+class User:
+    pub id: i64           # WARNING: public primitive field 'id: i64'
+    pub name: str         # OK: str is acceptable for text
+    pub age: i32          # WARNING: public primitive field 'age: i32'
+
+# Recommended: use unit types
+unit UserId: i64 as uid
+unit Age: i32 as age
+
+class User:
+    pub id: UserId        # OK: user-defined type
+    pub name: str         # OK
+    pub age: Age          # OK: user-defined type
+```
+
+### Public Function Parameter Warnings
+
+Public function parameters with numeric primitives generate warnings:
+
+```simple
+# WARNING: public function with primitive parameters
+pub fn calculate_distance(x1: f64, y1: f64, x2: f64, y2: f64) -> f64:
+    ...
+
+# Recommended: use meaningful types
+unit Coordinate: f64 as coord
+
+pub fn calculate_distance(x1: Coordinate, y1: Coordinate,
+                          x2: Coordinate, y2: Coordinate) -> length:
+    ...
+
+# Or use a struct
+struct Point:
+    x: Coordinate
+    y: Coordinate
+
+pub fn calculate_distance(p1: Point, p2: Point) -> length:
+    ...
+```
+
+### Public Return Value Warnings
+
+```simple
+# WARNING: public function returning primitive
+pub fn get_user_id() -> i64:
+    ...
+
+# WARNING: primitive return exposes implementation
+pub fn get_temperature() -> f64:
+    ...
+
+# Recommended
+pub fn get_user_id() -> UserId:
+    ...
+
+pub fn get_temperature() -> Celsius:
+    ...
+```
+
+### Allowed Primitives
+
+Some primitives are acceptable in public APIs:
+
+| Type | Status | Reason |
+|------|--------|--------|
+| `str` | OK | Text is inherently string |
+| `bool` | OK | Boolean has clear semantics |
+| `i8`-`i64`, `u8`-`u64` | WARNING | Use unit types |
+| `f32`, `f64` | WARNING | Use unit types |
+
+### Suppressing Warnings
+
+Use `#[allow(primitive_api)]` to suppress warnings when primitives are intentional:
+
+```simple
+#[allow(primitive_api)]
+pub fn raw_bytes() -> [u8]:
+    ...
+
+#[allow(primitive_api)]
+class LowLevelBuffer:
+    pub size: i64
+    pub data: [u8]
+```
+
+### Warning Levels
+
+| Level | Behavior |
+|-------|----------|
+| `warn` (default) | Emit warning, continue compilation |
+| `deny` | Treat as error, fail compilation |
+| `allow` | Suppress warning |
+
+Configure via:
+```simple
+#![primitive_api = "deny"]   # Module-level: treat as error
+
+#[allow(primitive_api)]      # Item-level: suppress
+pub fn legacy_api() -> i64:
+    ...
+```
+
+---
+
+## Numeric Literal Formats
+
+Simple supports multiple numeric literal formats for different bases and improved readability.
+
+### Integer Literals
+
+| Format | Prefix | Example | Value |
+|--------|--------|---------|-------|
+| Decimal | (none) | `42`, `1_000_000` | 42, 1000000 |
+| Hexadecimal | `0x` | `0xFF`, `0x1A2B` | 255, 6699 |
+| Binary | `0b` | `0b1010`, `0b1111_0000` | 10, 240 |
+| Octal | `0o` | `0o755`, `0o17` | 493, 15 |
+
+### Examples
+
+```simple
+# Decimal (default)
+let count = 1_000_000         # underscores for readability
+let small = 42
+
+# Hexadecimal (0x prefix)
+let color = 0xFF5733          # RGB color
+let mask = 0x0000_FFFF        # bit mask
+let byte = 0xff               # lowercase ok
+
+# Binary (0b prefix)
+let flags = 0b1010_0101       # bit flags
+let nibble = 0b1111           # 4 bits
+let byte = 0b1111_0000_1010_0101  # grouped by 4
+
+# Octal (0o prefix)
+let permissions = 0o755       # Unix file permissions
+let value = 0o17              # octal 17 = decimal 15
+```
+
+### With Unit Suffixes
+
+Numeric prefixes combine with unit suffixes:
+
+```simple
+unit Byte: i64 as b
+unit Kilobyte: i64 as kb = 1024
+unit Megabyte: i64 as mb = 1048576
+
+let size = 0x1000_b           # 4096 bytes in hex
+let mask = 0b1111_0000_b      # binary with unit
+let chunk = 0x100_kb          # 256 KB
+
+unit Color: u32 as rgb
+
+let red = 0xFF0000_rgb        # hex color as unit
+let green = 0x00FF00_rgb
+let blue = 0x0000FF_rgb
+```
+
+### Floating Point Literals
+
+```simple
+# Standard decimal
+let pi = 3.14159
+let avogadro = 6.022e23       # scientific notation
+let tiny = 1.5e-10
+
+# With underscores
+let big = 1_234_567.890_123
+
+# Hexadecimal float (IEEE 754)
+let precise = 0x1.921fb54442d18p+1   # pi in hex float
+```
+
+### Type Suffixes (Optional)
+
+Explicit type suffixes for numeric literals:
+
+```simple
+let a = 42i32                 # i32
+let b = 100u64                # u64
+let c = 3.14f32               # f32 (single precision)
+let d = 2.718f64              # f64 (double precision)
+
+# Combined with prefix
+let e = 0xFFi8                # i8 with value 255 (or -1 if signed)
+let f = 0b1010u8              # u8 with value 10
+```
+
+### Grammar Summary
+
+```
+integer     = decimal | hex | binary | octal
+decimal     = [0-9][0-9_]*
+hex         = '0x' [0-9a-fA-F][0-9a-fA-F_]*
+binary      = '0b' [01][01_]*
+octal       = '0o' [0-7][0-7_]*
+
+float       = decimal '.' decimal [exponent]? | decimal exponent
+exponent    = [eE] [+-]? decimal
+
+type_suffix = 'i8' | 'i16' | 'i32' | 'i64' | 'u8' | 'u16' | 'u32' | 'u64' | 'f32' | 'f64'
+unit_suffix = identifier
+
+suffixed    = (integer | float) '_' (unit_suffix | type_suffix)
+```
+
+---
+
 ## Structs and Classes
 
 Structs and classes are the two mechanisms for defining custom composite types in Simple, each with distinct semantics:
@@ -257,6 +718,222 @@ By default, all struct and class fields are publicly readable but only modifiabl
 ### Equality and Copying
 
 Structs, being value types, support value equality by default (two Points with same x,y are equal). Classes use reference equality by default (two references are equal if they point to the same object), though classes can override an `.equals` method to define structural equality if needed. Cloning an object requires either a copy method or, if the class is `immut`, just assigning the reference (since immutability means sharing is safe).
+
+### Auto-Forwarding Properties (get/set/is)
+
+Simple provides automatic property forwarding for methods prefixed with `get_`, `set_`, or `is_`. This feature enables encapsulation with minimal boilerplate while maintaining explicit control over field access.
+
+#### Basic Syntax
+
+When a method name starts with `get_`, `set_`, or `is_`, it automatically creates or references a private backing field:
+
+```simple
+class Person:
+    # These methods auto-create private backing field '_name'
+    fn get_name() -> str:
+        return _name
+
+    fn set_name(value: str):
+        _name = value
+
+    # 'is_' prefix for boolean properties
+    fn is_active() -> bool:
+        return _active
+
+    fn set_active(value: bool):
+        _active = value
+
+let p = Person()
+p.set_name("Alice")      # Sets _name
+print p.get_name()       # Gets _name -> "Alice"
+print p.is_active()      # Gets _active -> false (default)
+```
+
+#### Auto-Generated Backing Fields
+
+The compiler automatically creates private backing fields with `_` prefix:
+
+| Method | Backing Field | Type |
+|--------|---------------|------|
+| `get_name() -> str` | `_name: str` | Inferred from return type |
+| `set_name(v: str)` | `_name: str` | Inferred from parameter type |
+| `is_valid() -> bool` | `_valid: bool` | Always `bool` |
+
+#### Type Inference Rules
+
+1. **If type is not specified**, it is inferred from the getter/setter:
+   ```simple
+   class Config:
+       fn get_timeout():      # Return type inferred from _timeout
+           return _timeout
+
+       fn set_timeout(v):     # Parameter type inferred from _timeout
+           _timeout = v
+   ```
+
+2. **Getter and setter types must match**:
+   ```simple
+   class Example:
+       fn get_value() -> i32:
+           return _value
+
+       fn set_value(v: i32):  # Must be i32, not i64
+           _value = v
+   ```
+
+3. **Type conversion with different accessor types**:
+   If the accessor type differs from the backing field type, access goes through the accessor's type:
+   ```simple
+   class Temperature:
+       _celsius: f64 = 0.0
+
+       # Accessor uses different type - converts on access
+       fn get_fahrenheit() -> f64:
+           return _celsius * 9.0 / 5.0 + 32.0
+
+       fn set_fahrenheit(f: f64):
+           _celsius = (f - 32.0) * 5.0 / 9.0
+
+   let t = Temperature()
+   t.set_fahrenheit(98.6)  # Stores as celsius internally
+   print t.get_fahrenheit() # Returns fahrenheit
+   ```
+
+#### Read-Only Properties (set-only restriction)
+
+If only a `set_` method is defined without a corresponding `get_`, the property becomes **write-only from outside** but readable internally:
+
+```simple
+class SecureData:
+    # Only setter - can't read from outside
+    fn set_password(value: str):
+        _password = hash(value)
+
+    # Internal method can access _password directly
+    fn verify(input: str) -> bool:
+        return hash(input) == _password
+
+let s = SecureData()
+s.set_password("secret123")
+# print s.get_password()  # Error: no getter defined
+print s.verify("secret123") # OK: internal access allowed
+```
+
+Conversely, if only `get_` is defined, the property is **read-only from outside**:
+
+```simple
+class Counter:
+    fn get_count() -> i64:
+        return _count
+
+    fn increment():
+        _count = _count + 1  # Internal modification OK
+
+let c = Counter()
+c.increment()
+print c.get_count()  # OK: 1
+# c.set_count(100)   # Error: no setter defined
+```
+
+#### Direct Internal Access with `_` Prefix
+
+Methods within the same class can access backing fields directly using the `_` prefix:
+
+```simple
+class Rectangle:
+    fn get_width() -> f64:
+        return _width
+
+    fn set_width(w: f64):
+        if w < 0:
+            _width = 0.0
+        else:
+            _width = w
+
+    fn get_height() -> f64:
+        return _height
+
+    fn set_height(h: f64):
+        _height = if h < 0: 0.0 else: h
+
+    # Direct access to backing fields
+    fn area() -> f64:
+        return _width * _height  # Direct access, no getter call
+
+    fn scale(factor: f64):
+        _width = _width * factor   # Direct modification
+        _height = _height * factor
+```
+
+#### Compile-Time Errors
+
+1. **Duplicate field name**: If an explicit field with the same name exists, it's a compile error:
+   ```simple
+   class Invalid:
+       _name: str = "default"  # Explicit field
+
+       fn get_name() -> str:   # Error: _name already exists
+           return _name
+   ```
+
+2. **Type mismatch between getter and setter**:
+   ```simple
+   class Invalid:
+       fn get_value() -> i32:
+           return _value
+
+       fn set_value(v: i64):  # Error: type mismatch (i64 vs i32)
+           _value = v
+   ```
+
+3. **`is_` prefix with non-boolean return**:
+   ```simple
+   class Invalid:
+       fn is_count() -> i32:  # Error: is_ must return bool
+           return _count
+   ```
+
+#### Default Values
+
+Backing fields are initialized to their type's default value:
+
+| Type | Default |
+|------|---------|
+| Numeric (i32, f64, etc.) | `0` |
+| `bool` | `false` |
+| `str` | `""` |
+| Reference types | `nil` |
+
+To specify a different default, use an explicit initializer in the getter:
+
+```simple
+class Config:
+    fn get_timeout() -> i64:
+        if _timeout == 0:
+            _timeout = 30  # Default timeout
+        return _timeout
+
+    fn set_timeout(v: i64):
+        _timeout = v
+```
+
+#### Property Shorthand (Future)
+
+A more concise syntax may be added in future versions:
+
+```simple
+class Person:
+    # Shorthand: auto-generates get_name, set_name, and _name
+    property name: str
+
+    # Read-only property
+    property id: i64 { get }
+
+    # With custom logic
+    property age: i32:
+        get: _age
+        set(v): _age = if v < 0: 0 else: v
+```
 
 ---
 
@@ -707,6 +1384,376 @@ match p:
 ```
 
 This demonstrates matching a struct by its fields. You can use `_` to ignore certain values, or bind them to new variables (`x_val`, `y_val`) for use in the case's body. Pattern matching thus provides a concise yet expressive way to branch on complex data structures safely.
+
+---
+
+## Constructor Polymorphism
+
+Simple supports **constructor polymorphism**, allowing constructors to be passed as first-class values. This enables factory patterns and dependency injection while maintaining type safety.
+
+### Constructor Type
+
+The `Constructor[T]` type represents any constructor that produces an instance of `T` or a subtype of `T`:
+
+```simple
+# Constructor[T] - type for constructors producing T or subtypes
+let factory: Constructor[Widget] = Button    # Button extends Widget
+let widget = factory("OK")                   # Creates a Button
+```
+
+### Basic Usage
+
+```simple
+class Widget:
+    name: str
+
+    fn new(name: str) -> Self:
+        return Widget(name: name)
+
+class Button(Widget):
+    enabled: bool
+
+    fn new(name: str, enabled: bool = true) -> Self:
+        super(name)
+        self.enabled = enabled
+
+class Label(Widget):
+    color: str
+
+    fn new(name: str, color: str = "black") -> Self:
+        super(name)
+        self.color = color
+
+# Pass constructor as parameter
+fn create_widget(ctor: Constructor[Widget], name: str) -> Widget:
+    return ctor(name)
+
+let b = create_widget(Button, "Click")    # Creates Button
+let l = create_widget(Label, "Hello")     # Creates Label
+```
+
+### Compatibility Rules
+
+Child constructors must be **compatible** with parent constructors:
+
+1. Must accept all required parameters of parent constructor
+2. Additional parameters must have default values
+3. Parameter types must match or be contravariant
+
+```simple
+class Base:
+    fn new(name: str, value: i32) -> Self:
+        ...
+
+class ValidChild(Base):
+    # OK: has parent params + extra with default
+    fn new(name: str, value: i32, extra: bool = false) -> Self:
+        super(name, value)
+        ...
+
+class InvalidChild(Base):
+    # ERROR: extra param without default
+    fn new(name: str, value: i32, extra: bool) -> Self:  # Compile error!
+        ...
+
+class AlsoInvalid(Base):
+    # ERROR: missing required parent param
+    fn new(name: str) -> Self:  # Compile error!
+        ...
+```
+
+### Compatibility Table
+
+| Parent Constructor | Child Constructor | Valid? | Reason |
+|-------------------|-------------------|--------|--------|
+| `new(a: A)` | `new(a: A)` | ✓ | Same signature |
+| `new(a: A)` | `new(a: A, b: B = default)` | ✓ | Extra with default |
+| `new(a: A)` | `new(a: A, b: B)` | ✗ | Extra without default |
+| `new(a: A)` | `new()` | ✗ | Missing required |
+| `new(a: A, b: B = x)` | `new(a: A)` | ✓ | Parent default used |
+
+### Factory Functions
+
+Use constructor types to create flexible factory patterns:
+
+```simple
+# Generic factory function
+fn create_many[T](ctor: Constructor[T], names: [str]) -> [T]:
+    return [ctor(name) for name in names]
+
+let buttons = create_many(Button, ["OK", "Cancel", "Help"])
+let labels = create_many(Label, ["Title", "Subtitle"])
+
+# Factory selector
+fn get_widget_factory(kind: str) -> Constructor[Widget]:
+    match kind:
+        case "button": return Button
+        case "label": return Label
+        case "slider": return Slider
+        case _: return Widget
+
+let factory = get_widget_factory("button")
+let w = factory("Dynamic Button")
+```
+
+### Storing Constructors
+
+Constructors can be stored in variables, collections, and data structures:
+
+```simple
+# In variables
+let ctor: Constructor[Widget] = Button
+
+# In collections
+let factories: [Constructor[Widget]] = [Button, Label, Slider]
+
+for factory in factories:
+    let w = factory("Test")
+    print w.name
+
+# In dictionaries
+let registry: {str: Constructor[Widget]} = {
+    "button": Button,
+    "label": Label,
+    "slider": Slider,
+}
+
+let widget = registry["button"]("Created from registry")
+```
+
+### Constructor Constraints
+
+Specify exact constructor signatures with tuple type:
+
+```simple
+# Constructor that takes exactly (str, i32)
+fn exact_factory(ctor: Constructor[Widget, (str, i32)]) -> Widget:
+    return ctor("default", 42)
+
+# Constructor that takes no parameters
+fn no_arg_factory[T](ctor: Constructor[T, ()]) -> T:
+    return ctor()
+
+# With named parameters
+fn named_factory(ctor: Constructor[Widget, (name: str)]) -> Widget:
+    return ctor(name: "test")
+```
+
+### Dependency Injection
+
+Constructor polymorphism enables clean dependency injection:
+
+```simple
+class Service:
+    fn new(config: Config) -> Self:
+        ...
+
+class MockService(Service):
+    fn new(config: Config, mock_data: Data = Data.empty()) -> Self:
+        super(config)
+        ...
+
+class ProductionService(Service):
+    fn new(config: Config, pool_size: i32 = 10) -> Self:
+        super(config)
+        ...
+
+class Application:
+    service: Service
+
+    fn new(service_ctor: Constructor[Service], config: Config) -> Self:
+        self.service = service_ctor(config)
+
+# Production
+let app = Application(ProductionService, prod_config)
+
+# Testing
+let test_app = Application(MockService, test_config)
+```
+
+### Abstract Constructors
+
+Use traits to define abstract constructor requirements:
+
+```simple
+trait Creatable:
+    fn create(name: str) -> Self
+
+class Widget:
+    ...
+
+impl Creatable for Widget:
+    fn create(name: str) -> Widget:
+        return Widget.new(name)
+
+fn make[T: Creatable](name: str) -> T:
+    return T.create(name)
+```
+
+---
+
+## Strong Enums
+
+Simple supports a `#[strong]` attribute on enums that enforces **exhaustive explicit matching**. Strong enums disallow wildcard `_` patterns, ensuring all variants are handled explicitly.
+
+### Basic Strong Enum
+
+```simple
+#[strong]
+enum HttpStatus:
+    Ok
+    NotFound
+    ServerError
+    BadRequest
+    Unauthorized
+
+fn handle_status(status: HttpStatus) -> str:
+    match status:
+        case Ok: "Success"
+        case NotFound: "Not found"
+        case ServerError: "Server error"
+        case BadRequest: "Bad request"
+        case Unauthorized: "Unauthorized"
+        # No _ allowed - all cases must be explicit
+```
+
+### Wildcard Prohibition
+
+```simple
+#[strong]
+enum Color:
+    Red
+    Green
+    Blue
+
+fn describe(c: Color) -> str:
+    match c:
+        case Red: "red"
+        case Green: "green"
+        case _: "other"    # ERROR: wildcard not allowed on strong enum
+```
+
+### Why Strong Enums?
+
+Strong enums prevent bugs when new variants are added:
+
+```simple
+# Without #[strong] - wildcard hides missing cases
+enum Status:
+    Active
+    Inactive
+    Pending      # Added later
+
+fn process(s: Status):
+    match s:
+        case Active: activate()
+        case Inactive: deactivate()
+        case _: pass     # Silently ignores Pending - BUG!
+
+# With #[strong] - compiler catches missing cases
+#[strong]
+enum Status:
+    Active
+    Inactive
+    Pending      # Added later
+
+fn process(s: Status):
+    match s:
+        case Active: activate()
+        case Inactive: deactivate()
+        # ERROR: missing case 'Pending', wildcards not allowed
+```
+
+### Strong Enum Use Cases
+
+| Use Case | Example |
+|----------|---------|
+| State machines | `#[strong] enum State: Idle, Running, Paused, Stopped` |
+| HTTP status | `#[strong] enum HttpStatus: Ok, NotFound, ServerError` |
+| Error types | `#[strong] enum Error: Io, Parse, Network, Auth` |
+| Commands | `#[strong] enum Command: Start, Stop, Restart, Status` |
+
+### Combining with Other Attributes
+
+```simple
+#[strong]
+#[derive(Debug, Eq)]
+enum Permission:
+    Read
+    Write
+    Execute
+    Admin
+
+fn check(p: Permission) -> bool:
+    match p:
+        case Read: true
+        case Write: check_write_access()
+        case Execute: check_exec_access()
+        case Admin: check_admin_access()
+```
+
+### Strong Enums with Data
+
+```simple
+#[strong]
+enum Result[T, E]:
+    Ok(value: T)
+    Err(error: E)
+
+fn handle[T, E](r: Result[T, E]) -> T?:
+    match r:
+        case Ok(v): Some(v)
+        case Err(_): None
+        # _ at top level not allowed, but _ for unused bindings is OK
+```
+
+### Opt-Out for Specific Matches
+
+Use `#[allow(wildcard_match)]` to allow wildcards in specific functions:
+
+```simple
+#[strong]
+enum Event:
+    Click
+    Hover
+    Focus
+    Blur
+    Scroll
+    Resize
+
+# Normally all cases required
+fn handle_all(e: Event):
+    match e:
+        case Click: on_click()
+        case Hover: on_hover()
+        case Focus: on_focus()
+        case Blur: on_blur()
+        case Scroll: on_scroll()
+        case Resize: on_resize()
+
+# Opt-out for specific function
+#[allow(wildcard_match)]
+fn handle_some(e: Event):
+    match e:
+        case Click: on_click()
+        case _: pass     # OK with attribute
+```
+
+### Grammar
+
+```simple
+# Strong enum declaration
+#[strong]
+enum EnumName:
+    Variant1
+    Variant2
+    ...
+
+# Compiler enforces:
+# 1. All match expressions must cover all variants
+# 2. Wildcard _ pattern is compile error
+# 3. Or-patterns must not hide variants
+```
 
 ---
 
@@ -1479,6 +2526,280 @@ The waitless stackless coroutine actor model provides:
 
 ---
 
+## Isolated Threads
+
+Simple provides **isolated threads** for safe, parallel execution without shared mutable state. Isolated threads are true OS threads (or thread pool workers) that guarantee data isolation through compile-time restrictions on what data can be accessed.
+
+### Core Principles
+
+1. **No shared mutable state** - Isolated threads cannot access mutable globals or shared references
+2. **Copy or const only** - Data passed to isolated threads must be copied or const
+3. **Channel-only communication** - Like actors, isolated threads communicate only through channels
+4. **Global const access** - Can read global constants (truly immutable data)
+
+### Spawning Isolated Threads
+
+Use `spawn_isolated` to create an isolated thread:
+
+```simple
+# Spawn with copied values
+let data = [1, 2, 3, 4, 5]
+let result_channel = Channel[i64].new()
+
+spawn_isolated(data, result_channel) \copied_data, chan:
+    # copied_data is a deep copy, chan is the channel
+    let sum = copied_data.sum()
+    chan.send(sum)
+
+# Wait for result
+let total = result_channel.recv()
+```
+
+### Data Access Rules
+
+#### Allowed
+
+| Data Type | Access | Reason |
+|-----------|--------|--------|
+| `const` globals | Read | Truly immutable, safe to share |
+| Copied values | Read/Write | Thread owns its copy |
+| Channels | Send/Recv | Designed for cross-thread communication |
+| Thread-local state | Read/Write | No sharing |
+
+#### Forbidden
+
+| Data Type | Reason |
+|-----------|--------|
+| Mutable globals | Would create data races |
+| `static mut` variables | Shared mutable state |
+| Non-const references | Could alias mutable data |
+| GC-managed references (non-copied) | GC not thread-safe by default |
+
+### Syntax
+
+```simple
+# Basic isolated spawn
+spawn_isolated \:
+    # No captures - fully isolated
+    do_independent_work()
+
+# With copied values
+let config = load_config()
+let items = get_items()
+
+spawn_isolated(config, items) \cfg, data:
+    # cfg and data are deep copies
+    process_with_config(cfg, data)
+
+# With channel for results
+let results = Channel[Result[Data, Error]].new()
+
+spawn_isolated(input, results) \data, out:
+    match expensive_compute(data):
+        case Ok(result):
+            out.send(Ok(result))
+        case Err(e):
+            out.send(Err(e))
+```
+
+### Global Constant Access
+
+Isolated threads can access global constants because they are guaranteed immutable:
+
+```simple
+const MAX_RETRIES: i32 = 3
+const CONFIG: Config = Config(timeout: 30, retries: MAX_RETRIES)
+const LOOKUP_TABLE: [i64; 256] = compute_table()
+
+spawn_isolated \:
+    # OK: reading const globals
+    for i in 0..MAX_RETRIES:
+        if try_operation(CONFIG.timeout):
+            break
+
+    # OK: reading const array
+    let value = LOOKUP_TABLE[index]
+```
+
+### Mutable Global Restriction
+
+Mutable globals are compile-time errors in isolated threads:
+
+```simple
+static mut counter: i64 = 0  # Mutable global
+
+spawn_isolated \:
+    counter = counter + 1  # ERROR: cannot access mutable global from isolated thread
+```
+
+### Copy Semantics
+
+Values passed to `spawn_isolated` are deep-copied:
+
+```simple
+class Data:
+    items: [i64]
+    metadata: str
+
+let original = Data(items: [1, 2, 3], metadata: "test")
+
+spawn_isolated(original) \copied:
+    # copied is a complete deep copy
+    copied.items.push(4)  # Does not affect original
+    copied.metadata = "modified"  # Does not affect original
+
+# original is unchanged
+assert original.items == [1, 2, 3]
+assert original.metadata == "test"
+```
+
+### Channel Communication
+
+Isolated threads use channels for all inter-thread communication:
+
+```simple
+# Typed channels
+let numbers = Channel[i64].new()
+let results = Channel[str].new()
+
+# Producer thread
+spawn_isolated(numbers) \out:
+    for i in 0..100:
+        out.send(i)
+    out.close()
+
+# Consumer thread
+spawn_isolated(numbers, results) \inp, out:
+    while let Some(n) = inp.recv():
+        out.send("processed: {n}")
+    out.close()
+
+# Main thread collects results
+for msg in results:
+    print msg
+```
+
+### Comparison with Actors
+
+| Feature | Actors | Isolated Threads |
+|---------|--------|------------------|
+| Execution | Cooperative (green threads) | Preemptive (OS threads) |
+| State | Actor-local state | No persistent state |
+| Communication | Message passing | Channels |
+| Scheduling | Runtime scheduler | OS scheduler |
+| Use case | Many lightweight tasks | CPU-bound parallelism |
+| Blocking | Discouraged (waitless) | Allowed |
+
+### Thread Pool Integration
+
+Isolated threads can use a thread pool for efficiency:
+
+```simple
+# Configure thread pool
+let pool = ThreadPool.new(workers: 4)
+
+# Submit work to pool
+let futures = items.map \item:
+    pool.spawn_isolated(item) \data:
+        expensive_compute(data)
+
+# Wait for all results
+let results = futures.await_all()
+```
+
+### Error Handling
+
+Errors in isolated threads are captured and can be retrieved:
+
+```simple
+let handle = spawn_isolated \:
+    if random() < 0.5:
+        panic("random failure")
+    return 42
+
+match handle.join():
+    case Ok(value):
+        print "Got: {value}"
+    case Err(ThreadError.Panicked(msg)):
+        print "Thread panicked: {msg}"
+    case Err(ThreadError.Cancelled):
+        print "Thread was cancelled"
+```
+
+### Compile-Time Verification
+
+The compiler verifies isolation constraints:
+
+```simple
+let shared_ref = get_shared_reference()
+static mut global_counter: i64 = 0
+
+spawn_isolated \:
+    # ERROR: capturing non-const reference
+    print shared_ref
+
+    # ERROR: accessing mutable global
+    global_counter += 1
+
+# Correct version
+let copied_value = shared_ref.clone()
+spawn_isolated(copied_value) \local:
+    print local  # OK: working with copy
+```
+
+### Type Constraints
+
+The `spawn_isolated` function has type constraints:
+
+```simple
+fn spawn_isolated[T: Copy + Send](args: T, body: fn(T) -> R) -> ThreadHandle[R]
+```
+
+Where:
+- `Copy` - Type can be deep-copied
+- `Send` - Type is safe to transfer between threads
+- `R` - Return type (accessible via `ThreadHandle.join()`)
+
+Types that are NOT `Send`:
+- Raw pointers
+- Non-atomic reference counts
+- Thread-local references
+- Mutable global references
+
+### Use Cases
+
+1. **CPU-bound parallelism**:
+   ```simple
+   let chunks = data.chunk(4)
+   let handles = chunks.map \chunk:
+       spawn_isolated(chunk) \data:
+           data.map(\x: heavy_compute(x))
+
+   let results = handles.map(\h: h.join()).flatten()
+   ```
+
+2. **Background processing**:
+   ```simple
+   spawn_isolated(request) \req:
+       let result = process(req)
+       save_to_database(result)
+   ```
+
+3. **Parallel I/O** (with blocking allowed):
+   ```simple
+   let urls = ["http://a.com", "http://b.com", "http://c.com"]
+   let results = Channel[Response].new()
+
+   for url in urls:
+       spawn_isolated(url, results) \u, out:
+           out.send(http_get(u))  # Blocking OK in isolated thread
+
+   for response in results.take(urls.len()):
+       process(response)
+   ```
+
+---
+
 ## Futures and Promises
 
 Simple provides TypeScript-style async/await built on top of the actor system for handling asynchronous computations.
@@ -1733,6 +3054,478 @@ Combining context blocks and `method_missing` (along with flexible syntax for me
 - **Fluent Interfaces**: Although not explicitly mentioned above, Simple's flexible syntax also allows methods to be chainable (especially with the `->` functional update operator). A DSL can be designed where calls return `self` or new contexts to allow continuing the chain on new lines without extra punctuation.
 
 All these features together enable writing code in Simple that reads almost like a custom language for your domain, without sacrificing static typing and IDE support. The macros system further complements DSLs by allowing generation of boilerplate or repetitive patterns behind the scenes, while the core context/missing-method features handle the front-facing syntax.
+
+---
+
+## Error Handling
+
+Simple uses explicit error handling with Result types and the `?` operator, inspired by Rust. This approach makes error paths visible in the type system and avoids hidden exceptions.
+
+### Result Type
+
+`Result[T, E]` is a standard library enum representing either success (`Ok(value)`) or failure (`Err(error)`):
+
+```simple
+enum Result[T, E]:
+    Ok(value: T)
+    Err(error: E)
+
+fn divide(a: i64, b: i64) -> Result[i64, str]:
+    if b == 0:
+        return Err("division by zero")
+    return Ok(a / b)
+```
+
+### The `?` Operator
+
+The `?` operator provides ergonomic error propagation. When applied to a `Result` or `Option`, it:
+- Returns the inner value if `Ok` or `Some`
+- Returns early from the function with `Err` or `None`
+
+```simple
+fn process_file(path: str) -> Result[Data, Error]:
+    let file = open(path)?           # Returns Err if open fails
+    let content = file.read_all()?   # Returns Err if read fails
+    let data = parse(content)?       # Returns Err if parse fails
+    return Ok(data)
+```
+
+This desugars to:
+
+```simple
+fn process_file(path: str) -> Result[Data, Error]:
+    let file = match open(path):
+        case Ok(f): f
+        case Err(e): return Err(e)
+    # ... and so on
+```
+
+The `?` operator works with:
+- `Result[T, E]` - propagates `Err`
+- `T?` (Option) - propagates `None`
+
+---
+
+## Comprehensions
+
+Simple supports Python-style comprehensions for concise collection construction.
+
+### List Comprehension
+
+```simple
+# Basic comprehension
+let squares = [x * x for x in 0..10]
+# Result: [0, 1, 4, 9, 16, 25, 36, 49, 64, 81]
+
+# With filter
+let evens = [x for x in 0..20 if x % 2 == 0]
+# Result: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
+
+# Nested comprehension
+let pairs = [(x, y) for x in 0..3 for y in 0..3]
+# Result: [(0,0), (0,1), (0,2), (1,0), (1,1), (1,2), (2,0), (2,1), (2,2)]
+
+# With complex expressions
+let names = [user.name.upper() for user in users if user.active]
+```
+
+### Dict Comprehension
+
+```simple
+# Basic dict comprehension
+let squares = {x: x * x for x in 0..10}
+# Result: {0: 0, 1: 1, 2: 4, 3: 9, ...}
+
+# From pairs
+let dict = {k: v for k, v in pairs}
+
+# With filter
+let active_users = {u.id: u for u in users if u.active}
+
+# Swapping keys and values
+let inverted = {v: k for k, v in original}
+```
+
+### Grammar
+
+Comprehensions use the `for ... in ... if ...` syntax within brackets:
+
+```simple
+# List: [ expression for pattern in iterable if condition ]
+# Dict: { key: value for pattern in iterable if condition }
+```
+
+The `if condition` clause is optional and can appear after each `for` clause.
+
+---
+
+## Slicing and Indexing
+
+Simple supports Python-style slicing and negative indexing for sequences.
+
+### Negative Indexing
+
+Negative indices count from the end of the sequence:
+
+```simple
+let items = [1, 2, 3, 4, 5]
+
+items[-1]     # 5 (last element)
+items[-2]     # 4 (second to last)
+items[-5]     # 1 (first element, same as items[0])
+```
+
+### Slicing
+
+The slice syntax `[start:end:step]` extracts a subsequence:
+
+```simple
+let items = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+items[2:5]      # [2, 3, 4] (indices 2, 3, 4)
+items[:3]       # [0, 1, 2] (first 3 elements)
+items[7:]       # [7, 8, 9] (from index 7 to end)
+items[::2]      # [0, 2, 4, 6, 8] (every 2nd element)
+items[::-1]     # [9, 8, 7, 6, 5, 4, 3, 2, 1, 0] (reversed)
+items[1:7:2]    # [1, 3, 5] (from 1 to 7, step 2)
+
+# Negative indices in slices
+items[-3:]      # [7, 8, 9] (last 3 elements)
+items[:-3]      # [0, 1, 2, 3, 4, 5, 6] (all but last 3)
+```
+
+### Tuple Unpacking
+
+Unpack sequences into multiple variables:
+
+```simple
+# Basic unpacking
+let a, b = (1, 2)
+let x, y, z = [10, 20, 30]
+
+# Swap values
+a, b = b, a
+
+# Rest patterns with *
+let first, *rest = [1, 2, 3, 4, 5]
+# first = 1, rest = [2, 3, 4, 5]
+
+let *init, last = [1, 2, 3, 4, 5]
+# init = [1, 2, 3, 4], last = 5
+
+let head, *middle, tail = [1, 2, 3, 4, 5]
+# head = 1, middle = [2, 3, 4], tail = 5
+```
+
+### Spread Operators
+
+Spread elements when constructing collections:
+
+```simple
+let a = [1, 2, 3]
+let b = [4, 5, 6]
+
+# Spread in arrays
+let combined = [*a, *b]        # [1, 2, 3, 4, 5, 6]
+let extended = [0, *a, 10]     # [0, 1, 2, 3, 10]
+
+# Spread in dicts
+let d1 = {"a": 1, "b": 2}
+let d2 = {"c": 3}
+let merged = {**d1, **d2}      # {"a": 1, "b": 2, "c": 3}
+
+# Override with spread
+let updated = {**config, "timeout": 30}
+```
+
+---
+
+## Enhanced Pattern Matching
+
+Simple extends basic pattern matching with guards, or patterns, and range patterns for more expressive matching.
+
+### Match Guards
+
+Add conditions to patterns with `if`:
+
+```simple
+match value:
+    case x if x > 0:
+        print "positive"
+    case x if x < 0:
+        print "negative"
+    case 0:
+        print "zero"
+
+match user:
+    case User(name, age) if age >= 18:
+        grant_access(name)
+    case User(name, _):
+        deny_access(name)
+```
+
+### Or Patterns
+
+Match multiple alternatives with `|`:
+
+```simple
+match command:
+    case "quit" | "exit" | "q":
+        shutdown()
+    case "help" | "h" | "?":
+        show_help()
+    case _:
+        execute(command)
+
+match value:
+    case 1 | 2 | 3:
+        print "small"
+    case 4 | 5 | 6:
+        print "medium"
+    case _:
+        print "large"
+```
+
+### Range Patterns
+
+Match numeric ranges:
+
+```simple
+match score:
+    case 90..100:
+        "A"
+    case 80..90:
+        "B"
+    case 70..80:
+        "C"
+    case 60..70:
+        "D"
+    case _:
+        "F"
+
+match char:
+    case 'a'..'z':
+        "lowercase"
+    case 'A'..'Z':
+        "uppercase"
+    case '0'..'9':
+        "digit"
+    case _:
+        "other"
+```
+
+### If Let / While Let
+
+Convenient pattern matching for single cases:
+
+```simple
+# if let - execute block only if pattern matches
+if let Some(value) = optional:
+    print "got {value}"
+
+if let Ok(data) = result:
+    process(data)
+else:
+    handle_error()
+
+# while let - loop while pattern matches
+while let Some(item) = iterator.next():
+    process(item)
+
+# Equivalent to:
+loop:
+    match iterator.next():
+        case Some(item):
+            process(item)
+        case None:
+            break
+```
+
+### Chained Comparisons
+
+Multiple comparisons can be chained:
+
+```simple
+# These are equivalent
+if 0 < x < 10:
+    print "single digit"
+
+if 0 < x and x < 10:
+    print "single digit"
+
+# Multiple chains
+if a < b <= c < d:
+    print "ordered"
+```
+
+---
+
+## Decorators and Attributes
+
+Simple provides two mechanisms for annotating code: decorators for transformations and attributes for metadata.
+
+### Decorators
+
+Decorators are functions that transform other functions at compile time:
+
+```simple
+@cached
+fn expensive_calculation(x: i64) -> i64:
+    # Complex computation
+    return result
+
+@logged
+@retry(attempts: 3)
+fn fetch_data(url: str) -> Data:
+    return http_get(url)
+
+# Decorator with arguments
+@timeout(seconds: 30)
+fn slow_operation():
+    # ...
+```
+
+Decorators are applied bottom-up. The above is equivalent to:
+
+```simple
+fn fetch_data(url: str) -> Data:
+    return http_get(url)
+fetch_data = retry(attempts: 3)(logged(fetch_data))
+```
+
+Common built-in decorators:
+- `@cached` - Memoize function results
+- `@logged` - Log function calls
+- `@deprecated(message: str)` - Mark as deprecated
+- `@async_handler` - Convert to async handler
+
+### Attributes
+
+Attributes are passive metadata that don't transform code:
+
+```simple
+#[inline]
+fn hot_path(x: i64) -> i64:
+    return x * 2
+
+#[deprecated(since: "0.2", reason: "Use new_api instead")]
+fn old_api():
+    # ...
+
+#[derive(Debug, Clone, Eq)]
+struct Point:
+    x: f64
+    y: f64
+
+#[test]
+fn test_addition():
+    assert_eq(1 + 1, 2)
+```
+
+Common attributes:
+- `#[inline]` / `#[inline(always)]` - Inlining hints
+- `#[deprecated(...)]` - Deprecation warning
+- `#[derive(...)]` - Auto-generate trait implementations
+- `#[test]` - Mark as test function
+- `#[cfg(...)]` - Conditional compilation
+- `#[allow(...)]` / `#[deny(...)]` - Lint control
+
+### Difference Between Decorators and Attributes
+
+| Aspect | Decorator (`@`) | Attribute (`#[...]`) |
+|--------|-----------------|---------------------|
+| Behavior | Active - transforms code | Passive - attaches metadata |
+| Execution | Compile-time function call | Compiler directive |
+| Position | Before function | Before any item |
+| Chaining | Multiple decorators compose | Multiple attributes accumulate |
+| User-defined | Yes, any function | Limited to compiler-known |
+
+---
+
+## Context Managers
+
+Context managers ensure proper resource cleanup using the `with` statement:
+
+```simple
+with open("file.txt") as file:
+    let content = file.read()
+    process(content)
+# file is automatically closed here
+
+# Multiple resources
+with open("in.txt") as input, open("out.txt", "w") as output:
+    output.write(transform(input.read()))
+
+# Without binding
+with lock:
+    # Critical section
+    modify_shared_state()
+```
+
+### Implementing Context Managers
+
+Types implement the `ContextManager` trait:
+
+```simple
+trait ContextManager:
+    fn enter(self) -> Self
+    fn exit(self, error: Error?)
+
+class File:
+    # ...
+
+impl ContextManager for File:
+    fn enter(self) -> File:
+        return self  # Already open
+
+    fn exit(self, error: Error?):
+        self.close()
+```
+
+The `with` statement desugars to:
+
+```simple
+# with expr as name: body
+# becomes:
+let __ctx = expr.enter()
+let name = __ctx
+try:
+    body
+finally:
+    __ctx.exit(current_error())
+```
+
+---
+
+## Move Closures
+
+By default, closures capture variables by reference (GC-managed). Use `move` to capture by value:
+
+```simple
+fn create_counter(start: i64) -> Fn() -> i64:
+    let count = start
+    # Without move, this would capture 'count' by reference
+    return move \:
+        count = count + 1
+        count
+
+let counter = create_counter(0)
+counter()  # 1
+counter()  # 2
+```
+
+Move closures are essential for:
+- Sending closures to other actors
+- Storing closures that outlive their creation scope
+- Parallel execution with isolated state
+
+```simple
+# Sending to actor - must move
+actor.send(move \: process(captured_data))
+
+# Parallel map - each thread gets its own copy
+items.par_map(move \x: expensive_compute(x, config))
+```
 
 ---
 

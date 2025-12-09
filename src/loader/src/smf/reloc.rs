@@ -9,11 +9,12 @@ pub struct SmfRelocation {
     pub addend: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum RelocationType {
     None = 0,
     Abs64 = 1,
+    /// PC-relative 32-bit relocation (also known as Rel32)
     Pc32 = 2,
     Plt32 = 3,
     GotPcRel = 4,

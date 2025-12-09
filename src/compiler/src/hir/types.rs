@@ -1,8 +1,58 @@
 use std::collections::HashMap;
+use simple_parser::ast::{Visibility, Mutability};
+
+//==============================================================================
+// Signedness (for formal verification)
+//==============================================================================
+// Replaces boolean `signed` field with explicit enum.
+//
+// Lean equivalent:
+// ```lean
+// inductive Signedness
+//   | signed
+//   | unsigned
+// ```
+
+/// Integer signedness - whether the type is signed or unsigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Signedness {
+    /// Signed integer (can represent negative values)
+    #[default]
+    Signed,
+    /// Unsigned integer (non-negative values only)
+    Unsigned,
+}
+
+impl Signedness {
+    /// Check if signed
+    pub fn is_signed(&self) -> bool {
+        matches!(self, Signedness::Signed)
+    }
+
+    /// Check if unsigned
+    pub fn is_unsigned(&self) -> bool {
+        matches!(self, Signedness::Unsigned)
+    }
+}
 
 /// Unique identifier for types in the HIR
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeId(pub u32);
+
+//==============================================================================
+// Type IDs (for formal verification)
+//==============================================================================
+// TypeId is a simple newtype over u32 for type identity.
+// Built-in types have fixed IDs, custom types are allocated sequentially.
+//
+// For verification purposes, we distinguish between:
+// - Known types (ID < u32::MAX) - have a resolved HirType
+// - UNKNOWN (ID == u32::MAX) - type inference failed
+//
+// IMPORTANT: UNKNOWN should be avoided in new code. Instead:
+// - Return Err(LowerError::CannotInferType) for inference failures
+// - Use TypeId::VOID for empty/unit types
+// - Use explicit type annotations where inference is insufficient
 
 impl TypeId {
     pub const VOID: TypeId = TypeId(0);
@@ -19,7 +69,22 @@ impl TypeId {
     pub const F64: TypeId = TypeId(11);
     pub const STRING: TypeId = TypeId(12);
     pub const NIL: TypeId = TypeId(13);
+
+    /// DEPRECATED: Use explicit errors instead of UNKNOWN.
+    /// This constant exists for backwards compatibility but should be avoided.
+    #[deprecated(note = "Use explicit LowerError::CannotInferType instead")]
     pub const UNKNOWN: TypeId = TypeId(u32::MAX);
+
+    /// Check if this is a known (resolved) type.
+    pub fn is_known(&self) -> bool {
+        self.0 != u32::MAX
+    }
+
+    /// Check if this is the UNKNOWN sentinel.
+    #[deprecated(note = "Check for errors in lowering instead")]
+    pub fn is_unknown(&self) -> bool {
+        self.0 == u32::MAX
+    }
 }
 
 /// Resolved type information
@@ -27,7 +92,7 @@ impl TypeId {
 pub enum HirType {
     Void,
     Bool,
-    Int { bits: u8, signed: bool },
+    Int { bits: u8, signedness: Signedness },
     Float { bits: u8 },
     String,
     Nil,
@@ -38,6 +103,18 @@ pub enum HirType {
     Struct { name: String, fields: Vec<(String, TypeId)> },
     Enum { name: String, variants: Vec<(String, Option<Vec<TypeId>>)> },
     Unknown,
+}
+
+impl HirType {
+    /// Create a signed integer type with the given bit width
+    pub fn signed_int(bits: u8) -> Self {
+        HirType::Int { bits, signedness: Signedness::Signed }
+    }
+
+    /// Create an unsigned integer type with the given bit width
+    pub fn unsigned_int(bits: u8) -> Self {
+        HirType::Int { bits, signedness: Signedness::Unsigned }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,11 +140,60 @@ impl From<simple_parser::PointerKind> for PointerKind {
     }
 }
 
+/// Type ID allocator for formal verification.
+///
+/// Separates ID allocation from type storage, making allocation semantics explicit:
+/// - `alloc()` always returns a fresh ID (monotonically increasing)
+/// - No ID reuse is possible
+///
+/// Lean equivalent:
+/// ```lean
+/// structure TypeIdAllocator := (next : Nat)
+///
+/// def alloc (a : TypeIdAllocator) : TypeId × TypeIdAllocator :=
+///   (TypeId.mk a.next, { next := a.next + 1 })
+/// ```
+#[derive(Debug, Clone)]
+pub struct TypeIdAllocator {
+    next: u32,
+}
+
+impl TypeIdAllocator {
+    /// Create a new allocator starting after built-in types.
+    pub fn new() -> Self {
+        Self { next: 14 } // Built-in types 0-13
+    }
+
+    /// Create an allocator with a custom starting ID.
+    pub fn with_start(start: u32) -> Self {
+        Self { next: start }
+    }
+
+    /// Allocate a fresh TypeId.
+    /// Invariant: returned ID is always unique and greater than any previous allocation.
+    pub fn alloc(&mut self) -> TypeId {
+        let id = TypeId(self.next);
+        self.next += 1;
+        id
+    }
+
+    /// Get the next ID that would be allocated (for debugging/verification).
+    pub fn peek_next(&self) -> u32 {
+        self.next
+    }
+}
+
+impl Default for TypeIdAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Type registry that maps TypeId to HirType
 #[derive(Debug, Default)]
 pub struct TypeRegistry {
     types: HashMap<TypeId, HirType>,
-    next_id: u32,
+    allocator: TypeIdAllocator,
     name_to_id: HashMap<String, TypeId>,
 }
 
@@ -75,21 +201,21 @@ impl TypeRegistry {
     pub fn new() -> Self {
         let mut registry = Self {
             types: HashMap::new(),
-            next_id: 14, // Start after built-in types
+            allocator: TypeIdAllocator::new(),
             name_to_id: HashMap::new(),
         };
 
         // Register built-in types
         registry.types.insert(TypeId::VOID, HirType::Void);
         registry.types.insert(TypeId::BOOL, HirType::Bool);
-        registry.types.insert(TypeId::I8, HirType::Int { bits: 8, signed: true });
-        registry.types.insert(TypeId::I16, HirType::Int { bits: 16, signed: true });
-        registry.types.insert(TypeId::I32, HirType::Int { bits: 32, signed: true });
-        registry.types.insert(TypeId::I64, HirType::Int { bits: 64, signed: true });
-        registry.types.insert(TypeId::U8, HirType::Int { bits: 8, signed: false });
-        registry.types.insert(TypeId::U16, HirType::Int { bits: 16, signed: false });
-        registry.types.insert(TypeId::U32, HirType::Int { bits: 32, signed: false });
-        registry.types.insert(TypeId::U64, HirType::Int { bits: 64, signed: false });
+        registry.types.insert(TypeId::I8, HirType::signed_int(8));
+        registry.types.insert(TypeId::I16, HirType::signed_int(16));
+        registry.types.insert(TypeId::I32, HirType::signed_int(32));
+        registry.types.insert(TypeId::I64, HirType::signed_int(64));
+        registry.types.insert(TypeId::U8, HirType::unsigned_int(8));
+        registry.types.insert(TypeId::U16, HirType::unsigned_int(16));
+        registry.types.insert(TypeId::U32, HirType::unsigned_int(32));
+        registry.types.insert(TypeId::U64, HirType::unsigned_int(64));
         registry.types.insert(TypeId::F32, HirType::Float { bits: 32 });
         registry.types.insert(TypeId::F64, HirType::Float { bits: 64 });
         registry.types.insert(TypeId::STRING, HirType::String);
@@ -116,10 +242,14 @@ impl TypeRegistry {
     }
 
     pub fn register(&mut self, ty: HirType) -> TypeId {
-        let id = TypeId(self.next_id);
-        self.next_id += 1;
+        let id = self.allocator.alloc();
         self.types.insert(id, ty);
         id
+    }
+
+    /// Get the allocator for inspection (useful for verification).
+    pub fn allocator(&self) -> &TypeIdAllocator {
+        &self.allocator
     }
 
     pub fn register_named(&mut self, name: String, ty: HirType) -> TypeId {
@@ -218,6 +348,10 @@ pub enum BinOp {
     Add, Sub, Mul, Div, Mod, Pow, FloorDiv,
     // Comparison
     Eq, NotEq, Lt, Gt, LtEq, GtEq,
+    /// Identity comparison (object identity, not value equality)
+    Is,
+    /// Membership test (element in collection)
+    In,
     // Logical
     And, Or,
     // Bitwise
@@ -247,8 +381,8 @@ impl From<simple_parser::BinOp> for BinOp {
             simple_parser::BinOp::BitXor => BinOp::BitXor,
             simple_parser::BinOp::ShiftLeft => BinOp::ShiftLeft,
             simple_parser::BinOp::ShiftRight => BinOp::ShiftRight,
-            simple_parser::BinOp::Is => BinOp::Eq, // Approximate
-            simple_parser::BinOp::In => BinOp::Eq, // Approximate - needs special handling
+            simple_parser::BinOp::Is => BinOp::Is,
+            simple_parser::BinOp::In => BinOp::In,
         }
     }
 }
@@ -308,7 +442,14 @@ pub enum HirStmt {
 pub struct LocalVar {
     pub name: String,
     pub ty: TypeId,
-    pub is_mutable: bool,
+    pub mutability: Mutability,
+}
+
+impl LocalVar {
+    /// Check if this variable is mutable (helper for backwards compatibility)
+    pub fn is_mutable(&self) -> bool {
+        self.mutability.is_mutable()
+    }
 }
 
 /// HIR function definition
@@ -319,7 +460,14 @@ pub struct HirFunction {
     pub locals: Vec<LocalVar>,
     pub return_type: TypeId,
     pub body: Vec<HirStmt>,
-    pub is_public: bool,
+    pub visibility: Visibility,
+}
+
+impl HirFunction {
+    /// Check if this function is public (helper for backwards compatibility)
+    pub fn is_public(&self) -> bool {
+        self.visibility.is_public()
+    }
 }
 
 /// HIR module
@@ -358,7 +506,7 @@ mod tests {
 
         assert_eq!(registry.get(TypeId::VOID), Some(&HirType::Void));
         assert_eq!(registry.get(TypeId::BOOL), Some(&HirType::Bool));
-        assert_eq!(registry.get(TypeId::I64), Some(&HirType::Int { bits: 64, signed: true }));
+        assert_eq!(registry.get(TypeId::I64), Some(&HirType::signed_int(64)));
         assert_eq!(registry.get(TypeId::F64), Some(&HirType::Float { bits: 64 }));
         assert_eq!(registry.get(TypeId::STRING), Some(&HirType::String));
     }
@@ -458,8 +606,8 @@ mod tests {
         let func = HirFunction {
             name: "add".to_string(),
             params: vec![
-                LocalVar { name: "a".to_string(), ty: TypeId::I64, is_mutable: false },
-                LocalVar { name: "b".to_string(), ty: TypeId::I64, is_mutable: false },
+                LocalVar { name: "a".to_string(), ty: TypeId::I64, mutability: Mutability::Immutable },
+                LocalVar { name: "b".to_string(), ty: TypeId::I64, mutability: Mutability::Immutable },
             ],
             locals: vec![],
             return_type: TypeId::I64,
@@ -479,12 +627,14 @@ mod tests {
                     ty: TypeId::I64,
                 })),
             ],
-            is_public: true,
+            visibility: Visibility::Public,
         };
 
         assert_eq!(func.name, "add");
         assert_eq!(func.params.len(), 2);
         assert_eq!(func.return_type, TypeId::I64);
+        assert!(func.is_public());
+        assert!(!func.params[0].is_mutable());
     }
 
     #[test]

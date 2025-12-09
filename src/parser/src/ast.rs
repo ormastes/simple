@@ -1,5 +1,113 @@
 use crate::token::Span;
 
+//==============================================================================
+// Visibility and Mutability (for formal verification)
+//==============================================================================
+// These enums replace boolean flags to make the semantics explicit.
+// This simplifies formal verification by making invalid states unrepresentable.
+
+/// Visibility of a declaration.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive Visibility
+///   | public
+///   | private
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Visibility {
+    /// Publicly accessible
+    Public,
+    /// Private to the module (default)
+    #[default]
+    Private,
+}
+
+impl Visibility {
+    /// Check if this is public visibility
+    pub fn is_public(&self) -> bool {
+        matches!(self, Visibility::Public)
+    }
+}
+
+/// Mutability of a binding or field.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive Mutability
+///   | mutable
+///   | immutable
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mutability {
+    /// Can be modified
+    Mutable,
+    /// Cannot be modified (default)
+    #[default]
+    Immutable,
+}
+
+impl Mutability {
+    /// Check if this is mutable
+    pub fn is_mutable(&self) -> bool {
+        matches!(self, Mutability::Mutable)
+    }
+}
+
+/// Range bound type - whether the end bound is inclusive or exclusive.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive RangeBound
+///   | inclusive  -- a..=b includes b
+///   | exclusive  -- a..b excludes b
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RangeBound {
+    /// Inclusive bound (a..=b includes b)
+    Inclusive,
+    /// Exclusive bound (a..b excludes b, default)
+    #[default]
+    Exclusive,
+}
+
+impl RangeBound {
+    /// Check if this is inclusive
+    pub fn is_inclusive(&self) -> bool {
+        matches!(self, RangeBound::Inclusive)
+    }
+
+    /// Check if this is exclusive
+    pub fn is_exclusive(&self) -> bool {
+        matches!(self, RangeBound::Exclusive)
+    }
+}
+
+/// Self-binding mode for method calls.
+/// Distinguishes whether `self` should be explicitly bound in parameter evaluation.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive SelfMode
+///   | includeSelf  -- bind self from parameters
+///   | skipSelf     -- self is already bound
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelfMode {
+    /// Include self in parameter binding (for constructors, free functions)
+    #[default]
+    IncludeSelf,
+    /// Skip self in parameter binding (self already bound to receiver)
+    SkipSelf,
+}
+
+impl SelfMode {
+    /// Check if self should be skipped
+    pub fn should_skip_self(&self) -> bool {
+        matches!(self, SelfMode::SkipSelf)
+    }
+}
+
 /// All AST node types
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -41,7 +149,7 @@ pub struct FunctionDef {
     pub params: Vec<Parameter>,
     pub return_type: Option<Type>,
     pub body: Block,
-    pub is_public: bool,
+    pub visibility: Visibility,
     pub effect: Option<Effect>,
 }
 
@@ -51,7 +159,7 @@ pub struct Parameter {
     pub name: String,
     pub ty: Option<Type>,
     pub default: Option<Expr>,
-    pub is_mutable: bool,
+    pub mutability: Mutability,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,7 +184,7 @@ pub struct StructDef {
     /// Generic type parameters: struct Foo<T, U>
     pub generic_params: Vec<String>,
     pub fields: Vec<Field>,
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,7 +196,7 @@ pub struct ClassDef {
     pub fields: Vec<Field>,
     pub methods: Vec<FunctionDef>,
     pub parent: Option<String>,
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -97,8 +205,8 @@ pub struct Field {
     pub name: String,
     pub ty: Type,
     pub default: Option<Expr>,
-    pub is_mutable: bool,
-    pub is_public: bool,
+    pub mutability: Mutability,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -108,7 +216,7 @@ pub struct EnumDef {
     /// Generic type parameters: enum Result<T, E>
     pub generic_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -125,7 +233,7 @@ pub struct TraitDef {
     /// Generic type parameters: trait Foo<T>
     pub generic_params: Vec<String>,
     pub methods: Vec<FunctionDef>,
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -142,7 +250,7 @@ pub struct ActorDef {
     pub name: String,
     pub fields: Vec<Field>,
     pub methods: Vec<FunctionDef>,
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,7 +258,7 @@ pub struct TypeAliasDef {
     pub span: Span,
     pub name: String,
     pub ty: Type,
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -159,7 +267,7 @@ pub struct ExternDef {
     pub name: String,
     pub params: Vec<Parameter>,
     pub return_type: Option<Type>,
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 /// Macro definition: macro name!(pattern) = body
@@ -169,7 +277,7 @@ pub struct MacroDef {
     pub name: String,
     /// Macro patterns for matching invocations
     pub patterns: Vec<MacroPattern>,
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 /// A single macro pattern and its expansion
@@ -245,7 +353,7 @@ pub struct LetStmt {
     pub pattern: Pattern,
     pub ty: Option<Type>,
     pub value: Option<Expr>,
-    pub is_mutable: bool,
+    pub mutability: Mutability,
 }
 
 /// Compile-time constant declaration
@@ -257,7 +365,7 @@ pub struct ConstStmt {
     pub name: String,
     pub ty: Option<Type>,
     pub value: Expr,  // Required - must be evaluable at compile time
-    pub is_public: bool,
+    pub visibility: Visibility,
 }
 
 /// Static variable declaration (global, initialized once)
@@ -269,8 +377,8 @@ pub struct StaticStmt {
     pub name: String,
     pub ty: Option<Type>,
     pub value: Expr,  // Required
-    pub is_mutable: bool,
-    pub is_public: bool,
+    pub mutability: Mutability,
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -425,7 +533,7 @@ pub enum Expr {
     Await(Box<Expr>),
     Yield(Option<Box<Expr>>),  // yield or yield value
     New { kind: PointerKind, expr: Box<Expr> },
-    Range { start: Option<Box<Expr>>, end: Option<Box<Expr>>, inclusive: bool },
+    Range { start: Option<Box<Expr>>, end: Option<Box<Expr>>, bound: RangeBound },
     /// Functional update operator: obj->method(args) desugars to obj = obj.method(args)
     FunctionalUpdate { target: Box<Expr>, method: String, args: Vec<Argument> },
     /// Macro invocation: name!(args)
@@ -536,12 +644,12 @@ mod tests {
                     name: "a".to_string(),
                     ty: Some(Type::Simple("Int".to_string())),
                     default: None,
-                    is_mutable: false,
+                    mutability: Mutability::Immutable,
                 },
             ],
             return_type: Some(Type::Simple("Int".to_string())),
             body: Block::default(),
-            is_public: false,
+            visibility: Visibility::Private,
             effect: None,
         };
         assert_eq!(func.name, "add");
@@ -560,12 +668,12 @@ mod tests {
                     name: "x".to_string(),
                     ty: Some(Type::Simple("T".to_string())),
                     default: None,
-                    is_mutable: false,
+                    mutability: Mutability::Immutable,
                 },
             ],
             return_type: Some(Type::Simple("T".to_string())),
             body: Block::default(),
-            is_public: false,
+            visibility: Visibility::Private,
             effect: None,
         };
         assert_eq!(func.name, "identity");
@@ -584,11 +692,11 @@ mod tests {
                     name: "value".to_string(),
                     ty: Type::Simple("T".to_string()),
                     default: None,
-                    is_mutable: false,
-                    is_public: false,
+                    mutability: Mutability::Immutable,
+                    visibility: Visibility::Private,
                 },
             ],
-            is_public: false,
+            visibility: Visibility::Private,
         };
         assert_eq!(s.name, "Box");
         assert_eq!(s.generic_params, vec!["T"]);

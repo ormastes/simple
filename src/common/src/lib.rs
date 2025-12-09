@@ -91,4 +91,85 @@ impl<M, E> Default for ModuleCache<M, E> {
     }
 }
 
+/// Generic module registry that wraps a loader and cache.
+/// Provides load, unload, and reload functionality with caching.
+pub struct ModuleRegistry<L: DynLoader> {
+    cache: ModuleCache<L::Module, L::Error>,
+    loader: L,
+}
+
+impl<L: DynLoader> ModuleRegistry<L> {
+    pub fn new(loader: L) -> Self {
+        Self {
+            cache: ModuleCache::new(),
+            loader,
+        }
+    }
+
+    /// Get the underlying cache for direct access
+    pub fn cache(&self) -> &ModuleCache<L::Module, L::Error> {
+        &self.cache
+    }
+
+    /// Get all cached modules
+    pub fn modules(&self) -> Vec<Arc<L::Module>> {
+        self.cache.modules()
+    }
+
+    /// Load or get cached module (simple version without resolver)
+    pub fn load(&self, path: &Path) -> Result<Arc<L::Module>, L::Error> {
+        // Check cache first
+        if let Some(module) = self.cache.get(path) {
+            return Ok(module);
+        }
+
+        let module = Arc::new(self.loader.load(path)?);
+        self.cache.insert(path, Arc::clone(&module));
+        Ok(module)
+    }
+
+    /// Load with a custom resolver for external symbols
+    pub fn load_with_resolver<F>(&self, path: &Path, resolver: F) -> Result<Arc<L::Module>, L::Error>
+    where
+        F: Fn(&str) -> Option<usize>,
+    {
+        // Check cache first
+        if let Some(module) = self.cache.get(path) {
+            return Ok(module);
+        }
+
+        let module = Arc::new(self.loader.load_with_resolver(path, resolver)?);
+        self.cache.insert(path, Arc::clone(&module));
+        Ok(module)
+    }
+
+    /// Unload a module from cache
+    pub fn unload(&self, path: &Path) -> bool {
+        self.cache.remove(path)
+    }
+
+    /// Reload a module (simple version)
+    pub fn reload(&self, path: &Path) -> Result<Arc<L::Module>, L::Error> {
+        let new_module = Arc::new(self.loader.load(path)?);
+        self.cache.insert(path, Arc::clone(&new_module));
+        Ok(new_module)
+    }
+
+    /// Reload with a custom resolver
+    pub fn reload_with_resolver<F>(&self, path: &Path, resolver: F) -> Result<Arc<L::Module>, L::Error>
+    where
+        F: Fn(&str) -> Option<usize>,
+    {
+        let new_module = Arc::new(self.loader.load_with_resolver(path, resolver)?);
+        self.cache.insert(path, Arc::clone(&new_module));
+        Ok(new_module)
+    }
+}
+
+impl<L: DynLoader + Default> Default for ModuleRegistry<L> {
+    fn default() -> Self {
+        Self::new(L::default())
+    }
+}
+
 pub mod gc;

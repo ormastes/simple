@@ -4,50 +4,56 @@ use thiserror::Error;
 
 use crate::mir::MirModule;
 
-/// SMF file constants
-pub const SMF_MAGIC: &[u8; 4] = b"SMF\0";
+// Re-export SMF types from loader (single source of truth)
+pub use simple_loader::smf::{
+    RelocationType, SectionType, SymbolBinding, SymbolType,
+    SMF_MAGIC, SMF_FLAG_EXECUTABLE,
+    SECTION_FLAG_READ, SECTION_FLAG_WRITE, SECTION_FLAG_EXEC,
+};
+
+/// SMF version constants
 pub const SMF_VERSION_MAJOR: u8 = 0;
 pub const SMF_VERSION_MINOR: u8 = 1;
 
-/// SMF section types
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SmfSectionType {
-    Code = 1,
-    Data = 2,
-    Rodata = 3,
-    Bss = 4,
-    Reloc = 5,
-    Symtab = 6,
-    Strtab = 7,
-    Debug = 8,
+/// Data section kind - for formal verification.
+/// Replaces boolean `readonly` parameter with explicit enum.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive DataSectionKind
+///   | mutable   -- read-write data (.data)
+///   | readonly  -- read-only data (.rodata)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DataSectionKind {
+    /// Mutable data section (.data) - read-write
+    #[default]
+    Mutable,
+    /// Read-only data section (.rodata)
+    ReadOnly,
 }
 
-/// SMF symbol binding
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SymbolBinding {
-    Local = 0,
-    Global = 1,
-    Weak = 2,
-}
+impl DataSectionKind {
+    /// Check if this is read-only
+    pub fn is_readonly(&self) -> bool {
+        matches!(self, DataSectionKind::ReadOnly)
+    }
 
-/// SMF symbol type
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SymbolType {
-    None = 0,
-    Function = 1,
-    Data = 2,
-}
+    /// Convert to SMF section type
+    pub fn to_section_type(&self) -> SectionType {
+        match self {
+            DataSectionKind::Mutable => SectionType::Data,
+            DataSectionKind::ReadOnly => SectionType::RoData,
+        }
+    }
 
-/// SMF relocation type
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RelocationType {
-    Abs64 = 1,
-    Rel32 = 2,
-    Plt32 = 3,
+    /// Get section flags (read-only = 0x1, read-write = 0x3)
+    pub fn to_flags(&self) -> u32 {
+        match self {
+            DataSectionKind::ReadOnly => SECTION_FLAG_READ,
+            DataSectionKind::Mutable => SECTION_FLAG_READ | SECTION_FLAG_WRITE,
+        }
+    }
 }
 
 #[derive(Error, Debug)]
@@ -81,11 +87,11 @@ pub struct SmfRelocation {
     pub addend: i64,
 }
 
-/// SMF section
+/// SMF section for writing
 #[derive(Debug, Clone)]
 pub struct SmfSection {
     pub name: String,
-    pub section_type: SmfSectionType,
+    pub section_type: SectionType,
     pub flags: u32,
     pub data: Vec<u8>,
     pub alignment: u32,
@@ -133,8 +139,8 @@ impl SmfWriter {
     pub fn add_code_section(&mut self, name: &str, code: Vec<u8>) -> usize {
         let section = SmfSection {
             name: name.to_string(),
-            section_type: SmfSectionType::Code,
-            flags: 0x5, // Read + Execute
+            section_type: SectionType::Code,
+            flags: SECTION_FLAG_READ | SECTION_FLAG_EXEC,
             data: code,
             alignment: 16,
         };
@@ -143,18 +149,28 @@ impl SmfWriter {
         index
     }
 
-    /// Add a data section
-    pub fn add_data_section(&mut self, name: &str, data: Vec<u8>, readonly: bool) -> usize {
+    /// Add a data section with the specified kind (mutable or read-only)
+    pub fn add_data_section(&mut self, name: &str, data: Vec<u8>, kind: DataSectionKind) -> usize {
         let section = SmfSection {
             name: name.to_string(),
-            section_type: if readonly { SmfSectionType::Rodata } else { SmfSectionType::Data },
-            flags: if readonly { 0x1 } else { 0x3 }, // Read or Read+Write
+            section_type: kind.to_section_type(),
+            flags: kind.to_flags(),
             data,
             alignment: 8,
         };
         let index = self.sections.len();
         self.sections.push(section);
         index
+    }
+
+    /// Add a read-only data section (convenience method)
+    pub fn add_rodata_section(&mut self, name: &str, data: Vec<u8>) -> usize {
+        self.add_data_section(name, data, DataSectionKind::ReadOnly)
+    }
+
+    /// Add a mutable data section (convenience method)
+    pub fn add_mutable_data_section(&mut self, name: &str, data: Vec<u8>) -> usize {
+        self.add_data_section(name, data, DataSectionKind::Mutable)
     }
 
     /// Add a symbol
@@ -174,7 +190,7 @@ impl SmfWriter {
         // Build string table section
         let strtab_section = SmfSection {
             name: ".strtab".to_string(),
-            section_type: SmfSectionType::Strtab,
+            section_type: SectionType::StrTab,
             flags: 0,
             data: self.string_table.clone(),
             alignment: 1,
@@ -259,7 +275,7 @@ impl SmfWriter {
         for (i, func) in mir.functions.iter().enumerate() {
             let symbol = SmfSymbol {
                 name: func.name.clone(),
-                binding: if func.is_public { SymbolBinding::Global } else { SymbolBinding::Local },
+                binding: if func.is_public() { SymbolBinding::Global } else { SymbolBinding::Local },
                 sym_type: SymbolType::Function,
                 section_index: 0, // .text section
                 value: 0, // Would need to get from object file
@@ -304,7 +320,7 @@ mod tests {
 
         assert_eq!(idx, 0);
         assert_eq!(writer.sections.len(), 1);
-        assert_eq!(writer.sections[0].section_type, SmfSectionType::Code);
+        assert_eq!(writer.sections[0].section_type, SectionType::Code);
     }
 
     #[test]

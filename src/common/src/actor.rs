@@ -16,6 +16,52 @@ pub enum Message {
     Bytes(Vec<u8>),
 }
 
+/// Explicit actor lifecycle state for formal verification.
+///
+/// This enum makes the actor's lifecycle state explicit:
+/// - `Running`: Actor is alive and can be joined
+/// - `Joined`: Actor has been joined and cannot be joined again
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive ActorLifecycle
+///   | running (handle : JoinHandle)
+///   | joined
+/// ```
+#[derive(Debug)]
+pub enum ActorLifecycle {
+    /// Actor is running and has a join handle
+    Running(std::thread::JoinHandle<()>),
+    /// Actor has been joined (or was created without a handle)
+    Joined,
+}
+
+impl ActorLifecycle {
+    /// Check if the actor is still running
+    pub fn is_running(&self) -> bool {
+        matches!(self, ActorLifecycle::Running(_))
+    }
+
+    /// Check if the actor has been joined
+    pub fn is_joined(&self) -> bool {
+        matches!(self, ActorLifecycle::Joined)
+    }
+
+    /// Transition from Running to Joined by joining the thread.
+    /// Returns Ok(()) if successfully joined, Err if already joined or thread panicked.
+    pub fn join(&mut self) -> Result<(), String> {
+        match std::mem::replace(self, ActorLifecycle::Joined) {
+            ActorLifecycle::Running(handle) => {
+                handle.join().map_err(|_| "actor panicked".to_string())
+            }
+            ActorLifecycle::Joined => {
+                // Already joined, this is idempotent
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Handle to an actor for sending/receiving messages.
 ///
 /// This is an opaque handle that the compiler can use without knowing
@@ -25,7 +71,8 @@ pub struct ActorHandle {
     id: usize,
     inbox: mpsc::Sender<Message>,
     outbox: Arc<Mutex<mpsc::Receiver<Message>>>,
-    join_handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Explicit lifecycle state (replaces Option<JoinHandle>)
+    lifecycle: Arc<Mutex<ActorLifecycle>>,
 }
 
 impl PartialEq for ActorHandle {
@@ -42,11 +89,15 @@ impl ActorHandle {
         outbox: mpsc::Receiver<Message>,
         join_handle: Option<std::thread::JoinHandle<()>>,
     ) -> Self {
+        let lifecycle = match join_handle {
+            Some(handle) => ActorLifecycle::Running(handle),
+            None => ActorLifecycle::Joined,
+        };
         Self {
             id,
             inbox,
             outbox: Arc::new(Mutex::new(outbox)),
-            join_handle: Arc::new(Mutex::new(join_handle)),
+            lifecycle: Arc::new(Mutex::new(lifecycle)),
         }
     }
 
@@ -91,11 +142,28 @@ impl ActorHandle {
     }
 
     /// Wait for the actor to finish.
+    /// Uses explicit ActorLifecycle state machine for verification.
     pub fn join(&self) -> Result<(), String> {
-        if let Some(handle) = self.join_handle.lock().map_err(|_| "join lock poisoned".to_string())?.take() {
-            handle.join().map_err(|_| "actor panicked".to_string())?;
-        }
-        Ok(())
+        self.lifecycle
+            .lock()
+            .map_err(|_| "join lock poisoned".to_string())?
+            .join()
+    }
+
+    /// Check if the actor is still running.
+    pub fn is_running(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .map(|guard| guard.is_running())
+            .unwrap_or(false)
+    }
+
+    /// Check if the actor has been joined.
+    pub fn is_joined(&self) -> bool {
+        self.lifecycle
+            .lock()
+            .map(|guard| guard.is_joined())
+            .unwrap_or(true)
     }
 
     /// Get the inbox sender for registering with scheduler.

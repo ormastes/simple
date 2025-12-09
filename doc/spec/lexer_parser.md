@@ -20,11 +20,12 @@ This document specifies the complete lexer and parser implementation for the Sim
 struct      class       enum        trait       actor
 impl        fn          let         mut         immut
 type        where       as          in          is
+Constructor
 
 # Control Flow
 if          else        elif        match       case
 for         while       loop        break       continue
-return      yield
+return      yield       with
 
 # Memory & Ownership
 new         move        ref         self        Self
@@ -188,6 +189,8 @@ module.exports = grammar({
     source_file: $ => repeat($._definition),
 
     _definition: $ => choice(
+      $.decorated_definition,
+      $.attributed_definition,
       $.function_definition,
       $.struct_definition,
       $.class_definition,
@@ -199,7 +202,60 @@ module.exports = grammar({
       $.macro_definition,
       $.global_declaration,
       $.type_alias,
+      $.unit_family,
+      $.unit_standalone,
     ),
+
+    //=========================================================================
+    // DECORATORS AND ATTRIBUTES
+    //=========================================================================
+
+    // @decorator syntax (function transformers)
+    decorated_definition: $ => seq(
+      repeat1($.decorator),
+      choice(
+        $.function_definition,
+        $.class_definition,
+        $.method_definition,
+      ),
+    ),
+
+    decorator: $ => seq(
+      '@',
+      $.identifier,
+      optional(seq('(', commaSep($.argument), ')')),
+      $._newline,
+    ),
+
+    // #[attribute] syntax (metadata)
+    attributed_definition: $ => seq(
+      repeat1($.attribute),
+      $._definition,
+    ),
+
+    attribute: $ => seq(
+      '#',
+      '[',
+      $.identifier,
+      optional(seq('(', commaSep($.attribute_argument), ')')),
+      ']',
+      $._newline,
+    ),
+
+    attribute_argument: $ => choice(
+      $.identifier,
+      $.literal,
+      seq($.identifier, ':', $.expression),
+    ),
+
+    // Built-in attributes:
+    // - #[inline]           - Hint to inline function
+    // - #[deprecated]       - Mark as deprecated
+    // - #[derive(...)]      - Auto-derive trait implementations
+    // - #[strong]           - Enum: disallow wildcard _ in pattern matching
+    // - #[allow(wildcard)]  - Match case: opt-out of strong enum check
+    // - #[warn_primitive]   - Enable primitive API warnings
+    // - #[allow_primitive]  - Suppress primitive API warning
 
     //=========================================================================
     // TYPE SYSTEM
@@ -215,6 +271,7 @@ module.exports = grammar({
       $.function_type,
       $.union_type,
       $.optional_type,
+      $.constructor_type,
     ),
 
     simple_type: $ => $.type_identifier,
@@ -274,6 +331,15 @@ module.exports = grammar({
     optional_type: $ => seq(
       $.type,
       '?',
+    ),
+
+    // Constructor type for factory patterns: Constructor[T]
+    // Represents a callable that creates instances of T
+    constructor_type: $ => seq(
+      'Constructor',
+      '[',
+      $.type,
+      ']',
     ),
 
     type_parameters: $ => seq(
@@ -602,6 +668,63 @@ module.exports = grammar({
     ),
 
     //=========================================================================
+    // UNIT TYPES
+    //=========================================================================
+
+    // Unit family: unit length(base: f64): m = 1.0, km = 1000.0
+    unit_family: $ => seq(
+      'unit',
+      $.identifier,                    // length
+      '(',
+      'base',
+      ':',
+      $.type,                          // f64
+      ')',
+      optional($.unit_composite_clause),
+      ':',
+      $.INDENT,
+      repeat1($.unit_suffix_def),
+      $.DEDENT,
+    ),
+
+    // Composite clause: = length / time
+    unit_composite_clause: $ => seq(
+      '=',
+      $.type_identifier,               // length
+      $.unit_operator,                 // /, *, ^
+      choice($.type_identifier, $.number_literal),  // time or 3
+    ),
+
+    unit_operator: $ => choice('/', '*', '^'),
+
+    // Suffix definition: km = 1000.0
+    unit_suffix_def: $ => seq(
+      $.identifier,                    // km
+      '=',
+      $.number_literal,                // 1000.0
+      $._newline,
+    ),
+
+    // Standalone unit: unit UserId: i64 as uid [= factor]
+    unit_standalone: $ => seq(
+      'unit',
+      $.type_identifier,               // UserId
+      ':',
+      $.type,                          // i64
+      'as',
+      $.identifier,                    // uid (suffix)
+      optional(seq('=', $.expression)), // = 0.01
+      $._newline,
+    ),
+
+    // Suffixed literal: 100_km, 5.5_hr, 42_uid
+    suffixed_literal: $ => seq(
+      $.number_literal,                // 100
+      '_',
+      $.identifier,                    // km
+    ),
+
+    //=========================================================================
     // STATEMENTS
     //=========================================================================
 
@@ -632,10 +755,13 @@ module.exports = grammar({
 
     _compound_statement: $ => choice(
       $.if_statement,
+      $.if_let_statement,
       $.match_statement,
       $.for_statement,
       $.while_statement,
+      $.while_let_statement,
       $.loop_statement,
+      $.with_statement,
       $.receive_block,
       $.context_block,
     ),
@@ -774,6 +900,42 @@ module.exports = grammar({
       $.block,
     ),
 
+    // if let pattern = expr: block
+    if_let_statement: $ => seq(
+      'if',
+      'let',
+      $.pattern,
+      '=',
+      $.expression,
+      ':',
+      $.block,
+      optional($.else_clause),
+    ),
+
+    // while let pattern = expr: block
+    while_let_statement: $ => seq(
+      'while',
+      'let',
+      $.pattern,
+      '=',
+      $.expression,
+      ':',
+      $.block,
+    ),
+
+    // with expr as name: block
+    with_statement: $ => seq(
+      'with',
+      commaSep1($.with_item),
+      ':',
+      $.block,
+    ),
+
+    with_item: $ => seq(
+      $.expression,
+      optional(seq('as', $.identifier)),
+    ),
+
     //=========================================================================
     // PATTERNS
     //=========================================================================
@@ -786,6 +948,8 @@ module.exports = grammar({
       $.struct_pattern,
       $.enum_pattern,
       $.or_pattern,
+      $.range_pattern,
+      $.rest_pattern,
       $.typed_pattern,
     ),
 
@@ -832,6 +996,19 @@ module.exports = grammar({
       $.pattern,
     )),
 
+    // Range patterns: 0..10, 'a'..'z'
+    range_pattern: $ => seq(
+      $.literal,
+      '..',
+      $.literal,
+    ),
+
+    // Rest pattern: *rest, used in tuple/array unpacking
+    rest_pattern: $ => seq(
+      '*',
+      $.identifier,
+    ),
+
     typed_pattern: $ => seq(
       $.identifier,
       ':',
@@ -847,18 +1024,24 @@ module.exports = grammar({
       $.unary_expression,
       $.binary_expression,
       $.comparison_expression,
+      $.chained_comparison,
       $.logical_expression,
       $.functional_update_expression,
+      $.try_expression,
       $.if_expression,
       $.match_expression,
       $.lambda_expression,
+      $.move_lambda_expression,
       $.spawn_expression,
       $.new_expression,
+      $.list_comprehension,
+      $.dict_comprehension,
     ),
 
     primary_expression: $ => prec('primary', choice(
       $.identifier,
       $.literal,
+      $.suffixed_literal,         // 100_km, 5_hr
       $.grouped_expression,
       $.tuple_expression,
       $.array_expression,
@@ -873,6 +1056,7 @@ module.exports = grammar({
     identifier: $ => /[a-zA-Z_][a-zA-Z0-9_]*/,
 
     literal: $ => choice(
+      $.type_suffixed_literal,  // 42i32, 3.14f64 (must be before integer/float)
       $.integer,
       $.float,
       $.string,
@@ -883,13 +1067,36 @@ module.exports = grammar({
     ),
 
     integer: $ => choice(
-      /[0-9][0-9_]*/,
-      /0x[0-9a-fA-F_]+/,
-      /0b[01_]+/,
-      /0o[0-7_]+/,
+      $.decimal_integer,
+      $.hex_integer,
+      $.binary_integer,
+      $.octal_integer,
     ),
 
-    float: $ => /[0-9]+\.[0-9]+([eE][+-]?[0-9]+)?/,
+    decimal_integer: $ => /[0-9][0-9_]*/,
+
+    hex_integer: $ => /0[xX][0-9a-fA-F][0-9a-fA-F_]*/,
+
+    binary_integer: $ => /0[bB][01][01_]*/,
+
+    octal_integer: $ => /0[oO][0-7][0-7_]*/,
+
+    float: $ => choice(
+      /[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?/,
+      /0[xX][0-9a-fA-F][0-9a-fA-F_]*\.[0-9a-fA-F][0-9a-fA-F_]*[pP][+-]?[0-9]+/,  // hex float
+    ),
+
+    // Type suffix for explicit literal types: 42i32, 3.14f64
+    type_suffixed_literal: $ => seq(
+      choice($.integer, $.float),
+      $.type_suffix,
+    ),
+
+    type_suffix: $ => choice(
+      'i8', 'i16', 'i32', 'i64',
+      'u8', 'u16', 'u32', 'u64',
+      'f32', 'f64',
+    ),
 
     string: $ => seq(
       $._string_start,
@@ -1018,6 +1225,17 @@ module.exports = grammar({
       ']',
     )),
 
+    // Slice expression: items[1:3], items[::2], items[::-1]
+    slice_expression: $ => prec('call', seq(
+      $.primary_expression,
+      '[',
+      optional($.expression),  // start
+      ':',
+      optional($.expression),  // end
+      optional(seq(':', optional($.expression))),  // step
+      ']',
+    )),
+
     //=========================================================================
     // OPERATOR EXPRESSIONS
     //=========================================================================
@@ -1047,6 +1265,15 @@ module.exports = grammar({
       $.expression,
     )),
 
+    // Chained comparisons: 0 < x < 10, a <= b < c
+    chained_comparison: $ => prec.left('comparison', seq(
+      $.expression,
+      repeat1(seq(
+        choice('<', '>', '<=', '>=', '==', '!='),
+        $.expression,
+      )),
+    )),
+
     logical_expression: $ => choice(
       prec.left('logical_and', seq($.expression, choice('and', '&&'), $.expression)),
       prec.left('logical_or', seq($.expression, choice('or', '||'), $.expression)),
@@ -1065,6 +1292,12 @@ module.exports = grammar({
     //=========================================================================
     // SPECIAL EXPRESSIONS
     //=========================================================================
+
+    // Try expression: expr? (error propagation)
+    try_expression: $ => prec.left(seq(
+      $.expression,
+      '?',
+    )),
 
     if_expression: $ => seq(
       'if',
@@ -1121,6 +1354,72 @@ module.exports = grammar({
       $.identifier,
       ':',
       $.type,
+    ),
+
+    // Move closure: captures by value instead of reference
+    move_lambda_expression: $ => prec('lambda', seq(
+      'move',
+      $.lambda_params,
+      ':',
+      choice(
+        $.expression,
+        $.block,
+      ),
+    )),
+
+    //=========================================================================
+    // COMPREHENSIONS
+    //=========================================================================
+
+    // List comprehension: [x * 2 for x in items if x > 0]
+    list_comprehension: $ => seq(
+      '[',
+      $.expression,
+      repeat1($.comprehension_clause),
+      ']',
+    ),
+
+    // Dict comprehension: {k: v for k, v in pairs if k != ""}
+    dict_comprehension: $ => seq(
+      '{',
+      $.expression,
+      ':',
+      $.expression,
+      repeat1($.comprehension_clause),
+      '}',
+    ),
+
+    comprehension_clause: $ => choice(
+      $.for_clause,
+      $.if_clause,
+    ),
+
+    for_clause: $ => seq(
+      'for',
+      $.pattern,
+      'in',
+      $.expression,
+    ),
+
+    if_clause: $ => seq(
+      'if',
+      $.expression,
+    ),
+
+    //=========================================================================
+    // SPREAD EXPRESSIONS
+    //=========================================================================
+
+    // Spread in arrays: [*a, *b, 3]
+    spread_element: $ => seq(
+      '*',
+      $.expression,
+    ),
+
+    // Spread in dicts: {**d1, **d2, "key": value}
+    dict_spread: $ => seq(
+      '**',
+      $.expression,
     ),
 
     spawn_expression: $ => seq(
@@ -1659,6 +1958,186 @@ match result:
         print value
     case Err(msg):
         print "Error: {msg}"
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_list_comprehension() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+let squares = [x * x for x in 0..10]
+let evens = [x for x in items if x % 2 == 0]
+let pairs = [(x, y) for x in 0..3 for y in 0..3]
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_slicing() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+let first_three = items[:3]
+let last_three = items[-3:]
+let reversed = items[::-1]
+let every_other = items[::2]
+let middle = items[1:5:2]
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_try_expression() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+fn process() -> Result[Data, Error]:
+    let file = open(path)?
+    let content = file.read()?
+    return Ok(parse(content)?)
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_if_let() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+if let Some(value) = optional:
+    process(value)
+else:
+    handle_none()
+
+while let Some(item) = iter.next():
+    print item
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_decorators() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+@cached
+@logged
+fn expensive_operation(x: i64) -> i64:
+    return compute(x)
+
+@retry(attempts: 3)
+fn network_call():
+    return fetch()
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_attributes() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+#[inline]
+fn hot_path(x: i64) -> i64:
+    return x * 2
+
+#[derive(Debug, Clone, Eq)]
+struct Point:
+    x: f64
+    y: f64
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_with_statement() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+with open("file.txt") as f:
+    let content = f.read()
+    process(content)
+
+with open("in.txt") as inp, open("out.txt") as out:
+    out.write(transform(inp.read()))
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_move_lambda() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+let counter = move \:
+    count = count + 1
+    count
+
+let processor = move \x: expensive_compute(x, config)
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_or_patterns() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+match command:
+    case "quit" | "exit" | "q":
+        shutdown()
+    case 1 | 2 | 3:
+        print "small"
+    case _:
+        default()
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_range_patterns() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+match score:
+    case 90..100:
+        "A"
+    case 80..90:
+        "B"
+    case _:
+        "F"
 "#;
 
         let tree = parser.parse(source, None).unwrap();

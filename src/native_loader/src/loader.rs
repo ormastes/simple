@@ -30,19 +30,25 @@ impl ModuleLoader {
     }
 }
 
+impl Default for ModuleLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DynLoader for ModuleLoader {
     type Module = LoadedModule;
     type Error = LoadError;
 
     fn load(&self, path: &Path) -> Result<Self::Module, Self::Error> {
-        self.load_with_resolver(path, |_name| None)
+        ModuleLoader::load(self, path)
     }
 
-    fn load_with_resolver<F>(&self, path: &Path, _resolver: F) -> Result<Self::Module, Self::Error>
+    fn load_with_resolver<F>(&self, path: &Path, resolver: F) -> Result<Self::Module, Self::Error>
     where
         F: Fn(&str) -> Option<usize>,
     {
-        ModuleLoader::load_with_resolver(self, path, _resolver)
+        ModuleLoader::load_with_resolver(self, path, resolver)
     }
 }
 

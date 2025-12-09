@@ -1,0 +1,292 @@
+// Method call evaluation (part of interpreter module)
+
+fn evaluate_method_call(
+    receiver: &Box<Expr>,
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+
+    // Built-in methods for Array
+    if let Value::Array(ref arr) = recv_val {
+        match method {
+            "len" => return Ok(Value::Int(arr.len() as i64)),
+            "is_empty" => return Ok(Value::Bool(arr.is_empty())),
+            "first" => return Ok(arr.first().cloned().unwrap_or(Value::Nil)),
+            "last" => return Ok(arr.last().cloned().unwrap_or(Value::Nil)),
+            "get" => {
+                let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(arr.get(idx).cloned().unwrap_or(Value::Nil));
+            }
+            "contains" => {
+                let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Bool(arr.contains(&needle)));
+            }
+            "push" | "append" => {
+                let item = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                let mut new_arr = arr.clone();
+                new_arr.push(item);
+                return Ok(Value::Array(new_arr));
+            }
+            "pop" => {
+                let mut new_arr = arr.clone();
+                new_arr.pop();
+                return Ok(Value::Array(new_arr));
+            }
+            "concat" | "extend" => {
+                let other = eval_arg(args, 0, Value::Array(vec![]), env, functions, classes, enums, impl_methods)?;
+                if let Value::Array(other_arr) = other {
+                    let mut new_arr = arr.clone();
+                    new_arr.extend(other_arr);
+                    return Ok(Value::Array(new_arr));
+                }
+                return Err(CompileError::Semantic("concat expects array argument".into()));
+            }
+            "insert" => {
+                let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                let item = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                let mut new_arr = arr.clone();
+                if idx <= new_arr.len() {
+                    new_arr.insert(idx, item);
+                }
+                return Ok(Value::Array(new_arr));
+            }
+            "remove" => {
+                let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                let mut new_arr = arr.clone();
+                if idx < new_arr.len() {
+                    new_arr.remove(idx);
+                }
+                return Ok(Value::Array(new_arr));
+            }
+            "reverse" => {
+                let mut new_arr = arr.clone();
+                new_arr.reverse();
+                return Ok(Value::Array(new_arr));
+            }
+            "slice" => {
+                let start = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                let end = args.get(1)
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .transpose()?
+                    .map(|v| v.as_int().unwrap_or(arr.len() as i64) as usize)
+                    .unwrap_or(arr.len());
+                let end = end.min(arr.len());
+                let start = start.min(end);
+                return Ok(Value::Array(arr[start..end].to_vec()));
+            }
+            "map" => {
+                let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return eval_array_map(arr, func, functions, classes, enums, impl_methods);
+            }
+            "filter" => {
+                let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return eval_array_filter(arr, func, functions, classes, enums, impl_methods);
+            }
+            "reduce" | "fold" => {
+                let init = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
+                let func = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return eval_array_reduce(arr, init, func, functions, classes, enums, impl_methods);
+            }
+            "find" => {
+                let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return eval_array_find(arr, func, functions, classes, enums, impl_methods);
+            }
+            "any" => {
+                let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return eval_array_any(arr, func, functions, classes, enums, impl_methods);
+            }
+            "all" => {
+                let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return eval_array_all(arr, func, functions, classes, enums, impl_methods);
+            }
+            "join" => {
+                let sep = eval_arg(args, 0, Value::Str("".into()), env, functions, classes, enums, impl_methods)?.to_display_string();
+                let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
+                return Ok(Value::Str(parts.join(&sep)));
+            }
+            "sum" => {
+                let mut total: i64 = 0;
+                for item in arr {
+                    if let Value::Int(n) = item {
+                        total += n;
+                    }
+                }
+                return Ok(Value::Int(total));
+            }
+            "index_of" => {
+                let needle = args.get(0)
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .transpose()?
+                    .unwrap_or(Value::Nil);
+                for (i, item) in arr.iter().enumerate() {
+                    if item == &needle {
+                        return Ok(Value::Int(i as i64));
+                    }
+                }
+                return Ok(Value::Int(-1));
+            }
+            _ => {}
+        }
+    }
+
+    // Built-in methods for Tuple
+    if let Value::Tuple(ref tup) = recv_val {
+        match method {
+            "len" => return Ok(Value::Int(tup.len() as i64)),
+            "get" => {
+                let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(tup.get(idx).cloned().unwrap_or(Value::Nil));
+            }
+            _ => {}
+        }
+    }
+
+    // Built-in methods for Dict
+    if let Value::Dict(ref map) = recv_val {
+        match method {
+            "len" => return Ok(Value::Int(map.len() as i64)),
+            "is_empty" => return Ok(Value::Bool(map.is_empty())),
+            "contains_key" => {
+                let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(Value::Bool(map.contains_key(&key)));
+            }
+            "get" => {
+                let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(map.get(&key).cloned().unwrap_or(Value::Nil));
+            }
+            "keys" => {
+                let keys: Vec<Value> = map.keys().map(|k| Value::Str(k.clone())).collect();
+                return Ok(Value::Array(keys));
+            }
+            "values" => {
+                let vals: Vec<Value> = map.values().cloned().collect();
+                return Ok(Value::Array(vals));
+            }
+            "set" | "insert" => {
+                let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+                let value = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                let mut new_map = map.clone();
+                new_map.insert(key, value);
+                return Ok(Value::Dict(new_map));
+            }
+            "remove" | "delete" => {
+                let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+                let mut new_map = map.clone();
+                new_map.remove(&key);
+                return Ok(Value::Dict(new_map));
+            }
+            "merge" | "extend" => {
+                let other = eval_arg(args, 0, Value::Dict(HashMap::new()), env, functions, classes, enums, impl_methods)?;
+                if let Value::Dict(other_map) = other {
+                    let mut new_map = map.clone();
+                    new_map.extend(other_map);
+                    return Ok(Value::Dict(new_map));
+                }
+                return Err(CompileError::Semantic("merge expects dict argument".into()));
+            }
+            "get_or" => {
+                let key = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?.to_key_string();
+                let default = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return Ok(map.get(&key).cloned().unwrap_or(default));
+            }
+            "entries" | "items" => {
+                let entries: Vec<Value> = map.iter()
+                    .map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), v.clone()]))
+                    .collect();
+                return Ok(Value::Array(entries));
+            }
+            "map_values" => {
+                let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return eval_dict_map_values(map, func, functions, classes, enums, impl_methods);
+            }
+            "filter" => {
+                let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return eval_dict_filter(map, func, functions, classes, enums, impl_methods);
+            }
+            _ => {}
+        }
+    }
+
+    // Built-in methods for String
+    if let Value::Str(ref s) = recv_val {
+        match method {
+            "len" => return Ok(Value::Int(s.len() as i64)),
+            "is_empty" => return Ok(Value::Bool(s.is_empty())),
+            "chars" => {
+                let chars: Vec<Value> = s.chars().map(|c| Value::Str(c.to_string())).collect();
+                return Ok(Value::Array(chars));
+            }
+            "contains" => {
+                let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(Value::Bool(s.contains(&needle)));
+            }
+            "starts_with" => {
+                let prefix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(Value::Bool(s.starts_with(&prefix)));
+            }
+            "ends_with" => {
+                let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(Value::Bool(s.ends_with(&suffix)));
+            }
+            "to_upper" => return Ok(Value::Str(s.to_uppercase())),
+            "to_lower" => return Ok(Value::Str(s.to_lowercase())),
+            "trim" => return Ok(Value::Str(s.trim().to_string())),
+            "split" => {
+                let sep = eval_arg(args, 0, Value::Str(" ".into()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                let parts: Vec<Value> = s.split(&sep).map(|p| Value::Str(p.to_string())).collect();
+                return Ok(Value::Array(parts));
+            }
+            _ => {}
+        }
+    }
+
+    // Built-in methods for Option
+    if let Value::Enum { enum_name, variant, payload } = &recv_val {
+        if enum_name == "Option" {
+            match method {
+                "is_some" => return Ok(Value::Bool(variant == "Some")),
+                "is_none" => return Ok(Value::Bool(variant == "None")),
+                "unwrap" => {
+                    if variant == "Some" {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    return Err(CompileError::Semantic("called unwrap on None".into()));
+                }
+                "unwrap_or" => {
+                    if variant == "Some" {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    return eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods);
+                }
+                "map" => {
+                    return eval_option_map(variant, payload, args, env, functions, classes, enums, impl_methods);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Object methods (class/struct)
+    if let Value::Object { class, fields } = recv_val.clone() {
+        // Try to find and execute the method
+        if let Some(result) = find_and_exec_method(method, args, &class, &fields, env, functions, classes, enums, impl_methods)? {
+            return Ok(result);
+        }
+        // Try method_missing hook
+        if let Some(result) = try_method_missing(method, args, &class, &fields, env, functions, classes, enums, impl_methods)? {
+            return Ok(result);
+        }
+        return Err(CompileError::Semantic(format!("unknown method {method} on {class}")));
+    }
+    Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))
+}

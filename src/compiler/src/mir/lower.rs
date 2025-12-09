@@ -1,37 +1,298 @@
 use crate::hir::{HirModule, HirFunction, HirStmt, HirExpr, HirExprKind, TypeId, BinOp, UnaryOp};
-use super::types::*;
+use super::types::{*, LocalKind};
 use thiserror::Error;
+
+//==============================================================================
+// Explicit State Machine (for formal verification)
+//==============================================================================
+// The lowerer state is made explicit to simplify verification.
+// Instead of using Option<MirFunction> with implicit state transitions,
+// we use an enum that encodes valid state combinations.
+//
+// This maps to a Lean state machine:
+//   inductive LowererState
+//     | idle
+//     | lowering (func : MirFunction) (block : BlockId) (loop_stack : List LoopContext)
+//
+// Invariants:
+//   - In `Lowering` state, `current_block` always refers to a valid block in `func`
+//   - `loop_stack` tracks nested loops for break/continue
+
+/// Loop context for break/continue handling
+#[derive(Debug, Clone)]
+pub struct LoopContext {
+    /// Block to jump to on `continue`
+    pub continue_target: BlockId,
+    /// Block to jump to on `break`
+    pub break_target: BlockId,
+}
+
+/// Explicit lowerer state - makes state transitions verifiable
+#[derive(Debug)]
+pub enum LowererState {
+    /// Not currently lowering any function
+    Idle,
+    /// Actively lowering a function
+    Lowering {
+        func: MirFunction,
+        current_block: BlockId,
+        loop_stack: Vec<LoopContext>,
+    },
+}
+
+impl LowererState {
+    /// Check if we're in idle state
+    pub fn is_idle(&self) -> bool {
+        matches!(self, LowererState::Idle)
+    }
+
+    /// Check if we're lowering
+    pub fn is_lowering(&self) -> bool {
+        matches!(self, LowererState::Lowering { .. })
+    }
+
+    /// Get current block ID (returns error if idle - safe for verification)
+    ///
+    /// This is the preferred accessor for Lean-style verification.
+    /// All state access should be fallible to match the Lean model.
+    pub fn try_current_block(&self) -> MirLowerResult<BlockId> {
+        match self {
+            LowererState::Lowering { current_block, .. } => Ok(*current_block),
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
+        }
+    }
+
+    /// Get current block ID (panics if idle - use only when state is known)
+    ///
+    /// **DEPRECATED**: This method panics on invalid state access.
+    /// Prefer `try_current_block()` for verification-friendly code.
+    /// Lean models use total functions - panicking breaks this property.
+    #[deprecated(since = "0.1.0", note = "Use try_current_block() for Lean-compatible totality")]
+    pub fn current_block(&self) -> BlockId {
+        self.try_current_block().expect("Invariant violation: accessing block in idle state")
+    }
+
+    /// Get mutable reference to function (returns error if idle)
+    pub fn try_func_mut(&mut self) -> MirLowerResult<&mut MirFunction> {
+        match self {
+            LowererState::Lowering { func, .. } => Ok(func),
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
+        }
+    }
+
+    /// Get loop stack (returns error if idle)
+    pub fn try_loop_stack(&self) -> MirLowerResult<&Vec<LoopContext>> {
+        match self {
+            LowererState::Lowering { loop_stack, .. } => Ok(loop_stack),
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
+        }
+    }
+
+    /// Get mutable loop stack (returns error if idle)
+    pub fn try_loop_stack_mut(&mut self) -> MirLowerResult<&mut Vec<LoopContext>> {
+        match self {
+            LowererState::Lowering { loop_stack, .. } => Ok(loop_stack),
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
+        }
+    }
+
+    /// Set current block (returns error if idle)
+    pub fn try_set_current_block(&mut self, block: BlockId) -> MirLowerResult<()> {
+        match self {
+            LowererState::Lowering { current_block, .. } => {
+                *current_block = block;
+                Ok(())
+            }
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
+        }
+    }
+
+    /// Get loop depth for verification
+    pub fn loop_depth(&self) -> usize {
+        match self {
+            LowererState::Lowering { loop_stack, .. } => loop_stack.len(),
+            LowererState::Idle => 0,
+        }
+    }
+}
+
+/// Block building state - makes terminator state explicit
+#[derive(Debug, Clone, PartialEq)]
+pub enum BlockState {
+    /// Block is open, accepting instructions
+    Open,
+    /// Block has been sealed with a terminator
+    Sealed(Terminator),
+}
+
+impl BlockState {
+    pub fn is_open(&self) -> bool {
+        matches!(self, BlockState::Open)
+    }
+
+    pub fn is_sealed(&self) -> bool {
+        matches!(self, BlockState::Sealed(_))
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum MirLowerError {
     #[error("Unsupported HIR construct: {0}")]
     Unsupported(String),
+    #[error("Invalid state: expected {expected}, found {found}")]
+    InvalidState { expected: String, found: String },
+    #[error("Break outside loop")]
+    BreakOutsideLoop,
+    #[error("Continue outside loop")]
+    ContinueOutsideLoop,
 }
 
 pub type MirLowerResult<T> = Result<T, MirLowerError>;
 
-/// Lowers HIR to MIR
+/// Lowers HIR to MIR with explicit state tracking
 pub struct MirLowerer {
-    current_func: Option<MirFunction>,
-    current_block: BlockId,
+    state: LowererState,
 }
 
 impl MirLowerer {
     pub fn new() -> Self {
         Self {
-            current_func: None,
-            current_block: BlockId(0),
+            state: LowererState::Idle,
+        }
+    }
+
+    /// Get current state for verification
+    pub fn state(&self) -> &LowererState {
+        &self.state
+    }
+
+    /// Transition from Idle to Lowering - explicit state transition
+    fn begin_function(&mut self, func: MirFunction) -> MirLowerResult<()> {
+        match &self.state {
+            LowererState::Idle => {
+                self.state = LowererState::Lowering {
+                    func,
+                    current_block: BlockId(0),
+                    loop_stack: Vec::new(),
+                };
+                Ok(())
+            }
+            LowererState::Lowering { .. } => {
+                Err(MirLowerError::InvalidState {
+                    expected: "Idle".to_string(),
+                    found: "Lowering".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Transition from Lowering to Idle - explicit state transition
+    fn end_function(&mut self) -> MirLowerResult<MirFunction> {
+        match std::mem::replace(&mut self.state, LowererState::Idle) {
+            LowererState::Lowering { func, .. } => Ok(func),
+            LowererState::Idle => {
+                Err(MirLowerError::InvalidState {
+                    expected: "Lowering".to_string(),
+                    found: "Idle".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Get mutable access to current function (requires Lowering state)
+    fn with_func<T>(&mut self, f: impl FnOnce(&mut MirFunction, BlockId) -> T) -> MirLowerResult<T> {
+        match &mut self.state {
+            LowererState::Lowering { func, current_block, .. } => {
+                Ok(f(func, *current_block))
+            }
+            LowererState::Idle => {
+                Err(MirLowerError::InvalidState {
+                    expected: "Lowering".to_string(),
+                    found: "Idle".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Set current block - explicit state mutation
+    fn set_current_block(&mut self, block: BlockId) -> MirLowerResult<()> {
+        match &mut self.state {
+            LowererState::Lowering { current_block, .. } => {
+                *current_block = block;
+                Ok(())
+            }
+            LowererState::Idle => {
+                Err(MirLowerError::InvalidState {
+                    expected: "Lowering".to_string(),
+                    found: "Idle".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Push loop context - for break/continue handling
+    fn push_loop(&mut self, ctx: LoopContext) -> MirLowerResult<()> {
+        match &mut self.state {
+            LowererState::Lowering { loop_stack, .. } => {
+                loop_stack.push(ctx);
+                Ok(())
+            }
+            LowererState::Idle => {
+                Err(MirLowerError::InvalidState {
+                    expected: "Lowering".to_string(),
+                    found: "Idle".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Pop loop context
+    fn pop_loop(&mut self) -> MirLowerResult<LoopContext> {
+        match &mut self.state {
+            LowererState::Lowering { loop_stack, .. } => {
+                loop_stack.pop().ok_or(MirLowerError::BreakOutsideLoop)
+            }
+            LowererState::Idle => {
+                Err(MirLowerError::InvalidState {
+                    expected: "Lowering".to_string(),
+                    found: "Idle".to_string(),
+                })
+            }
+        }
+    }
+
+    /// Get current loop context (for break/continue)
+    fn current_loop(&self) -> Option<&LoopContext> {
+        match &self.state {
+            LowererState::Lowering { loop_stack, .. } => loop_stack.last(),
+            LowererState::Idle => None,
         }
     }
 
     /// Helper to set jump target if block terminator is still Unreachable
-    fn finalize_block_jump(&mut self, target: BlockId) {
-        let func = self.current_func.as_mut().unwrap();
-        if let Some(block) = func.block_mut(self.current_block) {
-            if matches!(block.terminator, Terminator::Unreachable) {
-                block.terminator = Terminator::Jump(target);
+    fn finalize_block_jump(&mut self, target: BlockId) -> MirLowerResult<()> {
+        self.with_func(|func, current_block| {
+            if let Some(block) = func.block_mut(current_block) {
+                if matches!(block.terminator, Terminator::Unreachable) {
+                    block.terminator = Terminator::Jump(target);
+                }
             }
-        }
+        })
     }
 
     pub fn lower_module(mut self, hir: &HirModule) -> MirLowerResult<MirModule> {
@@ -50,7 +311,7 @@ impl MirLowerer {
         let mut mir_func = MirFunction::new(
             func.name.clone(),
             func.return_type,
-            func.is_public,
+            func.visibility,
         );
 
         // Add parameters
@@ -58,7 +319,7 @@ impl MirLowerer {
             mir_func.params.push(MirLocal {
                 name: param.name.clone(),
                 ty: param.ty,
-                is_arg: true,
+                kind: LocalKind::Parameter,
             });
         }
 
@@ -67,12 +328,12 @@ impl MirLowerer {
             mir_func.locals.push(MirLocal {
                 name: local.name.clone(),
                 ty: local.ty,
-                is_arg: false,
+                kind: LocalKind::Local,
             });
         }
 
-        self.current_func = Some(mir_func);
-        self.current_block = BlockId(0);
+        // Explicit state transition: Idle -> Lowering
+        self.begin_function(mir_func)?;
 
         // Lower body
         for stmt in &func.body {
@@ -80,14 +341,16 @@ impl MirLowerer {
         }
 
         // Ensure we have a return
-        let func_mut = self.current_func.as_mut().unwrap();
-        if let Some(block) = func_mut.block_mut(self.current_block) {
-            if matches!(block.terminator, Terminator::Unreachable) {
-                block.terminator = Terminator::Return(None);
+        self.with_func(|func, current_block| {
+            if let Some(block) = func.block_mut(current_block) {
+                if matches!(block.terminator, Terminator::Unreachable) {
+                    block.terminator = Terminator::Return(None);
+                }
             }
-        }
+        })?;
 
-        Ok(self.current_func.take().unwrap())
+        // Explicit state transition: Lowering -> Idle
+        self.end_function()
     }
 
     fn lower_stmt(&mut self, stmt: &HirStmt) -> MirLowerResult<()> {
@@ -95,15 +358,18 @@ impl MirLowerer {
             HirStmt::Let { local_index, value, .. } => {
                 if let Some(val) = value {
                     let vreg = self.lower_expr(val)?;
-                    let func = self.current_func.as_mut().unwrap();
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(self.current_block).unwrap();
-                    block.instructions.push(MirInst::LocalAddr { dest, local_index: *local_index });
-                    block.instructions.push(MirInst::Store {
-                        addr: dest,
-                        value: vreg,
-                        ty: val.ty
-                    });
+                    let local_idx = *local_index;
+                    let ty = val.ty;
+                    self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::LocalAddr { dest, local_index: local_idx });
+                        block.instructions.push(MirInst::Store {
+                            addr: dest,
+                            value: vreg,
+                            ty
+                        });
+                    })?;
                 }
                 Ok(())
             }
@@ -111,14 +377,16 @@ impl MirLowerer {
             HirStmt::Assign { target, value } => {
                 let val_reg = self.lower_expr(value)?;
                 let addr_reg = self.lower_lvalue(target)?;
+                let ty = value.ty;
 
-                let func = self.current_func.as_mut().unwrap();
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::Store {
-                    addr: addr_reg,
-                    value: val_reg,
-                    ty: value.ty
-                });
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Store {
+                        addr: addr_reg,
+                        value: val_reg,
+                        ty
+                    });
+                })?;
                 Ok(())
             }
 
@@ -129,9 +397,10 @@ impl MirLowerer {
                     None
                 };
 
-                let func = self.current_func.as_mut().unwrap();
-                let block = func.block_mut(self.current_block).unwrap();
-                block.terminator = Terminator::Return(ret_reg);
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Return(ret_reg);
+                })?;
                 Ok(())
             }
 
@@ -143,152 +412,224 @@ impl MirLowerer {
             HirStmt::If { condition, then_block, else_block } => {
                 let cond_reg = self.lower_expr(condition)?;
 
-                let func = self.current_func.as_mut().unwrap();
-                let then_id = func.new_block();
-                let else_id = func.new_block();
-                let merge_id = func.new_block();
+                // Create blocks
+                let (then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+                    let then_id = func.new_block();
+                    let else_id = func.new_block();
+                    let merge_id = func.new_block();
 
-                // Set branch terminator
-                let block = func.block_mut(self.current_block).unwrap();
-                block.terminator = Terminator::Branch {
-                    cond: cond_reg,
-                    then_block: then_id,
-                    else_block: else_id,
-                };
+                    // Set branch terminator
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Branch {
+                        cond: cond_reg,
+                        then_block: then_id,
+                        else_block: else_id,
+                    };
+                    (then_id, else_id, merge_id)
+                })?;
 
                 // Lower then block
-                self.current_block = then_id;
+                self.set_current_block(then_id)?;
                 for stmt in then_block {
                     self.lower_stmt(stmt)?;
                 }
-                self.finalize_block_jump(merge_id);
+                self.finalize_block_jump(merge_id)?;
 
                 // Lower else block
-                self.current_block = else_id;
+                self.set_current_block(else_id)?;
                 if let Some(else_stmts) = else_block {
                     for stmt in else_stmts {
                         self.lower_stmt(stmt)?;
                     }
                 }
-                self.finalize_block_jump(merge_id);
+                self.finalize_block_jump(merge_id)?;
 
-                self.current_block = merge_id;
+                self.set_current_block(merge_id)?;
                 Ok(())
             }
 
             HirStmt::While { condition, body } => {
-                let func = self.current_func.as_mut().unwrap();
-                let cond_id = func.new_block();
-                let body_id = func.new_block();
-                let exit_id = func.new_block();
+                // Create blocks and set initial jump
+                let (cond_id, body_id, exit_id) = self.with_func(|func, current_block| {
+                    let cond_id = func.new_block();
+                    let body_id = func.new_block();
+                    let exit_id = func.new_block();
 
-                // Jump to condition check
-                let block = func.block_mut(self.current_block).unwrap();
-                block.terminator = Terminator::Jump(cond_id);
+                    // Jump to condition check
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Jump(cond_id);
+                    (cond_id, body_id, exit_id)
+                })?;
+
+                // Push loop context for break/continue
+                self.push_loop(LoopContext {
+                    continue_target: cond_id,
+                    break_target: exit_id,
+                })?;
 
                 // Check condition
-                self.current_block = cond_id;
+                self.set_current_block(cond_id)?;
                 let cond_reg = self.lower_expr(condition)?;
-                let func = self.current_func.as_mut().unwrap();
-                let block = func.block_mut(self.current_block).unwrap();
-                block.terminator = Terminator::Branch {
-                    cond: cond_reg,
-                    then_block: body_id,
-                    else_block: exit_id,
-                };
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Branch {
+                        cond: cond_reg,
+                        then_block: body_id,
+                        else_block: exit_id,
+                    };
+                })?;
 
                 // Lower body
-                self.current_block = body_id;
+                self.set_current_block(body_id)?;
                 for stmt in body {
                     self.lower_stmt(stmt)?;
                 }
-                self.finalize_block_jump(cond_id);
+                self.finalize_block_jump(cond_id)?;
 
-                self.current_block = exit_id;
+                // Pop loop context
+                self.pop_loop()?;
+
+                self.set_current_block(exit_id)?;
                 Ok(())
             }
 
             HirStmt::Loop { body } => {
-                let func = self.current_func.as_mut().unwrap();
-                let body_id = func.new_block();
-                let exit_id = func.new_block();
+                // Create blocks
+                let (body_id, exit_id) = self.with_func(|func, current_block| {
+                    let body_id = func.new_block();
+                    let exit_id = func.new_block();
 
-                let block = func.block_mut(self.current_block).unwrap();
-                block.terminator = Terminator::Jump(body_id);
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Jump(body_id);
+                    (body_id, exit_id)
+                })?;
 
-                self.current_block = body_id;
+                // Push loop context
+                self.push_loop(LoopContext {
+                    continue_target: body_id,
+                    break_target: exit_id,
+                })?;
+
+                self.set_current_block(body_id)?;
                 for stmt in body {
                     self.lower_stmt(stmt)?;
                 }
-                self.finalize_block_jump(body_id);
+                self.finalize_block_jump(body_id)?;
 
-                self.current_block = exit_id;
+                // Pop loop context
+                self.pop_loop()?;
+
+                self.set_current_block(exit_id)?;
                 Ok(())
             }
 
             HirStmt::Break => {
-                // Would need loop context to know where to jump
-                Err(MirLowerError::Unsupported("break outside tracked loop".to_string()))
+                // Use loop context for proper jump target
+                let loop_ctx = self.current_loop()
+                    .ok_or(MirLowerError::BreakOutsideLoop)?
+                    .clone();
+
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Jump(loop_ctx.break_target);
+                })?;
+                Ok(())
             }
 
             HirStmt::Continue => {
-                Err(MirLowerError::Unsupported("continue outside tracked loop".to_string()))
+                // Use loop context for proper jump target
+                let loop_ctx = self.current_loop()
+                    .ok_or(MirLowerError::ContinueOutsideLoop)?
+                    .clone();
+
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.terminator = Terminator::Jump(loop_ctx.continue_target);
+                })?;
+                Ok(())
             }
         }
     }
 
     fn lower_expr(&mut self, expr: &HirExpr) -> MirLowerResult<VReg> {
-        let func = self.current_func.as_mut().unwrap();
-        let dest = func.new_vreg();
+        let expr_ty = expr.ty;
+        let expr_kind = expr.kind.clone();
 
-        match &expr.kind {
+        match &expr_kind {
             HirExprKind::Integer(n) => {
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::ConstInt { dest, value: *n });
+                let n = *n;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt { dest, value: n });
+                    dest
+                })
             }
 
             HirExprKind::Float(f) => {
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::ConstFloat { dest, value: *f });
+                let f = *f;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstFloat { dest, value: f });
+                    dest
+                })
             }
 
             HirExprKind::Bool(b) => {
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::ConstBool { dest, value: *b });
+                let b = *b;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstBool { dest, value: b });
+                    dest
+                })
             }
 
             HirExprKind::Local(idx) => {
-                let addr_reg = func.new_vreg();
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::LocalAddr { dest: addr_reg, local_index: *idx });
-                block.instructions.push(MirInst::Load { dest, addr: addr_reg, ty: expr.ty });
+                let idx = *idx;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let addr_reg = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::LocalAddr { dest: addr_reg, local_index: idx });
+                    block.instructions.push(MirInst::Load { dest, addr: addr_reg, ty: expr_ty });
+                    dest
+                })
             }
 
             HirExprKind::Binary { op, left, right } => {
-                // Need to borrow check carefully here
+                let op = *op;
                 let left_reg = self.lower_expr(left)?;
                 let right_reg = self.lower_expr(right)?;
 
-                let func = self.current_func.as_mut().unwrap();
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::BinOp {
-                    dest,
-                    op: *op,
-                    left: left_reg,
-                    right: right_reg,
-                });
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BinOp {
+                        dest,
+                        op,
+                        left: left_reg,
+                        right: right_reg,
+                    });
+                    dest
+                })
             }
 
             HirExprKind::Unary { op, operand } => {
+                let op = *op;
                 let operand_reg = self.lower_expr(operand)?;
 
-                let func = self.current_func.as_mut().unwrap();
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::UnaryOp {
-                    dest,
-                    op: *op,
-                    operand: operand_reg,
-                });
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::UnaryOp {
+                        dest,
+                        op,
+                        operand: operand_reg,
+                    });
+                    dest
+                })
             }
 
             HirExprKind::Call { func: callee, args } => {
@@ -297,39 +638,41 @@ impl MirLowerer {
                     arg_regs.push(self.lower_expr(arg)?);
                 }
 
-                // Get function name
-                let func_name = if let HirExprKind::Global(name) = &callee.kind {
-                    name.clone()
+                // Get function name and create CallTarget with effect information
+                let call_target = if let HirExprKind::Global(name) = &callee.kind {
+                    CallTarget::from_name(name)
                 } else {
                     return Err(MirLowerError::Unsupported("indirect call".to_string()));
                 };
 
-                let func = self.current_func.as_mut().unwrap();
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::Call {
-                    dest: Some(dest),
-                    func: func_name,
-                    args: arg_regs,
-                });
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: call_target,
+                        args: arg_regs,
+                    });
+                    dest
+                })
             }
 
             _ => {
-                return Err(MirLowerError::Unsupported(format!("{:?}", expr.kind)));
+                Err(MirLowerError::Unsupported(format!("{:?}", expr_kind)))
             }
         }
-
-        Ok(dest)
     }
 
     fn lower_lvalue(&mut self, expr: &HirExpr) -> MirLowerResult<VReg> {
-        let func = self.current_func.as_mut().unwrap();
-        let dest = func.new_vreg();
-
         match &expr.kind {
             HirExprKind::Local(idx) => {
-                let block = func.block_mut(self.current_block).unwrap();
-                block.instructions.push(MirInst::LocalAddr { dest, local_index: *idx });
-                Ok(dest)
+                let idx = *idx;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::LocalAddr { dest, local_index: idx });
+                    dest
+                })
             }
             _ => Err(MirLowerError::Unsupported("complex lvalue".to_string())),
         }

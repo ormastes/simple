@@ -1,0 +1,222 @@
+//! Interpreter tests - oop
+
+use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+
+#[test]
+fn interpreter_class_methods() {
+    let code = r#"
+class Calculator:
+    fn add(a, b):
+        return a + b
+
+main = Calculator.add(3, 4)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 7);
+}
+
+#[test]
+fn interpreter_impl_blocks() {
+    let code = r#"
+struct Point:
+    x: i64
+    y: i64
+
+impl Point:
+    fn sum(self):
+        return self.x + self.y
+
+let p = Point { x: 15, y: 25 }
+main = p.sum()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 40); // 15 + 25 = 40
+}
+
+#[test]
+fn interpreter_impl_blocks_with_args() {
+    let code = r#"
+struct Counter:
+    value: i64
+
+impl Counter:
+    fn add(self, n):
+        return self.value + n
+
+let c = Counter { value: 10 }
+main = c.add(5)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15); // 10 + 5 = 15
+}
+
+#[test]
+fn interpreter_traits_basic() {
+    let code = r#"
+trait Summable:
+    fn sum(self):
+        return 0
+
+struct Point:
+    x: i64
+    y: i64
+
+impl Summable for Point:
+    fn sum(self):
+        return self.x + self.y
+
+let p = Point { x: 10, y: 20 }
+main = p.sum()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30); // 10 + 20 = 30
+}
+
+#[test]
+fn interpreter_traits_multiple_types() {
+    let code = r#"
+trait Valuable:
+    fn value(self):
+        return 0
+
+struct Coin:
+    amount: i64
+
+struct Bill:
+    amount: i64
+
+impl Valuable for Coin:
+    fn value(self):
+        return self.amount
+
+impl Valuable for Bill:
+    fn value(self):
+        return self.amount * 100
+
+let c = Coin { amount: 5 }
+let b = Bill { amount: 2 }
+main = c.value() + b.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 205); // 5 + 200 = 205
+}
+
+#[test]
+fn interpreter_traits_with_args() {
+    let code = r#"
+trait Calculator:
+    fn add(self, n):
+        return 0
+
+struct Counter:
+    value: i64
+
+impl Calculator for Counter:
+    fn add(self, n):
+        return self.value + n
+
+let c = Counter { value: 50 }
+main = c.add(25)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 75); // 50 + 25 = 75
+}
+
+#[test]
+fn interpreter_context_block_basic() {
+    // Simple context block - method calls dispatch to the context object
+    let code = r#"
+class Calculator:
+    fn double(self, x):
+        return x * 2
+
+let calc = Calculator {}
+let mut result = 0
+context calc:
+    result = double(21)
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_context_block_with_self() {
+    // Context block where method accesses self
+    let code = r#"
+class Adder:
+    base: i64 = 10
+
+    fn add(self, x):
+        return self.base + x
+
+let a = Adder { base: 30 }
+let mut result = 0
+context a:
+    result = add(12)
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+// ============ Method Missing (#36) ============
+
+#[test]
+fn interpreter_method_missing_basic() {
+    // Basic method_missing - called when method doesn't exist
+    let code = r#"
+class DSL:
+    fn method_missing(self, name, args, block):
+        # Return 42 for any unknown method
+        return 42
+
+let d = DSL {}
+main = d.unknown_method()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_method_missing_with_args() {
+    // method_missing with arguments
+    let code = r#"
+class Multiplier:
+    factor: i64 = 10
+
+    fn method_missing(self, name, args, block):
+        # Multiply first arg by factor
+        let x = args[0]
+        return self.factor * x
+
+let m = Multiplier { factor: 7 }
+main = m.any_method(6)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42); // 7 * 6
+}
+
+#[test]
+fn interpreter_method_missing_with_context() {
+    // method_missing inside context block
+    let code = r#"
+class Counter:
+    count: i64 = 0
+
+    fn method_missing(self, name, args, block):
+        # Any call returns 42
+        return 42
+
+let c = Counter { count: 0 }
+let mut result = 0
+context c:
+    result = something_undefined()
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+// === Raw String Tests ===
+

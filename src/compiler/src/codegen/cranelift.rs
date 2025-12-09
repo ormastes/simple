@@ -10,7 +10,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use target_lexicon::Triple;
 use thiserror::Error;
 
-use crate::hir::{TypeId, BinOp};
+use crate::hir::{TypeId, BinOp, UnaryOp};
 use crate::mir::{MirFunction, MirInst, MirModule, Terminator, VReg};
 
 #[derive(Error, Debug)]
@@ -71,7 +71,7 @@ impl Codegen {
         // First pass: declare all functions
         for func in &mir.functions {
             let sig = Self::build_signature(func);
-            let linkage = if func.is_public {
+            let linkage = if func.is_public() {
                 Linkage::Export
             } else {
                 Linkage::Local
@@ -116,7 +116,7 @@ impl Codegen {
 
     fn type_to_cranelift(ty: TypeId) -> types::Type {
         match ty {
-            TypeId::VOID => types::I64, // Placeholder
+            TypeId::VOID => types::I64, // Void returns use I64 for ABI compatibility
             TypeId::BOOL => types::I8,
             TypeId::I8 | TypeId::U8 => types::I8,
             TypeId::I16 | TypeId::U16 => types::I16,
@@ -124,7 +124,9 @@ impl Codegen {
             TypeId::I64 | TypeId::U64 => types::I64,
             TypeId::F32 => types::F32,
             TypeId::F64 => types::F64,
-            _ => types::I64, // Default to pointer-sized
+            TypeId::STRING => types::I64, // String pointer
+            TypeId::NIL => types::I64,    // Nil is pointer-sized
+            _ => types::I64, // Custom types default to pointer-sized
         }
     }
 
@@ -262,7 +264,90 @@ impl Codegen {
                                     lhs, rhs
                                 )
                             }
-                            _ => lhs, // TODO: handle remaining ops
+                            // Identity comparison (same as Eq for primitive types)
+                            BinOp::Is => {
+                                builder.ins().icmp(
+                                    cranelift_codegen::ir::condcodes::IntCC::Equal,
+                                    lhs, rhs
+                                )
+                            }
+                            // Membership test ('in' operator) - requires runtime support for
+                            // arrays, strings, dicts. Not available in AOT compiled code.
+                            // Trap to indicate unsupported operation at runtime.
+                            BinOp::In => {
+                                // The 'in' operator requires runtime collection support.
+                                // AOT compilation doesn't support dynamic membership tests.
+                                // This will trap at runtime if reached.
+                                builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(2));
+                                // Return value is needed for type checking but will never be used
+                                builder.ins().iconst(types::I8, 0)
+                            }
+                            // Logical And: non-zero && non-zero -> 1, else 0
+                            BinOp::And => {
+                                let lhs_bool = builder.ins().icmp_imm(
+                                    cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+                                    lhs, 0
+                                );
+                                let rhs_bool = builder.ins().icmp_imm(
+                                    cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+                                    rhs, 0
+                                );
+                                builder.ins().band(lhs_bool, rhs_bool)
+                            }
+                            // Logical Or: non-zero || non-zero -> 1, else 0
+                            BinOp::Or => {
+                                let lhs_bool = builder.ins().icmp_imm(
+                                    cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+                                    lhs, 0
+                                );
+                                let rhs_bool = builder.ins().icmp_imm(
+                                    cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+                                    rhs, 0
+                                );
+                                builder.ins().bor(lhs_bool, rhs_bool)
+                            }
+                            // Power operation: compute base ** exp using loop
+                            BinOp::Pow => {
+                                // Integer power implementation using loop:
+                                // result = 1; while (exp > 0) { result *= base; exp--; }
+
+                                // Create blocks for the loop
+                                let loop_header = builder.create_block();
+                                let loop_body = builder.create_block();
+                                let loop_exit = builder.create_block();
+
+                                // Add block params for loop variables: (result, exp_remaining)
+                                builder.append_block_param(loop_header, types::I64); // result
+                                builder.append_block_param(loop_header, types::I64); // exp_remaining
+                                builder.append_block_param(loop_exit, types::I64);   // final result
+
+                                // Initial values: result=1, exp_remaining=rhs
+                                let one = builder.ins().iconst(types::I64, 1);
+                                builder.ins().jump(loop_header, &[one, rhs]);
+
+                                // Loop header: check if exp_remaining > 0
+                                builder.switch_to_block(loop_header);
+                                let result_param = builder.block_params(loop_header)[0];
+                                let exp_param = builder.block_params(loop_header)[1];
+                                let zero = builder.ins().iconst(types::I64, 0);
+                                let cond = builder.ins().icmp(
+                                    cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
+                                    exp_param, zero
+                                );
+                                builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
+
+                                // Loop body: result *= base; exp_remaining--
+                                builder.switch_to_block(loop_body);
+                                let new_result = builder.ins().imul(result_param, lhs);
+                                let new_exp = builder.ins().isub(exp_param, one);
+                                builder.ins().jump(loop_header, &[new_result, new_exp]);
+
+                                // Loop exit: get the final result
+                                builder.switch_to_block(loop_exit);
+                                builder.block_params(loop_exit)[0]
+                            }
+                            // Floor division: divide then floor (for integers, same as sdiv)
+                            BinOp::FloorDiv => builder.ins().sdiv(lhs, rhs),
                         };
                         vreg_values.insert(*dest, val);
                     }
@@ -286,7 +371,25 @@ impl Codegen {
                         let _ = value;
                     }
 
-                    MirInst::Call { dest, func: func_name, args } => {
+                    MirInst::UnaryOp { dest, op, operand } => {
+                        let val = vreg_values[operand];
+                        let result = match op {
+                            UnaryOp::Neg => builder.ins().ineg(val),
+                            UnaryOp::Not => {
+                                // Logical not: 0 -> 1, non-zero -> 0
+                                let is_zero = builder.ins().icmp_imm(
+                                    cranelift_codegen::ir::condcodes::IntCC::Equal,
+                                    val, 0
+                                );
+                                is_zero
+                            }
+                            UnaryOp::BitNot => builder.ins().bnot(val),
+                        };
+                        vreg_values.insert(*dest, result);
+                    }
+
+                    MirInst::Call { dest, target, args } => {
+                        let func_name = target.name();
                         if let Some(&callee_id) = self.func_ids.get(func_name) {
                             let callee_ref = self.module.declare_func_in_func(
                                 callee_id,
@@ -307,7 +410,36 @@ impl Codegen {
                         }
                     }
 
-                    _ => {}
+                    MirInst::GetElementPtr { dest, base, index } => {
+                        // Compute element address: base + index * element_size
+                        // For simplicity, assume 8-byte elements (i64)
+                        let base_val = vreg_values[base];
+                        let index_val = vreg_values[index];
+                        let element_size = builder.ins().iconst(types::I64, 8);
+                        let offset = builder.ins().imul(index_val, element_size);
+                        let addr = builder.ins().iadd(base_val, offset);
+                        vreg_values.insert(*dest, addr);
+                    }
+
+                    MirInst::GcAlloc { dest, .. } => {
+                        // GC allocation requires runtime support.
+                        // Trap to indicate unsupported operation.
+                        builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(3));
+                        // Return null pointer (will never be reached)
+                        let null = builder.ins().iconst(types::I64, 0);
+                        vreg_values.insert(*dest, null);
+                    }
+
+                    MirInst::Wait { dest, .. } => {
+                        // Blocking wait requires runtime support.
+                        // Trap to indicate unsupported operation.
+                        builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(4));
+                        // Return nil if dest is expected
+                        if let Some(d) = dest {
+                            let null = builder.ins().iconst(types::I64, 0);
+                            vreg_values.insert(*d, null);
+                        }
+                    }
                 }
             }
 

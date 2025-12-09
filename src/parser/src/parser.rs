@@ -3,6 +3,49 @@ use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Token, TokenKind, Span};
 
+/// Macro to generate binary operator parsing functions.
+/// Reduces duplication in precedence-climbing parser.
+macro_rules! parse_binary_single {
+    ($fn_name:ident, $next_fn:ident, $token:ident, $op:expr) => {
+        fn $fn_name(&mut self) -> Result<Expr, ParseError> {
+            let mut left = self.$next_fn()?;
+            while self.check(&TokenKind::$token) {
+                self.advance();
+                let right = self.$next_fn()?;
+                left = Expr::Binary {
+                    op: $op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            }
+            Ok(left)
+        }
+    };
+}
+
+/// Macro for binary operators with multiple token options
+macro_rules! parse_binary_multi {
+    ($fn_name:ident, $next_fn:ident, $( $token:ident => $op:expr ),+ $(,)?) => {
+        fn $fn_name(&mut self) -> Result<Expr, ParseError> {
+            let mut left = self.$next_fn()?;
+            loop {
+                let op = match &self.current.kind {
+                    $( TokenKind::$token => $op, )+
+                    _ => break,
+                };
+                self.advance();
+                let right = self.$next_fn()?;
+                left = Expr::Binary {
+                    op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+            }
+            Ok(left)
+        }
+    };
+}
+
 pub struct Parser<'a> {
     lexer: Lexer<'a>,
     current: Token,
@@ -89,91 +132,91 @@ impl<'a> Parser<'a> {
             TokenKind::Fn => {
                 let mut node = self.parse_function()?;
                 if let Node::Function(ref mut f) = node {
-                    f.is_public = true;
+                    f.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Async => {
                 let mut node = self.parse_async_function()?;
                 if let Node::Function(ref mut f) = node {
-                    f.is_public = true;
+                    f.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Waitless => {
                 let mut node = self.parse_waitless_function()?;
                 if let Node::Function(ref mut f) = node {
-                    f.is_public = true;
+                    f.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Struct => {
                 let mut node = self.parse_struct()?;
                 if let Node::Struct(ref mut s) = node {
-                    s.is_public = true;
+                    s.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Class => {
                 let mut node = self.parse_class()?;
                 if let Node::Class(ref mut c) = node {
-                    c.is_public = true;
+                    c.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Enum => {
                 let mut node = self.parse_enum()?;
                 if let Node::Enum(ref mut e) = node {
-                    e.is_public = true;
+                    e.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Trait => {
                 let mut node = self.parse_trait()?;
                 if let Node::Trait(ref mut t) = node {
-                    t.is_public = true;
+                    t.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Actor => {
                 let mut node = self.parse_actor()?;
                 if let Node::Actor(ref mut a) = node {
-                    a.is_public = true;
+                    a.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Const => {
                 let mut node = self.parse_const()?;
                 if let Node::Const(ref mut c) = node {
-                    c.is_public = true;
+                    c.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Static => {
                 let mut node = self.parse_static()?;
                 if let Node::Static(ref mut s) = node {
-                    s.is_public = true;
+                    s.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Type => {
                 let mut node = self.parse_type_alias()?;
                 if let Node::TypeAlias(ref mut t) = node {
-                    t.is_public = true;
+                    t.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Extern => {
                 let mut node = self.parse_extern()?;
                 if let Node::Extern(ref mut e) = node {
-                    e.is_public = true;
+                    e.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
             TokenKind::Macro => {
                 let mut node = self.parse_macro_def()?;
                 if let Node::Macro(ref mut m) = node {
-                    m.is_public = true;
+                    m.visibility = Visibility::Public;
                 }
                 Ok(node)
             }
@@ -231,7 +274,7 @@ impl<'a> Parser<'a> {
             params,
             return_type,
             body,
-            is_public: false,
+            visibility: Visibility::Private,
             effect: None,
         }))
     }
@@ -243,11 +286,11 @@ impl<'a> Parser<'a> {
 
         while !self.check(&TokenKind::RParen) {
             let param_span = self.current.span;
-            let is_mutable = if self.check(&TokenKind::Mut) {
+            let mutability = if self.check(&TokenKind::Mut) {
                 self.advance();
-                true
+                Mutability::Mutable
             } else {
-                false
+                Mutability::Immutable
             };
 
             // Allow 'self' as a parameter name for method definitions
@@ -277,7 +320,7 @@ impl<'a> Parser<'a> {
                 name,
                 ty,
                 default,
-                is_mutable,
+                mutability,
             });
 
             if !self.check(&TokenKind::RParen) {
@@ -468,7 +511,7 @@ impl<'a> Parser<'a> {
             pattern,
             ty,
             value,
-            is_mutable: true,
+            mutability: Mutability::Mutable,
         }))
     }
 
@@ -476,11 +519,11 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Let)?;
 
-        let is_mutable = if self.check(&TokenKind::Mut) {
+        let mutability = if self.check(&TokenKind::Mut) {
             self.advance();
-            true
+            Mutability::Mutable
         } else {
-            false
+            Mutability::Immutable
         };
 
         let pattern = self.parse_pattern()?;
@@ -504,7 +547,7 @@ impl<'a> Parser<'a> {
             pattern,
             ty,
             value,
-            is_mutable,
+            mutability,
         }))
     }
 
@@ -529,7 +572,7 @@ impl<'a> Parser<'a> {
             name,
             ty,
             value,
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -537,11 +580,11 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Static)?;
 
-        let is_mutable = if self.check(&TokenKind::Mut) {
+        let mutability = if self.check(&TokenKind::Mut) {
             self.advance();
-            true
+            Mutability::Mutable
         } else {
-            false
+            Mutability::Immutable
         };
 
         let name = self.expect_identifier()?;
@@ -561,8 +604,8 @@ impl<'a> Parser<'a> {
             name,
             ty,
             value,
-            is_mutable,
-            is_public: false,
+            mutability,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -578,7 +621,7 @@ impl<'a> Parser<'a> {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
             ty,
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -602,7 +645,7 @@ impl<'a> Parser<'a> {
             name,
             params,
             return_type,
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -641,7 +684,7 @@ impl<'a> Parser<'a> {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
             patterns: vec![pattern],
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -920,7 +963,7 @@ impl<'a> Parser<'a> {
             name,
             generic_params,
             fields,
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -976,7 +1019,7 @@ impl<'a> Parser<'a> {
             fields,
             methods,
             parent,
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -1010,7 +1053,7 @@ impl<'a> Parser<'a> {
             name,
             generic_params,
             variants,
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -1077,7 +1120,7 @@ impl<'a> Parser<'a> {
             name,
             generic_params,
             methods,
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
@@ -1163,25 +1206,25 @@ impl<'a> Parser<'a> {
             name,
             fields,
             methods,
-            is_public: false,
+            visibility: Visibility::Private,
         }))
     }
 
     fn parse_field(&mut self) -> Result<Field, ParseError> {
         let start_span = self.current.span;
 
-        let is_public = if self.check(&TokenKind::Pub) {
+        let visibility = if self.check(&TokenKind::Pub) {
             self.advance();
-            true
+            Visibility::Public
         } else {
-            false
+            Visibility::Private
         };
 
-        let is_mutable = if self.check(&TokenKind::Mut) {
+        let mutability = if self.check(&TokenKind::Mut) {
             self.advance();
-            true
+            Mutability::Mutable
         } else {
-            false
+            Mutability::Immutable
         };
 
         let name = self.expect_identifier()?;
@@ -1204,8 +1247,8 @@ impl<'a> Parser<'a> {
             name,
             ty,
             default,
-            is_mutable,
-            is_public,
+            mutability,
+            visibility,
         })
     }
 
@@ -1344,197 +1387,47 @@ impl<'a> Parser<'a> {
         false
     }
 
-    // Binary expression parsing with precedence
-    fn parse_or(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_and()?;
+    // Binary expression parsing with precedence (using macros to reduce duplication)
+    // Precedence (lowest to highest): or, and, equality, comparison, bitwise_or, bitwise_xor, bitwise_and, shift, term, factor, power
 
-        while self.check(&TokenKind::Or) {
-            self.advance();
-            let right = self.parse_and()?;
-            left = Expr::Binary {
-                op: BinOp::Or,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
+    // Single-token operators
+    parse_binary_single!(parse_or, parse_and, Or, BinOp::Or);
+    parse_binary_single!(parse_and, parse_equality, And, BinOp::And);
+    parse_binary_single!(parse_bitwise_or, parse_bitwise_xor, Pipe, BinOp::BitOr);
+    parse_binary_single!(parse_bitwise_xor, parse_bitwise_and, Caret, BinOp::BitXor);
+    parse_binary_single!(parse_bitwise_and, parse_shift, Ampersand, BinOp::BitAnd);
 
-        Ok(left)
-    }
+    // Multi-token operators
+    parse_binary_multi!(parse_equality, parse_comparison,
+        Eq => BinOp::Eq,
+        NotEq => BinOp::NotEq,
+        Is => BinOp::Is,
+        In => BinOp::In,
+    );
 
-    fn parse_and(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_equality()?;
+    parse_binary_multi!(parse_comparison, parse_bitwise_or,
+        Lt => BinOp::Lt,
+        Gt => BinOp::Gt,
+        LtEq => BinOp::LtEq,
+        GtEq => BinOp::GtEq,
+    );
 
-        while self.check(&TokenKind::And) {
-            self.advance();
-            let right = self.parse_equality()?;
-            left = Expr::Binary {
-                op: BinOp::And,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
+    parse_binary_multi!(parse_shift, parse_term,
+        ShiftLeft => BinOp::ShiftLeft,
+        ShiftRight => BinOp::ShiftRight,
+    );
 
-        Ok(left)
-    }
+    parse_binary_multi!(parse_term, parse_factor,
+        Plus => BinOp::Add,
+        Minus => BinOp::Sub,
+    );
 
-    fn parse_equality(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_comparison()?;
-
-        loop {
-            let op = match &self.current.kind {
-                TokenKind::Eq => BinOp::Eq,
-                TokenKind::NotEq => BinOp::NotEq,
-                TokenKind::Is => BinOp::Is,
-                TokenKind::In => BinOp::In,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_comparison()?;
-            left = Expr::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
-    }
-
-    fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_bitwise_or()?;
-
-        loop {
-            let op = match &self.current.kind {
-                TokenKind::Lt => BinOp::Lt,
-                TokenKind::Gt => BinOp::Gt,
-                TokenKind::LtEq => BinOp::LtEq,
-                TokenKind::GtEq => BinOp::GtEq,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_bitwise_or()?;
-            left = Expr::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
-    }
-
-    fn parse_bitwise_or(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_bitwise_xor()?;
-
-        while self.check(&TokenKind::Pipe) {
-            self.advance();
-            let right = self.parse_bitwise_xor()?;
-            left = Expr::Binary {
-                op: BinOp::BitOr,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
-    }
-
-    fn parse_bitwise_xor(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_bitwise_and()?;
-
-        while self.check(&TokenKind::Caret) {
-            self.advance();
-            let right = self.parse_bitwise_and()?;
-            left = Expr::Binary {
-                op: BinOp::BitXor,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
-    }
-
-    fn parse_bitwise_and(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_shift()?;
-
-        while self.check(&TokenKind::Ampersand) {
-            self.advance();
-            let right = self.parse_shift()?;
-            left = Expr::Binary {
-                op: BinOp::BitAnd,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
-    }
-
-    fn parse_shift(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_term()?;
-
-        loop {
-            let op = match &self.current.kind {
-                TokenKind::ShiftLeft => BinOp::ShiftLeft,
-                TokenKind::ShiftRight => BinOp::ShiftRight,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_term()?;
-            left = Expr::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
-    }
-
-    fn parse_term(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_factor()?;
-
-        loop {
-            let op = match &self.current.kind {
-                TokenKind::Plus => BinOp::Add,
-                TokenKind::Minus => BinOp::Sub,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_factor()?;
-            left = Expr::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
-    }
-
-    fn parse_factor(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_power()?;
-
-        loop {
-            let op = match &self.current.kind {
-                TokenKind::Star => BinOp::Mul,
-                TokenKind::Slash => BinOp::Div,
-                TokenKind::Percent => BinOp::Mod,
-                TokenKind::DoubleSlash => BinOp::FloorDiv,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_power()?;
-            left = Expr::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
-        }
-
-        Ok(left)
-    }
+    parse_binary_multi!(parse_factor, parse_power,
+        Star => BinOp::Mul,
+        Slash => BinOp::Div,
+        Percent => BinOp::Mod,
+        DoubleSlash => BinOp::FloorDiv,
+    );
 
     fn parse_power(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_unary()?;
@@ -2335,7 +2228,7 @@ mod tests {
     fn test_let_statement() {
         let module = parse("let x = 42").unwrap();
         if let Node::Let(stmt) = &module.items[0] {
-            assert!(!stmt.is_mutable);
+            assert_eq!(stmt.mutability, Mutability::Immutable);
             if let Pattern::Identifier(name) = &stmt.pattern {
                 assert_eq!(name, "x");
             }
@@ -2348,7 +2241,7 @@ mod tests {
     fn test_let_mut_statement() {
         let module = parse("let mut x = 42").unwrap();
         if let Node::Let(stmt) = &module.items[0] {
-            assert!(stmt.is_mutable);
+            assert_eq!(stmt.mutability, Mutability::Mutable);
         } else {
             panic!("Expected let statement");
         }

@@ -2,10 +2,12 @@
 //!
 //! This module provides a clean API for embedding Simple as a scripting language,
 //! system testing, and REPL implementation.
+//!
+//! The Interpreter uses Runner internally and adds I/O capture and configuration.
 
 use simple_runtime::gc::GcRuntime;
 
-use crate::exec_core::ExecCore;
+use crate::Runner;
 
 /// Result of running Simple code
 #[derive(Debug, Clone, Default)]
@@ -27,37 +29,45 @@ pub struct RunConfig {
     pub stdin: String,
     /// Timeout in milliseconds (0 = no timeout)
     pub timeout_ms: u64,
+    /// If true, compile and run in memory (no disk I/O)
+    pub in_memory: bool,
 }
 
 /// Interpreter for running Simple code with I/O capture
+///
+/// Uses Runner internally and adds configuration and I/O capture support.
 pub struct Interpreter {
-    core: ExecCore,
+    runner: Runner,
 }
 
 impl Interpreter {
     /// Create a new interpreter instance
     pub fn new() -> Self {
-        Self { core: ExecCore::new() }
+        Self { runner: Runner::new() }
     }
 
     /// Create an interpreter that uses the no-GC allocator.
     pub fn new_no_gc() -> Self {
-        Self { core: ExecCore::new_no_gc() }
+        Self { runner: Runner::new_no_gc() }
     }
 
     /// Run Simple source code with configuration
     ///
     /// # Arguments
     /// * `code` - Simple source code to run
-    /// * `config` - Execution configuration (args, stdin, timeout)
+    /// * `config` - Execution configuration (args, stdin, timeout, in_memory)
     ///
     /// # Returns
     /// * `Ok(RunResult)` - Execution result with exit code and captured output
     /// * `Err(String)` - Error message if compilation or execution failed
     pub fn run(&self, code: &str, config: RunConfig) -> Result<RunResult, String> {
-        let _ = config; // TODO: use args, stdin, timeout when I/O is implemented
+        let _ = (config.args, config.stdin, config.timeout_ms); // TODO: use when I/O is implemented
 
-        let exit_code = self.core.run_source(code)?;
+        let exit_code = if config.in_memory {
+            self.runner.run_source_in_memory(code)?
+        } else {
+            self.runner.run_source(code)?
+        };
 
         Ok(RunResult {
             exit_code,
@@ -86,9 +96,25 @@ impl Interpreter {
         self.run(code, RunConfig::default())
     }
 
+    /// Run code in memory (no disk I/O)
+    ///
+    /// # Arguments
+    /// * `code` - Simple source code to run
+    pub fn run_in_memory(&self, code: &str) -> Result<RunResult, String> {
+        self.run(code, RunConfig {
+            in_memory: true,
+            ..Default::default()
+        })
+    }
+
+    /// Access the underlying Runner for advanced use
+    pub fn runner(&self) -> &Runner {
+        &self.runner
+    }
+
     /// Access the underlying GC runtime if present.
     pub fn gc(&self) -> Option<&GcRuntime> {
-        self.core.gc_runtime.as_deref()
+        self.runner.gc_runtime()
     }
 }
 
@@ -124,5 +150,6 @@ pub fn run_code(code: &str, args: &[String], stdin: &str) -> Result<RunResult, S
         args: args.to_vec(),
         stdin: stdin.to_string(),
         timeout_ms: 0,
+        in_memory: false,
     })
 }

@@ -655,7 +655,7 @@ fn test_parse_dict_single() {
 fn test_parse_let_simple() {
     let module = parse("let x = 42").unwrap();
     if let Node::Let(stmt) = &module.items[0] {
-        assert!(!stmt.is_mutable);
+        assert_eq!(stmt.mutability, Mutability::Immutable);
         if let Pattern::Identifier(name) = &stmt.pattern {
             assert_eq!(name, "x");
         }
@@ -669,7 +669,7 @@ fn test_parse_let_simple() {
 fn test_parse_let_mut() {
     let module = parse("let mut x = 42").unwrap();
     if let Node::Let(stmt) = &module.items[0] {
-        assert!(stmt.is_mutable);
+        assert_eq!(stmt.mutability, Mutability::Mutable);
     } else {
         panic!("Expected let statement");
     }
@@ -679,7 +679,7 @@ fn test_parse_let_mut() {
 fn test_parse_mut_let() {
     let module = parse("mut let x = 42").unwrap();
     if let Node::Let(stmt) = &module.items[0] {
-        assert!(stmt.is_mutable);
+        assert_eq!(stmt.mutability, Mutability::Mutable);
     } else {
         panic!("Expected let statement");
     }
@@ -738,7 +738,7 @@ fn test_parse_static() {
     let module = parse("static COUNT = 0").unwrap();
     if let Node::Static(stmt) = &module.items[0] {
         assert_eq!(stmt.name, "COUNT");
-        assert!(!stmt.is_mutable);
+        assert_eq!(stmt.mutability, Mutability::Immutable);
     } else {
         panic!("Expected static statement");
     }
@@ -748,7 +748,7 @@ fn test_parse_static() {
 fn test_parse_static_mut() {
     let module = parse("static mut COUNT = 0").unwrap();
     if let Node::Static(stmt) = &module.items[0] {
-        assert!(stmt.is_mutable);
+        assert_eq!(stmt.mutability, Mutability::Mutable);
     } else {
         panic!("Expected static statement");
     }
@@ -820,7 +820,7 @@ fn test_parse_pub_function() {
     let source = "pub fn exported():\n    pass";
     let module = parse(source).unwrap();
     if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_public);
+        assert_eq!(func.visibility, Visibility::Public);
     } else {
         panic!("Expected public function");
     }
@@ -1168,7 +1168,7 @@ fn test_parse_pattern_mut_identifier() {
     let source = "let mut x = 42";
     let module = parse(source).unwrap();
     if let Node::Let(stmt) = &module.items[0] {
-        assert!(stmt.is_mutable);
+        assert_eq!(stmt.mutability, Mutability::Mutable);
     } else {
         panic!("Expected let statement");
     }

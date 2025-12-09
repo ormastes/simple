@@ -1,65 +1,43 @@
-use std::path::Path;
 use std::sync::Arc;
 
-use simple_common::ModuleCache;
-
-use crate::loader::{LoadError, ModuleLoader};
+use crate::loader::ModuleLoader;
 use crate::module::LoadedModule;
 use crate::smf::SymbolBinding;
 
-/// Global module registry for tracking loaded modules
+/// SMF module registry - type alias with extension methods for symbol resolution
+pub type ModuleRegistryBase = simple_common::ModuleRegistry<ModuleLoader>;
+
+/// Global module registry for tracking loaded SMF modules.
+/// Extends the generic registry with symbol resolution across modules.
 pub struct ModuleRegistry {
-    cache: ModuleCache<LoadedModule, LoadError>,
-    loader: ModuleLoader,
+    inner: ModuleRegistryBase,
 }
 
 impl ModuleRegistry {
     pub fn new() -> Self {
         Self {
-            cache: ModuleCache::new(),
-            loader: ModuleLoader::new(),
+            inner: ModuleRegistryBase::new(ModuleLoader::new()),
         }
     }
 
-    /// Load or get cached module
-    pub fn load(&self, path: &Path) -> Result<Arc<LoadedModule>, LoadError> {
-        // Check cache first
-        if let Some(module) = self.cache.get(path) {
-            return Ok(module);
-        }
-
-        // Load new module with import resolution against already-loaded modules
-        let module = Arc::new(self.loader.load_with_resolver(path, |name| {
-            self.resolve_symbol(name)
-        })?);
-
-        // Cache it
-        self.cache.insert(path, Arc::clone(&module));
-
-        Ok(module)
+    /// Load or get cached module with cross-module symbol resolution
+    pub fn load(&self, path: &std::path::Path) -> Result<Arc<LoadedModule>, crate::loader::LoadError> {
+        self.inner.load_with_resolver(path, |name| self.resolve_symbol(name))
     }
 
     /// Unload a module
-    pub fn unload(&self, path: &Path) -> bool {
-        self.cache.remove(path)
+    pub fn unload(&self, path: &std::path::Path) -> bool {
+        self.inner.unload(path)
     }
 
     /// Reload a module (for hot reload)
-    pub fn reload(&self, path: &Path) -> Result<Arc<LoadedModule>, LoadError> {
-        // Load new version
-        let new_module = Arc::new(self.loader.load_with_resolver(path, |name| {
-            self.resolve_symbol(name)
-        })?);
-
-        // Replace in cache
-        self.cache.insert(path, Arc::clone(&new_module));
-
-        Ok(new_module)
+    pub fn reload(&self, path: &std::path::Path) -> Result<Arc<LoadedModule>, crate::loader::LoadError> {
+        self.inner.reload_with_resolver(path, |name| self.resolve_symbol(name))
     }
 
     /// Resolve symbol across all loaded modules
     pub fn resolve_symbol(&self, name: &str) -> Option<usize> {
-        for module in self.cache.modules() {
+        for module in self.inner.modules() {
             if let Some(sym) = module.symbols.lookup(name) {
                 if sym.binding == SymbolBinding::Global {
                     let addr = module.code_mem.as_ptr() as usize + sym.value as usize;
@@ -67,7 +45,12 @@ impl ModuleRegistry {
                 }
             }
         }
-
         None
+    }
+}
+
+impl Default for ModuleRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }

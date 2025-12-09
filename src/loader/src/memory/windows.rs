@@ -1,21 +1,19 @@
+use super::common::{check_windows_result, default_free};
 use super::{ExecutableMemory, MemoryAllocator, Protection};
 use windows_sys::Win32::System::Memory::*;
 
+/// Windows memory allocator using VirtualAlloc/VirtualProtect/VirtualFree
 pub struct WindowsAllocator;
 
-impl WindowsAllocator {
-    pub fn new() -> Self {
-        Self
-    }
+crate::impl_allocator_new!(WindowsAllocator);
 
+impl WindowsAllocator {
     fn protection_to_flags(prot: Protection) -> u32 {
-        match (prot.read, prot.write, prot.execute) {
-            (true, true, true) => PAGE_EXECUTE_READWRITE,
-            (true, true, false) => PAGE_READWRITE,
-            (true, false, true) => PAGE_EXECUTE_READ,
-            (true, false, false) => PAGE_READONLY,
-            (false, false, true) => PAGE_EXECUTE,
-            _ => PAGE_NOACCESS,
+        match prot {
+            Protection::ReadOnly => PAGE_READONLY,
+            Protection::ReadWrite => PAGE_READWRITE,
+            Protection::ReadExecute => PAGE_EXECUTE_READ,
+            Protection::ReadWriteExecute => PAGE_EXECUTE_READWRITE,
         }
     }
 }
@@ -44,23 +42,15 @@ impl MemoryAllocator for WindowsAllocator {
     fn protect(&self, mem: &ExecutableMemory, prot: Protection) -> std::io::Result<()> {
         let flags = Self::protection_to_flags(prot);
         let mut old_flags = 0u32;
-
         let result = unsafe { VirtualProtect(mem.ptr as *mut _, mem.size, flags, &mut old_flags) };
-
-        if result == 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        Ok(())
+        check_windows_result(result)
     }
 
     fn free(&self, mem: ExecutableMemory) -> std::io::Result<()> {
-        drop(mem);
-        Ok(())
+        default_free(mem)
     }
 }
 
-#[cfg(windows)]
 impl Drop for ExecutableMemory {
     fn drop(&mut self) {
         unsafe {

@@ -1,39 +1,32 @@
+use super::common::{align_size, check_unix_result, default_free, get_page_size};
 use super::{ExecutableMemory, MemoryAllocator, Protection};
-use libc::{mmap, mprotect, munmap, MAP_ANON, MAP_PRIVATE, PROT_EXEC, PROT_NONE, PROT_READ, PROT_WRITE};
+use libc::{
+    mmap, mprotect, munmap, MAP_ANON, MAP_FAILED, MAP_PRIVATE, PROT_EXEC, PROT_NONE, PROT_READ,
+    PROT_WRITE,
+};
 use std::ptr;
 
-pub struct LinuxAllocator;
+/// POSIX-compliant memory allocator for Unix systems (Linux, macOS, BSD)
+pub struct PosixAllocator;
 
-impl LinuxAllocator {
-    pub fn new() -> Self {
-        Self
-    }
+crate::impl_allocator_new!(PosixAllocator);
 
+impl PosixAllocator {
     fn protection_to_flags(prot: Protection) -> i32 {
-        let mut flags = 0;
-        if prot.read {
-            flags |= PROT_READ;
+        match prot {
+            Protection::ReadOnly => PROT_READ,
+            Protection::ReadWrite => PROT_READ | PROT_WRITE,
+            Protection::ReadExecute => PROT_READ | PROT_EXEC,
+            Protection::ReadWriteExecute => PROT_READ | PROT_WRITE | PROT_EXEC,
         }
-        if prot.write {
-            flags |= PROT_WRITE;
-        }
-        if prot.execute {
-            flags |= PROT_EXEC;
-        }
-        if flags == 0 {
-            flags = PROT_NONE;
-        }
-        flags
     }
 }
 
-impl MemoryAllocator for LinuxAllocator {
+impl MemoryAllocator for PosixAllocator {
     fn allocate(&self, size: usize, alignment: usize) -> std::io::Result<ExecutableMemory> {
-        // Round up to alignment and page size
-        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-        let page_size = if page_size == 0 { 4096 } else { page_size };
+        let page_size = get_page_size();
         let align = alignment.max(page_size);
-        let aligned_size = (size + align - 1) & !(align - 1);
+        let aligned_size = align_size(size, align);
 
         let ptr = unsafe {
             mmap(
@@ -46,7 +39,7 @@ impl MemoryAllocator for LinuxAllocator {
             )
         };
 
-        if ptr == libc::MAP_FAILED {
+        if ptr == MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
 
@@ -58,23 +51,15 @@ impl MemoryAllocator for LinuxAllocator {
 
     fn protect(&self, mem: &ExecutableMemory, prot: Protection) -> std::io::Result<()> {
         let flags = Self::protection_to_flags(prot);
-
         let result = unsafe { mprotect(mem.ptr as *mut _, mem.size, flags) };
-
-        if result != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        Ok(())
+        check_unix_result(result)
     }
 
     fn free(&self, mem: ExecutableMemory) -> std::io::Result<()> {
-        drop(mem);
-        Ok(())
+        default_free(mem)
     }
 }
 
-#[cfg(unix)]
 impl Drop for ExecutableMemory {
     fn drop(&mut self) {
         unsafe {

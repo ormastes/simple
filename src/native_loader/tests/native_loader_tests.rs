@@ -53,7 +53,7 @@ fn registry_caches_native_module() {
         "mainlib",
     );
 
-    let registry = ModuleRegistry::new();
+    let registry = ModuleRegistry::default();
     let first = registry.load(&so_path).expect("load ok");
     let second = registry.load(&so_path).expect("load cached");
     assert!(Arc::ptr_eq(&first, &second));
@@ -73,7 +73,7 @@ fn registry_unload_removes_module() {
         "unloadlib",
     );
 
-    let registry = ModuleRegistry::new();
+    let registry = ModuleRegistry::default();
     let _first = registry.load(&so_path).expect("load ok");
 
     // Unload should return true (module was cached)
@@ -92,7 +92,7 @@ fn registry_reload_replaces_cached_module() {
         "reloadlib",
     );
 
-    let registry = ModuleRegistry::new();
+    let registry = ModuleRegistry::default();
     let first = registry.load(&so_path).expect("load ok");
     let first_ptr = Arc::as_ptr(&first);
 
@@ -110,14 +110,14 @@ fn registry_reload_replaces_cached_module() {
 
 #[test]
 fn registry_load_nonexistent_fails() {
-    let registry = ModuleRegistry::new();
+    let registry = ModuleRegistry::default();
     let result = registry.load(std::path::Path::new("/nonexistent/path/lib.so"));
     assert!(result.is_err());
 }
 
 #[test]
 fn registry_unload_nonexistent_returns_false() {
-    let registry = ModuleRegistry::new();
+    let registry = ModuleRegistry::default();
     let result = registry.unload(std::path::Path::new("/nonexistent/path/lib.so"));
     assert!(!result);
 }
