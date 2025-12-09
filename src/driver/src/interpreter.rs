@@ -4,11 +4,14 @@
 //! system testing, and REPL implementation.
 
 use std::fs;
+use std::sync::Arc;
 use tempfile::TempDir;
 use simple_compiler::CompilerPipeline;
 use simple_loader::loader::ModuleLoader as SmfLoader;
 use simple_loader::LoadedModule;
+use simple_common::gc::GcAllocator;
 use simple_runtime::gc::GcRuntime;
+use simple_runtime::memory::no_gc::NoGcAllocator;
 
 /// Result of running Simple code
 #[derive(Debug, Clone, Default)]
@@ -35,15 +38,27 @@ pub struct RunConfig {
 /// Interpreter for running Simple code with I/O capture
 pub struct Interpreter {
     loader: SmfLoader,
-    gc: GcRuntime,
+    gc_alloc: Arc<dyn GcAllocator>,
+    gc_runtime: Option<Arc<GcRuntime>>,
 }
 
 impl Interpreter {
     /// Create a new interpreter instance
     pub fn new() -> Self {
+        let gc = Arc::new(GcRuntime::new());
         Self {
             loader: SmfLoader::new(),
-            gc: GcRuntime::new(),
+            gc_alloc: gc.clone(),
+            gc_runtime: Some(gc),
+        }
+    }
+
+    /// Create an interpreter that uses the no-GC allocator.
+    pub fn new_no_gc() -> Self {
+        Self {
+            loader: SmfLoader::new(),
+            gc_alloc: Arc::new(NoGcAllocator::new()),
+            gc_runtime: None,
         }
     }
 
@@ -68,7 +83,8 @@ impl Interpreter {
         fs::write(&src_path, code).map_err(|e| format!("write source: {e}"))?;
 
         // Compile
-        let mut compiler = CompilerPipeline::new().map_err(|e| format!("{e:?}"))?;
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone())
+            .map_err(|e| format!("{e:?}"))?;
         compiler.compile(&src_path, &out_path)
             .map_err(|e| format!("compile failed: {e}"))?;
 
@@ -80,7 +96,11 @@ impl Interpreter {
         let exit_code = run_main(&module)?;
 
         // Collect GC
-        let _ = self.gc.collect("post-run");
+        if let Some(gc) = &self.gc_runtime {
+            let _ = gc.collect("post-run");
+        } else {
+            self.gc_alloc.collect();
+        }
 
         Ok(RunResult {
             exit_code,
@@ -109,9 +129,9 @@ impl Interpreter {
         self.run(code, RunConfig::default())
     }
 
-    /// Access the underlying GC runtime
-    pub fn gc(&self) -> &GcRuntime {
-        &self.gc
+    /// Access the underlying GC runtime if present.
+    pub fn gc(&self) -> Option<&GcRuntime> {
+        self.gc_runtime.as_deref()
     }
 }
 
@@ -141,8 +161,8 @@ fn run_main(module: &LoadedModule) -> Result<i32, String> {
 /// * `Err(String)` - Error message if compilation or execution failed
 ///
 /// # Example
-/// ```ignore
-/// use simple_driver::interpreter::run_code;
+/// ```
+/// use simple_driver::run_code;
 ///
 /// let result = run_code("main = 42", &[], "").unwrap();
 /// assert_eq!(result.exit_code, 42);

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 /// Basic actor handle using channels; interim until scheduler lands.
 #[derive(Debug, Clone)]
@@ -38,6 +39,27 @@ impl ActorHandle {
             .map_err(|_| "recv lock poisoned".to_string())?
             .recv()
             .map_err(|e| format!("recv failed: {e}"))
+    }
+
+    /// Receive with timeout to avoid deadlocks
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Message, String> {
+        self.outbox
+            .lock()
+            .map_err(|_| "recv lock poisoned".to_string())?
+            .recv_timeout(timeout)
+            .map_err(|e| format!("recv timeout: {e}"))
+    }
+
+    /// Try to receive without blocking
+    pub fn try_recv(&self) -> Result<Option<Message>, String> {
+        let guard = self.outbox
+            .lock()
+            .map_err(|_| "recv lock poisoned".to_string())?;
+        match guard.try_recv() {
+            Ok(msg) => Ok(Some(msg)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err("channel disconnected".to_string()),
+        }
     }
 
     /// Wait for the actor to finish. Safe to call multiple times.

@@ -52,6 +52,8 @@ impl<'a> Parser<'a> {
 
         match &self.current.kind {
             TokenKind::Fn => self.parse_function(),
+            TokenKind::Async => self.parse_async_function(),
+            TokenKind::Waitless => self.parse_waitless_function(),
             TokenKind::Struct => self.parse_struct(),
             TokenKind::Class => self.parse_class(),
             TokenKind::Enum => self.parse_enum(),
@@ -68,6 +70,7 @@ impl<'a> Parser<'a> {
             TokenKind::Static => self.parse_static(),
             TokenKind::Type => self.parse_type_alias(),
             TokenKind::Extern => self.parse_extern(),
+            TokenKind::Macro => self.parse_macro_def(),
             TokenKind::If => self.parse_if(),
             TokenKind::Match => self.parse_match_stmt(),
             TokenKind::For => self.parse_for(),
@@ -85,6 +88,20 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::Fn => {
                 let mut node = self.parse_function()?;
+                if let Node::Function(ref mut f) = node {
+                    f.is_public = true;
+                }
+                Ok(node)
+            }
+            TokenKind::Async => {
+                let mut node = self.parse_async_function()?;
+                if let Node::Function(ref mut f) = node {
+                    f.is_public = true;
+                }
+                Ok(node)
+            }
+            TokenKind::Waitless => {
+                let mut node = self.parse_waitless_function()?;
                 if let Node::Function(ref mut f) = node {
                     f.is_public = true;
                 }
@@ -153,8 +170,15 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            TokenKind::Macro => {
+                let mut node = self.parse_macro_def()?;
+                if let Node::Macro(ref mut m) = node {
+                    m.is_public = true;
+                }
+                Ok(node)
+            }
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, trait, actor, const, static, type, or extern after 'pub'",
+                "fn, struct, class, enum, trait, actor, const, static, type, extern, or macro after 'pub'",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),
@@ -163,11 +187,31 @@ impl<'a> Parser<'a> {
 
     // === Function Parsing ===
 
+    fn parse_async_function(&mut self) -> Result<Node, ParseError> {
+        self.advance(); // consume 'async'
+        let mut func = self.parse_function()?;
+        if let Node::Function(ref mut f) = func {
+            f.effect = Some(Effect::Async);
+        }
+        Ok(func)
+    }
+
+    fn parse_waitless_function(&mut self) -> Result<Node, ParseError> {
+        self.advance(); // consume 'waitless'
+        let mut func = self.parse_function()?;
+        if let Node::Function(ref mut f) = func {
+            f.effect = Some(Effect::Waitless);
+        }
+        Ok(func)
+    }
+
     fn parse_function(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Fn)?;
 
         let name = self.expect_identifier()?;
+        // Parse optional generic parameters: fn foo<T, U>(...)
+        let generic_params = self.parse_generic_params()?;
         let params = self.parse_parameters()?;
 
         let return_type = if self.check(&TokenKind::Arrow) {
@@ -183,6 +227,7 @@ impl<'a> Parser<'a> {
         Ok(Node::Function(FunctionDef {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
+            generic_params,
             params,
             return_type,
             body,
@@ -304,8 +349,22 @@ impl<'a> Parser<'a> {
         match &self.current.kind {
             TokenKind::Ampersand => {
                 self.advance();
+                // Check for &mut T (mutable borrow)
+                if self.check(&TokenKind::Mut) {
+                    self.advance();
+                    let inner = self.parse_single_type()?;
+                    return Ok(Type::Pointer { kind: PointerKind::BorrowMut, inner: Box::new(inner) });
+                }
+                // Parse the inner type
                 let inner = self.parse_single_type()?;
-                return Ok(Type::Pointer { kind: PointerKind::Unique, inner: Box::new(inner) });
+                // Check if it's a borrow type (ends with _borrow suffix in the type name)
+                // or explicit borrow via &T_borrow
+                let kind = if self.is_borrow_type(&inner) {
+                    PointerKind::Borrow
+                } else {
+                    PointerKind::Unique
+                };
+                return Ok(Type::Pointer { kind, inner: Box::new(inner) });
             }
             TokenKind::Star => {
                 self.advance();
@@ -547,6 +606,90 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse a macro definition: macro name!(params): body
+    fn parse_macro_def(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Macro)?;
+
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Bang)?;
+
+        // Parse macro parameters
+        self.expect(&TokenKind::LParen)?;
+        let mut params = Vec::new();
+        while !self.check(&TokenKind::RParen) {
+            let param = self.parse_macro_param()?;
+            params.push(param);
+            if !self.check(&TokenKind::RParen) {
+                self.expect(&TokenKind::Comma)?;
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+
+        self.expect(&TokenKind::Colon)?;
+
+        // Parse macro body as a block
+        let body = self.parse_block()?;
+
+        let pattern = MacroPattern {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            params,
+            body: MacroBody::Block(body),
+        };
+
+        Ok(Node::Macro(MacroDef {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            name,
+            patterns: vec![pattern],
+            is_public: false,
+        }))
+    }
+
+    /// Parse a single macro parameter: $name or $name:ty
+    fn parse_macro_param(&mut self) -> Result<MacroParam, ParseError> {
+        if self.check(&TokenKind::Dollar) {
+            self.advance();
+            let name = self.expect_identifier()?;
+            if self.check(&TokenKind::Colon) {
+                self.advance();
+                let kind = self.expect_identifier()?;
+                match kind.as_str() {
+                    "expr" => Ok(MacroParam::Expr(name)),
+                    "ty" => Ok(MacroParam::Type(name)),
+                    "ident" => Ok(MacroParam::Ident(name)),
+                    _ => Ok(MacroParam::Expr(name)), // Default to expr
+                }
+            } else {
+                Ok(MacroParam::Expr(name)) // Default: $x is expression capture
+            }
+        } else if self.check(&TokenKind::Ellipsis) {
+            self.advance();
+            if self.check(&TokenKind::Dollar) {
+                self.advance();
+                let name = self.expect_identifier()?;
+                Ok(MacroParam::Variadic { name, separator: None })
+            } else {
+                Err(ParseError::unexpected_token(
+                    "$ after ...",
+                    format!("{:?}", self.current.kind),
+                    self.current.span,
+                ))
+            }
+        } else {
+            // Literal token that must match
+            let lit = if let TokenKind::Identifier(name) = &self.current.kind {
+                let name = name.clone();
+                self.advance();
+                name
+            } else {
+                let lexeme = self.current.lexeme.clone();
+                self.advance();
+                lexeme
+            };
+            Ok(MacroParam::Literal(lit))
+        }
+    }
+
     fn parse_if(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::If)?;
@@ -751,6 +894,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
+        // Parse optional generic parameters: struct Foo<T, U>:
+        let generic_params = self.parse_generic_params()?;
         self.expect(&TokenKind::Colon)?;
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
@@ -773,6 +918,7 @@ impl<'a> Parser<'a> {
         Ok(Node::Struct(StructDef {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
+            generic_params,
             fields,
             is_public: false,
         }))
@@ -782,6 +928,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Class)?;
         let name = self.expect_identifier()?;
+        // Parse optional generic parameters: class Foo<T, U>
+        let generic_params = self.parse_generic_params()?;
 
         let parent = if self.check(&TokenKind::LParen) {
             self.advance();
@@ -824,6 +972,7 @@ impl<'a> Parser<'a> {
         Ok(Node::Class(ClassDef {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
+            generic_params,
             fields,
             methods,
             parent,
@@ -835,6 +984,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Enum)?;
         let name = self.expect_identifier()?;
+        // Parse optional generic parameters: enum Result<T, E>
+        let generic_params = self.parse_generic_params()?;
         self.expect(&TokenKind::Colon)?;
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
@@ -857,6 +1008,7 @@ impl<'a> Parser<'a> {
         Ok(Node::Enum(EnumDef {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
+            generic_params,
             variants,
             is_public: false,
         }))
@@ -896,6 +1048,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Trait)?;
         let name = self.expect_identifier()?;
+        // Parse optional generic parameters: trait Foo<T>
+        let generic_params = self.parse_generic_params()?;
         self.expect(&TokenKind::Colon)?;
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
@@ -921,6 +1075,7 @@ impl<'a> Parser<'a> {
         Ok(Node::Trait(TraitDef {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
+            generic_params,
             methods,
             is_public: false,
         }))
@@ -1123,6 +1278,7 @@ impl<'a> Parser<'a> {
             TokenKind::Integer(_)
                 | TokenKind::Float(_)
                 | TokenKind::String(_)
+                | TokenKind::RawString(_)
                 | TokenKind::FString(_)
                 | TokenKind::Bool(_)
                 | TokenKind::Nil
@@ -1424,11 +1580,21 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ampersand => {
                 self.advance();
-                let operand = self.parse_unary()?;
-                Ok(Expr::Unary {
-                    op: UnaryOp::Ref,
-                    operand: Box::new(operand),
-                })
+                // Check for &mut expr (mutable borrow)
+                if self.check(&TokenKind::Mut) {
+                    self.advance();
+                    let operand = self.parse_unary()?;
+                    Ok(Expr::Unary {
+                        op: UnaryOp::RefMut,
+                        operand: Box::new(operand),
+                    })
+                } else {
+                    let operand = self.parse_unary()?;
+                    Ok(Expr::Unary {
+                        op: UnaryOp::Ref,
+                        operand: Box::new(operand),
+                    })
+                }
             }
             TokenKind::Star => {
                 self.advance();
@@ -1443,6 +1609,16 @@ impl<'a> Parser<'a> {
                 let operand = self.parse_unary()?;
                 Ok(Expr::Await(Box::new(operand)))
             }
+            TokenKind::Yield => {
+                self.advance();
+                // yield can be bare (yield) or with value (yield expr)
+                if self.is_at_end() || matches!(self.current.kind, TokenKind::Newline | TokenKind::Dedent | TokenKind::RParen | TokenKind::RBrace | TokenKind::Comma) {
+                    Ok(Expr::Yield(None))
+                } else {
+                    let operand = self.parse_unary()?;
+                    Ok(Expr::Yield(Some(Box::new(operand))))
+                }
+            }
             _ => self.parse_postfix(),
         }
     }
@@ -1454,6 +1630,16 @@ impl<'a> Parser<'a> {
             match &self.current.kind {
                 TokenKind::LParen => {
                     expr = self.parse_call(expr)?;
+                }
+                TokenKind::Bang => {
+                    // Macro invocation: name!(args)
+                    if let Expr::Identifier(name) = expr {
+                        self.advance(); // consume !
+                        let args = self.parse_macro_args()?;
+                        expr = Expr::MacroInvocation { name, args };
+                    } else {
+                        break;
+                    }
                 }
                 TokenKind::LBracket => {
                     self.advance();
@@ -1586,6 +1772,43 @@ impl<'a> Parser<'a> {
         Ok(args)
     }
 
+    /// Parse macro invocation arguments: !(args) or !{args} or ![args]
+    fn parse_macro_args(&mut self) -> Result<Vec<MacroArg>, ParseError> {
+        // Macros can use (), {}, or [] for their arguments
+        let (open, close) = if self.check(&TokenKind::LParen) {
+            (TokenKind::LParen, TokenKind::RParen)
+        } else if self.check(&TokenKind::LBrace) {
+            (TokenKind::LBrace, TokenKind::RBrace)
+        } else if self.check(&TokenKind::LBracket) {
+            (TokenKind::LBracket, TokenKind::RBracket)
+        } else {
+            return Err(ParseError::unexpected_token(
+                "'(', '{', or '['",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        };
+
+        self.advance(); // consume opening delimiter
+        let mut args = Vec::new();
+
+        while !self.check(&close) {
+            // Try to parse as expression
+            let expr = self.parse_expression()?;
+            args.push(MacroArg::Expr(expr));
+
+            if !self.check(&close) {
+                // Allow comma or semicolon as separator
+                if self.check(&TokenKind::Comma) || self.check(&TokenKind::Semicolon) {
+                    self.advance();
+                }
+            }
+        }
+
+        self.expect(&close)?;
+        Ok(args)
+    }
+
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
             TokenKind::Integer(n) => {
@@ -1599,6 +1822,12 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Float(n))
             }
             TokenKind::String(s) => {
+                let s = s.clone();
+                self.advance();
+                Ok(Expr::String(s))
+            }
+            TokenKind::RawString(s) => {
+                // Raw strings are just plain strings with no interpolation
                 let s = s.clone();
                 self.advance();
                 Ok(Expr::String(s))
@@ -1807,6 +2036,13 @@ impl<'a> Parser<'a> {
                     else_branch,
                 })
             }
+            TokenKind::Dollar => {
+                // Macro parameter reference: $name
+                self.advance();
+                let name = self.expect_identifier()?;
+                // Return as identifier with $ prefix for macro substitution
+                Ok(Expr::Identifier(format!("${}", name)))
+            }
             _ => Err(ParseError::unexpected_token(
                 "expression",
                 format!("{:?}", self.current.kind),
@@ -1874,10 +2110,22 @@ impl<'a> Parser<'a> {
                     return Ok(Pattern::Enum { name, variant, payload });
                 }
 
+                // Check for typed pattern: name: Type (for union type discrimination)
+                // This must be distinguished from struct field patterns, which are only
+                // valid inside struct patterns (handled above in LBrace case)
+                if self.check(&TokenKind::Colon) {
+                    self.advance();
+                    let ty = self.parse_type()?;
+                    return Ok(Pattern::Typed {
+                        pattern: Box::new(Pattern::Identifier(name)),
+                        ty,
+                    });
+                }
+
                 Ok(Pattern::Identifier(name))
             }
             TokenKind::Integer(_) | TokenKind::Float(_) | TokenKind::String(_)
-            | TokenKind::Bool(_) | TokenKind::Nil => {
+            | TokenKind::RawString(_) | TokenKind::FString(_) | TokenKind::Bool(_) | TokenKind::Nil => {
                 let expr = self.parse_primary()?;
                 Ok(Pattern::Literal(Box::new(expr)))
             }
@@ -1960,6 +2208,38 @@ impl<'a> Parser<'a> {
                 self.current.span,
             ))
         }
+    }
+
+    /// Check if a type should be treated as a borrow type
+    /// Types ending with _borrow are borrow references
+    fn is_borrow_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Simple(name) => name.ends_with("_borrow"),
+            Type::Generic { name, .. } => name.ends_with("_borrow"),
+            _ => false,
+        }
+    }
+
+    /// Parse generic type parameters: <T, U, V>
+    /// Returns empty Vec if no generic parameters are present
+    fn parse_generic_params(&mut self) -> Result<Vec<String>, ParseError> {
+        if !self.check(&TokenKind::Lt) {
+            return Ok(Vec::new());
+        }
+        self.advance(); // consume '<'
+
+        let mut params = Vec::new();
+        while !self.check(&TokenKind::Gt) {
+            let name = self.expect_identifier()?;
+            params.push(name);
+
+            if !self.check(&TokenKind::Gt) {
+                self.expect(&TokenKind::Comma)?;
+            }
+        }
+        self.expect(&TokenKind::Gt)?; // consume '>'
+
+        Ok(params)
     }
 }
 

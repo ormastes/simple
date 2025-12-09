@@ -1,25 +1,58 @@
-# Feature: Unique Pointers (#25)
+# Feature #25: Unique Pointers
 
-**Memory/Pointer Feature**
-- **Importance**: 4/5
-- **Difficulty**: 4/5
-- **Status**: COMPLETED
+**Status**: Implemented
+**Difficulty**: 4
+**Importance**: 4
 
-## Goal
+## Summary
 
-Introduce a manual memory domain that mirrors the language's `&T` unique pointer: move-only ownership, deterministic drop, and explicit lifecycle tracking separate from the GC-managed default.
+Unique pointers (`&T`) provide move-only ownership with deterministic drop, separate from GC-managed memory.
+
+## Syntax
+
+```simple
+# Create a unique pointer
+let ptr = new & 42
+
+# Access value (implicit deref)
+main = ptr  # Returns 42
+```
+
+## Features
+
+- [x] `new &` allocation syntax
+- [x] `Unique<T>` type in runtime (common crate)
+- [x] Move-only semantics
+- [x] Deterministic drop
+- [x] `into_inner()` consumption
+- [x] Lifecycle tracking via `ManualGc`
+- [x] `is_valid()` check
+- [x] Deref for value access
+
+## Tests
+
+### Runtime Tests (src/common/tests/manual_unique.rs)
+- `manual_gc_tracks_unique_lifetimes`
+- `into_inner_consumes_pointer_and_updates_tracking`
+- `standalone_unique_allows_mutation_without_tracking`
+
+### Language Tests (src/driver/tests/)
+- `runner_supports_unique_new`
 
 ## Implementation
 
-- Added `simple_common::manual::{ManualGc, Unique}` as the low-level contract for unique pointers.
-- `ManualGc` tracks outstanding allocations (`live`/`collect`) for leak checks; `Unique` enforces move-only semantics, supports safe deref/mutation, and exposes `into_inner`/`is_valid` helpers.
-- Strengthened GC coverage with a trait-level allocator test to validate the `GcAllocator` contract remains usable alongside manual pointers.
+- **common/manual.rs**: `Unique<T>`, `ManualGc`
+- **Interpreter**: Handles `Expr::New { kind: PointerKind::Unique, .. }`
+- **Value**: `Value::Unique(UniqueValue)`
 
-## Testing
+## Related
 
-- New unit tests in `src/common/tests/manual_unique.rs` cover drop tracking, `into_inner` consumption, and standalone unique mutation.
-- Added `src/runtime/tests/gc_allocator.rs` to assert `GcRuntime` satisfies the `GcAllocator` trait surface.
+- #24 GC-Managed Memory (default)
+- #26 Shared Pointers (*T)
+- #27 Weak Pointers (-T)
+- #28 Handle Pointers (+T)
 
-## Notes
+## Future Work
 
-- Shared/weak/handle pointer kinds remain todo; the manual module is structured so those wrappers can piggyback on the same tracker infrastructure when added.
+- Full borrow checking enforcement
+- Move semantics at type level

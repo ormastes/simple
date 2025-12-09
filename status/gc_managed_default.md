@@ -1,19 +1,70 @@
-# Feature: GC-Managed Default (Feature #24)
+# Feature #24: GC-Managed Memory
 
-- **Importance**: 5/5
-- **Difficulty**: 5/5
-- **Status**: COMPLETED
+**Status**: Implemented
+**Difficulty**: 5
+**Importance**: 5
 
-## Plan
-- Define GC handle/allocator traits in `src/common/`.
-- Adapt `runtime::gc::GcRuntime` to implement the allocator contract and expose options/logging.
-- Teach compiler codegen to route default heap allocations through the GC allocator; pointer kinds opt out.
-- Expose CLI flags/env for GC tuning; keep logging via `--gc-log`.
+## Summary
 
-## Current Work
-- `runtime::gc::GcRuntime` wraps Abfall with structured `GcLogEvent` markers and implements `common::gc::GcAllocator`; CLI flag `--gc-log` surfaces events.
-- Driver system tests assert GC logging hooks (runner logger + CLI flag). Compiler will route real allocations once codegen expands beyond the stub.
+Garbage-collected memory management is the default for heap allocations. The runtime includes a working GC with logging support.
 
-## References
-- Plan: `plans/13_type_inference_generics_gc.md`
-- Research: `research/type_inference_generics_gc.md`
+## Features
+
+- [x] GcRuntime implementation (wraps Abfall)
+- [x] GcAllocator trait (common crate)
+- [x] Allocation tracking
+- [x] Manual collection trigger
+- [x] Verbose GC logging with structured events
+- [x] GcLogEvent types: Allocation, CollectionStart, CollectionEnd
+- [x] No-GC mode for performance testing
+- [x] CLI `--gc-log` flag for runtime logging
+- [x] Post-run automatic collection
+
+## Tests
+
+### Runtime Tests (src/runtime/tests/)
+- `gc_allocator::allocator_contract_allocates_and_collects`
+- `gc_logging::verbose_logging_emits_collection_markers`
+- `gc_logging::structured_events_are_emitted`
+- `no_gc_allocator::no_gc_allocator_allocates_without_tracing`
+
+### Runner Tests (src/driver/tests/)
+- `runner_emits_gc_logs_in_verbose_mode`
+- `runner_supports_gc_off_mode`
+- `cli_flag_emits_gc_logs`
+
+## Usage
+
+```rust
+// With GC logging
+let runner = Runner::with_gc_runtime(GcRuntime::with_logger(|event| {
+    println!("{}", event);
+}));
+
+// Without GC
+let runner = Runner::new_no_gc();
+```
+
+```bash
+# CLI with GC logging
+simple-driver run main.spl --gc-log
+```
+
+## Implementation
+
+- **common/gc.rs**: `GcAllocator` trait defining allocator contract
+- **runtime/gc/mod.rs**: `GcRuntime`, `GcLogEvent`, `GcLogEventKind`
+- **driver**: Integration with Runner, CLI flag support
+
+## Log Format
+
+```
+gc:start reason=post-run
+gc:end reason=post-run freed=0 retained=0
+```
+
+## Future Work
+
+- Route actual language allocations through GC (currently stub codegen)
+- Generational collection
+- Concurrent collection

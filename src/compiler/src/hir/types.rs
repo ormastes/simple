@@ -46,6 +46,8 @@ pub enum PointerKind {
     Shared,
     Weak,
     Handle,
+    Borrow,
+    BorrowMut,
 }
 
 impl From<simple_parser::PointerKind> for PointerKind {
@@ -55,6 +57,8 @@ impl From<simple_parser::PointerKind> for PointerKind {
             simple_parser::PointerKind::Shared => PointerKind::Shared,
             simple_parser::PointerKind::Weak => PointerKind::Weak,
             simple_parser::PointerKind::Handle => PointerKind::Handle,
+            simple_parser::PointerKind::Borrow => PointerKind::Borrow,
+            simple_parser::PointerKind::BorrowMut => PointerKind::BorrowMut,
         }
     }
 }
@@ -263,6 +267,7 @@ impl From<simple_parser::UnaryOp> for UnaryOp {
             simple_parser::UnaryOp::Not => UnaryOp::Not,
             simple_parser::UnaryOp::BitNot => UnaryOp::BitNot,
             simple_parser::UnaryOp::Ref => UnaryOp::Not, // Handled separately
+            simple_parser::UnaryOp::RefMut => UnaryOp::Not, // Handled separately
             simple_parser::UnaryOp::Deref => UnaryOp::Not, // Handled separately
         }
     }
@@ -489,6 +494,9 @@ mod tests {
         assert!(module.name.is_none());
         assert!(module.functions.is_empty());
         assert!(module.globals.is_empty());
-        assert!(module.types.lookup("Int").is_some());
+        // Verify builtin types are registered with lowercase names
+        assert!(module.types.lookup("i64").is_some());
+        assert!(module.types.lookup("bool").is_some());
+        assert!(module.types.lookup("str").is_some());
     }
 }

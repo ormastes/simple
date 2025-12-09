@@ -4,7 +4,7 @@ pub mod config_env;
 pub use config_env::ConfigEnv;
 
 pub mod manual;
-pub use manual::{ManualGc, Unique};
+pub use manual::{Handle, HandlePool, ManualGc, Shared, Unique, WeakPtr};
 
 /// Common interface for dynamically loaded modules.
 pub trait DynModule {

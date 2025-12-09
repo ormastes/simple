@@ -228,11 +228,8 @@ impl Lowerer {
                     None
                 };
 
-                let name = match &let_stmt.pattern {
-                    Pattern::Identifier(n) => n.clone(),
-                    Pattern::MutIdentifier(n) => n.clone(),
-                    _ => return Err(LowerError::Unsupported("complex pattern in let".to_string())),
-                };
+                let name = Self::extract_pattern_name(&let_stmt.pattern)
+                    .ok_or_else(|| LowerError::Unsupported("complex pattern in let".to_string()))?;
 
                 let local_index = ctx.add_local(name, ty, let_stmt.is_mutable);
 
@@ -529,6 +526,18 @@ impl Lowerer {
                 }
             }
             _ => Ok(TypeId::UNKNOWN),
+        }
+    }
+}
+
+impl Lowerer {
+    /// Extract the variable name from a pattern, handling typed patterns
+    fn extract_pattern_name(pattern: &Pattern) -> Option<String> {
+        match pattern {
+            Pattern::Identifier(n) => Some(n.clone()),
+            Pattern::MutIdentifier(n) => Some(n.clone()),
+            Pattern::Typed { pattern: inner, .. } => Self::extract_pattern_name(inner),
+            _ => None,
         }
     }
 }

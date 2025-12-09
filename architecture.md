@@ -129,7 +129,10 @@ Install all tools: `make install-tools`
 - Prefer spans with fields (`tracing::info_span!(...)`) over ad-hoc prints; keep logging opt-in for perf-sensitive paths.
 - Rust has no runtime AOP; lean on proc-macros and DSL transforms if we need cross-cutting concerns.
 
-## Next Steps
-- Flesh out `runtime/gc/` with the Abfall-backed wrapper and put GC traits/types into `common`.
-- Expand `CompilerPipeline` to real IR/codegen, still targeting the `common` GC ABI.
-- Add CLI entry to watch/run using `driver::watcher::watch`.
+## Refactoring Plan (grounded in current code)
+- **Stabilize the memory boundary**: keep `simple_common::gc::GcAllocator` the only compiler/runtime contract; re-export `GcRuntime`/`NoGcAllocator` from `runtime::memory` and thread selection through the driver via config/env without leaking Abfall or manual allocators across crates.
+- **Introduce a MIR/CFG layer in `compiler`**: lower parsed AST into a stable, borrow-checkable IR to host alias analysis, region checks, and later optimizations. Keep this IR independent of runtime details so features like borrowing or waitless checks stay local.
+- **Isolate pointer-kind semantics in `common`**: move any new borrow/region markers or handle pool ABI types into `common` and keep parser/runtime unaware of each other; compiler should translate to these markers only.
+- **Module hygiene in runtime**: keep GC backends under `runtime::memory::{gc,no_gc}` and pool/concurrency in separate submodules; avoid cross-imports so swapping GC or introducing arenas does not affect the scheduler.
+- **Diagnostics pipeline**: add a small error-reporting helper crate or module consumed by parser/type/borrow passes so new analyses (borrow checker, effects) can emit consistent spans without coupling passes together.
+- **Driver simplification**: keep watch/build/run orchestration in `driver` using published interfaces only (`compiler::CompilerPipeline`, loaders, `runtime::memory` selection) to avoid circular reach as new features land.

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use simple_common::manual::{ManualGc, Unique};
+use simple_common::manual::{HandlePool, ManualGc, Unique, WeakPtr};
 
 #[derive(Clone)]
 struct DropCounter {
@@ -48,4 +48,22 @@ fn standalone_unique_allows_mutation_without_tracking() {
     assert_eq!(*ptr, 10);
     *ptr = 11;
     assert_eq!(*ptr, 11);
+}
+
+#[test]
+fn shared_and_weak_round_trip() {
+    let gc = ManualGc::new();
+    let shared = gc.alloc_shared(5);
+    let weak: WeakPtr<i32> = shared.downgrade();
+    assert_eq!(weak.upgrade().as_deref(), Some(&5));
+    drop(shared);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn handle_pool_allocates_and_resolves() {
+    let pool: HandlePool<String> = HandlePool::new();
+    let handle = pool.alloc("hi".to_string());
+    let resolved = handle.resolve().unwrap();
+    assert_eq!(resolved.as_str(), "hi");
 }

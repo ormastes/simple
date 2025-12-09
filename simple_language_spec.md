@@ -28,16 +28,31 @@ In the example above, `each` is a method that takes a block. The block is introd
 
 ### Other Syntax Highlights
 
-- **Literals**: Numbers (`42`, `3.14`), strings (`"hello"` or `'single quotes'`), booleans (`true`, `false`), and `nil` for "null" are supported. Underscores can be used in numeric literals for readability (e.g. `1_000_000`).
+- **Literals**: Numbers (`42`, `3.14`), booleans (`true`, `false`), and `nil` for "null" are supported. Underscores can be used in numeric literals for readability (e.g. `1_000_000`).
 
-- **F-strings (String Interpolation)**: Prefix a string with `f` to create an interpolated string where `{expr}` embeds the value of any expression:
+- **String Literals**: Simple has two string literal types:
+
+  **Interpolated Strings (default)** - Double quotes `"..."` create strings with automatic interpolation where `{expr}` embeds the value of any expression:
   ```simple
   let name = "world"
   let count = 42
-  let msg = f"Hello, {name}! Count is {count + 1}"
+  let msg = "Hello, {name}! Count is {count + 1}"
   # Result: "Hello, world! Count is 43"
   ```
-  Use `{{` and `}}` for literal braces.
+  Use `{{` and `}}` for literal braces. This is the default and most common string type.
+
+  **Raw Strings** - Single quotes `'...'` create raw strings with no interpolation or escape processing:
+  ```simple
+  let regex = '[a-z]+\d{2,3}'     # No escaping needed
+  let path = 'C:\Users\name'      # Backslashes are literal
+  let template = '{name}'         # Braces are literal, not interpolation
+  ```
+  Raw strings are useful for regular expressions, file paths, and templates where you want literal backslashes and braces.
+
+  **Legacy f-string prefix**: For compatibility, the `f` prefix is still supported but optional since double-quoted strings interpolate by default:
+  ```simple
+  let msg = f"Hello, {name}!"  # Same as "Hello, {name}!"
+  ```
 
 - **Line Continuation**: A line ending with a backslash `\` followed immediately by a newline will continue on the next line (though in many cases, indentation or parentheses make this unnecessary). Note: This is unambiguous with lambda syntax since line continuation requires `\` at line end, while lambda params have `\` followed by identifiers.
 
@@ -73,7 +88,24 @@ These choices keep the grammar simple and predictable while preserving the langu
 
 ## Functional Update Syntax (`->`)
 
-Simple introduces a functional update syntax using `->`. Writing `object->method(args)` is sugar for reassigning the result of a method call back to the object itself: essentially `object = object.method(args)`. This allows writing fluent transformations in a chain without repeating the variable name explicitly. For example:
+Simple introduces a functional update syntax using `->`. Writing `target->method(args)` is syntactic sugar that:
+1. Calls `target.method(args)`
+2. Assigns the result back to `target`
+
+This is equivalent to `target = target.method(args)` but more concise.
+
+### Basic Usage
+
+```simple
+let mut data = load_data()
+data->normalize()           # data = data.normalize()
+data->filter(min: 0)        # data = data.filter(min: 0)
+data->save("out.txt")       # data = data.save("out.txt")
+```
+
+### Chaining
+
+Multiple updates can be chained in a single expression:
 
 ```simple
 data->normalize()->filter(min: 0)->save("out.txt")
@@ -87,7 +119,34 @@ data = data.filter(min: 0)
 data = data.save("out.txt")
 ```
 
-The `->` operator thus simplifies in-place updates by making them look like method calls, improving readability for workflows where an object undergoes a sequence of transformations.
+### Use Cases
+
+The `->` operator is particularly useful for:
+
+1. **Immutable data transformations** - When methods return new instances rather than mutating in place:
+   ```simple
+   let mut list = [1, 2, 3]
+   list->append(4)->sort()->reverse()
+   # list is now [4, 3, 2, 1]
+   ```
+
+2. **Builder patterns** - When constructing objects step by step:
+   ```simple
+   let mut config = Config.new()
+   config->set_host("localhost")->set_port(8080)->set_timeout(30)
+   ```
+
+3. **State machine transitions** - When updating state:
+   ```simple
+   let mut parser = Parser.new(input)
+   parser->read_header()->validate()->parse_body()
+   ```
+
+### Requirements
+
+- The target must be a mutable variable (`let mut` or mutable field)
+- The method must return a value compatible with the target's type
+- Works with any expression that evaluates to an assignable location
 
 ---
 

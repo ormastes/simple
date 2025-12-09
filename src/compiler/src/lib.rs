@@ -1,7 +1,12 @@
+pub mod hir;
+pub mod mir;
+pub mod codegen;
+
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::fmt;
 use std::sync::{Arc, Mutex, mpsc};
 
 use simple_loader::smf::{
@@ -9,11 +14,14 @@ use simple_loader::smf::{
     SMF_FLAG_EXECUTABLE, SMF_MAGIC, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
 };
 use simple_parser::ast::{
-    AssignOp, BinOp, Block, ClassDef, ConstStmt, ContextStmt, Expr, ExternDef, FStringPart, FunctionDef, IfStmt, LambdaParam,
-    MatchStmt, Node, Pattern, PointerKind, StaticStmt, Type, UnaryOp,
+    AssignOp, BinOp, Block, ClassDef, ConstStmt, ContextStmt, Effect, Expr, ExternDef, FStringPart, FunctionDef, IfStmt, LambdaParam,
+    MacroArg, MacroDef, MacroBody, MacroParam, MatchStmt, Node, Pattern, PointerKind, StaticStmt, Type, UnaryOp,
 };
 use simple_common::gc::GcAllocator;
-use simple_common::manual::{ManualGc, Unique as ManualUnique};
+use simple_common::manual::{
+    Handle as ManualHandle, HandlePool as ManualHandlePool, ManualGc, Shared as ManualShared,
+    Unique as ManualUnique, WeakPtr as ManualWeak,
+};
 use simple_runtime::concurrency::{self, ActorHandle, Message};
 use simple_type::check as type_check;
 // Type checking lives in the separate crate simple-type
@@ -40,8 +48,172 @@ enum Value {
     Object { class: String, fields: HashMap<String, Value> },
     Enum { enum_name: String, variant: String, payload: Option<Box<Value>> },
     Actor(ActorHandle),
+    Future(FutureValue),
+    Generator(GeneratorValue),
     Unique(ManualUniqueValue),
+    Shared(ManualSharedValue),
+    Weak(ManualWeakValue),
+    Handle(ManualHandleValue),
+    Borrow(BorrowValue),
+    BorrowMut(BorrowMutValue),
     Nil,
+}
+
+/// A future that wraps a thread join handle and result
+#[derive(Debug)]
+struct FutureValue {
+    result: Arc<Mutex<Option<Result<Value, String>>>>,
+    handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+}
+
+impl FutureValue {
+    /// Create a new future from a computation
+    fn new<F>(f: F) -> Self
+    where
+        F: FnOnce() -> Result<Value, String> + Send + 'static,
+    {
+        let result: Arc<Mutex<Option<Result<Value, String>>>> = Arc::new(Mutex::new(None));
+        let result_clone = result.clone();
+        let handle = std::thread::spawn(move || {
+            let res = f();
+            *result_clone.lock().unwrap() = Some(res);
+        });
+        FutureValue {
+            result,
+            handle: Arc::new(Mutex::new(Some(handle))),
+        }
+    }
+
+    /// Wait for the future to complete and return the result
+    fn await_result(&self) -> Result<Value, String> {
+        // First, join the thread if it's still running
+        if let Some(handle) = self.handle.lock().unwrap().take() {
+            let _ = handle.join();
+        }
+        // Then get the result
+        self.result
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or(Err("future result already consumed".to_string()))
+    }
+
+    /// Check if the future is completed without blocking
+    fn is_ready(&self) -> bool {
+        self.result.lock().unwrap().is_some()
+    }
+}
+
+impl Clone for FutureValue {
+    fn clone(&self) -> Self {
+        FutureValue {
+            result: self.result.clone(),
+            handle: self.handle.clone(),
+        }
+    }
+}
+
+impl PartialEq for FutureValue {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.result, &other.result)
+    }
+}
+
+/// Generator state for stackless coroutines
+#[derive(Debug, Clone, PartialEq)]
+enum GeneratorState {
+    /// Initial state, not yet started
+    Created,
+    /// Suspended at a yield point, waiting to be resumed
+    Suspended,
+    /// Completed (returned or exhausted)
+    Completed,
+}
+
+/// A stackless coroutine/generator that can yield values
+/// Uses a simple iterator-based model where we collect all yields upfront
+#[derive(Debug)]
+struct GeneratorValue {
+    /// Pre-computed yielded values (simple implementation)
+    values: Arc<Mutex<Vec<Value>>>,
+    /// Current index into values
+    index: Arc<Mutex<usize>>,
+    /// Current state
+    state: Arc<Mutex<GeneratorState>>,
+}
+
+impl GeneratorValue {
+    /// Create a new generator with pre-computed values
+    fn new_with_values(values: Vec<Value>) -> Self {
+        GeneratorValue {
+            values: Arc::new(Mutex::new(values)),
+            index: Arc::new(Mutex::new(0)),
+            state: Arc::new(Mutex::new(GeneratorState::Created)),
+        }
+    }
+
+    /// Get the next yielded value
+    fn next(&self) -> Option<Value> {
+        let mut state = self.state.lock().unwrap();
+        if *state == GeneratorState::Completed {
+            return None;
+        }
+        *state = GeneratorState::Suspended;
+        drop(state);
+
+        let values = self.values.lock().unwrap();
+        let mut index = self.index.lock().unwrap();
+
+        if *index < values.len() {
+            let val = values[*index].clone();
+            *index += 1;
+
+            // Check if exhausted
+            if *index >= values.len() {
+                drop(index);
+                drop(values);
+                *self.state.lock().unwrap() = GeneratorState::Completed;
+            }
+
+            Some(val)
+        } else {
+            drop(index);
+            drop(values);
+            *self.state.lock().unwrap() = GeneratorState::Completed;
+            None
+        }
+    }
+
+    /// Check if the generator is exhausted
+    fn is_done(&self) -> bool {
+        *self.state.lock().unwrap() == GeneratorState::Completed
+    }
+
+    /// Collect all remaining values into an array
+    fn collect_remaining(&self) -> Vec<Value> {
+        let mut results = Vec::new();
+        while let Some(val) = self.next() {
+            results.push(val);
+        }
+        results
+    }
+}
+
+impl Clone for GeneratorValue {
+    fn clone(&self) -> Self {
+        // Share the same underlying state so iteration continues
+        GeneratorValue {
+            values: self.values.clone(),
+            index: self.index.clone(),  // Share the index Arc
+            state: self.state.clone(),  // Share the state Arc
+        }
+    }
+}
+
+impl PartialEq for GeneratorValue {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.values, &other.values)
+    }
 }
 
 impl Value {
@@ -50,6 +222,11 @@ impl Value {
             Value::Int(i) => Ok(*i),
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
             Value::Unique(u) => u.inner().as_int(),
+            Value::Shared(s) => s.inner().as_int(),
+            Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).as_int(),
+            Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).as_int(),
+            Value::Borrow(b) => b.inner().as_int(),
+            Value::BorrowMut(b) => b.inner().as_int(),
             Value::Str(_) => Err(CompileError::Semantic("expected int, got string".into())),
             Value::Symbol(_) => Err(CompileError::Semantic("expected int, got symbol".into())),
             Value::Nil => Ok(0),
@@ -66,6 +243,11 @@ impl Value {
             Value::Str(s) => s.clone(),
             Value::Symbol(s) => s.clone(),
             Value::Unique(u) => u.inner().to_key_string(),
+            Value::Shared(s) => s.inner().to_key_string(),
+            Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).to_key_string(),
+            Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).to_key_string(),
+            Value::Borrow(b) => b.inner().to_key_string(),
+            Value::BorrowMut(b) => b.inner().to_key_string(),
             Value::Nil => "nil".to_string(),
             other => format!("{other:?}"),
         }
@@ -82,7 +264,12 @@ impl Value {
             Value::Dict(d) => !d.is_empty(),
             Value::Nil => false,
             Value::Unique(u) => u.inner().truthy(),
-            Value::Object { .. } | Value::Enum { .. } | Value::Lambda { .. } | Value::Actor(_) => true,
+            Value::Shared(s) => s.inner().truthy(),
+            Value::Weak(w) => w.upgrade_inner().map_or(false, |v| v.truthy()),
+            Value::Handle(h) => h.resolve_inner().map_or(false, |v| v.truthy()),
+            Value::Borrow(b) => b.inner().truthy(),
+            Value::BorrowMut(b) => b.inner().truthy(),
+            Value::Object { .. } | Value::Enum { .. } | Value::Lambda { .. } | Value::Actor(_) | Value::Future(_) | Value::Generator(_) => true,
         }
     }
 
@@ -106,15 +293,104 @@ impl Value {
             }
             Value::Nil => "nil".into(),
             Value::Unique(u) => format!("&{}", u.inner().to_display_string()),
+            Value::Shared(s) => format!("*{}", s.inner().to_display_string()),
+            Value::Weak(w) => {
+                if let Some(v) = w.upgrade_inner() {
+                    format!("-{}", v.to_display_string())
+                } else {
+                    "-<dangling>".into()
+                }
+            }
+            Value::Handle(h) => {
+                if let Some(v) = h.resolve_inner() {
+                    format!("+{}", v.to_display_string())
+                } else {
+                    "+<released>".into()
+                }
+            }
+            Value::Borrow(b) => format!("&{}", b.inner().to_display_string()),
+            Value::BorrowMut(b) => format!("&mut {}", b.inner().to_display_string()),
             other => format!("{other:?}"),
         }
     }
 
     /// Convert a unique pointer into its inner value (clone) for read-only operations.
-    fn deref_unique(self) -> Value {
+    fn deref_pointer(self) -> Value {
         match self {
             Value::Unique(u) => u.into_inner(),
+            Value::Shared(s) => s.into_inner(),
+            Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil),
+            Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil),
+            Value::Borrow(b) => b.inner().clone(),
+            Value::BorrowMut(b) => b.inner().clone(),
             other => other,
+        }
+    }
+
+    /// Get the runtime type name for this value (used for union type discrimination)
+    fn type_name(&self) -> &'static str {
+        match self {
+            Value::Int(_) => "i64",
+            Value::Bool(_) => "bool",
+            Value::Str(_) => "str",
+            Value::Symbol(_) => "symbol",
+            Value::Array(_) => "array",
+            Value::Tuple(_) => "tuple",
+            Value::Dict(_) => "dict",
+            Value::Lambda { .. } => "function",
+            Value::Object { class, .. } => {
+                // For objects, we'd need to return the class name dynamically
+                // For now, return a static string
+                "object"
+            }
+            Value::Enum { .. } => "enum",
+            Value::Actor(_) => "actor",
+            Value::Future(_) => "future",
+            Value::Generator(_) => "generator",
+            Value::Unique(_) => "unique",
+            Value::Shared(_) => "shared",
+            Value::Weak(_) => "weak",
+            Value::Handle(_) => "handle",
+            Value::Borrow(_) => "borrow",
+            Value::BorrowMut(_) => "borrow_mut",
+            Value::Nil => "nil",
+        }
+    }
+
+    /// Check if this value matches a given type name (for union type discrimination)
+    fn matches_type(&self, type_name: &str) -> bool {
+        match type_name {
+            // Integer types
+            "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "Int" => {
+                matches!(self, Value::Int(_))
+            }
+            // Float types
+            "f32" | "f64" | "float" | "Float" => {
+                // Currently we store floats as Int, but this would be for actual Float values
+                matches!(self, Value::Int(_)) // TODO: Add proper Float value type
+            }
+            // Boolean
+            "bool" | "Bool" => matches!(self, Value::Bool(_)),
+            // String types
+            "str" | "String" | "Str" => matches!(self, Value::Str(_)),
+            // Nil/None
+            "nil" | "Nil" | "None" => matches!(self, Value::Nil),
+            // Array
+            "array" | "Array" => matches!(self, Value::Array(_)),
+            // Tuple
+            "tuple" | "Tuple" => matches!(self, Value::Tuple(_)),
+            // Dict
+            "dict" | "Dict" => matches!(self, Value::Dict(_)),
+            // Check for object class name
+            _ => {
+                if let Value::Object { class, .. } = self {
+                    class == type_name
+                } else if let Value::Enum { enum_name, .. } = self {
+                    enum_name == type_name
+                } else {
+                    false
+                }
+            }
         }
     }
 }
@@ -151,6 +427,186 @@ impl PartialEq for ManualUniqueValue {
     }
 }
 
+#[derive(Debug)]
+struct ManualSharedValue {
+    ptr: ManualShared<Value>,
+}
+
+impl ManualSharedValue {
+    fn new(value: Value) -> Self {
+        MANUAL_GC.with(|gc| Self { ptr: gc.alloc_shared(value) })
+    }
+
+    fn inner(&self) -> &Value {
+        &self.ptr
+    }
+
+    fn into_inner(self) -> Value {
+        (*self.ptr).clone()
+    }
+}
+
+impl Clone for ManualSharedValue {
+    fn clone(&self) -> Self {
+        Self { ptr: self.ptr.clone() }
+    }
+}
+
+impl PartialEq for ManualSharedValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner() == other.inner()
+    }
+}
+
+struct ManualWeakValue {
+    ptr: ManualWeak<Value>,
+}
+
+impl fmt::Debug for ManualWeakValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ManualWeakValue")
+    }
+}
+
+impl ManualWeakValue {
+    fn new_from_shared(shared: &ManualSharedValue) -> Self {
+        Self { ptr: shared.ptr.downgrade() }
+    }
+
+    fn upgrade_inner(&self) -> Option<Value> {
+        self.ptr.upgrade().map(|s| (*s).clone())
+    }
+}
+
+impl Clone for ManualWeakValue {
+    fn clone(&self) -> Self {
+        Self { ptr: self.ptr.clone() }
+    }
+}
+
+impl PartialEq for ManualWeakValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.upgrade_inner() == other.upgrade_inner()
+    }
+}
+
+struct ManualHandleValue {
+    handle: ManualHandle<Value>,
+}
+
+impl fmt::Debug for ManualHandleValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ManualHandleValue")
+    }
+}
+
+impl ManualHandleValue {
+    fn new(value: Value) -> Self {
+        let pool = ManualHandlePool::new();
+        Self { handle: pool.alloc(value) }
+    }
+
+    fn resolve_inner(&self) -> Option<Value> {
+        self.handle.resolve().map(|v| (*v).clone())
+    }
+}
+
+impl Clone for ManualHandleValue {
+    fn clone(&self) -> Self {
+        Self { handle: self.handle.clone() }
+    }
+}
+
+impl PartialEq for ManualHandleValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.resolve_inner() == other.resolve_inner()
+    }
+}
+
+use std::sync::RwLock;
+
+/// Immutable borrow - uses RwLock for thread-safe runtime borrow checking
+/// Multiple immutable borrows are allowed simultaneously
+#[derive(Debug)]
+struct BorrowValue {
+    /// The borrowed value (shared via Arc + RwLock for thread-safe runtime checking)
+    inner: Arc<RwLock<Value>>,
+}
+
+impl BorrowValue {
+    fn new(value: Value) -> Self {
+        Self { inner: Arc::new(RwLock::new(value)) }
+    }
+
+    fn from_arc(arc: Arc<RwLock<Value>>) -> Self {
+        Self { inner: arc }
+    }
+
+    fn inner(&self) -> std::sync::RwLockReadGuard<'_, Value> {
+        self.inner.read().unwrap()
+    }
+
+    fn get_arc(&self) -> Arc<RwLock<Value>> {
+        self.inner.clone()
+    }
+}
+
+impl Clone for BorrowValue {
+    fn clone(&self) -> Self {
+        // Cloning a borrow shares the same underlying reference
+        Self { inner: self.inner.clone() }
+    }
+}
+
+impl PartialEq for BorrowValue {
+    fn eq(&self, other: &Self) -> bool {
+        *self.inner.read().unwrap() == *other.inner.read().unwrap()
+    }
+}
+
+/// Mutable borrow - uses RwLock for thread-safe runtime borrow checking
+/// Only one mutable borrow is allowed at a time (enforced at runtime via RwLock)
+#[derive(Debug)]
+struct BorrowMutValue {
+    /// The borrowed value (shared via Arc + RwLock for thread-safe runtime checking)
+    inner: Arc<RwLock<Value>>,
+}
+
+impl BorrowMutValue {
+    fn new(value: Value) -> Self {
+        Self { inner: Arc::new(RwLock::new(value)) }
+    }
+
+    fn from_arc(arc: Arc<RwLock<Value>>) -> Self {
+        Self { inner: arc }
+    }
+
+    fn inner(&self) -> std::sync::RwLockReadGuard<'_, Value> {
+        self.inner.read().unwrap()
+    }
+
+    fn inner_mut(&self) -> std::sync::RwLockWriteGuard<'_, Value> {
+        self.inner.write().unwrap()
+    }
+
+    fn get_arc(&self) -> Arc<RwLock<Value>> {
+        self.inner.clone()
+    }
+}
+
+impl Clone for BorrowMutValue {
+    fn clone(&self) -> Self {
+        // Cloning a mutable borrow shares the same underlying reference
+        Self { inner: self.inner.clone() }
+    }
+}
+
+impl PartialEq for BorrowMutValue {
+    fn eq(&self, other: &Self) -> bool {
+        *self.inner.read().unwrap() == *other.inner.read().unwrap()
+    }
+}
+
 impl Clone for Value {
     fn clone(&self) -> Self {
         match self {
@@ -173,7 +629,14 @@ impl Clone for Value {
                 payload: payload.clone(),
             },
             Value::Actor(handle) => Value::Actor(handle.clone()),
+            Value::Future(f) => Value::Future(f.clone()),
+            Value::Generator(g) => Value::Generator(g.clone()),
             Value::Unique(u) => Value::Unique(u.clone()),
+            Value::Shared(s) => Value::Shared(s.clone()),
+            Value::Weak(w) => Value::Weak(w.clone()),
+            Value::Handle(h) => Value::Handle(h.clone()),
+            Value::Borrow(b) => Value::Borrow(b.clone()),
+            Value::BorrowMut(b) => Value::BorrowMut(b.clone()),
             Value::Nil => Value::Nil,
         }
     }
@@ -197,7 +660,13 @@ impl PartialEq for Value {
                 ea == eb && va == vb && pa == pb
             }
             (Value::Actor(_), Value::Actor(_)) => true,
+            (Value::Future(a), Value::Future(b)) => a == b,
             (Value::Unique(a), Value::Unique(b)) => a == b,
+            (Value::Shared(a), Value::Shared(b)) => a == b,
+            (Value::Weak(a), Value::Weak(b)) => a == b,
+            (Value::Handle(a), Value::Handle(b)) => a == b,
+            (Value::Borrow(a), Value::Borrow(b)) => a == b,
+            (Value::BorrowMut(a), Value::BorrowMut(b)) => a == b,
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }
@@ -211,6 +680,45 @@ thread_local! {
     static EXTERN_FUNCTIONS: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
     /// Current context object for context blocks (DSL support)
     static CONTEXT_OBJECT: RefCell<Option<Value>> = RefCell::new(None);
+    /// Current function effect for effect checking (Waitless, Async, None)
+    static CURRENT_EFFECT: RefCell<Option<Effect>> = RefCell::new(None);
+    /// Accumulated yield values during generator execution
+    static GENERATOR_YIELDS: RefCell<Option<Vec<Value>>> = RefCell::new(None);
+    /// User-defined macros
+    static USER_MACROS: RefCell<HashMap<String, MacroDef>> = RefCell::new(HashMap::new());
+}
+
+/// Operations that are considered "blocking" and not allowed in waitless functions
+const BLOCKING_OPERATIONS: &[&str] = &[
+    "recv",      // Blocking receive from channel
+    "join",      // Blocking wait for actor/future
+    "await",     // Blocking await (in this context)
+    "sleep",     // Thread sleep
+    "read_file", // File I/O
+    "write_file",
+    "print",     // I/O operations
+    "println",
+    "input",     // User input
+];
+
+/// Check if an operation is blocking (not allowed in waitless functions)
+fn is_blocking_operation(name: &str) -> bool {
+    BLOCKING_OPERATIONS.contains(&name)
+}
+
+/// Check if we're in a waitless context and report error if blocking operation is used
+fn check_waitless_violation(operation: &str) -> Result<(), CompileError> {
+    CURRENT_EFFECT.with(|cell| {
+        if let Some(Effect::Waitless) = *cell.borrow() {
+            if is_blocking_operation(operation) {
+                return Err(CompileError::Semantic(format!(
+                    "blocking operation '{}' not allowed in waitless function",
+                    operation
+                )));
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
@@ -260,6 +768,9 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 /// Stores extern function declarations: name -> definition
 type ExternFunctions = HashMap<String, ExternDef>;
 
+/// Stores macro definitions: name -> definition
+type Macros = HashMap<String, MacroDef>;
+
 /// Evaluate the module and return the `main` binding as an i32.
 #[instrument(skip(items))]
 fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
@@ -273,6 +784,7 @@ fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
     let mut enums: Enums = HashMap::new();
     let mut impl_methods: ImplMethods = HashMap::new();
     let mut extern_functions: ExternFunctions = HashMap::new();
+    let mut macros: Macros = HashMap::new();
 
     for item in items {
         match item {
@@ -316,6 +828,12 @@ fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 extern_functions.insert(ext.name.clone(), ext.clone());
                 // Register in thread-local for call resolution
                 EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().insert(ext.name.clone()));
+            }
+            Node::Macro(m) => {
+                // Store macro definition for later expansion
+                macros.insert(m.name.clone(), m.clone());
+                // Register in thread-local for macro invocation resolution
+                USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
             }
             Node::Let(_) | Node::Const(_) | Node::Static(_) | Node::Assignment(_) | Node::If(_) | Node::For(_) | Node::While(_) | Node::Loop(_) | Node::Match(_) | Node::Context(_) => {
                 if let Control::Return(val) = exec_node(item, &mut env, &functions, &classes, &enums, &impl_methods)? {
@@ -988,9 +1506,29 @@ fn pattern_matches(
             Ok(false)
         }
 
-        Pattern::Typed { pattern, .. } => {
-            // For now, ignore the type annotation and just match the pattern
-            pattern_matches(pattern, value, bindings, enums)
+        Pattern::Typed { pattern, ty } => {
+            // Check if the value matches the type annotation
+            // This is the key for union type discrimination
+            let type_matches = match ty {
+                Type::Simple(name) => value.matches_type(name),
+                Type::Union(types) => {
+                    // For union types, check if value matches any member
+                    types.iter().any(|t| {
+                        if let Type::Simple(name) = t {
+                            value.matches_type(name)
+                        } else {
+                            true // Allow other complex types for now
+                        }
+                    })
+                }
+                _ => true, // For complex types, defer to pattern matching
+            };
+
+            if type_matches {
+                pattern_matches(pattern, value, bindings, enums)
+            } else {
+                Ok(false)
+            }
         }
 
         Pattern::Rest => {
@@ -1043,11 +1581,23 @@ fn evaluate_expr(
                 .ok_or_else(|| CompileError::Semantic(format!("undefined variable: {name}")))
         },
         Expr::New { kind, expr } => {
-            if *kind != PointerKind::Unique {
-                return Err(CompileError::Semantic("only unique (&) allocation is supported right now".into()));
-            }
             let inner = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
-            Ok(Value::Unique(ManualUniqueValue::new(inner)))
+            match kind {
+                PointerKind::Unique => Ok(Value::Unique(ManualUniqueValue::new(inner))),
+                PointerKind::Shared => Ok(Value::Shared(ManualSharedValue::new(inner))),
+                PointerKind::Weak => {
+                    if let Value::Shared(shared) = inner {
+                        Ok(Value::Weak(ManualWeakValue::new_from_shared(&shared)))
+                    } else {
+                        Err(CompileError::Semantic(
+                            "new - expects a shared pointer to create a weak reference".into(),
+                        ))
+                    }
+                }
+                PointerKind::Handle => Ok(Value::Handle(ManualHandleValue::new(inner))),
+                PointerKind::Borrow => Ok(Value::Borrow(BorrowValue::new(inner))),
+                PointerKind::BorrowMut => Ok(Value::BorrowMut(BorrowMutValue::new(inner))),
+            }
         }
         Expr::Binary { op, left, right } => {
             let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
@@ -1097,6 +1647,9 @@ fn evaluate_expr(
             match op {
                 UnaryOp::Neg => Ok(Value::Int(-val.as_int()?)),
                 UnaryOp::Not => Ok(Value::Bool(!val.truthy())),
+                UnaryOp::Ref => Ok(Value::Borrow(BorrowValue::new(val))),
+                UnaryOp::RefMut => Ok(Value::BorrowMut(BorrowMutValue::new(val))),
+                UnaryOp::Deref => Ok(val.deref_pointer()),
                 _ => Err(CompileError::Semantic("unsupported unary op".into())),
             }
         }
@@ -1174,27 +1727,45 @@ fn evaluate_expr(
                         return Err(CompileError::Semantic("send target must be actor".into()));
                     }
                     "recv" => {
-                        if !args.is_empty() {
-                            return Err(CompileError::Semantic("recv takes no arguments".into()));
+                        check_waitless_violation("recv")?;
+                        // recv() - receive from own inbox (inside actor)
+                        // recv(handle) - receive from actor's outbox (outside actor)
+                        if args.is_empty() {
+                            // Inside actor: receive from own inbox with timeout
+                            let msg = ACTOR_INBOX.with(|cell| {
+                                cell.borrow()
+                                    .as_ref()
+                                    .ok_or_else(|| CompileError::Semantic("recv called outside actor without handle".into()))
+                                    .and_then(|rx| {
+                                        rx.lock()
+                                            .map_err(|_| CompileError::Semantic("actor inbox lock poisoned".into()))
+                                            .and_then(|receiver| {
+                                                // Use recv_timeout to avoid deadlock
+                                                receiver
+                                                    .recv_timeout(std::time::Duration::from_secs(5))
+                                                    .map_err(|e| CompileError::Semantic(format!("recv timeout: {e}")))
+                                            })
+                                    })
+                            })?;
+                            return Ok(match msg {
+                                Message::Value(s) => Value::Str(s),
+                                Message::Bytes(b) => Value::Str(String::from_utf8_lossy(&b).to_string()),
+                            });
+                        } else {
+                            // Outside actor: receive from actor's outbox
+                            let handle_arg = &args[0];
+                            let handle_val = evaluate_expr(&handle_arg.value, env, functions, classes, enums, impl_methods)?;
+                            if let Value::Actor(handle) = handle_val {
+                                // Use recv_timeout to avoid deadlock
+                                let msg = handle.recv_timeout(std::time::Duration::from_secs(5))
+                                    .map_err(|e| CompileError::Semantic(e))?;
+                                return Ok(match msg {
+                                    Message::Value(s) => Value::Str(s),
+                                    Message::Bytes(b) => Value::Str(String::from_utf8_lossy(&b).to_string()),
+                                });
+                            }
+                            return Err(CompileError::Semantic("recv expects actor handle".into()));
                         }
-                        let msg = ACTOR_INBOX.with(|cell| {
-                            cell.borrow()
-                                .as_ref()
-                                .ok_or_else(|| CompileError::Semantic("recv called outside actor".into()))
-                                .and_then(|rx| {
-                                    rx.lock()
-                                        .map_err(|_| CompileError::Semantic("actor inbox lock poisoned".into()))
-                                        .and_then(|receiver| {
-                                            receiver
-                                                .recv()
-                                                .map_err(|e| CompileError::Semantic(format!("recv failed: {e}")))
-                                        })
-                                })
-                        })?;
-                        return Ok(match msg {
-                            Message::Value(s) => Value::Str(s),
-                            Message::Bytes(b) => Value::Str(String::from_utf8_lossy(&b).to_string()),
-                        });
                     }
                     "reply" => {
                         let msg_arg = args.get(0).ok_or_else(|| CompileError::Semantic("reply expects message".into()))?;
@@ -1211,6 +1782,7 @@ fn evaluate_expr(
                         return Ok(Value::Nil);
                     }
                     "join" => {
+                        check_waitless_violation("join")?;
                         let handle_arg = args.get(0).ok_or_else(|| CompileError::Semantic("join expects actor handle".into()))?;
                         let handle_val = evaluate_expr(&handle_arg.value, env, functions, classes, enums, impl_methods)?;
                         if let Value::Actor(handle) = handle_val {
@@ -1237,6 +1809,73 @@ fn evaluate_expr(
                             ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
                         });
                         return Ok(Value::Actor(handle));
+                    }
+                    "async" | "future" => {
+                        // Create a future from an expression
+                        // async(expr) or future(expr) - evaluates expr in background thread
+                        let inner_expr = args.get(0).ok_or_else(|| CompileError::Semantic("async expects an expression".into()))?;
+                        let expr_clone = inner_expr.value.clone();
+                        let env_clone = env.clone();
+                        let funcs = functions.clone();
+                        let classes_clone = classes.clone();
+                        let enums_clone = enums.clone();
+                        let impls_clone = impl_methods.clone();
+                        let future = FutureValue::new(move || {
+                            evaluate_expr(&expr_clone, &env_clone, &funcs, &classes_clone, &enums_clone, &impls_clone)
+                                .map_err(|e| format!("{:?}", e))
+                        });
+                        return Ok(Value::Future(future));
+                    }
+                    "is_ready" => {
+                        // Check if a future is ready without blocking
+                        let future_arg = args.get(0).ok_or_else(|| CompileError::Semantic("is_ready expects a future".into()))?;
+                        let val = evaluate_expr(&future_arg.value, env, functions, classes, enums, impl_methods)?;
+                        if let Value::Future(f) = val {
+                            return Ok(Value::Bool(f.is_ready()));
+                        }
+                        return Err(CompileError::Semantic("is_ready expects a future".into()));
+                    }
+                    "generator" => {
+                        // Create a generator from a lambda/block expression
+                        // generator(|| { yield 1; yield 2; yield 3 })
+                        let inner_expr = args.get(0).ok_or_else(|| CompileError::Semantic("generator expects a lambda".into()))?;
+                        let val = evaluate_expr(&inner_expr.value, env, functions, classes, enums, impl_methods)?;
+                        if let Value::Lambda { body, env: captured, .. } = val {
+                            // Set up yield accumulation
+                            GENERATOR_YIELDS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
+
+                            // Execute the lambda body to collect all yields
+                            let _ = evaluate_expr(&body, &captured, functions, classes, enums, impl_methods);
+
+                            // Get the accumulated yields
+                            let yields = GENERATOR_YIELDS.with(|cell| cell.borrow_mut().take().unwrap_or_default());
+
+                            let gen = GeneratorValue::new_with_values(yields);
+                            return Ok(Value::Generator(gen));
+                        }
+                        return Err(CompileError::Semantic("generator expects a lambda".into()));
+                    }
+                    "next" => {
+                        // Get next value from a generator
+                        let gen_arg = args.get(0).ok_or_else(|| CompileError::Semantic("next expects a generator".into()))?;
+                        let val = evaluate_expr(&gen_arg.value, env, functions, classes, enums, impl_methods)?;
+                        if let Value::Generator(gen) = val {
+                            return Ok(gen.next().unwrap_or(Value::Nil));
+                        }
+                        return Err(CompileError::Semantic("next expects a generator".into()));
+                    }
+                    "collect" => {
+                        // Collect all values from a generator into an array
+                        let gen_arg = args.get(0).ok_or_else(|| CompileError::Semantic("collect expects a generator".into()))?;
+                        let val = evaluate_expr(&gen_arg.value, env, functions, classes, enums, impl_methods)?;
+                        if let Value::Generator(gen) = val {
+                            return Ok(Value::Array(gen.collect_remaining()));
+                        }
+                        // For arrays, just return them
+                        if let Value::Array(arr) = val {
+                            return Ok(Value::Array(arr));
+                        }
+                        return Err(CompileError::Semantic("collect expects a generator or array".into()));
                     }
                     _ => {
                         if let Some(func) = functions.get(name) {
@@ -1288,7 +1927,7 @@ fn evaluate_expr(
             }
         }
         Expr::MethodCall { receiver, method, args } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_unique();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             // Built-in methods for Array
             if let Value::Array(ref arr) = recv_val {
                 match method.as_str() {
@@ -1895,7 +2534,7 @@ fn evaluate_expr(
             Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))
         }
         Expr::FieldAccess { receiver, field } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_unique();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             if let Value::Object { fields, .. } = recv_val {
                 fields
                     .get(field)
@@ -1989,7 +2628,7 @@ fn evaluate_expr(
             Ok(Value::Tuple(tup))
         }
         Expr::Index { receiver, index } => {
-            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_unique();
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
             match recv_val {
                 Value::Array(arr) => {
@@ -2044,6 +2683,51 @@ fn evaluate_expr(
             });
             Ok(Value::Actor(handle))
         }
+        Expr::Await(inner) => {
+            check_waitless_violation("await")?;
+            // Await can work on:
+            // 1. A Future value - wait for it to complete
+            // 2. An async function call - create a future and wait
+            // 3. An Actor - join and get result
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            match val {
+                Value::Future(f) => {
+                    f.await_result().map_err(|e| CompileError::Semantic(e))
+                }
+                Value::Actor(handle) => {
+                    // Wait for actor to finish and return nil (actors don't have direct return values)
+                    handle.join().map_err(|e| CompileError::Semantic(e))?;
+                    Ok(Value::Nil)
+                }
+                // If it's already a value (not async), just return it
+                other => Ok(other),
+            }
+        }
+        Expr::Yield(maybe_val) => {
+            // Yield a value from a generator
+            // First evaluate the value if present
+            let yield_val = match maybe_val {
+                Some(expr) => evaluate_expr(expr, env, functions, classes, enums, impl_methods)?,
+                None => Value::Nil,
+            };
+
+            // Add to the accumulated yields
+            let added = GENERATOR_YIELDS.with(|cell| {
+                if let Some(yields) = cell.borrow_mut().as_mut() {
+                    yields.push(yield_val.clone());
+                    true
+                } else {
+                    false
+                }
+            });
+
+            if !added {
+                return Err(CompileError::Semantic("yield called outside of generator".into()));
+            }
+
+            // Return nil (yield doesn't return a value in this simple model)
+            Ok(Value::Nil)
+        }
         Expr::FunctionalUpdate { target, method, args } => {
             // When used as an expression (not statement), just evaluate as method call
             // The assignment semantics are handled at the statement level
@@ -2054,11 +2738,346 @@ fn evaluate_expr(
             };
             evaluate_expr(&method_call, env, functions, classes, enums, impl_methods)
         }
+        Expr::MacroInvocation { name, args: macro_args } => {
+            // Macro expansion at compile time
+            // For now, support a few built-in macros
+            match name.as_str() {
+                "println" => {
+                    // println! macro: print each argument followed by newline
+                    let mut output = String::new();
+                    for arg in macro_args {
+                        if let MacroArg::Expr(e) = arg {
+                            let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                            output.push_str(&val.to_display_string());
+                        }
+                    }
+                    println!("{}", output);
+                    Ok(Value::Nil)
+                }
+                "print" => {
+                    // print! macro: print each argument without newline
+                    for arg in macro_args {
+                        if let MacroArg::Expr(e) = arg {
+                            let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                            print!("{}", val.to_display_string());
+                        }
+                    }
+                    Ok(Value::Nil)
+                }
+                "vec" => {
+                    // vec! macro: create an array
+                    let mut items = Vec::new();
+                    for arg in macro_args {
+                        if let MacroArg::Expr(e) = arg {
+                            items.push(evaluate_expr(e, env, functions, classes, enums, impl_methods)?);
+                        }
+                    }
+                    Ok(Value::Array(items))
+                }
+                "assert" => {
+                    // assert! macro: check condition
+                    if let Some(MacroArg::Expr(e)) = macro_args.first() {
+                        let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                        if !val.truthy() {
+                            return Err(CompileError::Semantic("assertion failed".into()));
+                        }
+                    }
+                    Ok(Value::Nil)
+                }
+                "assert_eq" => {
+                    // assert_eq! macro: check equality
+                    if macro_args.len() >= 2 {
+                        if let (MacroArg::Expr(left), MacroArg::Expr(right)) = (&macro_args[0], &macro_args[1]) {
+                            let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+                            let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+                            if left_val != right_val {
+                                return Err(CompileError::Semantic(format!(
+                                    "assertion failed: {:?} != {:?}",
+                                    left_val, right_val
+                                )));
+                            }
+                        }
+                    }
+                    Ok(Value::Nil)
+                }
+                "panic" => {
+                    // panic! macro: abort with message
+                    let msg = macro_args.first()
+                        .map(|arg| {
+                            if let MacroArg::Expr(e) = arg {
+                                evaluate_expr(e, env, functions, classes, enums, impl_methods)
+                                    .map(|v| v.to_display_string())
+                                    .unwrap_or_else(|_| "panic".into())
+                            } else {
+                                "panic".into()
+                            }
+                        })
+                        .unwrap_or_else(|| "explicit panic".into());
+                    Err(CompileError::Semantic(format!("panic: {}", msg)))
+                }
+                "format" => {
+                    // format! macro: format string
+                    let mut output = String::new();
+                    for arg in macro_args {
+                        if let MacroArg::Expr(e) = arg {
+                            let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                            output.push_str(&val.to_display_string());
+                        }
+                    }
+                    Ok(Value::Str(output))
+                }
+                "dbg" => {
+                    // dbg! macro: debug print and return value
+                    if let Some(MacroArg::Expr(e)) = macro_args.first() {
+                        let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                        eprintln!("[dbg] {:?}", val);
+                        Ok(val)
+                    } else {
+                        Ok(Value::Nil)
+                    }
+                }
+                _ => {
+                    // Look up user-defined macro
+                    let macro_def = USER_MACROS.with(|cell| cell.borrow().get(name).cloned());
+                    if let Some(m) = macro_def {
+                        // Expand user-defined macro
+                        expand_user_macro(&m, macro_args, env, functions, classes, enums, impl_methods)
+                    } else {
+                        Err(CompileError::Semantic(format!("unknown macro: {}!", name)))
+                    }
+                }
+            }
+        }
         _ => Err(CompileError::Semantic(format!(
             "unsupported expression type: {:?}",
             expr
         ))),
     }
+}
+
+/// Expand a user-defined macro with given arguments
+fn expand_user_macro(
+    macro_def: &MacroDef,
+    args: &[MacroArg],
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    // Get the first pattern (for now, single pattern macros)
+    let pattern = macro_def.patterns.first()
+        .ok_or_else(|| CompileError::Semantic(format!("macro {} has no patterns", macro_def.name)))?;
+
+    // Bind macro arguments to parameters
+    let mut bindings: HashMap<String, Value> = HashMap::new();
+    let mut arg_exprs: HashMap<String, Expr> = HashMap::new();
+
+    for (i, param) in pattern.params.iter().enumerate() {
+        match param {
+            MacroParam::Ident(name) | MacroParam::Expr(name) => {
+                if let Some(MacroArg::Expr(e)) = args.get(i) {
+                    // Store both the evaluated value and the original expression
+                    let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                    bindings.insert(name.clone(), val);
+                    arg_exprs.insert(name.clone(), e.clone());
+                } else if let Some(MacroArg::Tokens(s)) = args.get(i) {
+                    bindings.insert(name.clone(), Value::Str(s.clone()));
+                }
+            }
+            MacroParam::Type(name) => {
+                if let Some(MacroArg::Type(_t)) = args.get(i) {
+                    // Type parameters - for now just store as nil
+                    bindings.insert(name.clone(), Value::Nil);
+                }
+            }
+            MacroParam::Variadic { name, separator: _ } => {
+                // Collect remaining args into an array
+                let mut items = Vec::new();
+                for arg in args.iter().skip(i) {
+                    if let MacroArg::Expr(e) = arg {
+                        items.push(evaluate_expr(e, env, functions, classes, enums, impl_methods)?);
+                    }
+                }
+                bindings.insert(name.clone(), Value::Array(items));
+            }
+            MacroParam::Literal(_) => {
+                // Literal parameters must match exactly - skip for now
+            }
+        }
+    }
+
+    // Execute the macro body with bindings in scope
+    match &pattern.body {
+        MacroBody::Expr(e) => {
+            // Substitute parameters in the expression and evaluate
+            let substituted = substitute_macro_params(e, &bindings, &arg_exprs)?;
+            evaluate_expr(&substituted, env, functions, classes, enums, impl_methods)
+        }
+        MacroBody::Block(block) => {
+            // Execute block with bindings in a new scope
+            // We need to substitute $param references in the block before executing
+            let mut local_env = env.clone();
+            // Add both $name and name to env for both direct use and substitution
+            for (name, value) in &bindings {
+                local_env.insert(format!("${}", name), value.clone());
+                local_env.insert(name.clone(), value.clone());
+            }
+
+            let mut last_val = Value::Nil;
+            for stmt in &block.statements {
+                // Substitute $params in the statement before executing
+                let substituted_stmt = substitute_macro_params_in_node(stmt, &arg_exprs)?;
+                match exec_node(&substituted_stmt, &mut local_env, functions, classes, enums, impl_methods)? {
+                    Control::Return(v) => {
+                        last_val = v;
+                        break;
+                    }
+                    Control::Break(_) => break,
+                    Control::Continue => continue,
+                    Control::Next => {}
+                }
+            }
+            Ok(last_val)
+        }
+        MacroBody::Tokens(_tokens) => {
+            // Token-based macros - for now just return nil
+            Ok(Value::Nil)
+        }
+    }
+}
+
+/// Substitute macro parameters in an expression
+fn substitute_macro_params(
+    expr: &Expr,
+    bindings: &HashMap<String, Value>,
+    arg_exprs: &HashMap<String, Expr>,
+) -> Result<Expr, CompileError> {
+    match expr {
+        Expr::Identifier(name) => {
+            // Check if this is a macro parameter reference (prefixed with $)
+            if let Some(stripped) = name.strip_prefix('$') {
+                if let Some(original_expr) = arg_exprs.get(stripped) {
+                    return Ok(original_expr.clone());
+                }
+            }
+            Ok(expr.clone())
+        }
+        Expr::Binary { left, op, right } => {
+            Ok(Expr::Binary {
+                left: Box::new(substitute_macro_params(left, bindings, arg_exprs)?),
+                op: op.clone(),
+                right: Box::new(substitute_macro_params(right, bindings, arg_exprs)?),
+            })
+        }
+        Expr::Unary { op, operand } => {
+            Ok(Expr::Unary {
+                op: op.clone(),
+                operand: Box::new(substitute_macro_params(operand, bindings, arg_exprs)?),
+            })
+        }
+        Expr::Call { callee, args } => {
+            let mut new_args = Vec::new();
+            for arg in args {
+                new_args.push(simple_parser::ast::Argument {
+                    name: arg.name.clone(),
+                    value: substitute_macro_params(&arg.value, bindings, arg_exprs)?,
+                });
+            }
+            Ok(Expr::Call {
+                callee: Box::new(substitute_macro_params(callee, bindings, arg_exprs)?),
+                args: new_args,
+            })
+        }
+        Expr::If { condition, then_branch, else_branch } => {
+            Ok(Expr::If {
+                condition: Box::new(substitute_macro_params(condition, bindings, arg_exprs)?),
+                then_branch: Box::new(substitute_macro_params(then_branch, bindings, arg_exprs)?),
+                else_branch: else_branch.as_ref()
+                    .map(|e| substitute_macro_params(e, bindings, arg_exprs))
+                    .transpose()?
+                    .map(Box::new),
+            })
+        }
+        // For other expression types, just clone them
+        _ => Ok(expr.clone()),
+    }
+}
+
+/// Substitute macro parameters in a Node (for block macro bodies)
+fn substitute_macro_params_in_node(
+    node: &Node,
+    arg_exprs: &HashMap<String, Expr>,
+) -> Result<Node, CompileError> {
+    use simple_parser::ast::{ReturnStmt, AssignmentStmt, LetStmt};
+    let empty_bindings = HashMap::new();
+    match node {
+        Node::Return(ret_stmt) => {
+            Ok(Node::Return(ReturnStmt {
+                span: ret_stmt.span,
+                value: ret_stmt.value.as_ref()
+                    .map(|e| substitute_macro_params(e, &empty_bindings, arg_exprs))
+                    .transpose()?,
+            }))
+        }
+        Node::Expression(e) => {
+            Ok(Node::Expression(substitute_macro_params(e, &empty_bindings, arg_exprs)?))
+        }
+        Node::If(if_stmt) => {
+            Ok(Node::If(IfStmt {
+                span: if_stmt.span,
+                condition: substitute_macro_params(&if_stmt.condition, &empty_bindings, arg_exprs)?,
+                then_block: substitute_block(&if_stmt.then_block, arg_exprs)?,
+                elif_branches: if_stmt.elif_branches.iter()
+                    .map(|(cond, block)| {
+                        Ok((
+                            substitute_macro_params(cond, &empty_bindings, arg_exprs)?,
+                            substitute_block(block, arg_exprs)?,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, CompileError>>()?,
+                else_block: if_stmt.else_block.as_ref()
+                    .map(|b| substitute_block(b, arg_exprs))
+                    .transpose()?,
+            }))
+        }
+        Node::Let(let_stmt) => {
+            Ok(Node::Let(LetStmt {
+                span: let_stmt.span,
+                pattern: let_stmt.pattern.clone(),
+                ty: let_stmt.ty.clone(),
+                value: let_stmt.value.as_ref()
+                    .map(|e| substitute_macro_params(e, &empty_bindings, arg_exprs))
+                    .transpose()?,
+                is_mutable: let_stmt.is_mutable,
+            }))
+        }
+        Node::Assignment(assign) => {
+            Ok(Node::Assignment(AssignmentStmt {
+                span: assign.span,
+                target: substitute_macro_params(&assign.target, &empty_bindings, arg_exprs)?,
+                op: assign.op.clone(),
+                value: substitute_macro_params(&assign.value, &empty_bindings, arg_exprs)?,
+            }))
+        }
+        // For other node types, just clone them
+        _ => Ok(node.clone()),
+    }
+}
+
+/// Substitute in a block
+fn substitute_block(
+    block: &Block,
+    arg_exprs: &HashMap<String, Expr>,
+) -> Result<Block, CompileError> {
+    let mut statements = Vec::new();
+    for stmt in &block.statements {
+        statements.push(substitute_macro_params_in_node(stmt, arg_exprs)?);
+    }
+    Ok(Block {
+        span: block.span,
+        statements,
+    })
 }
 
 fn bind_args(
@@ -2155,6 +3174,30 @@ fn exec_function(
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
+    // Save previous effect and set new one for this function
+    let prev_effect = CURRENT_EFFECT.with(|cell| cell.borrow().clone());
+    if func.effect.is_some() {
+        CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = func.effect.clone());
+    }
+
+    let result = exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx);
+
+    // Restore previous effect
+    CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = prev_effect);
+
+    result
+}
+
+fn exec_function_inner(
+    func: &FunctionDef,
+    args: &[simple_parser::ast::Argument],
+    outer_env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_ctx: Option<(&str, &HashMap<String, Value>)>,
+) -> Result<Value, CompileError> {
     let mut local_env = Env::new();
     if let Some((class_name, fields)) = self_ctx {
         local_env.insert(
@@ -2203,12 +3246,14 @@ fn call_extern_function(
     match name {
         // I/O functions
         "print" => {
+            check_waitless_violation("print")?;
             for val in &evaluated {
                 print!("{}", val.to_display_string());
             }
             Ok(Value::Nil)
         }
         "println" => {
+            check_waitless_violation("println")?;
             for val in &evaluated {
                 print!("{}", val.to_display_string());
             }
@@ -2216,6 +3261,7 @@ fn call_extern_function(
             Ok(Value::Nil)
         }
         "input" => {
+            check_waitless_violation("input")?;
             use std::io::{self, BufRead};
             let stdin = io::stdin();
             let line = stdin.lock().lines().next()

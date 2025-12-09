@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use simple_parser::ast::{Node, Expr, Pattern};
+use simple_parser::ast::{Node, Expr, Pattern, Type as AstType, BinOp, PointerKind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -11,25 +11,454 @@ pub enum Type {
     Var(usize),
     Function { params: Vec<Type>, ret: Box<Type> },
     Array(Box<Type>),
+    /// Union type: A | B | C - value can be any of the member types
+    Union(Vec<Type>),
+    /// Generic type: Type<A, B> - parameterized type
+    Generic { name: String, args: Vec<Type> },
+    /// Type parameter: T, U, etc. - placeholder for generic instantiation
+    TypeParam(String),
+    /// Named type reference (struct, class, enum name)
+    Named(String),
+    /// Tuple type: (A, B, C)
+    Tuple(Vec<Type>),
+    /// Dictionary type: {K: V}
+    Dict { key: Box<Type>, value: Box<Type> },
+    /// Optional type: T?
+    Optional(Box<Type>),
+    /// Immutable borrow: &T - reference that allows read-only access
+    Borrow(Box<Type>),
+    /// Mutable borrow: &mut T - reference that allows read-write access
+    BorrowMut(Box<Type>),
+}
+
+impl Type {
+    /// Apply substitution to this type
+    pub fn apply_subst(&self, subst: &Substitution) -> Type {
+        match self {
+            Type::Var(id) => {
+                if let Some(ty) = subst.get(*id) {
+                    ty.apply_subst(subst)
+                } else {
+                    self.clone()
+                }
+            }
+            Type::Function { params, ret } => Type::Function {
+                params: params.iter().map(|p| p.apply_subst(subst)).collect(),
+                ret: Box::new(ret.apply_subst(subst)),
+            },
+            Type::Array(elem) => Type::Array(Box::new(elem.apply_subst(subst))),
+            Type::Union(types) => Type::Union(types.iter().map(|t| t.apply_subst(subst)).collect()),
+            Type::Generic { name, args } => Type::Generic {
+                name: name.clone(),
+                args: args.iter().map(|a| a.apply_subst(subst)).collect(),
+            },
+            Type::Tuple(types) => Type::Tuple(types.iter().map(|t| t.apply_subst(subst)).collect()),
+            Type::Dict { key, value } => Type::Dict {
+                key: Box::new(key.apply_subst(subst)),
+                value: Box::new(value.apply_subst(subst)),
+            },
+            Type::Optional(inner) => Type::Optional(Box::new(inner.apply_subst(subst))),
+            Type::Borrow(inner) => Type::Borrow(Box::new(inner.apply_subst(subst))),
+            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(inner.apply_subst(subst))),
+            _ => self.clone(),
+        }
+    }
+
+    /// Check if this type contains the given type variable
+    pub fn contains_var(&self, var_id: usize) -> bool {
+        match self {
+            Type::Var(id) => *id == var_id,
+            Type::Function { params, ret } => {
+                params.iter().any(|p| p.contains_var(var_id)) || ret.contains_var(var_id)
+            }
+            Type::Array(elem) => elem.contains_var(var_id),
+            Type::Union(types) => types.iter().any(|t| t.contains_var(var_id)),
+            Type::Generic { args, .. } => args.iter().any(|a| a.contains_var(var_id)),
+            Type::Tuple(types) => types.iter().any(|t| t.contains_var(var_id)),
+            Type::Dict { key, value } => key.contains_var(var_id) || value.contains_var(var_id),
+            Type::Optional(inner) => inner.contains_var(var_id),
+            Type::Borrow(inner) => inner.contains_var(var_id),
+            Type::BorrowMut(inner) => inner.contains_var(var_id),
+            _ => false,
+        }
+    }
+}
+
+/// Substitution map for type variables
+#[derive(Debug, Clone, Default)]
+pub struct Substitution {
+    map: HashMap<usize, Type>,
+}
+
+impl Substitution {
+    pub fn new() -> Self {
+        Self { map: HashMap::new() }
+    }
+
+    pub fn get(&self, id: usize) -> Option<&Type> {
+        self.map.get(&id)
+    }
+
+    pub fn insert(&mut self, id: usize, ty: Type) {
+        self.map.insert(id, ty);
+    }
+
+    /// Compose two substitutions: self ∘ other
+    pub fn compose(&mut self, other: &Substitution) {
+        // Apply self to all types in other
+        for (id, ty) in &other.map {
+            let new_ty = ty.apply_subst(self);
+            self.map.insert(*id, new_ty);
+        }
+    }
 }
 
 #[derive(Debug)]
 pub enum TypeError {
     Mismatch { expected: Type, found: Type },
     Undefined(String),
+    OccursCheck { var_id: usize, ty: Type },
     Other(String),
 }
 
 pub struct TypeChecker {
     env: HashMap<String, Type>,
     next_var: usize,
+    /// Type parameter environment for generics
+    type_params: HashMap<String, Type>,
+    /// Substitution map for type inference
+    subst: Substitution,
 }
 
 impl TypeChecker {
     pub fn new() -> Self {
-        Self {
+        let mut tc = Self {
             env: HashMap::new(),
             next_var: 0,
+            type_params: HashMap::new(),
+            subst: Substitution::new(),
+        };
+        // Add built-in functions to environment
+        tc.add_builtins();
+        tc
+    }
+
+    /// Add built-in functions to the type environment
+    fn add_builtins(&mut self) {
+        // Generate fresh vars first to avoid borrow issues
+        let var1 = self.fresh_var();
+        let var2 = self.fresh_var();
+        let var3 = self.fresh_var();
+        let var4 = self.fresh_var();
+        let var5 = self.fresh_var();
+        let var6 = self.fresh_var();
+        let var7 = self.fresh_var();
+        let var8 = self.fresh_var();
+        let var9 = self.fresh_var();
+        let var10 = self.fresh_var();
+        let var11 = self.fresh_var();
+        let var12 = self.fresh_var();
+        let var13 = self.fresh_var();
+
+        // Generic function type (takes any, returns any)
+        let generic_fn = Type::Function {
+            params: vec![var1.clone()],
+            ret: Box::new(var2),
+        };
+
+        // Concurrency functions
+        self.env.insert("spawn".to_string(), generic_fn.clone());
+        self.env.insert("async".to_string(), generic_fn.clone());
+        self.env.insert("future".to_string(), generic_fn.clone());
+        self.env.insert("await".to_string(), generic_fn.clone());
+        self.env.insert("is_ready".to_string(), Type::Function {
+            params: vec![var3],
+            ret: Box::new(Type::Bool),
+        });
+
+        // Actor functions
+        self.env.insert("send".to_string(), Type::Function {
+            params: vec![var4, var5],
+            ret: Box::new(Type::Nil),
+        });
+        self.env.insert("recv".to_string(), generic_fn.clone());
+        self.env.insert("reply".to_string(), Type::Function {
+            params: vec![var6],
+            ret: Box::new(Type::Nil),
+        });
+        self.env.insert("join".to_string(), Type::Function {
+            params: vec![var7],
+            ret: Box::new(Type::Nil),
+        });
+
+        // Common built-in functions
+        self.env.insert("len".to_string(), Type::Function {
+            params: vec![var8],
+            ret: Box::new(Type::Int),
+        });
+        self.env.insert("print".to_string(), generic_fn.clone());
+        self.env.insert("println".to_string(), generic_fn.clone());
+        self.env.insert("type".to_string(), Type::Function {
+            params: vec![var9],
+            ret: Box::new(Type::Str),
+        });
+        self.env.insert("str".to_string(), Type::Function {
+            params: vec![var10],
+            ret: Box::new(Type::Str),
+        });
+        self.env.insert("int".to_string(), Type::Function {
+            params: vec![var11],
+            ret: Box::new(Type::Int),
+        });
+
+        // Math functions (extern)
+        self.env.insert("abs".to_string(), Type::Function {
+            params: vec![Type::Int],
+            ret: Box::new(Type::Int),
+        });
+        self.env.insert("sqrt".to_string(), Type::Function {
+            params: vec![Type::Int],
+            ret: Box::new(Type::Int),
+        });
+        self.env.insert("pow".to_string(), Type::Function {
+            params: vec![Type::Int, Type::Int],
+            ret: Box::new(Type::Int),
+        });
+        self.env.insert("min".to_string(), Type::Function {
+            params: vec![Type::Int, Type::Int],
+            ret: Box::new(Type::Int),
+        });
+        self.env.insert("max".to_string(), Type::Function {
+            params: vec![Type::Int, Type::Int],
+            ret: Box::new(Type::Int),
+        });
+
+        // Generator/coroutine functions
+        self.env.insert("generator".to_string(), generic_fn.clone());
+        self.env.insert("next".to_string(), generic_fn.clone());
+        self.env.insert("collect".to_string(), generic_fn.clone());
+
+        // Use remaining vars for reserved names
+        let _ = (var12, var13);
+    }
+
+    /// Unify two types, updating the substitution
+    pub fn unify(&mut self, t1: &Type, t2: &Type) -> Result<(), TypeError> {
+        let t1 = t1.apply_subst(&self.subst);
+        let t2 = t2.apply_subst(&self.subst);
+
+        match (&t1, &t2) {
+            // Same types unify
+            (Type::Int, Type::Int) => Ok(()),
+            (Type::Float, Type::Float) => Ok(()),
+            (Type::Bool, Type::Bool) => Ok(()),
+            (Type::Str, Type::Str) => Ok(()),
+            (Type::Nil, Type::Nil) => Ok(()),
+
+            // Type variable unification
+            (Type::Var(id1), Type::Var(id2)) if id1 == id2 => Ok(()),
+            (Type::Var(id), ty) | (ty, Type::Var(id)) => {
+                // Occurs check: prevent infinite types
+                if ty.contains_var(*id) {
+                    return Err(TypeError::OccursCheck { var_id: *id, ty: ty.clone() });
+                }
+                self.subst.insert(*id, ty.clone());
+                Ok(())
+            }
+
+            // Named types match by name
+            (Type::Named(n1), Type::Named(n2)) if n1 == n2 => Ok(()),
+
+            // Arrays unify if elements unify
+            (Type::Array(e1), Type::Array(e2)) => self.unify(e1, e2),
+
+            // Tuples unify if all elements unify
+            (Type::Tuple(ts1), Type::Tuple(ts2)) if ts1.len() == ts2.len() => {
+                for (a, b) in ts1.iter().zip(ts2.iter()) {
+                    self.unify(a, b)?;
+                }
+                Ok(())
+            }
+
+            // Functions unify if params and return types unify
+            (Type::Function { params: p1, ret: r1 }, Type::Function { params: p2, ret: r2 })
+                if p1.len() == p2.len() => {
+                for (a, b) in p1.iter().zip(p2.iter()) {
+                    self.unify(a, b)?;
+                }
+                self.unify(r1, r2)
+            }
+
+            // Generic types unify if name and args match
+            (Type::Generic { name: n1, args: a1 }, Type::Generic { name: n2, args: a2 })
+                if n1 == n2 && a1.len() == a2.len() => {
+                for (x, y) in a1.iter().zip(a2.iter()) {
+                    self.unify(x, y)?;
+                }
+                Ok(())
+            }
+
+            // Optional types
+            (Type::Optional(i1), Type::Optional(i2)) => self.unify(i1, i2),
+
+            // Dict types
+            (Type::Dict { key: k1, value: v1 }, Type::Dict { key: k2, value: v2 }) => {
+                self.unify(k1, k2)?;
+                self.unify(v1, v2)
+            }
+
+            // Type parameters
+            (Type::TypeParam(n1), Type::TypeParam(n2)) if n1 == n2 => Ok(()),
+
+            // Union types are compatible if one is a member of the other
+            (Type::Union(members), other) | (other, Type::Union(members)) => {
+                // Check if other matches any member
+                for member in members {
+                    if self.types_compatible(other, member) {
+                        return Ok(());
+                    }
+                }
+                Err(TypeError::Mismatch { expected: t1.clone(), found: t2.clone() })
+            }
+
+            // Borrow types unify if inner types unify
+            (Type::Borrow(i1), Type::Borrow(i2)) => self.unify(i1, i2),
+            (Type::BorrowMut(i1), Type::BorrowMut(i2)) => self.unify(i1, i2),
+
+            // &mut T can coerce to &T (mutable borrow is subtype of immutable borrow)
+            (Type::Borrow(i1), Type::BorrowMut(i2)) => self.unify(i1, i2),
+
+            // Mismatch
+            _ => Err(TypeError::Mismatch { expected: t1.clone(), found: t2.clone() }),
+        }
+    }
+
+    /// Get the resolved type (applying all substitutions)
+    pub fn resolve(&self, ty: &Type) -> Type {
+        ty.apply_subst(&self.subst)
+    }
+
+    /// Convert an AST type annotation to a type checker Type
+    pub fn ast_type_to_type(&mut self, ast_ty: &AstType) -> Type {
+        match ast_ty {
+            AstType::Simple(name) => {
+                // Check if it's a type parameter first
+                if let Some(ty) = self.type_params.get(name) {
+                    return ty.clone();
+                }
+                // Map common type names
+                match name.as_str() {
+                    "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "Int" => Type::Int,
+                    "f32" | "f64" | "float" | "Float" => Type::Float,
+                    "bool" | "Bool" => Type::Bool,
+                    "str" | "String" | "Str" => Type::Str,
+                    "nil" | "Nil" | "None" => Type::Nil,
+                    _ => Type::Named(name.clone()),
+                }
+            }
+            AstType::Generic { name, args } => {
+                let converted_args: Vec<Type> = args.iter()
+                    .map(|a| self.ast_type_to_type(a))
+                    .collect();
+                Type::Generic { name: name.clone(), args: converted_args }
+            }
+            AstType::Union(types) => {
+                let converted: Vec<Type> = types.iter()
+                    .map(|t| self.ast_type_to_type(t))
+                    .collect();
+                Type::Union(converted)
+            }
+            AstType::Tuple(types) => {
+                let converted: Vec<Type> = types.iter()
+                    .map(|t| self.ast_type_to_type(t))
+                    .collect();
+                Type::Tuple(converted)
+            }
+            AstType::Array { element, .. } => {
+                Type::Array(Box::new(self.ast_type_to_type(element)))
+            }
+            AstType::Function { params, ret } => {
+                let param_types: Vec<Type> = params.iter()
+                    .map(|p| self.ast_type_to_type(p))
+                    .collect();
+                let ret_type = ret.as_ref()
+                    .map(|r| self.ast_type_to_type(r))
+                    .unwrap_or(Type::Nil);
+                Type::Function { params: param_types, ret: Box::new(ret_type) }
+            }
+            AstType::Optional(inner) => {
+                Type::Optional(Box::new(self.ast_type_to_type(inner)))
+            }
+            AstType::Pointer { inner, kind } => {
+                let inner_type = self.ast_type_to_type(inner);
+                match kind {
+                    PointerKind::Borrow => Type::Borrow(Box::new(inner_type)),
+                    PointerKind::BorrowMut => Type::BorrowMut(Box::new(inner_type)),
+                    // For other pointer types, treat as their inner type for now
+                    _ => inner_type,
+                }
+            }
+        }
+    }
+
+    /// Check if a type is compatible with a union type
+    pub fn type_matches_union(&self, ty: &Type, union_members: &[Type]) -> bool {
+        for member in union_members {
+            if self.types_compatible(ty, member) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if two types are compatible (for union type checking)
+    pub fn types_compatible(&self, t1: &Type, t2: &Type) -> bool {
+        match (t1, t2) {
+            // Same primitive types
+            (Type::Int, Type::Int) => true,
+            (Type::Float, Type::Float) => true,
+            (Type::Bool, Type::Bool) => true,
+            (Type::Str, Type::Str) => true,
+            (Type::Nil, Type::Nil) => true,
+            // Type variables are compatible with anything
+            (Type::Var(_), _) | (_, Type::Var(_)) => true,
+            // Named types match by name
+            (Type::Named(n1), Type::Named(n2)) => n1 == n2,
+            // Arrays match if elements match
+            (Type::Array(e1), Type::Array(e2)) => self.types_compatible(e1, e2),
+            // Tuples match if all elements match
+            (Type::Tuple(t1), Type::Tuple(t2)) => {
+                t1.len() == t2.len() && t1.iter().zip(t2.iter()).all(|(a, b)| self.types_compatible(a, b))
+            }
+            // Union types: check if either is a subset
+            (Type::Union(members), other) | (other, Type::Union(members)) => {
+                self.type_matches_union(other, members)
+            }
+            // Generic types match if name and all args match
+            (Type::Generic { name: n1, args: a1 }, Type::Generic { name: n2, args: a2 }) => {
+                n1 == n2 && a1.len() == a2.len() &&
+                a1.iter().zip(a2.iter()).all(|(x, y)| self.types_compatible(x, y))
+            }
+            // Functions match if params and return types match
+            (Type::Function { params: p1, ret: r1 }, Type::Function { params: p2, ret: r2 }) => {
+                p1.len() == p2.len() &&
+                p1.iter().zip(p2.iter()).all(|(a, b)| self.types_compatible(a, b)) &&
+                self.types_compatible(r1, r2)
+            }
+            // Optional types
+            (Type::Optional(inner1), Type::Optional(inner2)) => self.types_compatible(inner1, inner2),
+            // Dict types
+            (Type::Dict { key: k1, value: v1 }, Type::Dict { key: k2, value: v2 }) => {
+                self.types_compatible(k1, k2) && self.types_compatible(v1, v2)
+            }
+            // Type parameters
+            (Type::TypeParam(n1), Type::TypeParam(n2)) => n1 == n2,
+            // Borrow types
+            (Type::Borrow(inner1), Type::Borrow(inner2)) => self.types_compatible(inner1, inner2),
+            (Type::BorrowMut(inner1), Type::BorrowMut(inner2)) => self.types_compatible(inner1, inner2),
+            // &mut T is compatible with &T (mutable borrow can be used where immutable is expected)
+            (Type::Borrow(inner1), Type::BorrowMut(inner2)) => self.types_compatible(inner1, inner2),
+            _ => false,
         }
     }
 
@@ -99,6 +528,11 @@ impl TypeChecker {
                     let ty = self.fresh_var();
                     self.env.insert(ext.name.clone(), ty);
                 }
+                Node::Macro(m) => {
+                    // Register macro as a special type (macros are compile-time)
+                    let ty = self.fresh_var();
+                    self.env.insert(m.name.clone(), ty);
+                }
                 _ => {}
             }
         }
@@ -140,7 +574,12 @@ impl TypeChecker {
             Node::Function(func) => {
                 let old_env = self.env.clone();
                 for param in &func.params {
-                    let ty = self.fresh_var();
+                    // Use type annotation if present, otherwise create fresh var
+                    let ty = if let Some(ref ast_ty) = param.ty {
+                        self.ast_type_to_type(ast_ty)
+                    } else {
+                        self.fresh_var()
+                    };
                     self.env.insert(param.name.clone(), ty);
                 }
                 for stmt in &func.body.statements {
@@ -324,37 +763,128 @@ impl TypeChecker {
                     TypeError::Undefined(format!("undefined identifier: {}", name))
                 })
             }
-            Expr::Binary { left, right, .. } => {
-                let _ = self.infer_expr(left)?;
-                let _ = self.infer_expr(right)?;
-                Ok(self.fresh_var())
-            }
-            Expr::Unary { operand, .. } => self.infer_expr(operand),
-            Expr::Call { callee, args } => {
-                let _ = self.infer_expr(callee)?;
-                for arg in args {
-                    let _ = self.infer_expr(&arg.value)?;
+            Expr::Binary { left, right, op } => {
+                let left_ty = self.infer_expr(left)?;
+                let right_ty = self.infer_expr(right)?;
+
+                match op {
+                    // Arithmetic operators: both operands should be numeric, result is numeric
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow | BinOp::FloorDiv => {
+                        // Unify operands to ensure they're compatible
+                        let _ = self.unify(&left_ty, &right_ty);
+                        Ok(self.resolve(&left_ty))
+                    }
+                    // Comparison operators: result is always Bool
+                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                        // Operands should be comparable (same type)
+                        let _ = self.unify(&left_ty, &right_ty);
+                        Ok(Type::Bool)
+                    }
+                    // Logical operators: both operands should be Bool, result is Bool
+                    BinOp::And | BinOp::Or => {
+                        let _ = self.unify(&left_ty, &Type::Bool);
+                        let _ = self.unify(&right_ty, &Type::Bool);
+                        Ok(Type::Bool)
+                    }
+                    // Bitwise operators: both operands should be Int
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::ShiftLeft | BinOp::ShiftRight => {
+                        let _ = self.unify(&left_ty, &Type::Int);
+                        let _ = self.unify(&right_ty, &Type::Int);
+                        Ok(Type::Int)
+                    }
+                    // Is and In operators
+                    BinOp::Is | BinOp::In => {
+                        Ok(Type::Bool)
+                    }
                 }
-                Ok(self.fresh_var())
+            }
+            Expr::Unary { op, operand } => {
+                use simple_parser::ast::UnaryOp;
+                let operand_ty = self.infer_expr(operand)?;
+                match op {
+                    UnaryOp::Ref => Ok(Type::Borrow(Box::new(operand_ty))),
+                    UnaryOp::RefMut => Ok(Type::BorrowMut(Box::new(operand_ty))),
+                    UnaryOp::Deref => {
+                        // Dereferencing a borrow gives the inner type
+                        match operand_ty {
+                            Type::Borrow(inner) | Type::BorrowMut(inner) => Ok(*inner),
+                            _ => Ok(operand_ty), // For other types, just pass through
+                        }
+                    }
+                    UnaryOp::Neg => {
+                        let _ = self.unify(&operand_ty, &Type::Int);
+                        Ok(Type::Int)
+                    }
+                    UnaryOp::Not => Ok(Type::Bool),
+                    UnaryOp::BitNot => {
+                        let _ = self.unify(&operand_ty, &Type::Int);
+                        Ok(Type::Int)
+                    }
+                }
+            }
+            Expr::Call { callee, args } => {
+                let callee_ty = self.infer_expr(callee)?;
+                let mut arg_types = Vec::new();
+                for arg in args {
+                    arg_types.push(self.infer_expr(&arg.value)?);
+                }
+                // If callee has a function type, use its return type
+                let result_ty = self.fresh_var();
+                match self.resolve(&callee_ty) {
+                    Type::Function { params, ret } => {
+                        // Unify argument types with parameter types
+                        for (arg_ty, param_ty) in arg_types.iter().zip(params.iter()) {
+                            let _ = self.unify(arg_ty, param_ty);
+                        }
+                        Ok(*ret)
+                    }
+                    _ => Ok(result_ty)
+                }
             }
             Expr::Array(items) => {
-                for item in items {
-                    let _ = self.infer_expr(item)?;
+                if items.is_empty() {
+                    // Empty array has unknown element type
+                    let elem_ty = self.fresh_var();
+                    Ok(Type::Array(Box::new(elem_ty)))
+                } else {
+                    // Infer element type from first item, unify with rest
+                    let first_ty = self.infer_expr(&items[0])?;
+                    for item in items.iter().skip(1) {
+                        let item_ty = self.infer_expr(item)?;
+                        let _ = self.unify(&first_ty, &item_ty);
+                    }
+                    Ok(Type::Array(Box::new(self.resolve(&first_ty))))
                 }
-                Ok(self.fresh_var())
             }
             Expr::Index { receiver, index } => {
-                let _ = self.infer_expr(receiver)?;
-                let _ = self.infer_expr(index)?;
-                Ok(self.fresh_var())
+                let recv_ty = self.infer_expr(receiver)?;
+                let idx_ty = self.infer_expr(index)?;
+                // Index should be Int for arrays
+                let _ = self.unify(&idx_ty, &Type::Int);
+                // Result type depends on receiver
+                match self.resolve(&recv_ty) {
+                    Type::Array(elem) => Ok(*elem),
+                    Type::Str => Ok(Type::Str), // String indexing returns string/char
+                    Type::Dict { value, .. } => Ok(*value),
+                    Type::Tuple(types) => {
+                        // Tuple indexing - type depends on index literal
+                        // For now, return fresh var since we don't know which element
+                        Ok(self.fresh_var())
+                    }
+                    _ => Ok(self.fresh_var())
+                }
             }
             Expr::If { condition, then_branch, else_branch } => {
-                let _ = self.infer_expr(condition)?;
+                let cond_ty = self.infer_expr(condition)?;
+                // Condition should be Bool
+                let _ = self.unify(&cond_ty, &Type::Bool);
                 let then_ty = self.infer_expr(then_branch)?;
                 if let Some(else_b) = else_branch {
-                    let _ = self.infer_expr(else_b)?;
+                    let else_ty = self.infer_expr(else_b)?;
+                    // Both branches should have same type
+                    let _ = self.unify(&then_ty, &else_ty);
                 }
-                Ok(then_ty)
+                Ok(self.resolve(&then_ty))
             }
             Expr::Match { subject, arms } => {
                 let _ = self.infer_expr(subject)?;

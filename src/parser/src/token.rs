@@ -26,8 +26,9 @@ pub enum TokenKind {
     // Literals
     Integer(i64),
     Float(f64),
-    String(String),
-    FString(Vec<FStringToken>),  // f"hello {expr}" interpolated strings
+    String(String),           // Legacy: plain string (for backward compat)
+    FString(Vec<FStringToken>),  // "hello {expr}" interpolated strings (now default for double quotes)
+    RawString(String),        // 'raw string' - no escapes, no interpolation
     Bool(bool),
     Nil,
     Symbol(String),      // :symbol
@@ -74,11 +75,14 @@ pub enum TokenKind {
     Async,
     Await,
     Waitless,
+    Yield,
     Const,
     Static,
     Type,
     Extern,
     Context,
+    Macro,
+    Bang,           // ! (for macro invocations)
 
     // Operators
     Plus,           // +

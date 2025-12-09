@@ -5,7 +5,9 @@ use std::sync::Arc;
 use simple_loader::loader::ModuleLoader as SmfLoader;
 use simple_loader::LoadedModule;
 use simple_compiler::CompilerPipeline;
+use simple_common::gc::GcAllocator;
 use simple_runtime::gc::GcRuntime;
+use simple_runtime::memory::no_gc::NoGcAllocator;
 use tempfile::TempDir;
 use tracing::instrument;
 
@@ -14,36 +16,48 @@ use tracing::instrument;
 /// For now, compilation is a stub that emits a minimal executable SMF with a `main` that returns 0.
 pub struct Runner {
     loader: SmfLoader,
-    gc: Arc<GcRuntime>,
+    gc_alloc: Arc<dyn GcAllocator>,
+    gc_runtime: Option<Arc<GcRuntime>>,
 }
 
 impl Runner {
     pub fn new() -> Self {
-        Self::with_gc(GcRuntime::new())
+        Self::with_gc_runtime(GcRuntime::new())
     }
 
-    pub fn with_gc(gc: GcRuntime) -> Self {
+    pub fn with_gc_runtime(gc: GcRuntime) -> Self {
+        let gc = Arc::new(gc);
         Self {
             loader: SmfLoader::new(),
-            gc: Arc::new(gc),
+            gc_alloc: gc.clone(),
+            gc_runtime: Some(gc),
+        }
+    }
+
+    pub fn new_no_gc() -> Self {
+        let alloc: Arc<dyn GcAllocator> = Arc::new(NoGcAllocator::new());
+        Self {
+            loader: SmfLoader::new(),
+            gc_alloc: alloc,
+            gc_runtime: None,
         }
     }
 
     /// Create a runner that logs GC events to stdout.
     pub fn new_with_gc_logging() -> Self {
-        Self::with_gc(GcRuntime::verbose_stdout())
+        Self::with_gc_runtime(GcRuntime::verbose_stdout())
     }
 
     /// Access the underlying GC runtime (for tests and diagnostics).
     pub fn gc(&self) -> Arc<GcRuntime> {
-        Arc::clone(&self.gc)
+        Arc::clone(self.gc_runtime.as_ref().expect("GC runtime available"))
     }
 
     /// Run a Simple source file from disk.
     #[instrument(skip(self), fields(path = %path.display()))]
     pub fn run_file(&self, path: &Path) -> Result<i32, String> {
         let out_path = path.with_extension("smf");
-        let mut compiler = CompilerPipeline::with_gc(self.gc.clone()).map_err(|e| format!("{e:?}"))?;
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
         compiler
             .compile(path, &out_path)
             .map_err(|e| format!("compile failed: {e}"))?;
@@ -52,7 +66,11 @@ impl Runner {
             .load(&out_path)
             .map_err(|e| format!("load failed: {e}"))?;
         let exit = run_main(&module)?;
-        let _ = self.gc.collect("post-run");
+        if let Some(gc) = &self.gc_runtime {
+            let _ = gc.collect("post-run");
+        } else {
+            self.gc_alloc.collect();
+        }
         Ok(exit)
     }
 
@@ -64,7 +82,7 @@ impl Runner {
         let src_path = dir.join("tmp.spl");
         fs::write(&src_path, source).map_err(|e| format!("write temp source: {e}"))?;
 
-        let mut compiler = CompilerPipeline::with_gc(self.gc.clone()).map_err(|e| format!("{e:?}"))?;
+        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
         compiler
             .compile(&src_path, out)
             .map_err(|e| format!("compile failed: {e}"))
@@ -84,7 +102,11 @@ impl Runner {
             .map_err(|e| format!("load failed: {e}"))?;
 
         let exit = run_main(&module)?;
-        let _ = self.gc.collect("post-run");
+        if let Some(gc) = &self.gc_runtime {
+            let _ = gc.collect("post-run");
+        } else {
+            self.gc_alloc.collect();
+        }
         Ok(exit)
     }
 }

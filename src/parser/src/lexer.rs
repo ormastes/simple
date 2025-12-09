@@ -171,7 +171,8 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     TokenKind::NotEq
                 } else {
-                    TokenKind::Error("Unexpected '!'".to_string())
+                    // Standalone ! for macro invocations
+                    TokenKind::Bang
                 }
             }
             '<' => {
@@ -222,7 +223,8 @@ impl<'a> Lexer<'a> {
             }
 
             // String literals
-            '"' => self.scan_string(),
+            '"' => self.scan_fstring(),  // Double quotes are interpolated by default
+            '\'' => self.scan_raw_string(),  // Single quotes are raw strings
 
             // Numbers
             '0'..='9' => self.scan_number(ch),
@@ -366,6 +368,27 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Scan a raw string literal (single quotes) - no escape processing or interpolation
+    fn scan_raw_string(&mut self) -> TokenKind {
+        let mut value = String::new();
+
+        while let Some(ch) = self.peek() {
+            if ch == '\'' {
+                self.advance();
+                return TokenKind::RawString(value);
+            } else if ch == '\n' {
+                return TokenKind::Error("Unterminated raw string".to_string());
+            } else {
+                self.advance();
+                value.push(ch);
+            }
+        }
+
+        TokenKind::Error("Unterminated raw string".to_string())
+    }
+
+    /// Legacy scan_string for backward compatibility (not currently used - double quotes use scan_fstring)
+    #[allow(dead_code)]
     fn scan_string(&mut self) -> TokenKind {
         let mut value = String::new();
 
@@ -685,11 +708,13 @@ impl<'a> Lexer<'a> {
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
             "waitless" => TokenKind::Waitless,
+            "yield" => TokenKind::Yield,
             "const" => TokenKind::Const,
             "static" => TokenKind::Static,
             "type" => TokenKind::Type,
             "extern" => TokenKind::Extern,
             "context" => TokenKind::Context,
+            "macro" => TokenKind::Macro,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
         }
@@ -760,17 +785,58 @@ mod tests {
 
     #[test]
     fn test_string_literals() {
+        use crate::token::FStringToken;
+        // Double-quoted strings are now FStrings (interpolated by default)
         assert_eq!(
             tokenize(r#""hello""#),
-            vec![TokenKind::String("hello".to_string()), TokenKind::Eof]
+            vec![TokenKind::FString(vec![FStringToken::Literal("hello".to_string())]), TokenKind::Eof]
         );
         assert_eq!(
             tokenize(r#""hello\nworld""#),
-            vec![TokenKind::String("hello\nworld".to_string()), TokenKind::Eof]
+            vec![TokenKind::FString(vec![FStringToken::Literal("hello\nworld".to_string())]), TokenKind::Eof]
         );
         assert_eq!(
             tokenize(r#""tab\there""#),
-            vec![TokenKind::String("tab\there".to_string()), TokenKind::Eof]
+            vec![TokenKind::FString(vec![FStringToken::Literal("tab\there".to_string())]), TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_raw_string_literals() {
+        // Single-quoted strings are raw (no escape processing, no interpolation)
+        assert_eq!(
+            tokenize(r#"'hello'"#),
+            vec![TokenKind::RawString("hello".to_string()), TokenKind::Eof]
+        );
+        // Backslashes are literal in raw strings
+        assert_eq!(
+            tokenize(r#"'hello\nworld'"#),
+            vec![TokenKind::RawString("hello\\nworld".to_string()), TokenKind::Eof]
+        );
+        // Braces are literal in raw strings (no interpolation)
+        assert_eq!(
+            tokenize(r#"'{name}'"#),
+            vec![TokenKind::RawString("{name}".to_string()), TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn test_interpolated_strings() {
+        use crate::token::FStringToken;
+        // Test interpolation in double-quoted strings
+        assert_eq!(
+            tokenize(r#""hello {name}""#),
+            vec![TokenKind::FString(vec![
+                FStringToken::Literal("hello ".to_string()),
+                FStringToken::Expr("name".to_string()),
+            ]), TokenKind::Eof]
+        );
+        // Test escaped braces
+        assert_eq!(
+            tokenize(r#""literal {{braces}}""#),
+            vec![TokenKind::FString(vec![
+                FStringToken::Literal("literal {braces}".to_string()),
+            ]), TokenKind::Eof]
         );
     }
 

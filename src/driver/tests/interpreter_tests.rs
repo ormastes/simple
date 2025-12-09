@@ -369,6 +369,65 @@ main = double(21)
 }
 
 #[test]
+fn interpreter_union_type_pattern_match_int() {
+    // Union type with pattern matching - match on int type
+    let code = r#"
+fn process(x: i64 | str) -> i64:
+    match x:
+        n: i64 =>
+            return n * 2
+        s: str =>
+            return 0
+    return -1
+
+main = process(21)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_union_type_pattern_match_str() {
+    // Union type with pattern matching - match on string type
+    let code = r#"
+fn process(x: i64 | str) -> i64:
+    match x:
+        n: i64 =>
+            return n * 2
+        s: str =>
+            return 100
+    return -1
+
+main = process("hello")
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 100);
+}
+
+#[test]
+fn interpreter_union_type_three_types() {
+    // Union type with three types
+    let code = r#"
+fn classify(x: i64 | str | bool) -> i64:
+    match x:
+        n: i64 =>
+            return 1
+        s: str =>
+            return 2
+        b: bool =>
+            return 3
+    return 0
+
+let a = classify(42)
+let b = classify("test")
+let c = classify(true)
+main = a + b * 10 + c * 100
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 321); // 1 + 20 + 300
+}
+
+#[test]
 fn interpreter_optional_type() {
     // T? syntax for optional types
     let code = r#"
@@ -378,6 +437,75 @@ main = maybe_value(10)
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 5);
+}
+
+#[test]
+fn interpreter_generic_function_identity() {
+    // Generic function: fn identity<T>(x: T) -> T
+    let code = r#"
+fn identity<T>(x: T) -> T:
+    return x
+
+main = identity(42)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_generic_function_pair() {
+    // Generic function with two type parameters
+    let code = r#"
+fn first<A, B>(a: A, b: B) -> A:
+    return a
+
+fn second<A, B>(a: A, b: B) -> B:
+    return b
+
+let x = first(10, 20)
+let y = second(30, 40)
+main = x + y
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 50); // 10 + 40
+}
+
+#[test]
+fn interpreter_generic_struct() {
+    // Generic struct: struct Box<T>
+    let code = r#"
+struct Box<T>:
+    value: T
+
+let b = Box { value: 42 }
+main = b.value
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_generic_enum() {
+    // Generic enum: enum Option<T>
+    // Note: Generic type arguments in type positions use [] not <>
+    let code = r#"
+enum Maybe<T>:
+    Just(T)
+    Nothing
+
+fn get_or_default(m: Maybe[i64], default: i64) -> i64:
+    match m:
+        Maybe::Just(v) =>
+            return v
+        Maybe::Nothing =>
+            return default
+    return default
+
+let x = Maybe::Just(42)
+main = get_or_default(x, 0)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
 }
 
 #[test]
@@ -1408,5 +1536,728 @@ main = result
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
+}
+
+// === Raw String Tests ===
+
+#[test]
+fn interpreter_raw_string_basic() {
+    // Raw strings with single quotes don't process escapes
+    let code = r#"
+let s = 'hello world'
+main = len(s)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 11);
+}
+
+#[test]
+fn interpreter_raw_string_backslashes() {
+    // Backslashes are literal in raw strings
+    let code = r#"
+let path = 'C:\Users\test'
+main = len(path)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 13); // C:\Users\test = 13 chars
+}
+
+#[test]
+fn interpreter_raw_string_no_interpolation() {
+    // Braces are literal in raw strings, not interpolation
+    let code = r#"
+let template = '{name}'
+main = len(template)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 6); // {name} = 6 chars
+}
+
+#[test]
+fn interpreter_default_string_interpolation() {
+    // Double-quoted strings interpolate by default (like f-strings)
+    let code = r#"
+let x = 5
+let msg = "value is {x}"
+main = len(msg)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10); // "value is 5" = 10 chars
+}
+
+#[test]
+fn interpreter_default_string_escaped_braces() {
+    // Double braces escape to literal braces
+    let code = r#"
+let msg = "use {{x}} for interpolation"
+main = len(msg)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 25); // "use {x} for interpolation" = 25 chars
+}
+
+// === Manual Pointer Tests ===
+
+#[test]
+fn interpreter_unique_pointer_basic() {
+    // Unique pointer with & syntax
+    let code = r#"
+let ptr = new & 42
+main = ptr
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_unique_pointer_arithmetic() {
+    // Unique pointer arithmetic
+    let code = r#"
+let a = new & 10
+let b = new & 5
+main = a + b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15);
+}
+
+#[test]
+fn interpreter_shared_pointer_basic() {
+    // Shared pointer with * syntax
+    let code = r#"
+let ptr = new * 42
+main = ptr
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_shared_pointer_arithmetic() {
+    // Shared pointer arithmetic
+    let code = r#"
+let a = new * 10
+let b = new * 5
+main = a + b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15);
+}
+
+#[test]
+fn interpreter_shared_pointer_multiple_refs() {
+    // Multiple references to same shared value
+    let code = r#"
+let a = new * 42
+let b = a
+main = a + b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 84);
+}
+
+#[test]
+fn interpreter_handle_pointer_basic() {
+    // Handle pointer with + syntax
+    let code = r#"
+let ptr = new + 42
+main = ptr
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_handle_pointer_arithmetic() {
+    // Handle pointer arithmetic
+    let code = r#"
+let a = new + 10
+let b = new + 5
+main = a + b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15);
+}
+
+#[test]
+fn interpreter_weak_pointer_from_shared() {
+    // Weak pointer from shared - needs downgrade method
+    let code = r#"
+let shared = new * 42
+let weak = new - shared
+main = 42
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_pointer_with_struct() {
+    // Unique pointer to struct
+    let code = r#"
+struct Point:
+    x: i64
+    y: i64
+
+let p = new & Point { x: 10, y: 20 }
+main = p.x + p.y
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30);
+}
+
+#[test]
+fn interpreter_shared_pointer_with_struct() {
+    // Shared pointer to struct
+    let code = r#"
+struct Point:
+    x: i64
+    y: i64
+
+let p = new * Point { x: 5, y: 15 }
+main = p.x + p.y
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 20);
+}
+
+#[test]
+fn interpreter_handle_pointer_with_struct() {
+    // Handle pointer to struct
+    let code = r#"
+struct Point:
+    x: i64
+    y: i64
+
+let p = new + Point { x: 7, y: 3 }
+main = p.x + p.y
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+// ============================================================================
+// Macro Tests
+// ============================================================================
+
+#[test]
+fn interpreter_macro_vec() {
+    // vec! macro creates an array
+    let code = r#"
+let arr = vec!(1, 2, 3, 4, 5)
+main = arr.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5);
+}
+
+#[test]
+fn interpreter_macro_vec_sum() {
+    // vec! macro with sum
+    let code = r#"
+let arr = vec!(10, 20, 30)
+main = arr.sum()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 60);
+}
+
+#[test]
+fn interpreter_macro_assert_pass() {
+    // assert! macro that passes
+    let code = r#"
+assert!(true)
+assert!(1 == 1)
+main = 42
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_macro_assert_fail() {
+    // assert! macro that fails
+    let code = r#"
+assert!(false)
+main = 42
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_macro_assert_eq_pass() {
+    // assert_eq! macro that passes
+    let code = r#"
+let x = 10
+let y = 10
+assert_eq!(x, y)
+main = 100
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 100);
+}
+
+#[test]
+fn interpreter_macro_assert_eq_fail() {
+    // assert_eq! macro that fails
+    let code = r#"
+assert_eq!(5, 10)
+main = 42
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_macro_format() {
+    // format! macro creates a string
+    let code = r#"
+let s = format!("hello", " ", "world")
+main = s.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 11); // "hello world" = 11 chars
+}
+
+#[test]
+fn interpreter_macro_panic() {
+    // panic! macro aborts execution
+    let code = r#"
+panic!("test panic")
+main = 42
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_macro_dbg() {
+    // dbg! macro returns the value
+    let code = r#"
+let x = dbg!(42)
+main = x
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_macro_vec_with_expressions() {
+    // vec! macro with computed expressions
+    let code = r#"
+let a = 5
+let arr = vec!(a * 2, a + 3, a - 1)
+main = arr[0] + arr[1] + arr[2]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 22); // 10 + 8 + 4 = 22
+}
+
+// ============================================================================
+// Future/Async Tests
+// ============================================================================
+
+#[test]
+fn interpreter_future_basic() {
+    // Create a future and await it
+    let code = r#"
+let f = future(42)
+let result = await f
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_future_with_computation() {
+    // Future with actual computation
+    let code = r#"
+fn compute():
+    return 10 + 20 + 30
+
+let f = future(compute())
+let result = await f
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 60);
+}
+
+#[test]
+fn interpreter_future_multiple() {
+    // Multiple futures
+    let code = r#"
+let f1 = future(10)
+let f2 = future(20)
+let f3 = future(30)
+let r1 = await f1
+let r2 = await f2
+let r3 = await f3
+main = r1 + r2 + r3
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 60);
+}
+
+#[test]
+fn interpreter_await_non_future() {
+    // Await on a non-future value should just return it
+    let code = r#"
+let x = 42
+let result = await x
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_future_function_call() {
+    // future() creates a future from a function call
+    let code = r#"
+fn slow_add(a, b):
+    return a + b
+
+let f = future(slow_add(15, 27))
+let result = await f
+main = result
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_waitless_basic() {
+    // waitless fn can do non-blocking computation
+    let code = r#"
+waitless fn compute(x):
+    return x * 2
+
+main = compute(21)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_waitless_blocks_print() {
+    // waitless fn cannot use print (blocking I/O)
+    let code = r#"
+extern fn print(msg)
+
+waitless fn bad():
+    print("hello")
+    return 0
+
+main = bad()
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err(), "Expected error but got: {:?}", result);
+    let err = result.unwrap_err();
+    assert!(err.contains("blocking operation 'print' not allowed in waitless function"), "Error: {}", err);
+}
+
+#[test]
+fn interpreter_waitless_blocks_await() {
+    // waitless fn cannot use await
+    let code = r#"
+waitless fn bad():
+    let f = future(42)
+    return await f
+
+main = bad()
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    assert!(err.contains("blocking operation 'await' not allowed in waitless function"));
+}
+
+#[test]
+fn interpreter_async_fn_basic() {
+    // async fn can use blocking operations
+    let code = r#"
+async fn fetch():
+    return 42
+
+main = await fetch()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_waitless_can_call_waitless() {
+    // waitless fn can call other waitless functions
+    let code = r#"
+waitless fn double(x):
+    return x * 2
+
+waitless fn quadruple(x):
+    return double(double(x))
+
+main = quadruple(10)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 40);
+}
+
+#[test]
+fn interpreter_generator_basic() {
+    // Basic generator test - multiple yields using array
+    let code = r#"
+let gen = generator(\: [yield 1, yield 2, yield 3])
+
+let first = next(gen)
+let second = next(gen)
+let third = next(gen)
+
+main = first + second + third
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 6);
+}
+
+#[test]
+fn interpreter_generator_single() {
+    // Simple single-value generator
+    let code = r#"
+let gen = generator(\: yield 42)
+
+main = next(gen)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_generator_collect() {
+    // Collect all generator values into array
+    let code = r#"
+let gen = generator(\: (yield 10, yield 20, yield 30, 0)[3])
+
+let arr = collect(gen)
+main = arr[0] + arr[1] + arr[2]
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 60);
+}
+
+#[test]
+fn interpreter_generator_exhausted() {
+    // Generator returns nil when exhausted
+    let code = r#"
+let gen = generator(\: yield 1)
+
+let first = next(gen)
+let second = next(gen)  # should be nil
+
+# nil converts to 0 for main
+main = first
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+// ===== Borrowing Tests =====
+
+#[test]
+fn interpreter_immutable_borrow() {
+    // Basic immutable borrow with & operator
+    let code = r#"
+let x = 42
+let y = &x  # immutable borrow
+main = *y   # dereference
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_mutable_borrow() {
+    // Mutable borrow with &mut operator
+    let code = r#"
+let x = 10
+let y = &mut x  # mutable borrow
+main = *y       # dereference
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn interpreter_borrow_through_function() {
+    // Pass borrow to function
+    let code = r#"
+fn read_ref(r):
+    return *r
+
+let x = 100
+let borrowed = &x
+main = read_ref(borrowed)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 100);
+}
+
+#[test]
+fn interpreter_multiple_immutable_borrows() {
+    // Multiple immutable borrows allowed
+    let code = r#"
+let x = 25
+let a = &x
+let b = &x
+main = *a + *b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 50);
+}
+
+#[test]
+fn interpreter_mutable_borrow_modify() {
+    // Mutable borrow allows modification through the reference
+    let code = r#"
+fn add_ten(r):
+    # In real borrowing, we'd modify through the ref
+    # For now, just read and return modified value
+    return *r + 10
+
+let x = 5
+let borrowed = &mut x
+main = add_ten(borrowed)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 15);
+}
+
+#[test]
+fn interpreter_borrow_nested_deref() {
+    // Nested borrows and dereferences
+    let code = r#"
+let x = 100
+let ref1 = &x
+let ref2 = &ref1
+let inner = *ref2
+main = *inner
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 100);
+}
+
+#[test]
+fn interpreter_borrow_in_expression() {
+    // Use borrows directly in expressions
+    let code = r#"
+let a = 10
+let b = 20
+main = *(&a) + *(&b)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30);
+}
+
+// =====================
+// Macro Tests
+// =====================
+
+#[test]
+fn interpreter_builtin_vec_macro() {
+    // vec! macro creates an array
+    let code = r#"
+let arr = vec!(1, 2, 3)
+main = arr.len()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 3);
+}
+
+#[test]
+fn interpreter_builtin_assert_macro() {
+    // assert! macro should not fail for true condition
+    let code = r#"
+assert!(true)
+main = 42
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_builtin_assert_eq_macro() {
+    // assert_eq! macro should not fail for equal values
+    let code = r#"
+assert_eq!(5, 5)
+main = 10
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn interpreter_builtin_format_macro() {
+    // format! macro concatenates values
+    let code = r#"
+let s = format!("hello", " ", "world")
+main = if s == "hello world": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_user_defined_macro_simple() {
+    // Simple user-defined macro that returns a constant
+    let code = r#"
+macro answer!():
+    return 42
+
+main = answer!()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_user_defined_macro_with_param() {
+    // User-defined macro with a parameter
+    let code = r#"
+macro double!($x):
+    return $x * 2
+
+main = double!(21)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_user_defined_macro_two_params() {
+    // User-defined macro with two parameters
+    let code = r#"
+macro add!($a, $b):
+    return $a + $b
+
+main = add!(30, 12)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_user_defined_macro_max() {
+    // MAX macro implementation
+    let code = r#"
+macro max!($a, $b):
+    if $a > $b:
+        return $a
+    else:
+        return $b
+
+main = max!(10, 50)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 50);
 }
 

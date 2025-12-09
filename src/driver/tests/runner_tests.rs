@@ -91,8 +91,8 @@ fn runner_supports_variables() {
 #[test]
 fn runner_handles_if_else_and_loops() {
     let src = r#"
-let sum = 0
-let i = 0
+let mut sum = 0
+let mut i = 0
 while i < 5:
     if i % 2 == 0:
         sum = sum + i
@@ -107,7 +107,7 @@ main = sum
 #[test]
 fn runner_handles_for_loop_and_break_continue() {
     let src = r#"
-let sum = 0
+let mut sum = 0
 for i in range(0, 10):
     if i == 5:
         break
@@ -152,6 +152,13 @@ fn runner_supports_unique_new() {
     let runner = Runner::new();
     let exit = runner.run_source("main = new & 21").expect("run ok");
     assert_eq!(exit, 21);
+}
+
+#[test]
+fn runner_supports_gc_off_mode() {
+    let runner = Runner::new_no_gc();
+    let exit = runner.run_source("main = 7").expect("run ok");
+    assert_eq!(exit, 7);
 }
 
 #[test]
@@ -243,7 +250,7 @@ fn runner_emits_gc_logs_in_verbose_mode() {
             events.lock().unwrap().push(event.to_string());
         }
     };
-    let runner = Runner::with_gc(GcRuntime::with_logger(logger));
+    let runner = Runner::with_gc_runtime(GcRuntime::with_logger(logger));
     let exit = runner.run_source("main = 0").expect("run ok");
     assert_eq!(exit, 0);
 
@@ -289,7 +296,7 @@ fn runner_handles_array_literals_and_indexing() {
     assert_eq!(exit, 30, "arr[2] should return 30");
 
     // Index with variable
-    let exit = runner.run_source("let arr = [5, 10, 15]\nlet i = 1\nmain = arr[i]").expect("run ok");
+    let exit = runner.run_source("let arr = [5, 10, 15]\nlet mut i = 1\nmain = arr[i]").expect("run ok");
     assert_eq!(exit, 10, "arr[i] where i=1 should return 10");
 
     // Index with expression
@@ -303,8 +310,8 @@ fn runner_handles_array_literals_and_indexing() {
     // Nested array access in loop
     let src = r#"
 let arr = [1, 2, 3, 4, 5]
-let sum = 0
-let i = 0
+let mut sum = 0
+let mut i = 0
 while i < 5:
     sum = sum + arr[i]
     i = i + 1
@@ -319,9 +326,9 @@ fn runner_handles_pattern_matching() {
     let runner = Runner::new();
 
     // Match on integer literals (using block syntax)
-    let src = r#"
+let src = r#"
 let x = 2
-let result = 0
+let mut result = 0
 match x:
     1 =>
         result = 10
@@ -335,9 +342,9 @@ main = result
     assert_eq!(exit, 20, "match x=2 should return 20");
 
     // Match with wildcard
-    let src = r#"
+let src = r#"
 let x = 99
-let result = 0
+let mut result = 0
 match x:
     1 =>
         result = 10
@@ -351,9 +358,9 @@ main = result
     assert_eq!(exit, 0, "match x=99 should hit wildcard and return 0");
 
     // Match with variable binding
-    let src = r#"
+let src = r#"
 let x = 42
-let result = 0
+let mut result = 0
 match x:
     n =>
         result = n
@@ -363,13 +370,13 @@ main = result
     assert_eq!(exit, 42, "match with binding should capture value");
 
     // Match on enum variants
-    let src = r#"
+let src = r#"
 enum Status:
     Ok
     Error
 
 let s = Status::Ok
-let result = 0
+let mut result = 0
 match s:
     Status::Ok =>
         result = 1
@@ -381,13 +388,13 @@ main = result
     assert_eq!(exit, 1, "match on Status::Ok should return 1");
 
     // Match on enum with different variant
-    let src = r#"
+let src = r#"
 enum Status:
     Ok
     Error
 
 let s = Status::Error
-let result = 0
+let mut result = 0
 match s:
     Status::Ok =>
         result = 1
@@ -399,9 +406,9 @@ main = result
     assert_eq!(exit, 0, "match on Status::Error should return 0");
 
     // Match with guard
-    let src = r#"
+let src = r#"
 let x = 10
-let result = 0
+let mut result = 0
 match x:
     n if n > 5 =>
         result = 1
@@ -447,7 +454,6 @@ main = 0
 }
 
 #[test]
-#[ignore = "actor send/recv has deadlock issue - needs async runtime"]
 fn runner_handles_actor_send_recv_join() {
     let runner = Runner::new();
     let src = r#"
@@ -510,7 +516,7 @@ enum Option:
     None
 
 let x = Option::Some(42)
-let result = 0
+let mut result = 0
 match x:
     Option::Some(v) =>
         result = v
@@ -528,7 +534,7 @@ enum Option:
     None
 
 let x = Option::None
-let result = 0
+let mut result = 0
 match x:
     Option::Some(v) =>
         result = v
@@ -606,14 +612,23 @@ main = d[key]
 fn runner_handles_mutability_control() {
     let runner = Runner::new();
 
-    // Variables are mutable by default (Python-like)
+    // let is immutable by default; reassignment without mut should fail
     let src = r#"
 let x = 10
 x = 20
 main = x
 "#;
+    let result = runner.run_source(src);
+    assert!(result.is_err(), "immutable let should reject reassignment");
+
+    // Mutable binding with let mut allows reassignment
+    let src = r#"
+let mut x = 10
+x = 20
+main = x
+"#;
     let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 20, "let variables are mutable by default");
+    assert_eq!(exit, 20, "let mut variables can be reassigned");
 
     // Bare assignment creates mutable variable (Python-like)
     let src = r#"

@@ -170,7 +170,6 @@ impl Codegen {
         let entry_block = *blocks.get(&func.entry_block).unwrap();
         builder.append_block_params_for_function_params(entry_block);
         builder.switch_to_block(entry_block);
-        builder.seal_block(entry_block);
 
         // Initialize parameter variables
         for (i, _param) in func.params.iter().enumerate() {
@@ -187,7 +186,6 @@ impl Codegen {
 
             if mir_block.id != func.entry_block {
                 builder.switch_to_block(cl_block);
-                builder.seal_block(cl_block);
             }
 
             // Compile instructions
@@ -229,46 +227,40 @@ impl Codegen {
                             BinOp::ShiftLeft => builder.ins().ishl(lhs, rhs),
                             BinOp::ShiftRight => builder.ins().sshr(lhs, rhs),
                             BinOp::Lt => {
-                                let cmp = builder.ins().icmp(
+                                builder.ins().icmp(
                                     cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
                                     lhs, rhs
-                                );
-                                builder.ins().uextend(types::I64, cmp)
+                                )
                             }
                             BinOp::Gt => {
-                                let cmp = builder.ins().icmp(
+                                builder.ins().icmp(
                                     cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
                                     lhs, rhs
-                                );
-                                builder.ins().uextend(types::I64, cmp)
+                                )
                             }
                             BinOp::LtEq => {
-                                let cmp = builder.ins().icmp(
+                                builder.ins().icmp(
                                     cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
                                     lhs, rhs
-                                );
-                                builder.ins().uextend(types::I64, cmp)
+                                )
                             }
                             BinOp::GtEq => {
-                                let cmp = builder.ins().icmp(
+                                builder.ins().icmp(
                                     cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
                                     lhs, rhs
-                                );
-                                builder.ins().uextend(types::I64, cmp)
+                                )
                             }
                             BinOp::Eq => {
-                                let cmp = builder.ins().icmp(
+                                builder.ins().icmp(
                                     cranelift_codegen::ir::condcodes::IntCC::Equal,
                                     lhs, rhs
-                                );
-                                builder.ins().uextend(types::I64, cmp)
+                                )
                             }
                             BinOp::NotEq => {
-                                let cmp = builder.ins().icmp(
+                                builder.ins().icmp(
                                     cranelift_codegen::ir::condcodes::IntCC::NotEqual,
                                     lhs, rhs
-                                );
-                                builder.ins().uextend(types::I64, cmp)
+                                )
                             }
                             _ => lhs, // TODO: handle remaining ops
                         };
@@ -325,8 +317,11 @@ impl Codegen {
                     if let Some(v) = val {
                         let ret_val = vreg_values[v];
                         builder.ins().return_(&[ret_val]);
-                    } else {
+                    } else if func.return_type == TypeId::VOID {
                         builder.ins().return_(&[]);
+                    } else {
+                        // Return(None) on a non-void function is unreachable
+                        builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
                     }
                 }
 
@@ -340,23 +335,34 @@ impl Codegen {
                     let then_bl = *blocks.get(then_block).unwrap();
                     let else_bl = *blocks.get(else_block).unwrap();
 
-                    // Truncate to i8 for comparison
-                    let cond_i8 = builder.ins().ireduce(types::I8, cond_val);
-                    builder.ins().brif(cond_i8, then_bl, &[], else_bl, &[]);
+                    // brif expects I8 (boolean) condition
+                    // If cond_val is already I8, use it directly; otherwise truncate
+                    builder.ins().brif(cond_val, then_bl, &[], else_bl, &[]);
                 }
 
                 Terminator::Unreachable => {
-                    builder.ins().trap(cranelift_codegen::ir::TrapCode::user(0).unwrap());
+                    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
                 }
             }
         }
 
+        // Seal all blocks after all predecessors are known
+        for mir_block in &func.blocks {
+            let cl_block = *blocks.get(&mir_block.id).unwrap();
+            builder.seal_block(cl_block);
+        }
+
         builder.finalize();
+
+        // Verify the function before defining
+        if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
+            return Err(CodegenError::ModuleError(format!("Verifier errors:\n{}", errors)));
+        }
 
         // Define the function
         self.module
             .define_function(func_id, &mut self.ctx)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
+            .map_err(|e| CodegenError::ModuleError(format!("Compilation error: {}", e)))?;
 
         self.module.clear_context(&mut self.ctx);
 
@@ -403,7 +409,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Cranelift verifier issue with comparison return type - needs fix"]
     fn test_compile_comparison() {
         let obj = compile_to_object(
             "fn is_positive(x: i64) -> bool:\n    return x > 0\n"
@@ -412,7 +417,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Cranelift verifier issue with control flow - needs fix"]
     fn test_compile_if_else() {
         let obj = compile_to_object(
             "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n"
