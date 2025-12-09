@@ -11,7 +11,7 @@ simple/
 ├── architecture.md                # Design principles and dependency rules
 ├── simple_language_spec.md        # Language specification
 ├── simple_lexer_parser_spec.md    # Parser/lexer specification
-├── system_test.md                 # Testing guidelines (incl. logging/GC scenarios)
+├── test.md                        # Test policy (mock control, coverage, test levels)
 ├── status/                        # Feature implementation status tracking
 │   ├── basic_types_integer_literals.md
 │   ├── operators_arithmetic.md
@@ -139,23 +139,50 @@ Source Code (.spl)
 - For cross-cutting “AOP-like” logging, prefer `#[tracing::instrument]` on functions to capture args/latency without manual boilerplate.
 - Keep logging opt-in to avoid overhead; avoid ad-hoc `println!` on hot paths.
 
-## TDD Approach
+## Test Strategy
 
-### Test Hierarchy
+See `test.md` for the complete test policy. Tests use `simple_mock_helper` for mock control and coverage tracking.
 
-1. **System Tests** (driver/tests/)
-   - End-to-end: source → compile → load → execute → verify exit code
-   - Example: `runner.run_source("main = 42")` returns 42
-   - For CLI/TUI paths, use `shadow-terminal` to drive the binary in a headless PTY (see `system_test.md` for skeletons and scenarios).
-   - GC coverage: use `Runner::with_gc(GcRuntime::with_logger(..))` or `Runner::new_with_gc_logging()` to assert `gc:start/gc:end` markers after runs (see `system_test.md`).
+**Current Test Count: 631+ tests**
 
-2. **Integration Tests** (compiler/tests/)
-   - Compile source → verify SMF structure
-   - Example: verify function exists in symbol table
+### Test Levels and Coverage Metrics
 
-3. **Unit Tests** (inline in modules)
-   - HIR: AST → HIR lowering
-   - Codegen: HIR → Cranelift IR → machine code
+| Level | Tests | Mock Policy | Coverage Metric | Command |
+|-------|-------|-------------|-----------------|---------|
+| **Unit** | 631+ | All mocks | Branch/Condition | `make test-unit` |
+| **Integration** | 9 | HAL-only | Public func on class/struct | `make test-it` |
+| **System** | 8 | No mocks | Class/struct method | `make test-system` |
+| **Environment** | 7 | HAL/External/Lib | Branch/Condition | `make test-env` |
+
+### Coverage Commands
+
+```bash
+# Show coverage by test level
+make coverage-unit      # Unit: branch/condition coverage
+make coverage-it        # IT: public function on class/struct
+make coverage-system    # System: class/struct method coverage
+make coverage-env       # Environment: branch/condition
+make coverage-all       # Generate all reports
+```
+
+### Test Binary Initialization
+
+Each test binary initializes its mock policy via `#[ctor::ctor]`:
+
+```rust
+use ctor::ctor;
+use simple_mock_helper::{init_unit_tests, validate_test_config};
+
+#[ctor]
+fn init() {
+    init_unit_tests!("my_crate_unit");
+}
+
+#[test]
+fn validate_config() {
+    validate_test_config().expect_pass();
+}
+```
 
 ### TDD Cycle
 
@@ -222,15 +249,52 @@ make help              # Show all available targets
 
 ### Test Coverage
 
-Uses `cargo-llvm-cov` for accurate coverage measurement.
+Uses `cargo-llvm-cov` for accurate coverage measurement. Coverage metrics vary by test level:
+
+| Test Level | Coverage Metric | Target |
+|------------|-----------------|--------|
+| Unit | Branch/Condition | 100% |
+| Integration | Public function on class/struct | 100% |
+| System | Class/struct method | 100% |
+| Environment | Branch/Condition (merged with Unit) | 100% |
 
 ```bash
-make coverage          # HTML report → target/coverage/html/index.html
-make coverage-summary  # Print summary to console
-make coverage-lcov     # LCOV format for CI integration
+# Coverage by test level
+make coverage-unit      # Unit: branch/condition (all 631+ tests)
+make coverage-it        # IT: public function on class/struct
+make coverage-system    # System: class/struct method coverage
+make coverage-env       # Environment: branch/condition
+
+# Combined reports
+make coverage           # HTML report → target/coverage/html/index.html
+make coverage-all       # All test level reports
+make coverage-summary   # Print summary to console
 ```
 
 Install: `cargo install cargo-llvm-cov`
+
+**Coverage Goals:**
+- Unit tests: 100% branch and condition coverage
+- IT tests: 100% public function coverage on class/struct (defined in public_api.yml)
+- System tests: 100% class/struct method coverage (defined in public_api.yml)
+- Focus on: parser edge cases, type system branches, error handling paths
+
+**Test Helper Pattern (reduces duplication):**
+```rust
+/// Helper to run source and assert expected exit code
+fn run_expect(src: &str, expected: i32) {
+    let runner = Runner::new();
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, expected);
+}
+
+#[test]
+fn test_arithmetic() {
+    run_expect("main = 1 + 2", 3);
+    run_expect("main = 10 - 3", 7);
+    run_expect("main = 6 * 7", 42);
+}
+```
 
 ### Code Duplication Detection
 
@@ -239,11 +303,33 @@ Uses `jscpd` for detecting copy-paste code that should be refactored.
 ```bash
 make duplication       # Full report → target/duplication/
 make duplication-simple # Grep-based fallback (no npm needed)
+jscpd ./src            # Direct run with .jscpd.json config
 ```
 
-Configuration in `.jscpd.json`:
-- Minimum 5 lines / 50 tokens to flag as duplicate
-- Ignores test files and target/
+**Configuration (`.jscpd.json`):**
+```json
+{
+  "threshold": 2,        // Max allowed duplication % (fail if exceeded)
+  "minLines": 5,         // Minimum lines to detect as clone
+  "minTokens": 50,       // Minimum tokens to detect as clone
+  "ignore": ["**/target/**", "**/*.md"]
+}
+```
+
+**Adjusting Detection Sensitivity:**
+```bash
+# For stricter detection (find smaller duplicates):
+jscpd ./src --min-lines 3 --min-tokens 10
+
+# For test files specifically:
+jscpd ./src/driver/tests --min-lines 3 --min-tokens 10
+```
+
+**Refactoring Duplicates:**
+1. Run `jscpd` to identify clones
+2. Extract common patterns into helper functions/structs
+3. Use builder patterns for complex object creation (see `SmfBuilder` in loader_tests.rs)
+4. Use parameterized test helpers (see `run_expect` in runner_tests.rs)
 
 Install: `npm install -g jscpd`
 
@@ -271,12 +357,13 @@ Optional (requires npm): `npm install -g jscpd`
 
 ## How to Write System Tests (CLI/TUI)
 - Add `shadow-terminal` to the crate hosting the CLI tests (likely `src/driver`) so tests can spawn the binary in a fake PTY, send keys, and assert the screen/output without a real terminal.
-- Follow the flow in `system_test.md`:
+- Follow the flow in `test.md`:
   - Create a temp dir and write a `main.spl` (and any imports) to exercise dependency analysis and SMF emission.
   - Spawn the CLI via `shadow_terminal::Command::new([...])` with `rows/cols` set; wait for banners or diagnostics with `wait_for_stdout`.
   - Assert exit code (`wait_for_exit_success`), artifact existence (`.with_extension("smf")` non-empty), and readable buffers (no ANSI errors or wrapped lines).
   - For watch-mode scenarios, mutate the source after starting the command and assert a rebuild message + updated `.smf` mtime; remember to stop the process (`kill`) at the end of the test.
 - Keep system tests fast and isolated: no network, only temp directories, and avoid assuming a specific shell. Use plain-text assertions for errors so failures are legible in CI logs.
+- System tests must use `init_system_tests!()` - no mocks allowed.
 
 ## Key Files for Current Work
 

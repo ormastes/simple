@@ -7,90 +7,48 @@ use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
 
+/// Helper to run source and assert expected exit code
+fn run_expect(src: &str, expected: i32) {
+    let runner = Runner::new();
+    let exit = runner.run_source(src).expect("run ok");
+    assert_eq!(exit, expected);
+}
+
 #[test]
 fn runner_compiles_and_runs_stub() {
-    let runner = Runner::new();
-    let exit = runner.run_source("main = 0").expect("run ok");
-    assert_eq!(exit, 0);
+    run_expect("main = 0", 0);
 }
 
 #[test]
 fn runner_returns_integer_literal_value() {
-    let runner = Runner::new();
-
-    // Test that main = 42 actually returns 42, not 0
-    let exit = runner.run_source("main = 42").expect("run ok");
-    assert_eq!(exit, 42, "main = 42 should return 42");
-
-    // Test other values
-    let exit = runner.run_source("main = 1").expect("run ok");
-    assert_eq!(exit, 1, "main = 1 should return 1");
-
-    let exit = runner.run_source("main = 255").expect("run ok");
-    assert_eq!(exit, 255, "main = 255 should return 255");
+    run_expect("main = 42", 42);
+    run_expect("main = 1", 1);
+    run_expect("main = 255", 255);
 }
 
 #[test]
 fn runner_evaluates_arithmetic_expressions() {
-    let runner = Runner::new();
-
-    // Addition
-    let exit = runner.run_source("main = 1 + 2").expect("run ok");
-    assert_eq!(exit, 3, "1 + 2 should equal 3");
-
-    // Subtraction
-    let exit = runner.run_source("main = 10 - 3").expect("run ok");
-    assert_eq!(exit, 7, "10 - 3 should equal 7");
-
-    // Multiplication
-    let exit = runner.run_source("main = 6 * 7").expect("run ok");
-    assert_eq!(exit, 42, "6 * 7 should equal 42");
-
-    // Division
-    let exit = runner.run_source("main = 15 / 3").expect("run ok");
-    assert_eq!(exit, 5, "15 / 3 should equal 5");
-
-    // Modulo
-    let exit = runner.run_source("main = 17 % 5").expect("run ok");
-    assert_eq!(exit, 2, "17 % 5 should equal 2");
-
-    // Complex expression with precedence
-    let exit = runner.run_source("main = 2 + 3 * 4").expect("run ok");
-    assert_eq!(exit, 14, "2 + 3 * 4 should equal 14 (not 20)");
-
-    // Parentheses
-    let exit = runner.run_source("main = (2 + 3) * 4").expect("run ok");
-    assert_eq!(exit, 20, "(2 + 3) * 4 should equal 20");
+    run_expect("main = 1 + 2", 3);
+    run_expect("main = 10 - 3", 7);
+    run_expect("main = 6 * 7", 42);
+    run_expect("main = 15 / 3", 5);
+    run_expect("main = 17 % 5", 2);
+    run_expect("main = 2 + 3 * 4", 14);
+    run_expect("main = (2 + 3) * 4", 20);
 }
 
 #[test]
 fn runner_supports_variables() {
-    let runner = Runner::new();
-
-    // Simple variable
-    let exit = runner.run_source("let x = 42\nmain = x").expect("run ok");
-    assert_eq!(exit, 42, "let x = 42; main = x should return 42");
-
-    // Two variables
-    let exit = runner.run_source("let x = 10\nlet y = 20\nmain = x + y").expect("run ok");
-    assert_eq!(exit, 30, "x + y should return 30");
-
-    // Variable in expression
-    let exit = runner.run_source("let a = 5\nmain = a * a").expect("run ok");
-    assert_eq!(exit, 25, "a * a should return 25");
-
-    // Variable referencing another variable
-    let exit = runner.run_source("let x = 7\nlet y = x + 3\nmain = y").expect("run ok");
-    assert_eq!(exit, 10, "y = x + 3 should be 10");
-
-    // Multiple variables in complex expression
-    let exit = runner.run_source("let a = 2\nlet b = 3\nlet c = 4\nmain = a + b * c").expect("run ok");
-    assert_eq!(exit, 14, "a + b * c should be 14");
+    run_expect("let x = 42\nmain = x", 42);
+    run_expect("let x = 10\nlet y = 20\nmain = x + y", 30);
+    run_expect("let a = 5\nmain = a * a", 25);
+    run_expect("let x = 7\nlet y = x + 3\nmain = y", 10);
+    run_expect("let a = 2\nlet b = 3\nlet c = 4\nmain = a + b * c", 14);
 }
 
 #[test]
 fn runner_handles_if_else_and_loops() {
-    let src = r#"
+    run_expect(r#"
 let mut sum = 0
 let mut i = 0
 while i < 5:
@@ -98,15 +56,12 @@ while i < 5:
         sum = sum + i
     i = i + 1
 main = sum
-"#;
-    let runner = Runner::new();
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 6); // 0 + 2 + 4
+"#, 6); // 0 + 2 + 4
 }
 
 #[test]
 fn runner_handles_for_loop_and_break_continue() {
-    let src = r#"
+    run_expect(r#"
 let mut sum = 0
 for i in range(0, 10):
     if i == 5:
@@ -115,43 +70,32 @@ for i in range(0, 10):
         continue
     sum = sum + i
 main = sum
-"#;
-    let runner = Runner::new();
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 4); // 1 + 3
+"#, 4); // 1 + 3
 }
 
 #[test]
 fn runner_handles_functions() {
-    let src = r#"
+    run_expect(r#"
 fn add(a, b):
     return a + b
 main = add(2, 3)
-"#;
-    let runner = Runner::new();
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 5);
+"#, 5);
 }
 
 #[test]
 fn runner_handles_class_methods() {
-    let src = r#"
+    run_expect(r#"
 class Point:
     fn value():
         return 7
 
 main = Point.value()
-"#;
-    let runner = Runner::new();
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 7);
+"#, 7);
 }
 
 #[test]
 fn runner_supports_unique_new() {
-    let runner = Runner::new();
-    let exit = runner.run_source("main = new & 21").expect("run ok");
-    assert_eq!(exit, 21);
+    run_expect("main = new & 21", 21);
 }
 
 #[test]
@@ -212,7 +156,7 @@ fn dependency_analysis_finds_imports_and_macros() {
 
 #[test]
 fn runner_handles_enums() {
-    let src = r#"
+    run_expect(r#"
 enum Color:
     Red
     Green
@@ -220,25 +164,19 @@ enum Color:
 
 let c = Color::Red
 main = if c is Color::Red: 1 else: 0
-"#;
-    let runner = Runner::new();
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 1);
+"#, 1);
 }
 
 #[test]
 fn runner_handles_structs() {
-    let src = r#"
+    run_expect(r#"
 struct Point:
     x: i64
     y: i64
 
 let p = Point { x: 10, y: 20 }
 main = p.x + p.y
-"#;
-    let runner = Runner::new();
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 30);
+"#, 30);
 }
 
 #[test]
@@ -283,32 +221,13 @@ fn cli_flag_emits_gc_logs() {
 
 #[test]
 fn runner_handles_array_literals_and_indexing() {
-    let runner = Runner::new();
-
-    // Simple array index access
-    let exit = runner.run_source("let arr = [10, 20, 30]\nmain = arr[0]").expect("run ok");
-    assert_eq!(exit, 10, "arr[0] should return 10");
-
-    let exit = runner.run_source("let arr = [10, 20, 30]\nmain = arr[1]").expect("run ok");
-    assert_eq!(exit, 20, "arr[1] should return 20");
-
-    let exit = runner.run_source("let arr = [10, 20, 30]\nmain = arr[2]").expect("run ok");
-    assert_eq!(exit, 30, "arr[2] should return 30");
-
-    // Index with variable
-    let exit = runner.run_source("let arr = [5, 10, 15]\nlet mut i = 1\nmain = arr[i]").expect("run ok");
-    assert_eq!(exit, 10, "arr[i] where i=1 should return 10");
-
-    // Index with expression
-    let exit = runner.run_source("let arr = [100, 200, 300]\nmain = arr[1 + 1]").expect("run ok");
-    assert_eq!(exit, 300, "arr[1+1] should return 300");
-
-    // Array element in arithmetic
-    let exit = runner.run_source("let arr = [2, 3, 4]\nmain = arr[0] + arr[1] * arr[2]").expect("run ok");
-    assert_eq!(exit, 14, "arr[0] + arr[1] * arr[2] = 2 + 3*4 = 14");
-
-    // Nested array access in loop
-    let src = r#"
+    run_expect("let arr = [10, 20, 30]\nmain = arr[0]", 10);
+    run_expect("let arr = [10, 20, 30]\nmain = arr[1]", 20);
+    run_expect("let arr = [10, 20, 30]\nmain = arr[2]", 30);
+    run_expect("let arr = [5, 10, 15]\nlet mut i = 1\nmain = arr[i]", 10);
+    run_expect("let arr = [100, 200, 300]\nmain = arr[1 + 1]", 300);
+    run_expect("let arr = [2, 3, 4]\nmain = arr[0] + arr[1] * arr[2]", 14);
+    run_expect(r#"
 let arr = [1, 2, 3, 4, 5]
 let mut sum = 0
 let mut i = 0
@@ -316,17 +235,13 @@ while i < 5:
     sum = sum + arr[i]
     i = i + 1
 main = sum
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 15, "sum of [1,2,3,4,5] should be 15");
+"#, 15);
 }
 
 #[test]
 fn runner_handles_pattern_matching() {
-    let runner = Runner::new();
-
-    // Match on integer literals (using block syntax)
-let src = r#"
+    // Match on integer literals
+    run_expect(r#"
 let x = 2
 let mut result = 0
 match x:
@@ -337,12 +252,10 @@ match x:
     _ =>
         result = 0
 main = result
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 20, "match x=2 should return 20");
+"#, 20);
 
     // Match with wildcard
-let src = r#"
+    run_expect(r#"
 let x = 99
 let mut result = 0
 match x:
@@ -353,24 +266,20 @@ match x:
     _ =>
         result = 0
 main = result
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 0, "match x=99 should hit wildcard and return 0");
+"#, 0);
 
     // Match with variable binding
-let src = r#"
+    run_expect(r#"
 let x = 42
 let mut result = 0
 match x:
     n =>
         result = n
 main = result
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 42, "match with binding should capture value");
+"#, 42);
 
     // Match on enum variants
-let src = r#"
+    run_expect(r#"
 enum Status:
     Ok
     Error
@@ -383,12 +292,10 @@ match s:
     Status::Error =>
         result = 0
 main = result
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 1, "match on Status::Ok should return 1");
+"#, 1);
 
     // Match on enum with different variant
-let src = r#"
+    run_expect(r#"
 enum Status:
     Ok
     Error
@@ -401,12 +308,10 @@ match s:
     Status::Error =>
         result = 0
 main = result
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 0, "match on Status::Error should return 0");
+"#, 0);
 
     // Match with guard
-let src = r#"
+    run_expect(r#"
 let x = 10
 let mut result = 0
 match x:
@@ -417,12 +322,10 @@ match x:
     _ =>
         result = 99
 main = result
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 1, "match with guard n>5 should return 1");
+"#, 1);
 
     // Match in a function with return
-    let src = r#"
+    run_expect(r#"
 fn classify(n):
     match n:
         0 =>
@@ -433,30 +336,22 @@ fn classify(n):
             return 2
 
 main = classify(0) + classify(1) * 10 + classify(99) * 100
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 210, "classify(0)=0, classify(1)=1, classify(99)=2 -> 0+10+200=210");
+"#, 210);
 }
 
 #[test]
 fn runner_handles_spawn_expression() {
-    let runner = Runner::new();
-    // spawn is fire-and-forget; we just assert it doesn't crash.
-    // The spawned actor returns a handle, so we store it and return a fixed value.
-    let src = r#"
+    run_expect(r#"
 fn work():
     return 42
 let handle = spawn work()
 main = 0
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 0);
+"#, 0);
 }
 
 #[test]
 fn runner_handles_actor_send_recv_join() {
-    let runner = Runner::new();
-    let src = r#"
+    run_expect(r#"
 fn worker():
     let msg = recv()
     reply(msg)
@@ -466,51 +361,28 @@ send(h, "ping")
 let resp = recv(h)
 join(h)
 main = if resp == "ping": 0 else: 1
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 0, "actor roundtrip should succeed");
+"#, 0);
 }
 
 #[test]
 fn runner_handles_tuples() {
-    let runner = Runner::new();
-
-    // Simple tuple creation and indexing
-    let exit = runner.run_source("let t = (10, 20, 30)\nmain = t[0]").expect("run ok");
-    assert_eq!(exit, 10, "tuple[0] should be 10");
-
-    let exit = runner.run_source("let t = (10, 20, 30)\nmain = t[1]").expect("run ok");
-    assert_eq!(exit, 20, "tuple[1] should be 20");
-
-    let exit = runner.run_source("let t = (10, 20, 30)\nmain = t[2]").expect("run ok");
-    assert_eq!(exit, 30, "tuple[2] should be 30");
-
-    // Tuple arithmetic
-    let exit = runner.run_source("let t = (2, 3, 4)\nmain = t[0] + t[1] * t[2]").expect("run ok");
-    assert_eq!(exit, 14, "2 + 3*4 = 14");
-
-    // Nested tuple usage
-    let src = r#"
+    run_expect("let t = (10, 20, 30)\nmain = t[0]", 10);
+    run_expect("let t = (10, 20, 30)\nmain = t[1]", 20);
+    run_expect("let t = (10, 20, 30)\nmain = t[2]", 30);
+    run_expect("let t = (2, 3, 4)\nmain = t[0] + t[1] * t[2]", 14);
+    run_expect(r#"
 let point = (5, 10)
 let x = point[0]
 let y = point[1]
 main = x + y
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 15, "5 + 10 = 15");
-
-    // Empty tuple
-    let exit = runner.run_source("let t = ()\nmain = 42").expect("run ok");
-    assert_eq!(exit, 42, "empty tuple should work");
+"#, 15);
+    run_expect("let t = ()\nmain = 42", 42);
 }
 
 #[test]
 fn runner_handles_option_type() {
-    let runner = Runner::new();
-
-    // Using user-defined Option enum (since no built-in generics yet)
     // Test Some variant with value
-    let src = r#"
+    run_expect(r#"
 enum Option:
     Some(i64)
     None
@@ -523,12 +395,10 @@ match x:
     Option::None =>
         result = 0
 main = result
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 42, "Some(42) should unwrap to 42");
+"#, 42);
 
     // Test None variant
-    let src = r#"
+    run_expect(r#"
 enum Option:
     Some(i64)
     None
@@ -541,12 +411,10 @@ match x:
     Option::None =>
         result = 99
 main = result
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 99, "None should match None arm");
+"#, 99);
 
     // Test Option in function
-    let src = r#"
+    run_expect(r#"
 enum Option:
     Some(i64)
     None
@@ -561,51 +429,21 @@ fn get_value(opt):
 let a = Option::Some(10)
 let b = Option::None
 main = get_value(a) + get_value(b)
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 10, "get_value(Some(10)) + get_value(None) = 10 + 0 = 10");
+"#, 10);
 }
 
 #[test]
 fn runner_handles_dictionary_types() {
-    let runner = Runner::new();
-
-    // Simple dict with string keys
-    let src = r#"
-let d = {"a": 10, "b": 20, "c": 30}
-main = d["a"]
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 10, "d['a'] should be 10");
-
-    // Dict with integer keys
-    let src = r#"
-let d = {1: 100, 2: 200, 3: 300}
-main = d[2]
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 200, "d[2] should be 200");
-
-    // Dict value arithmetic
-    let src = r#"
-let d = {"x": 5, "y": 7}
-main = d["x"] + d["y"]
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 12, "d['x'] + d['y'] = 5 + 7 = 12");
-
-    // Dict with variable key lookup
-    let src = r#"
-let d = {"first": 1, "second": 2}
+    run_expect(r#"let d = {"a": 10, "b": 20, "c": 30}
+main = d["a"]"#, 10);
+    run_expect(r#"let d = {1: 100, 2: 200, 3: 300}
+main = d[2]"#, 200);
+    run_expect(r#"let d = {"x": 5, "y": 7}
+main = d["x"] + d["y"]"#, 12);
+    run_expect(r#"let d = {"first": 1, "second": 2}
 let key = "second"
-main = d[key]
-"#;
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 2, "d[key] where key='second' should be 2");
-
-    // Empty dict
-    let exit = runner.run_source("let d = {}\nmain = 42").expect("run ok");
-    assert_eq!(exit, 42, "empty dict should work");
+main = d[key]"#, 2);
+    run_expect("let d = {}\nmain = 42", 42);
 }
 
 #[test]
@@ -727,4 +565,321 @@ main = SIZE
 "#;
     let exit = runner.run_source(src).expect("run ok");
     assert_eq!(exit, 256, "const SIZE should be 256");
+}
+
+// Futures require special runtime setup - skipping for now
+// #[test]
+// fn runner_handles_futures() {
+//     run_expect(r#"
+// fn compute():
+//     return 42
+// let f = async(compute())
+// let result = await(f)
+// main = result
+// "#, 42);
+// }
+
+// Generators require yield keyword which may not parse correctly
+// #[test]
+// fn runner_handles_generators() {
+//     run_expect(r#"
+// let gen = generator(\:
+//     yield 1
+//     yield 2
+// )
+// let a = next(gen)
+// let b = next(gen)
+// main = a + b
+// "#, 3);
+// }
+
+// Impl blocks - testing static method syntax
+// #[test]
+// fn runner_handles_impl_blocks() {
+//     run_expect(r#"
+// struct Point:
+//     x: i64
+//     y: i64
+// impl Point:
+//     fn sum(self):
+//         return self.x + self.y
+// let p = Point { x: 10, y: 20 }
+// main = p.sum()
+// "#, 30);
+// }
+
+// Context blocks need special parser/runtime support
+// #[test]
+// fn runner_handles_context_blocks() {
+//     run_expect(r#"
+// fn get_from_context():
+//     return context.value
+// context { value: 100 }:
+//     main = get_from_context()
+// "#, 100);
+// }
+
+// Macros may need different invocation syntax
+// #[test]
+// fn runner_handles_macro_expansion() {
+//     run_expect(r#"
+// macro double(x) = x + x
+// main = double(21)
+// "#, 42);
+// }
+
+#[test]
+fn runner_handles_lambda_expressions() {
+    // Basic lambda
+    run_expect(r#"
+let double = \x: x * 2
+main = double(21)
+"#, 42);
+
+    // Lambda with multiple params
+    run_expect(r#"
+let add = \a, b: a + b
+main = add(10, 32)
+"#, 42);
+
+    // Lambda passed to function
+    run_expect(r#"
+fn apply(f, x):
+    return f(x)
+
+let inc = \n: n + 1
+main = apply(inc, 41)
+"#, 42);
+}
+
+#[test]
+fn runner_handles_string_operations() {
+    // String length
+    run_expect(r#"
+let s = "hello"
+main = s.len()
+"#, 5);
+
+    // String concatenation
+    run_expect(r#"
+let a = "hello"
+let b = "world"
+let c = a + " " + b
+main = c.len()
+"#, 11);
+
+    // F-string interpolation
+    run_expect(r#"
+let x = 42
+let s = "value is {x}"
+main = s.len()
+"#, 11);
+}
+
+#[test]
+fn runner_handles_array_methods() {
+    // Array length
+    run_expect(r#"
+let arr = [1, 2, 3, 4, 5]
+main = arr.len()
+"#, 5);
+}
+
+// Array push may not return the mutated array correctly
+// #[test]
+// fn runner_handles_array_push() {
+//     run_expect(r#"
+// let mut arr = [1, 2]
+// arr.push(3)
+// main = arr.len()
+// "#, 3);
+// }
+
+// Map/filter/reduce may need different syntax
+// #[test]
+// fn runner_handles_array_functional_methods() {
+//     run_expect(r#"
+// let arr = [1, 2, 3]
+// let doubled = arr.map(\x: x * 2)
+// main = doubled[0] + doubled[1] + doubled[2]
+// "#, 12);
+// }
+
+#[test]
+fn runner_handles_dict_methods() {
+    // Dict len
+    run_expect(r#"
+let d = {"a": 1, "b": 2, "c": 3}
+main = d.len()
+"#, 3);
+
+    // Dict keys
+    run_expect(r#"
+let d = {"x": 10, "y": 20}
+let keys = d.keys()
+main = keys.len()
+"#, 2);
+
+    // Dict values
+    run_expect(r#"
+let d = {"a": 5, "b": 10}
+let vals = d.values()
+main = vals[0] + vals[1]
+"#, 15);
+
+    // Dict contains_key
+    run_expect(r#"
+let d = {"hello": 1}
+main = if d.contains_key("hello"): 1 else: 0
+"#, 1);
+}
+
+// Bitwise operations not yet implemented in interpreter
+// #[test]
+// fn runner_handles_bitwise_operations() {
+//     run_expect("main = 12 & 10", 8);
+//     run_expect("main = 12 | 10", 14);
+//     run_expect("main = 12 ^ 10", 6);
+// }
+
+#[test]
+fn runner_handles_comparison_operators() {
+    run_expect("main = if 1 < 2: 1 else: 0", 1);
+    run_expect("main = if 2 > 1: 1 else: 0", 1);
+    run_expect("main = if 2 <= 2: 1 else: 0", 1);
+    run_expect("main = if 2 >= 2: 1 else: 0", 1);
+    run_expect("main = if 2 == 2: 1 else: 0", 1);
+    run_expect("main = if 2 != 3: 1 else: 0", 1);
+}
+
+#[test]
+fn runner_handles_logical_operators() {
+    run_expect("main = if true and true: 1 else: 0", 1);
+    run_expect("main = if true and false: 1 else: 0", 0);
+    run_expect("main = if true or false: 1 else: 0", 1);
+    run_expect("main = if false or false: 1 else: 0", 0);
+    run_expect("main = if not false: 1 else: 0", 1);
+    run_expect("main = if not true: 1 else: 0", 0);
+}
+
+// Pointer types may have different syntax
+// #[test]
+// fn runner_handles_pointer_types() {
+//     run_expect(r#"
+// let s = new @ 42
+// main = *s
+// "#, 42);
+// }
+
+// Union types need special type system support
+// #[test]
+// fn runner_handles_union_types() {
+//     run_expect(r#"
+// fn process(x: i64 | str):
+//     match x:
+//         n: i64 =>
+//             return n
+//         s: str =>
+//             return s.len()
+//     return 0
+// main = process(42)
+// "#, 42);
+// }
+
+// Functional update operator may need method resolution
+// #[test]
+// fn runner_handles_functional_update() {
+//     run_expect(r#"
+// let mut x = 5
+// x->double()
+// main = x
+// fn double():
+//     return self * 2
+// "#, 10);
+// }
+
+#[test]
+fn runner_handles_extern_functions() {
+    // Note: extern functions typically require native libraries
+    // This tests the parsing and basic handling
+    run_expect(r#"
+extern fn add_numbers(a: i64, b: i64) -> i64
+main = 42
+"#, 42);
+}
+
+// method_missing needs special class/method resolution
+// #[test]
+// fn runner_handles_method_missing() {
+//     run_expect(r#"
+// class Flexible:
+//     fn method_missing(name, args):
+//         return 99
+// let f = Flexible {}
+// main = f.unknown_method()
+// "#, 99);
+// }
+
+#[test]
+fn runner_handles_recursive_functions() {
+    // Factorial with smaller input to avoid stack overflow
+    run_expect(r#"
+fn factorial(n):
+    if n <= 1:
+        return 1
+    return n * factorial(n - 1)
+
+main = factorial(5)
+"#, 120);
+}
+
+#[test]
+fn runner_handles_nested_data_structures() {
+    // Nested arrays
+    run_expect(r#"
+let arr = [[1, 2], [3, 4], [5, 6]]
+main = arr[0][0] + arr[1][1] + arr[2][0]
+"#, 10);
+
+    // Nested structs
+    run_expect(r#"
+struct Inner:
+    value: i64
+
+struct Outer:
+    inner: Inner
+
+let o = Outer { inner: Inner { value: 42 } }
+main = o.inner.value
+"#, 42);
+}
+
+#[test]
+fn runner_handles_early_return() {
+    run_expect(r#"
+fn check(x):
+    if x > 10:
+        return 1
+    if x > 5:
+        return 2
+    return 3
+
+main = check(7)
+"#, 2);
+}
+
+#[test]
+fn runner_handles_multiple_assignment() {
+    run_expect(r#"
+let (a, b, c) = (1, 2, 3)
+main = a + b + c
+"#, 6);
+}
+
+#[test]
+fn runner_handles_symbols() {
+    run_expect(r#"
+let s = :hello
+main = if s == :hello: 1 else: 0
+"#, 1);
 }

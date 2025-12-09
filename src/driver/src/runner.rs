@@ -53,6 +53,15 @@ impl Runner {
         Arc::clone(self.gc_runtime.as_ref().expect("GC runtime available"))
     }
 
+    /// Trigger post-run GC collection.
+    fn collect_gc(&self) {
+        if let Some(gc) = &self.gc_runtime {
+            let _ = gc.collect("post-run");
+        } else {
+            self.gc_alloc.collect();
+        }
+    }
+
     /// Run a Simple source file from disk.
     #[instrument(skip(self), fields(path = %path.display()))]
     pub fn run_file(&self, path: &Path) -> Result<i32, String> {
@@ -66,11 +75,7 @@ impl Runner {
             .load(&out_path)
             .map_err(|e| format!("load failed: {e}"))?;
         let exit = run_main(&module)?;
-        if let Some(gc) = &self.gc_runtime {
-            let _ = gc.collect("post-run");
-        } else {
-            self.gc_alloc.collect();
-        }
+        self.collect_gc();
         Ok(exit)
     }
 
@@ -102,11 +107,7 @@ impl Runner {
             .map_err(|e| format!("load failed: {e}"))?;
 
         let exit = run_main(&module)?;
-        if let Some(gc) = &self.gc_runtime {
-            let _ = gc.collect("post-run");
-        } else {
-            self.gc_alloc.collect();
-        }
+        self.collect_gc();
         Ok(exit)
     }
 }

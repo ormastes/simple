@@ -24,6 +24,16 @@ impl MirLowerer {
         }
     }
 
+    /// Helper to set jump target if block terminator is still Unreachable
+    fn finalize_block_jump(&mut self, target: BlockId) {
+        let func = self.current_func.as_mut().unwrap();
+        if let Some(block) = func.block_mut(self.current_block) {
+            if matches!(block.terminator, Terminator::Unreachable) {
+                block.terminator = Terminator::Jump(target);
+            }
+        }
+    }
+
     pub fn lower_module(mut self, hir: &HirModule) -> MirLowerResult<MirModule> {
         let mut module = MirModule::new();
         module.name = hir.name.clone();
@@ -151,12 +161,7 @@ impl MirLowerer {
                 for stmt in then_block {
                     self.lower_stmt(stmt)?;
                 }
-                let func = self.current_func.as_mut().unwrap();
-                if let Some(block) = func.block_mut(self.current_block) {
-                    if matches!(block.terminator, Terminator::Unreachable) {
-                        block.terminator = Terminator::Jump(merge_id);
-                    }
-                }
+                self.finalize_block_jump(merge_id);
 
                 // Lower else block
                 self.current_block = else_id;
@@ -165,12 +170,7 @@ impl MirLowerer {
                         self.lower_stmt(stmt)?;
                     }
                 }
-                let func = self.current_func.as_mut().unwrap();
-                if let Some(block) = func.block_mut(self.current_block) {
-                    if matches!(block.terminator, Terminator::Unreachable) {
-                        block.terminator = Terminator::Jump(merge_id);
-                    }
-                }
+                self.finalize_block_jump(merge_id);
 
                 self.current_block = merge_id;
                 Ok(())
@@ -202,12 +202,7 @@ impl MirLowerer {
                 for stmt in body {
                     self.lower_stmt(stmt)?;
                 }
-                let func = self.current_func.as_mut().unwrap();
-                if let Some(block) = func.block_mut(self.current_block) {
-                    if matches!(block.terminator, Terminator::Unreachable) {
-                        block.terminator = Terminator::Jump(cond_id);
-                    }
-                }
+                self.finalize_block_jump(cond_id);
 
                 self.current_block = exit_id;
                 Ok(())
@@ -225,12 +220,7 @@ impl MirLowerer {
                 for stmt in body {
                     self.lower_stmt(stmt)?;
                 }
-                let func = self.current_func.as_mut().unwrap();
-                if let Some(block) = func.block_mut(self.current_block) {
-                    if matches!(block.terminator, Terminator::Unreachable) {
-                        block.terminator = Terminator::Jump(body_id);
-                    }
-                }
+                self.finalize_block_jump(body_id);
 
                 self.current_block = exit_id;
                 Ok(())

@@ -6,7 +6,8 @@ use simple_loader::registry::ModuleRegistry;
 use simple_loader::smf::{
     apply_relocations, hash_name, Arch, Platform, RelocationType, SectionType, SmfHeader,
     SmfRelocation, SmfSection, SmfSymbol, SymbolBinding, SymbolTable, SymbolType,
-    SMF_FLAG_EXECUTABLE, SMF_MAGIC, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
+    SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_MAGIC, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
+    SECTION_FLAG_WRITE,
 };
 
 fn push_struct<T: Copy>(buf: &mut Vec<u8>, value: &T) {
@@ -15,71 +16,130 @@ fn push_struct<T: Copy>(buf: &mut Vec<u8>, value: &T) {
     buf.extend_from_slice(slice);
 }
 
+/// Helper to build SMF test modules with less boilerplate
+struct SmfBuilder {
+    filename: String,
+    symbol_name: String,
+    code_bytes: Vec<u8>,
+    relocations: Vec<SmfRelocation>,
+    exported_count: u32,
+}
+
+impl SmfBuilder {
+    fn new(filename: &str, symbol_name: &str) -> Self {
+        Self {
+            filename: filename.to_string(),
+            symbol_name: symbol_name.to_string(),
+            code_bytes: vec![0xC3u8], // ret
+            relocations: Vec::new(),
+            exported_count: 1,
+        }
+    }
+
+    fn with_code(mut self, code: Vec<u8>) -> Self {
+        self.code_bytes = code;
+        self
+    }
+
+    fn with_relocation(mut self, reloc: SmfRelocation) -> Self {
+        self.relocations.push(reloc);
+        self
+    }
+
+    fn with_exported_count(mut self, count: u32) -> Self {
+        self.exported_count = count;
+        self
+    }
+
+    fn build(self) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(&self.filename);
+
+        let section_count = if self.relocations.is_empty() { 1 } else { 2 };
+        let section_table_offset = SmfHeader::SIZE as u64;
+        let section_table_size = std::mem::size_of::<SmfSection>() as u64 * section_count as u64;
+        let code_offset = section_table_offset + section_table_size;
+
+        let reloc_offset = code_offset + self.code_bytes.len() as u64;
+        let reloc_size = std::mem::size_of::<SmfRelocation>() as u64 * self.relocations.len() as u64;
+        let symbol_table_offset = reloc_offset + reloc_size;
+
+        let header = SmfHeader {
+            magic: *SMF_MAGIC,
+            version_major: 0,
+            version_minor: 1,
+            platform: Platform::Any as u8,
+            arch: Arch::X86_64 as u8,
+            flags: SMF_FLAG_EXECUTABLE,
+            section_count,
+            section_table_offset,
+            symbol_table_offset,
+            symbol_count: 1,
+            exported_count: self.exported_count,
+            entry_point: 0,
+            module_hash: 0,
+            source_hash: 0,
+            reserved: [0; 8],
+        };
+
+        let code_section = Self::make_section(b"code", SectionType::Code,
+            SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset,
+            self.code_bytes.len() as u64, 16);
+
+        let string_table = format!("{}\0", self.symbol_name).into_bytes();
+        let symbol = SmfSymbol {
+            name_offset: 0,
+            name_hash: hash_name(&self.symbol_name),
+            sym_type: SymbolType::Function,
+            binding: SymbolBinding::Global,
+            visibility: 0,
+            flags: 0,
+            value: 0,
+            size: 0,
+            type_id: 0,
+            version: 0,
+        };
+
+        let mut buf = Vec::new();
+        push_struct(&mut buf, &header);
+        push_struct(&mut buf, &code_section);
+
+        if !self.relocations.is_empty() {
+            let reloc_section = Self::make_section(b"reloc", SectionType::Reloc,
+                SECTION_FLAG_READ, reloc_offset, reloc_size, 8);
+            push_struct(&mut buf, &reloc_section);
+        }
+
+        buf.extend_from_slice(&self.code_bytes);
+        for reloc in &self.relocations {
+            push_struct(&mut buf, reloc);
+        }
+        push_struct(&mut buf, &symbol);
+        buf.extend_from_slice(&string_table);
+
+        std::fs::write(&path, &buf).unwrap();
+        (dir, path)
+    }
+
+    fn make_section(name: &[u8], section_type: SectionType, flags: u32,
+                    offset: u64, size: u64, alignment: u64) -> SmfSection {
+        let mut sec_name = [0u8; 16];
+        let len = name.len().min(16);
+        sec_name[..len].copy_from_slice(&name[..len]);
+        SmfSection {
+            section_type,
+            flags,
+            offset,
+            size,
+            virtual_size: size,
+            alignment,
+            name: sec_name,
+        }
+    }
+}
+
 fn make_minimal_module() -> (tempfile::TempDir, std::path::PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("module.smf");
-
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-    let code_bytes = vec![0xC3u8]; // ret
-    let symbol_table_offset = code_offset + code_bytes.len() as u64;
-
-    let mut header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: SMF_FLAG_EXECUTABLE,
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 1,
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 0,
-        reserved: [0; 8],
-    };
-
-    let mut name = [0u8; 16];
-    name[..4].copy_from_slice(b"code");
-    let code_section = SmfSection {
-        section_type: SectionType::Code,
-        flags: SECTION_FLAG_READ | SECTION_FLAG_EXEC,
-        offset: code_offset,
-        size: code_bytes.len() as u64,
-        virtual_size: code_bytes.len() as u64,
-        alignment: 16,
-        name,
-    };
-
-    let string_table = b"entry\0".to_vec();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name("entry"),
-        sym_type: SymbolType::Function,
-        binding: SymbolBinding::Global,
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    header.symbol_table_offset = symbol_table_offset;
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(&code_bytes);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    std::fs::write(&path, &buf).unwrap();
-    (dir, path)
+    SmfBuilder::new("module.smf", "entry").build()
 }
 
 #[test]
@@ -168,163 +228,20 @@ fn relocations_patch_local_symbol() {
 }
 
 fn make_exporting_module(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join(format!("{name}.smf"));
-
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-    let code_bytes = vec![0xC3u8]; // ret
-    let symbol_table_offset = code_offset + code_bytes.len() as u64;
-
-    let mut header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: SMF_FLAG_EXECUTABLE,
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 1,
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 0,
-        reserved: [0; 8],
-    };
-
-    let mut sec_name = [0u8; 16];
-    sec_name[..4].copy_from_slice(b"code");
-    let code_section = SmfSection {
-        section_type: SectionType::Code,
-        flags: SECTION_FLAG_READ | SECTION_FLAG_EXEC,
-        offset: code_offset,
-        size: code_bytes.len() as u64,
-        virtual_size: code_bytes.len() as u64,
-        alignment: 16,
-        name: sec_name,
-    };
-
-    let string_table = format!("{name}\0").into_bytes();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name(name),
-        sym_type: SymbolType::Function,
-        binding: SymbolBinding::Global,
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    header.symbol_table_offset = symbol_table_offset;
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(&code_bytes);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    std::fs::write(&path, &buf).unwrap();
-    (dir, path)
+    SmfBuilder::new(&format!("{name}.smf"), name).build()
 }
 
 fn make_importing_module(import_name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("importer.smf");
-
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-
-    // Layout: header | sections | code | reloc | symbols | strings
-    let code_offset = section_table_offset + section_table_size * 2;
-    let code_bytes = vec![0u8; 8]; // will be patched
-
-    let reloc_offset = code_offset + code_bytes.len() as u64;
-    let reloc_size = std::mem::size_of::<SmfRelocation>() as u64;
-    let symbol_table_offset = reloc_offset + reloc_size;
-
-    let mut header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: SMF_FLAG_EXECUTABLE,
-        section_count: 2,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 0,
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 0,
-        reserved: [0; 8],
-    };
-
-    let mut code_name = [0u8; 16];
-    code_name[..4].copy_from_slice(b"code");
-    let code_section = SmfSection {
-        section_type: SectionType::Code,
-        flags: SECTION_FLAG_READ | SECTION_FLAG_EXEC,
-        offset: code_offset,
-        size: code_bytes.len() as u64,
-        virtual_size: code_bytes.len() as u64,
-        alignment: 16,
-        name: code_name,
-    };
-
-    let mut reloc_name = [0u8; 16];
-    reloc_name[..5].copy_from_slice(b"reloc");
-    let reloc_section = SmfSection {
-        section_type: SectionType::Reloc,
-        flags: SECTION_FLAG_READ,
-        offset: reloc_offset,
-        size: reloc_size,
-        virtual_size: reloc_size,
-        alignment: 8,
-        name: reloc_name,
-    };
-
-    let string_table = format!("{import_name}\0").into_bytes();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name(import_name),
-        sym_type: SymbolType::Function,
-        binding: SymbolBinding::Global,
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    let reloc = SmfRelocation {
-        offset: 0,
-        symbol_index: 0,
-        reloc_type: RelocationType::Abs64,
-        addend: 0,
-    };
-
-    header.symbol_table_offset = symbol_table_offset;
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    push_struct(&mut buf, &reloc_section);
-    buf.extend_from_slice(&code_bytes);
-    push_struct(&mut buf, &reloc);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    std::fs::write(&path, &buf).unwrap();
-    (dir, path)
+    SmfBuilder::new("importer.smf", import_name)
+        .with_code(vec![0u8; 8])
+        .with_relocation(SmfRelocation {
+            offset: 0,
+            symbol_index: 0,
+            reloc_type: RelocationType::Abs64,
+            addend: 0,
+        })
+        .with_exported_count(0)
+        .build()
 }
 
 #[test]
@@ -371,4 +288,444 @@ fn loader_resolves_imports_via_registry() {
     };
     let expected = provider.code_mem.as_ptr() as usize + 0;
     assert_eq!(patched, expected);
+}
+
+// ============== SmfSection Tests ==============
+
+#[test]
+fn section_name_str_returns_trimmed_name() {
+    let section = SmfBuilder::make_section(b"code", SectionType::Code, 0, 0, 0, 16);
+    assert_eq!(section.name_str(), "code");
+
+    // Test longer name
+    let section2 = SmfBuilder::make_section(b"longer_name", SectionType::Data, 0, 0, 0, 16);
+    assert_eq!(section2.name_str(), "longer_name");
+
+    // Test max length name (16 bytes, no null terminator)
+    let section3 = SmfBuilder::make_section(b"0123456789abcdef", SectionType::RoData, 0, 0, 0, 16);
+    assert_eq!(section3.name_str(), "0123456789abcdef");
+}
+
+#[test]
+fn section_flags_correctly_identify_permissions() {
+    // Executable section
+    let exec_section = SmfBuilder::make_section(b"code", SectionType::Code,
+        SECTION_FLAG_READ | SECTION_FLAG_EXEC, 0, 0, 16);
+    assert!(exec_section.is_executable());
+    assert!(!exec_section.is_writable());
+
+    // Writable section
+    let data_section = SmfBuilder::make_section(b"data", SectionType::Data,
+        SECTION_FLAG_READ | SECTION_FLAG_WRITE, 0, 0, 16);
+    assert!(!data_section.is_executable());
+    assert!(data_section.is_writable());
+
+    // Read-only section
+    let ro_section = SmfBuilder::make_section(b"rodata", SectionType::RoData,
+        SECTION_FLAG_READ, 0, 0, 16);
+    assert!(!ro_section.is_executable());
+    assert!(!ro_section.is_writable());
+
+    // All flags
+    let all_section = SmfBuilder::make_section(b"all", SectionType::Code,
+        SECTION_FLAG_READ | SECTION_FLAG_WRITE | SECTION_FLAG_EXEC, 0, 0, 16);
+    assert!(all_section.is_executable());
+    assert!(all_section.is_writable());
+}
+
+// ============== Module Method Tests ==============
+
+#[test]
+fn module_get_function_returns_none_for_data_symbol() {
+    // Create module with data symbol instead of function
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.smf");
+
+    let section_table_offset = SmfHeader::SIZE as u64;
+    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
+    let code_offset = section_table_offset + section_table_size;
+    let code_bytes = vec![0xC3u8];
+    let symbol_table_offset = code_offset + code_bytes.len() as u64;
+
+    let header = SmfHeader {
+        magic: *SMF_MAGIC,
+        version_major: 0,
+        version_minor: 1,
+        platform: Platform::Any as u8,
+        arch: Arch::X86_64 as u8,
+        flags: SMF_FLAG_EXECUTABLE,
+        section_count: 1,
+        section_table_offset,
+        symbol_table_offset,
+        symbol_count: 1,
+        exported_count: 1,
+        entry_point: 0,
+        module_hash: 0,
+        source_hash: 12345,
+        reserved: [0; 8],
+    };
+
+    let code_section = SmfBuilder::make_section(b"code", SectionType::Code,
+        SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset, code_bytes.len() as u64, 16);
+
+    let string_table = b"data_sym\0".to_vec();
+    let symbol = SmfSymbol {
+        name_offset: 0,
+        name_hash: hash_name("data_sym"),
+        sym_type: SymbolType::Data, // Data symbol, not function
+        binding: SymbolBinding::Global,
+        visibility: 0,
+        flags: 0,
+        value: 0,
+        size: 0,
+        type_id: 0,
+        version: 0,
+    };
+
+    let mut buf = Vec::new();
+    push_struct(&mut buf, &header);
+    push_struct(&mut buf, &code_section);
+    buf.extend_from_slice(&code_bytes);
+    push_struct(&mut buf, &symbol);
+    buf.extend_from_slice(&string_table);
+
+    std::fs::write(&path, &buf).unwrap();
+
+    let loader = ModuleLoader::new();
+    let module = loader.load(&path).expect("should load");
+
+    // get_function should return None for data symbol
+    let func: Option<unsafe extern "C" fn()> = module.get_function("data_sym");
+    assert!(func.is_none(), "get_function should return None for data symbol");
+
+    // source_hash should be readable
+    assert_eq!(module.source_hash(), 12345);
+}
+
+#[test]
+fn module_entry_point_returns_none_for_non_executable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lib.smf");
+
+    let section_table_offset = SmfHeader::SIZE as u64;
+    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
+    let code_offset = section_table_offset + section_table_size;
+    let code_bytes = vec![0xC3u8];
+    let symbol_table_offset = code_offset + code_bytes.len() as u64;
+
+    // Non-executable header (library)
+    let header = SmfHeader {
+        magic: *SMF_MAGIC,
+        version_major: 0,
+        version_minor: 1,
+        platform: Platform::Any as u8,
+        arch: Arch::X86_64 as u8,
+        flags: 0, // NOT executable
+        section_count: 1,
+        section_table_offset,
+        symbol_table_offset,
+        symbol_count: 1,
+        exported_count: 1,
+        entry_point: 0,
+        module_hash: 0,
+        source_hash: 0,
+        reserved: [0; 8],
+    };
+
+    let code_section = SmfBuilder::make_section(b"code", SectionType::Code,
+        SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset, code_bytes.len() as u64, 16);
+
+    let string_table = b"func\0".to_vec();
+    let symbol = SmfSymbol {
+        name_offset: 0,
+        name_hash: hash_name("func"),
+        sym_type: SymbolType::Function,
+        binding: SymbolBinding::Global,
+        visibility: 0,
+        flags: 0,
+        value: 0,
+        size: 0,
+        type_id: 0,
+        version: 0,
+    };
+
+    let mut buf = Vec::new();
+    push_struct(&mut buf, &header);
+    push_struct(&mut buf, &code_section);
+    buf.extend_from_slice(&code_bytes);
+    push_struct(&mut buf, &symbol);
+    buf.extend_from_slice(&string_table);
+
+    std::fs::write(&path, &buf).unwrap();
+
+    let loader = ModuleLoader::new();
+    let module = loader.load(&path).expect("should load");
+
+    // entry_point should return None for non-executable
+    let entry: Option<unsafe extern "C" fn()> = module.entry_point();
+    assert!(entry.is_none(), "entry_point should return None for non-executable module");
+
+    // But get_function should still work
+    let func: Option<unsafe extern "C" fn()> = module.get_function("func");
+    assert!(func.is_some(), "get_function should work on library module");
+}
+
+#[test]
+fn module_exports_lists_global_symbols() {
+    let (_dir, path) = make_minimal_module();
+    let loader = ModuleLoader::new();
+    let module = loader.load(&path).expect("should load");
+
+    let exports = module.exports();
+    assert!(!exports.is_empty());
+    assert!(exports.iter().any(|(name, ty)| *name == "entry" && *ty == SymbolType::Function));
+}
+
+#[test]
+fn module_is_reloadable_checks_flag() {
+    // Non-reloadable module (default)
+    let (_dir1, path1) = make_minimal_module();
+    let loader = ModuleLoader::new();
+    let module1 = loader.load(&path1).expect("should load");
+    assert!(!module1.is_reloadable());
+
+    // Reloadable module
+    let dir2 = tempfile::tempdir().unwrap();
+    let path2 = dir2.path().join("reloadable.smf");
+
+    let section_table_offset = SmfHeader::SIZE as u64;
+    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
+    let code_offset = section_table_offset + section_table_size;
+    let code_bytes = vec![0xC3u8];
+    let symbol_table_offset = code_offset + code_bytes.len() as u64;
+
+    let header = SmfHeader {
+        magic: *SMF_MAGIC,
+        version_major: 0,
+        version_minor: 1,
+        platform: Platform::Any as u8,
+        arch: Arch::X86_64 as u8,
+        flags: SMF_FLAG_EXECUTABLE | SMF_FLAG_RELOADABLE,
+        section_count: 1,
+        section_table_offset,
+        symbol_table_offset,
+        symbol_count: 1,
+        exported_count: 1,
+        entry_point: 0,
+        module_hash: 0,
+        source_hash: 0,
+        reserved: [0; 8],
+    };
+
+    let code_section = SmfBuilder::make_section(b"code", SectionType::Code,
+        SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset, code_bytes.len() as u64, 16);
+
+    let string_table = b"entry\0".to_vec();
+    let symbol = SmfSymbol {
+        name_offset: 0,
+        name_hash: hash_name("entry"),
+        sym_type: SymbolType::Function,
+        binding: SymbolBinding::Global,
+        visibility: 0,
+        flags: 0,
+        value: 0,
+        size: 0,
+        type_id: 0,
+        version: 0,
+    };
+
+    let mut buf = Vec::new();
+    push_struct(&mut buf, &header);
+    push_struct(&mut buf, &code_section);
+    buf.extend_from_slice(&code_bytes);
+    push_struct(&mut buf, &symbol);
+    buf.extend_from_slice(&string_table);
+
+    std::fs::write(&path2, &buf).unwrap();
+
+    let module2 = loader.load(&path2).expect("should load");
+    assert!(module2.is_reloadable());
+}
+
+// ============== DynModule Trait Tests ==============
+
+#[test]
+fn dyn_module_trait_get_fn_works() {
+    use simple_common::DynModule;
+
+    let (_dir, path) = make_minimal_module();
+    let loader = ModuleLoader::new();
+    let module = loader.load(&path).expect("should load");
+
+    // Use trait method
+    let func: Option<unsafe extern "C" fn()> = DynModule::get_fn(&module, "entry");
+    assert!(func.is_some());
+
+    let missing: Option<unsafe extern "C" fn()> = DynModule::get_fn(&module, "nonexistent");
+    assert!(missing.is_none());
+}
+
+#[test]
+fn dyn_module_trait_entry_fn_works() {
+    use simple_common::DynModule;
+
+    let (_dir, path) = make_minimal_module();
+    let loader = ModuleLoader::new();
+    let module = loader.load(&path).expect("should load");
+
+    let entry: Option<unsafe extern "C" fn()> = DynModule::entry_fn(&module);
+    assert!(entry.is_some());
+}
+
+// ============== Registry Additional Tests ==============
+
+#[test]
+fn registry_unload_and_reload() {
+    let (_dir, path) = make_minimal_module();
+    let registry = ModuleRegistry::new();
+
+    // Load module
+    let first = registry.load(&path).unwrap();
+    let first_ptr = Arc::as_ptr(&first);
+
+    // Unload should succeed
+    assert!(registry.unload(&path));
+
+    // Unload again should fail (not in cache)
+    assert!(!registry.unload(&path));
+
+    // Load again - should get new instance
+    let second = registry.load(&path).unwrap();
+    let second_ptr = Arc::as_ptr(&second);
+
+    // Should be different instances (not cached)
+    assert_ne!(first_ptr, second_ptr);
+}
+
+#[test]
+fn registry_reload_replaces_module() {
+    let (_dir, path) = make_minimal_module();
+    let registry = ModuleRegistry::new();
+
+    // Load module
+    let first = registry.load(&path).unwrap();
+    let first_ptr = Arc::as_ptr(&first);
+
+    // Reload
+    let reloaded = registry.reload(&path).unwrap();
+    let reloaded_ptr = Arc::as_ptr(&reloaded);
+
+    // Should be different instances
+    assert_ne!(first_ptr, reloaded_ptr);
+
+    // Cache should have the reloaded version
+    let cached = registry.load(&path).unwrap();
+    assert!(Arc::ptr_eq(&reloaded, &cached));
+}
+
+#[test]
+fn registry_resolve_symbol_finds_global() {
+    let (_dir, path) = make_minimal_module();
+    let registry = ModuleRegistry::new();
+
+    // Before loading, symbol should not resolve
+    assert!(registry.resolve_symbol("entry").is_none());
+
+    // Load module
+    let module = registry.load(&path).unwrap();
+
+    // Now symbol should resolve
+    let addr = registry.resolve_symbol("entry");
+    assert!(addr.is_some());
+
+    // Address should be within module's code memory
+    let code_start = module.code_mem.as_ptr() as usize;
+    let resolved = addr.unwrap();
+    assert!(resolved >= code_start);
+}
+
+#[test]
+fn registry_resolve_symbol_returns_none_for_unknown() {
+    let (_dir, path) = make_minimal_module();
+    let registry = ModuleRegistry::new();
+    registry.load(&path).unwrap();
+
+    // Unknown symbol should not resolve
+    assert!(registry.resolve_symbol("nonexistent_symbol").is_none());
+}
+
+#[test]
+fn registry_resolve_symbol_ignores_local_symbols() {
+    // Create module with local symbol
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("local.smf");
+
+    let section_table_offset = SmfHeader::SIZE as u64;
+    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
+    let code_offset = section_table_offset + section_table_size;
+    let code_bytes = vec![0xC3u8];
+    let symbol_table_offset = code_offset + code_bytes.len() as u64;
+
+    let header = SmfHeader {
+        magic: *SMF_MAGIC,
+        version_major: 0,
+        version_minor: 1,
+        platform: Platform::Any as u8,
+        arch: Arch::X86_64 as u8,
+        flags: SMF_FLAG_EXECUTABLE,
+        section_count: 1,
+        section_table_offset,
+        symbol_table_offset,
+        symbol_count: 1,
+        exported_count: 0, // No exports
+        entry_point: 0,
+        module_hash: 0,
+        source_hash: 0,
+        reserved: [0; 8],
+    };
+
+    let code_section = SmfBuilder::make_section(b"code", SectionType::Code,
+        SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset, code_bytes.len() as u64, 16);
+
+    let string_table = b"local_fn\0".to_vec();
+    let symbol = SmfSymbol {
+        name_offset: 0,
+        name_hash: hash_name("local_fn"),
+        sym_type: SymbolType::Function,
+        binding: SymbolBinding::Local, // Local, not Global
+        visibility: 0,
+        flags: 0,
+        value: 0,
+        size: 0,
+        type_id: 0,
+        version: 0,
+    };
+
+    let mut buf = Vec::new();
+    push_struct(&mut buf, &header);
+    push_struct(&mut buf, &code_section);
+    buf.extend_from_slice(&code_bytes);
+    push_struct(&mut buf, &symbol);
+    buf.extend_from_slice(&string_table);
+
+    std::fs::write(&path, &buf).unwrap();
+
+    let registry = ModuleRegistry::new();
+    registry.load(&path).unwrap();
+
+    // Local symbol should not be resolved by registry
+    assert!(registry.resolve_symbol("local_fn").is_none());
+}
+
+#[test]
+fn registry_load_nonexistent_fails() {
+    let registry = ModuleRegistry::new();
+    let result = registry.load(std::path::Path::new("/nonexistent/path.smf"));
+    assert!(result.is_err());
+}
+
+#[test]
+fn registry_unload_nonexistent_returns_false() {
+    let registry = ModuleRegistry::new();
+    assert!(!registry.unload(std::path::Path::new("/nonexistent/path.smf")));
 }
