@@ -1,7 +1,7 @@
 //! Comprehensive type checker unit tests
 
-use simple_type::{Type, TypeChecker, TypeError, Substitution, check};
 use simple_parser::Parser;
+use simple_type::{check, Substitution, Type, TypeChecker, TypeError};
 
 // === Type Construction Tests ===
 
@@ -1178,9 +1178,9 @@ fn test_ast_type_to_type_generic() {
 #[test]
 fn test_ast_type_to_type_optional() {
     let mut tc = TypeChecker::new();
-    let ast_ty = simple_parser::ast::Type::Optional(
-        Box::new(simple_parser::ast::Type::Simple("i64".to_string()))
-    );
+    let ast_ty = simple_parser::ast::Type::Optional(Box::new(simple_parser::ast::Type::Simple(
+        "i64".to_string(),
+    )));
     let ty = tc.ast_type_to_type(&ast_ty);
     assert_eq!(ty, Type::Optional(Box::new(Type::Int)));
 }
@@ -1190,7 +1190,9 @@ fn test_ast_type_to_type_function() {
     let mut tc = TypeChecker::new();
     let ast_ty = simple_parser::ast::Type::Function {
         params: vec![simple_parser::ast::Type::Simple("i64".to_string())],
-        ret: Some(Box::new(simple_parser::ast::Type::Simple("bool".to_string()))),
+        ret: Some(Box::new(simple_parser::ast::Type::Simple(
+            "bool".to_string(),
+        ))),
     };
     let ty = tc.ast_type_to_type(&ast_ty);
     if let Type::Function { params, ret } = ty {

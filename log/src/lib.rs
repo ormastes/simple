@@ -10,5 +10,8 @@ pub fn init() {
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
     let fmt_layer = fmt::layer().with_target(true).with_line_number(true);
-    tracing_subscriber::registry().with(env_filter).with(fmt_layer).init();
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .init();
 }

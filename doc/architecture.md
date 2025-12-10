@@ -24,7 +24,7 @@ simple/
 ├── verification/            # Lean 4 formal verification
 │   ├── manual_pointer_borrow/   # Borrow checker proofs
 │   ├── gc_manual_borrow/        # GC safety proofs
-│   ├── waitless_compile/        # Effect tracking proofs
+│   ├── async_compile/        # Async safety proofs (non-blocking verification)
 │   ├── nogc_compile/            # NoGC instruction proofs
 │   └── type_inference_compile/  # Type inference proofs
 │
@@ -51,34 +51,51 @@ simple/
                     │   common    │  ← Zero dependencies, defines all contracts
                     └─────┬───────┘
                           │
-        ┌─────────────────┼─────────────────┐
-        │                 │                 │
-        ▼                 ▼                 ▼
-  ┌──────────┐      ┌──────────┐      ┌──────────┐
-  │  parser  │      │   type   │      │  runtime │
-  └────┬─────┘      └────┬─────┘      └────┬─────┘
-       │                 │                 │
-       └────────┬────────┘                 │
-                │                          │
-                ▼                          │
-          ┌──────────┐                     │
-          │ compiler │ ←───────────────────┘
-          └────┬─────┘
-               │
-       ┌───────┼───────┐
-       │       │       │
-       ▼       │       ▼
-  ┌────────┐   │  ┌──────────────┐
-  │ loader │   │  │ native_loader│
-  └────┬───┘   │  └──────┬───────┘
-       │       │         │
-       └───────┼─────────┘
-               │
-               ▼
-          ┌────────┐
-          │ driver │  ← Orchestrates everything
-          └────────┘
+        ┌─────────────────┼─────────────────────────┐
+        │                 │                         │
+        ▼                 ▼                         ▼
+  ┌──────────┐      ┌──────────┐             ┌──────────┐
+  │  parser  │      │  loader  │             │  runtime │
+  └────┬─────┘      └──────────┘             └──────────┘
+       │                                           │
+       ▼                                           │
+  ┌──────────┐                                     │
+  │   type   │                                     │
+  └────┬─────┘                                     │
+       │                                           │
+       ▼                                           │
+  ┌──────────────────────────────┐                 │
+  │          compiler            │                 │
+  │  (depends: parser, type,     │                 │
+  │   loader/smf, common)        │                 │
+  │  NOTE: does NOT depend on    │                 │
+  │  runtime - uses trait only   │                 │
+  └───────────────┬──────────────┘                 │
+                  │                                │
+       ┌──────────┼──────────────┬─────────────────┘
+       │          │              │
+       ▼          ▼              ▼
+  ┌────────┐  ┌────────────┐  ┌──────────────┐
+  │ loader │  │native_loader│ │   runtime    │
+  └────────┘  └────────────┘  └──────────────┘
+       │          │              │
+       └──────────┴──────┬───────┘
+                         │
+                         ▼
+                   ┌──────────┐
+                   │  driver  │  ← Orchestrates everything
+                   │  (also   │
+                   │  lib/log)│
+                   └──────────┘
 ```
+
+**Key Dependency Notes:**
+- `parser` has NO internal dependencies (pure syntax)
+- `type` depends only on `parser`
+- `loader` depends only on `common`
+- `runtime` depends only on `common`
+- `compiler` depends on parser, type, loader/smf, common (NOT runtime - uses ActorSpawner trait)
+- `driver` depends on ALL modules and orchestrates execution
 
 ---
 
@@ -99,7 +116,7 @@ src/
 │   ├── lexer.rs         # Tokenization with INDENT/DEDENT
 │   ├── ast.rs           # AST node definitions
 │   ├── parser.rs        # Recursive descent parser
-│   └── error.rs         # Parse error types
+│   └── error.rs         # Parse error types (ParseError enum)
 │
 ├── type/                # Type checking/inference
 │   └── lib.rs           # TypeChecker, Substitution, Type enum, unify()
@@ -110,36 +127,48 @@ src/
 │   ├── error.rs         # CompileError enum
 │   ├── pipeline.rs      # CompilerPipeline - orchestrates compilation
 │   ├── value.rs         # Value enum, Env, pointer wrappers
-│   ├── effects.rs       # Effect checking (waitless violations)
+│   ├── effects.rs       # Effect checking (async safety, blocking detection)
 │   ├── interpreter.rs   # Tree-walking interpreter entry
-│   ├── interpreter_*.rs # Interpreter sub-modules (call, method, macro, extern, context)
+│   ├── interpreter_call.rs    # Function call handling
+│   ├── interpreter_method.rs  # Method dispatch handling
+│   ├── interpreter_macro.rs   # Macro expansion handling
+│   ├── interpreter_extern.rs  # External function handling
+│   ├── interpreter_context.rs # Context statement handling
 │   ├── hir/             # High-level IR
 │   │   ├── mod.rs
 │   │   ├── types.rs     # HIR type representations
 │   │   └── lower.rs     # AST → HIR lowering
 │   ├── mir/             # Mid-level IR
 │   │   ├── mod.rs
-│   │   ├── types.rs     # MIR type representations
+│   │   ├── types.rs     # MIR types (50+ instructions, effects, patterns)
 │   │   └── lower.rs     # HIR → MIR lowering
 │   ├── codegen/         # Code generation
 │   │   ├── mod.rs
-│   │   └── cranelift.rs # Cranelift backend
-│   └── linker/          # SMF emission
-│       ├── mod.rs
-│       └── smf_writer.rs
+│   │   ├── cranelift.rs # AOT Cranelift backend
+│   │   └── jit.rs       # JIT Cranelift backend
+│   ├── linker/          # SMF emission
+│   │   ├── mod.rs
+│   │   └── smf_writer.rs
+│   ├── value_bridge.rs  # FFI value marshalling (BridgeValue)
+│   ├── interpreter_ffi.rs # Interpreter FFI exports for fallback
+│   └── compilability.rs # Compilability analysis
 │
 ├── loader/              # SMF binary loading
-│   ├── lib.rs           # Re-exports
+│   ├── lib.rs           # Re-exports ModuleLoader, LoadedModule, ModuleRegistry
 │   ├── loader.rs        # ModuleLoader (DynLoader impl)
 │   ├── module.rs        # LoadedModule (DynModule impl)
 │   ├── registry.rs      # ModuleRegistry with symbol resolution
 │   ├── smf/             # SMF format definitions
-│   │   └── mod.rs       # SmfHeader, SmfSection, SmfSymbol, constants
+│   │   ├── mod.rs       # Re-exports, SMF_MAGIC constant
+│   │   ├── header.rs    # SmfHeader, Platform, Arch
+│   │   ├── section.rs   # SmfSection, SectionType
+│   │   ├── symbol.rs    # SmfSymbol, SymbolType, SymbolBinding, SymbolTable
+│   │   └── reloc.rs     # SmfRelocation, RelocationType
 │   └── memory/          # Memory mapping
-│       ├── mod.rs
+│       ├── mod.rs       # PlatformAllocator, Protection, ExecutableMemory, MemoryAllocator trait
 │       ├── common.rs    # Shared memory abstractions
-│       ├── posix.rs     # POSIX mmap implementation
-│       └── windows.rs   # Windows VirtualAlloc implementation
+│       ├── posix.rs     # PosixAllocator (mmap implementation)
+│       └── windows.rs   # WindowsAllocator (VirtualAlloc implementation)
 │
 ├── native_loader/       # OS dylib loading
 │   ├── lib.rs           # Re-exports
@@ -147,32 +176,44 @@ src/
 │   ├── module.rs        # LoadedModule (DynModule impl)
 │   └── registry.rs      # Type alias for common::ModuleRegistry
 │
-├── runtime/             # GC and concurrency
-│   ├── lib.rs           # Re-exports gc module
+├── runtime/             # GC, concurrency, and runtime values
+│   ├── lib.rs           # Re-exports memory::gc, NoGcAllocator, RuntimeValue types
+│   ├── value.rs         # RuntimeValue (tagged pointer), heap types, FFI functions
 │   ├── memory/
 │   │   ├── mod.rs
 │   │   ├── gc.rs        # GcRuntime (Abfall wrapper, logging)
 │   │   └── no_gc.rs     # NoGcAllocator (GC-off profile)
 │   └── concurrency/
-│       └── mod.rs       # (Future: scheduler, async runtime)
+│       └── mod.rs       # Scheduler, ScheduledSpawner, spawn_actor, send_to, join_actor
 │
 ├── driver/              # CLI and orchestration
-│   ├── lib.rs           # Re-exports Runner, Interpreter, watch
+│   ├── lib.rs           # Re-exports Runner, Interpreter, watch, run_code
 │   ├── main.rs          # CLI entry point
 │   ├── runner.rs        # Runner - compile & run files
 │   ├── exec_core.rs     # ExecCore - shared compile/load/run logic
-│   ├── interpreter.rs   # Interpreter - programmatic API
-│   ├── dependency_cache.rs # Import/macro dependency tracking
+│   ├── interpreter.rs   # Interpreter, RunResult, RunConfig, run_code()
+│   ├── dependency_cache.rs # DepInfo, BuildCache - import/macro tracking
 │   └── watcher/
 │       └── mod.rs       # File watching for hot reload
 │
 ├── lib/                 # Native stdlib
 │   └── src/
+│       ├── lib.rs       # Re-exports io module
 │       └── io/
-│           └── term/    # Terminal I/O bindings
+│           ├── mod.rs   # I/O module entry
+│           └── term/
+│               └── mod.rs  # Terminal I/O bindings
 │
-└── log/                 # Logging facade
-    └── lib.rs           # simple_log::init(), tracing setup
+└── util/
+    └── simple_mock_helper/  # Test utilities
+        └── src/
+            ├── lib.rs           # Re-exports all public items
+            ├── api_scanner.rs   # ScannedApi, ScannedType, scan_directory, generate_yaml
+            ├── coverage.rs      # ClassCoverage, MethodCoverage, CoverageSummary, PublicApiSpec
+            ├── mock_policy.rs   # MockCheckResult, init_mocks_for_*, check_mock_use_from
+            ├── test_check.rs    # TestLevel, TestCheckResult, validate_test_config
+            └── bin/
+                └── smh_coverage.rs  # Coverage CLI tool
 ```
 
 ---
@@ -182,40 +223,41 @@ src/
 ### common/src/
 
 **`lib.rs`** - Core module traits and caching
-- `trait DynModule` - Runtime module interface
-- `trait DynLoader` - Module loader interface
-- `struct ModuleCache<M,E>` - Generic thread-safe caching
-- `struct ModuleRegistry<L>` - Loader + cache combination
+- `trait DynModule` - Runtime module interface (`get_fn`, `entry_fn`)
+- `trait DynLoader` - Module loader interface (`load`, `load_with_resolver`)
+- `struct ModuleCache<M,E>` - Generic thread-safe caching (`get`, `insert`, `remove`, `modules`)
+- `struct ModuleRegistry<L>` - Loader + cache combination (`load`, `unload`, `reload`)
 
 **`gc.rs`** - GC contract
-- `trait GcAllocator` - Memory allocation contract
-- `trait GcHandle` - Marker for GC-managed references
+- `trait GcAllocator` - Memory allocation contract (`alloc_bytes`, `collect`)
+- `trait GcHandle` - Marker trait for GC-managed references
 
 **`config_env.rs`** - Configuration
 - `struct ConfigEnv` - Dict-like config/env/args access
 
 **`actor.rs`** - Actor system
-- `enum Message` - Actor message types
-- `enum ActorLifecycle` - Actor state machine
-- `struct ActorHandle` - Communication handle
-- `trait ActorSpawner` - Spawning interface
-- `struct ThreadSpawner` - Thread-based spawner
+- `enum Message` - Actor message types (`Value(String)`, `Bytes(Vec<u8>)`)
+- `enum ActorLifecycle` - Actor state machine (`Running`, `Joined`)
+- `struct ActorHandle` - Communication handle (`id`, `send`, `recv`, `join`, `is_running`)
+- `trait ActorSpawner` - Spawning interface (`spawn`)
+- `struct ThreadSpawner` - Thread-based spawner implementation
 
-**`manual.rs`** - Manual memory management
-- `struct Nat` - Natural number newtype
-- `struct BorrowState` - Borrow tracking
-- `enum ValidBorrowState` - Verified borrow states
-- `struct BorrowTracker` - Runtime borrow checker
-- `struct ValidBorrowTracker` - Verified tracker
-- `struct GcState` - GC state tracking
-- `struct GcStateVerify` - GC verification
-- `struct GcStateTracker` - GC tracker
-- `struct ManualGc` - Manual memory arena
-- `struct Unique<T>` - Unique ownership pointer
-- `struct Shared<T>` - Reference-counted pointer
-- `struct WeakPtr<T>` - Weak reference
-- `struct HandlePool<T>` - Handle allocation pool
-- `struct Handle<T>` - Pool-managed handle
+**`manual.rs`** - Manual memory management (matches Lean formal verification)
+- `struct Nat` - Natural number newtype (matches Lean's Nat, saturating pred)
+- `struct BorrowState` - Borrow tracking (`exclusive: bool`, `shared: Nat`)
+- `enum ValidBorrowState` - Type-safe borrow states (`Unborrowed`, `Exclusive`, `Shared(NonZeroUsize)`)
+- `struct BorrowTracker` - Thread-safe runtime borrow checker
+- `struct ValidBorrowTracker` - Type-safe borrow tracker
+- `struct GcState` - GC state tracking (HashSet-based, `allocate`, `borrow`, `release`, `collect_safe`)
+- `struct GcStateVerify` - Vec-based GC state for Lean correspondence
+- `struct GcStateTracker` - Thread-safe GC tracker
+- `struct ManualGc` - Manual memory arena (`alloc`, `alloc_shared`, `alloc_handle`, `live`, `collect`)
+- `struct Unique<T>` - Unique ownership pointer (`new`, `is_valid`, `into_inner`)
+- `struct Shared<T>` - Reference-counted pointer (`new`, `downgrade`)
+- `struct WeakPtr<T>` - Weak reference (`upgrade`)
+- `struct HandlePool<T>` - Handle allocation pool (`alloc`, `resolve`, `release`)
+- `struct Handle<T>` - Pool-managed handle (`resolve`)
+- Pure functions: `borrow_state_valid`, `gc_state_safe`, `take_exclusive`, `take_shared`, `release_exclusive`, `release_shared`, `gc_allocate`, `gc_borrow`, `gc_release`, `gc_collect_safe`
 
 ---
 
@@ -320,17 +362,24 @@ src/
 
 **`mir/types.rs`** - MIR types
 - `enum LocalKind`
-- `enum WaitlessEffect`
-- `enum NogcInstr`
-- `enum Effect` ⚠️ *Also in ast.rs*
-- `struct EffectSet`
-- `trait HasEffects`
-- `enum BuiltinFunc`, `CallTarget`
+- `enum AsyncEffect` - Async safety effects (Compute, Io, Wait) - matches Lean `async_compile` model
+- `fn is_async(e)` - Check if effect is non-blocking (Lean: `is_async`)
+- `fn pipeline_safe(es)` - Check if all effects are async-safe (Lean: `pipelineSafe`)
+- `enum NogcInstr` - NoGC instructions (Const, Add, GcAlloc) - matches Lean model
+- `fn nogc(p)` - Check if no GC allocations
+- `enum Effect` - Combined effects for production use ⚠️ *Also in ast.rs (different purpose)*
+- `struct EffectSet` - Set of effects with `is_pipeline_safe()` for async safety
+- `trait HasEffects` - Trait for types that report their effects
+- `enum BuiltinFunc`, `CallTarget` - Known functions with effect annotations
 - `struct BlockId`, `VReg`
-- `enum MirInst`, `Terminator`
+- `enum MirInst` - 50+ instruction variants (see MIR Instruction Summary below)
+- `enum Terminator` - Block terminators (Return, Jump, Branch, Unreachable)
 - `enum BlockBuildState`, `BlockBuildError`
 - `struct BlockBuilder`, `MirBlock`
 - `struct MirLocal`, `MirFunction`, `MirModule`
+- **Closure support**: `struct CapturedVar`, `enum CaptureMode` (ByValue, ByRef, ByMutRef)
+- **Pattern matching**: `enum MirPattern`, `enum MirLiteral`, `struct PatternBinding`, `enum BindingStep`
+- **F-strings**: `enum FStringPart` (Literal, Expr)
 
 **`mir/lower.rs`** - HIR→MIR
 - `struct LoopContext`
@@ -339,10 +388,32 @@ src/
 - `type MirLowerResult<T>`
 - `struct MirLowerer`
 
-**`codegen/cranelift.rs`** - Code generation
+**`codegen/cranelift.rs`** - AOT code generation
 - `enum CodegenError`
 - `type CodegenResult<T>`
 - `struct Codegen`
+- Supports 50+ MIR instructions with trap fallbacks for unimplemented ops
+
+**`codegen/jit.rs`** - JIT code generation
+- JIT variant of Codegen for interactive execution
+- Same instruction set as cranelift.rs
+- Memory-based module loading
+
+**`value_bridge.rs`** - FFI value marshalling
+- `struct BridgeValue` - FFI-safe value representation (64-bit tagged)
+- 23 tag constants for all value types
+- Conversions: `Value ↔ BridgeValue ↔ RuntimeValue`
+
+**`interpreter_ffi.rs`** - Interpreter FFI exports
+- `simple_interp_init(module)` - Initialize interpreter context
+- `simple_interp_call(func_name, argc, argv)` - Call interpreter function
+- `simple_interp_eval_expr(expr_index)` - Evaluate expression via interpreter
+- Thread-local interpreter state for hybrid execution
+
+**`compilability.rs`** - Compilability analysis
+- `enum FallbackReason` - 20+ reasons for interpreter fallback
+- `enum CompilabilityStatus` - Compilable vs RequiresInterpreter
+- `analyze_module()`, `analyze_function()` - Determine what can be compiled
 
 **`linker/smf_writer.rs`** - SMF writing
 - `enum DataSectionKind` - Mutable/readonly
@@ -420,55 +491,145 @@ src/
 
 ### runtime/src/
 
+**`lib.rs`** - Re-exports
+- Re-exports `memory::gc`, `NoGcAllocator`
+- Re-exports `RuntimeValue` types and FFI functions
+
+**`value.rs`** - Runtime value representation for codegen
+- `mod tags` - Tag constants (TAG_INT, TAG_HEAP, TAG_FLOAT, TAG_SPECIAL)
+- `enum HeapObjectType` - String, Array, Dict, Tuple, Object, Closure, Enum, Future, Generator, Actor, Unique, Shared, Borrow
+- `struct HeapHeader` - Common header for heap objects
+- `struct RuntimeValue` - 64-bit tagged pointer value
+- `struct RuntimeString`, `RuntimeArray`, `RuntimeTuple` - Heap collections
+- `struct RuntimeClosure` - Closure with captured values
+- `struct RuntimeObject` - Class/struct instance
+- `struct RuntimeEnum` - Enum variant with payload
+- **FFI functions for codegen**:
+  - Value creation: `rt_value_int`, `rt_value_float`, `rt_value_bool`, `rt_value_nil`
+  - Value extraction: `rt_value_as_int`, `rt_value_as_float`, `rt_value_as_bool`
+  - Type checking: `rt_value_is_nil`, `rt_value_is_int`, `rt_value_is_float`, `rt_value_is_bool`, `rt_value_is_heap`, `rt_value_truthy`
+  - Array ops: `rt_array_new`, `rt_array_len`, `rt_array_get`, `rt_array_set`, `rt_array_push`, `rt_array_pop`
+  - Tuple ops: `rt_tuple_new`, `rt_tuple_len`, `rt_tuple_get`, `rt_tuple_set`
+  - String ops: `rt_string_new`, `rt_string_len`, `rt_string_data`, `rt_string_concat`
+  - Generic ops: `rt_index_get`, `rt_index_set`, `rt_slice`
+
 **`memory/gc.rs`** - GC runtime
 - `enum GcLogEventKind`
 - `struct GcLogEvent`
-- `struct GcRuntime`
+- `struct GcRuntime` - Abfall-backed GC wrapper with logging
 
 **`memory/no_gc.rs`** - No-GC allocator
-- `struct NoGcAllocator`
+- `struct NoGcAllocator` - GC-off profile implementation
 
-**`concurrency/mod.rs`** - Concurrency
-- `struct ScheduledSpawner`
+**`concurrency/mod.rs`** - Actor scheduler
+- `struct Scheduler` (private) - Global actor registry with mailboxes and join handles
+- `struct ScheduledSpawner` - Actor spawner that registers with global scheduler
+- `fn spawn_actor<F>` - Spawn a new actor thread with mailbox setup
+- `fn send_to(id, msg)` - Send message to actor by ID (scheduler dispatch)
+- `fn join_actor(id)` - Join an actor by ID (scheduler join table)
+
+---
+
+### util/simple_mock_helper/src/
+
+**`lib.rs`** - Re-exports all public items
+
+**`api_scanner.rs`** - Public API scanning
+- `struct ScannedApi` - Scanned API data
+- `struct ScannedType` - Scanned type information
+- `fn scan_directory` - Scan directory for public APIs
+- `fn generate_yaml` - Generate YAML from scanned APIs
+- `fn write_yaml` - Write YAML to file
+- `fn merge_with_existing` - Merge with existing API spec
+
+**`coverage.rs`** - Coverage analysis
+- `struct ClassCoverage` - Class-level coverage data
+- `struct MethodCoverage` - Method-level coverage data
+- `struct CoverageSummary` - Overall coverage summary
+- `struct PublicApiSpec` - Public API specification
+- `struct LlvmCovExport` - LLVM coverage export data
+- `fn compute_class_coverage` - Compute class coverage from llvm-cov
+- `fn load_llvm_cov_export` - Load llvm-cov export file
+- `fn load_public_api_spec` - Load public API spec from YAML
+- `fn print_class_coverage_table` - Print coverage table
+
+**`mock_policy.rs`** - Mock control for tests
+- `enum MockCheckResult` - Result of mock permission check
+- `const DEFAULT_HAL_PATTERNS` - Default HAL mock patterns
+- `const DEFAULT_ENV_PATTERNS` - Default environment mock patterns
+- `fn are_mocks_enabled` - Check if mocks are enabled
+- `fn check_mock_use_from` - Check if mock use is allowed
+- `fn try_check_mock_use_from` - Try to check mock permission
+- `fn get_allowed_patterns` - Get allowed mock patterns
+- `fn init_mocks_for_only` - Initialize mocks for specific patterns
+- `fn init_mocks_for_only_default` - Initialize with default patterns
+- `fn init_mocks_for_system` - Initialize for system tests (no mocks)
+- `fn is_policy_initialized` - Check if policy is initialized
+
+**`test_check.rs`** - Test level management
+- `enum TestLevel` - Test level (`Unit`, `Integration`, `System`, `Environment`)
+- `struct TestCheckResult` - Result of test check
+- `fn get_test_level` - Get current test level
+- `fn get_test_level_name` - Get test level name
+- `fn try_get_test_level` - Try to get test level
+- `fn init_test_level` - Initialize test level
+- `fn init_test_level_named` - Initialize test level with name
+- `fn assert_test_level` - Assert expected test level
+- `fn assert_mocks_allowed` - Assert mocks are allowed
+- `fn assert_mocks_forbidden` - Assert mocks are forbidden
+- `fn validate_test_config` - Validate test configuration
 
 ---
 
 ### driver/src/
 
+**`lib.rs`** - Re-exports
+- Re-exports `Runner`, `watch`, `run_code`, `Interpreter`, `RunResult`, `RunConfig`
+
 **`exec_core.rs`** - Low-level execution engine (shared logic)
 - `struct ExecCore`
+  - `new()`, `new_no_gc()` - Create with/without GC
   - `compile_source(source, out)` - Compile source to SMF file
   - `compile_file(path, out)` - Compile file to SMF
-  - `compile_to_memory(source)` - Compile to bytes, no disk I/O (TODO)
+  - `compile_to_memory(source)` - Compile to bytes, no disk I/O
   - `load_module(path)` - Load SMF from file
-  - `load_module_from_memory(bytes)` - Load SMF from memory (TODO)
+  - `load_module_from_memory(bytes)` - Load SMF from memory
   - `run_smf(path)` - Run pre-compiled SMF file
-  - `run_smf_from_memory(bytes)` - Run SMF from memory (TODO)
+  - `run_smf_from_memory(bytes)` - Run SMF from memory
   - `run_source(source)` - Compile and run (uses temp file)
-  - `run_source_in_memory(source)` - Compile and run, no disk I/O (TODO)
+  - `run_source_in_memory(source)` - Compile and run, no disk I/O
   - `run_file(path)` - Auto-detect .spl/.smf and run
 
 **`runner.rs`** - Mid-level public API
 - `struct Runner`
+  - `new()`, `new_no_gc()` - Create with/without GC
   - `run_source(source)` - Compile and run source string
+  - `run_source_in_memory(source)` - Compile and run without disk I/O
   - `run_file(path)` - Run .spl or .smf file (auto-detect)
   - `run_smf(path)` - Run pre-compiled SMF directly
   - `compile_to_smf(source, out)` - Compile source to SMF file
-  - `compile_to_memory(source)` - Compile to bytes (TODO)
+  - `gc_runtime()` - Access underlying GC runtime
 
 **`interpreter.rs`** - High-level API with I/O capture
 - `struct Interpreter`
+  - `new()`, `new_no_gc()` - Create with/without GC
   - Uses `Runner` internally (delegates execution)
   - `run(code, config)` - Run with configuration
+  - `run_with_stdin(code, stdin)` - Run with stdin input
   - `run_simple(code)` - Run without config
-  - `run_in_memory(code)` - Run without disk I/O (TODO)
+  - `run_in_memory(code)` - Run without disk I/O
   - `runner()` - Access underlying Runner
-- `struct RunResult` - exit_code, stdout, stderr
-- `struct RunConfig` - args, stdin, timeout_ms, in_memory
+  - `gc()` - Access underlying GC runtime
+- `struct RunResult` - `exit_code`, `stdout`, `stderr`
+- `struct RunConfig` - `args`, `stdin`, `timeout_ms`, `in_memory`
+- `fn run_code(code, args, stdin)` - Convenience function for running code
 
-**`dependency_cache.rs`** - Caching
-- `struct DepInfo`
-- `struct BuildCache`
+**`dependency_cache.rs`** - Import/macro dependency tracking
+- `struct DepInfo` - Dependency information
+- `struct BuildCache` - Build cache for incremental compilation
+
+**`watcher/mod.rs`** - File watching
+- `fn watch(path, callback)` - Watch file for changes and trigger rebuild
 
 ---
 
@@ -497,33 +658,44 @@ src/
 - Everything else may depend on it
 - Never import from parser/compiler/runtime/loader
 
-### parser (depends: common)
+### parser (ZERO internal dependencies)
 - Pure syntax; no semantic analysis
 - Adding new syntax: ONLY modify parser/
 - No interpretation, no type checking
+- External deps: only `thiserror`
 
-### type (depends: parser, common)
+### type (depends: parser)
 - Type inference and checking
 - No runtime values, no interpretation
+- Does NOT depend on common (standalone type system)
 
-### compiler (depends: parser, type, common, loader/smf)
+### loader (depends: common)
+- SMF binary loading
+- DynLoader/DynModule implementations
+- Memory mapping abstractions
+- No parser/compiler/runtime dependencies
+
+### native_loader (depends: common)
+- OS dylib loading (.so/.dll)
+- DynLoader/DynModule implementations
+- No parser/compiler/runtime dependencies
+
+### runtime (depends: common)
+- GcAllocator implementation (Abfall wrapper)
+- Actor scheduler (ScheduledSpawner)
+- No compiler/parser dependencies
+
+### compiler (depends: parser, type, loader/smf, common)
 - Interpretation lives HERE (not in driver)
 - Value types live HERE (not in common)
 - Uses loader/smf only for format structs
+- **Does NOT depend on runtime** - uses `common::ActorSpawner` trait instead
+- This allows compiler to be runtime-agnostic
 
-### loader/native_loader (depends: common)
-- DynLoader/DynModule implementations
-- No parser/compiler/runtime dependencies
-- Hot reload logic stays HERE
-
-### runtime (depends: common)
-- GcAllocator implementation
-- Scheduler (future)
-- No compiler/parser dependencies
-
-### driver (depends: all except runtime internals)
-- Uses `GcAllocator` trait, not `GcRuntime` directly
+### driver (depends: all modules)
+- Uses loader, native_loader, compiler, runtime, common, lib (term-io), log
 - Orchestration only; no business logic
+- Wires up GcRuntime and provides it to compiler via trait
 
 ---
 
@@ -790,6 +962,112 @@ Source → compile_to_memory() → Vec<u8> → load_from_memory() → LoadedModu
 
 ---
 
+## Hybrid Execution Architecture (Codegen + Interpreter)
+
+The Simple compiler supports a hybrid execution model where compilable features are compiled to native code via Cranelift, while unsupported features fall back to the tree-walking interpreter.
+
+### Architecture Overview
+
+```
+Source Code
+    │
+    ▼
+┌─────────────────────────┐
+│  Compilability Analysis │  ← Determine what can be compiled
+│  (compilability.rs)     │
+└───────────┬─────────────┘
+            │
+    ┌───────┴───────┐
+    ▼               ▼
+┌────────┐    ┌──────────────┐
+│Compiled│    │ Interpreter  │
+│  Path  │◄──►│   Fallback   │  ← Bidirectional calls
+│(codegen)│   │(interpreter) │
+└────────┘    └──────────────┘
+    │               │
+    └───────┬───────┘
+            ▼
+┌─────────────────────────┐
+│    Runtime Bridge       │  ← Value conversion (BridgeValue)
+│  (value_bridge.rs)      │
+└─────────────────────────┘
+```
+
+### MIR Instruction Summary
+
+The MIR (Mid-level IR) defines 50+ instructions organized by category:
+
+| Category | Instructions | Effect |
+|----------|-------------|--------|
+| **Core** | ConstInt, ConstFloat, ConstBool, Copy, BinOp, UnaryOp | Compute |
+| **Memory** | Load, Store, LocalAddr, GetElementPtr, GcAlloc, Wait | Varies |
+| **Collections** | ArrayLit, TupleLit, DictLit, IndexGet, IndexSet, SliceOp, Spread | GcAlloc |
+| **Strings** | ConstString, ConstSymbol, FStringFormat | GcAlloc |
+| **Closures** | ClosureCreate, IndirectCall | GcAlloc |
+| **Objects** | StructInit, FieldGet, FieldSet | Compute/GcAlloc |
+| **Methods** | MethodCallStatic, MethodCallVirtual, BuiltinMethod | Io |
+| **Patterns** | PatternTest, PatternBind, EnumDiscriminant, EnumPayload | Compute |
+| **Enums** | EnumUnit, EnumWith | GcAlloc |
+| **Async** | FutureCreate, Await, ActorSpawn, ActorSend, ActorRecv | Wait/Io |
+| **Generators** | GeneratorCreate, Yield, GeneratorNext | Wait/Io |
+| **Errors** | TryUnwrap, OptionSome, OptionNone, ResultOk, ResultErr | Wait/GcAlloc |
+| **Fallback** | InterpCall, InterpEval | Io |
+
+**Codegen coverage note (runtime FFI)**: Actors, generators, and futures are wired to runtime imports (`rt_actor_spawn/send/recv`, `rt_generator_new/yield/next`, `rt_future_new/await`) and now pass `(body_func, ctx)` to the runtime. `body_block` is still a no-op stub until outlining/capture plumbing is implemented, so compiled bodies do not run yet; the interpreter remains the source of correct behavior.
+
+**Planned codegen upgrades (in progress)**:
+- Body outlining (Plan 20): turn `body_block` into standalone `fn(ctx)` with copied captures (Rust ABI, Erlang isolation) so compiled actors/generators/futures run real bodies.
+- Generator state machine (Plan 21): transform yields into a stackless state machine so compiled `yield/next` suspend/resume instead of eager collection.
+- Future execution (Plan 22): execute outlined future body, store result, and make `await` return it.
+
+### Runtime Value Representation
+
+The `RuntimeValue` type uses a 64-bit tagged pointer layout:
+
+```
+| Payload (61 bits)                              | Tag (3 bits) |
+```
+
+**Tag values:**
+- `000`: Signed integer (61-bit, sign-extended)
+- `001`: Heap pointer to object
+- `010`: Float (NaN-boxing)
+- `011`: Special values (nil, bool, symbol ID)
+
+### Interpreter Fallback Design
+
+**Granularity**: Function-level (cleanest boundary)
+
+**FFI Bridge Functions**:
+```rust
+#[no_mangle]
+extern "C" fn simple_interp_call(
+    func_name: *const c_char,
+    argc: usize,
+    argv: *const BridgeValue,
+) -> BridgeValue;
+
+#[no_mangle]
+extern "C" fn simple_interp_init(module_ptr: *const Module);
+```
+
+**Fallback Reasons** (20+ reasons tracked in `compilability.rs`):
+- Closures, lambdas, decorators
+- Actors, async/await, generators
+- Dynamic dispatch, method missing
+- Macros, context blocks
+- Complex pattern matching
+
+### Effect Tracking
+
+All MIR instructions maintain effect annotations for formal verification:
+- **Compute**: Pure operations (literals, field access, pattern test)
+- **Io**: Non-blocking I/O (ActorSend, method calls)
+- **Wait**: Blocking operations (Await, ActorRecv)
+- **GcAlloc**: Heap allocation (collections, closures, objects)
+
+---
+
 ## GC / Memory Management Strategy (from spec: GC-managed default)
 
 ### Architecture
@@ -988,7 +1266,7 @@ The `verification/` directory contains Lean 4 proofs for key safety invariants. 
 |-------|--------------|---------------|---------------------|
 | **Manual Pointer Borrow** | `manual_pointer_borrow/` | `common/manual.rs` | Borrow operations preserve validity |
 | **GC Manual Borrow** | `gc_manual_borrow/` | `common/manual.rs` | GC collection preserves borrowed ⊆ live |
-| **Waitless Compile** | `waitless_compile/` | `compiler/mir/types.rs` | Waitless effects compose safely |
+| **Async Compile (Async Safety)** | `async_compile/` | `compiler/mir/types.rs` | Non-blocking functions compose safely |
 | **NoGC Compile** | `nogc_compile/` | `compiler/mir/types.rs` | NoGC programs compose safely |
 | **Type Inference** | `type_inference_compile/` | `type/lib.rs` | Type inference is deterministic |
 
@@ -1012,10 +1290,11 @@ pub struct BorrowState { pub exclusive: bool, pub shared: Nat }
 pub fn take_exclusive(s: BorrowState) -> BorrowState { ... }
 pub fn borrow_state_valid(s: &BorrowState) -> bool { ... }
 
-// compiler/mir/types.rs - matches WaitlessCompile.lean
-pub enum WaitlessEffect { Compute, Io, Wait }
-pub fn waitless(e: WaitlessEffect) -> bool { !matches!(e, WaitlessEffect::Wait) }
-pub fn pipeline_safe(es: &[WaitlessEffect]) -> bool { es.iter().all(|e| waitless(*e)) }
+// compiler/mir/types.rs - matches AsyncCompile.lean (Async Safety)
+// AsyncEffect tracks which operations may block (Wait = blocking, others = non-blocking)
+pub enum AsyncEffect { Compute, Io, Wait }  // Wait = blocking operation
+pub fn is_async(e: AsyncEffect) -> bool { !matches!(e, AsyncEffect::Wait) }  // Lean: is_async
+pub fn pipeline_safe(es: &[AsyncEffect]) -> bool { es.iter().all(|e| is_async(*e)) }
 
 // type/lib.rs - matches TypeInferenceCompile.lean
 pub enum LeanTy { Nat, Bool, Arrow(Box<LeanTy>, Box<LeanTy>) }
@@ -1028,7 +1307,7 @@ See `doc/formal_verification.md` for detailed correspondence tables and proofs.
 
 ## Refactoring Plan (grounded in current code)
 - **Stabilize the memory boundary**: keep `simple_common::gc::GcAllocator` the only compiler/runtime contract; re-export `GcRuntime`/`NoGcAllocator` from `runtime::memory` and thread selection through the driver via config/env without leaking Abfall or manual allocators across crates.
-- **Introduce a MIR/CFG layer in `compiler`**: lower parsed AST into a stable, borrow-checkable IR to host alias analysis, region checks, and later optimizations. Keep this IR independent of runtime details so features like borrowing or waitless checks stay local.
+- **Introduce a MIR/CFG layer in `compiler`**: lower parsed AST into a stable, borrow-checkable IR to host alias analysis, region checks, and later optimizations. Keep this IR independent of runtime details so features like borrowing or async safety (async) checks stay local.
 - **Isolate pointer-kind semantics in `common`**: move any new borrow/region markers or handle pool ABI types into `common` and keep parser/runtime unaware of each other; compiler should translate to these markers only.
 - **Module hygiene in runtime**: keep GC backends under `runtime::memory::{gc,no_gc}` and pool/concurrency in separate submodules; avoid cross-imports so swapping GC or introducing arenas does not affect the scheduler.
 - **Diagnostics pipeline**: add a small error-reporting helper crate or module consumed by parser/type/borrow passes so new analyses (borrow checker, effects) can emit consistent spans without coupling passes together.

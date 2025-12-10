@@ -67,7 +67,11 @@ impl From<Nat> for usize {
 /// Check the borrow state validity invariant.
 /// Valid states either have no exclusive borrow, or have exclusive with zero shared.
 pub fn borrow_state_valid(s: &BorrowState) -> bool {
-    if s.exclusive { s.shared.is_zero() } else { true }
+    if s.exclusive {
+        s.shared.is_zero()
+    } else {
+        true
+    }
 }
 
 /// Lean: def safe (s : GcState) : Prop := ∀ id, id ∈ s.borrowed → id ∈ s.live
@@ -185,7 +189,10 @@ impl BorrowState {
 ///   if s.shared = 0 then { s with exclusive := true } else s
 pub fn take_exclusive(s: BorrowState) -> BorrowState {
     if s.shared.is_zero() {
-        BorrowState { exclusive: true, ..s }
+        BorrowState {
+            exclusive: true,
+            ..s
+        }
     } else {
         s
     }
@@ -197,20 +204,29 @@ pub fn take_shared(s: BorrowState) -> BorrowState {
     if s.exclusive {
         s
     } else {
-        BorrowState { shared: s.shared.succ(), ..s }
+        BorrowState {
+            shared: s.shared.succ(),
+            ..s
+        }
     }
 }
 
 /// Lean: def releaseShared (s : BorrowState) : BorrowState :=
 ///   { s with shared := s.shared.pred }
 pub fn release_shared(s: BorrowState) -> BorrowState {
-    BorrowState { shared: s.shared.pred(), ..s }
+    BorrowState {
+        shared: s.shared.pred(),
+        ..s
+    }
 }
 
 /// Lean: def releaseExclusive (s : BorrowState) : BorrowState :=
 ///   { s with exclusive := false }
 pub fn release_exclusive(s: BorrowState) -> BorrowState {
-    BorrowState { exclusive: false, ..s }
+    BorrowState {
+        exclusive: false,
+        ..s
+    }
 }
 
 //==============================================================================
@@ -250,7 +266,7 @@ impl ValidBorrowState {
             (false, 0) => Some(ValidBorrowState::Unborrowed),
             (true, 0) => Some(ValidBorrowState::Exclusive),
             (false, n) if n > 0 => Some(ValidBorrowState::Shared(
-                std::num::NonZeroUsize::new(n).unwrap()
+                std::num::NonZeroUsize::new(n).unwrap(),
             )),
             _ => None, // Invalid: exclusive AND shared
         }
@@ -259,9 +275,18 @@ impl ValidBorrowState {
     /// Convert to dynamic BorrowState for interop.
     pub fn to_state(&self) -> BorrowState {
         match self {
-            ValidBorrowState::Unborrowed => BorrowState { exclusive: false, shared: Nat::ZERO },
-            ValidBorrowState::Exclusive => BorrowState { exclusive: true, shared: Nat::ZERO },
-            ValidBorrowState::Shared(n) => BorrowState { exclusive: false, shared: Nat::new(n.get()) },
+            ValidBorrowState::Unborrowed => BorrowState {
+                exclusive: false,
+                shared: Nat::ZERO,
+            },
+            ValidBorrowState::Exclusive => BorrowState {
+                exclusive: true,
+                shared: Nat::ZERO,
+            },
+            ValidBorrowState::Shared(n) => BorrowState {
+                exclusive: false,
+                shared: Nat::new(n.get()),
+            },
         }
     }
 
@@ -279,13 +304,13 @@ impl ValidBorrowState {
     pub fn take_shared(self) -> Result<ValidBorrowState, ValidBorrowState> {
         match self {
             ValidBorrowState::Unborrowed => Ok(ValidBorrowState::Shared(
-                std::num::NonZeroUsize::new(1).unwrap()
+                std::num::NonZeroUsize::new(1).unwrap(),
             )),
             ValidBorrowState::Shared(n) => {
                 // Saturating add to prevent overflow
                 let new_count = n.get().saturating_add(1);
                 Ok(ValidBorrowState::Shared(
-                    std::num::NonZeroUsize::new(new_count).unwrap()
+                    std::num::NonZeroUsize::new(new_count).unwrap(),
                 ))
             }
             ValidBorrowState::Exclusive => Err(ValidBorrowState::Exclusive),
@@ -306,9 +331,9 @@ impl ValidBorrowState {
     pub fn release_shared(self) -> ValidBorrowState {
         match self {
             ValidBorrowState::Shared(n) if n.get() == 1 => ValidBorrowState::Unborrowed,
-            ValidBorrowState::Shared(n) => ValidBorrowState::Shared(
-                std::num::NonZeroUsize::new(n.get() - 1).unwrap()
-            ),
+            ValidBorrowState::Shared(n) => {
+                ValidBorrowState::Shared(std::num::NonZeroUsize::new(n.get() - 1).unwrap())
+            }
             other => other, // No-op if not shared
         }
     }
@@ -927,7 +952,10 @@ impl<T> HandlePool<T> {
         let mut slots = self.inner.slots.lock().unwrap();
         let gen = self.inner.next_gen.fetch_add(1, Ordering::SeqCst);
         let value = Arc::new(value);
-        let entry = HandleEntry { generation: gen, value };
+        let entry = HandleEntry {
+            generation: gen,
+            value,
+        };
         let idx = slots.iter().position(|s| s.is_none()).unwrap_or_else(|| {
             slots.push(None);
             slots.len() - 1
@@ -977,7 +1005,10 @@ pub struct Handle<T> {
 
 impl<T> Handle<T> {
     pub fn resolve(&self) -> Option<Arc<T>> {
-        HandlePool { inner: self.pool.clone() }.resolve(self)
+        HandlePool {
+            inner: self.pool.clone(),
+        }
+        .resolve(self)
     }
 }
 
@@ -997,7 +1028,10 @@ impl<T> Drop for Handle<T> {
     fn drop(&mut self) {
         // When this is the last clone, release the slot.
         if Arc::strong_count(&self.pool) == 1 {
-            HandlePool { inner: self.pool.clone() }.release(self);
+            HandlePool {
+                inner: self.pool.clone(),
+            }
+            .release(self);
         } else {
             self.pool.tracker.fetch_sub(1, Ordering::SeqCst);
         }

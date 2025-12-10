@@ -6,13 +6,14 @@ use simple_loader::registry::ModuleRegistry;
 use simple_loader::smf::{
     apply_relocations, hash_name, Arch, Platform, RelocationType, SectionType, SmfHeader,
     SmfRelocation, SmfSection, SmfSymbol, SymbolBinding, SymbolTable, SymbolType,
-    SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_MAGIC, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
-    SECTION_FLAG_WRITE,
+    SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE, SMF_FLAG_EXECUTABLE,
+    SMF_FLAG_RELOADABLE, SMF_MAGIC,
 };
 
 fn push_struct<T: Copy>(buf: &mut Vec<u8>, value: &T) {
-    let slice =
-        unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) };
+    let slice = unsafe {
+        std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
+    };
     buf.extend_from_slice(slice);
 }
 
@@ -92,7 +93,8 @@ impl SmfBuilder {
     }
 
     fn local_symbol(self) -> Self {
-        self.with_sym_binding(SymbolBinding::Local).with_exported_count(0)
+        self.with_sym_binding(SymbolBinding::Local)
+            .with_exported_count(0)
     }
 
     fn build(self) -> (tempfile::TempDir, std::path::PathBuf) {
@@ -105,7 +107,8 @@ impl SmfBuilder {
         let code_offset = section_table_offset + section_table_size;
 
         let reloc_offset = code_offset + self.code_bytes.len() as u64;
-        let reloc_size = std::mem::size_of::<SmfRelocation>() as u64 * self.relocations.len() as u64;
+        let reloc_size =
+            std::mem::size_of::<SmfRelocation>() as u64 * self.relocations.len() as u64;
         let symbol_table_offset = reloc_offset + reloc_size;
 
         let header = SmfHeader {
@@ -126,9 +129,14 @@ impl SmfBuilder {
             reserved: [0; 8],
         };
 
-        let code_section = Self::make_section(b"code", SectionType::Code,
-            SECTION_FLAG_READ | SECTION_FLAG_EXEC, code_offset,
-            self.code_bytes.len() as u64, 16);
+        let code_section = Self::make_section(
+            b"code",
+            SectionType::Code,
+            SECTION_FLAG_READ | SECTION_FLAG_EXEC,
+            code_offset,
+            self.code_bytes.len() as u64,
+            16,
+        );
 
         let string_table = format!("{}\0", self.symbol_name).into_bytes();
         let symbol = SmfSymbol {
@@ -149,8 +157,14 @@ impl SmfBuilder {
         push_struct(&mut buf, &code_section);
 
         if !self.relocations.is_empty() {
-            let reloc_section = Self::make_section(b"reloc", SectionType::Reloc,
-                SECTION_FLAG_READ, reloc_offset, reloc_size, 8);
+            let reloc_section = Self::make_section(
+                b"reloc",
+                SectionType::Reloc,
+                SECTION_FLAG_READ,
+                reloc_offset,
+                reloc_size,
+                8,
+            );
             push_struct(&mut buf, &reloc_section);
         }
 
@@ -165,8 +179,14 @@ impl SmfBuilder {
         (dir, path)
     }
 
-    fn make_section(name: &[u8], section_type: SectionType, flags: u32,
-                    offset: u64, size: u64, alignment: u64) -> SmfSection {
+    fn make_section(
+        name: &[u8],
+        section_type: SectionType,
+        flags: u32,
+        offset: u64,
+        size: u64,
+        alignment: u64,
+    ) -> SmfSection {
         let mut sec_name = [0u8; 16];
         let len = name.len().min(16);
         sec_name[..len].copy_from_slice(&name[..len]);
@@ -353,26 +373,44 @@ fn section_name_str_returns_trimmed_name() {
 #[test]
 fn section_flags_correctly_identify_permissions() {
     // Executable section
-    let exec_section = SmfBuilder::make_section(b"code", SectionType::Code,
-        SECTION_FLAG_READ | SECTION_FLAG_EXEC, 0, 0, 16);
+    let exec_section = SmfBuilder::make_section(
+        b"code",
+        SectionType::Code,
+        SECTION_FLAG_READ | SECTION_FLAG_EXEC,
+        0,
+        0,
+        16,
+    );
     assert!(exec_section.is_executable());
     assert!(!exec_section.is_writable());
 
     // Writable section
-    let data_section = SmfBuilder::make_section(b"data", SectionType::Data,
-        SECTION_FLAG_READ | SECTION_FLAG_WRITE, 0, 0, 16);
+    let data_section = SmfBuilder::make_section(
+        b"data",
+        SectionType::Data,
+        SECTION_FLAG_READ | SECTION_FLAG_WRITE,
+        0,
+        0,
+        16,
+    );
     assert!(!data_section.is_executable());
     assert!(data_section.is_writable());
 
     // Read-only section
-    let ro_section = SmfBuilder::make_section(b"rodata", SectionType::RoData,
-        SECTION_FLAG_READ, 0, 0, 16);
+    let ro_section =
+        SmfBuilder::make_section(b"rodata", SectionType::RoData, SECTION_FLAG_READ, 0, 0, 16);
     assert!(!ro_section.is_executable());
     assert!(!ro_section.is_writable());
 
     // All flags
-    let all_section = SmfBuilder::make_section(b"all", SectionType::Code,
-        SECTION_FLAG_READ | SECTION_FLAG_WRITE | SECTION_FLAG_EXEC, 0, 0, 16);
+    let all_section = SmfBuilder::make_section(
+        b"all",
+        SectionType::Code,
+        SECTION_FLAG_READ | SECTION_FLAG_WRITE | SECTION_FLAG_EXEC,
+        0,
+        0,
+        16,
+    );
     assert!(all_section.is_executable());
     assert!(all_section.is_writable());
 }
@@ -391,7 +429,10 @@ fn module_get_function_returns_none_for_data_symbol() {
 
     // get_function should return None for data symbol
     let func: Option<unsafe extern "C" fn()> = module.get_function("data_sym");
-    assert!(func.is_none(), "get_function should return None for data symbol");
+    assert!(
+        func.is_none(),
+        "get_function should return None for data symbol"
+    );
 
     // source_hash should be readable
     assert_eq!(module.source_hash(), 12345);
@@ -399,16 +440,17 @@ fn module_get_function_returns_none_for_data_symbol() {
 
 #[test]
 fn module_entry_point_returns_none_for_non_executable() {
-    let (_dir, path) = SmfBuilder::new("lib.smf", "func")
-        .library()
-        .build();
+    let (_dir, path) = SmfBuilder::new("lib.smf", "func").library().build();
 
     let loader = ModuleLoader::new();
     let module = loader.load(&path).expect("should load");
 
     // entry_point should return None for non-executable
     let entry: Option<unsafe extern "C" fn()> = module.entry_point();
-    assert!(entry.is_none(), "entry_point should return None for non-executable module");
+    assert!(
+        entry.is_none(),
+        "entry_point should return None for non-executable module"
+    );
 
     // But get_function should still work
     let func: Option<unsafe extern "C" fn()> = module.get_function("func");
@@ -423,7 +465,9 @@ fn module_exports_lists_global_symbols() {
 
     let exports = module.exports();
     assert!(!exports.is_empty());
-    assert!(exports.iter().any(|(name, ty)| *name == "entry" && *ty == SymbolType::Function));
+    assert!(exports
+        .iter()
+        .any(|(name, ty)| *name == "entry" && *ty == SymbolType::Function));
 }
 
 #[test]

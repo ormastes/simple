@@ -17,14 +17,14 @@ fn call_extern_function(
     match name {
         // I/O functions
         "print" => {
-            check_waitless_violation("print")?;
+            check_async_violation("print")?;
             for val in &evaluated {
                 print!("{}", val.to_display_string());
             }
             Ok(Value::Nil)
         }
         "println" => {
-            check_waitless_violation("println")?;
+            check_async_violation("println")?;
             for val in &evaluated {
                 print!("{}", val.to_display_string());
             }
@@ -32,7 +32,7 @@ fn call_extern_function(
             Ok(Value::Nil)
         }
         "input" => {
-            check_waitless_violation("input")?;
+            check_async_violation("input")?;
             use std::io::{self, BufRead};
             let stdin = io::stdin();
             let line = stdin.lock().lines().next()

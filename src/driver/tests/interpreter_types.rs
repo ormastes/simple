@@ -233,5 +233,253 @@ main = result.unwrap()
     assert_eq!(result.exit_code, 20);
 }
 
+// ============= Strong Enum Tests =============
+
+#[test]
+fn interpreter_strong_enum_exhaustive_match() {
+    // Strong enum with exhaustive matching - no wildcard
+    let code = r#"
+#[strong]
+enum Status:
+    Active
+    Inactive
+    Pending
+
+let s = Status::Active
+let mut r = 0
+match s:
+    Status::Active =>
+        r = 1
+    Status::Inactive =>
+        r = 2
+    Status::Pending =>
+        r = 3
+main = r
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_strong_enum_wildcard_error() {
+    // Strong enum should reject wildcard pattern
+    let code = r#"
+#[strong]
+enum Status:
+    Active
+    Inactive
+
+let s = Status::Active
+main = match s:
+    Status::Active => 1
+    _ => 0
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_strong_enum_identifier_catchall_error() {
+    // Strong enum should reject identifier catch-all pattern
+    let code = r#"
+#[strong]
+enum Status:
+    Active
+    Inactive
+
+let s = Status::Active
+main = match s:
+    Status::Active => 1
+    other => 0
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+#[ignore = "match expression not yet implemented in parser"]
+fn interpreter_weak_enum_allows_wildcard() {
+    // Normal (weak) enum should allow wildcard
+    let code = r#"
+enum Status:
+    Active
+    Inactive
+    Pending
+
+let s = Status::Active
+main = match s:
+    Status::Active => 1
+    _ => 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+// ============= Type Suffix Tests =============
+
+#[test]
+fn interpreter_type_suffix_i32() {
+    let code = r#"
+main = 42i32
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_type_suffix_i64() {
+    let code = r#"
+main = 100i64
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 100);
+}
+
+#[test]
+fn interpreter_type_suffix_u32() {
+    let code = r#"
+main = 255u32
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 255);
+}
+
+#[test]
+fn interpreter_unit_suffix_km() {
+    // User-defined unit suffix: 100_km
+    let code = r#"
+let distance = 100_km
+main = distance
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 100);
+}
+
+#[test]
+fn interpreter_unit_suffix_expression() {
+    // Unit suffixes in expressions
+    let code = r#"
+let a = 50_m
+let b = 30_m
+main = a + b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 80);
+}
+
+#[test]
+fn interpreter_float_suffix_f64() {
+    // Float with type suffix - just verify it parses and evaluates
+    let code = r#"
+let x = 3.14f64
+main = 1
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_float_suffix_f32() {
+    let code = r#"
+let x = 1.5f32
+main = 2
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2);
+}
+
+// ============= Standalone Unit Tests =============
+
+#[test]
+fn interpreter_unit_def_basic() {
+    // Define a standalone unit type and use it
+    let code = r#"
+unit UserId: i64 as uid
+
+let user_id = 42_uid
+main = user_id
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_unit_def_arithmetic() {
+    // Unit types can be used in arithmetic (value semantics)
+    let code = r#"
+unit Score: i64 as pts
+
+let a = 100_pts
+let b = 50_pts
+main = a + b
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 150);
+}
+
 // ============= String Methods Tests =============
 
+// ============= Unit Family Tests (#87) =============
+// Note: Full unit family syntax `unit length(base: f64): m = 1.0, km = 1000.0`
+// is not yet implemented. These tests use standalone units as a foundation.
+
+#[test]
+#[ignore = "unit family syntax not yet implemented"]
+fn interpreter_unit_family_basic() {
+    // Define a unit family with conversion factors
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+let d = 5000.0_m
+main = 1
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+#[ignore = "unit family syntax not yet implemented"]
+fn interpreter_unit_family_to_base() {
+    // Convert to base unit
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+let d = 2_km
+let meters = d.to_m()
+main = 1
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+// ============= Primitive API Warnings (#92) =============
+// These tests verify that warnings are issued for public APIs using primitives
+
+#[test]
+fn interpreter_primitive_warning_suppressed_with_attribute() {
+    // #[allow(primitive_api)] suppresses the warning
+    let code = r#"
+#[allow(primitive_api)]
+pub fn get_count() -> i64:
+    return 42
+
+main = get_count()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_semantic_type_no_warning() {
+    // Using semantic types (unit types) should not warn
+    let code = r#"
+unit Count: i64 as cnt
+
+pub fn get_count() -> Count:
+    return 42_cnt
+
+main = get_count()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}

@@ -1,5 +1,5 @@
-use simple_parser::Parser;
 use simple_parser::ast::*;
+use simple_parser::Parser;
 
 fn parse(src: &str) -> Vec<Node> {
     let mut parser = Parser::new(src);

@@ -274,6 +274,71 @@ fn evaluate_method_call(
                 _ => {}
             }
         }
+        // Built-in methods for Result
+        if enum_name == "Result" {
+            match method {
+                "is_ok" => return Ok(Value::Bool(variant == "Ok")),
+                "is_err" => return Ok(Value::Bool(variant == "Err")),
+                "unwrap" => {
+                    if variant == "Ok" {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    if variant == "Err" {
+                        if let Some(err_val) = payload {
+                            return Err(CompileError::Semantic(format!("called unwrap on Err: {}", err_val.to_display_string())));
+                        }
+                    }
+                    return Err(CompileError::Semantic("called unwrap on Err".into()));
+                }
+                "unwrap_or" => {
+                    if variant == "Ok" {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    return eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods);
+                }
+                "unwrap_err" => {
+                    if variant == "Err" {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    return Err(CompileError::Semantic("called unwrap_err on Ok".into()));
+                }
+                "ok" => {
+                    if variant == "Ok" {
+                        return Ok(Value::Enum {
+                            enum_name: "Option".into(),
+                            variant: "Some".into(),
+                            payload: payload.clone(),
+                        });
+                    }
+                    return Ok(Value::Enum {
+                        enum_name: "Option".into(),
+                        variant: "None".into(),
+                        payload: None,
+                    });
+                }
+                "err" => {
+                    if variant == "Err" {
+                        return Ok(Value::Enum {
+                            enum_name: "Option".into(),
+                            variant: "Some".into(),
+                            payload: payload.clone(),
+                        });
+                    }
+                    return Ok(Value::Enum {
+                        enum_name: "Option".into(),
+                        variant: "None".into(),
+                        payload: None,
+                    });
+                }
+                _ => {}
+            }
+        }
     }
 
     // Object methods (class/struct)

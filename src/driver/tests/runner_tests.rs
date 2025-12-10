@@ -1,11 +1,11 @@
-use simple_driver::runner::Runner;
-use simple_driver::dependency_cache::{analyze_source_str, BuildCache, DepInfo};
-use simple_term_io::io::term::TermNative;
-use simple_runtime::gc::GcRuntime;
-use std::sync::{Arc, Mutex};
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
+use simple_driver::dependency_cache::{analyze_source_str, BuildCache, DepInfo};
+use simple_driver::runner::Runner;
+use simple_runtime::gc::GcRuntime;
+use simple_term_io::io::term::TermNative;
+use std::sync::{Arc, Mutex};
 
 /// Helper to run source and assert expected exit code
 fn run_expect(src: &str, expected: i32) {
@@ -48,7 +48,8 @@ fn runner_supports_variables() {
 
 #[test]
 fn runner_handles_if_else_and_loops() {
-    run_expect(r#"
+    run_expect(
+        r#"
 let mut sum = 0
 let mut i = 0
 while i < 5:
@@ -56,12 +57,15 @@ while i < 5:
         sum = sum + i
     i = i + 1
 main = sum
-"#, 6); // 0 + 2 + 4
+"#,
+        6,
+    ); // 0 + 2 + 4
 }
 
 #[test]
 fn runner_handles_for_loop_and_break_continue() {
-    run_expect(r#"
+    run_expect(
+        r#"
 let mut sum = 0
 for i in range(0, 10):
     if i == 5:
@@ -70,27 +74,35 @@ for i in range(0, 10):
         continue
     sum = sum + i
 main = sum
-"#, 4); // 1 + 3
+"#,
+        4,
+    ); // 1 + 3
 }
 
 #[test]
 fn runner_handles_functions() {
-    run_expect(r#"
+    run_expect(
+        r#"
 fn add(a, b):
     return a + b
 main = add(2, 3)
-"#, 5);
+"#,
+        5,
+    );
 }
 
 #[test]
 fn runner_handles_class_methods() {
-    run_expect(r#"
+    run_expect(
+        r#"
 class Point:
     fn value():
         return 7
 
 main = Point.value()
-"#, 7);
+"#,
+        7,
+    );
 }
 
 #[test]
@@ -156,7 +168,8 @@ fn dependency_analysis_finds_imports_and_macros() {
 
 #[test]
 fn runner_handles_enums() {
-    run_expect(r#"
+    run_expect(
+        r#"
 enum Color:
     Red
     Green
@@ -164,19 +177,24 @@ enum Color:
 
 let c = Color::Red
 main = if c is Color::Red: 1 else: 0
-"#, 1);
+"#,
+        1,
+    );
 }
 
 #[test]
 fn runner_handles_structs() {
-    run_expect(r#"
+    run_expect(
+        r#"
 struct Point:
     x: i64
     y: i64
 
 let p = Point { x: 10, y: 20 }
 main = p.x + p.y
-"#, 30);
+"#,
+        30,
+    );
 }
 
 #[test]
@@ -227,7 +245,8 @@ fn runner_handles_array_literals_and_indexing() {
     run_expect("let arr = [5, 10, 15]\nlet mut i = 1\nmain = arr[i]", 10);
     run_expect("let arr = [100, 200, 300]\nmain = arr[1 + 1]", 300);
     run_expect("let arr = [2, 3, 4]\nmain = arr[0] + arr[1] * arr[2]", 14);
-    run_expect(r#"
+    run_expect(
+        r#"
 let arr = [1, 2, 3, 4, 5]
 let mut sum = 0
 let mut i = 0
@@ -235,13 +254,16 @@ while i < 5:
     sum = sum + arr[i]
     i = i + 1
 main = sum
-"#, 15);
+"#,
+        15,
+    );
 }
 
 #[test]
 fn runner_handles_pattern_matching() {
     // Match on integer literals
-    run_expect(r#"
+    run_expect(
+        r#"
 let x = 2
 let mut result = 0
 match x:
@@ -252,10 +274,13 @@ match x:
     _ =>
         result = 0
 main = result
-"#, 20);
+"#,
+        20,
+    );
 
     // Match with wildcard
-    run_expect(r#"
+    run_expect(
+        r#"
 let x = 99
 let mut result = 0
 match x:
@@ -266,20 +291,26 @@ match x:
     _ =>
         result = 0
 main = result
-"#, 0);
+"#,
+        0,
+    );
 
     // Match with variable binding
-    run_expect(r#"
+    run_expect(
+        r#"
 let x = 42
 let mut result = 0
 match x:
     n =>
         result = n
 main = result
-"#, 42);
+"#,
+        42,
+    );
 
     // Match on enum variants
-    run_expect(r#"
+    run_expect(
+        r#"
 enum Status:
     Ok
     Error
@@ -292,10 +323,13 @@ match s:
     Status::Error =>
         result = 0
 main = result
-"#, 1);
+"#,
+        1,
+    );
 
     // Match on enum with different variant
-    run_expect(r#"
+    run_expect(
+        r#"
 enum Status:
     Ok
     Error
@@ -308,10 +342,13 @@ match s:
     Status::Error =>
         result = 0
 main = result
-"#, 0);
+"#,
+        0,
+    );
 
     // Match with guard
-    run_expect(r#"
+    run_expect(
+        r#"
 let x = 10
 let mut result = 0
 match x:
@@ -322,10 +359,13 @@ match x:
     _ =>
         result = 99
 main = result
-"#, 1);
+"#,
+        1,
+    );
 
     // Match in a function with return
-    run_expect(r#"
+    run_expect(
+        r#"
 fn classify(n):
     match n:
         0 =>
@@ -336,22 +376,28 @@ fn classify(n):
             return 2
 
 main = classify(0) + classify(1) * 10 + classify(99) * 100
-"#, 210);
+"#,
+        210,
+    );
 }
 
 #[test]
 fn runner_handles_spawn_expression() {
-    run_expect(r#"
+    run_expect(
+        r#"
 fn work():
     return 42
 let handle = spawn work()
 main = 0
-"#, 0);
+"#,
+        0,
+    );
 }
 
 #[test]
 fn runner_handles_actor_send_recv_join() {
-    run_expect(r#"
+    run_expect(
+        r#"
 fn worker():
     let msg = recv()
     reply(msg)
@@ -361,7 +407,9 @@ send(h, "ping")
 let resp = recv(h)
 join(h)
 main = if resp == "ping": 0 else: 1
-"#, 0);
+"#,
+        0,
+    );
 }
 
 #[test]
@@ -370,19 +418,23 @@ fn runner_handles_tuples() {
     run_expect("let t = (10, 20, 30)\nmain = t[1]", 20);
     run_expect("let t = (10, 20, 30)\nmain = t[2]", 30);
     run_expect("let t = (2, 3, 4)\nmain = t[0] + t[1] * t[2]", 14);
-    run_expect(r#"
+    run_expect(
+        r#"
 let point = (5, 10)
 let x = point[0]
 let y = point[1]
 main = x + y
-"#, 15);
+"#,
+        15,
+    );
     run_expect("let t = ()\nmain = 42", 42);
 }
 
 #[test]
 fn runner_handles_option_type() {
     // Test Some variant with value
-    run_expect(r#"
+    run_expect(
+        r#"
 enum Option:
     Some(i64)
     None
@@ -395,10 +447,13 @@ match x:
     Option::None =>
         result = 0
 main = result
-"#, 42);
+"#,
+        42,
+    );
 
     // Test None variant
-    run_expect(r#"
+    run_expect(
+        r#"
 enum Option:
     Some(i64)
     None
@@ -411,10 +466,13 @@ match x:
     Option::None =>
         result = 99
 main = result
-"#, 99);
+"#,
+        99,
+    );
 
     // Test Option in function
-    run_expect(r#"
+    run_expect(
+        r#"
 enum Option:
     Some(i64)
     None
@@ -429,20 +487,34 @@ fn get_value(opt):
 let a = Option::Some(10)
 let b = Option::None
 main = get_value(a) + get_value(b)
-"#, 10);
+"#,
+        10,
+    );
 }
 
 #[test]
 fn runner_handles_dictionary_types() {
-    run_expect(r#"let d = {"a": 10, "b": 20, "c": 30}
-main = d["a"]"#, 10);
-    run_expect(r#"let d = {1: 100, 2: 200, 3: 300}
-main = d[2]"#, 200);
-    run_expect(r#"let d = {"x": 5, "y": 7}
-main = d["x"] + d["y"]"#, 12);
-    run_expect(r#"let d = {"first": 1, "second": 2}
+    run_expect(
+        r#"let d = {"a": 10, "b": 20, "c": 30}
+main = d["a"]"#,
+        10,
+    );
+    run_expect(
+        r#"let d = {1: 100, 2: 200, 3: 300}
+main = d[2]"#,
+        200,
+    );
+    run_expect(
+        r#"let d = {"x": 5, "y": 7}
+main = d["x"] + d["y"]"#,
+        12,
+    );
+    run_expect(
+        r#"let d = {"first": 1, "second": 2}
 let key = "second"
-main = d[key]"#, 2);
+main = d[key]"#,
+        2,
+    );
     run_expect("let d = {}\nmain = 42", 42);
 }
 
@@ -498,7 +570,10 @@ main = x
     let result = runner.run_source(src);
     assert!(result.is_err(), "const reassignment should fail");
     let err = result.unwrap_err();
-    assert!(err.contains("immutable") || err.contains("cannot assign"), "error should mention immutability");
+    assert!(
+        err.contains("immutable") || err.contains("cannot assign"),
+        "error should mention immutability"
+    );
 }
 
 #[test]
@@ -547,7 +622,10 @@ counter = counter + 1
 main = counter
 "#;
     let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, 2, "static mut counter should be 2 after two increments");
+    assert_eq!(
+        exit, 2,
+        "static mut counter should be 2 after two increments"
+    );
 
     // Static (non-mut) cannot be reassigned (should error)
     let src = r#"
@@ -631,58 +709,79 @@ main = SIZE
 #[test]
 fn runner_handles_lambda_expressions() {
     // Basic lambda
-    run_expect(r#"
+    run_expect(
+        r#"
 let double = \x: x * 2
 main = double(21)
-"#, 42);
+"#,
+        42,
+    );
 
     // Lambda with multiple params
-    run_expect(r#"
+    run_expect(
+        r#"
 let add = \a, b: a + b
 main = add(10, 32)
-"#, 42);
+"#,
+        42,
+    );
 
     // Lambda passed to function
-    run_expect(r#"
+    run_expect(
+        r#"
 fn apply(f, x):
     return f(x)
 
 let inc = \n: n + 1
 main = apply(inc, 41)
-"#, 42);
+"#,
+        42,
+    );
 }
 
 #[test]
 fn runner_handles_string_operations() {
     // String length
-    run_expect(r#"
+    run_expect(
+        r#"
 let s = "hello"
 main = s.len()
-"#, 5);
+"#,
+        5,
+    );
 
     // String concatenation
-    run_expect(r#"
+    run_expect(
+        r#"
 let a = "hello"
 let b = "world"
 let c = a + " " + b
 main = c.len()
-"#, 11);
+"#,
+        11,
+    );
 
     // F-string interpolation
-    run_expect(r#"
+    run_expect(
+        r#"
 let x = 42
 let s = "value is {x}"
 main = s.len()
-"#, 11);
+"#,
+        11,
+    );
 }
 
 #[test]
 fn runner_handles_array_methods() {
     // Array length
-    run_expect(r#"
+    run_expect(
+        r#"
 let arr = [1, 2, 3, 4, 5]
 main = arr.len()
-"#, 5);
+"#,
+        5,
+    );
 }
 
 // Array push may not return the mutated array correctly
@@ -708,40 +807,52 @@ main = arr.len()
 #[test]
 fn runner_handles_dict_methods() {
     // Dict len
-    run_expect(r#"
+    run_expect(
+        r#"
 let d = {"a": 1, "b": 2, "c": 3}
 main = d.len()
-"#, 3);
+"#,
+        3,
+    );
 
     // Dict keys
-    run_expect(r#"
+    run_expect(
+        r#"
 let d = {"x": 10, "y": 20}
 let keys = d.keys()
 main = keys.len()
-"#, 2);
+"#,
+        2,
+    );
 
     // Dict values
-    run_expect(r#"
+    run_expect(
+        r#"
 let d = {"a": 5, "b": 10}
 let vals = d.values()
 main = vals[0] + vals[1]
-"#, 15);
+"#,
+        15,
+    );
 
     // Dict contains_key
-    run_expect(r#"
+    run_expect(
+        r#"
 let d = {"hello": 1}
 main = if d.contains_key("hello"): 1 else: 0
-"#, 1);
+"#,
+        1,
+    );
 }
 
 #[test]
 fn runner_handles_bitwise_operations() {
-    run_expect("main = 12 & 10", 8);   // 1100 & 1010 = 1000
-    run_expect("main = 12 | 10", 14);  // 1100 | 1010 = 1110
-    run_expect("main = 12 ^ 10", 6);   // 1100 ^ 1010 = 0110
-    run_expect("main = 1 << 4", 16);   // shift left
-    run_expect("main = 16 >> 2", 4);   // shift right
-    run_expect("main = ~0", -1);       // bitwise not
+    run_expect("main = 12 & 10", 8); // 1100 & 1010 = 1000
+    run_expect("main = 12 | 10", 14); // 1100 | 1010 = 1110
+    run_expect("main = 12 ^ 10", 6); // 1100 ^ 1010 = 0110
+    run_expect("main = 1 << 4", 16); // shift left
+    run_expect("main = 16 >> 2", 4); // shift right
+    run_expect("main = ~0", -1); // bitwise not
 }
 
 #[test]
@@ -766,19 +877,19 @@ fn runner_handles_logical_operators() {
 
 #[test]
 fn runner_handles_power_operator() {
-    run_expect("main = 2 ** 0", 1);    // any ** 0 = 1
-    run_expect("main = 2 ** 1", 2);    // x ** 1 = x
-    run_expect("main = 2 ** 3", 8);    // 2^3 = 8
+    run_expect("main = 2 ** 0", 1); // any ** 0 = 1
+    run_expect("main = 2 ** 1", 2); // x ** 1 = x
+    run_expect("main = 2 ** 3", 8); // 2^3 = 8
     run_expect("main = 2 ** 10", 1024); // 2^10 = 1024
-    run_expect("main = 3 ** 4", 81);   // 3^4 = 81
+    run_expect("main = 3 ** 4", 81); // 3^4 = 81
 }
 
 #[test]
 fn runner_handles_floor_division() {
-    run_expect("main = 7 // 2", 3);    // floor(7/2) = 3
-    run_expect("main = 10 // 3", 3);   // floor(10/3) = 3
-    run_expect("main = -7 // 2", -4);  // floor(-7/2) = -4 (rounds toward negative infinity)
-    run_expect("main = 8 // 4", 2);    // exact division
+    run_expect("main = 7 // 2", 3); // floor(7/2) = 3
+    run_expect("main = 10 // 3", 3); // floor(10/3) = 3
+    run_expect("main = -7 // 2", -4); // floor(-7/2) = -4 (rounds toward negative infinity)
+    run_expect("main = 8 // 4", 2); // exact division
 }
 
 #[test]
@@ -831,10 +942,13 @@ fn runner_handles_in_operator() {
 fn runner_handles_extern_functions() {
     // Note: extern functions typically require native libraries
     // This tests the parsing and basic handling
-    run_expect(r#"
+    run_expect(
+        r#"
 extern fn add_numbers(a: i64, b: i64) -> i64
 main = 42
-"#, 42);
+"#,
+        42,
+    );
 }
 
 // method_missing needs special class/method resolution
@@ -852,26 +966,33 @@ main = 42
 #[test]
 fn runner_handles_recursive_functions() {
     // Factorial with smaller input to avoid stack overflow
-    run_expect(r#"
+    run_expect(
+        r#"
 fn factorial(n):
     if n <= 1:
         return 1
     return n * factorial(n - 1)
 
 main = factorial(5)
-"#, 120);
+"#,
+        120,
+    );
 }
 
 #[test]
 fn runner_handles_nested_data_structures() {
     // Nested arrays
-    run_expect(r#"
+    run_expect(
+        r#"
 let arr = [[1, 2], [3, 4], [5, 6]]
 main = arr[0][0] + arr[1][1] + arr[2][0]
-"#, 10);
+"#,
+        10,
+    );
 
     // Nested structs
-    run_expect(r#"
+    run_expect(
+        r#"
 struct Inner:
     value: i64
 
@@ -880,12 +1001,15 @@ struct Outer:
 
 let o = Outer { inner: Inner { value: 42 } }
 main = o.inner.value
-"#, 42);
+"#,
+        42,
+    );
 }
 
 #[test]
 fn runner_handles_early_return() {
-    run_expect(r#"
+    run_expect(
+        r#"
 fn check(x):
     if x > 10:
         return 1
@@ -894,21 +1018,29 @@ fn check(x):
     return 3
 
 main = check(7)
-"#, 2);
+"#,
+        2,
+    );
 }
 
 #[test]
 fn runner_handles_multiple_assignment() {
-    run_expect(r#"
+    run_expect(
+        r#"
 let (a, b, c) = (1, 2, 3)
 main = a + b + c
-"#, 6);
+"#,
+        6,
+    );
 }
 
 #[test]
 fn runner_handles_symbols() {
-    run_expect(r#"
+    run_expect(
+        r#"
 let s = :hello
 main = if s == :hello: 1 else: 0
-"#, 1);
+"#,
+        1,
+    );
 }

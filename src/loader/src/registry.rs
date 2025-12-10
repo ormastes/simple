@@ -21,8 +21,12 @@ impl ModuleRegistry {
     }
 
     /// Load or get cached module with cross-module symbol resolution
-    pub fn load(&self, path: &std::path::Path) -> Result<Arc<LoadedModule>, crate::loader::LoadError> {
-        self.inner.load_with_resolver(path, |name| self.resolve_symbol(name))
+    pub fn load(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Arc<LoadedModule>, crate::loader::LoadError> {
+        self.inner
+            .load_with_resolver(path, |name| self.resolve_symbol(name))
     }
 
     /// Unload a module
@@ -31,8 +35,12 @@ impl ModuleRegistry {
     }
 
     /// Reload a module (for hot reload)
-    pub fn reload(&self, path: &std::path::Path) -> Result<Arc<LoadedModule>, crate::loader::LoadError> {
-        self.inner.reload_with_resolver(path, |name| self.resolve_symbol(name))
+    pub fn reload(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<Arc<LoadedModule>, crate::loader::LoadError> {
+        self.inner
+            .reload_with_resolver(path, |name| self.resolve_symbol(name))
     }
 
     /// Resolve symbol across all loaded modules

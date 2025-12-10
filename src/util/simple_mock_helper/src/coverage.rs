@@ -304,10 +304,7 @@ mod tests {
             split_type_method("Namespace::Type::method"),
             Some(("Namespace::Type", "method"))
         );
-        assert_eq!(
-            split_type_method("Type::method"),
-            Some(("Type", "method"))
-        );
+        assert_eq!(split_type_method("Type::method"), Some(("Type", "method")));
         assert_eq!(split_type_method("free_function"), None);
     }
 
@@ -390,7 +387,10 @@ types:
         assert_eq!(spec.types.len(), 2);
         assert!(spec.types.contains_key("MyNamespace::Foo"));
         assert!(spec.types.contains_key("Bar"));
-        assert_eq!(spec.types["MyNamespace::Foo"].methods, vec!["do_stuff", "reset"]);
+        assert_eq!(
+            spec.types["MyNamespace::Foo"].methods,
+            vec!["do_stuff", "reset"]
+        );
         assert_eq!(spec.types["Bar"].methods, vec!["run", "stop"]);
     }
 
@@ -426,7 +426,7 @@ types:
     fn test_compute_class_coverage_all_covered() {
         let results = compute_coverage(
             r#"{"data": [{"functions": [{"name": "Type::a", "count": 1}, {"name": "Type::b", "count": 2}]}]}"#,
-            "types:\n  Type:\n    methods: [a, b]"
+            "types:\n  Type:\n    methods: [a, b]",
         );
         let type_result = &results[0];
         assert_eq!(type_result.covered_methods, 2);
@@ -437,7 +437,7 @@ types:
     fn test_compute_class_coverage_none_covered() {
         let results = compute_coverage(
             r#"{"data": [{"functions": [{"name": "Type::a", "count": 0}, {"name": "Type::b", "count": 0}]}]}"#,
-            "types:\n  Type:\n    methods: [a, b]"
+            "types:\n  Type:\n    methods: [a, b]",
         );
         let type_result = &results[0];
         assert_eq!(type_result.covered_methods, 0);
@@ -448,7 +448,7 @@ types:
     fn test_compute_class_coverage_multiple_data_entries() {
         let results = compute_coverage(
             r#"{"data": [{"functions": [{"name": "Type::a", "count": 1}]}, {"functions": [{"name": "Type::b", "count": 2}]}]}"#,
-            "types:\n  Type:\n    methods: [a, b, c]"
+            "types:\n  Type:\n    methods: [a, b, c]",
         );
         let type_result = &results[0];
         assert_eq!(type_result.total_methods, 3);

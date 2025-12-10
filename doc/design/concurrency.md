@@ -20,7 +20,7 @@
 - Replace per-actor threads with a runtime scheduler:
   - Worker threads with work-stealing deques for actor tasks.
   - Mailboxes as MPMC queues; scheduler polls and dispatches messages.
-  - Stackless actors (waitless) run-to-completion; stackful actors support suspension.
+  - Stackless actors (async) run-to-completion; stackful actors support suspension.
 - Expose scheduler hooks in `common` for compiler codegen to target (`spawn_task`, `send_msg`, `recv_msg` with timeout).
 - Add supervision semantics (restart/stop) and linking between actors.
 

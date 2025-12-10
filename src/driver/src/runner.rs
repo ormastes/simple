@@ -16,20 +16,28 @@ pub struct Runner {
 
 impl Runner {
     pub fn new() -> Self {
-        Self { core: ExecCore::new() }
+        Self {
+            core: ExecCore::new(),
+        }
     }
 
     pub fn with_gc_runtime(gc: GcRuntime) -> Self {
-        Self { core: ExecCore::with_gc(gc) }
+        Self {
+            core: ExecCore::with_gc(gc),
+        }
     }
 
     pub fn new_no_gc() -> Self {
-        Self { core: ExecCore::new_no_gc() }
+        Self {
+            core: ExecCore::new_no_gc(),
+        }
     }
 
     /// Create a runner that logs GC events to stdout.
     pub fn new_with_gc_logging() -> Self {
-        Self { core: ExecCore::new_with_gc_logging() }
+        Self {
+            core: ExecCore::new_with_gc_logging(),
+        }
     }
 
     /// Access the underlying GC runtime (for tests and diagnostics).
@@ -83,6 +91,18 @@ impl Runner {
     #[instrument(skip(self, source))]
     pub fn run_source_in_memory(&self, source: &str) -> Result<i32, String> {
         self.core.run_source_in_memory(source)
+    }
+
+    /// Compile using native codegen and run a source string, returning the program exit code.
+    #[instrument(skip(self, source))]
+    pub fn run_source_native(&self, source: &str) -> Result<i32, String> {
+        self.core.run_source_native(source)
+    }
+
+    /// Compile using native codegen and run source in memory (no disk I/O).
+    #[instrument(skip(self, source))]
+    pub fn run_source_in_memory_native(&self, source: &str) -> Result<i32, String> {
+        self.core.run_source_in_memory_native(source)
     }
 }
 

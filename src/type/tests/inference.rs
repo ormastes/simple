@@ -40,7 +40,8 @@ fn infers_while_loop() {
 
 #[test]
 fn infers_for_loop() {
-    let items = parse_items("let mut sum = 0\nfor i in range(0, 10):\n    sum = sum + i\nmain = sum");
+    let items =
+        parse_items("let mut sum = 0\nfor i in range(0, 10):\n    sum = sum + i\nmain = sum");
     check(&items).expect("type check ok");
 }
 
@@ -70,7 +71,9 @@ fn infers_struct_definition() {
 
 #[test]
 fn infers_struct_init() {
-    let items = parse_items("struct Point:\n    x: i64\n    y: i64\nlet p = Point { x: 10, y: 20 }\nmain = 0");
+    let items = parse_items(
+        "struct Point:\n    x: i64\n    y: i64\nlet p = Point { x: 10, y: 20 }\nmain = 0",
+    );
     check(&items).expect("type check ok");
 }
 
@@ -113,7 +116,8 @@ fn infers_comparison_operators() {
 
 #[test]
 fn infers_logical_operators() {
-    let items = parse_items("let a = true and false\nlet b = true or false\nmain = if a: 1 else: 0");
+    let items =
+        parse_items("let a = true and false\nlet b = true or false\nmain = if a: 1 else: 0");
     check(&items).expect("type check ok");
 }
 
@@ -163,7 +167,8 @@ fn infers_lambda_with_multiple_params() {
 
 #[test]
 fn infers_match_expression() {
-    let items = parse_items("let x = 1\nmatch x:\n    1 =>\n        0\n    _ =>\n        1\nmain = 0");
+    let items =
+        parse_items("let x = 1\nmatch x:\n    1 =>\n        0\n    _ =>\n        1\nmain = 0");
     check(&items).expect("type check ok");
 }
 
@@ -239,13 +244,16 @@ fn infers_multiple_statements() {
 
 #[test]
 fn infers_loop_statement() {
-    let items = parse_items("let mut x = 0\nloop:\n    x = x + 1\n    if x > 10:\n        break\nmain = x");
+    let items =
+        parse_items("let mut x = 0\nloop:\n    x = x + 1\n    if x > 10:\n        break\nmain = x");
     check(&items).expect("type check ok");
 }
 
 #[test]
 fn infers_context_block() {
-    let items = parse_items("struct Obj:\n    x: i64\nlet o = Obj { x: 1 }\ncontext o:\n    x = 2\nmain = 0");
+    let items = parse_items(
+        "struct Obj:\n    x: i64\nlet o = Obj { x: 1 }\ncontext o:\n    x = 2\nmain = 0",
+    );
     check(&items).expect("type check ok");
 }
 
@@ -373,13 +381,17 @@ fn infers_string_indexing() {
 
 #[test]
 fn infers_if_with_elif() {
-    let items = parse_items("let x = 1\nif x == 1:\n    x = 10\nelif x == 2:\n    x = 20\nelse:\n    x = 30\nmain = x");
+    let items = parse_items(
+        "let x = 1\nif x == 1:\n    x = 10\nelif x == 2:\n    x = 20\nelse:\n    x = 30\nmain = x",
+    );
     check(&items).expect("type check ok");
 }
 
 #[test]
 fn infers_match_with_guard() {
-    let items = parse_items("let x = 5\nmatch x:\n    n if n > 0 =>\n        n\n    _ =>\n        0\nmain = 0");
+    let items = parse_items(
+        "let x = 5\nmatch x:\n    n if n > 0 =>\n        n\n    _ =>\n        0\nmain = 0",
+    );
     check(&items).expect("type check ok");
 }
 

@@ -6,9 +6,8 @@ use crate::mir::MirModule;
 
 // Re-export SMF types from loader (single source of truth)
 pub use simple_loader::smf::{
-    RelocationType, SectionType, SymbolBinding, SymbolType,
-    SMF_MAGIC, SMF_FLAG_EXECUTABLE,
-    SECTION_FLAG_READ, SECTION_FLAG_WRITE, SECTION_FLAG_EXEC,
+    RelocationType, SectionType, SymbolBinding, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ,
+    SECTION_FLAG_WRITE, SMF_FLAG_EXECUTABLE, SMF_MAGIC,
 };
 
 /// SMF version constants
@@ -228,7 +227,9 @@ impl SmfWriter {
         writer.write_all(&[0u8; 32])?; // Reserved
 
         // Pre-compute name offsets (add all names to string table first)
-        let name_offsets: Vec<u32> = self.sections.iter()
+        let name_offsets: Vec<u32> = self
+            .sections
+            .iter()
             .map(|s| s.name.clone())
             .collect::<Vec<_>>()
             .into_iter()
@@ -275,10 +276,14 @@ impl SmfWriter {
         for (i, func) in mir.functions.iter().enumerate() {
             let symbol = SmfSymbol {
                 name: func.name.clone(),
-                binding: if func.is_public() { SymbolBinding::Global } else { SymbolBinding::Local },
+                binding: if func.is_public() {
+                    SymbolBinding::Global
+                } else {
+                    SymbolBinding::Local
+                },
                 sym_type: SymbolType::Function,
                 section_index: 0, // .text section
-                value: 0, // Would need to get from object file
+                value: 0,         // Would need to get from object file
                 size: 0,
             };
             writer.add_symbol(symbol);

@@ -83,5 +83,5 @@ This is a simplified "eager" generator implementation that:
 
 - #30 Actors (Implemented)
 - #31 Concurrency Primitives (Implemented)
-- #32 Waitless Effects (Implemented)
+- #32 Async Effects (Implemented)
 - #48 Futures and Promises (Implemented)

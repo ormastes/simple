@@ -36,7 +36,10 @@ pub fn watch(entry: &Path, verbose: bool) -> Result<(), String> {
     loop {
         match rx.recv() {
             Ok(Ok(event)) => {
-                if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)) {
+                if !matches!(
+                    event.kind,
+                    EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+                ) {
                     continue;
                 }
                 let changed: Vec<PathBuf> = event.paths.into_iter().collect();
@@ -74,7 +77,12 @@ pub fn watch(entry: &Path, verbose: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn rebuild(source: &Path, runner: &Runner, cache: &mut BuildCache, verbose: bool) -> Result<(), String> {
+fn rebuild(
+    source: &Path,
+    runner: &Runner,
+    cache: &mut BuildCache,
+    verbose: bool,
+) -> Result<(), String> {
     let out = source.with_extension("smf");
     runner.run_file(source)?;
 

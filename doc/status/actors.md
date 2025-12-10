@@ -69,5 +69,5 @@ main = 0  # Works - spawn is fire-and-forget
 ## Related
 
 - #31 Concurrency Primitives (partial)
-- #32 Waitless Effects (not implemented)
+- #32 Async Effects (not implemented)
 - #33 Stackless Coroutines (not implemented)

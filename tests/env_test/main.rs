@@ -13,8 +13,8 @@ fn init() {
     init_env_tests!("simple_env");
 }
 
-mod runtime_tests;
 mod io_tests;
+mod runtime_tests;
 
 #[test]
 fn validate_config() {

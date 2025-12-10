@@ -1,9 +1,9 @@
 //! CLI system tests
 //! Tests the command-line interface end-to-end
 
-use tempfile::tempdir;
 use std::fs;
 use std::process::Command;
+use tempfile::tempdir;
 
 #[test]
 fn test_cli_run_source() {
@@ -21,8 +21,10 @@ fn test_cli_run_source() {
     match result {
         Ok(output) => {
             // Check that command executed (may fail for other reasons)
-            assert!(output.status.success() || !output.stderr.is_empty(),
-                "Command should execute");
+            assert!(
+                output.status.success() || !output.stderr.is_empty(),
+                "Command should execute"
+            );
         }
         Err(_) => {
             // cargo not available or build failed - skip test
@@ -42,8 +44,10 @@ fn test_cli_help() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Either help should be in stdout or we got some output
-            assert!(!stdout.is_empty() || !stderr.is_empty(),
-                "Should produce some output");
+            assert!(
+                !stdout.is_empty() || !stderr.is_empty(),
+                "Should produce some output"
+            );
         }
         Err(_) => {
             println!("Skipping CLI test - cargo run not available");

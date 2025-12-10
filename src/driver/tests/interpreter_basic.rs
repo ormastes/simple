@@ -1,6 +1,6 @@
 //! Interpreter tests - basic
 
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+use simple_driver::interpreter::{run_code, Interpreter, RunConfig, RunningType};
 
 #[test]
 fn interpreter_runs_simple_code() {
@@ -93,22 +93,27 @@ main = if c is Color::Red: 1 else: 0
 #[test]
 fn interpreter_with_config() {
     let interpreter = Interpreter::new();
-    let result = interpreter.run(
-        "main = 255",
-        RunConfig {
-            args: vec!["arg1".to_string()],
-            stdin: "input".to_string(),
-            timeout_ms: 0,
-            in_memory: false,
-        }
-    ).unwrap();
+    let result = interpreter
+        .run(
+            "main = 255",
+            RunConfig {
+                args: vec!["arg1".to_string()],
+                stdin: "input".to_string(),
+                timeout_ms: 0,
+                in_memory: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert_eq!(result.exit_code, 255);
 }
 
 #[test]
 fn interpreter_run_with_stdin() {
     let interpreter = Interpreter::new();
-    let result = interpreter.run_with_stdin("main = 50", "test input").unwrap();
+    let result = interpreter
+        .run_with_stdin("main = 50", "test input")
+        .unwrap();
     assert_eq!(result.exit_code, 50);
 }
 
@@ -120,3 +125,63 @@ fn interpreter_result_has_empty_stdout() {
     assert!(result.stderr.is_empty());
 }
 
+// ============= Running Type Tests =============
+
+#[test]
+fn compiler_mode_runs_simple_code() {
+    let interpreter = Interpreter::new();
+    // Compiler mode uses native codegen which requires fn main() -> i64 syntax
+    let code = r#"
+fn main() -> i64:
+    return 42
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn compiler_mode_with_arithmetic() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    return 10 + 32
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn compiler_mode_in_memory() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    return 100
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                in_memory: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.exit_code, 100);
+}

@@ -35,7 +35,7 @@
 | 29 | **Borrowing** (&T_borrow, &mut T_borrow) | 4 | 5 | Type System, Borrow Checker |
 | 30 | **Actors** (actor keyword, state, message handlers) | 4 | 5 | Parser, Type System, Runtime Scheduler |
 | 31 | **Concurrency Primitives** (spawn, send, receive) | 4 | 5 | Runtime, Scheduler, Message Queues |
-| 32 | **Waitless Effects** | 3 | 5 | Type System, Effect Analysis, Runtime Guards |
+| 32 | **Async Effects** | 3 | 5 | Type System, Effect Analysis, Runtime Guards |
 | 33 | **Stackless Coroutine Actors** | 3 | 5 | Runtime, State Machine Transform |
 | 34 | **Macros** (compile-time code generation) | 3 | 5 | Macro System, AST Manipulation, Hygiene |
 | 35 | **Context Blocks** (DSL support) | 2 | 3 | Parser, Scope Resolution |
@@ -102,19 +102,77 @@
 | 96 | **Type Suffixes** (`42i32`, `3.14f64`) | 3 | 2 | Lexer, Parser |
 | 97 | **Constructor Polymorphism** (`Constructor[T]` type for factory patterns) | 4 | 3 | Parser, Type System, Codegen |
 | 98 | **Strong Enums** (`#[strong]` disallows wildcard `_` in pattern matching) | 4 | 2 | Parser, Pattern Matching, Semantic Analysis |
+| 99 | **Body Block Outlining** (Actor/Generator/Future `body_block` to `fn(ctx)`) | 4 | 4 | MIR Transform, Codegen, Runtime FFI |
+| 100 | **Capture Buffer & VReg Remapping** (ctx layout for outlined bodies) | 4 | 5 | MIR Liveness, Closure Encoding, Codegen |
+| 101 | **Generator State Machine Codegen** (stackless yield/next) | 4 | 5 | MIR Transform, Runtime State, Codegen |
+| 102 | **Future Body Execution** (compiled future resolves/awaits) | 4 | 4 | Runtime, Codegen, MIR Outlining |
+| 103 | **Codegen Parity Completion** (remove stubs, pass full tests) | 5 | 5 | MIR, Codegen, Runtime |
+
+### Difficulty-5 Breakdowns
+
+| Parent | Sub-feature | Difficulty | Scope |
+|--------|-------------|------------|-------|
+| 100 | Capture liveness analysis | 3 | MIR dataflow |
+| 100 | Capture buffer encode/decode | 3 | Codegen, Runtime |
+| 101 | Yield-point discovery + state layout | 4 | MIR Transform |
+| 101 | State dispatcher codegen | 4 | Codegen |
+| 103 | Outlined block registration | 3 | MIR, Codegen |
+| 103 | Runtime ctx ABI wiring | 3 | Runtime |
+| 103 | Compiled actor/gen/future tests | 4 | Tests, Codegen |
 
 ## Dependency Guidelines (by module)
 - **common**: shared contracts (ABI, GC handles, effect flags). Depends on nothing else.
 - **parser**: implements syntax from the language spec; no runtime/loader dependency.
-- **compiler**: depends on parser+common; targets ABIs defined in `common`; avoid runtime/internal deps.
+- **compiler**: depends on parser+common+runtime; targets ABIs defined in `common`; uses runtime for RuntimeValue types.
 - **loader/native_loader**: dynamic loading only; no parser/compiler/runtime deps.
 - **lib (native stdlib)**: uses loaders; avoid compiler/runtime coupling.
-- **runtime**: implements ABIs declared in `common` (GC, scheduler). No parser/compiler awareness.
+- **runtime**: implements ABIs declared in `common` (GC, scheduler) plus RuntimeValue types for codegen. No parser/compiler awareness.
 - **driver**: orchestrates compile/load/run/watch via public interfaces; no deep coupling to compiler/runtime internals.
 
 When implementing features above:
 - Touch parser for syntax, compiler for lowering/codegen, runtime only via `common` ABI if needed.
 - Keep memory/pointer semantics behind `common` GC ABI; stdlib/system features stay in `lib` + loaders.
+
+---
+
+## Codegen Implementation Status
+
+The compiler uses a **hybrid execution model** where compilable features are compiled to native code via Cranelift, while unsupported features fall back to the tree-walking interpreter.
+
+### MIR Instruction Coverage
+
+| Category | Instructions | Codegen Status |
+|----------|-------------|----------------|
+| **Core** | ConstInt, ConstFloat, ConstBool, Copy, BinOp, UnaryOp | ✅ Implemented |
+| **Memory** | Load, Store, LocalAddr, GetElementPtr | ✅ Implemented |
+| **Control** | Call, Jump, Branch, Return | ✅ Implemented |
+| **Collections** | ArrayLit, TupleLit, DictLit, IndexGet, IndexSet, Slice | ⚡ Stub (runtime FFI ready) |
+| **Strings** | ConstString, ConstSymbol, FStringFormat | ⚡ Stub (runtime FFI ready) |
+| **Closures** | ClosureCreate, IndirectCall | ⚡ Stub |
+| **Objects** | StructInit, FieldGet, FieldSet | ⚡ Stub |
+| **Methods** | MethodCallStatic, MethodCallVirtual, BuiltinMethod | ⚡ Stub |
+| **Patterns** | PatternTest, PatternBind, EnumDiscriminant, EnumPayload | ⚡ Stub |
+| **Enums** | EnumUnit, EnumWith | ⚡ Stub |
+| **Async** | FutureCreate, Await, ActorSpawn, ActorSend, ActorRecv | 🔄 Interpreter fallback |
+| **Generators** | GeneratorCreate, Yield, GeneratorNext | 🔄 Interpreter fallback |
+| **Errors** | TryUnwrap, OptionSome, OptionNone, ResultOk, ResultErr | ⚡ Stub |
+| **Fallback** | InterpCall, InterpEval | ✅ FFI bridge ready |
+
+**Legend**: ✅ Implemented | ⚡ Stub (trap code) | 🔄 Interpreter fallback
+
+### Runtime FFI Functions
+
+The runtime provides FFI functions for codegen to call:
+
+| Category | Functions |
+|----------|-----------|
+| **Value creation** | `rt_value_int`, `rt_value_float`, `rt_value_bool`, `rt_value_nil` |
+| **Value extraction** | `rt_value_as_int`, `rt_value_as_float`, `rt_value_as_bool` |
+| **Type checking** | `rt_value_is_nil`, `rt_value_is_int`, `rt_value_is_heap`, `rt_value_truthy` |
+| **Array ops** | `rt_array_new`, `rt_array_len`, `rt_array_get`, `rt_array_set`, `rt_array_push`, `rt_array_pop` |
+| **Tuple ops** | `rt_tuple_new`, `rt_tuple_len`, `rt_tuple_get`, `rt_tuple_set` |
+| **String ops** | `rt_string_new`, `rt_string_len`, `rt_string_data`, `rt_string_concat` |
+| **Generic ops** | `rt_index_get`, `rt_index_set`, `rt_slice` |
 
 ---
 
@@ -135,9 +193,9 @@ This is the hardest subsystem to get right and has the broadest architectural im
 
 ### 3. Concurrency Model is High-Value but High-Complexity
 
-Actors, waitless effects, and stackless coroutines (all difficulty **5**) represent Simple's unique value proposition but require:
+Actors, async effects, and stackless coroutines (all difficulty **5**) represent Simple's unique value proposition but require:
 - **Runtime scheduler** for lightweight process management
-- **Effect system** for compile-time waitless verification
+- **Effect system** for compile-time async verification
 - **State machine transformation** for stackless actors
 - **Message queue infrastructure** for inter-actor communication
 

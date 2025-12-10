@@ -9,7 +9,12 @@ pub struct Span {
 
 impl Span {
     pub fn new(start: usize, end: usize, line: usize, column: usize) -> Self {
-        Self { start, end, line, column }
+        Self {
+            start,
+            end,
+            line,
+            column,
+        }
     }
 }
 
@@ -17,7 +22,23 @@ impl Span {
 #[derive(Debug, Clone, PartialEq)]
 pub enum FStringToken {
     Literal(String),
-    Expr(String),  // The expression text to be parsed later
+    Expr(String), // The expression text to be parsed later
+}
+
+/// Numeric type suffix for typed literals
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NumericSuffix {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
+    Unit(String), // User-defined unit suffix like _km, _hr
 }
 
 /// Token types for the Simple language
@@ -26,12 +47,14 @@ pub enum TokenKind {
     // Literals
     Integer(i64),
     Float(f64),
-    String(String),           // Legacy: plain string (for backward compat)
-    FString(Vec<FStringToken>),  // "hello {expr}" interpolated strings (now default for double quotes)
-    RawString(String),        // 'raw string' - no escapes, no interpolation
+    TypedInteger(i64, NumericSuffix),
+    TypedFloat(f64, NumericSuffix),
+    String(String),             // Legacy: plain string (for backward compat)
+    FString(Vec<FStringToken>), // "hello {expr}" interpolated strings (now default for double quotes)
+    RawString(String),          // 'raw string' - no escapes, no interpolation
     Bool(bool),
     Nil,
-    Symbol(String),      // :symbol
+    Symbol(String), // :symbol
 
     // Identifiers and Keywords
     Identifier(String),
@@ -74,69 +97,71 @@ pub enum TokenKind {
     Super,
     Async,
     Await,
-    Waitless,
     Yield,
     Const,
     Static,
     Type,
+    Unit, // unit (for unit type definitions)
     Extern,
     Context,
+    With, // with (for context managers)
     Macro,
-    Bang,           // ! (for macro invocations)
+    Bang, // ! (for macro invocations)
 
     // Operators
-    Plus,           // +
-    Minus,          // -
-    Star,           // *
-    Slash,          // /
-    Percent,        // %
-    DoubleStar,     // **
-    DoubleSlash,    // //
+    Plus,        // +
+    Minus,       // -
+    Star,        // *
+    Slash,       // /
+    Percent,     // %
+    DoubleStar,  // **
+    DoubleSlash, // //
 
-    Eq,             // ==
-    NotEq,          // !=
-    Lt,             // <
-    Gt,             // >
-    LtEq,           // <=
-    GtEq,           // >=
+    Eq,    // ==
+    NotEq, // !=
+    Lt,    // <
+    Gt,    // >
+    LtEq,  // <=
+    GtEq,  // >=
 
-    Assign,         // =
-    PlusAssign,     // +=
-    MinusAssign,    // -=
-    StarAssign,     // *=
-    SlashAssign,    // /=
+    Assign,      // =
+    PlusAssign,  // +=
+    MinusAssign, // -=
+    StarAssign,  // *=
+    SlashAssign, // /=
 
-    Ampersand,      // &
-    Pipe,           // |
-    Caret,          // ^
-    Tilde,          // ~
-    ShiftLeft,      // <<
-    ShiftRight,     // >>
+    Ampersand,  // &
+    Pipe,       // |
+    Caret,      // ^
+    Tilde,      // ~
+    ShiftLeft,  // <<
+    ShiftRight, // >>
 
-    Arrow,          // ->
-    FatArrow,       // =>
+    Arrow,    // ->
+    FatArrow, // =>
 
     // Delimiters
-    LParen,         // (
-    RParen,         // )
-    LBracket,       // [
-    RBracket,       // ]
-    LBrace,         // {
-    RBrace,         // }
+    LParen,   // (
+    RParen,   // )
+    LBracket, // [
+    RBracket, // ]
+    LBrace,   // {
+    RBrace,   // }
 
-    Comma,          // ,
-    Colon,          // :
-    DoubleColon,    // ::
-    Semicolon,      // ;
-    Dot,            // .
-    DoubleDot,      // ..
-    Ellipsis,       // ...
-    Question,       // ?
-    At,             // @
-    Hash,           // #
-    Dollar,         // $
-    Backslash,      // \
-    Underscore,     // _ (as pattern)
+    Comma,       // ,
+    Colon,       // :
+    DoubleColon, // ::
+    Semicolon,   // ;
+    Dot,         // .
+    DoubleDot,   // ..
+    DoubleDotEq, // ..=
+    Ellipsis,    // ...
+    Question,    // ?
+    At,          // @
+    Hash,        // #
+    Dollar,      // $
+    Backslash,   // \
+    Underscore,  // _ (as pattern)
 
     // Indentation tokens
     Newline,

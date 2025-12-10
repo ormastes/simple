@@ -78,7 +78,9 @@ pub fn check_mock_use_from(source_path: &str) {
             panic!("Mock used while mocks are disabled (system test policy)");
         }
         MockCheckResult::NotInitialized => {
-            panic!("Mock policy not initialized. Call init_mocks_for_only*() once per test binary.");
+            panic!(
+                "Mock policy not initialized. Call init_mocks_for_only*() once per test binary."
+            );
         }
         MockCheckResult::NotAllowed { source_path } => {
             panic!(
@@ -206,18 +208,34 @@ mod tests {
 
     #[test]
     fn test_pattern_matches_nested_hal() {
-        assert!(pattern_matches("my_app::drivers::hal::gpio::pin", "*::hal::*"));
-        assert!(pattern_matches("root::sub_hal::i2c::device", "*::sub_hal::*"));
+        assert!(pattern_matches(
+            "my_app::drivers::hal::gpio::pin",
+            "*::hal::*"
+        ));
+        assert!(pattern_matches(
+            "root::sub_hal::i2c::device",
+            "*::sub_hal::*"
+        ));
     }
 
     #[test]
     fn test_mock_check_result_variants() {
         assert_eq!(MockCheckResult::Allowed, MockCheckResult::Allowed);
-        assert_eq!(MockCheckResult::MocksDisabled, MockCheckResult::MocksDisabled);
-        assert_eq!(MockCheckResult::NotInitialized, MockCheckResult::NotInitialized);
         assert_eq!(
-            MockCheckResult::NotAllowed { source_path: "test".to_string() },
-            MockCheckResult::NotAllowed { source_path: "test".to_string() }
+            MockCheckResult::MocksDisabled,
+            MockCheckResult::MocksDisabled
+        );
+        assert_eq!(
+            MockCheckResult::NotInitialized,
+            MockCheckResult::NotInitialized
+        );
+        assert_eq!(
+            MockCheckResult::NotAllowed {
+                source_path: "test".to_string()
+            },
+            MockCheckResult::NotAllowed {
+                source_path: "test".to_string()
+            }
         );
     }
 
@@ -244,7 +262,10 @@ mod tests {
         assert!(pattern_matches("my_crate::hal::gpio", "*::hal::*"));
         assert!(pattern_matches("my_crate::sub_hal::spi", "*::sub_hal::*"));
         // External lib patterns
-        assert!(pattern_matches("my_crate::external::http", "*::external::*"));
+        assert!(pattern_matches(
+            "my_crate::external::http",
+            "*::external::*"
+        ));
         // Lib patterns
         assert!(pattern_matches("my_crate::lib::utils", "*::lib::*"));
         // IO patterns

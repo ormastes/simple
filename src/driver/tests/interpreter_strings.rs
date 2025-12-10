@@ -160,4 +160,3 @@ main = len(msg)
 }
 
 // === Manual Pointer Tests ===
-

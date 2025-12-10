@@ -2,6 +2,16 @@
 
 This repo now carries small Lean 4 projects that encode sanity properties for memory and compilation behaviors. Each folder is a standalone Lake project; to check one, run `lake build` inside it (Lean 4 from `leanprover/lean4:stable` is specified in each `lean-toolchain`).
 
+## Terminology
+
+| Term | Meaning |
+|------|---------|
+| **`async fn`** | Asynchronous, non-blocking function (safe to call from async code) |
+| **`wait`** | Blocking operation (join, recv, sleep) - forbidden in async functions |
+| **`nogc`** | No GC allocations - for real-time or embedded contexts |
+
+**Key Insight:** An `async` function is guaranteed not to block the calling thread, making it safe to use in async executors. The Lean model proves that composing async functions preserves this property.
+
 ## Formal Verification Summary
 
 All 5 Lean models have been **individually verified** to have exact Rust implementations. The verification confirms:
@@ -16,7 +26,7 @@ All 5 Lean models have been **individually verified** to have exact Rust impleme
 |-------|-----------|---------------------|--------|--------|
 | Manual Pointer Borrow | `manual_pointer_borrow/` | `common/manual.rs` → `BorrowState`, `ValidBorrowState` | ✅ Verified | 3 theorems |
 | GC Manual Borrow | `gc_manual_borrow/` | `common/manual.rs` → `GcState`, `GcStateVerify` | ✅ Verified | 2 theorems |
-| Waitless Compile | `waitless_compile/` | `compiler/mir/types.rs` → `WaitlessEffect`, `pipeline_safe()` | ✅ Verified | 2 theorems |
+| Async Compile (Async Safety) | `async_compile/` | `compiler/mir/types.rs` → `AsyncEffect`, `is_async()`, `pipeline_safe()` | ✅ Verified | 2 theorems |
 | NoGC Compile | `nogc_compile/` | `compiler/mir/types.rs` → `NogcInstr`, `nogc()` | ✅ Verified | 2 theorems |
 | Type Inference | `type_inference_compile/` | `type/lib.rs` → `LeanTy`, `LeanExpr`, `lean_infer()` | ✅ Verified | 1 theorem |
 
@@ -108,23 +118,33 @@ def collectSafe (s : GcState) (id : Nat) : GcState :=
 
 ---
 
-### 3. Waitless Compile Model ✅ VERIFIED
+### 3. Async Compile Model ✅ VERIFIED
 
-**Lean Model** (`verification/waitless_compile/src/WaitlessCompile.lean`):
+**Purpose:** The async safety property ensures functions are safe to use in async contexts by verifying they contain no blocking operations. An `async fn` is "non-blocking" - it may perform I/O but will never block the calling thread.
+
+**Terminology:**
+- `async fn` = non-blocking function, safe to call from async code
+- `wait` = blocking operation (e.g., `join`, `recv`, `sleep`)
+- `is_async(e)` = Lean/Rust function that checks if an effect is non-blocking
+
+In the Simple language:
+- `async fn` - non-blocking function guaranteed not to contain blocking operations
+
+**Lean Model** (`verification/async_compile/src/AsyncCompile.lean`):
 ```lean
 inductive Effect
-  | compute
-  | io
-  | wait
+  | compute   -- Pure computation, always async-safe
+  | io        -- I/O operation (non-blocking), async-safe
+  | wait      -- Blocking operation, NOT async-safe
   deriving DecidableEq, Repr
 
-def waitless (e : Effect) : Bool :=
+def is_async (e : Effect) : Bool :=
   match e with
   | Effect.wait => false
   | _ => true
 
 def pipelineSafe (es : List Effect) : Prop :=
-  ∀ e, e ∈ es → waitless e = true
+  ∀ e, e ∈ es → is_async e = true
 ```
 
 **Proven Theorems:**
@@ -135,24 +155,31 @@ def pipelineSafe (es : List Effect) : Prop :=
 
 | Lean | Rust | Match |
 |------|------|-------|
-| `Effect.compute` | `WaitlessEffect::Compute` | ✅ Exact |
-| `Effect.io` | `WaitlessEffect::Io` | ✅ Exact |
-| `Effect.wait` | `WaitlessEffect::Wait` | ✅ Exact |
-| `waitless` | `waitless()` | ✅ Exact |
+| `Effect.compute` | `AsyncEffect::Compute` | ✅ Exact |
+| `Effect.io` | `AsyncEffect::Io` | ✅ Exact |
+| `Effect.wait` | `AsyncEffect::Wait` | ✅ Exact |
+| `is_async` | `is_async()` | ✅ Exact |
 | `pipelineSafe` | `pipeline_safe()` | ✅ Exact |
 
 **Code Comparison:**
 ```lean
-def waitless (e : Effect) : Bool :=
+def is_async (e : Effect) : Bool :=
   match e with
   | Effect.wait => false
   | _ => true
 ```
 ```rust
-pub fn waitless(e: WaitlessEffect) -> bool {
-    !matches!(e, WaitlessEffect::Wait)
+pub fn is_async(e: AsyncEffect) -> bool {
+    !matches!(e, AsyncEffect::Wait)
 }
 ```
+
+**Blocking Operations (Effect::Wait):**
+- `await` - wait for async result
+- `wait` - explicit wait
+- `join` - join thread/actor
+- `recv` - receive from channel (blocking)
+- `sleep` - sleep current thread
 
 ---
 
@@ -264,7 +291,7 @@ LeanExpr::Add(a, b) => {
 
 - `verification/gc_manual_borrow/`: models GC + manual borrows. Invariant `safe` states borrowed objects stay in the GC live set; lemmas show borrow/collect steps preserve it.
 - `verification/manual_pointer_borrow/`: borrow-discipline model for manual pointers. Valid states forbid mixing exclusive and shared borrows; lemmas show taking/releasing borrows keeps validity.
-- `verification/waitless_compile/`: waitless compile-time check. Pipelines are lists of effects; property `pipelineSafe` rules out blocking waits and is preserved by concatenation.
+- `verification/async_compile/`: **async-safety verification**. Verifies that `async` functions (non-blocking) contain no blocking operations (`wait`, `join`, `recv`, `sleep`). The `pipelineSafe` property ensures functions are safe to call from async code. This is preserved by function composition (concatenation).
 - `verification/nogc_compile/`: no-GC compile-time check. Programs are instruction lists; property `nogc` asserts absence of `gcAlloc` and composes across concatenation.
 - `verification/type_inference_compile/`: miniature type inference. A toy `infer` function on a lambda/if/add language; determinism lemma states inference returns at most one type.
 
@@ -369,17 +396,38 @@ fn pop_loop(&mut self) -> Result<LoopContext>;
 
 ### 4. Effect Tracking (`src/compiler/src/mir/types.rs`)
 
+**Effect System for Async Safety:**
+
+The effect system tracks which operations may block, enabling compile-time verification that async-safe functions are truly non-blocking.
+
+**Lean-matching types (for formal verification):**
+```rust
+// Matches AsyncCompile.lean exactly (Rust uses "async" naming)
+pub enum AsyncEffect { Compute, Io, Wait }
+
+pub fn is_async(e: AsyncEffect) -> bool {  // Lean: is_async
+    !matches!(e, AsyncEffect::Wait)
+}
+
+pub fn pipeline_safe(es: &[AsyncEffect]) -> bool {  // Lean: pipelineSafe
+    es.iter().all(|e| is_async(*e))
+}
+```
+
+**Production types (combined for practical use):**
 ```rust
 pub enum Effect {
-    Compute,   // Pure computation
-    Io,        // Non-blocking I/O
-    Wait,      // Blocking wait (forbidden in waitless)
-    GcAlloc,   // GC allocation (forbidden in nogc)
+    Compute,   // Pure computation - always async-safe
+    Io,        // Non-blocking I/O - async-safe (may yield but won't block)
+    Wait,      // Blocking wait - NOT async-safe (forbidden in async functions)
+    GcAlloc,   // GC allocation (forbidden in nogc mode, but async-safe)
 }
 
 impl Effect {
-    pub fn is_waitless(&self) -> bool;
-    pub fn is_nogc(&self) -> bool;
+    /// Returns true if this effect is async (non-blocking).
+    pub fn is_async(&self) -> bool;   // !matches!(self, Effect::Wait)
+    pub fn is_nogc(&self) -> bool;       // !matches!(self, Effect::GcAlloc)
+    pub fn to_async(&self) -> AsyncEffect;  // Convert to Lean-matching type
 }
 
 pub struct EffectSet {
@@ -387,9 +435,17 @@ pub struct EffectSet {
 }
 
 impl EffectSet {
-    pub fn is_pipeline_safe(&self) -> bool;  // ∀e. is_waitless(e)
+    /// Check if all effects are async (no blocking waits).
+    pub fn is_pipeline_safe(&self) -> bool;  // ∀e. is_async(e)
     pub fn is_nogc(&self) -> bool;           // ∀e. is_nogc(e)
     pub fn append(&mut self, other: &EffectSet);
+}
+```
+
+**AST Effect Annotations (`src/parser/src/ast.rs`):**
+```rust
+pub enum Effect {
+    Async,  // async fn - non-blocking, async-safe function
 }
 ```
 
@@ -462,19 +518,19 @@ If a model proves too complex to mirror the implementation:
 
 ## Verification Levels
 
-| Model | Rust Type | Invariant | Encoding |
-|-------|-----------|-----------|----------|
-| manual_pointer_borrow | `ValidBorrowState` | `exclusive ⊕ shared` | Type-safe enum |
-| gc_manual_borrow | `GcState` | `borrowed ⊆ live` | Runtime check |
-| waitless_compile | `EffectSet` | `∀e. is_waitless(e)` | List property |
-| nogc_compile | `EffectSet` | `∀e. is_nogc(e)` | List property |
-| type_inference | `SimpleTy` | determinism | Pure function |
-| mir_lowerer | `LowererState` | state machine | Explicit enum |
-| block_builder | `BlockBuildState` | `Open → Sealed` | State machine |
-| actor_lifecycle | `ActorLifecycle` | `Running → Joined` | State machine |
-| type_allocator | `TypeIdAllocator` | monotonic allocation | Pure allocator |
-| visibility | `Visibility` | `Public ⊕ Private` | Type-safe enum |
-| mutability | `Mutability` | `Mutable ⊕ Immutable` | Type-safe enum |
+| Model | Rust Type | Invariant | Encoding | Purpose |
+|-------|-----------|-----------|----------|---------|
+| manual_pointer_borrow | `ValidBorrowState` | `exclusive ⊕ shared` | Type-safe enum | Memory safety |
+| gc_manual_borrow | `GcState` | `borrowed ⊆ live` | Runtime check | GC safety |
+| async_compile | `EffectSet` | `∀e. is_async(e)` | List property | Async safety (no blocking) |
+| nogc_compile | `EffectSet` | `∀e. is_nogc(e)` | List property | Real-time safety |
+| type_inference | `SimpleTy` | determinism | Pure function | Type soundness |
+| mir_lowerer | `LowererState` | state machine | Explicit enum | Correct compilation |
+| block_builder | `BlockBuildState` | `Open → Sealed` | State machine | IR construction |
+| actor_lifecycle | `ActorLifecycle` | `Running → Joined` | State machine | Actor safety |
+| type_allocator | `TypeIdAllocator` | monotonic allocation | Pure allocator | ID uniqueness |
+| visibility | `Visibility` | `Public ⊕ Private` | Type-safe enum | Access control |
+| mutability | `Mutability` | `Mutable ⊕ Immutable` | Type-safe enum | Mutability tracking |
 
 ## Remaining Simplification Opportunities
 
@@ -688,7 +744,7 @@ New helper methods for type lookup:
 
 2. **Trace extraction**: Emit (operation, state) pairs from runtime to replay in Lean.
 
-3. **Compile-time checks**: Verify MIR lowering preserves effect properties (waitless HIR → waitless MIR).
+3. **Compile-time checks**: Verify MIR lowering preserves effect properties (async HIR → async MIR).
 
 4. **Type soundness**: Prove `infer_simple` is sound with respect to a typing relation.
 
@@ -810,17 +866,27 @@ pub struct GcStateVerify {
 
 ---
 
-### 3. Waitless Compile (`waitless_compile/`)
+### 3. Async Compile (`async_compile/`)
+
+**Purpose:** Verify that `async` functions (non-blocking, async-safe) contain no blocking operations.
+
+**Terminology:**
+- `async` = non-blocking function, safe to call from async code
+- `wait` = blocking operation that would block an async executor
+- `async` = asynchronous function using async/await
 
 **Lean Model:**
 ```lean
-inductive Effect | compute | io | wait
+inductive Effect
+  | compute   -- Pure computation, always async-safe
+  | io        -- Non-blocking I/O, async-safe
+  | wait      -- Blocking operation, NOT async-safe
 
-def waitless (e : Effect) : Bool :=
+def is_async (e : Effect) : Bool :=
   match e with | Effect.wait => false | _ => true
 
 def pipelineSafe (es : List Effect) : Prop :=
-  ∀ e, e ∈ es → waitless e = true
+  ∀ e, e ∈ es → is_async e = true
 
 theorem append_safe {a b : List Effect} :
   pipelineSafe a → pipelineSafe b → pipelineSafe (a ++ b)
@@ -831,28 +897,34 @@ theorem wait_detected (e : Effect) :
 
 **Rust Implementation (`compiler/mir/types.rs`):**
 ```rust
-pub enum WaitlessEffect {
-    Compute,
-    Io,
-    Wait,
+pub enum AsyncEffect {
+    Compute,  // Pure computation - async-safe
+    Io,       // Non-blocking I/O - async-safe
+    Wait,     // Blocking - NOT async-safe
 }
 
-pub fn waitless(e: WaitlessEffect) -> bool {
-    !matches!(e, WaitlessEffect::Wait)
+pub fn is_async(e: AsyncEffect) -> bool {  // Lean: is_async
+    !matches!(e, AsyncEffect::Wait)
 }
 
-pub fn pipeline_safe(es: &[WaitlessEffect]) -> bool {
-    es.iter().all(|e| waitless(*e))
+pub fn pipeline_safe(es: &[AsyncEffect]) -> bool {
+    es.iter().all(|e| is_async(*e))
 }
 
-pub fn append_safe(a: Vec<WaitlessEffect>, b: Vec<WaitlessEffect>) -> Vec<WaitlessEffect> {
+pub fn append_safe(a: Vec<AsyncEffect>, b: Vec<AsyncEffect>) -> Vec<AsyncEffect> {
     debug_assert!(pipeline_safe(&a));
     debug_assert!(pipeline_safe(&b));
     // ... appends and asserts result is safe
 }
 ```
 
-**Correspondence:** ✅ **EXACT** - `WaitlessEffect` matches Lean's 3-variant `Effect` exactly.
+**Blocking operations that are NOT async:**
+- `await`, `wait` - explicit blocking wait
+- `join` - join thread/actor
+- `recv` - blocking receive from channel
+- `sleep` - blocking sleep
+
+**Correspondence:** ✅ **EXACT** - `AsyncEffect` matches Lean's 3-variant `Effect` exactly.
 
 ---
 
@@ -957,13 +1029,13 @@ pub fn infer_deterministic(e: &LeanExpr) -> bool {
 
 ## Verified Properties Summary
 
-| Property | Lean Theorem | Invariant | Rust Encoding |
-|----------|--------------|-----------|---------------|
-| Borrow validity preserved | `exclusive_ok`, `shared_ok`, `release_ok` | `exclusive → shared = 0` | `ValidBorrowState` enum |
-| GC safety preserved | `borrow_preserves`, `collect_preserves` | `borrowed ⊆ live` | `gc_state_safe()` predicate |
-| Waitless composability | `append_safe` | `∀e ∈ pipeline. waitless(e)` | `pipeline_safe()` predicate |
-| NoGC composability | `nogc_append`, `nogc_singleton` | `∀i ∈ program. i ≠ gcAlloc` | `nogc()` predicate |
-| Type inference determinism | `infer_deterministic` | `infer e = t₁ ∧ infer e = t₂ → t₁ = t₂` | Pure function |
+| Property | Lean Theorem | Invariant | Rust Encoding | Use Case |
+|----------|--------------|-----------|---------------|----------|
+| Borrow validity preserved | `exclusive_ok`, `shared_ok`, `release_ok` | `exclusive → shared = 0` | `ValidBorrowState` enum | Memory safety |
+| GC safety preserved | `borrow_preserves`, `collect_preserves` | `borrowed ⊆ live` | `gc_state_safe()` predicate | No use-after-free |
+| Async safety (async) | `append_safe` | `∀e ∈ pipeline. is_async(e)` | `pipeline_safe()` predicate | Non-blocking async |
+| NoGC composability | `nogc_append`, `nogc_singleton` | `∀i ∈ program. i ≠ gcAlloc` | `nogc()` predicate | Real-time safety |
+| Type inference determinism | `infer_deterministic` | `infer e = t₁ ∧ infer e = t₂ → t₁ = t₂` | Pure function | Type soundness |
 
 ---
 
@@ -981,10 +1053,11 @@ pub fn infer_deterministic(e: &LeanExpr) -> bool {
    - The `borrowed ⊆ live` invariant is an inductive invariant
    - All operations preserve this invariant
 
-3. **Effect Composition**
-   - Waitless pipelines remain waitless under concatenation
+3. **Effect Composition (Async Safety)**
+   - Async (non-blocking) pipelines remain async under concatenation
    - NoGC programs remain NoGC under concatenation
    - These are *monotonic* properties (preserved by structural composition)
+   - **Async safety guarantee:** Functions marked `async` are verified to never block the thread
 
 4. **Type Soundness (Partial)**
    - Type inference is deterministic (functional correctness)

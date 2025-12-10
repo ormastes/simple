@@ -422,7 +422,7 @@ uint64_t compute_signature_hash(Function* f) {
     for (Param* p : f->params) {
         hash_add(&h, p->type_descriptor);
     }
-    hash_add(&h, f->effect);  // async, waitless
+    hash_add(&h, f->effect);  // async, async
     return hash_finalize(&h);
 }
 

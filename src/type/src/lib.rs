@@ -1,5 +1,5 @@
+use simple_parser::ast::{BinOp, Expr, Node, Pattern, PointerKind, Type as AstType};
 use std::collections::HashMap;
-use simple_parser::ast::{Node, Expr, Pattern, Type as AstType, BinOp, PointerKind};
 
 //==============================================================================
 // Pure Type Inference (for formal verification)
@@ -162,9 +162,10 @@ impl SimpleTy {
             SimpleTy::Nat => Some(LeanTy::Nat),
             SimpleTy::Bool => Some(LeanTy::Bool),
             SimpleTy::Str => None, // No Lean equivalent
-            SimpleTy::Arrow(a, b) => {
-                Some(LeanTy::Arrow(Box::new(a.to_lean()?), Box::new(b.to_lean()?)))
-            }
+            SimpleTy::Arrow(a, b) => Some(LeanTy::Arrow(
+                Box::new(a.to_lean()?),
+                Box::new(b.to_lean()?),
+            )),
         }
     }
 }
@@ -189,20 +190,20 @@ impl SimpleExpr {
             SimpleExpr::LitNat(_) => None, // Negative numbers not in Lean Nat
             SimpleExpr::LitBool(b) => Some(LeanExpr::LitBool(*b)),
             SimpleExpr::LitStr(_) => None, // No Lean equivalent
-            SimpleExpr::Add(a, b) => {
-                Some(LeanExpr::Add(Box::new(a.to_lean()?), Box::new(b.to_lean()?)))
-            }
-            SimpleExpr::IfElse(c, t, e) => {
-                Some(LeanExpr::IfElse(
-                    Box::new(c.to_lean()?),
-                    Box::new(t.to_lean()?),
-                    Box::new(e.to_lean()?),
-                ))
-            }
+            SimpleExpr::Add(a, b) => Some(LeanExpr::Add(
+                Box::new(a.to_lean()?),
+                Box::new(b.to_lean()?),
+            )),
+            SimpleExpr::IfElse(c, t, e) => Some(LeanExpr::IfElse(
+                Box::new(c.to_lean()?),
+                Box::new(t.to_lean()?),
+                Box::new(e.to_lean()?),
+            )),
             SimpleExpr::Lam(body) => Some(LeanExpr::Lam(Box::new(body.to_lean()?))),
-            SimpleExpr::App(f, x) => {
-                Some(LeanExpr::App(Box::new(f.to_lean()?), Box::new(x.to_lean()?)))
-            }
+            SimpleExpr::App(f, x) => Some(LeanExpr::App(
+                Box::new(f.to_lean()?),
+                Box::new(x.to_lean()?),
+            )),
         }
     }
 }
@@ -248,19 +249,17 @@ pub fn infer_simple(expr: &SimpleExpr) -> Option<SimpleTy> {
             Some(SimpleTy::Arrow(Box::new(SimpleTy::Nat), Box::new(body_ty)))
         }
 
-        SimpleExpr::App(f, x) => {
-            match infer_simple(f)? {
-                SimpleTy::Arrow(arg_ty, ret_ty) => {
-                    let x_ty = infer_simple(x)?;
-                    if x_ty == *arg_ty {
-                        Some(*ret_ty)
-                    } else {
-                        None
-                    }
+        SimpleExpr::App(f, x) => match infer_simple(f)? {
+            SimpleTy::Arrow(arg_ty, ret_ty) => {
+                let x_ty = infer_simple(x)?;
+                if x_ty == *arg_ty {
+                    Some(*ret_ty)
+                } else {
+                    None
                 }
-                _ => None,
             }
-        }
+            _ => None,
+        },
     }
 }
 
@@ -272,13 +271,21 @@ pub fn to_simple_expr(expr: &Expr) -> Option<SimpleExpr> {
         Expr::Bool(b) => Some(SimpleExpr::LitBool(*b)),
         Expr::String(s) => Some(SimpleExpr::LitStr(s.clone())),
 
-        Expr::Binary { left, right, op: BinOp::Add } => {
+        Expr::Binary {
+            left,
+            right,
+            op: BinOp::Add,
+        } => {
             let l = to_simple_expr(left)?;
             let r = to_simple_expr(right)?;
             Some(SimpleExpr::Add(Box::new(l), Box::new(r)))
         }
 
-        Expr::If { condition, then_branch, else_branch } => {
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             let c = to_simple_expr(condition)?;
             let t = to_simple_expr(then_branch)?;
             let e = to_simple_expr(else_branch.as_ref()?)?;
@@ -308,12 +315,18 @@ pub enum Type {
     Float,
     Nil,
     Var(usize),
-    Function { params: Vec<Type>, ret: Box<Type> },
+    Function {
+        params: Vec<Type>,
+        ret: Box<Type>,
+    },
     Array(Box<Type>),
     /// Union type: A | B | C - value can be any of the member types
     Union(Vec<Type>),
     /// Generic type: Type<A, B> - parameterized type
-    Generic { name: String, args: Vec<Type> },
+    Generic {
+        name: String,
+        args: Vec<Type>,
+    },
     /// Type parameter: T, U, etc. - placeholder for generic instantiation
     TypeParam(String),
     /// Named type reference (struct, class, enum name)
@@ -321,13 +334,21 @@ pub enum Type {
     /// Tuple type: (A, B, C)
     Tuple(Vec<Type>),
     /// Dictionary type: {K: V}
-    Dict { key: Box<Type>, value: Box<Type> },
+    Dict {
+        key: Box<Type>,
+        value: Box<Type>,
+    },
     /// Optional type: T?
     Optional(Box<Type>),
     /// Immutable borrow: &T - reference that allows read-only access
     Borrow(Box<Type>),
     /// Mutable borrow: &mut T - reference that allows read-write access
     BorrowMut(Box<Type>),
+    /// Constructor type: Constructor[T] - a constructor that produces T
+    Constructor {
+        target: Box<Type>,
+        args: Option<Vec<Type>>,
+    },
 }
 
 impl Type {
@@ -391,7 +412,9 @@ pub struct Substitution {
 
 impl Substitution {
     pub fn new() -> Self {
-        Self { map: HashMap::new() }
+        Self {
+            map: HashMap::new(),
+        }
     }
 
     pub fn get(&self, id: usize) -> Option<&Type> {
@@ -470,67 +493,106 @@ impl TypeChecker {
         self.env.insert("async".to_string(), generic_fn.clone());
         self.env.insert("future".to_string(), generic_fn.clone());
         self.env.insert("await".to_string(), generic_fn.clone());
-        self.env.insert("is_ready".to_string(), Type::Function {
-            params: vec![var3],
-            ret: Box::new(Type::Bool),
-        });
+        self.env.insert(
+            "is_ready".to_string(),
+            Type::Function {
+                params: vec![var3],
+                ret: Box::new(Type::Bool),
+            },
+        );
 
         // Actor functions
-        self.env.insert("send".to_string(), Type::Function {
-            params: vec![var4, var5],
-            ret: Box::new(Type::Nil),
-        });
+        self.env.insert(
+            "send".to_string(),
+            Type::Function {
+                params: vec![var4, var5],
+                ret: Box::new(Type::Nil),
+            },
+        );
         self.env.insert("recv".to_string(), generic_fn.clone());
-        self.env.insert("reply".to_string(), Type::Function {
-            params: vec![var6],
-            ret: Box::new(Type::Nil),
-        });
-        self.env.insert("join".to_string(), Type::Function {
-            params: vec![var7],
-            ret: Box::new(Type::Nil),
-        });
+        self.env.insert(
+            "reply".to_string(),
+            Type::Function {
+                params: vec![var6],
+                ret: Box::new(Type::Nil),
+            },
+        );
+        self.env.insert(
+            "join".to_string(),
+            Type::Function {
+                params: vec![var7],
+                ret: Box::new(Type::Nil),
+            },
+        );
 
         // Common built-in functions
-        self.env.insert("len".to_string(), Type::Function {
-            params: vec![var8],
-            ret: Box::new(Type::Int),
-        });
+        self.env.insert(
+            "len".to_string(),
+            Type::Function {
+                params: vec![var8],
+                ret: Box::new(Type::Int),
+            },
+        );
         self.env.insert("print".to_string(), generic_fn.clone());
         self.env.insert("println".to_string(), generic_fn.clone());
-        self.env.insert("type".to_string(), Type::Function {
-            params: vec![var9],
-            ret: Box::new(Type::Str),
-        });
-        self.env.insert("str".to_string(), Type::Function {
-            params: vec![var10],
-            ret: Box::new(Type::Str),
-        });
-        self.env.insert("int".to_string(), Type::Function {
-            params: vec![var11],
-            ret: Box::new(Type::Int),
-        });
+        self.env.insert(
+            "type".to_string(),
+            Type::Function {
+                params: vec![var9],
+                ret: Box::new(Type::Str),
+            },
+        );
+        self.env.insert(
+            "str".to_string(),
+            Type::Function {
+                params: vec![var10],
+                ret: Box::new(Type::Str),
+            },
+        );
+        self.env.insert(
+            "int".to_string(),
+            Type::Function {
+                params: vec![var11],
+                ret: Box::new(Type::Int),
+            },
+        );
 
         // Math functions (extern)
-        self.env.insert("abs".to_string(), Type::Function {
-            params: vec![Type::Int],
-            ret: Box::new(Type::Int),
-        });
-        self.env.insert("sqrt".to_string(), Type::Function {
-            params: vec![Type::Int],
-            ret: Box::new(Type::Int),
-        });
-        self.env.insert("pow".to_string(), Type::Function {
-            params: vec![Type::Int, Type::Int],
-            ret: Box::new(Type::Int),
-        });
-        self.env.insert("min".to_string(), Type::Function {
-            params: vec![Type::Int, Type::Int],
-            ret: Box::new(Type::Int),
-        });
-        self.env.insert("max".to_string(), Type::Function {
-            params: vec![Type::Int, Type::Int],
-            ret: Box::new(Type::Int),
-        });
+        self.env.insert(
+            "abs".to_string(),
+            Type::Function {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+        );
+        self.env.insert(
+            "sqrt".to_string(),
+            Type::Function {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+        );
+        self.env.insert(
+            "pow".to_string(),
+            Type::Function {
+                params: vec![Type::Int, Type::Int],
+                ret: Box::new(Type::Int),
+            },
+        );
+        self.env.insert(
+            "min".to_string(),
+            Type::Function {
+                params: vec![Type::Int, Type::Int],
+                ret: Box::new(Type::Int),
+            },
+        );
+        self.env.insert(
+            "max".to_string(),
+            Type::Function {
+                params: vec![Type::Int, Type::Int],
+                ret: Box::new(Type::Int),
+            },
+        );
 
         // Generator/coroutine functions
         self.env.insert("generator".to_string(), generic_fn.clone());
@@ -559,7 +621,10 @@ impl TypeChecker {
             (Type::Var(id), ty) | (ty, Type::Var(id)) => {
                 // Occurs check: prevent infinite types
                 if ty.contains_var(*id) {
-                    return Err(TypeError::OccursCheck { var_id: *id, ty: ty.clone() });
+                    return Err(TypeError::OccursCheck {
+                        var_id: *id,
+                        ty: ty.clone(),
+                    });
                 }
                 self.subst.insert(*id, ty.clone());
                 Ok(())
@@ -580,8 +645,16 @@ impl TypeChecker {
             }
 
             // Functions unify if params and return types unify
-            (Type::Function { params: p1, ret: r1 }, Type::Function { params: p2, ret: r2 })
-                if p1.len() == p2.len() => {
+            (
+                Type::Function {
+                    params: p1,
+                    ret: r1,
+                },
+                Type::Function {
+                    params: p2,
+                    ret: r2,
+                },
+            ) if p1.len() == p2.len() => {
                 for (a, b) in p1.iter().zip(p2.iter()) {
                     self.unify(a, b)?;
                 }
@@ -590,7 +663,8 @@ impl TypeChecker {
 
             // Generic types unify if name and args match
             (Type::Generic { name: n1, args: a1 }, Type::Generic { name: n2, args: a2 })
-                if n1 == n2 && a1.len() == a2.len() => {
+                if n1 == n2 && a1.len() == a2.len() =>
+            {
                 for (x, y) in a1.iter().zip(a2.iter()) {
                     self.unify(x, y)?;
                 }
@@ -617,7 +691,10 @@ impl TypeChecker {
                         return Ok(());
                     }
                 }
-                Err(TypeError::Mismatch { expected: t1.clone(), found: t2.clone() })
+                Err(TypeError::Mismatch {
+                    expected: t1.clone(),
+                    found: t2.clone(),
+                })
             }
 
             // Borrow types unify if inner types unify
@@ -628,7 +705,10 @@ impl TypeChecker {
             (Type::Borrow(i1), Type::BorrowMut(i2)) => self.unify(i1, i2),
 
             // Mismatch
-            _ => Err(TypeError::Mismatch { expected: t1.clone(), found: t2.clone() }),
+            _ => Err(TypeError::Mismatch {
+                expected: t1.clone(),
+                found: t2.clone(),
+            }),
         }
     }
 
@@ -647,7 +727,9 @@ impl TypeChecker {
                 }
                 // Map common type names
                 match name.as_str() {
-                    "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "Int" => Type::Int,
+                    "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "int" | "Int" => {
+                        Type::Int
+                    }
                     "f32" | "f64" | "float" | "Float" => Type::Float,
                     "bool" | "Bool" => Type::Bool,
                     "str" | "String" | "Str" => Type::Str,
@@ -656,38 +738,35 @@ impl TypeChecker {
                 }
             }
             AstType::Generic { name, args } => {
-                let converted_args: Vec<Type> = args.iter()
-                    .map(|a| self.ast_type_to_type(a))
-                    .collect();
-                Type::Generic { name: name.clone(), args: converted_args }
+                let converted_args: Vec<Type> =
+                    args.iter().map(|a| self.ast_type_to_type(a)).collect();
+                Type::Generic {
+                    name: name.clone(),
+                    args: converted_args,
+                }
             }
             AstType::Union(types) => {
-                let converted: Vec<Type> = types.iter()
-                    .map(|t| self.ast_type_to_type(t))
-                    .collect();
+                let converted: Vec<Type> = types.iter().map(|t| self.ast_type_to_type(t)).collect();
                 Type::Union(converted)
             }
             AstType::Tuple(types) => {
-                let converted: Vec<Type> = types.iter()
-                    .map(|t| self.ast_type_to_type(t))
-                    .collect();
+                let converted: Vec<Type> = types.iter().map(|t| self.ast_type_to_type(t)).collect();
                 Type::Tuple(converted)
             }
-            AstType::Array { element, .. } => {
-                Type::Array(Box::new(self.ast_type_to_type(element)))
-            }
+            AstType::Array { element, .. } => Type::Array(Box::new(self.ast_type_to_type(element))),
             AstType::Function { params, ret } => {
-                let param_types: Vec<Type> = params.iter()
-                    .map(|p| self.ast_type_to_type(p))
-                    .collect();
-                let ret_type = ret.as_ref()
+                let param_types: Vec<Type> =
+                    params.iter().map(|p| self.ast_type_to_type(p)).collect();
+                let ret_type = ret
+                    .as_ref()
                     .map(|r| self.ast_type_to_type(r))
                     .unwrap_or(Type::Nil);
-                Type::Function { params: param_types, ret: Box::new(ret_type) }
+                Type::Function {
+                    params: param_types,
+                    ret: Box::new(ret_type),
+                }
             }
-            AstType::Optional(inner) => {
-                Type::Optional(Box::new(self.ast_type_to_type(inner)))
-            }
+            AstType::Optional(inner) => Type::Optional(Box::new(self.ast_type_to_type(inner))),
             AstType::Pointer { inner, kind } => {
                 let inner_type = self.ast_type_to_type(inner);
                 match kind {
@@ -695,6 +774,16 @@ impl TypeChecker {
                     PointerKind::BorrowMut => Type::BorrowMut(Box::new(inner_type)),
                     // For other pointer types, treat as their inner type for now
                     _ => inner_type,
+                }
+            }
+            AstType::Constructor { target, args } => {
+                let target_type = self.ast_type_to_type(target);
+                let args_types = args
+                    .as_ref()
+                    .map(|a| a.iter().map(|t| self.ast_type_to_type(t)).collect());
+                Type::Constructor {
+                    target: Box::new(target_type),
+                    args: args_types,
                 }
             }
         }
@@ -727,7 +816,11 @@ impl TypeChecker {
             (Type::Array(e1), Type::Array(e2)) => self.types_compatible(e1, e2),
             // Tuples match if all elements match
             (Type::Tuple(t1), Type::Tuple(t2)) => {
-                t1.len() == t2.len() && t1.iter().zip(t2.iter()).all(|(a, b)| self.types_compatible(a, b))
+                t1.len() == t2.len()
+                    && t1
+                        .iter()
+                        .zip(t2.iter())
+                        .all(|(a, b)| self.types_compatible(a, b))
             }
             // Union types: check if either is a subset
             (Type::Union(members), other) | (other, Type::Union(members)) => {
@@ -735,17 +828,35 @@ impl TypeChecker {
             }
             // Generic types match if name and all args match
             (Type::Generic { name: n1, args: a1 }, Type::Generic { name: n2, args: a2 }) => {
-                n1 == n2 && a1.len() == a2.len() &&
-                a1.iter().zip(a2.iter()).all(|(x, y)| self.types_compatible(x, y))
+                n1 == n2
+                    && a1.len() == a2.len()
+                    && a1
+                        .iter()
+                        .zip(a2.iter())
+                        .all(|(x, y)| self.types_compatible(x, y))
             }
             // Functions match if params and return types match
-            (Type::Function { params: p1, ret: r1 }, Type::Function { params: p2, ret: r2 }) => {
-                p1.len() == p2.len() &&
-                p1.iter().zip(p2.iter()).all(|(a, b)| self.types_compatible(a, b)) &&
-                self.types_compatible(r1, r2)
+            (
+                Type::Function {
+                    params: p1,
+                    ret: r1,
+                },
+                Type::Function {
+                    params: p2,
+                    ret: r2,
+                },
+            ) => {
+                p1.len() == p2.len()
+                    && p1
+                        .iter()
+                        .zip(p2.iter())
+                        .all(|(a, b)| self.types_compatible(a, b))
+                    && self.types_compatible(r1, r2)
             }
             // Optional types
-            (Type::Optional(inner1), Type::Optional(inner2)) => self.types_compatible(inner1, inner2),
+            (Type::Optional(inner1), Type::Optional(inner2)) => {
+                self.types_compatible(inner1, inner2)
+            }
             // Dict types
             (Type::Dict { key: k1, value: v1 }, Type::Dict { key: k2, value: v2 }) => {
                 self.types_compatible(k1, k2) && self.types_compatible(v1, v2)
@@ -754,9 +865,13 @@ impl TypeChecker {
             (Type::TypeParam(n1), Type::TypeParam(n2)) => n1 == n2,
             // Borrow types
             (Type::Borrow(inner1), Type::Borrow(inner2)) => self.types_compatible(inner1, inner2),
-            (Type::BorrowMut(inner1), Type::BorrowMut(inner2)) => self.types_compatible(inner1, inner2),
+            (Type::BorrowMut(inner1), Type::BorrowMut(inner2)) => {
+                self.types_compatible(inner1, inner2)
+            }
             // &mut T is compatible with &T (mutable borrow can be used where immutable is expected)
-            (Type::Borrow(inner1), Type::BorrowMut(inner2)) => self.types_compatible(inner1, inner2),
+            (Type::Borrow(inner1), Type::BorrowMut(inner2)) => {
+                self.types_compatible(inner1, inner2)
+            }
             _ => false,
         }
     }
@@ -790,6 +905,11 @@ impl TypeChecker {
         self.env.insert("Some".to_string(), some_ty);
         let none_ty = self.fresh_var();
         self.env.insert("None".to_string(), none_ty);
+        // Result type constructors
+        let ok_ty = self.fresh_var();
+        self.env.insert("Ok".to_string(), ok_ty);
+        let err_ty = self.fresh_var();
+        self.env.insert("Err".to_string(), err_ty);
 
         // First pass: register all function, class, struct, const, static names
         for item in items {
@@ -842,12 +962,27 @@ impl TypeChecker {
                     let ty = self.fresh_var();
                     self.env.insert(t.name.clone(), ty);
                 }
+                Node::Unit(u) => {
+                    // Register unit type
+                    let ty = self.fresh_var();
+                    self.env.insert(u.name.clone(), ty);
+                }
                 Node::Impl(_) => {
                     // Impl blocks don't introduce new names
                 }
-                Node::Let(_) | Node::Assignment(_) | Node::Return(_) | Node::If(_)
-                | Node::Match(_) | Node::For(_) | Node::While(_) | Node::Loop(_)
-                | Node::Break(_) | Node::Continue(_) | Node::Context(_) | Node::Expression(_) => {
+                Node::Let(_)
+                | Node::Assignment(_)
+                | Node::Return(_)
+                | Node::If(_)
+                | Node::Match(_)
+                | Node::For(_)
+                | Node::While(_)
+                | Node::Loop(_)
+                | Node::Break(_)
+                | Node::Continue(_)
+                | Node::Context(_)
+                | Node::With(_)
+                | Node::Expression(_) => {
                     // Statement nodes at module level are checked in second pass
                 }
             }
@@ -888,6 +1023,10 @@ impl TypeChecker {
                 Ok(())
             }
             Node::Function(func) => {
+                // Register the function name in current scope (for nested functions)
+                let func_ty = self.fresh_var();
+                self.env.insert(func.name.clone(), func_ty.clone());
+
                 let old_env = self.env.clone();
                 for param in &func.params {
                     // Use type annotation if present, otherwise create fresh var
@@ -902,6 +1041,8 @@ impl TypeChecker {
                     self.check_node(stmt)?;
                 }
                 self.env = old_env;
+                // Re-add function name after restoring env (it was added before saving old_env)
+                self.env.insert(func.name.clone(), func_ty);
                 Ok(())
             }
             Node::Return(ret) => {
@@ -916,6 +1057,10 @@ impl TypeChecker {
             }
             Node::If(if_stmt) => {
                 let _ = self.infer_expr(&if_stmt.condition)?;
+                // Handle if let pattern binding
+                if let Some(pattern) = &if_stmt.let_pattern {
+                    self.bind_pattern(pattern);
+                }
                 for stmt in &if_stmt.then_block.statements {
                     self.check_node(stmt)?;
                 }
@@ -934,6 +1079,10 @@ impl TypeChecker {
             }
             Node::While(while_stmt) => {
                 let _ = self.infer_expr(&while_stmt.condition)?;
+                // Handle while let pattern binding
+                if let Some(pattern) = &while_stmt.let_pattern {
+                    self.bind_pattern(pattern);
+                }
                 for stmt in &while_stmt.body.statements {
                     self.check_node(stmt)?;
                 }
@@ -1015,6 +1164,20 @@ impl TypeChecker {
                 }
                 Ok(())
             }
+            Node::With(with_stmt) => {
+                // Check the resource expression
+                let _ = self.infer_expr(&with_stmt.resource)?;
+                // Bind the "as name" if present
+                if let Some(name) = &with_stmt.name {
+                    let ty = self.fresh_var();
+                    self.env.insert(name.clone(), ty);
+                }
+                // Check body statements
+                for stmt in &with_stmt.body.statements {
+                    self.check_node(stmt)?;
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -1054,7 +1217,7 @@ impl TypeChecker {
             Pattern::Typed { pattern, .. } => {
                 self.bind_pattern(pattern);
             }
-            Pattern::Wildcard | Pattern::Literal(_) | Pattern::Rest => {
+            Pattern::Wildcard | Pattern::Literal(_) | Pattern::Rest | Pattern::Range { .. } => {
                 // These patterns don't bind any names
             }
         }
@@ -1076,24 +1239,35 @@ impl TypeChecker {
             }
             Expr::Bool(_) => Ok(Type::Bool),
             Expr::Nil => Ok(Type::Nil),
-            Expr::Identifier(name) => {
-                self.env.get(name).cloned().ok_or_else(|| {
-                    TypeError::Undefined(format!("undefined identifier: {}", name))
-                })
-            }
+            Expr::Identifier(name) => self
+                .env
+                .get(name)
+                .cloned()
+                .ok_or_else(|| TypeError::Undefined(format!("undefined identifier: {}", name))),
             Expr::Binary { left, right, op } => {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;
 
                 match op {
                     // Arithmetic operators: both operands should be numeric, result is numeric
-                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow | BinOp::FloorDiv => {
+                    BinOp::Add
+                    | BinOp::Sub
+                    | BinOp::Mul
+                    | BinOp::Div
+                    | BinOp::Mod
+                    | BinOp::Pow
+                    | BinOp::FloorDiv => {
                         // Unify operands to ensure they're compatible
                         let _ = self.unify(&left_ty, &right_ty);
                         Ok(self.resolve(&left_ty))
                     }
                     // Comparison operators: result is always Bool
-                    BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                    BinOp::Eq
+                    | BinOp::NotEq
+                    | BinOp::Lt
+                    | BinOp::LtEq
+                    | BinOp::Gt
+                    | BinOp::GtEq => {
                         // Operands should be comparable (same type)
                         let _ = self.unify(&left_ty, &right_ty);
                         Ok(Type::Bool)
@@ -1105,15 +1279,17 @@ impl TypeChecker {
                         Ok(Type::Bool)
                     }
                     // Bitwise operators: both operands should be Int
-                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::ShiftLeft | BinOp::ShiftRight => {
+                    BinOp::BitAnd
+                    | BinOp::BitOr
+                    | BinOp::BitXor
+                    | BinOp::ShiftLeft
+                    | BinOp::ShiftRight => {
                         let _ = self.unify(&left_ty, &Type::Int);
                         let _ = self.unify(&right_ty, &Type::Int);
                         Ok(Type::Int)
                     }
                     // Is and In operators
-                    BinOp::Is | BinOp::In => {
-                        Ok(Type::Bool)
-                    }
+                    BinOp::Is | BinOp::In => Ok(Type::Bool),
                 }
             }
             Expr::Unary { op, operand } => {
@@ -1156,7 +1332,7 @@ impl TypeChecker {
                         }
                         Ok(*ret)
                     }
-                    _ => Ok(result_ty)
+                    _ => Ok(result_ty),
                 }
             }
             Expr::Array(items) => {
@@ -1189,10 +1365,14 @@ impl TypeChecker {
                         // For now, return fresh var since we don't know which element
                         Ok(self.fresh_var())
                     }
-                    _ => Ok(self.fresh_var())
+                    _ => Ok(self.fresh_var()),
                 }
             }
-            Expr::If { condition, then_branch, else_branch } => {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 let cond_ty = self.infer_expr(condition)?;
                 // Condition should be Bool
                 let _ = self.unify(&cond_ty, &Type::Bool);

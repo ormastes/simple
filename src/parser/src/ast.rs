@@ -1,4 +1,4 @@
-use crate::token::Span;
+use crate::token::{NumericSuffix, Span};
 
 //==============================================================================
 // Visibility and Mutability (for formal verification)
@@ -122,6 +122,7 @@ pub enum Node {
     TypeAlias(TypeAliasDef),
     Extern(ExternDef),
     Macro(MacroDef),
+    Unit(UnitDef),
 
     // Statements
     Let(LetStmt),
@@ -137,7 +138,37 @@ pub enum Node {
     Break(BreakStmt),
     Continue(ContinueStmt),
     Context(ContextStmt),
+    With(WithStmt),
     Expression(Expr),
+}
+
+/// With statement for RAII/context manager pattern
+/// with resource as name:
+///     statements
+#[derive(Debug, Clone, PartialEq)]
+pub struct WithStmt {
+    pub span: Span,
+    pub resource: Expr,       // The resource expression
+    pub name: Option<String>, // Optional binding name (as name)
+    pub body: Block,
+}
+
+/// Decorator applied to a function: @decorator or @decorator(args)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decorator {
+    pub span: Span,
+    pub name: Expr,              // The decorator expression (e.g., Identifier or Call)
+    pub args: Option<Vec<Expr>>, // Arguments if @decorator(args)
+}
+
+/// Attribute applied to an item: #[name] or #[name = "value"] or #[name(args)]
+/// Attributes provide compile-time metadata for items like functions and classes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribute {
+    pub span: Span,
+    pub name: String,            // The attribute name (e.g., "inline", "deprecated")
+    pub value: Option<Expr>,     // Optional value: #[name = value]
+    pub args: Option<Vec<Expr>>, // Optional arguments: #[name(arg1, arg2)]
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -151,6 +182,10 @@ pub struct FunctionDef {
     pub body: Block,
     pub visibility: Visibility,
     pub effect: Option<Effect>,
+    /// Decorators applied to the function: @decorator
+    pub decorators: Vec<Decorator>,
+    /// Attributes applied to the function: #[inline], #[deprecated]
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -185,6 +220,8 @@ pub struct StructDef {
     pub generic_params: Vec<String>,
     pub fields: Vec<Field>,
     pub visibility: Visibility,
+    /// Attributes applied to the struct: #[derive(Debug)]
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +234,8 @@ pub struct ClassDef {
     pub methods: Vec<FunctionDef>,
     pub parent: Option<String>,
     pub visibility: Visibility,
+    /// Attributes applied to the class: #[deprecated]
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -217,13 +256,26 @@ pub struct EnumDef {
     pub generic_params: Vec<String>,
     pub variants: Vec<EnumVariant>,
     pub visibility: Visibility,
+    /// Attributes like #[strong]
+    pub attributes: Vec<Attribute>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumVariant {
     pub span: Span,
     pub name: String,
-    pub fields: Option<Vec<Type>>,  // None = unit, Some = tuple/struct
+    pub fields: Option<Vec<Type>>, // None = unit, Some = tuple/struct
+}
+
+/// Standalone unit type definition: `unit UserId: i64 as uid`
+/// Creates a newtype wrapper with literal suffix support
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitDef {
+    pub span: Span,
+    pub name: String,    // e.g., "UserId"
+    pub base_type: Type, // e.g., i64
+    pub suffix: String,  // e.g., "uid" (for literals like 42_uid)
+    pub visibility: Visibility,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -300,7 +352,10 @@ pub enum MacroParam {
     /// Type capture: $t:ty
     Type(String),
     /// Variadic capture: $(...)*
-    Variadic { name: String, separator: Option<String> },
+    Variadic {
+        name: String,
+        separator: Option<String>,
+    },
     /// Literal token (must match exactly)
     Literal(String),
 }
@@ -326,7 +381,10 @@ pub enum MacroToken {
     /// Literal token
     Literal(String),
     /// Variadic expansion: $(...)*
-    Variadic { body: Vec<MacroToken>, separator: Option<String> },
+    Variadic {
+        body: Vec<MacroToken>,
+        separator: Option<String>,
+    },
 }
 
 /// Macro invocation: name!(args)
@@ -364,7 +422,7 @@ pub struct ConstStmt {
     pub span: Span,
     pub name: String,
     pub ty: Option<Type>,
-    pub value: Expr,  // Required - must be evaluable at compile time
+    pub value: Expr, // Required - must be evaluable at compile time
     pub visibility: Visibility,
 }
 
@@ -376,7 +434,7 @@ pub struct StaticStmt {
     pub span: Span,
     pub name: String,
     pub ty: Option<Type>,
-    pub value: Expr,  // Required
+    pub value: Expr, // Required
     pub mutability: Mutability,
     pub visibility: Visibility,
 }
@@ -391,11 +449,11 @@ pub struct AssignmentStmt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignOp {
-    Assign,     // =
-    AddAssign,  // +=
-    SubAssign,  // -=
-    MulAssign,  // *=
-    DivAssign,  // /=
+    Assign,    // =
+    AddAssign, // +=
+    SubAssign, // -=
+    MulAssign, // *=
+    DivAssign, // /=
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -407,6 +465,8 @@ pub struct ReturnStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct IfStmt {
     pub span: Span,
+    /// For if-let: the pattern to match against, None for regular if
+    pub let_pattern: Option<Pattern>,
     pub condition: Expr,
     pub then_block: Block,
     pub elif_branches: Vec<(Expr, Block)>,
@@ -439,6 +499,8 @@ pub struct ForStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct WhileStmt {
     pub span: Span,
+    /// For while-let: the pattern to match against, None for regular while
+    pub let_pattern: Option<Pattern>,
     pub condition: Expr,
     pub body: Block,
 }
@@ -466,7 +528,7 @@ pub struct ContinueStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContextStmt {
     pub span: Span,
-    pub context: Expr,  // The object that becomes the implicit receiver
+    pub context: Expr, // The object that becomes the implicit receiver
     pub body: Block,
 }
 
@@ -475,29 +537,47 @@ pub struct ContextStmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Simple(String),
-    Generic { name: String, args: Vec<Type> },
-    Pointer { kind: PointerKind, inner: Box<Type> },
+    Generic {
+        name: String,
+        args: Vec<Type>,
+    },
+    Pointer {
+        kind: PointerKind,
+        inner: Box<Type>,
+    },
     Tuple(Vec<Type>),
-    Array { element: Box<Type>, size: Option<Box<Expr>> },
-    Function { params: Vec<Type>, ret: Option<Box<Type>> },
+    Array {
+        element: Box<Type>,
+        size: Option<Box<Expr>>,
+    },
+    Function {
+        params: Vec<Type>,
+        ret: Option<Box<Type>>,
+    },
     Union(Vec<Type>),
     Optional(Box<Type>),
+    /// Constructor type: Constructor[T] or Constructor[T, (args)]
+    /// Represents a constructor that produces T or a subtype of T
+    Constructor {
+        target: Box<Type>,
+        /// Optional argument types constraint: Constructor[Widget, (str, i32)]
+        args: Option<Vec<Type>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerKind {
-    Unique,   // &T
-    Shared,   // *T
-    Weak,     // -T
-    Handle,   // +T
-    Borrow,      // &T_borrow (immutable borrow)
-    BorrowMut,   // &mut T_borrow (mutable borrow)
+    Unique,    // &T
+    Shared,    // *T
+    Weak,      // -T
+    Handle,    // +T
+    Borrow,    // &T_borrow (immutable borrow)
+    BorrowMut, // &mut T_borrow (mutable borrow)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Effect {
     Async,
-    Waitless,
 }
 
 // Expressions
@@ -507,42 +587,119 @@ pub enum Expr {
     // Literals
     Integer(i64),
     Float(f64),
+    TypedInteger(i64, NumericSuffix), // 42i32, 100_km
+    TypedFloat(f64, NumericSuffix),   // 3.14f32, 100.0_m
     String(String),
-    FString(Vec<FStringPart>),  // f"hello {name}!" interpolated strings
+    FString(Vec<FStringPart>), // f"hello {name}!" interpolated strings
     Bool(bool),
     Nil,
     Symbol(String),
 
     // Compound
     Identifier(String),
-    Path(Vec<String>),  // EnumName::Variant or module::item
-    Binary { op: BinOp, left: Box<Expr>, right: Box<Expr> },
-    Unary { op: UnaryOp, operand: Box<Expr> },
-    Call { callee: Box<Expr>, args: Vec<Argument> },
-    MethodCall { receiver: Box<Expr>, method: String, args: Vec<Argument> },
-    FieldAccess { receiver: Box<Expr>, field: String },
-    Index { receiver: Box<Expr>, index: Box<Expr> },
-    Lambda { params: Vec<LambdaParam>, body: Box<Expr> },
-    If { condition: Box<Expr>, then_branch: Box<Expr>, else_branch: Option<Box<Expr>> },
-    Match { subject: Box<Expr>, arms: Vec<MatchArm> },
+    Path(Vec<String>), // EnumName::Variant or module::item
+    Binary {
+        op: BinOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expr>,
+    },
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Argument>,
+    },
+    MethodCall {
+        receiver: Box<Expr>,
+        method: String,
+        args: Vec<Argument>,
+    },
+    FieldAccess {
+        receiver: Box<Expr>,
+        field: String,
+    },
+    Index {
+        receiver: Box<Expr>,
+        index: Box<Expr>,
+    },
+    Lambda {
+        params: Vec<LambdaParam>,
+        body: Box<Expr>,
+    },
+    If {
+        condition: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Option<Box<Expr>>,
+    },
+    Match {
+        subject: Box<Expr>,
+        arms: Vec<MatchArm>,
+    },
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
-    StructInit { name: String, fields: Vec<(String, Expr)> },
+    /// List comprehension: [expr for pattern in iterable if condition]
+    ListComprehension {
+        expr: Box<Expr>,
+        pattern: Pattern,
+        iterable: Box<Expr>,
+        condition: Option<Box<Expr>>,
+    },
+    /// Dict comprehension: {key: value for pattern in iterable if condition}
+    DictComprehension {
+        key: Box<Expr>,
+        value: Box<Expr>,
+        pattern: Pattern,
+        iterable: Box<Expr>,
+        condition: Option<Box<Expr>>,
+    },
+    /// Slice expression: items[start:end:step]
+    Slice {
+        receiver: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
+    },
+    /// Spread expression in array: *expr
+    Spread(Box<Expr>),
+    /// Spread expression in dict: **expr
+    DictSpread(Box<Expr>),
+    StructInit {
+        name: String,
+        fields: Vec<(String, Expr)>,
+    },
     Spawn(Box<Expr>),
     Await(Box<Expr>),
-    Yield(Option<Box<Expr>>),  // yield or yield value
-    New { kind: PointerKind, expr: Box<Expr> },
-    Range { start: Option<Box<Expr>>, end: Option<Box<Expr>>, bound: RangeBound },
+    Yield(Option<Box<Expr>>), // yield or yield value
+    New {
+        kind: PointerKind,
+        expr: Box<Expr>,
+    },
+    Range {
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        bound: RangeBound,
+    },
     /// Functional update operator: obj->method(args) desugars to obj = obj.method(args)
-    FunctionalUpdate { target: Box<Expr>, method: String, args: Vec<Argument> },
+    FunctionalUpdate {
+        target: Box<Expr>,
+        method: String,
+        args: Vec<Argument>,
+    },
     /// Macro invocation: name!(args)
-    MacroInvocation { name: String, args: Vec<MacroArg> },
+    MacroInvocation {
+        name: String,
+        args: Vec<MacroArg>,
+    },
+    /// Try operator: expr? - unwrap Ok or early return Err
+    Try(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Argument {
-    pub name: Option<String>,  // for named arguments
+    pub name: Option<String>, // for named arguments
     pub value: Expr,
 }
 
@@ -562,25 +719,42 @@ pub struct LambdaParam {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinOp {
     // Arithmetic
-    Add, Sub, Mul, Div, Mod, Pow, FloorDiv,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Pow,
+    FloorDiv,
     // Comparison
-    Eq, NotEq, Lt, Gt, LtEq, GtEq,
+    Eq,
+    NotEq,
+    Lt,
+    Gt,
+    LtEq,
+    GtEq,
     // Logical
-    And, Or,
+    And,
+    Or,
     // Bitwise
-    BitAnd, BitOr, BitXor, ShiftLeft, ShiftRight,
+    BitAnd,
+    BitOr,
+    BitXor,
+    ShiftLeft,
+    ShiftRight,
     // Other
-    Is, In,
+    Is,
+    In,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
-    Neg,      // -
-    Not,      // not
-    BitNot,   // ~
-    Ref,      // & (immutable borrow)
-    RefMut,   // &mut (mutable borrow)
-    Deref,    // *
+    Neg,    // -
+    Not,    // not
+    BitNot, // ~
+    Ref,    // & (immutable borrow)
+    RefMut, // &mut (mutable borrow)
+    Deref,  // *
 }
 
 // Patterns
@@ -593,11 +767,27 @@ pub enum Pattern {
     Literal(Box<Expr>),
     Tuple(Vec<Pattern>),
     Array(Vec<Pattern>),
-    Struct { name: String, fields: Vec<(String, Pattern)> },
-    Enum { name: String, variant: String, payload: Option<Vec<Pattern>> },
+    Struct {
+        name: String,
+        fields: Vec<(String, Pattern)>,
+    },
+    Enum {
+        name: String,
+        variant: String,
+        payload: Option<Vec<Pattern>>,
+    },
     Or(Vec<Pattern>),
-    Typed { pattern: Box<Pattern>, ty: Type },
-    Rest,  // ...
+    Typed {
+        pattern: Box<Pattern>,
+        ty: Type,
+    },
+    /// Range pattern: start..end (exclusive) or start..=end (inclusive)
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        inclusive: bool,
+    },
+    Rest, // ...
 }
 
 // Module level
@@ -638,19 +828,19 @@ mod tests {
             span: Span::new(0, 10, 1, 1),
             name: "add".to_string(),
             generic_params: vec![],
-            params: vec![
-                Parameter {
-                    span: Span::new(4, 5, 1, 5),
-                    name: "a".to_string(),
-                    ty: Some(Type::Simple("Int".to_string())),
-                    default: None,
-                    mutability: Mutability::Immutable,
-                },
-            ],
+            params: vec![Parameter {
+                span: Span::new(4, 5, 1, 5),
+                name: "a".to_string(),
+                ty: Some(Type::Simple("Int".to_string())),
+                default: None,
+                mutability: Mutability::Immutable,
+            }],
             return_type: Some(Type::Simple("Int".to_string())),
             body: Block::default(),
             visibility: Visibility::Private,
             effect: None,
+            decorators: vec![],
+            attributes: vec![],
         };
         assert_eq!(func.name, "add");
         assert_eq!(func.params.len(), 1);
@@ -662,19 +852,19 @@ mod tests {
             span: Span::new(0, 20, 1, 1),
             name: "identity".to_string(),
             generic_params: vec!["T".to_string()],
-            params: vec![
-                Parameter {
-                    span: Span::new(10, 11, 1, 11),
-                    name: "x".to_string(),
-                    ty: Some(Type::Simple("T".to_string())),
-                    default: None,
-                    mutability: Mutability::Immutable,
-                },
-            ],
+            params: vec![Parameter {
+                span: Span::new(10, 11, 1, 11),
+                name: "x".to_string(),
+                ty: Some(Type::Simple("T".to_string())),
+                default: None,
+                mutability: Mutability::Immutable,
+            }],
             return_type: Some(Type::Simple("T".to_string())),
             body: Block::default(),
             visibility: Visibility::Private,
             effect: None,
+            decorators: vec![],
+            attributes: vec![],
         };
         assert_eq!(func.name, "identity");
         assert_eq!(func.generic_params, vec!["T"]);
@@ -686,17 +876,16 @@ mod tests {
             span: Span::new(0, 30, 1, 1),
             name: "Box".to_string(),
             generic_params: vec!["T".to_string()],
-            fields: vec![
-                Field {
-                    span: Span::new(10, 20, 2, 5),
-                    name: "value".to_string(),
-                    ty: Type::Simple("T".to_string()),
-                    default: None,
-                    mutability: Mutability::Immutable,
-                    visibility: Visibility::Private,
-                },
-            ],
+            fields: vec![Field {
+                span: Span::new(10, 20, 2, 5),
+                name: "value".to_string(),
+                ty: Type::Simple("T".to_string()),
+                default: None,
+                mutability: Mutability::Immutable,
+                visibility: Visibility::Private,
+            }],
             visibility: Visibility::Private,
+            attributes: vec![],
         };
         assert_eq!(s.name, "Box");
         assert_eq!(s.generic_params, vec!["T"]);

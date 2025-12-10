@@ -261,6 +261,7 @@ fn substitute_macro_params_in_node(
         Node::If(if_stmt) => {
             Ok(Node::If(IfStmt {
                 span: if_stmt.span,
+                let_pattern: if_stmt.let_pattern.clone(),
                 condition: substitute_macro_params(&if_stmt.condition, &empty_bindings, arg_exprs)?,
                 then_block: substitute_block(&if_stmt.then_block, arg_exprs)?,
                 elif_branches: if_stmt.elif_branches.iter()

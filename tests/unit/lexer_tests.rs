@@ -1,7 +1,7 @@
 //! Comprehensive lexer unit tests
 
 use simple_parser::lexer::Lexer;
-use simple_parser::token::{Token, TokenKind, Span, FStringToken};
+use simple_parser::token::{FStringToken, Span, Token, TokenKind};
 
 fn tokenize(source: &str) -> Vec<TokenKind> {
     let mut lexer = Lexer::new(source);
@@ -48,12 +48,18 @@ fn test_integer_single_digit() {
 
 #[test]
 fn test_integer_multi_digit() {
-    assert_eq!(tokenize("12345"), vec![TokenKind::Integer(12345), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("12345"),
+        vec![TokenKind::Integer(12345), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_integer_with_underscores() {
-    assert_eq!(tokenize("1_000_000"), vec![TokenKind::Integer(1000000), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("1_000_000"),
+        vec![TokenKind::Integer(1000000), TokenKind::Eof]
+    );
 }
 
 #[test]
@@ -67,63 +73,96 @@ fn test_integer_negative_parsed_as_minus() {
 
 #[test]
 fn test_hex_lowercase() {
-    assert_eq!(tokenize("0xff"), vec![TokenKind::Integer(255), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0xff"),
+        vec![TokenKind::Integer(255), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_hex_uppercase() {
-    assert_eq!(tokenize("0XFF"), vec![TokenKind::Integer(255), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0XFF"),
+        vec![TokenKind::Integer(255), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_hex_mixed_case() {
-    assert_eq!(tokenize("0xAbCd"), vec![TokenKind::Integer(0xABCD), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0xAbCd"),
+        vec![TokenKind::Integer(0xABCD), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_hex_with_underscores() {
-    assert_eq!(tokenize("0xff_ff"), vec![TokenKind::Integer(0xFFFF), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0xff_ff"),
+        vec![TokenKind::Integer(0xFFFF), TokenKind::Eof]
+    );
 }
 
 // === Binary Literal Tests ===
 
 #[test]
 fn test_binary_lowercase() {
-    assert_eq!(tokenize("0b1010"), vec![TokenKind::Integer(10), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0b1010"),
+        vec![TokenKind::Integer(10), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_binary_uppercase() {
-    assert_eq!(tokenize("0B1111"), vec![TokenKind::Integer(15), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0B1111"),
+        vec![TokenKind::Integer(15), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_binary_with_underscores() {
-    assert_eq!(tokenize("0b1111_0000"), vec![TokenKind::Integer(0xF0), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0b1111_0000"),
+        vec![TokenKind::Integer(0xF0), TokenKind::Eof]
+    );
 }
 
 // === Octal Literal Tests ===
 
 #[test]
 fn test_octal_lowercase() {
-    assert_eq!(tokenize("0o77"), vec![TokenKind::Integer(63), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0o77"),
+        vec![TokenKind::Integer(63), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_octal_uppercase() {
-    assert_eq!(tokenize("0O77"), vec![TokenKind::Integer(63), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0O77"),
+        vec![TokenKind::Integer(63), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_octal_with_underscores() {
-    assert_eq!(tokenize("0o7_7_7"), vec![TokenKind::Integer(511), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("0o7_7_7"),
+        vec![TokenKind::Integer(511), TokenKind::Eof]
+    );
 }
 
 // === Float Literal Tests ===
 
 #[test]
 fn test_float_simple() {
-    assert_eq!(tokenize("3.14"), vec![TokenKind::Float(3.14), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("3.14"),
+        vec![TokenKind::Float(3.14), TokenKind::Eof]
+    );
 }
 
 #[test]
@@ -133,27 +172,42 @@ fn test_float_leading_zero() {
 
 #[test]
 fn test_float_with_exponent_lowercase() {
-    assert_eq!(tokenize("1e10"), vec![TokenKind::Float(1e10), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("1e10"),
+        vec![TokenKind::Float(1e10), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_float_with_exponent_uppercase() {
-    assert_eq!(tokenize("1E10"), vec![TokenKind::Float(1e10), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("1E10"),
+        vec![TokenKind::Float(1e10), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_float_with_negative_exponent() {
-    assert_eq!(tokenize("2.5E-3"), vec![TokenKind::Float(2.5e-3), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("2.5E-3"),
+        vec![TokenKind::Float(2.5e-3), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_float_with_positive_exponent() {
-    assert_eq!(tokenize("1.5e+2"), vec![TokenKind::Float(1.5e2), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("1.5e+2"),
+        vec![TokenKind::Float(1.5e2), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_float_with_underscores() {
-    assert_eq!(tokenize("1_000.5"), vec![TokenKind::Float(1000.5), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("1_000.5"),
+        vec![TokenKind::Float(1000.5), TokenKind::Eof]
+    );
 }
 
 // === String Literal Tests ===
@@ -170,7 +224,10 @@ fn test_string_empty() {
 fn test_string_simple() {
     assert_eq!(
         tokenize(r#""hello""#),
-        vec![TokenKind::FString(vec![FStringToken::Literal("hello".to_string())]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello".to_string())]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -178,7 +235,10 @@ fn test_string_simple() {
 fn test_string_escape_newline() {
     assert_eq!(
         tokenize(r#""hello\nworld""#),
-        vec![TokenKind::FString(vec![FStringToken::Literal("hello\nworld".to_string())]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello\nworld".to_string())]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -186,7 +246,10 @@ fn test_string_escape_newline() {
 fn test_string_escape_tab() {
     assert_eq!(
         tokenize(r#""hello\tworld""#),
-        vec![TokenKind::FString(vec![FStringToken::Literal("hello\tworld".to_string())]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello\tworld".to_string())]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -194,7 +257,10 @@ fn test_string_escape_tab() {
 fn test_string_escape_carriage_return() {
     assert_eq!(
         tokenize(r#""hello\rworld""#),
-        vec![TokenKind::FString(vec![FStringToken::Literal("hello\rworld".to_string())]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello\rworld".to_string())]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -202,7 +268,10 @@ fn test_string_escape_carriage_return() {
 fn test_string_escape_backslash() {
     assert_eq!(
         tokenize(r#""hello\\world""#),
-        vec![TokenKind::FString(vec![FStringToken::Literal("hello\\world".to_string())]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello\\world".to_string())]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -210,7 +279,10 @@ fn test_string_escape_backslash() {
 fn test_string_escape_quote() {
     assert_eq!(
         tokenize(r#""hello\"world""#),
-        vec![TokenKind::FString(vec![FStringToken::Literal("hello\"world".to_string())]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello\"world".to_string())]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -218,7 +290,10 @@ fn test_string_escape_quote() {
 fn test_string_escape_null() {
     assert_eq!(
         tokenize(r#""hello\0world""#),
-        vec![TokenKind::FString(vec![FStringToken::Literal("hello\0world".to_string())]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello\0world".to_string())]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -244,7 +319,10 @@ fn test_raw_string_simple() {
 fn test_raw_string_no_escape_processing() {
     assert_eq!(
         tokenize(r#"'hello\nworld'"#),
-        vec![TokenKind::RawString("hello\\nworld".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::RawString("hello\\nworld".to_string()),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -262,10 +340,13 @@ fn test_raw_string_no_interpolation() {
 fn test_fstring_with_interpolation() {
     assert_eq!(
         tokenize(r#""hello {name}""#),
-        vec![TokenKind::FString(vec![
-            FStringToken::Literal("hello ".to_string()),
-            FStringToken::Expr("name".to_string()),
-        ]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![
+                FStringToken::Literal("hello ".to_string()),
+                FStringToken::Expr("name".to_string()),
+            ]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -273,13 +354,16 @@ fn test_fstring_with_interpolation() {
 fn test_fstring_multiple_interpolations() {
     assert_eq!(
         tokenize(r#""{x} + {y} = {z}""#),
-        vec![TokenKind::FString(vec![
-            FStringToken::Expr("x".to_string()),
-            FStringToken::Literal(" + ".to_string()),
-            FStringToken::Expr("y".to_string()),
-            FStringToken::Literal(" = ".to_string()),
-            FStringToken::Expr("z".to_string()),
-        ]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![
+                FStringToken::Expr("x".to_string()),
+                FStringToken::Literal(" + ".to_string()),
+                FStringToken::Expr("y".to_string()),
+                FStringToken::Literal(" = ".to_string()),
+                FStringToken::Expr("z".to_string()),
+            ]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -287,9 +371,10 @@ fn test_fstring_multiple_interpolations() {
 fn test_fstring_escaped_braces() {
     assert_eq!(
         tokenize(r#""literal {{braces}}""#),
-        vec![TokenKind::FString(vec![
-            FStringToken::Literal("literal {braces}".to_string()),
-        ]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("literal {braces}".to_string()),]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -297,9 +382,10 @@ fn test_fstring_escaped_braces() {
 fn test_fstring_complex_expression() {
     assert_eq!(
         tokenize(r#""{x + y}""#),
-        vec![TokenKind::FString(vec![
-            FStringToken::Expr("x + y".to_string()),
-        ]), TokenKind::Eof]
+        vec![
+            TokenKind::FString(vec![FStringToken::Expr("x + y".to_string()),]),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -307,12 +393,18 @@ fn test_fstring_complex_expression() {
 
 #[test]
 fn test_bool_true() {
-    assert_eq!(tokenize("true"), vec![TokenKind::Bool(true), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("true"),
+        vec![TokenKind::Bool(true), TokenKind::Eof]
+    );
 }
 
 #[test]
 fn test_bool_false() {
-    assert_eq!(tokenize("false"), vec![TokenKind::Bool(false), TokenKind::Eof]);
+    assert_eq!(
+        tokenize("false"),
+        vec![TokenKind::Bool(false), TokenKind::Eof]
+    );
 }
 
 // === Nil Literal Test ===
@@ -378,7 +470,10 @@ fn test_identifier_with_numbers() {
 fn test_identifier_all_caps() {
     assert_eq!(
         tokenize("CONSTANT"),
-        vec![TokenKind::Identifier("CONSTANT".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::Identifier("CONSTANT".to_string()),
+            TokenKind::Eof
+        ]
     );
 }
 
@@ -436,7 +531,10 @@ fn test_keyword_break() {
 
 #[test]
 fn test_keyword_continue() {
-    assert_eq!(tokenize("continue"), vec![TokenKind::Continue, TokenKind::Eof]);
+    assert_eq!(
+        tokenize("continue"),
+        vec![TokenKind::Continue, TokenKind::Eof]
+    );
 }
 
 #[test]
@@ -560,11 +658,6 @@ fn test_keyword_await() {
 }
 
 #[test]
-fn test_keyword_waitless() {
-    assert_eq!(tokenize("waitless"), vec![TokenKind::Waitless, TokenKind::Eof]);
-}
-
-#[test]
 fn test_keyword_yield() {
     assert_eq!(tokenize("yield"), vec![TokenKind::Yield, TokenKind::Eof]);
 }
@@ -591,7 +684,10 @@ fn test_keyword_extern() {
 
 #[test]
 fn test_keyword_context() {
-    assert_eq!(tokenize("context"), vec![TokenKind::Context, TokenKind::Eof]);
+    assert_eq!(
+        tokenize("context"),
+        vec![TokenKind::Context, TokenKind::Eof]
+    );
 }
 
 #[test]
@@ -884,7 +980,9 @@ fn test_empty_lines_in_indent() {
 #[test]
 fn test_line_comment() {
     let tokens = tokenize("x # this is a comment\ny");
-    assert!(!tokens.iter().any(|t| matches!(t, TokenKind::Identifier(s) if s.contains("comment"))));
+    assert!(!tokens
+        .iter()
+        .any(|t| matches!(t, TokenKind::Identifier(s) if s.contains("comment"))));
 }
 
 #[test]
@@ -896,7 +994,10 @@ fn test_comment_only_line() {
 #[test]
 fn test_comment_at_line_start() {
     let tokens = tokenize("# comment\nx");
-    assert_eq!(tokens, vec![TokenKind::Identifier("x".to_string()), TokenKind::Eof]);
+    assert_eq!(
+        tokens,
+        vec![TokenKind::Identifier("x".to_string()), TokenKind::Eof]
+    );
 }
 
 // === Line Continuation Tests ===
@@ -904,11 +1005,14 @@ fn test_comment_at_line_start() {
 #[test]
 fn test_line_continuation() {
     let tokens = tokenize("x \\\ny");
-    assert_eq!(tokens, vec![
-        TokenKind::Identifier("x".to_string()),
-        TokenKind::Identifier("y".to_string()),
-        TokenKind::Eof,
-    ]);
+    assert_eq!(
+        tokens,
+        vec![
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier("y".to_string()),
+            TokenKind::Eof,
+        ]
+    );
 }
 
 // === Newline Tests ===
@@ -954,55 +1058,67 @@ fn test_token_line_tracking() {
 #[test]
 fn test_expression_arithmetic() {
     let tokens = tokenize("1 + 2 * 3");
-    assert_eq!(tokens, vec![
-        TokenKind::Integer(1),
-        TokenKind::Plus,
-        TokenKind::Integer(2),
-        TokenKind::Star,
-        TokenKind::Integer(3),
-        TokenKind::Eof,
-    ]);
+    assert_eq!(
+        tokens,
+        vec![
+            TokenKind::Integer(1),
+            TokenKind::Plus,
+            TokenKind::Integer(2),
+            TokenKind::Star,
+            TokenKind::Integer(3),
+            TokenKind::Eof,
+        ]
+    );
 }
 
 #[test]
 fn test_expression_function_call() {
     let tokens = tokenize("foo(x, y)");
-    assert_eq!(tokens, vec![
-        TokenKind::Identifier("foo".to_string()),
-        TokenKind::LParen,
-        TokenKind::Identifier("x".to_string()),
-        TokenKind::Comma,
-        TokenKind::Identifier("y".to_string()),
-        TokenKind::RParen,
-        TokenKind::Eof,
-    ]);
+    assert_eq!(
+        tokens,
+        vec![
+            TokenKind::Identifier("foo".to_string()),
+            TokenKind::LParen,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Comma,
+            TokenKind::Identifier("y".to_string()),
+            TokenKind::RParen,
+            TokenKind::Eof,
+        ]
+    );
 }
 
 #[test]
 fn test_expression_method_chain() {
     let tokens = tokenize("a.b.c()");
-    assert_eq!(tokens, vec![
-        TokenKind::Identifier("a".to_string()),
-        TokenKind::Dot,
-        TokenKind::Identifier("b".to_string()),
-        TokenKind::Dot,
-        TokenKind::Identifier("c".to_string()),
-        TokenKind::LParen,
-        TokenKind::RParen,
-        TokenKind::Eof,
-    ]);
+    assert_eq!(
+        tokens,
+        vec![
+            TokenKind::Identifier("a".to_string()),
+            TokenKind::Dot,
+            TokenKind::Identifier("b".to_string()),
+            TokenKind::Dot,
+            TokenKind::Identifier("c".to_string()),
+            TokenKind::LParen,
+            TokenKind::RParen,
+            TokenKind::Eof,
+        ]
+    );
 }
 
 #[test]
 fn test_expression_array_indexing() {
     let tokens = tokenize("arr[0]");
-    assert_eq!(tokens, vec![
-        TokenKind::Identifier("arr".to_string()),
-        TokenKind::LBracket,
-        TokenKind::Integer(0),
-        TokenKind::RBracket,
-        TokenKind::Eof,
-    ]);
+    assert_eq!(
+        tokens,
+        vec![
+            TokenKind::Identifier("arr".to_string()),
+            TokenKind::LBracket,
+            TokenKind::Integer(0),
+            TokenKind::RBracket,
+            TokenKind::Eof,
+        ]
+    );
 }
 
 // === Function Definition Tokenization ===

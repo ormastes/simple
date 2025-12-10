@@ -7,8 +7,8 @@ use std::path::Path;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use simple_compiler::CompilerPipeline;
 use simple_common::gc::GcAllocator;
+use simple_compiler::CompilerPipeline;
 use simple_loader::loader::ModuleLoader as SmfLoader;
 use simple_loader::LoadedModule;
 use simple_runtime::gc::GcRuntime;
@@ -69,28 +69,43 @@ impl ExecCore {
 
     /// Compile source string to SMF bytes in memory (no disk I/O)
     pub fn compile_to_memory(&self, source: &str) -> Result<Vec<u8>, String> {
-        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone())
-            .map_err(|e| format!("{e:?}"))?;
-        compiler.compile_source_to_memory(source)
+        let mut compiler =
+            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        compiler
+            .compile_source_to_memory(source)
+            .map_err(|e| format!("compile failed: {e}"))
+    }
+
+    /// Compile source string to SMF bytes using native codegen (HIR → MIR → Cranelift)
+    pub fn compile_to_memory_native(&self, source: &str) -> Result<Vec<u8>, String> {
+        let mut compiler =
+            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        compiler
+            .compile_source_to_memory_native(source)
             .map_err(|e| format!("compile failed: {e}"))
     }
 
     /// Compile file to SMF
     pub fn compile_file(&self, path: &Path, out: &Path) -> Result<(), String> {
-        let mut compiler = CompilerPipeline::with_gc(self.gc_alloc.clone())
-            .map_err(|e| format!("{e:?}"))?;
-        compiler.compile(path, out)
+        let mut compiler =
+            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        compiler
+            .compile(path, out)
             .map_err(|e| format!("compile failed: {e}"))
     }
 
     /// Load an SMF module from file
     pub fn load_module(&self, path: &Path) -> Result<LoadedModule, String> {
-        self.loader.load(path).map_err(|e| format!("load failed: {e}"))
+        self.loader
+            .load(path)
+            .map_err(|e| format!("load failed: {e}"))
     }
 
     /// Load an SMF module from memory buffer
     pub fn load_module_from_memory(&self, bytes: &[u8]) -> Result<LoadedModule, String> {
-        self.loader.load_from_memory(bytes).map_err(|e| format!("load failed: {e}"))
+        self.loader
+            .load_from_memory(bytes)
+            .map_err(|e| format!("load failed: {e}"))
     }
 
     /// Compile and run source string, return exit code (uses temp file)
@@ -108,6 +123,28 @@ impl ExecCore {
     /// Compile and run source string in memory (no disk I/O)
     pub fn run_source_in_memory(&self, source: &str) -> Result<i32, String> {
         let smf_bytes = self.compile_to_memory(source)?;
+        let module = self.load_module_from_memory(&smf_bytes)?;
+        let exit = run_main(&module)?;
+        self.collect_gc();
+        Ok(exit)
+    }
+
+    /// Compile using native codegen and run source string (uses temp file)
+    pub fn run_source_native(&self, source: &str) -> Result<i32, String> {
+        let tmp = TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
+        let out = tmp.path().join("module.smf");
+
+        let smf_bytes = self.compile_to_memory_native(source)?;
+        fs::write(&out, smf_bytes).map_err(|e| format!("write smf: {e}"))?;
+        let module = self.load_module(&out)?;
+        let exit = run_main(&module)?;
+        self.collect_gc();
+        Ok(exit)
+    }
+
+    /// Compile using native codegen and run source string in memory (no disk I/O)
+    pub fn run_source_in_memory_native(&self, source: &str) -> Result<i32, String> {
+        let smf_bytes = self.compile_to_memory_native(source)?;
         let module = self.load_module_from_memory(&smf_bytes)?;
         let exit = run_main(&module)?;
         self.collect_gc();
@@ -132,9 +169,7 @@ impl ExecCore {
 
     /// Run a file, auto-detecting type by extension (.spl or .smf)
     pub fn run_file(&self, path: &Path) -> Result<i32, String> {
-        let extension = path.extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         match extension {
             "smf" => self.run_smf(path),
@@ -149,7 +184,7 @@ impl ExecCore {
             other => Err(format!(
                 "unsupported file extension '.{}': expected '.spl' or '.smf'",
                 other
-            ))
+            )),
         }
     }
 }

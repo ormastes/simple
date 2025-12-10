@@ -85,18 +85,22 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Scan { source, output } => {
-            cmd_scan(&source, &output)
-        }
-        Commands::Class { coverage_json, source, filter } => {
-            cmd_class_coverage(&coverage_json, &source, filter.as_deref())
-        }
-        Commands::Func { coverage_json, source, filter } => {
-            cmd_func_coverage(&coverage_json, &source, filter.as_deref())
-        }
-        Commands::Report { coverage_json, public_api, type_filter } => {
-            cmd_report(&coverage_json, &public_api, type_filter.as_deref())
-        }
+        Commands::Scan { source, output } => cmd_scan(&source, &output),
+        Commands::Class {
+            coverage_json,
+            source,
+            filter,
+        } => cmd_class_coverage(&coverage_json, &source, filter.as_deref()),
+        Commands::Func {
+            coverage_json,
+            source,
+            filter,
+        } => cmd_func_coverage(&coverage_json, &source, filter.as_deref()),
+        Commands::Report {
+            coverage_json,
+            public_api,
+            type_filter,
+        } => cmd_report(&coverage_json, &public_api, type_filter.as_deref()),
     }
 }
 
@@ -106,9 +110,11 @@ fn cmd_scan(source: &PathBuf, output: &PathBuf) -> Result<()> {
 
     let api = scan_directory(source)?;
 
-    println!("Found {} types, {} crates with public functions",
+    println!(
+        "Found {} types, {} crates with public functions",
         api.types.len(),
-        api.public_functions.len());
+        api.public_functions.len()
+    );
 
     write_yaml(&api, output)?;
     println!("Written to: {}", output.display());
@@ -121,7 +127,10 @@ fn cmd_scan(source: &PathBuf, output: &PathBuf) -> Result<()> {
 // =============================================================================
 
 /// Load coverage data and API, returning both with touched functions map
-fn load_coverage_data(coverage_json: &PathBuf, source: &PathBuf) -> Result<(ScannedApi, HashMap<String, u64>)> {
+fn load_coverage_data(
+    coverage_json: &PathBuf,
+    source: &PathBuf,
+) -> Result<(ScannedApi, HashMap<String, u64>)> {
     let cov = load_llvm_cov_export(coverage_json)
         .with_context(|| format!("Failed to load coverage JSON: {}", coverage_json.display()))?;
 
@@ -143,7 +152,11 @@ fn print_header(title: &str) {
 
 /// Print coverage summary line
 fn print_summary(touched: usize, total: usize, label: &str) {
-    let pct = if total > 0 { (touched as f64 / total as f64) * 100.0 } else { 100.0 };
+    let pct = if total > 0 {
+        (touched as f64 / total as f64) * 100.0
+    } else {
+        100.0
+    };
     println!("TOTAL: {}/{} {} ({:.1}%)", touched, total, label, pct);
 }
 
@@ -173,7 +186,11 @@ fn is_class_touched(type_name: &str, methods: &[String], touched: &HashMap<Strin
 // =============================================================================
 
 /// Show class/struct touch coverage for System Tests
-fn cmd_class_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<&str>) -> Result<()> {
+fn cmd_class_coverage(
+    coverage_json: &PathBuf,
+    source: &PathBuf,
+    filter: Option<&str>,
+) -> Result<()> {
     let (api, touched) = load_coverage_data(coverage_json, source)?;
 
     print_header("SYSTEM TEST - Class/Struct Touch Coverage");
@@ -199,7 +216,11 @@ fn cmd_class_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<
             touched_classes += 1;
         }
 
-        let status = if class_touched { "✓ TOUCHED" } else { "✗ NOT TOUCHED" };
+        let status = if class_touched {
+            "✓ TOUCHED"
+        } else {
+            "✗ NOT TOUCHED"
+        };
         println!("{:<50} {:>10}", type_name, status);
     }
 
@@ -210,7 +231,11 @@ fn cmd_class_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<
 }
 
 /// Show public function touch coverage for Integration Tests
-fn cmd_func_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<&str>) -> Result<()> {
+fn cmd_func_coverage(
+    coverage_json: &PathBuf,
+    source: &PathBuf,
+    filter: Option<&str>,
+) -> Result<()> {
     let (api, touched) = load_coverage_data(coverage_json, source)?;
 
     print_header("INTEGRATION TEST - Public Function Touch Coverage");
@@ -259,7 +284,11 @@ fn cmd_func_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<&
         if *is_touched {
             total_touched += 1;
         }
-        let status = if *is_touched { "✓ TOUCHED" } else { "✗ NOT TOUCHED" };
+        let status = if *is_touched {
+            "✓ TOUCHED"
+        } else {
+            "✗ NOT TOUCHED"
+        };
         // Truncate long names
         let display_name = if func_name.len() > 58 {
             format!("{}...", &func_name[..55])
@@ -270,14 +299,24 @@ fn cmd_func_coverage(coverage_json: &PathBuf, source: &PathBuf, filter: Option<&
     }
 
     println!("{}", "─".repeat(72));
-    print_summary(total_touched, total_funcs, "public functions/methods touched");
+    print_summary(
+        total_touched,
+        total_funcs,
+        "public functions/methods touched",
+    );
 
     Ok(())
 }
 
 /// Legacy report mode with YAML file
-fn cmd_report(coverage_json: &PathBuf, public_api: &PathBuf, type_filter: Option<&str>) -> Result<()> {
-    use simple_mock_helper::coverage::{compute_class_coverage, load_public_api_spec, print_class_coverage_table};
+fn cmd_report(
+    coverage_json: &PathBuf,
+    public_api: &PathBuf,
+    type_filter: Option<&str>,
+) -> Result<()> {
+    use simple_mock_helper::coverage::{
+        compute_class_coverage, load_public_api_spec, print_class_coverage_table,
+    };
 
     let cov = load_llvm_cov_export(coverage_json)?;
     let api = load_public_api_spec(public_api)?;

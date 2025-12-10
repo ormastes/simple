@@ -57,5 +57,5 @@ main = 0  # Fire-and-forget works
 ## Related
 
 - #30 Actors (partial)
-- #32 Waitless Effects
+- #32 Async Effects
 - #33 Stackless Coroutines

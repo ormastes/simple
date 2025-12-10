@@ -6,8 +6,8 @@
 //! The `ActorSpawner` trait allows the compiler to spawn actors without
 //! depending directly on runtime implementation details.
 
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 /// Message type for actor communication.
 #[derive(Debug, Clone)]
@@ -108,7 +108,9 @@ impl ActorHandle {
 
     /// Send a message to this actor.
     pub fn send(&self, msg: Message) -> Result<(), String> {
-        self.inbox.send(msg).map_err(|e| format!("send failed: {e}"))
+        self.inbox
+            .send(msg)
+            .map_err(|e| format!("send failed: {e}"))
     }
 
     /// Receive a message from this actor (blocking).
@@ -131,7 +133,8 @@ impl ActorHandle {
 
     /// Try to receive without blocking.
     pub fn try_recv(&self) -> Result<Option<Message>, String> {
-        let guard = self.outbox
+        let guard = self
+            .outbox
             .lock()
             .map_err(|_| "recv lock poisoned".to_string())?;
         match guard.try_recv() {

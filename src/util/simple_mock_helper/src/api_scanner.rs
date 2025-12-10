@@ -264,7 +264,10 @@ pub fn write_yaml(api: &ScannedApi, path: &Path) -> anyhow::Result<()> {
 }
 
 /// Load existing YAML and merge with scanned API.
-pub fn merge_with_existing(scanned: &ScannedApi, existing_path: &Path) -> anyhow::Result<ScannedApi> {
+pub fn merge_with_existing(
+    scanned: &ScannedApi,
+    existing_path: &Path,
+) -> anyhow::Result<ScannedApi> {
     if !existing_path.exists() {
         return Ok(scanned.clone());
     }
@@ -311,26 +314,48 @@ mod tests {
 
     #[test]
     fn test_extract_type_name() {
-        assert_eq!(extract_type_name("pub struct Foo {"), Some("Foo".to_string()));
-        assert_eq!(extract_type_name("pub struct Bar<T> {"), Some("Bar".to_string()));
+        assert_eq!(
+            extract_type_name("pub struct Foo {"),
+            Some("Foo".to_string())
+        );
+        assert_eq!(
+            extract_type_name("pub struct Bar<T> {"),
+            Some("Bar".to_string())
+        );
         assert_eq!(extract_type_name("pub enum Baz {"), Some("Baz".to_string()));
-        assert_eq!(extract_type_name("pub struct Unit;"), Some("Unit".to_string()));
+        assert_eq!(
+            extract_type_name("pub struct Unit;"),
+            Some("Unit".to_string())
+        );
     }
 
     #[test]
     fn test_extract_fn_name() {
-        assert_eq!(extract_fn_name("pub fn new() -> Self {"), Some("new".to_string()));
-        assert_eq!(extract_fn_name("pub fn run<T>(x: T) {"), Some("run".to_string()));
-        assert_eq!(extract_fn_name("pub async fn fetch() {"), Some("fetch".to_string()));
+        assert_eq!(
+            extract_fn_name("pub fn new() -> Self {"),
+            Some("new".to_string())
+        );
+        assert_eq!(
+            extract_fn_name("pub fn run<T>(x: T) {"),
+            Some("run".to_string())
+        );
+        assert_eq!(
+            extract_fn_name("pub async fn fetch() {"),
+            Some("fetch".to_string())
+        );
     }
 
     #[test]
     fn test_generate_yaml() {
         let mut api = ScannedApi::default();
-        api.types.insert("test::Foo".to_string(), ScannedType {
-            methods: vec!["new".to_string(), "run".to_string()],
-        });
-        api.public_functions.insert("test".to_string(), vec!["helper".to_string()]);
+        api.types.insert(
+            "test::Foo".to_string(),
+            ScannedType {
+                methods: vec!["new".to_string(), "run".to_string()],
+            },
+        );
+        api.public_functions
+            .insert("test".to_string(), vec!["helper".to_string()]);
 
         let yaml = generate_yaml(&api);
         assert!(yaml.contains("types:"));

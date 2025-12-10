@@ -27,7 +27,10 @@ pub enum TestLevel {
 impl TestLevel {
     /// Returns true if this test level allows any mocks.
     pub fn allows_mocks(&self) -> bool {
-        matches!(self, TestLevel::Unit | TestLevel::Integration | TestLevel::Environment)
+        matches!(
+            self,
+            TestLevel::Unit | TestLevel::Integration | TestLevel::Environment
+        )
     }
 
     /// Returns true if this test level allows mocks only in HAL layers.
@@ -121,10 +124,7 @@ pub fn get_test_level_name() -> Option<&'static str> {
 pub fn assert_test_level(expected: TestLevel) {
     let actual = get_test_level();
     if actual != expected {
-        panic!(
-            "Expected test level {:?}, but got {:?}",
-            expected, actual
-        );
+        panic!("Expected test level {:?}, but got {:?}", expected, actual);
     }
 }
 
@@ -135,10 +135,7 @@ pub fn assert_test_level(expected: TestLevel) {
 pub fn assert_mocks_allowed() {
     let level = get_test_level();
     if !level.allows_mocks() {
-        panic!(
-            "Mocks are not allowed at test level {:?}",
-            level
-        );
+        panic!("Mocks are not allowed at test level {:?}", level);
     }
 }
 
@@ -186,10 +183,7 @@ impl TestCheckResult {
     /// Assert this result passed, panicking with errors if not.
     pub fn expect_pass(self) {
         if !self.passed {
-            panic!(
-                "Test check failed:\n{}",
-                self.errors.join("\n")
-            );
+            panic!("Test check failed:\n{}", self.errors.join("\n"));
         }
     }
 }
@@ -242,7 +236,9 @@ pub fn validate_test_config() -> TestCheckResult {
         TestLevel::Environment => {
             // Environment tests should have mocks enabled for HAL/external/lib
             if !are_mocks_enabled() {
-                errors.push("Environment tests should have mocks enabled (HAL/external/lib)".to_string());
+                errors.push(
+                    "Environment tests should have mocks enabled (HAL/external/lib)".to_string(),
+                );
             }
             if !is_policy_initialized() {
                 errors.push("Mock policy not initialized for environment tests".to_string());
@@ -282,7 +278,10 @@ macro_rules! init_integration_tests {
         $crate::mock_policy::init_mocks_for_only_default();
     };
     ($name:expr) => {
-        $crate::test_check::init_test_level_named($crate::test_check::TestLevel::Integration, $name);
+        $crate::test_check::init_test_level_named(
+            $crate::test_check::TestLevel::Integration,
+            $name,
+        );
         $crate::mock_policy::init_mocks_for_only_default();
     };
     (patterns: $patterns:expr) => {
@@ -317,7 +316,10 @@ macro_rules! init_env_tests {
         $crate::mock_policy::init_mocks_for_only($crate::mock_policy::DEFAULT_ENV_PATTERNS);
     };
     ($name:expr) => {
-        $crate::test_check::init_test_level_named($crate::test_check::TestLevel::Environment, $name);
+        $crate::test_check::init_test_level_named(
+            $crate::test_check::TestLevel::Environment,
+            $name,
+        );
         $crate::mock_policy::init_mocks_for_only($crate::mock_policy::DEFAULT_ENV_PATTERNS);
     };
     (patterns: $patterns:expr) => {

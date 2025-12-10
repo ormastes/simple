@@ -218,5 +218,3 @@ main = max!(10, 50)
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 50);
 }
-
-

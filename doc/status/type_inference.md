@@ -1,12 +1,12 @@
-# Feature: Type Inference (Feature #13)
+# Feature #13: Type Inference
 
-**Status**: Complete (Basic HM-style)
+**Status**: Interpreter: Working | Type Checker: Partial HM scaffold
 **Difficulty**: 4 (was 5)
 **Importance**: 4
 
 ## Summary
 
-Hindley-Milner-style local inference for lets/functions with unification.
+Hindley-Milner-style local inference for lets/functions with unification. The type checker validates code before interpretation.
 
 ## Implementation
 
@@ -17,11 +17,7 @@ The `simple-type` crate provides:
 - [x] **Unification algorithm** with occurs check
 - [x] **Substitution** data structure for tracking solved type variables
 - [x] Expression type inference for literals, identifiers
-- [x] **Binary operator inference** with proper type rules:
-  - Arithmetic: both operands unify, result is operand type
-  - Comparison: operands unify, result is Bool
-  - Logical: operands unify with Bool, result is Bool
-  - Bitwise: operands unify with Int, result is Int
+- [x] **Binary operator inference** with proper type rules
 - [x] Array inference with element unification
 - [x] **If expression** inference with branch unification
 - [x] **Index expression** inference (array → element type)
@@ -29,10 +25,19 @@ The `simple-type` crate provides:
 - [x] Pattern matching with guards
 - [x] Function/struct/class/enum registration in environment
 
+## Architecture
+
+```
+Source → Parser → AST → Type Checker → Interpreter
+                              ↓
+                   Validates types before execution
+```
+
+The type checker runs before the interpreter but doesn't yet feed types to a native codegen pipeline.
+
 ## Key Components
 
 ### Substitution
-Tracks type variable assignments:
 ```rust
 pub struct Substitution {
     map: HashMap<usize, Type>,
@@ -40,60 +45,44 @@ pub struct Substitution {
 ```
 
 ### Unification
-Unifies two types, updating the substitution:
 ```rust
 pub fn unify(&mut self, t1: &Type, t2: &Type) -> Result<(), TypeError>
 ```
 
-### Type Application
-Applies substitution to resolve type variables:
-```rust
-pub fn apply_subst(&self, subst: &Substitution) -> Type
-```
-
 ### Occurs Check
-Prevents infinite types like `T = Array<T>`:
-```rust
-pub fn contains_var(&self, var_id: usize) -> bool
-```
+Prevents infinite types like `T = Array<T>`.
 
-## Example Inference
+## Example
 
 ```simple
-# Integer literals → Int
-let x = 42
-
-# Binary ops unify operands
-let y = x + 10  # x: Int, 10: Int → y: Int
-
-# Array elements unify
+let x = 42           # x: Int (inferred)
+let y = x + 10       # y: Int (unification)
 let arr = [1, 2, 3]  # arr: Array<Int>
-
-# Function calls propagate types
-fn double(n: i64) -> i64:
-    return n * 2
-let z = double(x)  # z: i64
 ```
 
 ## Tests
 
-- `infers_let_and_function_return` - Basic let and function inference
-- `catches_undefined_variable` - Error on undefined variables
+```bash
+cargo test -p simple-type
+```
+
+- `infers_let_and_function_return`
+- `catches_undefined_variable`
 
 ## Files
 
-- `src/type/src/lib.rs` - Main type checker implementation (~750 lines)
+- `src/type/src/lib.rs` - Type checker (~750 lines)
+- `src/compiler/src/pipeline.rs` - Calls type_check before interpreter
 
 ## Future Work
 
 - [ ] Generalization at let-binding (polymorphic lets)
-- [ ] Instantiation at use sites (fresh copies of polymorphic types)
-- [ ] Better error reporting with span information
-- [ ] Integration with interpreter for runtime type checks
+- [ ] Instantiation at use sites
+- [ ] Integration with HIR for native codegen
+- [ ] Better error messages with source spans
 
 ## Why Difficulty Reduced (5→4)
 
-- TypeChecker crate already had basic infrastructure
-- Unification and type variable infrastructure was partially in place
-- Core HM algorithm is well-understood
-- Remaining work was incremental, not from scratch
+- Core HM infrastructure exists
+- Unification and substitution working
+- Remaining work is polish, not foundational

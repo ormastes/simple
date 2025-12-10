@@ -1,5 +1,5 @@
-use crate::hir::{HirModule, HirFunction, HirStmt, HirExpr, HirExprKind, TypeId, BinOp, UnaryOp};
-use super::types::{*, LocalKind};
+use super::types::{LocalKind, *};
+use crate::hir::{BinOp, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId, UnaryOp};
 use thiserror::Error;
 
 //==============================================================================
@@ -70,9 +70,13 @@ impl LowererState {
     /// **DEPRECATED**: This method panics on invalid state access.
     /// Prefer `try_current_block()` for verification-friendly code.
     /// Lean models use total functions - panicking breaks this property.
-    #[deprecated(since = "0.1.0", note = "Use try_current_block() for Lean-compatible totality")]
+    #[deprecated(
+        since = "0.1.0",
+        note = "Use try_current_block() for Lean-compatible totality"
+    )]
     pub fn current_block(&self) -> BlockId {
-        self.try_current_block().expect("Invariant violation: accessing block in idle state")
+        self.try_current_block()
+            .expect("Invariant violation: accessing block in idle state")
     }
 
     /// Get mutable reference to function (returns error if idle)
@@ -192,12 +196,10 @@ impl MirLowerer {
                 };
                 Ok(())
             }
-            LowererState::Lowering { .. } => {
-                Err(MirLowerError::InvalidState {
-                    expected: "Idle".to_string(),
-                    found: "Lowering".to_string(),
-                })
-            }
+            LowererState::Lowering { .. } => Err(MirLowerError::InvalidState {
+                expected: "Idle".to_string(),
+                found: "Lowering".to_string(),
+            }),
         }
     }
 
@@ -205,27 +207,28 @@ impl MirLowerer {
     fn end_function(&mut self) -> MirLowerResult<MirFunction> {
         match std::mem::replace(&mut self.state, LowererState::Idle) {
             LowererState::Lowering { func, .. } => Ok(func),
-            LowererState::Idle => {
-                Err(MirLowerError::InvalidState {
-                    expected: "Lowering".to_string(),
-                    found: "Idle".to_string(),
-                })
-            }
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
         }
     }
 
     /// Get mutable access to current function (requires Lowering state)
-    fn with_func<T>(&mut self, f: impl FnOnce(&mut MirFunction, BlockId) -> T) -> MirLowerResult<T> {
+    fn with_func<T>(
+        &mut self,
+        f: impl FnOnce(&mut MirFunction, BlockId) -> T,
+    ) -> MirLowerResult<T> {
         match &mut self.state {
-            LowererState::Lowering { func, current_block, .. } => {
-                Ok(f(func, *current_block))
-            }
-            LowererState::Idle => {
-                Err(MirLowerError::InvalidState {
-                    expected: "Lowering".to_string(),
-                    found: "Idle".to_string(),
-                })
-            }
+            LowererState::Lowering {
+                func,
+                current_block,
+                ..
+            } => Ok(f(func, *current_block)),
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
         }
     }
 
@@ -236,12 +239,10 @@ impl MirLowerer {
                 *current_block = block;
                 Ok(())
             }
-            LowererState::Idle => {
-                Err(MirLowerError::InvalidState {
-                    expected: "Lowering".to_string(),
-                    found: "Idle".to_string(),
-                })
-            }
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
         }
     }
 
@@ -252,12 +253,10 @@ impl MirLowerer {
                 loop_stack.push(ctx);
                 Ok(())
             }
-            LowererState::Idle => {
-                Err(MirLowerError::InvalidState {
-                    expected: "Lowering".to_string(),
-                    found: "Idle".to_string(),
-                })
-            }
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
         }
     }
 
@@ -267,12 +266,10 @@ impl MirLowerer {
             LowererState::Lowering { loop_stack, .. } => {
                 loop_stack.pop().ok_or(MirLowerError::BreakOutsideLoop)
             }
-            LowererState::Idle => {
-                Err(MirLowerError::InvalidState {
-                    expected: "Lowering".to_string(),
-                    found: "Idle".to_string(),
-                })
-            }
+            LowererState::Idle => Err(MirLowerError::InvalidState {
+                expected: "Lowering".to_string(),
+                found: "Idle".to_string(),
+            }),
         }
     }
 
@@ -308,11 +305,7 @@ impl MirLowerer {
     }
 
     fn lower_function(&mut self, func: &HirFunction) -> MirLowerResult<MirFunction> {
-        let mut mir_func = MirFunction::new(
-            func.name.clone(),
-            func.return_type,
-            func.visibility,
-        );
+        let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);
 
         // Add parameters
         for param in &func.params {
@@ -355,7 +348,9 @@ impl MirLowerer {
 
     fn lower_stmt(&mut self, stmt: &HirStmt) -> MirLowerResult<()> {
         match stmt {
-            HirStmt::Let { local_index, value, .. } => {
+            HirStmt::Let {
+                local_index, value, ..
+            } => {
                 if let Some(val) = value {
                     let vreg = self.lower_expr(val)?;
                     let local_idx = *local_index;
@@ -363,11 +358,14 @@ impl MirLowerer {
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::LocalAddr { dest, local_index: local_idx });
+                        block.instructions.push(MirInst::LocalAddr {
+                            dest,
+                            local_index: local_idx,
+                        });
                         block.instructions.push(MirInst::Store {
                             addr: dest,
                             value: vreg,
-                            ty
+                            ty,
                         });
                     })?;
                 }
@@ -384,7 +382,7 @@ impl MirLowerer {
                     block.instructions.push(MirInst::Store {
                         addr: addr_reg,
                         value: val_reg,
-                        ty
+                        ty,
                     });
                 })?;
                 Ok(())
@@ -409,7 +407,11 @@ impl MirLowerer {
                 Ok(())
             }
 
-            HirStmt::If { condition, then_block, else_block } => {
+            HirStmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
                 let cond_reg = self.lower_expr(condition)?;
 
                 // Create blocks
@@ -525,7 +527,8 @@ impl MirLowerer {
 
             HirStmt::Break => {
                 // Use loop context for proper jump target
-                let loop_ctx = self.current_loop()
+                let loop_ctx = self
+                    .current_loop()
                     .ok_or(MirLowerError::BreakOutsideLoop)?
                     .clone();
 
@@ -538,7 +541,8 @@ impl MirLowerer {
 
             HirStmt::Continue => {
                 // Use loop context for proper jump target
-                let loop_ctx = self.current_loop()
+                let loop_ctx = self
+                    .current_loop()
                     .ok_or(MirLowerError::ContinueOutsideLoop)?
                     .clone();
 
@@ -561,7 +565,9 @@ impl MirLowerer {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::ConstInt { dest, value: n });
+                    block
+                        .instructions
+                        .push(MirInst::ConstInt { dest, value: n });
                     dest
                 })
             }
@@ -571,7 +577,9 @@ impl MirLowerer {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::ConstFloat { dest, value: f });
+                    block
+                        .instructions
+                        .push(MirInst::ConstFloat { dest, value: f });
                     dest
                 })
             }
@@ -581,7 +589,9 @@ impl MirLowerer {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::ConstBool { dest, value: b });
+                    block
+                        .instructions
+                        .push(MirInst::ConstBool { dest, value: b });
                     dest
                 })
             }
@@ -592,8 +602,15 @@ impl MirLowerer {
                     let dest = func.new_vreg();
                     let addr_reg = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::LocalAddr { dest: addr_reg, local_index: idx });
-                    block.instructions.push(MirInst::Load { dest, addr: addr_reg, ty: expr_ty });
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest: addr_reg,
+                        local_index: idx,
+                    });
+                    block.instructions.push(MirInst::Load {
+                        dest,
+                        addr: addr_reg,
+                        ty: expr_ty,
+                    });
                     dest
                 })
             }
@@ -657,9 +674,7 @@ impl MirLowerer {
                 })
             }
 
-            _ => {
-                Err(MirLowerError::Unsupported(format!("{:?}", expr_kind)))
-            }
+            _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }
 
@@ -670,7 +685,10 @@ impl MirLowerer {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::LocalAddr { dest, local_index: idx });
+                    block.instructions.push(MirInst::LocalAddr {
+                        dest,
+                        local_index: idx,
+                    });
                     dest
                 })
             }
@@ -724,7 +742,10 @@ mod tests {
         let entry = func.block(BlockId(0)).unwrap();
 
         // Should have: load a, load b, add, return
-        assert!(entry.instructions.iter().any(|i| matches!(i, MirInst::BinOp { op: BinOp::Add, .. })));
+        assert!(entry
+            .instructions
+            .iter()
+            .any(|i| matches!(i, MirInst::BinOp { op: BinOp::Add, .. })));
     }
 
     #[test]
@@ -754,15 +775,19 @@ mod tests {
 
     #[test]
     fn test_lower_local_variable() {
-        let mir = compile_to_mir(
-            "fn test() -> i64:\n    let x: i64 = 5\n    return x\n"
-        ).unwrap();
+        let mir = compile_to_mir("fn test() -> i64:\n    let x: i64 = 5\n    return x\n").unwrap();
 
         let func = &mir.functions[0];
         let entry = func.block(BlockId(0)).unwrap();
 
         // Should have LocalAddr and Store for the let
-        assert!(entry.instructions.iter().any(|i| matches!(i, MirInst::LocalAddr { .. })));
-        assert!(entry.instructions.iter().any(|i| matches!(i, MirInst::Store { .. })));
+        assert!(entry
+            .instructions
+            .iter()
+            .any(|i| matches!(i, MirInst::LocalAddr { .. })));
+        assert!(entry
+            .instructions
+            .iter()
+            .any(|i| matches!(i, MirInst::Store { .. })));
     }
 }

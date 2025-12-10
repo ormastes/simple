@@ -2,10 +2,10 @@
 //! Tests Runner and Interpreter with real compilation
 //! Focus: Public function coverage on class/struct
 
-use simple_driver::{Runner, Interpreter, RunConfig, run_code};
+use simple_driver::{run_code, Interpreter, RunConfig, Runner, RunningType};
 use simple_runtime::gc::GcRuntime;
-use tempfile::tempdir;
 use std::fs;
+use tempfile::tempdir;
 
 // =============================================================================
 // Runner Public API Tests
@@ -68,7 +68,9 @@ fn test_runner_compile_to_smf() {
     let smf_path = dir.path().join("output.smf");
 
     let runner = Runner::new();
-    runner.compile_to_smf("main = 77", &smf_path).expect("compile ok");
+    runner
+        .compile_to_smf("main = 77", &smf_path)
+        .expect("compile ok");
     assert!(smf_path.exists(), "SMF should exist");
 }
 
@@ -120,6 +122,7 @@ fn test_interpreter_with_config() {
         stdin: "hello".to_string(),
         timeout_ms: 1000,
         in_memory: false,
+        running_type: RunningType::default(),
     };
     let result = interpreter.run("main = 99", config).expect("run ok");
     assert_eq!(result.exit_code, 99, "Should return 99");

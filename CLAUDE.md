@@ -29,7 +29,7 @@ simple/
 ├── verification/                  # Lean 4 formal verification projects
 │   ├── manual_pointer_borrow/     # Borrow checker model
 │   ├── gc_manual_borrow/          # GC safety model
-│   ├── waitless_compile/          # Effect tracking model
+│   ├── async_compile/          # Effect tracking model
 │   ├── nogc_compile/              # NoGC instruction model
 │   └── type_inference_compile/    # Type inference model
 │
@@ -52,15 +52,24 @@ simple/
     ├── type/                      # Type checker/inference (HM scaffold)
     │   └── src/lib.rs             # Unification, generalize/instantiate, core expr inference
     │
-    ├── compiler/                  # HIR, MIR, Codegen (depends: parser, common)
+    ├── compiler/                  # HIR, MIR, Codegen (depends: parser, common, runtime)
     │   └── src/
     │       ├── lib.rs             # Compilation entry point
     │       ├── hir/               # High-level IR
     │       │   ├── mod.rs
-    │       │   └── types.rs       # Type system
+    │       │   ├── types.rs       # Type system
+    │       │   └── lower.rs       # AST → HIR lowering
     │       ├── mir/               # Mid-level IR
-    │       └── codegen/
-    │           └── cranelift.rs   # Cranelift backend
+    │       │   ├── mod.rs
+    │       │   ├── types.rs       # 50+ MIR instructions, effects, patterns
+    │       │   └── lower.rs       # HIR → MIR lowering
+    │       ├── codegen/
+    │       │   ├── mod.rs
+    │       │   ├── cranelift.rs   # AOT Cranelift backend
+    │       │   └── jit.rs         # JIT Cranelift backend
+    │       ├── value_bridge.rs    # FFI value marshalling (BridgeValue)
+    │       ├── interpreter_ffi.rs # Interpreter FFI for hybrid execution
+    │       └── compilability.rs   # Compilability analysis
     │
     ├── loader/                    # SMF binary loader (depends: common)
     │   └── src/
@@ -77,9 +86,15 @@ simple/
     ├── log/                       # Tracing/log init (structured logging)
     │   └── src/lib.rs             # simple_log::init(); tracing subscriber setup
     │
-    ├── runtime/                   # GC wrapper (depends: abfall)
+    ├── runtime/                   # GC, concurrency, and runtime values
     │   └── src/
-    │       └── gc/mod.rs          # GcRuntime + logging hooks
+    │       ├── lib.rs             # Re-exports
+    │       ├── value.rs           # RuntimeValue (tagged pointers, collection FFI)
+    │       ├── memory/
+    │       │   ├── gc.rs          # GcRuntime + logging hooks
+    │       │   └── no_gc.rs       # NoGcAllocator
+    │       └── concurrency/
+    │           └── mod.rs         # Actor scheduler
     │
     └── driver/                    # CLI runner (depends: all)
         └── src/
@@ -109,20 +124,24 @@ Source Code (.spl)
         │
         ▼
    ┌─────────┐
-   │   HIR   │  → Type-checked IR (TODO)
+   │   HIR   │  → Type-checked IR
    └────┬────┘
         │
         ▼
    ┌─────────┐
-   │   MIR   │  → Simplified IR (TODO)
+   │   MIR   │  → 50+ instructions with effect annotations
    └────┬────┘
         │
-        ▼
-   ┌──────────┐
-   │ Cranelift │  → Machine code
-   └────┬─────┘
-        │
-        ▼
+    ┌───┴───┐
+    ▼       ▼
+┌────────┐ ┌──────────────┐
+│Compiled│ │ Interpreter  │  ← Hybrid execution
+│(Crane- │ │  Fallback    │
+│ lift)  │ │              │
+└───┬────┘ └──────┬───────┘
+    │             │
+    └──────┬──────┘
+           ▼
    ┌─────────┐
    │   SMF   │  → Binary module format
    └────┬────┘
@@ -143,12 +162,34 @@ Source Code (.spl)
 | Lexer | Complete |
 | Parser | Complete |
 | AST | Complete |
-| HIR | Stub |
-| MIR | Stub |
-| Codegen | Stub (returns 0 always) |
+| HIR | Complete (type-checked IR) |
+| MIR | Complete (50+ instructions) |
+| Codegen | Hybrid (Cranelift + Interpreter fallback) |
+| RuntimeValue | Complete (tagged pointers, collection FFI) |
 | SMF Loader | Complete |
 | Driver | Complete |
 | Runtime/GC | Abfall-backed wrapper with optional logging (requires Rust 1.90+) |
+
+### MIR Instruction Categories
+
+| Category | Count | Examples |
+|----------|-------|----------|
+| Core | 6 | ConstInt, BinOp, UnaryOp, Copy |
+| Memory | 6 | Load, Store, GcAlloc, Wait |
+| Collections | 7 | ArrayLit, TupleLit, DictLit, IndexGet, Slice |
+| Strings | 3 | ConstString, ConstSymbol, FStringFormat |
+| Closures | 2 | ClosureCreate, IndirectCall |
+| Objects | 6 | StructInit, FieldGet, FieldSet, MethodCall* |
+| Patterns | 6 | PatternTest, PatternBind, EnumDiscriminant |
+| Async | 5 | FutureCreate, Await, ActorSpawn, ActorSend |
+| Generators | 3 | GeneratorCreate, Yield, GeneratorNext |
+| Errors | 5 | TryUnwrap, OptionSome, ResultOk, ResultErr |
+| Fallback | 2 | InterpCall, InterpEval |
+
+### Codegen status snapshot (runtime FFI)
+- Actors: Spawn/Send/Recv now call runtime FFI; actor bodies still use a no-op stub until outlining is added.
+- Generators: Yield/Next wired to runtime eager collector; generator bodies also use the stub pointer (no state machine yet).
+- Futures: FutureCreate uses the same stubbed body pointer; Await calls runtime stub.
 
 ## Logging Strategy
 - Use `tracing` for structured, span-based logging. Initialize once via `simple_log::init()` (respects `SIMPLE_LOG`/`RUST_LOG`).

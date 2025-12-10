@@ -13,8 +13,8 @@ fn init() {
     init_system_tests!("simple_system");
 }
 
-mod runner_tests;
 mod cli_tests;
+mod runner_tests;
 
 #[test]
 fn validate_config() {

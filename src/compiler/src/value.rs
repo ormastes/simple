@@ -12,7 +12,7 @@ use simple_common::manual::{
     Handle as ManualHandle, HandlePool as ManualHandlePool, ManualGc, Shared as ManualShared,
     Unique as ManualUnique, WeakPtr as ManualWeak,
 };
-use simple_parser::ast::Expr;
+use simple_parser::ast::{Expr, FunctionDef};
 
 use crate::error::CompileError;
 
@@ -128,9 +128,32 @@ pub enum Value {
     Array(Vec<Value>),
     Tuple(Vec<Value>),
     Dict(HashMap<String, Value>),
-    Lambda { params: Vec<String>, body: Box<Expr>, env: Env },
-    Object { class: String, fields: HashMap<String, Value> },
-    Enum { enum_name: String, variant: String, payload: Option<Box<Value>> },
+    Lambda {
+        params: Vec<String>,
+        body: Box<Expr>,
+        env: Env,
+    },
+    /// A function reference - used for decorators and first-class functions
+    /// Includes captured environment for closure semantics
+    Function {
+        name: String,
+        def: Box<FunctionDef>,
+        captured_env: Env,
+    },
+    Object {
+        class: String,
+        fields: HashMap<String, Value>,
+    },
+    Enum {
+        enum_name: String,
+        variant: String,
+        payload: Option<Box<Value>>,
+    },
+    /// Constructor reference - a class that can be used to create instances
+    /// Used for constructor polymorphism: Constructor[T] type
+    Constructor {
+        class_name: String,
+    },
     Actor(ActorHandle),
     Future(FutureValue),
     Generator(GeneratorValue),
@@ -374,7 +397,14 @@ impl Value {
             Value::Handle(h) => h.resolve_inner().map_or(false, |v| v.truthy()),
             Value::Borrow(b) => b.inner().truthy(),
             Value::BorrowMut(b) => b.inner().truthy(),
-            Value::Object { .. } | Value::Enum { .. } | Value::Lambda { .. } | Value::Actor(_) | Value::Future(_) | Value::Generator(_) => true,
+            Value::Object { .. }
+            | Value::Enum { .. }
+            | Value::Lambda { .. }
+            | Value::Function { .. }
+            | Value::Constructor { .. }
+            | Value::Actor(_)
+            | Value::Future(_)
+            | Value::Generator(_) => true,
         }
     }
 
@@ -394,7 +424,10 @@ impl Value {
                 format!("({})", parts.join(", "))
             }
             Value::Dict(map) => {
-                let parts: Vec<String> = map.iter().map(|(k, v)| format!("{}: {}", k, v.to_display_string())).collect();
+                let parts: Vec<String> = map
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, v.to_display_string()))
+                    .collect();
                 format!("{{{}}}", parts.join(", "))
             }
             Value::Nil => "nil".into(),
@@ -445,8 +478,10 @@ impl Value {
             Value::Tuple(_) => "tuple",
             Value::Dict(_) => "dict",
             Value::Lambda { .. } => "function",
+            Value::Function { .. } => "function",
             Value::Object { .. } => "object",
             Value::Enum { .. } => "enum",
+            Value::Constructor { .. } => "constructor",
             Value::Actor(_) => "actor",
             Value::Future(_) => "future",
             Value::Generator(_) => "generator",
@@ -508,7 +543,9 @@ pub struct ManualUniqueValue {
 
 impl ManualUniqueValue {
     pub fn new(value: Value) -> Self {
-        MANUAL_GC.with(|gc| Self { ptr: gc.alloc(value) })
+        MANUAL_GC.with(|gc| Self {
+            ptr: gc.alloc(value),
+        })
     }
 
     pub fn inner(&self) -> &Value {
@@ -540,7 +577,9 @@ pub struct ManualSharedValue {
 
 impl ManualSharedValue {
     pub fn new(value: Value) -> Self {
-        MANUAL_GC.with(|gc| Self { ptr: gc.alloc_shared(value) })
+        MANUAL_GC.with(|gc| Self {
+            ptr: gc.alloc_shared(value),
+        })
     }
 
     pub fn inner(&self) -> &Value {
@@ -558,7 +597,9 @@ impl ManualSharedValue {
 
 impl Clone for ManualSharedValue {
     fn clone(&self) -> Self {
-        Self { ptr: self.ptr.clone() }
+        Self {
+            ptr: self.ptr.clone(),
+        }
     }
 }
 
@@ -580,7 +621,9 @@ impl fmt::Debug for ManualWeakValue {
 
 impl ManualWeakValue {
     pub fn new_from_shared(shared: &ManualSharedValue) -> Self {
-        Self { ptr: shared.downgrade() }
+        Self {
+            ptr: shared.downgrade(),
+        }
     }
 
     pub fn upgrade_inner(&self) -> Option<Value> {
@@ -590,7 +633,9 @@ impl ManualWeakValue {
 
 impl Clone for ManualWeakValue {
     fn clone(&self) -> Self {
-        Self { ptr: self.ptr.clone() }
+        Self {
+            ptr: self.ptr.clone(),
+        }
     }
 }
 
@@ -613,7 +658,9 @@ impl fmt::Debug for ManualHandleValue {
 impl ManualHandleValue {
     pub fn new(value: Value) -> Self {
         let pool = ManualHandlePool::new();
-        Self { handle: pool.alloc(value) }
+        Self {
+            handle: pool.alloc(value),
+        }
     }
 
     pub fn resolve_inner(&self) -> Option<Value> {
@@ -623,7 +670,9 @@ impl ManualHandleValue {
 
 impl Clone for ManualHandleValue {
     fn clone(&self) -> Self {
-        Self { handle: self.handle.clone() }
+        Self {
+            handle: self.handle.clone(),
+        }
     }
 }
 
@@ -650,7 +699,9 @@ macro_rules! impl_borrow_wrapper {
 
         impl $name {
             pub fn new(value: Value) -> Self {
-                Self { inner: Arc::new(RwLock::new(value)) }
+                Self {
+                    inner: Arc::new(RwLock::new(value)),
+                }
             }
 
             pub fn from_arc(arc: Arc<RwLock<Value>>) -> Self {
@@ -669,7 +720,9 @@ macro_rules! impl_borrow_wrapper {
         impl Clone for $name {
             fn clone(&self) -> Self {
                 // Cloning a borrow shares the same underlying reference
-                Self { inner: self.inner.clone() }
+                Self {
+                    inner: self.inner.clone(),
+                }
             }
         }
 
@@ -716,11 +769,30 @@ impl Clone for Value {
                 body: body.clone(),
                 env: env.clone(),
             },
-            Value::Object { class, fields } => Value::Object { class: class.clone(), fields: fields.clone() },
-            Value::Enum { enum_name, variant, payload } => Value::Enum {
+            Value::Function {
+                name,
+                def,
+                captured_env,
+            } => Value::Function {
+                name: name.clone(),
+                def: def.clone(),
+                captured_env: captured_env.clone(),
+            },
+            Value::Object { class, fields } => Value::Object {
+                class: class.clone(),
+                fields: fields.clone(),
+            },
+            Value::Enum {
+                enum_name,
+                variant,
+                payload,
+            } => Value::Enum {
                 enum_name: enum_name.clone(),
                 variant: variant.clone(),
                 payload: payload.clone(),
+            },
+            Value::Constructor { class_name } => Value::Constructor {
+                class_name: class_name.clone(),
             },
             Value::Actor(handle) => Value::Actor(handle.clone()),
             Value::Future(f) => Value::Future(f.clone()),
@@ -747,13 +819,53 @@ impl PartialEq for Value {
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Dict(a), Value::Dict(b)) => a == b,
-            (Value::Lambda { params: pa, body: ba, env: ea }, Value::Lambda { params: pb, body: bb, env: eb }) => {
-                pa == pb && ba == bb && ea == eb
-            }
-            (Value::Object { class: ca, fields: fa }, Value::Object { class: cb, fields: fb }) => ca == cb && fa == fb,
-            (Value::Enum { enum_name: ea, variant: va, payload: pa }, Value::Enum { enum_name: eb, variant: vb, payload: pb }) => {
-                ea == eb && va == vb && pa == pb
-            }
+            (
+                Value::Lambda {
+                    params: pa,
+                    body: ba,
+                    env: ea,
+                },
+                Value::Lambda {
+                    params: pb,
+                    body: bb,
+                    env: eb,
+                },
+            ) => pa == pb && ba == bb && ea == eb,
+            (
+                Value::Function {
+                    name: na,
+                    def: da,
+                    captured_env: ea,
+                },
+                Value::Function {
+                    name: nb,
+                    def: db,
+                    captured_env: eb,
+                },
+            ) => na == nb && da == db && ea == eb,
+            (
+                Value::Object {
+                    class: ca,
+                    fields: fa,
+                },
+                Value::Object {
+                    class: cb,
+                    fields: fb,
+                },
+            ) => ca == cb && fa == fb,
+            (
+                Value::Enum {
+                    enum_name: ea,
+                    variant: va,
+                    payload: pa,
+                },
+                Value::Enum {
+                    enum_name: eb,
+                    variant: vb,
+                    payload: pb,
+                },
+            ) => ea == eb && va == vb && pa == pb,
+            (Value::Constructor { class_name: a }, Value::Constructor { class_name: b }) => a == b,
             (Value::Actor(_), Value::Actor(_)) => true,
             (Value::Future(a), Value::Future(b)) => a == b,
             (Value::Unique(a), Value::Unique(b)) => a == b,
@@ -767,3 +879,6 @@ impl PartialEq for Value {
         }
     }
 }
+
+// Include tests from separate file
+include!("value_tests.rs");

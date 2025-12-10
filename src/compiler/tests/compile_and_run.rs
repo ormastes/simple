@@ -120,11 +120,16 @@ fn compile_multiple_lets() {
 
 #[test]
 fn compile_function_definition() {
-    assert_eq!(compile_and_run(r#"
+    assert_eq!(
+        compile_and_run(
+            r#"
 fn add(a, b):
     return a + b
 main = add(10, 32)
-"#), 42);
+"#
+        ),
+        42
+    );
 }
 
 #[test]
@@ -140,4 +145,125 @@ fn compile_boolean_true() {
 #[test]
 fn compile_boolean_false() {
     assert_eq!(compile_and_run("main = if false: 0 else: 42"), 42);
+}
+
+// =============================================================================
+// Native compilation tests (HIR → MIR → Cranelift)
+// =============================================================================
+
+/// Helper to compile using native codegen and run
+fn compile_native_and_run(src: &str) -> i32 {
+    let dir = tempfile::tempdir().unwrap();
+    let src_path = dir.path().join("main.simple");
+    let out_path = dir.path().join("main.smf");
+
+    std::fs::write(&src_path, src).unwrap();
+
+    let mut compiler = CompilerPipeline::new().unwrap();
+    compiler.compile_native(&src_path, &out_path).unwrap();
+
+    let loader = ModuleLoader::new();
+    let module = loader.load(&out_path).unwrap();
+
+    type MainFn = extern "C" fn() -> i32;
+    let main: MainFn = module.entry_point().expect("main symbol");
+    main()
+}
+
+#[test]
+fn native_compile_simple_return() {
+    // fn main() -> i64: return 42
+    let code = r#"
+fn main() -> i64:
+    return 42
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
+fn native_compile_addition() {
+    let code = r#"
+fn main() -> i64:
+    return 10 + 32
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
+fn native_compile_subtraction() {
+    let code = r#"
+fn main() -> i64:
+    return 50 - 8
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
+fn native_compile_multiplication() {
+    let code = r#"
+fn main() -> i64:
+    return 6 * 7
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
+fn native_compile_comparison() {
+    let code = r#"
+fn main() -> i64:
+    if 10 > 5:
+        return 42
+    else:
+        return 0
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
+fn native_compile_local_variable() {
+    let code = r#"
+fn main() -> i64:
+    let x: i64 = 42
+    return x
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
+fn native_compile_binary_with_locals() {
+    let code = r#"
+fn main() -> i64:
+    let a: i64 = 10
+    let b: i64 = 32
+    return a + b
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
+fn native_compile_while_loop() {
+    let code = r#"
+fn main() -> i64:
+    let mut x: i64 = 0
+    while x < 42:
+        x = x + 1
+    return x
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
+}
+
+#[test]
+fn native_compile_nested_if() {
+    let code = r#"
+fn main() -> i64:
+    let x: i64 = 10
+    if x > 5:
+        if x > 8:
+            return 42
+        else:
+            return 0
+    else:
+        return -1
+"#;
+    assert_eq!(compile_native_and_run(code), 42);
 }

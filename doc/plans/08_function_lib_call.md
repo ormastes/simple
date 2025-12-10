@@ -145,7 +145,7 @@ impl Arity {
 #[derive(Clone, Copy, Debug)]
 pub enum Effect {
     None,
-    Waitless,
+    Async,
     Async,
 }
 

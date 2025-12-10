@@ -139,13 +139,13 @@ impl ConfigEnv {
     /// Returns false for "false", "0", "no", "off" (case-insensitive).
     /// Returns None for other values or missing keys.
     pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.data.get(key).and_then(|s| {
-            match s.to_lowercase().as_str() {
+        self.data
+            .get(key)
+            .and_then(|s| match s.to_lowercase().as_str() {
                 "true" | "1" | "yes" | "on" => Some(true),
                 "false" | "0" | "no" | "off" => Some(false),
                 _ => None,
-            }
-        })
+            })
     }
 
     /// Get a value as a boolean with a default.
@@ -322,10 +322,7 @@ mod tests {
 
     #[test]
     fn test_from_args_key_equals_value() {
-        let args = vec![
-            "--port=8080".to_string(),
-            "--host=localhost".to_string(),
-        ];
+        let args = vec!["--port=8080".to_string(), "--host=localhost".to_string()];
         let config = ConfigEnv::from_args(&args);
 
         assert_eq!(config.get("port"), Some("8080"));
@@ -362,10 +359,7 @@ mod tests {
 
     #[test]
     fn test_from_args_boolean_flags() {
-        let args = vec![
-            "--verbose".to_string(),
-            "--debug".to_string(),
-        ];
+        let args = vec!["--verbose".to_string(), "--debug".to_string()];
         let config = ConfigEnv::from_args(&args);
 
         assert_eq!(config.get("verbose"), Some("true"));

@@ -1,7 +1,7 @@
 //! Comprehensive parser unit tests
 
-use simple_parser::{Parser, ast::*};
 use simple_parser::error::ParseError;
+use simple_parser::{ast::*, Parser};
 
 fn parse(source: &str) -> Result<Module, ParseError> {
     let mut parser = Parser::new(source);
@@ -510,7 +510,12 @@ fn test_parse_function_call_named_args() {
 #[test]
 fn test_parse_method_call() {
     let module = parse("obj.method(x)").unwrap();
-    if let Node::Expression(Expr::MethodCall { receiver, method, args }) = &module.items[0] {
+    if let Node::Expression(Expr::MethodCall {
+        receiver,
+        method,
+        args,
+    }) = &module.items[0]
+    {
         assert!(matches!(**receiver, Expr::Identifier(ref name) if name == "obj"));
         assert_eq!(method, "method");
         assert_eq!(args.len(), 1);
@@ -522,7 +527,10 @@ fn test_parse_method_call() {
 #[test]
 fn test_parse_method_chain() {
     let module = parse("a.b().c()").unwrap();
-    if let Node::Expression(Expr::MethodCall { receiver, method, .. }) = &module.items[0] {
+    if let Node::Expression(Expr::MethodCall {
+        receiver, method, ..
+    }) = &module.items[0]
+    {
         assert_eq!(method, "c");
         assert!(matches!(**receiver, Expr::MethodCall { .. }));
     } else {
@@ -801,17 +809,6 @@ fn test_parse_async_function() {
         assert_eq!(func.effect, Some(Effect::Async));
     } else {
         panic!("Expected async function");
-    }
-}
-
-#[test]
-fn test_parse_waitless_function() {
-    let source = "waitless fn compute():\n    return 42";
-    let module = parse(source).unwrap();
-    if let Node::Function(func) = &module.items[0] {
-        assert_eq!(func.effect, Some(Effect::Waitless));
-    } else {
-        panic!("Expected waitless function");
     }
 }
 

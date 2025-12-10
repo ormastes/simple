@@ -1,4 +1,4 @@
-use crate::hir::{TypeId, BinOp, UnaryOp};
+use crate::hir::{BinOp, TypeId, UnaryOp};
 use simple_parser::ast::Visibility;
 
 //==============================================================================
@@ -38,22 +38,22 @@ impl LocalKind {
 //==============================================================================
 // This module provides explicit effect tracking that maps directly to the
 // Lean 4 formal verification models:
-// - `verification/waitless_compile/` for blocking operation detection
+// - `verification/async_compile/` for blocking operation detection
 // - `verification/nogc_compile/` for GC allocation detection
 //
 // The Lean models are:
 //   inductive Effect | compute | io | wait
-//   def pipelineSafe (es : List Effect) : Prop := ∀ e, e ∈ es → waitless e = true
+//   def pipelineSafe (es : List Effect) : Prop := ∀ e, e ∈ es → is_async e = true
 //
 //   inductive Instr | const | add | gcAlloc
 //   def nogc (p : List Instr) : Prop := ∀ i, i ∈ p → i ≠ Instr.gcAlloc
 //
 // Invariants:
-// - Waitless: No blocking wait operations in the pipeline
+// - Async: No blocking wait operations in the pipeline
 // - NoGC: No GC allocations in the program
 
 //==============================================================================
-// WaitlessEffect - Exact match to WaitlessCompile.lean
+// AsyncEffect - Exact match to AsyncCompile.lean
 //==============================================================================
 // This enum matches the Lean model exactly with 3 variants.
 //
@@ -66,9 +66,9 @@ impl LocalKind {
 //   deriving DecidableEq, Repr
 // ```
 
-/// Effect type matching WaitlessCompile.lean exactly (3 variants).
+/// Effect type matching AsyncCompile.lean exactly (3 variants).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WaitlessEffect {
+pub enum AsyncEffect {
     /// Pure computation
     Compute,
     /// I/O operation (non-blocking)
@@ -77,14 +77,14 @@ pub enum WaitlessEffect {
     Wait,
 }
 
-/// Lean: def waitless (e : Effect) : Bool := match e with | Effect.wait => false | _ => true
-pub fn waitless(e: WaitlessEffect) -> bool {
-    !matches!(e, WaitlessEffect::Wait)
+/// Lean: def is_async (e : Effect) : Bool := match e with | Effect.wait => false | _ => true
+pub fn is_async(e: AsyncEffect) -> bool {
+    !matches!(e, AsyncEffect::Wait)
 }
 
-/// Lean: def pipelineSafe (es : List Effect) : Prop := ∀ e, e ∈ es → waitless e = true
-pub fn pipeline_safe(es: &[WaitlessEffect]) -> bool {
-    es.iter().all(|e| waitless(*e))
+/// Lean: def pipelineSafe (es : List Effect) : Prop := ∀ e, e ∈ es → is_async e = true
+pub fn pipeline_safe(es: &[AsyncEffect]) -> bool {
+    es.iter().all(|e| is_async(*e))
 }
 
 /// Lean: theorem append_safe {a b : List Effect} :
@@ -92,21 +92,24 @@ pub fn pipeline_safe(es: &[WaitlessEffect]) -> bool {
 ///
 /// This function encodes the theorem as a runtime check.
 /// If both inputs are safe, the output is guaranteed safe.
-pub fn append_safe(a: Vec<WaitlessEffect>, b: Vec<WaitlessEffect>) -> Vec<WaitlessEffect> {
+pub fn append_safe(a: Vec<AsyncEffect>, b: Vec<AsyncEffect>) -> Vec<AsyncEffect> {
     debug_assert!(pipeline_safe(&a), "Precondition: a must be pipeline safe");
     debug_assert!(pipeline_safe(&b), "Precondition: b must be pipeline safe");
     let mut result = a;
     result.extend(b);
-    debug_assert!(pipeline_safe(&result), "Postcondition: result must be pipeline safe");
+    debug_assert!(
+        pipeline_safe(&result),
+        "Postcondition: result must be pipeline safe"
+    );
     result
 }
 
 /// Lean: theorem wait_detected (e : Effect) : pipelineSafe [e] → e ≠ Effect.wait
 ///
 /// If a singleton list is pipeline safe, it cannot contain wait.
-pub fn wait_detected(e: WaitlessEffect) -> bool {
+pub fn wait_detected(e: AsyncEffect) -> bool {
     if pipeline_safe(&[e]) {
-        e != WaitlessEffect::Wait
+        e != AsyncEffect::Wait
     } else {
         true // vacuously true if not safe
     }
@@ -180,9 +183,9 @@ pub enum Effect {
 }
 
 impl Effect {
-    /// Check if this effect is waitless (non-blocking).
-    /// Corresponds to Lean's `waitless` predicate.
-    pub fn is_waitless(&self) -> bool {
+    /// Check if this effect is async (non-blocking).
+    /// Corresponds to Lean's `is_async` predicate.
+    pub fn is_async(&self) -> bool {
         !matches!(self, Effect::Wait)
     }
 
@@ -192,13 +195,13 @@ impl Effect {
         !matches!(self, Effect::GcAlloc)
     }
 
-    /// Convert to WaitlessEffect (for Lean model correspondence).
-    pub fn to_waitless(&self) -> WaitlessEffect {
+    /// Convert to AsyncEffect (for Lean model correspondence).
+    pub fn to_async(&self) -> AsyncEffect {
         match self {
-            Effect::Compute => WaitlessEffect::Compute,
-            Effect::Io => WaitlessEffect::Io,
-            Effect::Wait => WaitlessEffect::Wait,
-            Effect::GcAlloc => WaitlessEffect::Compute, // GcAlloc is not blocking
+            Effect::Compute => AsyncEffect::Compute,
+            Effect::Io => AsyncEffect::Io,
+            Effect::Wait => AsyncEffect::Wait,
+            Effect::GcAlloc => AsyncEffect::Compute, // GcAlloc is not blocking
         }
     }
 }
@@ -220,10 +223,10 @@ impl EffectSet {
         self.effects.push(effect);
     }
 
-    /// Check if all effects are waitless.
+    /// Check if all effects are async (non-blocking).
     /// Corresponds to Lean's `pipelineSafe` predicate.
     pub fn is_pipeline_safe(&self) -> bool {
-        self.effects.iter().all(|e| e.is_waitless())
+        self.effects.iter().all(|e| e.is_async())
     }
 
     /// Check if no effects involve GC.
@@ -250,8 +253,10 @@ impl EffectSet {
         let was_safe = self.is_pipeline_safe() && other.is_pipeline_safe();
         self.append(other);
         // Postcondition: if both were safe, result must be safe
-        debug_assert!(!was_safe || self.is_pipeline_safe(),
-            "Theorem violation: append should preserve pipeline safety");
+        debug_assert!(
+            !was_safe || self.is_pipeline_safe(),
+            "Theorem violation: append should preserve pipeline safety"
+        );
         self.is_pipeline_safe()
     }
 
@@ -264,8 +269,10 @@ impl EffectSet {
         let was_nogc = self.is_nogc() && other.is_nogc();
         self.append(other);
         // Postcondition: if both were nogc, result must be nogc
-        debug_assert!(!was_nogc || self.is_nogc(),
-            "Theorem violation: append should preserve nogc property");
+        debug_assert!(
+            !was_nogc || self.is_nogc(),
+            "Theorem violation: append should preserve nogc property"
+        );
         self.is_nogc()
     }
 
@@ -279,9 +286,9 @@ impl EffectSet {
         self.effects.is_empty()
     }
 
-    /// Convert to WaitlessEffect list for Lean model correspondence.
-    pub fn to_waitless(&self) -> Vec<WaitlessEffect> {
-        self.effects.iter().map(|e| e.to_waitless()).collect()
+    /// Convert to AsyncEffect list for Lean model correspondence.
+    pub fn to_async(&self) -> Vec<AsyncEffect> {
+        self.effects.iter().map(|e| e.to_async()).collect()
     }
 }
 
@@ -331,13 +338,20 @@ impl BuiltinFunc {
     /// Get the effect category of this builtin
     pub fn effect(&self) -> Effect {
         match self {
-            BuiltinFunc::Await | BuiltinFunc::Wait | BuiltinFunc::Join |
-            BuiltinFunc::Recv | BuiltinFunc::Sleep => Effect::Wait,
+            BuiltinFunc::Await
+            | BuiltinFunc::Wait
+            | BuiltinFunc::Join
+            | BuiltinFunc::Recv
+            | BuiltinFunc::Sleep => Effect::Wait,
 
             BuiltinFunc::GcAlloc | BuiltinFunc::GcNew | BuiltinFunc::Box => Effect::GcAlloc,
 
-            BuiltinFunc::Print | BuiltinFunc::Println | BuiltinFunc::Read |
-            BuiltinFunc::Write | BuiltinFunc::Send | BuiltinFunc::Spawn => Effect::Io,
+            BuiltinFunc::Print
+            | BuiltinFunc::Println
+            | BuiltinFunc::Read
+            | BuiltinFunc::Write
+            | BuiltinFunc::Send
+            | BuiltinFunc::Spawn => Effect::Io,
         }
     }
 
@@ -428,9 +442,9 @@ impl CallTarget {
         }
     }
 
-    /// Check if this call is waitless.
-    pub fn is_waitless(&self) -> bool {
-        self.effect().is_waitless()
+    /// Check if this call is async (non-blocking).
+    pub fn is_async(&self) -> bool {
+        self.effect().is_async()
     }
 
     /// Check if this call is nogc.
@@ -446,7 +460,9 @@ impl CallTarget {
             // GC allocating functions
             "gc_alloc" | "gc_new" | "box" => CallTarget::GcAllocating(name.to_string()),
             // I/O functions
-            "print" | "println" | "read" | "write" | "send" | "spawn" => CallTarget::Io(name.to_string()),
+            "print" | "println" | "read" | "write" | "send" | "spawn" => {
+                CallTarget::Io(name.to_string())
+            }
             // Pure functions (default)
             _ => CallTarget::Pure(name.to_string()),
         }
@@ -481,13 +497,26 @@ pub enum MirInst {
     Copy { dest: VReg, src: VReg },
 
     /// Binary operation
-    BinOp { dest: VReg, op: BinOp, left: VReg, right: VReg },
+    BinOp {
+        dest: VReg,
+        op: BinOp,
+        left: VReg,
+        right: VReg,
+    },
 
     /// Unary operation
-    UnaryOp { dest: VReg, op: UnaryOp, operand: VReg },
+    UnaryOp {
+        dest: VReg,
+        op: UnaryOp,
+        operand: VReg,
+    },
 
     /// Function call with effect tracking
-    Call { dest: Option<VReg>, target: CallTarget, args: Vec<VReg> },
+    Call {
+        dest: Option<VReg>,
+        target: CallTarget,
+        args: Vec<VReg>,
+    },
 
     /// Load from memory
     Load { dest: VReg, addr: VReg, ty: TypeId },
@@ -506,39 +535,461 @@ pub enum MirInst {
 
     /// Blocking wait (explicit for verification)
     Wait { dest: Option<VReg>, target: VReg },
+
+    // =========================================================================
+    // Interpreter fallback instructions (will be removed once all codegen implemented)
+    // =========================================================================
+    /// Call interpreter for a function that can't be compiled yet.
+    /// This is a temporary fallback - will be removed once all features have native codegen.
+    InterpCall {
+        dest: Option<VReg>,
+        func_name: String,
+        args: Vec<VReg>,
+    },
+
+    /// Evaluate an expression via interpreter fallback.
+    /// Temporary - will be removed once all expressions have native codegen.
+    InterpEval { dest: VReg, expr_index: u32 },
+
+    // =========================================================================
+    // Collection instructions
+    // =========================================================================
+    /// Create an array literal from elements
+    ArrayLit { dest: VReg, elements: Vec<VReg> },
+
+    /// Create a tuple literal from elements
+    TupleLit { dest: VReg, elements: Vec<VReg> },
+
+    /// Create a dictionary literal from key-value pairs
+    DictLit {
+        dest: VReg,
+        keys: Vec<VReg>,
+        values: Vec<VReg>,
+    },
+
+    /// Get an element from a collection by index
+    IndexGet {
+        dest: VReg,
+        collection: VReg,
+        index: VReg,
+    },
+
+    /// Set an element in a collection by index
+    IndexSet {
+        collection: VReg,
+        index: VReg,
+        value: VReg,
+    },
+
+    /// Create a slice of a collection
+    SliceOp {
+        dest: VReg,
+        collection: VReg,
+        start: Option<VReg>,
+        end: Option<VReg>,
+        step: Option<VReg>,
+    },
+
+    /// Spread/unpack a collection into multiple values
+    Spread { dest: VReg, source: VReg },
+
+    /// Create a constant string
+    ConstString { dest: VReg, value: String },
+
+    /// Create a symbol
+    ConstSymbol { dest: VReg, value: String },
+
+    /// Format string interpolation
+    FStringFormat { dest: VReg, parts: Vec<FStringPart> },
+
+    // =========================================================================
+    // Closure instructions (Phase 3)
+    // =========================================================================
+    /// Create a closure with captured variables (zero-cost: typed struct allocation)
+    ClosureCreate {
+        dest: VReg,
+        /// Function name for direct call
+        func_name: String,
+        /// Total closure size: 8 (fn_ptr) + sum of capture sizes
+        closure_size: u32,
+        /// Byte offsets for each capture (first capture at offset 8)
+        capture_offsets: Vec<u32>,
+        /// Types of captured variables (for correct store instruction)
+        capture_types: Vec<TypeId>,
+        /// Captured variable values
+        captures: Vec<VReg>,
+    },
+
+    /// Indirect call through a closure or function pointer (zero-cost: load + indirect call)
+    IndirectCall {
+        dest: Option<VReg>,
+        /// The closure/function pointer to call
+        callee: VReg,
+        /// Parameter types for the call signature
+        param_types: Vec<TypeId>,
+        /// Return type
+        return_type: TypeId,
+        /// Arguments to pass
+        args: Vec<VReg>,
+        /// Effect annotation for the call
+        effect: Effect,
+    },
+
+    // =========================================================================
+    // Object/Method instructions (Phase 4)
+    // =========================================================================
+    /// Initialize a struct/class instance (zero-cost: inline allocation + stores)
+    StructInit {
+        dest: VReg,
+        /// Type ID for the struct
+        type_id: TypeId,
+        /// Total struct size in bytes (for allocation)
+        struct_size: u32,
+        /// Byte offsets for each field (for direct stores)
+        field_offsets: Vec<u32>,
+        /// Field types (for correct store instruction)
+        field_types: Vec<TypeId>,
+        /// Field values in declaration order
+        field_values: Vec<VReg>,
+    },
+
+    /// Get a field from an object (zero-cost: pointer arithmetic + load)
+    FieldGet {
+        dest: VReg,
+        object: VReg,
+        /// Byte offset from object pointer (computed at compile time)
+        byte_offset: u32,
+        /// Field type (for correct load instruction)
+        field_type: TypeId,
+    },
+
+    /// Set a field on an object (zero-cost: pointer arithmetic + store)
+    FieldSet {
+        object: VReg,
+        /// Byte offset from object pointer (computed at compile time)
+        byte_offset: u32,
+        /// Field type (for correct store instruction)
+        field_type: TypeId,
+        value: VReg,
+    },
+
+    /// Static method call (zero-cost: direct function call)
+    /// Receiver type is known at compile time, so we can call directly.
+    MethodCallStatic {
+        dest: Option<VReg>,
+        receiver: VReg,
+        /// Direct function name (Type::method format)
+        func_name: String,
+        /// Arguments (not including receiver)
+        args: Vec<VReg>,
+    },
+
+    /// Virtual method call (vtable-based dispatch for dyn types)
+    /// Only used when receiver type is unknown at compile time.
+    MethodCallVirtual {
+        dest: Option<VReg>,
+        receiver: VReg,
+        /// Vtable slot index (computed at compile time)
+        vtable_slot: u32,
+        /// Method signature for indirect call
+        param_types: Vec<TypeId>,
+        return_type: TypeId,
+        /// Arguments (not including receiver)
+        args: Vec<VReg>,
+    },
+
+    /// Built-in method call (e.g., array.push, string.len)
+    BuiltinMethod {
+        dest: Option<VReg>,
+        receiver: VReg,
+        /// Type of the receiver (for dispatch)
+        receiver_type: String,
+        /// Method name
+        method: String,
+        /// Arguments (not including receiver)
+        args: Vec<VReg>,
+    },
+
+    // =========================================================================
+    // Pattern matching instructions (Phase 5)
+    // =========================================================================
+    /// Test if a value matches a pattern
+    PatternTest {
+        dest: VReg,
+        subject: VReg,
+        pattern: MirPattern,
+    },
+
+    /// Bind variables from a pattern match
+    PatternBind {
+        dest: VReg,
+        subject: VReg,
+        /// Binding path within the pattern
+        binding: PatternBinding,
+    },
+
+    /// Get enum discriminant (variant index)
+    EnumDiscriminant { dest: VReg, value: VReg },
+
+    /// Get enum payload
+    EnumPayload { dest: VReg, value: VReg },
+
+    /// Create a unit enum variant (no payload)
+    EnumUnit {
+        dest: VReg,
+        /// Enum type name
+        enum_name: String,
+        /// Variant name
+        variant_name: String,
+    },
+
+    /// Create an enum variant with payload
+    EnumWith {
+        dest: VReg,
+        /// Enum type name
+        enum_name: String,
+        /// Variant name
+        variant_name: String,
+        /// Payload value
+        payload: VReg,
+    },
+
+    // =========================================================================
+    // Async/Generator instructions (Phase 6)
+    // =========================================================================
+    /// Create a future
+    FutureCreate {
+        dest: VReg,
+        /// Block containing the async body
+        body_block: BlockId,
+    },
+
+    /// Await a future
+    Await { dest: VReg, future: VReg },
+
+    /// Spawn an actor
+    ActorSpawn {
+        dest: VReg,
+        /// Block containing the actor body
+        body_block: BlockId,
+    },
+
+    /// Send a message to an actor
+    ActorSend { actor: VReg, message: VReg },
+
+    /// Receive a message from the current actor's mailbox
+    ActorRecv { dest: VReg },
+
+    /// Create a generator
+    GeneratorCreate {
+        dest: VReg,
+        /// Block containing the generator body
+        body_block: BlockId,
+    },
+
+    /// Yield a value from a generator
+    Yield { value: VReg },
+
+    /// Get next value from a generator
+    GeneratorNext { dest: VReg, generator: VReg },
+
+    // =========================================================================
+    // Error handling instructions (Phase 7)
+    // =========================================================================
+    /// Try to unwrap a Result/Option, branching on error
+    TryUnwrap {
+        dest: VReg,
+        value: VReg,
+        /// Block to jump to on error
+        error_block: BlockId,
+        /// Register to store error value
+        error_dest: VReg,
+    },
+
+    /// Create Option::Some
+    OptionSome { dest: VReg, value: VReg },
+
+    /// Create Option::None
+    OptionNone { dest: VReg },
+
+    /// Create Result::Ok
+    ResultOk { dest: VReg, value: VReg },
+
+    /// Create Result::Err
+    ResultErr { dest: VReg, value: VReg },
+}
+
+/// Captured variable in a closure
+#[derive(Debug, Clone, PartialEq)]
+pub struct CapturedVar {
+    /// Original variable register
+    pub source: VReg,
+    /// Capture mode
+    pub mode: CaptureMode,
+}
+
+/// How a variable is captured by a closure
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureMode {
+    /// Capture by value (copy)
+    ByValue,
+    /// Capture by reference (borrow)
+    ByRef,
+    /// Capture by mutable reference
+    ByMutRef,
+}
+
+/// Pattern for pattern matching
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirPattern {
+    /// Wildcard pattern (matches anything)
+    Wildcard,
+    /// Literal value pattern
+    Literal(MirLiteral),
+    /// Variable binding pattern
+    Binding(String),
+    /// Enum variant pattern
+    Variant {
+        enum_name: String,
+        variant_name: String,
+        payload: Option<Box<MirPattern>>,
+    },
+    /// Tuple pattern
+    Tuple(Vec<MirPattern>),
+    /// Struct pattern
+    Struct {
+        type_name: String,
+        fields: Vec<(String, MirPattern)>,
+    },
+    /// Or pattern (match any of)
+    Or(Vec<MirPattern>),
+    /// Guard pattern (pattern with condition)
+    Guard {
+        pattern: Box<MirPattern>,
+        condition: VReg,
+    },
+}
+
+/// Literal value for pattern matching
+#[derive(Debug, Clone, PartialEq)]
+pub enum MirLiteral {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
+    Nil,
+}
+
+/// Binding path for extracting values from patterns
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternBinding {
+    /// Name of the bound variable
+    pub name: String,
+    /// Path to the value (e.g., [TupleIndex(0), FieldName("x")])
+    pub path: Vec<BindingStep>,
+}
+
+/// Step in a binding path
+#[derive(Debug, Clone, PartialEq)]
+pub enum BindingStep {
+    /// Tuple index
+    TupleIndex(u32),
+    /// Struct field
+    FieldName(String),
+    /// Enum payload
+    EnumPayload,
+}
+
+/// Part of an f-string for MIR
+#[derive(Debug, Clone, PartialEq)]
+pub enum FStringPart {
+    /// Literal string part
+    Literal(String),
+    /// Expression value to format
+    Expr(VReg),
 }
 
 impl HasEffects for MirInst {
     /// Return the effect of this instruction.
-    /// Enables compile-time verification of waitless/nogc properties.
+    /// Enables compile-time verification of async/nogc properties.
     fn effect(&self) -> Effect {
         match self {
             // Pure computation
             MirInst::ConstInt { .. }
             | MirInst::ConstFloat { .. }
             | MirInst::ConstBool { .. }
+            | MirInst::ConstString { .. }
+            | MirInst::ConstSymbol { .. }
             | MirInst::Copy { .. }
             | MirInst::BinOp { .. }
             | MirInst::UnaryOp { .. }
             | MirInst::Load { .. }
             | MirInst::Store { .. }
             | MirInst::LocalAddr { .. }
-            | MirInst::GetElementPtr { .. } => Effect::Compute,
+            | MirInst::GetElementPtr { .. }
+            | MirInst::IndexGet { .. }
+            | MirInst::IndexSet { .. }
+            | MirInst::SliceOp { .. }
+            | MirInst::FieldGet { .. }
+            | MirInst::FieldSet { .. }
+            | MirInst::EnumDiscriminant { .. }
+            | MirInst::EnumPayload { .. }
+            | MirInst::PatternTest { .. }
+            | MirInst::PatternBind { .. } => Effect::Compute,
+
+            // Collection allocation (GcAlloc effect)
+            MirInst::ArrayLit { .. }
+            | MirInst::TupleLit { .. }
+            | MirInst::DictLit { .. }
+            | MirInst::Spread { .. }
+            | MirInst::FStringFormat { .. }
+            | MirInst::ClosureCreate { .. }
+            | MirInst::StructInit { .. }
+            | MirInst::EnumUnit { .. }
+            | MirInst::EnumWith { .. }
+            | MirInst::OptionSome { .. }
+            | MirInst::OptionNone { .. }
+            | MirInst::ResultOk { .. }
+            | MirInst::ResultErr { .. }
+            | MirInst::FutureCreate { .. }
+            | MirInst::GeneratorCreate { .. } => Effect::GcAlloc,
 
             // Function calls - effect depends on target
             MirInst::Call { target, .. } => target.effect(),
 
+            // Indirect call - uses provided effect annotation
+            MirInst::IndirectCall { effect, .. } => *effect,
+
+            // Method calls may have side effects
+            MirInst::MethodCallStatic { .. }
+            | MirInst::MethodCallVirtual { .. }
+            | MirInst::BuiltinMethod { .. } => Effect::Io,
+
             // Explicit effect markers for verification
             MirInst::GcAlloc { .. } => Effect::GcAlloc,
             MirInst::Wait { .. } => Effect::Wait,
+
+            // Blocking operations
+            MirInst::Await { .. }
+            | MirInst::ActorRecv { .. }
+            | MirInst::GeneratorNext { .. }
+            | MirInst::TryUnwrap { .. } => Effect::Wait,
+
+            // Non-blocking I/O
+            MirInst::ActorSpawn { .. } | MirInst::ActorSend { .. } | MirInst::Yield { .. } => {
+                Effect::Io
+            }
+
+            // Interpreter fallback (temporary - will be removed)
+            MirInst::InterpCall { .. } | MirInst::InterpEval { .. } => Effect::Io,
         }
     }
 }
 
 impl MirInst {
-    /// Check if this instruction is waitless.
-    pub fn is_waitless(&self) -> bool {
-        self.effect().is_waitless()
+    /// Check if this instruction is async (non-blocking).
+    pub fn is_async(&self) -> bool {
+        self.effect().is_async()
     }
 
     /// Check if this instruction is nogc.
@@ -557,7 +1008,11 @@ pub enum Terminator {
     Jump(BlockId),
 
     /// Conditional branch
-    Branch { cond: VReg, then_block: BlockId, else_block: BlockId },
+    Branch {
+        cond: VReg,
+        then_block: BlockId,
+        else_block: BlockId,
+    },
 
     /// Unreachable (after infinite loop, etc.)
     Unreachable,
@@ -579,7 +1034,11 @@ impl Terminator {
         match self {
             Terminator::Return(_) => vec![],
             Terminator::Jump(target) => vec![*target],
-            Terminator::Branch { then_block, else_block, .. } => vec![*then_block, *else_block],
+            Terminator::Branch {
+                then_block,
+                else_block,
+                ..
+            } => vec![*then_block, *else_block],
             Terminator::Unreachable => vec![],
         }
     }
@@ -715,10 +1174,13 @@ impl BlockBuilder {
 
     /// Seal the block with a terminator (only if open)
     pub fn seal(&mut self, terminator: Terminator) -> Result<(), BlockBuildError> {
-        match std::mem::replace(&mut self.state, BlockBuildState::Open {
-            id: BlockId(0),
-            instructions: Vec::new(),
-        }) {
+        match std::mem::replace(
+            &mut self.state,
+            BlockBuildState::Open {
+                id: BlockId(0),
+                instructions: Vec::new(),
+            },
+        ) {
             BlockBuildState::Open { id, instructions } => {
                 self.state = BlockBuildState::Sealed {
                     id,
@@ -727,7 +1189,11 @@ impl BlockBuilder {
                 };
                 Ok(())
             }
-            BlockBuildState::Sealed { id, instructions, terminator: old_term } => {
+            BlockBuildState::Sealed {
+                id,
+                instructions,
+                terminator: old_term,
+            } => {
                 // Restore the sealed state
                 self.state = BlockBuildState::Sealed {
                     id,
@@ -749,13 +1215,15 @@ impl BlockBuilder {
     /// Finalize and return the completed block (only if sealed)
     pub fn finalize(self) -> Result<MirBlock, BlockBuildError> {
         match self.state {
-            BlockBuildState::Sealed { id, instructions, terminator } => {
-                Ok(MirBlock {
-                    id,
-                    instructions,
-                    terminator,
-                })
-            }
+            BlockBuildState::Sealed {
+                id,
+                instructions,
+                terminator,
+            } => Ok(MirBlock {
+                id,
+                instructions,
+                terminator,
+            }),
             BlockBuildState::Open { .. } => Err(BlockBuildError::NotSealed),
         }
     }
@@ -763,16 +1231,20 @@ impl BlockBuilder {
     /// Force finalize - use Unreachable if not sealed (for compatibility)
     pub fn finalize_or_unreachable(self) -> MirBlock {
         match self.state {
-            BlockBuildState::Sealed { id, instructions, terminator } => {
-                MirBlock { id, instructions, terminator }
-            }
-            BlockBuildState::Open { id, instructions } => {
-                MirBlock {
-                    id,
-                    instructions,
-                    terminator: Terminator::Unreachable,
-                }
-            }
+            BlockBuildState::Sealed {
+                id,
+                instructions,
+                terminator,
+            } => MirBlock {
+                id,
+                instructions,
+                terminator,
+            },
+            BlockBuildState::Open { id, instructions } => MirBlock {
+                id,
+                instructions,
+                terminator: Terminator::Unreachable,
+            },
         }
     }
 }
@@ -813,8 +1285,8 @@ impl MirBlock {
         set
     }
 
-    /// Check if this block is waitless (no blocking operations).
-    pub fn is_waitless(&self) -> bool {
+    /// Check if this block is async (no blocking operations).
+    pub fn is_async(&self) -> bool {
         self.effects().is_pipeline_safe()
     }
 
@@ -850,8 +1322,18 @@ pub struct MirFunction {
     pub blocks: Vec<MirBlock>,
     pub entry_block: BlockId,
     pub visibility: Visibility,
+    /// Outlined bodies generated from body_block instructions (Actor/Generator/Future).
+    /// Maps the original BlockId to the outlined function name.
+    pub outlined_bodies: std::collections::HashMap<BlockId, String>,
     next_vreg: u32,
     next_block: u32,
+}
+
+impl MirFunction {
+    /// Create a simple outlined function name from a base name and block id.
+    pub fn outlined_name(&self, block: BlockId) -> String {
+        format!("{}_outlined_{}", self.name, block.0)
+    }
 }
 
 impl MirFunction {
@@ -866,6 +1348,7 @@ impl MirFunction {
             blocks: vec![entry],
             entry_block: BlockId(0),
             visibility,
+            outlined_bodies: std::collections::HashMap::new(),
             next_vreg: 0,
             next_block: 1,
         }
@@ -874,7 +1357,11 @@ impl MirFunction {
     /// Create a new MIR function from a boolean public flag.
     /// Helper for backwards compatibility during migration.
     pub fn new_from_bool(name: String, return_type: TypeId, is_public: bool) -> Self {
-        let visibility = if is_public { Visibility::Public } else { Visibility::Private };
+        let visibility = if is_public {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
         Self::new(name, return_type, visibility)
     }
 
@@ -914,8 +1401,8 @@ impl MirFunction {
         set
     }
 
-    /// Check if this function is waitless (no blocking operations).
-    pub fn is_waitless(&self) -> bool {
+    /// Check if this function is async (no blocking operations).
+    pub fn is_async(&self) -> bool {
         self.effects().is_pipeline_safe()
     }
 
@@ -1005,13 +1492,17 @@ mod tests {
         let r2 = func.new_vreg();
 
         let entry = func.block_mut(BlockId(0)).unwrap();
-        entry.instructions.push(MirInst::ConstInt { dest: r0, value: 1 });
-        entry.instructions.push(MirInst::ConstInt { dest: r1, value: 2 });
+        entry
+            .instructions
+            .push(MirInst::ConstInt { dest: r0, value: 1 });
+        entry
+            .instructions
+            .push(MirInst::ConstInt { dest: r1, value: 2 });
         entry.instructions.push(MirInst::BinOp {
             dest: r2,
             op: BinOp::Add,
             left: r0,
-            right: r1
+            right: r1,
         });
         entry.terminator = Terminator::Return(Some(r2));
 

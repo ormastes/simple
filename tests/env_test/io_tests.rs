@@ -1,8 +1,8 @@
 //! I/O environment tests
 //! Tests I/O operations with mocking allowed
 
-use tempfile::tempdir;
 use std::fs;
+use tempfile::tempdir;
 
 #[test]
 fn test_filesystem_operations() {
@@ -40,5 +40,8 @@ fn main() -> int = 42
     fs::write(&source, content).expect("write ok");
 
     let read_content = fs::read_to_string(&source).expect("read ok");
-    assert!(read_content.contains("fn main()"), "Should contain function");
+    assert!(
+        read_content.contains("fn main()"),
+        "Should contain function"
+    );
 }

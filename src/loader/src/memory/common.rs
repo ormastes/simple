@@ -34,7 +34,11 @@ pub fn align_size(size: usize, alignment: usize) -> usize {
 #[cfg(unix)]
 pub fn get_page_size() -> usize {
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
-    if page_size == 0 { 4096 } else { page_size }
+    if page_size == 0 {
+        4096
+    } else {
+        page_size
+    }
 }
 
 /// Macro to implement common allocator methods

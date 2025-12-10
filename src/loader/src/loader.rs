@@ -28,11 +28,7 @@ impl ModuleLoader {
 
     /// Load an SMF module from file using a custom import resolver.
     /// The resolver is called for every non-local symbol reference during relocation.
-    pub fn load_with_resolver<F>(
-        &self,
-        path: &Path,
-        resolver: F,
-    ) -> Result<LoadedModule, LoadError>
+    pub fn load_with_resolver<F>(&self, path: &Path, resolver: F) -> Result<LoadedModule, LoadError>
     where
         F: Fn(&str) -> Option<usize>,
     {
@@ -109,7 +105,9 @@ impl ModuleLoader {
                         let extra = section.virtual_size as usize - section.size as usize;
                         let pad_slice = unsafe {
                             std::slice::from_raw_parts_mut(
-                                code_mem.as_mut_ptr().add(code_offset + section.size as usize),
+                                code_mem
+                                    .as_mut_ptr()
+                                    .add(code_offset + section.size as usize),
                                 extra,
                             )
                         };
@@ -134,7 +132,9 @@ impl ModuleLoader {
                             let extra = section.virtual_size as usize - section.size as usize;
                             let pad_slice = unsafe {
                                 std::slice::from_raw_parts_mut(
-                                    data_mem.as_mut_ptr().add(data_offset + section.size as usize),
+                                    data_mem
+                                        .as_mut_ptr()
+                                        .add(data_offset + section.size as usize),
                                     extra,
                                 )
                             };
@@ -170,7 +170,8 @@ impl ModuleLoader {
         let relocs = self.read_relocations(reader, &sections)?;
 
         // Apply relocations
-        let code_slice = unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), code_size) };
+        let code_slice =
+            unsafe { std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), code_size) };
 
         apply_relocations(
             code_slice,
@@ -184,8 +185,7 @@ impl ModuleLoader {
         self.allocator
             .protect(&code_mem, Protection::READ_EXECUTE)?;
         if let Some(ref data_mem) = data_mem {
-            self.allocator
-                .protect(data_mem, Protection::READ_WRITE)?;
+            self.allocator.protect(data_mem, Protection::READ_WRITE)?;
         }
 
         Ok(LoadedModule {
@@ -219,7 +219,11 @@ impl ModuleLoader {
         Ok(())
     }
 
-    fn read_sections<R: Read>(&self, reader: &mut R, count: u32) -> Result<Vec<SmfSection>, LoadError> {
+    fn read_sections<R: Read>(
+        &self,
+        reader: &mut R,
+        count: u32,
+    ) -> Result<Vec<SmfSection>, LoadError> {
         let mut sections = Vec::with_capacity(count as usize);
 
         for _ in 0..count {
@@ -256,7 +260,11 @@ impl ModuleLoader {
         (code_size, data_size)
     }
 
-    fn read_symbols<R: Read + Seek>(&self, reader: &mut R, header: &SmfHeader) -> Result<SymbolTable, LoadError> {
+    fn read_symbols<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+        header: &SmfHeader,
+    ) -> Result<SymbolTable, LoadError> {
         reader.seek(SeekFrom::Start(header.symbol_table_offset))?;
 
         let mut symbols = Vec::with_capacity(header.symbol_count as usize);

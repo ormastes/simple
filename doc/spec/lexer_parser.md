@@ -34,7 +34,7 @@ new         move        ref         self        Self
 spawn       send        receive     on          state
 
 # Effects & Modifiers
-waitless    async       await       extern      static
+async       await       extern      static
 pub         priv        const       global
 
 # Logical & Values
@@ -518,7 +518,7 @@ module.exports = grammar({
       'on',
       $.type_identifier,
       optional($.handler_parameters),
-      $.effect_modifier,  // must be 'waitless' for stackless actors
+      $.effect_modifier,  // must be 'async' for stackless actors
       ':',
       $.block,
     ),
@@ -581,10 +581,7 @@ module.exports = grammar({
       optional(seq('=', $.expression)),
     ),
 
-    effect_modifier: $ => choice(
-      'waitless',
-      'async',
-    ),
+    effect_modifier: $ => 'async',
 
     //=========================================================================
     // MACRO DEFINITION
@@ -1909,7 +1906,7 @@ actor Counter:
     state:
         value: i64 = 0
 
-    on Inc(by: i64) waitless:
+    on Inc(by: i64) async:
         self.value = self.value + by
 "#;
 
@@ -2516,7 +2513,7 @@ pub struct FunctionCollector {
 
 pub struct FunctionInfo {
     pub name: String,
-    pub is_waitless: bool,
+    pub is_async: bool,
     pub line: usize,
 }
 
@@ -2529,7 +2526,7 @@ impl FunctionCollector {
 impl Visitor for FunctionCollector {
     fn visit_function_definition(&mut self, node: Node, source: &str) {
         let mut name = String::new();
-        let mut is_waitless = false;
+        let mut is_async = false;
         
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
@@ -2538,7 +2535,7 @@ impl Visitor for FunctionCollector {
                     name = source[child.byte_range()].to_string();
                 }
                 "effect_modifier" => {
-                    is_waitless = source[child.byte_range()] == *"waitless";
+                    is_async = source[child.byte_range()] == *"async";
                 }
                 _ => {}
             }
@@ -2547,7 +2544,7 @@ impl Visitor for FunctionCollector {
         if !name.is_empty() {
             self.functions.push(FunctionInfo {
                 name,
-                is_waitless,
+                is_async,
                 line: node.start_position().row + 1,
             });
         }
@@ -2631,7 +2628,7 @@ impl Visitor for HandlePoolCollector {
   "if" "else" "elif" "match" "case"
   "for" "while" "loop" "break" "continue" "return"
   "spawn" "send" "receive" "on" "state"
-  "waitless" "async" "await"
+  "async" "async" "await"
   "new" "move"
   "context" "macro" "handle_pool" "gen_code"
   "pub" "priv" "extern" "static" "const" "global"
@@ -2896,7 +2893,7 @@ actor GameWorld:
     state:
         players: List[+Player] = []
 
-    on Tick(dt: f64) waitless:
+    on Tick(dt: f64) async:
         for handle in self.players:
             match Player.handle_get_mut(handle):
                 case Some(player):
@@ -2937,7 +2934,7 @@ actor Counter:
     state:
         value: i64 = 0
 
-    on Inc(by: i64) waitless:
+    on Inc(by: i64) async:
         self.value = self.value + by
 "#;
 
@@ -2948,8 +2945,8 @@ actor Counter:
     
     for func in &collector.functions {
         println!(
-            "Function '{}' at line {} (waitless: {})",
-            func.name, func.line, func.is_waitless
+            "Function '{}' at line {} (async: {})",
+            func.name, func.line, func.is_async
         );
     }
 }

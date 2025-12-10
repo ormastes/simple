@@ -1,64 +1,70 @@
-# Feature: Basic Types - Integer Literals
+# Feature #1: Basic Types
 
-**Feature #1 from feature.md**
-- **Importance**: 5/5
-- **Difficulty**: 1/5
-- **Status**: COMPLETED
+**Status**: Interpreter Complete | Native Codegen: Stub
+**Difficulty**: 1/5
+**Importance**: 5/5
 
-## Goal
+## Summary
 
-Make the compiler actually compile integer literals so that `main = 42` returns 42 (not always 0).
+Basic types (i8-i64, u8-u64, f32-f64, bool, str, nil) are fully supported in the tree-walking interpreter.
 
-## TDD Approach
+## Supported Types
 
-### Phase 1: System Test (Red) - DONE
-- Test: `runner.run_source("main = 42")` should return 42
-- Test added in `src/driver/tests/runner_tests.rs`
-- Test initially failed (returned 0 instead of 42)
+| Type | Interpreter | Native Codegen |
+|------|-------------|----------------|
+| `i8`, `i16`, `i32`, `i64` | Working | Stub |
+| `u8`, `u16`, `u32`, `u64` | Working | Stub |
+| `f32`, `f64` | Working | Stub |
+| `bool` | Working | Stub |
+| `str` | Working | Stub |
+| `nil` | Working | Stub |
 
-### Phase 2: Implementation (Green) - DONE
-- Modified `src/compiler/src/lib.rs`:
-  - Added `extract_main_value()` to parse AST and find `main = <integer>`
-  - Modified `write_smf_with_return_value()` to generate x86-64 `mov eax, imm32; ret`
-  - Changed from always `xor eax, eax; ret` (return 0) to dynamic value
+## Implementation
 
-### Phase 3: Verify (All Tests Pass) - DONE
-- All 64 workspace tests pass
-- System test `runner_returns_integer_literal_value` passes
+### Interpreter (`src/compiler/src/interpreter.rs`)
 
-## Files Modified
-
-| File | Change |
-|------|--------|
-| `src/compiler/src/lib.rs` | Added AST parsing, integer extraction, x86-64 codegen |
-| `src/driver/tests/runner_tests.rs` | Added system test for integer return values |
-
-## Progress
-
-- [x] System test written
-- [x] Compiler modified to extract main value from AST
-- [x] x86-64 codegen generates `mov eax, <value>; ret`
-- [x] All tests passing (64/64)
-
-## Implementation Details
+The `Value` enum in `value.rs` represents all runtime values:
 
 ```rust
-// Extract integer from `main = <int>` assignment
-fn extract_main_value(items: &[Node]) -> Result<i32, CompileError>
-
-// Generate x86-64: mov eax, imm32; ret
-let code_bytes = {
-    let mut code = Vec::with_capacity(6);
-    code.push(0xB8u8); // mov eax, imm32
-    code.extend_from_slice(&return_value.to_le_bytes());
-    code.push(0xC3); // ret
-    code
-};
+pub enum Value {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
+    Nil,
+    // ... other variants
+}
 ```
 
-## Next Features
+Integer literals in `main = 42` are evaluated by the interpreter, then the result is packaged into an SMF binary.
 
-Now that integer literals work, the next logical steps are:
-- Variables (`let x = 42`) - Feature #2
-- Arithmetic operators (`1 + 2`) - Feature #4
-- Other basic types (bool, float) - Feature #1 continuation
+### Native Pipeline (TODO)
+
+For true native compilation:
+1. HIR needs to lower integer literals to typed constants
+2. MIR needs to represent typed integer values
+3. Cranelift needs to emit `iconst` instructions
+
+Current SMF generation just does:
+```rust
+// mov eax, <interpreter_result>; ret
+code.push(0xB8u8);
+code.extend_from_slice(&return_value.to_le_bytes());
+code.push(0xC3);
+```
+
+## Tests
+
+```bash
+# Interpreter tests for basic types
+cargo test -p simple-driver interpreter_integer
+cargo test -p simple-driver interpreter_float
+cargo test -p simple-driver interpreter_bool
+cargo test -p simple-driver interpreter_string
+```
+
+## Next Steps
+
+1. Implement HIR lowering for integer literals
+2. Add MIR representation for typed constants
+3. Wire Cranelift `iconst` generation

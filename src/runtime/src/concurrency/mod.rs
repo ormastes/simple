@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 
 // Re-export actor ABI types from common for convenience
@@ -11,7 +11,12 @@ struct Scheduler {
 }
 
 impl Scheduler {
-    fn register(&self, id: usize, inbox: mpsc::Sender<Message>, join_slot: Arc<Mutex<Option<JoinHandle<()>>>>) {
+    fn register(
+        &self,
+        id: usize,
+        inbox: mpsc::Sender<Message>,
+        join_slot: Arc<Mutex<Option<JoinHandle<()>>>>,
+    ) {
         let mut mb = self.mailboxes.lock().unwrap();
         mb.insert(id, inbox);
         let mut joins = self.joins.lock().unwrap();
@@ -28,7 +33,11 @@ impl Scheduler {
 
     fn join(&self, id: usize) -> Result<(), String> {
         if let Some(slot) = self.joins.lock().unwrap().remove(&id) {
-            if let Some(handle) = slot.lock().map_err(|_| "join lock poisoned".to_string())?.take() {
+            if let Some(handle) = slot
+                .lock()
+                .map_err(|_| "join lock poisoned".to_string())?
+                .take()
+            {
                 handle.join().map_err(|_| "actor panicked".to_string())?;
             }
         }

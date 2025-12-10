@@ -1,8 +1,8 @@
 import Lake
 open Lake DSL
 
-package waitless_compile where
+package async_compile where
   srcDir := "src"
 
 @[default_target]
-lean_lib WaitlessCompile
+lean_lib AsyncCompile

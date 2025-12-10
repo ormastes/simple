@@ -111,7 +111,7 @@ pub struct HirFunction {
 #[derive(Debug, Clone, Copy)]
 pub enum Effect {
     None,
-    Waitless,
+    Async,
     Async,
 }
 
@@ -374,7 +374,7 @@ impl HirLowering {
         };
 
         let effect = match func.effect {
-            Some(Effect::Waitless) => Effect::Waitless,
+            Some(Effect::Async) => Effect::Async,
             Some(Effect::Async) => Effect::Async,
             _ => Effect::None,
         };

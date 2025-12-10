@@ -220,3 +220,72 @@ main = result
 
 // === Raw String Tests ===
 
+// ============ Auto-Forwarding Properties (#82) ============
+
+#[test]
+fn interpreter_auto_property_getter() {
+    // get_ method auto-creates backing _field
+    let code = r#"
+class Person:
+    fn get_name(self) -> str:
+        return self._name
+
+let p = Person { _name: "Alice" }
+main = if p.get_name() == "Alice": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_auto_property_setter() {
+    // set_ method returns modified self for chaining/update
+    let code = r#"
+class Counter:
+    fn get_value(self) -> i64:
+        return self._value
+
+    fn set_value(self, v: i64) -> Counter:
+        return Counter { _value: v }
+
+let c = Counter { _value: 10 }
+let c2 = c.set_value(42)
+main = c2.get_value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_auto_property_is() {
+    // is_ method auto-creates backing _field (bool type)
+    let code = r#"
+class Item:
+    fn is_active(self) -> bool:
+        return self._active
+
+let item = Item { _active: true }
+main = if item.is_active(): 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_auto_property_combined() {
+    // Combined getter and setter with functional update pattern
+    let code = r#"
+class Box:
+    fn get_content(self) -> i64:
+        return self._content
+
+    fn set_content(self, v: i64) -> Box:
+        return Box { _content: v }
+
+let b = Box { _content: 0 }
+let b2 = b.set_content(100)
+main = b2.get_content()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 100);
+}

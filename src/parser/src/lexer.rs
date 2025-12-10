@@ -1,4 +1,4 @@
-use crate::token::{Token, TokenKind, Span};
+use crate::token::{NumericSuffix, Span, Token, TokenKind};
 
 /// Result of processing an escape sequence
 enum EscapeResult {
@@ -224,6 +224,9 @@ impl<'a> Lexer<'a> {
                     if self.check('.') {
                         self.advance();
                         TokenKind::Ellipsis
+                    } else if self.check('=') {
+                        self.advance();
+                        TokenKind::DoubleDotEq
                     } else {
                         TokenKind::DoubleDot
                     }
@@ -233,8 +236,8 @@ impl<'a> Lexer<'a> {
             }
 
             // String literals
-            '"' => self.scan_fstring(),  // Double quotes are interpolated by default
-            '\'' => self.scan_raw_string(),  // Single quotes are raw strings
+            '"' => self.scan_fstring(), // Double quotes are interpolated by default
+            '\'' => self.scan_raw_string(), // Single quotes are raw strings
 
             // Numbers
             '0'..='9' => self.scan_number(ch),
@@ -274,10 +277,17 @@ impl<'a> Lexer<'a> {
     }
 
     fn check_alpha(&mut self) -> bool {
-        self.peek().map(|c| c.is_alphabetic() || c == '_').unwrap_or(false)
+        self.peek()
+            .map(|c| c.is_alphabetic() || c == '_')
+            .unwrap_or(false)
     }
 
-    fn match_char(&mut self, expected: char, if_match: TokenKind, otherwise: TokenKind) -> TokenKind {
+    fn match_char(
+        &mut self,
+        expected: char,
+        if_match: TokenKind,
+        otherwise: TokenKind,
+    ) -> TokenKind {
         if self.check(expected) {
             self.advance();
             if_match
@@ -301,14 +311,38 @@ impl<'a> Lexer<'a> {
     /// If `allow_braces` is true, also handles \{ and \} escapes (for f-strings).
     fn process_escape(&mut self, allow_braces: bool) -> EscapeResult {
         match self.peek() {
-            Some('n') => { self.advance(); EscapeResult::Char('\n') }
-            Some('t') => { self.advance(); EscapeResult::Char('\t') }
-            Some('r') => { self.advance(); EscapeResult::Char('\r') }
-            Some('\\') => { self.advance(); EscapeResult::Char('\\') }
-            Some('"') => { self.advance(); EscapeResult::Char('"') }
-            Some('0') => { self.advance(); EscapeResult::Char('\0') }
-            Some('{') if allow_braces => { self.advance(); EscapeResult::Char('{') }
-            Some('}') if allow_braces => { self.advance(); EscapeResult::Char('}') }
+            Some('n') => {
+                self.advance();
+                EscapeResult::Char('\n')
+            }
+            Some('t') => {
+                self.advance();
+                EscapeResult::Char('\t')
+            }
+            Some('r') => {
+                self.advance();
+                EscapeResult::Char('\r')
+            }
+            Some('\\') => {
+                self.advance();
+                EscapeResult::Char('\\')
+            }
+            Some('"') => {
+                self.advance();
+                EscapeResult::Char('"')
+            }
+            Some('0') => {
+                self.advance();
+                EscapeResult::Char('\0')
+            }
+            Some('{') if allow_braces => {
+                self.advance();
+                EscapeResult::Char('{')
+            }
+            Some('}') if allow_braces => {
+                self.advance();
+                EscapeResult::Char('}')
+            }
             Some(c) => EscapeResult::Error(format!("Invalid escape sequence: \\{}", c)),
             None => EscapeResult::Unterminated,
         }
@@ -429,7 +463,9 @@ impl<'a> Lexer<'a> {
                 match self.process_escape(false) {
                     EscapeResult::Char(c) => value.push(c),
                     EscapeResult::Error(msg) => return TokenKind::Error(msg),
-                    EscapeResult::Unterminated => return TokenKind::Error("Unterminated string".to_string()),
+                    EscapeResult::Unterminated => {
+                        return TokenKind::Error("Unterminated string".to_string())
+                    }
                 }
             } else if ch == '\n' {
                 return TokenKind::Error("Unterminated string".to_string());
@@ -502,7 +538,9 @@ impl<'a> Lexer<'a> {
                 match self.process_escape(true) {
                     EscapeResult::Char(c) => current_literal.push(c),
                     EscapeResult::Error(msg) => return TokenKind::Error(msg),
-                    EscapeResult::Unterminated => return TokenKind::Error("Unterminated f-string".to_string()),
+                    EscapeResult::Unterminated => {
+                        return TokenKind::Error("Unterminated f-string".to_string())
+                    }
                 }
             } else if ch == '\n' {
                 return TokenKind::Error("Unterminated f-string".to_string());
@@ -556,7 +594,9 @@ impl<'a> Lexer<'a> {
                         }
                         return match i64::from_str_radix(&num_str[2..], 8) {
                             Ok(n) => TokenKind::Integer(n),
-                            Err(_) => TokenKind::Error(format!("Invalid octal number: {}", num_str)),
+                            Err(_) => {
+                                TokenKind::Error(format!("Invalid octal number: {}", num_str))
+                            }
                         };
                     }
                     'b' | 'B' => {
@@ -574,7 +614,9 @@ impl<'a> Lexer<'a> {
                         }
                         return match i64::from_str_radix(&num_str[2..], 2) {
                             Ok(n) => TokenKind::Integer(n),
-                            Err(_) => TokenKind::Error(format!("Invalid binary number: {}", num_str)),
+                            Err(_) => {
+                                TokenKind::Error(format!("Invalid binary number: {}", num_str))
+                            }
                         };
                     }
                     _ => {}
@@ -584,10 +626,20 @@ impl<'a> Lexer<'a> {
 
         // Regular decimal number
         while let Some(ch) = self.peek() {
-            if ch.is_ascii_digit() || ch == '_' {
-                if ch != '_' {
-                    num_str.push(ch);
+            if ch.is_ascii_digit() {
+                num_str.push(ch);
+                self.advance();
+            } else if ch == '_' {
+                // Look ahead: if underscore is followed by letter (unit suffix), stop
+                let mut peek_ahead = self.chars.clone();
+                peek_ahead.next(); // skip '_'
+                if let Some((_, next)) = peek_ahead.next() {
+                    if next.is_alphabetic() {
+                        // This is a unit suffix like _km, stop number parsing
+                        break;
+                    }
                 }
+                // Otherwise it's a digit separator, consume and skip
                 self.advance();
             } else {
                 break;
@@ -606,9 +658,17 @@ impl<'a> Lexer<'a> {
                     num_str.push('.');
 
                     while let Some(ch) = self.peek() {
-                        if ch.is_ascii_digit() || ch == '_' {
-                            if ch != '_' {
-                                num_str.push(ch);
+                        if ch.is_ascii_digit() {
+                            num_str.push(ch);
+                            self.advance();
+                        } else if ch == '_' {
+                            // Look ahead: if underscore is followed by letter (unit suffix), stop
+                            let mut peek_ahead = self.chars.clone();
+                            peek_ahead.next(); // skip '_'
+                            if let Some((_, next)) = peek_ahead.next() {
+                                if next.is_alphabetic() {
+                                    break;
+                                }
                             }
                             self.advance();
                         } else {
@@ -644,17 +704,82 @@ impl<'a> Lexer<'a> {
             }
         }
 
+        // Check for type suffix
+        let suffix = self.scan_numeric_suffix();
+
         if is_float {
             match num_str.parse::<f64>() {
-                Ok(n) => TokenKind::Float(n),
+                Ok(n) => {
+                    if let Some(s) = suffix {
+                        TokenKind::TypedFloat(n, s)
+                    } else {
+                        TokenKind::Float(n)
+                    }
+                }
                 Err(_) => TokenKind::Error(format!("Invalid float: {}", num_str)),
             }
         } else {
             match num_str.parse::<i64>() {
-                Ok(n) => TokenKind::Integer(n),
+                Ok(n) => {
+                    if let Some(s) = suffix {
+                        TokenKind::TypedInteger(n, s)
+                    } else {
+                        TokenKind::Integer(n)
+                    }
+                }
                 Err(_) => TokenKind::Error(format!("Invalid integer: {}", num_str)),
             }
         }
+    }
+
+    fn scan_numeric_suffix(&mut self) -> Option<NumericSuffix> {
+        // Check for type suffix: i8, i16, i32, i64, u8, u16, u32, u64, f32, f64
+        // Or user-defined unit suffix starting with _ like _km, _hr
+        let mut suffix = String::new();
+
+        // Peek ahead to see if we have a suffix
+        let mut peek_iter = self.chars.clone();
+        if let Some((_, ch)) = peek_iter.peek() {
+            if *ch == 'i' || *ch == 'u' || *ch == 'f' || *ch == '_' {
+                // Collect the suffix
+                while let Some(&(_, c)) = peek_iter.peek() {
+                    if c.is_alphanumeric() || c == '_' {
+                        suffix.push(c);
+                        peek_iter.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Check if it's a valid suffix
+        let result = match suffix.as_str() {
+            "i8" => Some(NumericSuffix::I8),
+            "i16" => Some(NumericSuffix::I16),
+            "i32" => Some(NumericSuffix::I32),
+            "i64" => Some(NumericSuffix::I64),
+            "u8" => Some(NumericSuffix::U8),
+            "u16" => Some(NumericSuffix::U16),
+            "u32" => Some(NumericSuffix::U32),
+            "u64" => Some(NumericSuffix::U64),
+            "f32" => Some(NumericSuffix::F32),
+            "f64" => Some(NumericSuffix::F64),
+            s if s.starts_with('_') && s.len() > 1 => {
+                // User-defined unit suffix (e.g., _km, _hr)
+                Some(NumericSuffix::Unit(s[1..].to_string()))
+            }
+            _ => None,
+        };
+
+        // Actually consume the suffix if valid
+        if result.is_some() {
+            for _ in 0..suffix.len() {
+                self.advance();
+            }
+        }
+
+        result
     }
 
     fn scan_identifier(&mut self, first: char) -> TokenKind {
@@ -715,13 +840,14 @@ impl<'a> Lexer<'a> {
             "super" => TokenKind::Super,
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
-            "waitless" => TokenKind::Waitless,
             "yield" => TokenKind::Yield,
             "const" => TokenKind::Const,
             "static" => TokenKind::Static,
             "type" => TokenKind::Type,
+            "unit" => TokenKind::Unit,
             "extern" => TokenKind::Extern,
             "context" => TokenKind::Context,
+            "with" => TokenKind::With,
             "macro" => TokenKind::Macro,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
@@ -764,31 +890,58 @@ mod tests {
     fn test_integer_literals() {
         assert_eq!(tokenize("42"), vec![TokenKind::Integer(42), TokenKind::Eof]);
         assert_eq!(tokenize("0"), vec![TokenKind::Integer(0), TokenKind::Eof]);
-        assert_eq!(tokenize("1_000_000"), vec![TokenKind::Integer(1000000), TokenKind::Eof]);
+        assert_eq!(
+            tokenize("1_000_000"),
+            vec![TokenKind::Integer(1000000), TokenKind::Eof]
+        );
     }
 
     #[test]
     fn test_hex_literals() {
-        assert_eq!(tokenize("0xFF"), vec![TokenKind::Integer(255), TokenKind::Eof]);
-        assert_eq!(tokenize("0x1A2B"), vec![TokenKind::Integer(0x1A2B), TokenKind::Eof]);
+        assert_eq!(
+            tokenize("0xFF"),
+            vec![TokenKind::Integer(255), TokenKind::Eof]
+        );
+        assert_eq!(
+            tokenize("0x1A2B"),
+            vec![TokenKind::Integer(0x1A2B), TokenKind::Eof]
+        );
     }
 
     #[test]
     fn test_binary_literals() {
-        assert_eq!(tokenize("0b1010"), vec![TokenKind::Integer(10), TokenKind::Eof]);
-        assert_eq!(tokenize("0b1111_0000"), vec![TokenKind::Integer(0xF0), TokenKind::Eof]);
+        assert_eq!(
+            tokenize("0b1010"),
+            vec![TokenKind::Integer(10), TokenKind::Eof]
+        );
+        assert_eq!(
+            tokenize("0b1111_0000"),
+            vec![TokenKind::Integer(0xF0), TokenKind::Eof]
+        );
     }
 
     #[test]
     fn test_octal_literals() {
-        assert_eq!(tokenize("0o77"), vec![TokenKind::Integer(63), TokenKind::Eof]);
+        assert_eq!(
+            tokenize("0o77"),
+            vec![TokenKind::Integer(63), TokenKind::Eof]
+        );
     }
 
     #[test]
     fn test_float_literals() {
-        assert_eq!(tokenize("3.14"), vec![TokenKind::Float(3.14), TokenKind::Eof]);
-        assert_eq!(tokenize("1.0e10"), vec![TokenKind::Float(1.0e10), TokenKind::Eof]);
-        assert_eq!(tokenize("2.5E-3"), vec![TokenKind::Float(2.5e-3), TokenKind::Eof]);
+        assert_eq!(
+            tokenize("3.14"),
+            vec![TokenKind::Float(3.14), TokenKind::Eof]
+        );
+        assert_eq!(
+            tokenize("1.0e10"),
+            vec![TokenKind::Float(1.0e10), TokenKind::Eof]
+        );
+        assert_eq!(
+            tokenize("2.5E-3"),
+            vec![TokenKind::Float(2.5e-3), TokenKind::Eof]
+        );
     }
 
     #[test]
@@ -797,15 +950,24 @@ mod tests {
         // Double-quoted strings are now FStrings (interpolated by default)
         assert_eq!(
             tokenize(r#""hello""#),
-            vec![TokenKind::FString(vec![FStringToken::Literal("hello".to_string())]), TokenKind::Eof]
+            vec![
+                TokenKind::FString(vec![FStringToken::Literal("hello".to_string())]),
+                TokenKind::Eof
+            ]
         );
         assert_eq!(
             tokenize(r#""hello\nworld""#),
-            vec![TokenKind::FString(vec![FStringToken::Literal("hello\nworld".to_string())]), TokenKind::Eof]
+            vec![
+                TokenKind::FString(vec![FStringToken::Literal("hello\nworld".to_string())]),
+                TokenKind::Eof
+            ]
         );
         assert_eq!(
             tokenize(r#""tab\there""#),
-            vec![TokenKind::FString(vec![FStringToken::Literal("tab\there".to_string())]), TokenKind::Eof]
+            vec![
+                TokenKind::FString(vec![FStringToken::Literal("tab\there".to_string())]),
+                TokenKind::Eof
+            ]
         );
     }
 
@@ -819,7 +981,10 @@ mod tests {
         // Backslashes are literal in raw strings
         assert_eq!(
             tokenize(r#"'hello\nworld'"#),
-            vec![TokenKind::RawString("hello\\nworld".to_string()), TokenKind::Eof]
+            vec![
+                TokenKind::RawString("hello\\nworld".to_string()),
+                TokenKind::Eof
+            ]
         );
         // Braces are literal in raw strings (no interpolation)
         assert_eq!(
@@ -834,24 +999,34 @@ mod tests {
         // Test interpolation in double-quoted strings
         assert_eq!(
             tokenize(r#""hello {name}""#),
-            vec![TokenKind::FString(vec![
-                FStringToken::Literal("hello ".to_string()),
-                FStringToken::Expr("name".to_string()),
-            ]), TokenKind::Eof]
+            vec![
+                TokenKind::FString(vec![
+                    FStringToken::Literal("hello ".to_string()),
+                    FStringToken::Expr("name".to_string()),
+                ]),
+                TokenKind::Eof
+            ]
         );
         // Test escaped braces
         assert_eq!(
             tokenize(r#""literal {{braces}}""#),
-            vec![TokenKind::FString(vec![
-                FStringToken::Literal("literal {braces}".to_string()),
-            ]), TokenKind::Eof]
+            vec![
+                TokenKind::FString(vec![FStringToken::Literal("literal {braces}".to_string()),]),
+                TokenKind::Eof
+            ]
         );
     }
 
     #[test]
     fn test_bool_literals() {
-        assert_eq!(tokenize("true"), vec![TokenKind::Bool(true), TokenKind::Eof]);
-        assert_eq!(tokenize("false"), vec![TokenKind::Bool(false), TokenKind::Eof]);
+        assert_eq!(
+            tokenize("true"),
+            vec![TokenKind::Bool(true), TokenKind::Eof]
+        );
+        assert_eq!(
+            tokenize("false"),
+            vec![TokenKind::Bool(false), TokenKind::Eof]
+        );
     }
 
     #[test]
@@ -1114,7 +1289,7 @@ mod tests {
                 TokenKind::Identifier("a".to_string()),
                 TokenKind::Plus,
                 TokenKind::Identifier("b".to_string()),
-                TokenKind::Dedent,  // DEDENT at EOF for remaining indentation
+                TokenKind::Dedent, // DEDENT at EOF for remaining indentation
                 TokenKind::Eof,
             ]
         );

@@ -18,11 +18,13 @@ fn verbose_logging_emits_collection_markers() {
 
     let logs = events.lock().unwrap();
     assert!(
-        logs.iter().any(|l| l.contains("gc:start reason=test-collect")),
+        logs.iter()
+            .any(|l| l.contains("gc:start reason=test-collect")),
         "expected start log"
     );
     assert!(
-        logs.iter().any(|l| l.contains("gc:end reason=test-collect")),
+        logs.iter()
+            .any(|l| l.contains("gc:end reason=test-collect")),
         "expected end log"
     );
 }
@@ -43,6 +45,8 @@ fn structured_events_are_emitted() {
 
     let logs = events.lock().unwrap();
     assert!(logs.iter().any(|e| e.kind == GcLogEventKind::Allocation));
-    assert!(logs.iter().any(|e| e.kind == GcLogEventKind::CollectionStart));
+    assert!(logs
+        .iter()
+        .any(|e| e.kind == GcLogEventKind::CollectionStart));
     assert!(logs.iter().any(|e| e.kind == GcLogEventKind::CollectionEnd));
 }

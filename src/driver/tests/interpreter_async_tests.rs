@@ -140,10 +140,10 @@ main = result
 }
 
 #[test]
-fn interpreter_waitless_basic() {
-    // waitless fn can do non-blocking computation
+fn interpreter_async_basic() {
+    // async fn can do non-blocking computation
     let code = r#"
-waitless fn compute(x):
+async fn compute(x):
     return x * 2
 
 main = compute(21)
@@ -153,12 +153,12 @@ main = compute(21)
 }
 
 #[test]
-fn interpreter_waitless_blocks_print() {
-    // waitless fn cannot use print (blocking I/O)
+fn interpreter_async_blocks_print() {
+    // async fn cannot use print (blocking I/O)
     let code = r#"
 extern fn print(msg)
 
-waitless fn bad():
+async fn bad():
     print("hello")
     return 0
 
@@ -167,14 +167,18 @@ main = bad()
     let result = run_code(code, &[], "");
     assert!(result.is_err(), "Expected error but got: {:?}", result);
     let err = result.unwrap_err();
-    assert!(err.contains("blocking operation 'print' not allowed in waitless function"), "Error: {}", err);
+    assert!(
+        err.contains("blocking operation 'print' not allowed in async function"),
+        "Error: {}",
+        err
+    );
 }
 
 #[test]
-fn interpreter_waitless_blocks_await() {
-    // waitless fn cannot use await
+fn interpreter_async_blocks_await() {
+    // async fn cannot use await
     let code = r#"
-waitless fn bad():
+async fn bad():
     let f = future(42)
     return await f
 
@@ -183,7 +187,7 @@ main = bad()
     let result = run_code(code, &[], "");
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(err.contains("blocking operation 'await' not allowed in waitless function"));
+    assert!(err.contains("blocking operation 'await' not allowed in async function"));
 }
 
 #[test]
@@ -200,13 +204,13 @@ main = await fetch()
 }
 
 #[test]
-fn interpreter_waitless_can_call_waitless() {
-    // waitless fn can call other waitless functions
+fn interpreter_async_can_call_async() {
+    // async fn can call other async functions
     let code = r#"
-waitless fn double(x):
+async fn double(x):
     return x * 2
 
-waitless fn quadruple(x):
+async fn quadruple(x):
     return double(double(x))
 
 main = quadruple(10)
@@ -273,4 +277,3 @@ main = first
 }
 
 // ===== Borrowing Tests =====
-

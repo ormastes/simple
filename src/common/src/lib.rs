@@ -129,7 +129,11 @@ impl<L: DynLoader> ModuleRegistry<L> {
     }
 
     /// Load with a custom resolver for external symbols
-    pub fn load_with_resolver<F>(&self, path: &Path, resolver: F) -> Result<Arc<L::Module>, L::Error>
+    pub fn load_with_resolver<F>(
+        &self,
+        path: &Path,
+        resolver: F,
+    ) -> Result<Arc<L::Module>, L::Error>
     where
         F: Fn(&str) -> Option<usize>,
     {
@@ -156,7 +160,11 @@ impl<L: DynLoader> ModuleRegistry<L> {
     }
 
     /// Reload with a custom resolver
-    pub fn reload_with_resolver<F>(&self, path: &Path, resolver: F) -> Result<Arc<L::Module>, L::Error>
+    pub fn reload_with_resolver<F>(
+        &self,
+        path: &Path,
+        resolver: F,
+    ) -> Result<Arc<L::Module>, L::Error>
     where
         F: Fn(&str) -> Option<usize>,
     {

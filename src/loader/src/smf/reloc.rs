@@ -32,7 +32,12 @@ pub fn apply_relocations(
         let sym = symbols
             .symbols
             .get(reloc.symbol_index as usize)
-            .ok_or_else(|| format!("Relocation references missing symbol {}", reloc.symbol_index))?;
+            .ok_or_else(|| {
+                format!(
+                    "Relocation references missing symbol {}",
+                    reloc.symbol_index
+                )
+            })?;
         let sym_name = symbols.symbol_name(sym);
 
         // Resolve symbol address

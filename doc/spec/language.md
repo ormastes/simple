@@ -1261,15 +1261,15 @@ actor GameWorld:
         enemies: List[+Enemy] = []
         projectiles: List[+Projectile] = []
 
-    on SpawnEnemy(pos: Vec2, hp: i32) waitless:
+    on SpawnEnemy(pos: Vec2, hp: i32) async:
         let h: +Enemy = new+ Enemy(pos: pos, hp: hp)
         self.enemies->push(h)
 
-    on SpawnProjectile(pos: Vec2, vel: Vec2, target: +Enemy) waitless:
+    on SpawnProjectile(pos: Vec2, vel: Vec2, target: +Enemy) async:
         let p: +Projectile = new+ Projectile(pos: pos, vel: vel, target: target)
         self.projectiles->push(p)
 
-    on Tick(dt: f64) waitless:
+    on Tick(dt: f64) async:
         # Update projectiles
         for proj_handle in self.projectiles:
             match Projectile.handle_get_mut(proj_handle):
@@ -1947,6 +1947,8 @@ Macros in Simple aim to give you metaprogramming superpowers while keeping the l
 
 Simple adopts a message-passing concurrency model inspired by Erlang's actor model. Instead of shared mutable threads, concurrency in Simple is achieved by spawning lightweight processes (actors) that communicate via immutable messages. This model greatly simplifies writing concurrent programs by eliminating data races and locking concerns, as each process has its own isolated state.
 
+> Implementation note: compiled actors call runtime FFI for spawn/send/recv, but actor bodies are still a no-op stub until `body_block` outlining is added. The interpreter runs full actor bodies.
+
 ### Key Concurrency Primitives
 
 **Processes (Actors)**: A process is an independent thread of execution (managed by the runtime, potentially as a green thread or fiber) that does not share memory with other processes. Processes are extremely lightweight, allowing many of them to run concurrently. You can think of a process as analogous to an Erlang process or an Akka actor, rather than an OS thread. Since processes do not share memory, all interaction must be done through messaging.
@@ -2040,21 +2042,21 @@ In summary, concurrency in Simple is about spawning isolated processes and commu
 
 ---
 
-## Waitless Effects and Stackless Coroutine Actors
+## Async Effects and Stackless Coroutine Actors
 
-Simple provides a specialized actor model optimized for high-performance, predictable execution: **stackless coroutine actors** with **waitless** message handlers. This model guarantees that message processing never blocks, enabling extremely efficient scheduling and predictable latency.
+Simple provides a specialized actor model optimized for high-performance, predictable execution: **stackless coroutine actors** with **async** message handlers. This model guarantees that message processing never blocks, enabling extremely efficient scheduling and predictable latency.
 
-### The Waitless Effect
+### The Async Effect
 
 #### Definition of "Waiting"
 
-For waitless code, we forbid anything that can stall progress of an actor:
+For async code, we forbid anything that can stall progress of an actor:
 
 - Blocking syscalls (synchronous file/network I/O, sleep, thread join, etc.)
 - Explicit `await`, `receive`, or blocking locks
 - Spinning loops or recursion that the compiler can't prove will terminate promptly
 
-We call such operations **blocking effects**. A `waitless` function must not:
+We call such operations **blocking effects**. A `async` function must not:
 
 1. Perform any blocking effect directly
 2. Call any function that might perform a blocking effect
@@ -2066,7 +2068,7 @@ We call such operations **blocking effects**. A `waitless` function must not:
 Add a function effect modifier after the signature:
 
 ```simple
-fn handle(msg: Msg) waitless:
+fn handle(msg: Msg) async:
     # guaranteed non-blocking
     ...
 ```
@@ -2074,12 +2076,12 @@ fn handle(msg: Msg) waitless:
 Or using attribute-style syntax:
 
 ```simple
-@waitless
+@async
 fn handle(msg: Msg):
     ...
 ```
 
-**Meaning**: A `waitless` function is guaranteed by the compiler not to block or spin forever, under explicit, checkable rules.
+**Meaning**: A `async` function is guaranteed by the compiler not to block or spin forever, under explicit, checkable rules.
 
 #### Effect Classification
 
@@ -2087,36 +2089,36 @@ Every function receives a simple effect flag:
 
 | Effect | Description |
 |--------|-------------|
-| `waitless` | Statically checked to be non-blocking and structurally finite |
+| `async` | Statically checked to be non-blocking and structurally finite |
 | `may_block` | Default; can perform any operation |
 
 **Rules**:
 
-1. **Default**: Every function is `may_block` unless explicitly declared `waitless` (or inferred `waitless` by future extensions).
+1. **Default**: Every function is `may_block` unless explicitly declared `async` (or inferred `async` by future extensions).
 
-2. **Call rule**: A `waitless` function may only call:
-   - Other `waitless` functions
+2. **Call rule**: A `async` function may only call:
+   - Other `async` functions
    - Whitelisted intrinsics known to be non-blocking (pure math, local allocations, message send, etc.)
    
-   Calling a `may_block` function from `waitless` code produces a compile-time error.
+   Calling a `may_block` function from `async` code produces a compile-time error.
 
-3. **Trait methods**: Trait method signatures can be tagged `waitless`:
+3. **Trait methods**: Trait method signatures can be tagged `async`:
    ```simple
    trait Handler:
-       fn handle(msg: Msg) waitless
+       fn handle(msg: Msg) async
    ```
-   Any implementation of a `waitless` trait method must itself be `waitless`. Calling a trait object method is allowed in `waitless` code only if the trait method is declared `waitless`.
+   Any implementation of a `async` trait method must itself be `async`. Calling a trait object method is allowed in `async` code only if the trait method is declared `async`.
 
-4. **FFI / external functions**: All FFI functions are `may_block` by default. They must be explicitly annotated to be callable from `waitless` code:
+4. **FFI / external functions**: All FFI functions are `may_block` by default. They must be explicitly annotated to be callable from `async` code:
    ```simple
-   extern fn fast_random() waitless -> i64
+   extern fn fast_random() async -> i64
    ```
 
-### Compile-Time Rules for Waitless Functions
+### Compile-Time Rules for Async Functions
 
 #### Forbidden Constructs
 
-Inside a `waitless` function, the following are forbidden:
+Inside a `async` function, the following are forbidden:
 
 | Construct | Reason |
 |-----------|--------|
@@ -2125,7 +2127,7 @@ Inside a `waitless` function, the following are forbidden:
 | Blocking I/O functions | All are `may_block` |
 | Blocking locks/mutexes | Can stall indefinitely |
 | Direct recursion | Function calls itself |
-| Mutual recursion | Cycle between `waitless` functions |
+| Mutual recursion | Cycle between `async` functions |
 | Unbounded loops | Cannot prove termination |
 
 #### Loop Restrictions
@@ -2164,33 +2166,33 @@ loop:
     ...
 ```
 
-**Simplest initial rule set**: In `waitless` functions, allow only `for i in 0 .. constN` and `for elem in fixed_size_array`. Ban `while`, `loop`, and all recursion entirely. This provides strong guarantees with straightforward static checking.
+**Simplest initial rule set**: In `async` functions, allow only `for i in 0 .. constN` and `for elem in fixed_size_array`. Ban `while`, `loop`, and all recursion entirely. This provides strong guarantees with straightforward static checking.
 
 #### Data and Allocations
 
-Inside a `waitless` function:
+Inside a `async` function:
 
 - **Local allocations** (stack, small heap) are allowed if they cannot block. If the GC is unpredictable, options include:
-  - Disallow heap allocation in `waitless` entirely
+  - Disallow heap allocation in `async` entirely
   - Provide a "bump allocator" region guaranteed to be non-blocking and fast
 
 - **Mutations** must be to local or actor-local state only (no global locks). This aligns with Simple's immutability-by-default philosophy.
 
 #### Static Checking Algorithm
 
-For each `waitless` function `f`:
+For each `async` function `f`:
 
 1. **Scan body for forbidden constructs**:
    - If `await`, `receive`, `lock`, `sleep`, `while`, `loop`, or explicit recursion is found → reject
 
 2. **Build call graph from `f`**:
    - For every call site in `f` (and transitive callees):
-     - Verify callee is `waitless` or a whitelisted intrinsic
+     - Verify callee is `async` or a whitelisted intrinsic
 
 3. **Check loops**:
    - Verify each `for` loop has a statically-known upper bound
 
-If any check fails: **compile-time error** with message indicating which `waitless` constraint was violated.
+If any check fails: **compile-time error** with message indicating which `async` constraint was violated.
 
 ### Runtime Detection
 
@@ -2205,19 +2207,19 @@ Some properties cannot be fully proven at compile time:
 
 #### Runtime Guard: TLS Context Flag
 
-When entering a `waitless` function, the compiler/runtime sets a thread/actor-local flag:
+When entering a `async` function, the compiler/runtime sets a thread/actor-local flag:
 
 ```simple
 # Pseudocode - compiler-generated
-TLS.current_context = Context.Waitless
+TLS.current_context = Context.Async
 ```
 
 When exiting, the flag is restored. All blocking APIs in the runtime check this flag:
 
 ```simple
 fn sleep(ms: i64):
-    if TLS.current_context == Context.Waitless:
-        panic("sleep() called from waitless context")
+    if TLS.current_context == Context.Async:
+        panic("sleep() called from async context")
     # ... actual implementation
 ```
 
@@ -2245,7 +2247,7 @@ This protects against FFI bypasses, unsafe code, or future language relaxations.
 Optionally, the scheduler can:
 
 1. Track instruction count or wall-clock time per actor message handling
-2. If a `waitless` handler exceeds a configured budget:
+2. If a `async` handler exceeds a configured budget:
    - Log the violation
    - Preempt the handler (if preemption is implemented)
    - Kill and restart the actor (with supervision)
@@ -2261,13 +2263,13 @@ actor Counter:
     state:
         value: i64 = 0
 
-    on Inc(by: i64) waitless:
+    on Inc(by: i64) async:
         self.value = self.value + by
 
-    on Get(reply_to: Pid[i64]) waitless:
+    on Get(reply_to: Pid[i64]) async:
         send reply_to, self.value
 
-    on Reset() waitless:
+    on Reset() async:
         self.value = 0
 ```
 
@@ -2275,8 +2277,8 @@ actor Counter:
 
 - `actor Name:` defines an actor type
 - `state:` block declares actor-local fields (immutable by default; use `mut` if needed)
-- `on MessageType(...) waitless:` defines message handlers
-- Every handler must be `waitless` (by design for this actor kind)
+- `on MessageType(...) async:` defines message handlers
+- Every handler must be `async` (by design for this actor kind)
 
 #### Stackless and Run-to-Completion
 
@@ -2303,7 +2305,7 @@ Within an actor's `on` handler, `self` is implicitly available and points to the
 **Option A: Normal parameter** (simplest):
 ```simple
 # Compiler-generated signature
-fn Counter_on_Inc(self: &mut CounterState, msg: Inc) waitless:
+fn Counter_on_Inc(self: &mut CounterState, msg: Inc) async:
     self.value = self.value + msg.by
 ```
 
@@ -2319,7 +2321,7 @@ Both appear identical from user code: you write `self.value`, `self.buffer`, etc
 
 #### Allowed Operations in Handlers
 
-Inside `on ... waitless:` handlers:
+Inside `on ... async:` handlers:
 
 **Allowed** (compile-time verified):
 | Operation | Notes |
@@ -2329,7 +2331,7 @@ Inside `on ... waitless:` handlers:
 | `send pid, msg` | Non-blocking |
 | `spawn` new actors | Non-blocking |
 | Logging, metrics | Assuming non-blocking implementations |
-| Bounded loops | Per `waitless` rules |
+| Bounded loops | Per `async` rules |
 
 **Forbidden** (compile-time error):
 | Operation | Reason |
@@ -2340,7 +2342,7 @@ Inside `on ... waitless:` handlers:
 | Recursion / unbounded loops | Cannot prove termination |
 
 **Forbidden** (runtime guard via TLS):
-- Any `may_block` API call when `TLS.current_context == Waitless`
+- Any `may_block` API call when `TLS.current_context == Async`
 
 #### Message Queue and Scheduling
 
@@ -2356,7 +2358,7 @@ Runtime responsibilities:
        handler = lookup_handler(actor.type, msg.type)
        
        # Set TLS flags
-       TLS.current_context = Context.Waitless
+       TLS.current_context = Context.Async
        TLS.current_actor = actor
        
        # Run handler
@@ -2389,7 +2391,7 @@ actor StreamParser:
         buffer: Bytes = Bytes.empty()
         header: Option[Header] = None
 
-    on Data(chunk: Bytes) waitless:
+    on Data(chunk: Bytes) async:
         match self.mode:
             case ReadingHeader:
                 self.buffer->append(chunk)
@@ -2408,7 +2410,7 @@ actor StreamParser:
                 # Ignore further data or log warning
                 pass
 
-    on Reset() waitless:
+    on Reset() async:
         self.mode = ParserMode.ReadingHeader
         self.buffer = Bytes.empty()
         self.header = None
@@ -2434,23 +2436,23 @@ actor Main:
     state:
         counter: Pid[Counter.Msg]
 
-    on Start() waitless:
+    on Start() async:
         self.counter = spawn Counter()
         send self.counter, Inc(by: 10)
         send self.counter, Get(reply_to: self.pid)
 
-    on Int(value: i64) waitless:
+    on Int(value: i64) async:
         # Received response from Counter
         print "Counter value: {value}"
 ```
 
 #### Error Handling for Violations
 
-If something violates `waitless` rules at runtime:
+If something violates `async` rules at runtime:
 
 | Violation | Response |
 |-----------|----------|
-| Blocking API called in waitless context | Panic or controlled error |
+| Blocking API called in async context | Panic or controlled error |
 | Recursion limit exceeded | Panic with stack info |
 | Handler exceeds time budget | Supervisor flags/kills actor |
 
@@ -2464,7 +2466,7 @@ Simple supports both:
 
 1. **Standard actors** (from the Concurrency section): Use `spawn`, `send`, `receive` with full flexibility including blocking operations
 
-2. **Stackless coroutine actors** (this section): Use `actor` definition with `waitless` handlers for guaranteed non-blocking execution
+2. **Stackless coroutine actors** (this section): Use `actor` definition with `async` handlers for guaranteed non-blocking execution
 
 You can mix both in the same system:
 
@@ -2484,24 +2486,24 @@ actor Coordinator:
         workers: List[Pid]
         pending: Dict[RequestId, Pid]
 
-    on Dispatch(job: Job, client: Pid) waitless:
+    on Dispatch(job: Job, client: Pid) async:
         let worker = self.workers.next_available()
         let req_id = generate_id()
         self.pending[req_id] = client
         send worker, Job(job.data, reply_to: self.pid, req_id: req_id)
 
-    on Result(data: Data, req_id: RequestId) waitless:
+    on Result(data: Data, req_id: RequestId) async:
         let client = self.pending.remove(req_id)
         send client, Response(data)
 ```
 
 ### Summary
 
-The waitless stackless coroutine actor model provides:
+The async stackless coroutine actor model provides:
 
 | Feature | Benefit |
 |---------|---------|
-| `waitless` effect | Compile-time guarantee of non-blocking execution |
+| `async` effect | Compile-time guarantee of non-blocking execution |
 | Static analysis | Catches blocking calls, recursion, unbounded loops |
 | Runtime guards | TLS flag catches FFI/unsafe violations |
 | Stackless design | No suspended frames; state machines in fields |
@@ -2688,7 +2690,7 @@ for msg in results:
 | Communication | Message passing | Channels |
 | Scheduling | Runtime scheduler | OS scheduler |
 | Use case | Many lightweight tasks | CPU-bound parallelism |
-| Blocking | Discouraged (waitless) | Allowed |
+| Blocking | Discouraged (async) | Allowed |
 
 ### Thread Pool Integration
 
@@ -2865,7 +2867,7 @@ fn fetch_data() -> Future<Data>:
     # 3. Resolves with the parsed Data
 ```
 
-**Important**: `await` can only be used inside `async` functions. Using `await` in a `waitless` context is a compile-time error.
+**Important**: `await` can only be used inside `async` functions. Using `await` in a `async` context is a compile-time error.
 
 ### Future Combinators
 
@@ -2937,7 +2939,7 @@ actor DataService:
     state:
         cache: Dict<String, Data> = {}
 
-    # Async handler (NOT waitless - can await)
+    # Async handler (NOT async - can await)
     on FetchData(key: String, reply_to: Pid) async:
         if key in self.cache:
             send reply_to, self.cache[key]
@@ -2947,7 +2949,7 @@ actor DataService:
             send reply_to, data
 ```
 
-**Note**: Async handlers cannot be marked `waitless` since `await` is a blocking operation. Use standard actors for async operations and stackless coroutine actors for guaranteed non-blocking handlers.
+**Note**: Async handlers cannot be marked `async` since `await` is a blocking operation. Use standard actors for async operations and stackless coroutine actors for guaranteed non-blocking handlers.
 
 ### Request-Response Pattern
 
@@ -3629,4 +3631,3 @@ In summary, the standard library gives you everything you need to be productive:
 - Vinicius Stock, Write a simple DSL in Ruby – Demonstrates using method_missing in a DSL context to handle calls that aren't pre-defined in the interface.
 - QuickBird Studios, Swift Macros – Example of macros requiring naming schemes for generated declarations to aid tooling and avoid conflicts.
 - Fred Hebert et al., Erlang Concurrency – Erlang's model uses spawn to create processes and messages that are sent immutably to process mailboxes; Simple adopts this for safe concurrency.
-

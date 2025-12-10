@@ -2,122 +2,144 @@
 
 ## Overview
 
-This directory tracks the implementation status of all 48 language features.
+This directory tracks the implementation status of language features.
 
-## Status Summary
+## Component Status
 
-| Status | Count | Description |
-|--------|-------|-------------|
-| Implemented | 48 | Fully working with tests |
+| Component | Status | Notes |
+|-----------|--------|-------|
+| **Lexer** | Complete | Tokens, INDENT/DEDENT, comments |
+| **Parser** | Complete | Full AST generation |
+| **Type Checker** | Partial | Basic HM inference scaffold |
+| **HIR** | Stub | Structure exists, minimal lowering |
+| **MIR** | Stub | Types defined, no transformation |
+| **Cranelift Codegen** | Stub | Not generating real code |
+| **Interpreter** | **Complete** | Tree-walking, all features |
+| **SMF Loader** | Complete | Binary format loading |
+| **Driver/CLI** | Complete | Run, watch modes |
+| **Runtime/GC** | Complete | Abfall-backed wrapper |
 
-## Features by Status
+## Execution Model
 
-### Fully Implemented (48)
+The Simple language currently uses a **tree-walking interpreter** for execution:
 
-| # | Feature | Difficulty | File |
-|---|---------|------------|------|
-| 1 | Basic Types | 1 | `basic_types_integer_literals.md` |
-| 2 | Variables & Let Bindings | 2 | `variables_let_bindings.md` |
-| 3 | Mutability Control | 3 | `mutability_control.md` |
-| 4 | Operators | 2 | `operators_arithmetic.md` |
-| 5 | Control Flow | 2 | `control_flow_if_else.md` |
-| 6 | Loops | 2 | `loops.md` |
-| 7 | Functions | 3 | `functions.md` |
-| 8 | Indentation-Based Blocks | 4 | `indentation_blocks.md` |
-| 9 | Structs | 3 | `structs.md` |
-| 10 | Classes | 4 | `classes.md` |
-| 11 | Enums | 3 | `enums.md` |
-| 12 | Pattern Matching | 4 | `pattern_matching.md` |
-| 13 | Type Inference | 4 | `type_inference.md` |
-| 14 | Generics | 4 | `generics.md` |
-| 15 | Traits | 4 | `traits.md` |
-| 16 | Impl Blocks | 3 | `impl_blocks.md` |
-| 17 | Lambdas/Closures | 4 | `lambdas_closures.md` |
-| 18 | Named Arguments | 2 | `named_arguments.md` |
-| 19 | Trailing Blocks | 3 | `trailing_blocks.md` |
-| 20 | Functional Update (->) | 2 | `functional_update.md` |
-| 21 | String Interpolation | 3 | `string_interpolation.md` |
-| 22 | Comments | 1 | `comments.md` |
-| 23 | Line Continuation | 2 | `line_continuation.md` |
-| 24 | GC-Managed Memory | 5 | `gc_managed_default.md` |
-| 25 | Unique Pointers | 4 | `unique_pointers.md` |
-| 26 | Shared Pointers | 4 | `shared_pointers.md` |
-| 27 | Weak Pointers | 3 | `weak_pointers.md` |
-| 28 | Handle Pointers | 4 | `handle_pointers.md` |
-| 29 | Borrowing | 5 | `borrowing.md` |
-| 30 | Actors | 3 | `actors.md` |
-| 31 | Concurrency | 3 | `concurrency_primitives.md` |
-| 32 | Waitless Effects | 4 | `waitless_effects.md` |
-| 33 | Stackless Coroutines | 4 | `stackless_coroutines.md` |
-| 34 | Macros | 4 | `macros.md` |
-| 35 | Context Blocks | 3 | `context_blocks.md` |
-| 36 | Method Missing | 4 | `method_missing.md` |
-| 37 | Union Types | 2 | `union_types.md` |
-| 38 | Option Type | 2 | `option_type.md` |
-| 39 | Symbols/Atoms | 2 | `symbols_atoms.md` |
-| 40 | Tuple Types | 2 | `tuple_types.md` |
-| 41 | Array Types | 3 | `array_types.md` |
-| 42 | Dictionary Types | 3 | `dictionary_types.md` |
-| 43 | Type Aliases | 2 | `type_aliases.md` |
-| 44 | Visibility Modifiers | 2 | `visibility_modifiers.md` |
-| 45 | Static/Const | 3 | `static_const_declarations.md` |
-| 46 | Extern Functions | 4 | `extern_functions.md` |
-| 47 | No-Parentheses Calls | 3 | `no_paren_calls.md` |
-| 48 | Futures/Promises | 3 | `futures_promises.md` |
+```
+Source (.spl) → Lexer → Parser → AST → Type Check → Interpreter → Result
+                                              ↓
+                                    SMF (returns interpreter result)
+```
+
+The SMF binary currently just packages the interpreter's result as x86-64 `mov eax, <result>; ret`.
 
 ## Test Summary
 
 ```
-Total tests: ~323
-├── Interpreter tests: 177
-├── Parser tests: 50
-├── Compiler tests: 31 (HIR: 10, MIR: 9, Cranelift: 4, Types: 8)
-├── Runtime tests: 10+
-├── Runner tests: 26
-├── Type checker tests: 18
-├── Common tests: 6
+Total tests: 425+ passing (19 failing in collections)
+├── Parser tests: ~180
+├── Interpreter tests: ~100
+├── Type checker tests: ~22
+├── Compiler tests: ~30
+├── Common tests: ~6
 └── Other: Various
 ```
 
-Run all tests:
+Run tests:
 ```bash
-cargo test
+cargo test --workspace
 ```
 
-## Runtime/Pointer Support Matrix
+## Feature Status Summary
 
-| Pointer Type | Runtime | Parser | Language |
-|--------------|---------|--------|----------|
-| GC (default) | ✅ | ✅ | ✅ |
-| Unique (&T) | ✅ | ✅ | ✅ |
-| Shared (*T) | ✅ | ✅ | ✅ |
-| Weak (-T) | ✅ | ✅ | ✅ |
-| Handle (+T) | ✅ | ✅ | ✅ |
-| Borrow (&T) | ✅ | ✅ | ✅ |
-| BorrowMut (&mut T) | ✅ | ✅ | ✅ |
+| Status | Count | Description |
+|--------|-------|-------------|
+| Interpreter Complete | 48 | Working via tree-walking interpreter |
+| Native Codegen | 0 | HIR/MIR/Cranelift are stubs |
+| Partial | 19 | Some tests failing (Result, decorators, with) |
 
-## Concurrency Support
+## Features by Implementation Level
+
+### Fully Working (Interpreter)
+
+All 48 original features work through the interpreter:
+
+| Category | Features |
+|----------|----------|
+| **Core** | Basic types, variables, operators, control flow, loops, functions |
+| **Data Types** | Structs, classes, enums, tuples, arrays, dicts, unions |
+| **Type System** | Type inference (HM scaffold), generics, traits, impl blocks |
+| **Memory** | GC-managed, unique/shared/weak/handle pointers, borrowing |
+| **Concurrency** | Actors, spawn/send/recv, async/await, futures, generators |
+| **Syntax** | Comments, indentation blocks, lambdas, pattern matching |
+| **Advanced** | Macros, context blocks, method missing, string interpolation |
+
+### Partially Working (19 failing tests)
+
+| Feature | Issue |
+|---------|-------|
+| Result type | `Ok`/`Err` not in scope |
+| `?` operator | Depends on Result |
+| Decorators | Some edge cases failing |
+| `with` statement | Class enter/exit issues |
+| `if let`/`while let` | Pattern binding issues |
+
+### Not Yet Implemented (Features 49-98)
+
+| # | Feature | Difficulty |
+|---|---------|------------|
+| 49-55 | CLI enhancements (SMF gen, REPL, -c) | 2-3 |
+| 56-61 | Package manager | 2-4 |
+| 62-70 | Python-style syntax (comprehensions, slicing, decorators) | 2-3 |
+| 71-81 | Rust-style features (attributes, match guards, derive) | 2-3 |
+| 82 | Auto-forwarding properties | 3 |
+| 83-86 | Isolated threads, channels | 3-4 |
+| 87-92 | Unit types, literal suffixes | 2-4 |
+| 93-98 | Numeric literals, constructor polymorphism | 1-3 |
+
+## Native Compilation Pipeline (TODO)
+
+To achieve native compilation (not interpreter):
+
+1. **HIR Lowering** - AST → typed HIR
+2. **MIR Transformation** - HIR → simplified MIR
+3. **Cranelift Codegen** - MIR → machine code
+
+Current blockers:
+- HIR/MIR types exist but no real transformation
+- Cranelift module structure exists but not wired up
+- SMF generation uses interpreter result, not codegen
+
+## Concurrency Support (Interpreter)
 
 | Feature | Status |
 |---------|--------|
-| `spawn` | ✅ Working |
-| `send/recv` | ✅ Working (timeout-based) |
-| `join` | ✅ Working |
-| `reply` | ✅ Working |
-| `async/await` | ✅ Working |
-| `future` | ✅ Working |
-| `generator` | ✅ Working |
-| `waitless` | ✅ Working |
+| `spawn` | Working |
+| `send/recv` | Working (timeout-based) |
+| `join` | Working |
+| `reply` | Working |
+| `async/await` | Working |
+| `future` | Working |
+| `generator` | Working |
 
-## Remaining Work
+## Pointer/Memory Support (Interpreter)
 
-All 48 features are now implemented. Future enhancements:
-- Macro hygiene (avoid name collisions)
-- `stringify!` macro for expression text
-- Actor supervision
-- Channel creation syntax
-- Select/multiplex on channels
+| Pointer Type | Syntax | Status |
+|--------------|--------|--------|
+| GC (default) | `T` | Working |
+| Unique | `&T` | Working |
+| Shared | `*T` | Working |
+| Weak | `-T` | Working |
+| Handle | `+T` | Working |
+| Borrow | `&T` | Working |
+| BorrowMut | `&mut T` | Working |
 
 ## Architecture
 
-See `CLAUDE.md` and `architecture.md` for design principles.
+See `CLAUDE.md` and `doc/architecture.md` for design principles.
+
+## Individual Feature Status Files
+
+Each `.md` file in this directory documents a specific feature's status:
+- Implementation approach
+- Test coverage
+- Known issues
+- Next steps

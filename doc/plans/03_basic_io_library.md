@@ -44,23 +44,23 @@ Implement minimal terminal input/output for the Simple language runtime. This is
 
 ```simple
 # Print without newline
-fn print(value: Any) waitless
+fn print(value: Any) async
 
 # Print with newline
-fn println(value: Any) waitless
+fn println(value: Any) async
 
 # Formatted print (with string interpolation)
-fn printf(format: String, args: [Any]) waitless
+fn printf(format: String, args: [Any]) async
 
 # Print to stderr
-fn eprint(value: Any) waitless
-fn eprintln(value: Any) waitless
+fn eprint(value: Any) async
+fn eprintln(value: Any) async
 ```
 
 ### Input Functions
 
 ```simple
-# Read a line from stdin (blocking - NOT waitless)
+# Read a line from stdin (blocking - NOT async)
 fn input() -> String
 
 # Read a line with prompt
@@ -70,7 +70,7 @@ fn input(prompt: String) -> String
 fn read_char() -> Char
 
 # Check if input available (non-blocking)
-fn has_input() waitless -> Bool
+fn has_input() async -> Bool
 ```
 
 ---

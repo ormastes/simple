@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use simple_parser::{self as ast, Module, Node, Expr, Type, Pattern};
 use simple_parser::ast::Mutability;
+use simple_parser::{self as ast, Expr, Module, Node, Pattern, Type};
 use thiserror::Error;
 
 use super::types::*;
@@ -72,8 +72,16 @@ impl FunctionContext {
 
     fn add_local(&mut self, name: String, ty: TypeId, is_mutable: bool) -> usize {
         let index = self.locals.len();
-        let mutability = if is_mutable { Mutability::Mutable } else { Mutability::Immutable };
-        self.locals.push(LocalVar { name: name.clone(), ty, mutability });
+        let mutability = if is_mutable {
+            Mutability::Mutable
+        } else {
+            Mutability::Immutable
+        };
+        self.locals.push(LocalVar {
+            name: name.clone(),
+            ty,
+            mutability,
+        });
         self.local_map.insert(name, index);
         index
     }
@@ -112,9 +120,16 @@ impl Lowerer {
                 }
                 Node::Class(c) => {
                     // Register class as a struct-like type
-                    let fields: Vec<_> = c.fields.iter().map(|f| {
-                        (f.name.clone(), self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
-                    }).collect();
+                    let fields: Vec<_> = c
+                        .fields
+                        .iter()
+                        .map(|f| {
+                            (
+                                f.name.clone(),
+                                self.resolve_type(&f.ty).unwrap_or(TypeId::VOID),
+                            )
+                        })
+                        .collect();
                     self.module.types.register_named(
                         c.name.clone(),
                         HirType::Struct {
@@ -125,12 +140,19 @@ impl Lowerer {
                 }
                 Node::Enum(e) => {
                     // Register enum type with variant information
-                    let variants = e.variants.iter().map(|v| {
-                        let fields = v.fields.as_ref().map(|types| {
-                            types.iter().map(|t| self.resolve_type(t).unwrap_or(TypeId::VOID)).collect()
-                        });
-                        (v.name.clone(), fields)
-                    }).collect();
+                    let variants = e
+                        .variants
+                        .iter()
+                        .map(|v| {
+                            let fields = v.fields.as_ref().map(|types| {
+                                types
+                                    .iter()
+                                    .map(|t| self.resolve_type(t).unwrap_or(TypeId::VOID))
+                                    .collect()
+                            });
+                            (v.name.clone(), fields)
+                        })
+                        .collect();
                     self.module.types.register_named(
                         e.name.clone(),
                         HirType::Enum {
@@ -139,15 +161,31 @@ impl Lowerer {
                         },
                     );
                 }
-                Node::Trait(_) | Node::Actor(_) | Node::TypeAlias(_) | Node::Impl(_)
-                | Node::Extern(_) | Node::Macro(_) => {
+                Node::Trait(_)
+                | Node::Actor(_)
+                | Node::TypeAlias(_)
+                | Node::Impl(_)
+                | Node::Extern(_)
+                | Node::Macro(_)
+                | Node::Unit(_) => {
                     // These are handled at type-check time or runtime
                     // HIR lowering focuses on functions and struct types
                 }
-                Node::Let(_) | Node::Const(_) | Node::Static(_) | Node::Assignment(_)
-                | Node::Return(_) | Node::If(_) | Node::Match(_) | Node::For(_)
-                | Node::While(_) | Node::Loop(_) | Node::Break(_) | Node::Continue(_)
-                | Node::Context(_) | Node::Expression(_) => {
+                Node::Let(_)
+                | Node::Const(_)
+                | Node::Static(_)
+                | Node::Assignment(_)
+                | Node::Return(_)
+                | Node::If(_)
+                | Node::Match(_)
+                | Node::For(_)
+                | Node::While(_)
+                | Node::Loop(_)
+                | Node::Break(_)
+                | Node::Continue(_)
+                | Node::Context(_)
+                | Node::With(_)
+                | Node::Expression(_) => {
                     // Statement nodes at module level are not supported in HIR
                     // They should be inside function bodies
                 }
@@ -182,10 +220,11 @@ impl Lowerer {
 
     fn resolve_type(&mut self, ty: &Type) -> LowerResult<TypeId> {
         match ty {
-            Type::Simple(name) => {
-                self.module.types.lookup(name)
-                    .ok_or_else(|| LowerError::UnknownType(name.clone()))
-            }
+            Type::Simple(name) => self
+                .module
+                .types
+                .lookup(name)
+                .ok_or_else(|| LowerError::UnknownType(name.clone())),
             Type::Pointer { kind, inner } => {
                 let inner_id = self.resolve_type(inner)?;
                 let ptr_type = HirType::Pointer {
@@ -210,7 +249,10 @@ impl Lowerer {
                         None
                     }
                 });
-                Ok(self.module.types.register(HirType::Array { element: elem_id, size: size_val }))
+                Ok(self.module.types.register(HirType::Array {
+                    element: elem_id,
+                    size: size_val,
+                }))
             }
             Type::Function { params, ret } => {
                 let mut param_ids = Vec::new();
@@ -222,7 +264,10 @@ impl Lowerer {
                 } else {
                     TypeId::VOID
                 };
-                Ok(self.module.types.register(HirType::Function { params: param_ids, ret: ret_id }))
+                Ok(self.module.types.register(HirType::Function {
+                    params: param_ids,
+                    ret: ret_id,
+                }))
             }
             Type::Optional(inner) => {
                 // Optional is represented as a nullable pointer or special enum
@@ -274,7 +319,11 @@ impl Lowerer {
         })
     }
 
-    fn lower_block(&mut self, block: &ast::Block, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
+    fn lower_block(
+        &mut self,
+        block: &ast::Block,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirStmt>> {
         let mut stmts = Vec::new();
         for node in &block.statements {
             stmts.extend(self.lower_node(node, ctx)?);
@@ -304,7 +353,11 @@ impl Lowerer {
 
                 let local_index = ctx.add_local(name, ty, let_stmt.mutability.is_mutable());
 
-                Ok(vec![HirStmt::Let { local_index, ty, value }])
+                Ok(vec![HirStmt::Let {
+                    local_index,
+                    ty,
+                    value,
+                }])
             }
 
             Node::Assignment(assign) => {
@@ -325,13 +378,33 @@ impl Lowerer {
             Node::If(if_stmt) => {
                 let condition = self.lower_expr(&if_stmt.condition, ctx)?;
                 let then_block = self.lower_block(&if_stmt.then_block, ctx)?;
-                let else_block = if let Some(eb) = &if_stmt.else_block {
+
+                // Build else block, incorporating elif branches from the end
+                // elif a: B1; elif b: B2; else: E  =>  if a: B1 else: if b: B2 else: E
+                let mut else_block = if let Some(eb) = &if_stmt.else_block {
                     Some(self.lower_block(eb, ctx)?)
                 } else {
                     None
                 };
 
-                Ok(vec![HirStmt::If { condition, then_block, else_block }])
+                // Process elif branches in reverse order to build nested if-else chain
+                for (elif_cond, elif_body) in if_stmt.elif_branches.iter().rev() {
+                    let elif_condition = self.lower_expr(elif_cond, ctx)?;
+                    let elif_then = self.lower_block(elif_body, ctx)?;
+
+                    // Wrap the current else_block in a nested if
+                    else_block = Some(vec![HirStmt::If {
+                        condition: elif_condition,
+                        then_block: elif_then,
+                        else_block,
+                    }]);
+                }
+
+                Ok(vec![HirStmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                }])
             }
 
             Node::While(while_stmt) => {
@@ -407,11 +480,16 @@ impl Lowerer {
 
                 // Type is determined by operands (simplified)
                 let ty = match op {
-                    ast::BinOp::Eq | ast::BinOp::NotEq |
-                    ast::BinOp::Lt | ast::BinOp::Gt |
-                    ast::BinOp::LtEq | ast::BinOp::GtEq |
-                    ast::BinOp::And | ast::BinOp::Or |
-                    ast::BinOp::Is | ast::BinOp::In => TypeId::BOOL,
+                    ast::BinOp::Eq
+                    | ast::BinOp::NotEq
+                    | ast::BinOp::Lt
+                    | ast::BinOp::Gt
+                    | ast::BinOp::LtEq
+                    | ast::BinOp::GtEq
+                    | ast::BinOp::And
+                    | ast::BinOp::Or
+                    | ast::BinOp::Is
+                    | ast::BinOp::In => TypeId::BOOL,
                     _ => left_hir.ty,
                 };
 
@@ -556,7 +634,11 @@ impl Lowerer {
                 })
             }
 
-            Expr::If { condition, then_branch, else_branch } => {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 let cond_hir = Box::new(self.lower_expr(condition, ctx)?);
                 let then_hir = Box::new(self.lower_expr(then_branch, ctx)?);
                 let else_hir = if let Some(eb) = else_branch {
@@ -597,21 +679,21 @@ impl Lowerer {
                     Err(LowerError::UnknownVariable(name.clone()))
                 }
             }
-            Expr::Binary { op, left, .. } => {
-                match op {
-                    ast::BinOp::Eq | ast::BinOp::NotEq |
-                    ast::BinOp::Lt | ast::BinOp::Gt |
-                    ast::BinOp::LtEq | ast::BinOp::GtEq |
-                    ast::BinOp::And | ast::BinOp::Or => Ok(TypeId::BOOL),
-                    _ => self.infer_type(left, ctx),
-                }
-            }
-            Expr::Unary { op, operand } => {
-                match op {
-                    ast::UnaryOp::Not => Ok(TypeId::BOOL),
-                    _ => self.infer_type(operand, ctx),
-                }
-            }
+            Expr::Binary { op, left, .. } => match op {
+                ast::BinOp::Eq
+                | ast::BinOp::NotEq
+                | ast::BinOp::Lt
+                | ast::BinOp::Gt
+                | ast::BinOp::LtEq
+                | ast::BinOp::GtEq
+                | ast::BinOp::And
+                | ast::BinOp::Or => Ok(TypeId::BOOL),
+                _ => self.infer_type(left, ctx),
+            },
+            Expr::Unary { op, operand } => match op {
+                ast::UnaryOp::Not => Ok(TypeId::BOOL),
+                _ => self.infer_type(operand, ctx),
+            },
             Expr::Call { callee, .. } => {
                 // Return type of call is the type of the callee (function)
                 self.infer_type(callee, ctx)
@@ -669,7 +751,10 @@ impl Lowerer {
                 _ => Err(LowerError::CannotInferDerefType(format!("{:?}", hir_ty))),
             }
         } else {
-            Err(LowerError::CannotInferDerefType(format!("TypeId({:?})", ptr_ty)))
+            Err(LowerError::CannotInferDerefType(format!(
+                "TypeId({:?})",
+                ptr_ty
+            )))
         }
     }
 
@@ -713,9 +798,10 @@ impl Lowerer {
                 HirType::Tuple(types) => {
                     // For tuple indexing, would need compile-time index
                     // For now, return first element type if exists
-                    types.first().copied().ok_or_else(|| {
-                        LowerError::CannotInferIndexType("empty tuple".to_string())
-                    })
+                    types
+                        .first()
+                        .copied()
+                        .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string()))
                 }
                 HirType::Pointer { inner, .. } => {
                     // Auto-deref for pointer to array
@@ -724,7 +810,10 @@ impl Lowerer {
                 _ => Err(LowerError::CannotInferIndexType(format!("{:?}", hir_ty))),
             }
         } else {
-            Err(LowerError::CannotInferIndexType(format!("TypeId({:?})", arr_ty)))
+            Err(LowerError::CannotInferIndexType(format!(
+                "TypeId({:?})",
+                arr_ty
+            )))
         }
     }
 }
@@ -777,7 +866,9 @@ mod tests {
     #[test]
     fn test_basic_types() {
         // Test basic types: i64, str, bool, f64
-        let module = parse_and_lower("fn greet(name: str) -> i64:\n    let x: i64 = 42\n    return x\n").unwrap();
+        let module =
+            parse_and_lower("fn greet(name: str) -> i64:\n    let x: i64 = 42\n    return x\n")
+                .unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.params[0].ty, TypeId::STRING);
@@ -787,9 +878,9 @@ mod tests {
 
     #[test]
     fn test_lower_function_with_locals() {
-        let module = parse_and_lower(
-            "fn compute(x: i64) -> i64:\n    let y: i64 = x * 2\n    return y\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn compute(x: i64) -> i64:\n    let y: i64 = x * 2\n    return y\n")
+                .unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.params.len(), 1);
@@ -809,9 +900,8 @@ mod tests {
 
     #[test]
     fn test_lower_binary_ops() {
-        let module = parse_and_lower(
-            "fn compare(a: i64, b: i64) -> bool:\n    return a < b\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn compare(a: i64, b: i64) -> bool:\n    return a < b\n").unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.return_type, TypeId::BOOL);
@@ -846,35 +936,31 @@ mod tests {
     #[test]
     fn test_lower_struct() {
         let module = parse_and_lower(
-            "struct Point:\n    x: f64\n    y: f64\n\nfn origin() -> i64:\n    return 0\n"
-        ).unwrap();
+            "struct Point:\n    x: f64\n    y: f64\n\nfn origin() -> i64:\n    return 0\n",
+        )
+        .unwrap();
 
         assert!(module.types.lookup("Point").is_some());
     }
 
     #[test]
     fn test_unknown_type_error() {
-        let result = parse_and_lower(
-            "fn test(x: Unknown) -> i64:\n    return 0\n"
-        );
+        let result = parse_and_lower("fn test(x: Unknown) -> i64:\n    return 0\n");
 
         assert!(matches!(result, Err(LowerError::UnknownType(_))));
     }
 
     #[test]
     fn test_unknown_variable_error() {
-        let result = parse_and_lower(
-            "fn test() -> i64:\n    return unknown\n"
-        );
+        let result = parse_and_lower("fn test() -> i64:\n    return unknown\n");
 
         assert!(matches!(result, Err(LowerError::UnknownVariable(_))));
     }
 
     #[test]
     fn test_lower_array_expression() {
-        let module = parse_and_lower(
-            "fn test() -> i64:\n    let arr = [1, 2, 3]\n    return 0\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn test() -> i64:\n    let arr = [1, 2, 3]\n    return 0\n").unwrap();
 
         let func = &module.functions[0];
         assert!(!func.locals.is_empty());
@@ -882,9 +968,8 @@ mod tests {
 
     #[test]
     fn test_lower_tuple_expression() {
-        let module = parse_and_lower(
-            "fn test() -> i64:\n    let t = (1, 2, 3)\n    return 0\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn test() -> i64:\n    let t = (1, 2, 3)\n    return 0\n").unwrap();
 
         let func = &module.functions[0];
         assert!(!func.locals.is_empty());
@@ -892,9 +977,8 @@ mod tests {
 
     #[test]
     fn test_lower_empty_array() {
-        let module = parse_and_lower(
-            "fn test() -> i64:\n    let arr = []\n    return 0\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn test() -> i64:\n    let arr = []\n    return 0\n").unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.locals.len(), 1);
@@ -903,8 +987,9 @@ mod tests {
     #[test]
     fn test_lower_index_expression() {
         let module = parse_and_lower(
-            "fn test() -> i64:\n    let arr = [1, 2, 3]\n    let x = arr[0]\n    return x\n"
-        ).unwrap();
+            "fn test() -> i64:\n    let arr = [1, 2, 3]\n    let x = arr[0]\n    return x\n",
+        )
+        .unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.locals.len(), 2);
@@ -922,8 +1007,9 @@ mod tests {
     #[test]
     fn test_lower_if_expression() {
         let module = parse_and_lower(
-            "fn test(x: i64) -> i64:\n    let y = if x > 0: 1 else: 0\n    return y\n"
-        ).unwrap();
+            "fn test(x: i64) -> i64:\n    let y = if x > 0: 1 else: 0\n    return y\n",
+        )
+        .unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.locals.len(), 1);
@@ -932,9 +1018,7 @@ mod tests {
     #[test]
     fn test_lower_string_literal() {
         // Use single quotes for raw string (double quotes create FStrings)
-        let module = parse_and_lower(
-            "fn test() -> str:\n    return 'hello'\n"
-        ).unwrap();
+        let module = parse_and_lower("fn test() -> str:\n    return 'hello'\n").unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.return_type, TypeId::STRING);
@@ -942,9 +1026,7 @@ mod tests {
 
     #[test]
     fn test_lower_bool_literal() {
-        let module = parse_and_lower(
-            "fn test() -> bool:\n    return false\n"
-        ).unwrap();
+        let module = parse_and_lower("fn test() -> bool:\n    return false\n").unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.return_type, TypeId::BOOL);
@@ -952,9 +1034,7 @@ mod tests {
 
     #[test]
     fn test_lower_float_literal() {
-        let module = parse_and_lower(
-            "fn test() -> f64:\n    return 3.14\n"
-        ).unwrap();
+        let module = parse_and_lower("fn test() -> f64:\n    return 3.14\n").unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.return_type, TypeId::F64);
@@ -962,9 +1042,7 @@ mod tests {
 
     #[test]
     fn test_lower_nil_literal() {
-        let module = parse_and_lower(
-            "fn test() -> i64:\n    let x = nil\n    return 0\n"
-        ).unwrap();
+        let module = parse_and_lower("fn test() -> i64:\n    let x = nil\n    return 0\n").unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.locals.len(), 1);
@@ -972,9 +1050,7 @@ mod tests {
 
     #[test]
     fn test_lower_unary_negation() {
-        let module = parse_and_lower(
-            "fn test(x: i64) -> i64:\n    return -x\n"
-        ).unwrap();
+        let module = parse_and_lower("fn test(x: i64) -> i64:\n    return -x\n").unwrap();
 
         let func = &module.functions[0];
         if let HirStmt::Return(Some(expr)) = &func.body[0] {
@@ -984,9 +1060,7 @@ mod tests {
 
     #[test]
     fn test_lower_logical_not() {
-        let module = parse_and_lower(
-            "fn test(x: bool) -> bool:\n    return not x\n"
-        ).unwrap();
+        let module = parse_and_lower("fn test(x: bool) -> bool:\n    return not x\n").unwrap();
 
         let func = &module.functions[0];
         if let HirStmt::Return(Some(expr)) = &func.body[0] {
@@ -1009,22 +1083,21 @@ mod tests {
     #[test]
     fn test_lower_logical_operators() {
         // Test and/or return bool
-        let module = parse_and_lower(
-            "fn test(a: bool, b: bool) -> bool:\n    return a and b\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn test(a: bool, b: bool) -> bool:\n    return a and b\n").unwrap();
         assert_eq!(module.functions[0].return_type, TypeId::BOOL);
 
-        let module = parse_and_lower(
-            "fn test(a: bool, b: bool) -> bool:\n    return a or b\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn test(a: bool, b: bool) -> bool:\n    return a or b\n").unwrap();
         assert_eq!(module.functions[0].return_type, TypeId::BOOL);
     }
 
     #[test]
     fn test_lower_field_access() {
         let module = parse_and_lower(
-            "struct Point:\n    x: i64\n    y: i64\n\nfn test(p: Point) -> i64:\n    return p.x\n"
-        ).unwrap();
+            "struct Point:\n    x: i64\n    y: i64\n\nfn test(p: Point) -> i64:\n    return p.x\n",
+        )
+        .unwrap();
 
         let func = &module.functions[0];
         if let HirStmt::Return(Some(expr)) = &func.body[0] {
@@ -1035,8 +1108,9 @@ mod tests {
     #[test]
     fn test_lower_assignment() {
         let module = parse_and_lower(
-            "fn test() -> i64:\n    let mut x: i64 = 0\n    x = 42\n    return x\n"
-        ).unwrap();
+            "fn test() -> i64:\n    let mut x: i64 = 0\n    x = 42\n    return x\n",
+        )
+        .unwrap();
 
         let func = &module.functions[0];
         assert!(matches!(func.body[1], HirStmt::Assign { .. }));
@@ -1044,9 +1118,7 @@ mod tests {
 
     #[test]
     fn test_lower_expression_statement() {
-        let module = parse_and_lower(
-            "fn test() -> i64:\n    1 + 2\n    return 0\n"
-        ).unwrap();
+        let module = parse_and_lower("fn test() -> i64:\n    1 + 2\n    return 0\n").unwrap();
 
         let func = &module.functions[0];
         assert!(matches!(func.body[0], HirStmt::Expr(_)));
@@ -1054,9 +1126,8 @@ mod tests {
 
     #[test]
     fn test_infer_type_from_binary_arithmetic() {
-        let module = parse_and_lower(
-            "fn test() -> i64:\n    let x = 1 + 2\n    return x\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn test() -> i64:\n    let x = 1 + 2\n    return x\n").unwrap();
 
         let func = &module.functions[0];
         // The type should be inferred from the left operand (i64)
@@ -1065,9 +1136,7 @@ mod tests {
 
     #[test]
     fn test_lower_return_without_value() {
-        let module = parse_and_lower(
-            "fn test() -> i64:\n    return\n"
-        ).unwrap();
+        let module = parse_and_lower("fn test() -> i64:\n    return\n").unwrap();
 
         let func = &module.functions[0];
         assert!(matches!(func.body[0], HirStmt::Return(None)));
@@ -1087,9 +1156,9 @@ mod tests {
 
     #[test]
     fn test_function_with_multiple_params() {
-        let module = parse_and_lower(
-            "fn multi(a: i64, b: f64, c: str, d: bool) -> i64:\n    return a\n"
-        ).unwrap();
+        let module =
+            parse_and_lower("fn multi(a: i64, b: f64, c: str, d: bool) -> i64:\n    return a\n")
+                .unwrap();
 
         let func = &module.functions[0];
         assert_eq!(func.params.len(), 4);

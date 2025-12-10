@@ -4,7 +4,9 @@ pub mod mock_policy;
 pub mod test_check;
 
 // Re-export commonly used items
-pub use api_scanner::{scan_directory, generate_yaml, write_yaml, merge_with_existing, ScannedApi, ScannedType};
+pub use api_scanner::{
+    generate_yaml, merge_with_existing, scan_directory, write_yaml, ScannedApi, ScannedType,
+};
 pub use coverage::{
     compute_class_coverage, load_llvm_cov_export, load_public_api_spec, parse_llvm_cov_export,
     parse_public_api_spec, print_class_coverage_table, ClassCoverage, CoverageSummary,
