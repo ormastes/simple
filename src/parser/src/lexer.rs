@@ -863,6 +863,7 @@ impl<'a> Lexer<'a> {
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
             "yield" => TokenKind::Yield,
+            "move" => TokenKind::Move,
             "const" => TokenKind::Const,
             "static" => TokenKind::Static,
             "type" => TokenKind::Type,

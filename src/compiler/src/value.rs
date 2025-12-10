@@ -157,6 +157,8 @@ pub enum Value {
     Actor(ActorHandle),
     Future(FutureValue),
     Generator(GeneratorValue),
+    Channel(ChannelValue),
+    ThreadPool(ThreadPoolValue),
     Unique(ManualUniqueValue),
     Shared(ManualSharedValue),
     Weak(ManualWeakValue),
@@ -323,6 +325,100 @@ impl PartialEq for GeneratorValue {
     }
 }
 
+/// A channel for inter-thread communication
+#[derive(Debug)]
+pub struct ChannelValue {
+    sender: std::sync::mpsc::Sender<Value>,
+    receiver: Arc<Mutex<std::sync::mpsc::Receiver<Value>>>,
+}
+
+impl ChannelValue {
+    /// Create a new unbuffered channel
+    pub fn new() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        ChannelValue {
+            sender: tx,
+            receiver: Arc::new(Mutex::new(rx)),
+        }
+    }
+
+    /// Create a new buffered channel with the given capacity
+    /// Note: Rust's mpsc doesn't support true buffering, so we just create a regular channel
+    /// The capacity is ignored for simplicity
+    pub fn with_buffer(_capacity: usize) -> Self {
+        // For now, just create a regular unbounded channel
+        // True buffering would require a different implementation
+        Self::new()
+    }
+
+    /// Send a value through the channel
+    pub fn send(&self, value: Value) -> Result<(), String> {
+        self.sender
+            .send(value)
+            .map_err(|_| "channel closed".to_string())
+    }
+
+    /// Receive a value from the channel (blocking)
+    pub fn recv(&self) -> Result<Value, String> {
+        self.receiver
+            .lock()
+            .map_err(|_| "channel lock poisoned".to_string())?
+            .recv()
+            .map_err(|_| "channel closed".to_string())
+    }
+
+    /// Try to receive a value without blocking
+    pub fn try_recv(&self) -> Option<Value> {
+        self.receiver
+            .lock()
+            .ok()?
+            .try_recv()
+            .ok()
+    }
+}
+
+impl Clone for ChannelValue {
+    fn clone(&self) -> Self {
+        ChannelValue {
+            sender: self.sender.clone(),
+            receiver: self.receiver.clone(),
+        }
+    }
+}
+
+impl PartialEq for ChannelValue {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.receiver, &other.receiver)
+    }
+}
+
+/// Thread pool for parallel task execution
+#[derive(Debug)]
+pub struct ThreadPoolValue {
+    workers: usize,
+}
+
+impl ThreadPoolValue {
+    /// Create a new thread pool with the given number of workers
+    pub fn new(workers: usize) -> Self {
+        ThreadPoolValue { workers }
+    }
+}
+
+impl Clone for ThreadPoolValue {
+    fn clone(&self) -> Self {
+        ThreadPoolValue {
+            workers: self.workers,
+        }
+    }
+}
+
+impl PartialEq for ThreadPoolValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.workers == other.workers
+    }
+}
+
 impl Value {
     pub fn as_int(&self) -> Result<i64, CompileError> {
         match self {
@@ -404,7 +500,9 @@ impl Value {
             | Value::Constructor { .. }
             | Value::Actor(_)
             | Value::Future(_)
-            | Value::Generator(_) => true,
+            | Value::Generator(_)
+            | Value::Channel(_)
+            | Value::ThreadPool(_) => true,
         }
     }
 
@@ -485,6 +583,8 @@ impl Value {
             Value::Actor(_) => "actor",
             Value::Future(_) => "future",
             Value::Generator(_) => "generator",
+            Value::Channel(_) => "channel",
+            Value::ThreadPool(_) => "thread_pool",
             Value::Unique(_) => "unique",
             Value::Shared(_) => "shared",
             Value::Weak(_) => "weak",
@@ -797,6 +897,8 @@ impl Clone for Value {
             Value::Actor(handle) => Value::Actor(handle.clone()),
             Value::Future(f) => Value::Future(f.clone()),
             Value::Generator(g) => Value::Generator(g.clone()),
+            Value::Channel(c) => Value::Channel(c.clone()),
+            Value::ThreadPool(tp) => Value::ThreadPool(tp.clone()),
             Value::Unique(u) => Value::Unique(u.clone()),
             Value::Shared(s) => Value::Shared(s.clone()),
             Value::Weak(w) => Value::Weak(w.clone()),

@@ -354,6 +354,97 @@ fn evaluate_method_call(
         return Err(CompileError::Semantic(format!("unknown method {method} on {class}")));
     }
 
+    // Future methods (join, await, get, is_ready)
+    if let Value::Future(ref future) = recv_val {
+        match method {
+            "join" | "await" | "get" => {
+                return future.await_result().map_err(|e| CompileError::Semantic(e));
+            }
+            "is_ready" => {
+                return Ok(Value::Bool(future.is_ready()));
+            }
+            _ => return Err(CompileError::Semantic(format!("unknown method {method} on Future"))),
+        }
+    }
+
+    // Channel methods (send, recv, try_recv)
+    if let Value::Channel(ref channel) = recv_val {
+        match method {
+            "send" => {
+                let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                channel.send(val).map_err(|e| CompileError::Semantic(e))?;
+                return Ok(Value::Nil);
+            }
+            "recv" => {
+                let val = channel.recv().map_err(|e| CompileError::Semantic(e))?;
+                return Ok(val);
+            }
+            "try_recv" => {
+                return Ok(match channel.try_recv() {
+                    Some(val) => Value::Enum {
+                        enum_name: "Option".to_string(),
+                        variant: "Some".to_string(),
+                        payload: Some(Box::new(val)),
+                    },
+                    None => Value::Enum {
+                        enum_name: "Option".to_string(),
+                        variant: "None".to_string(),
+                        payload: None,
+                    },
+                });
+            }
+            _ => return Err(CompileError::Semantic(format!("unknown method {method} on Channel"))),
+        }
+    }
+
+    // ThreadPool methods (submit)
+    if let Value::ThreadPool(ref pool) = recv_val {
+        match method {
+            "submit" => {
+                // pool.submit(func, arg) - submit a task to the pool
+                let func_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                let arg_val = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+                // For proper execution, we need to call the function in a thread
+                // Clone all the context needed
+                let func_clone = func_val.clone();
+                let arg_clone = arg_val.clone();
+                let env_clone = env.clone();
+                let funcs_clone = functions.clone();
+                let classes_clone = classes.clone();
+                let enums_clone = enums.clone();
+                let impls_clone = impl_methods.clone();
+
+                let future = FutureValue::new(move || {
+                    match func_clone {
+                        Value::Function { ref def, ref captured_env, .. } => {
+                            let mut local_env = captured_env.clone();
+                            if let Some(first_param) = def.params.first() {
+                                local_env.insert(first_param.name.clone(), arg_clone);
+                            }
+                            match exec_block(&def.body, &mut local_env, &funcs_clone, &classes_clone, &enums_clone, &impls_clone) {
+                                Ok(Control::Return(v)) => Ok(v),
+                                Ok(_) => Ok(Value::Nil),
+                                Err(e) => Err(format!("{:?}", e)),
+                            }
+                        }
+                        Value::Lambda { ref params, ref body, ref env } => {
+                            let mut local_env = env.clone();
+                            if let Some(first_param) = params.first() {
+                                local_env.insert(first_param.clone(), arg_clone);
+                            }
+                            evaluate_expr(&body, &local_env, &funcs_clone, &classes_clone, &enums_clone, &impls_clone)
+                                .map_err(|e| format!("{:?}", e))
+                        }
+                        _ => Err("submit expects a function or lambda".into()),
+                    }
+                });
+                return Ok(Value::Future(future));
+            }
+            _ => return Err(CompileError::Semantic(format!("unknown method {method} on ThreadPool"))),
+        }
+    }
+
     // Static method calls on class constructor (e.g. Calculator.add(...))
     if let Value::Constructor { ref class_name } = recv_val {
         if let Some(class_def) = classes.get(class_name) {
@@ -384,4 +475,123 @@ fn evaluate_method_call(
     }
 
     Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))
+}
+
+/// Evaluate a method call and return both the result and the potentially modified self.
+/// This is used when we need to persist mutations to self back to the calling environment.
+fn evaluate_method_call_with_self_update(
+    receiver: &Box<Expr>,
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Value, Option<Value>), CompileError> {
+    let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+
+    // Only handle Object methods with self mutation
+    if let Value::Object { class, fields } = recv_val.clone() {
+        // Try to find and execute the method
+        if let Some((result, updated_self)) = find_and_exec_method_with_self(method, args, &class, &fields, env, functions, classes, enums, impl_methods)? {
+            return Ok((result, Some(updated_self)));
+        }
+        // Try method_missing hook
+        if let Some(result) = try_method_missing(method, args, &class, &fields, env, functions, classes, enums, impl_methods)? {
+            // method_missing returns just a result, self is not mutated
+            return Ok((result, None));
+        }
+        // Fall back to regular method call if not found
+        return Err(CompileError::Semantic(format!("unknown method {method} on {class}")));
+    }
+
+    // For non-objects, just use regular method call
+    let result = evaluate_method_call(receiver, method, args, env, functions, classes, enums, impl_methods)?;
+    Ok((result, None))
+}
+
+/// Find and execute a method, returning both result and modified self.
+fn find_and_exec_method_with_self(
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    class: &str,
+    fields: &HashMap<String, Value>,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<(Value, Value)>, CompileError> {
+    // Check class methods
+    if let Some(class_def) = classes.get(class) {
+        if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
+            let (result, updated_self) = exec_function_with_self_return(func, args, env, functions, classes, enums, impl_methods, class, fields)?;
+            return Ok(Some((result, updated_self)));
+        }
+    }
+    // Check impl methods
+    if let Some(methods) = impl_methods.get(class) {
+        if let Some(func) = methods.iter().find(|m| m.name == method) {
+            let (result, updated_self) = exec_function_with_self_return(func, args, env, functions, classes, enums, impl_methods, class, fields)?;
+            return Ok(Some((result, updated_self)));
+        }
+    }
+    Ok(None)
+}
+
+/// Execute a function and return both the result and the modified self value.
+fn exec_function_with_self_return(
+    func: &FunctionDef,
+    args: &[simple_parser::ast::Argument],
+    outer_env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    class_name: &str,
+    fields: &HashMap<String, Value>,
+) -> Result<(Value, Value), CompileError> {
+    let mut local_env = Env::new();
+
+    // Set up self
+    local_env.insert(
+        "self".into(),
+        Value::Object {
+            class: class_name.to_string(),
+            fields: fields.clone(),
+        },
+    );
+
+    // Bind arguments (skip self parameter)
+    let self_mode = simple_parser::ast::SelfMode::SkipSelf;
+    let bound = bind_args(
+        &func.params,
+        args,
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_mode,
+    )?;
+    for (name, val) in bound {
+        local_env.insert(name, val);
+    }
+
+    // Execute the function body
+    let result = match exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
+        Ok(Control::Return(v)) => v,
+        Ok(_) => Value::Nil,
+        Err(CompileError::TryError(val)) => val,
+        Err(e) => return Err(e),
+    };
+
+    // Get the potentially modified self
+    let updated_self = local_env.get("self").cloned().unwrap_or_else(|| Value::Object {
+        class: class_name.to_string(),
+        fields: fields.clone(),
+    });
+
+    Ok((result, updated_self))
 }

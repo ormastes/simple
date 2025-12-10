@@ -6141,7 +6141,6 @@ main = p.x + p.y
 
 /// Test Feature #10: Classes - basic definition
 #[test]
-#[ignore = "class instantiation not yet fully implemented"]
 fn test_feature_classes_basic() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -6170,7 +6169,6 @@ main = c.value
 
 /// Test Feature #11: Enums - basic
 #[test]
-#[ignore = "match expression not yet fully implemented in codegen"]
 fn test_feature_enums_basic() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -6181,11 +6179,11 @@ enum Color:
     Green
     Blue
 
-c = Color.Red
+c = Color::Red
 main = match c:
-    Color.Red => 1
-    Color.Green => 2
-    Color.Blue => 3
+    Color::Red => 1
+    Color::Green => 2
+    Color::Blue => 3
 "#,
         )
         .expect("enum basic");
@@ -6469,7 +6467,6 @@ main = a + b + c
 
 /// Test Feature #66: Tuple Unpacking - swap
 #[test]
-#[ignore = "tuple assignment target not yet supported"]
 fn test_feature_tuple_unpacking_swap() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -6999,7 +6996,6 @@ main = p.x + p.y
 
 /// Feature #77: Move Closures
 #[test]
-#[ignore = "move closures not yet implemented"]
 fn test_feature_77_move_closure() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -7095,7 +7091,6 @@ main = classify(5)
 
 /// Feature #82: Auto-Forwarding Properties - get_ prefix
 #[test]
-#[ignore = "auto-forwarding properties not yet implemented"]
 fn test_feature_82_auto_forwarding_get() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -7143,7 +7138,6 @@ main = v.value
 
 /// Feature #82: Auto-Forwarding Properties - is_ prefix
 #[test]
-#[ignore = "auto-forwarding properties not yet implemented"]
 fn test_feature_82_auto_forwarding_is() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -7167,7 +7161,6 @@ main = if t.enabled: 1 else: 0
 
 /// Feature #83: Isolated Threads - spawn_isolated
 #[test]
-#[ignore = "isolated threads not yet implemented"]
 fn test_feature_83_spawn_isolated() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -7189,7 +7182,6 @@ main = result
 
 /// Feature #83: Isolated Threads with channel
 #[test]
-#[ignore = "isolated threads not yet implemented"]
 fn test_feature_83_isolated_with_channel() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -7212,7 +7204,6 @@ main = consumer(ch)
 
 /// Feature #84: Channel Types - basic send/recv
 #[test]
-#[ignore = "channel types not yet implemented"]
 fn test_feature_84_channel_basic() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -7229,7 +7220,6 @@ main = ch.recv()
 
 /// Feature #84: Channel Types - buffered channel
 #[test]
-#[ignore = "channel types not yet implemented"]
 fn test_feature_84_channel_buffered() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -7248,7 +7238,6 @@ main = ch.recv() + ch.recv() + ch.recv()
 
 /// Feature #84: Channel Types - try_recv
 #[test]
-#[ignore = "channel types not yet implemented"]
 fn test_feature_84_channel_try_recv() {
     let runner = Runner::new_no_gc();
     let result = runner
@@ -7284,7 +7273,6 @@ main = thread_safe(42)
 
 /// Feature #86: Thread Pool
 #[test]
-#[ignore = "thread pool not yet implemented"]
 fn test_feature_86_thread_pool() {
     let runner = Runner::new_no_gc();
     let result = runner

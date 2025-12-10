@@ -391,6 +391,14 @@ impl From<&Value> for BridgeValue {
                     extended: Box::into_raw(boxed) as *mut u8,
                 }
             }
+            Value::Channel(_) => {
+                // Channels cannot be bridged across FFI - use nil
+                BridgeValue::nil()
+            }
+            Value::ThreadPool(_) => {
+                // ThreadPools cannot be bridged across FFI - use nil
+                BridgeValue::nil()
+            }
         }
     }
 }

@@ -714,7 +714,7 @@ impl Lowerer {
                 })
             }
 
-            Expr::Lambda { params, body } => {
+            Expr::Lambda { params, body, .. } => {
                 // Track captured variables from outer scope
                 let captures: Vec<usize> = ctx.locals.iter().enumerate().map(|(i, _)| i).collect();
 

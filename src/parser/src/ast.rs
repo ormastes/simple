@@ -647,6 +647,7 @@ pub enum Expr {
     Lambda {
         params: Vec<LambdaParam>,
         body: Box<Expr>,
+        is_move: bool,
     },
     If {
         condition: Box<Expr>,

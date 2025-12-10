@@ -128,6 +128,56 @@ fn evaluate_call(
                 let inner_expr = args.get(0).ok_or_else(|| CompileError::Semantic("spawn expects a thunk".into()))?;
                 return Ok(spawn_actor_with_expr(&inner_expr.value, env, functions, classes, enums, impl_methods));
             }
+            "spawn_isolated" => {
+                // spawn_isolated(func, arg) - spawns a function in a new thread with isolated data
+                let func_arg = args.get(0).ok_or_else(|| CompileError::Semantic("spawn_isolated expects a function".into()))?;
+                let func_val = evaluate_expr(&func_arg.value, env, functions, classes, enums, impl_methods)?;
+                let arg_val = if args.len() > 1 {
+                    evaluate_expr(&args[1].value, env, functions, classes, enums, impl_methods)?
+                } else {
+                    Value::Nil
+                };
+
+                // Clone everything needed for the thread
+                let env_clone = env.clone();
+                let funcs_clone = functions.clone();
+                let classes_clone = classes.clone();
+                let enums_clone = enums.clone();
+                let impls_clone = impl_methods.clone();
+
+                let future = FutureValue::new(move || {
+                    match func_val {
+                        Value::Function { def, .. } => {
+                            // Create argument from the value
+                            let arg = simple_parser::ast::Argument {
+                                name: None,
+                                value: Expr::Integer(0), // Dummy, we'll substitute the value
+                            };
+                            // Execute with the arg value directly
+                            let mut local_env = env_clone.clone();
+                            if !def.params.is_empty() {
+                                local_env.insert(def.params[0].name.clone(), arg_val);
+                            }
+                            exec_block(&def.body, &mut local_env, &funcs_clone, &classes_clone, &enums_clone, &impls_clone)
+                                .map(|ctrl| match ctrl {
+                                    Control::Return(v) => v,
+                                    _ => Value::Nil,
+                                })
+                                .map_err(|e| format!("{:?}", e))
+                        }
+                        Value::Lambda { params, body, env: captured } => {
+                            let mut local_env = captured.clone();
+                            if !params.is_empty() {
+                                local_env.insert(params[0].clone(), arg_val);
+                            }
+                            evaluate_expr(&body, &local_env, &funcs_clone, &classes_clone, &enums_clone, &impls_clone)
+                                .map_err(|e| format!("{:?}", e))
+                        }
+                        _ => Err("spawn_isolated requires a function or lambda".into()),
+                    }
+                });
+                return Ok(Value::Future(future));
+            }
             "async" | "future" => {
                 let inner_expr = args.get(0).ok_or_else(|| CompileError::Semantic("async expects an expression".into()))?;
                 let expr_clone = inner_expr.value.clone();
@@ -181,6 +231,20 @@ fn evaluate_call(
                 }
                 return Err(CompileError::Semantic("collect expects a generator or array".into()));
             }
+            "ThreadPool" => {
+                // ThreadPool(workers=N) - create a thread pool
+                let workers = args.iter().find_map(|arg| {
+                    if arg.name.as_deref() == Some("workers") {
+                        evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)
+                            .ok()
+                            .and_then(|v| v.as_int().ok())
+                            .map(|n| n as usize)
+                    } else {
+                        None
+                    }
+                }).unwrap_or(4); // default to 4 workers
+                return Ok(Value::ThreadPool(ThreadPoolValue::new(workers)));
+            }
             _ => {
                 // Check env first for decorated functions and closures
                 if let Some(val) = env.get(name) {
@@ -229,6 +293,33 @@ fn evaluate_call(
             }
         }
         return Err(CompileError::Semantic(format!("unsupported path call: {:?}", segments)));
+    }
+
+    // Handle generic type constructors like Channel[int]()
+    if let Expr::Index { receiver, .. } = callee.as_ref() {
+        if let Expr::Identifier(name) = receiver.as_ref() {
+            if name == "Channel" {
+                // Create a channel - ignore the type parameter for runtime (type erasure)
+                // Check for buffer argument
+                let buffer_size = args.iter().find_map(|arg| {
+                    if arg.name.as_deref() == Some("buffer") {
+                        evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)
+                            .ok()
+                            .and_then(|v| v.as_int().ok())
+                            .map(|n| n as usize)
+                    } else {
+                        None
+                    }
+                });
+
+                let channel = if let Some(size) = buffer_size {
+                    ChannelValue::with_buffer(size)
+                } else {
+                    ChannelValue::new()
+                };
+                return Ok(Value::Channel(channel));
+            }
+        }
     }
 
     let callee_val = evaluate_expr(callee, env, functions, classes, enums, impl_methods)?;

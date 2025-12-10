@@ -23,8 +23,9 @@ use tracing::instrument;
 use crate::effects::{check_async_violation, CURRENT_EFFECT};
 use crate::error::CompileError;
 use crate::value::{
-    BorrowMutValue, BorrowValue, Env, FutureValue, GeneratorValue, ManualHandleValue,
-    ManualSharedValue, ManualUniqueValue, ManualWeakValue, Value, BUILTIN_ARRAY, BUILTIN_RANGE,
+    BorrowMutValue, BorrowValue, ChannelValue, Env, FutureValue, GeneratorValue, ManualHandleValue,
+    ManualSharedValue, ManualUniqueValue, ManualWeakValue, ThreadPoolValue, Value, BUILTIN_ARRAY,
+    BUILTIN_RANGE,
 };
 
 // Thread-local state for interpreter execution
@@ -392,6 +393,20 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                         "functional update target must be an identifier".into(),
                     ));
                 }
+                // Handle method calls on objects - need to persist mutations to self
+                if let Expr::MethodCall { receiver, method, args } = expr {
+                    if let Expr::Identifier(name) = receiver.as_ref() {
+                        if let Some(Value::Object { .. }) = env.get(name).cloned() {
+                            let (result, updated_self) = evaluate_method_call_with_self_update(
+                                receiver, method, args, &env, &functions, &classes, &enums, &impl_methods
+                            )?;
+                            if let Some(new_self) = updated_self {
+                                env.insert(name.clone(), new_self);
+                            }
+                            continue;
+                        }
+                    }
+                }
                 let _ = evaluate_expr(expr, &env, &functions, &classes, &enums, &impl_methods)?;
             }
             Node::Break(_) => {
@@ -427,8 +442,26 @@ pub(crate) fn exec_node(
     match node {
         Node::Let(let_stmt) => {
             if let Some(value_expr) = &let_stmt.value {
-                let value =
-                    evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                // Handle method calls on objects - need to persist mutations to self
+                let value = if let Expr::MethodCall { receiver, method, args } = value_expr {
+                    if let Expr::Identifier(obj_name) = receiver.as_ref() {
+                        if let Some(Value::Object { .. }) = env.get(obj_name) {
+                            let (result, updated_self) = evaluate_method_call_with_self_update(
+                                receiver, method, args, env, functions, classes, enums, impl_methods
+                            )?;
+                            if let Some(new_self) = updated_self {
+                                env.insert(obj_name.clone(), new_self);
+                            }
+                            result
+                        } else {
+                            evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?
+                        }
+                    } else {
+                        evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?
+                    }
+                } else {
+                    evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?
+                };
                 if let Pattern::Identifier(name) = &let_stmt.pattern {
                     env.insert(name.clone(), value);
                     if !let_stmt.mutability.is_mutable() {
@@ -506,8 +539,26 @@ pub(crate) fn exec_node(
                         "cannot assign to const '{name}'"
                     )));
                 }
-                let value =
-                    evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                // Handle method calls on objects - need to persist mutations to self
+                let value = if let Expr::MethodCall { receiver, method, args } = &assign.value {
+                    if let Expr::Identifier(obj_name) = receiver.as_ref() {
+                        if let Some(Value::Object { .. }) = env.get(obj_name) {
+                            let (result, updated_self) = evaluate_method_call_with_self_update(
+                                receiver, method, args, env, functions, classes, enums, impl_methods
+                            )?;
+                            if let Some(new_self) = updated_self {
+                                env.insert(obj_name.clone(), new_self);
+                            }
+                            result
+                        } else {
+                            evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?
+                        }
+                    } else {
+                        evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?
+                    }
+                } else {
+                    evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?
+                };
                 env.insert(name.clone(), value);
                 Ok(Control::Next)
             } else if let Expr::FieldAccess { receiver, field } = &assign.target {
@@ -539,6 +590,28 @@ pub(crate) fn exec_node(
                         "field assignment requires identifier as object".into(),
                     ))
                 }
+            } else if let Expr::Tuple(targets) = &assign.target {
+                // Handle tuple unpacking: (a, b) = (x, y)
+                let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                let values: Vec<Value> = match value {
+                    Value::Tuple(v) => v,
+                    Value::Array(v) => v,
+                    _ => return Err(CompileError::Semantic("tuple unpacking requires tuple or array on right side".into())),
+                };
+                if targets.len() != values.len() {
+                    return Err(CompileError::Semantic(format!(
+                        "tuple unpacking length mismatch: expected {}, got {}",
+                        targets.len(), values.len()
+                    )));
+                }
+                for (target_expr, val) in targets.iter().zip(values.into_iter()) {
+                    if let Expr::Identifier(name) = target_expr {
+                        env.insert(name.clone(), val);
+                    } else {
+                        return Err(CompileError::Semantic("tuple unpacking target must be identifier".into()));
+                    }
+                }
+                Ok(Control::Next)
             } else {
                 Err(CompileError::Semantic(
                     "unsupported assignment target".into(),
@@ -621,6 +694,22 @@ pub(crate) fn exec_node(
                     "functional update target must be an identifier".into(),
                 ));
             }
+            // Handle method calls on objects - need to persist mutations to self
+            if let Expr::MethodCall { receiver, method, args } = expr {
+                if let Expr::Identifier(name) = receiver.as_ref() {
+                    if let Some(Value::Object { .. }) = env.get(name).cloned() {
+                        // Execute method with self context
+                        let (result, updated_self) = evaluate_method_call_with_self_update(
+                            receiver, method, args, env, functions, classes, enums, impl_methods
+                        )?;
+                        // Update the object in the environment with any mutations to self
+                        if let Some(new_self) = updated_self {
+                            env.insert(name.clone(), new_self);
+                        }
+                        return Ok(Control::Next);
+                    }
+                }
+            }
             let _ = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
             Ok(Control::Next)
         }
@@ -660,6 +749,24 @@ pub(crate) fn exec_block(
 
 // Include control flow functions (if, while, loop, for, match, pattern_matches)
 include!("interpreter_control.rs");
+
+/// Helper to execute a method function with self context (for auto-forwarding properties)
+fn exec_method_function(
+    method: &FunctionDef,
+    args: &[simple_parser::ast::Argument],
+    self_val: &Value,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    if let Value::Object { class, fields } = self_val {
+        exec_function(method, args, env, functions, classes, enums, impl_methods, Some((class.as_str(), fields)))
+    } else {
+        Err(CompileError::Semantic("exec_method_function called with non-object self".into()))
+    }
+}
 
 /// Evaluate a constant expression at compile time
 #[instrument(skip(env, functions, classes, enums, impl_methods))]
@@ -844,15 +951,24 @@ pub(crate) fn evaluate_expr(
                 UnaryOp::Deref => Ok(val.deref_pointer()),
             }
         }
-        Expr::Lambda { params, body } => {
+        Expr::Lambda { params, body, is_move } => {
             let names: Vec<String> = params
                 .iter()
                 .map(|LambdaParam { name, .. }| name.clone())
                 .collect();
+            // For move closures, we capture by value (clone the environment)
+            // For regular closures, we share the environment reference
+            // In the interpreter, both behave the same since we clone env anyway
+            let captured_env = if *is_move {
+                // Move closure: capture a snapshot of current env
+                env.clone()
+            } else {
+                env.clone()
+            };
             Ok(Value::Lambda {
                 params: names,
                 body: body.clone(),
-                env: env.clone(),
+                env: captured_env,
             })
         }
         Expr::If {
@@ -944,10 +1060,40 @@ pub(crate) fn evaluate_expr(
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
                 .deref_pointer();
             match recv_val {
-                Value::Object { ref fields, .. } => fields
-                    .get(field)
-                    .cloned()
-                    .ok_or_else(|| CompileError::Semantic(format!("unknown field {field}"))),
+                Value::Object { ref fields, ref class, .. } => {
+                    // First, try direct field access
+                    if let Some(val) = fields.get(field) {
+                        return Ok(val.clone());
+                    }
+                    // Auto-initializing internal fields: fields starting with '_' default to 0
+                    if field.starts_with('_') {
+                        return Ok(Value::Int(0));
+                    }
+                    // Auto-forwarding: try get_<field>() or is_<field>() methods
+                    let getter_name = format!("get_{}", field);
+                    let is_getter_name = format!("is_{}", field);
+
+                    if let Some(class_def) = classes.get(class) {
+                        // Try get_<field>
+                        if let Some(method) = class_def.methods.iter().find(|m| m.name == getter_name) {
+                            // Call the getter method with self
+                            let self_val = Value::Object {
+                                class: class.clone(),
+                                fields: fields.clone(),
+                            };
+                            return exec_method_function(method, &[], &self_val, env, functions, classes, enums, impl_methods);
+                        }
+                        // Try is_<field>
+                        if let Some(method) = class_def.methods.iter().find(|m| m.name == is_getter_name) {
+                            let self_val = Value::Object {
+                                class: class.clone(),
+                                fields: fields.clone(),
+                            };
+                            return exec_method_function(method, &[], &self_val, env, functions, classes, enums, impl_methods);
+                        }
+                    }
+                    Err(CompileError::Semantic(format!("unknown field {field}")))
+                }
                 Value::Constructor { ref class_name } => {
                     // Look up static method on class
                     if let Some(class_def) = classes.get(class_name) {

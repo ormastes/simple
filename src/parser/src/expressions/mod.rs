@@ -612,6 +612,7 @@ impl<'a> Parser<'a> {
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),
+            is_move: false,
         })
     }
 
@@ -820,6 +821,41 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Lambda {
                     params,
                     body: Box::new(body),
+                    is_move: false,
+                })
+            }
+            TokenKind::Move => {
+                // Move closure: move \x: expr
+                self.advance();
+                // Expect the backslash for lambda
+                if !self.check(&TokenKind::Backslash) {
+                    return Err(ParseError::unexpected_token(
+                        "'\\'",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ));
+                }
+                self.advance();
+                let mut params = Vec::new();
+
+                // Check for no-param lambda: move \: expr
+                if !self.check(&TokenKind::Colon) {
+                    let name = self.expect_identifier()?;
+                    params.push(LambdaParam { name, ty: None });
+
+                    while self.check(&TokenKind::Comma) {
+                        self.advance();
+                        let name = self.expect_identifier()?;
+                        params.push(LambdaParam { name, ty: None });
+                    }
+                }
+
+                self.expect(&TokenKind::Colon)?;
+                let body = self.parse_expression()?;
+                Ok(Expr::Lambda {
+                    params,
+                    body: Box::new(body),
+                    is_move: true,
                 })
             }
             TokenKind::LParen => {
@@ -836,6 +872,7 @@ impl<'a> Parser<'a> {
                         return Ok(Expr::Lambda {
                             params: vec![],
                             body: Box::new(body),
+                            is_move: false,
                         });
                     }
                     return Ok(Expr::Tuple(vec![]));

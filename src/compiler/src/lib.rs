@@ -23,6 +23,7 @@ pub use pipeline::CompilerPipeline;
 pub use value::{
     BorrowMutValue,
     BorrowValue,
+    ChannelValue,
     // NewTypes for formal verification
     ClassName,
     EnumTypeName,
@@ -34,6 +35,7 @@ pub use value::{
     ManualSharedValue,
     ManualUniqueValue,
     ManualWeakValue,
+    ThreadPoolValue,
     Value,
     VariantName,
     BUILTIN_ARRAY,

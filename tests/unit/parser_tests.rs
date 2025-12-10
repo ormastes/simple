@@ -1110,7 +1110,7 @@ fn test_parse_extern() {
 #[test]
 fn test_parse_lambda_simple() {
     let module = parse(r"\x: x + 1").unwrap();
-    if let Node::Expression(Expr::Lambda { params, body }) = &module.items[0] {
+    if let Node::Expression(Expr::Lambda { params, body, .. }) = &module.items[0] {
         assert_eq!(params.len(), 1);
         assert!(matches!(**body, Expr::Binary { .. }));
     } else {

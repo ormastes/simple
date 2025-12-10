@@ -490,6 +490,7 @@ impl TypeChecker {
 
         // Concurrency functions
         self.env.insert("spawn".to_string(), generic_fn.clone());
+        self.env.insert("spawn_isolated".to_string(), generic_fn.clone());
         self.env.insert("async".to_string(), generic_fn.clone());
         self.env.insert("future".to_string(), generic_fn.clone());
         self.env.insert("await".to_string(), generic_fn.clone());
@@ -535,6 +536,10 @@ impl TypeChecker {
         );
         self.env.insert("print".to_string(), generic_fn.clone());
         self.env.insert("println".to_string(), generic_fn.clone());
+        // Channel type constructor
+        self.env.insert("Channel".to_string(), generic_fn.clone());
+        // ThreadPool constructor
+        self.env.insert("ThreadPool".to_string(), generic_fn.clone());
         self.env.insert(
             "type".to_string(),
             Type::Function {
@@ -900,6 +905,11 @@ impl TypeChecker {
         self.env.insert("join".to_string(), join_ty);
         let spawn_ty = self.fresh_var();
         self.env.insert("spawn".to_string(), spawn_ty);
+        let spawn_isolated_ty = self.fresh_var();
+        self.env.insert("spawn_isolated".to_string(), spawn_isolated_ty);
+        // ThreadPool constructor
+        let threadpool_ty = self.fresh_var();
+        self.env.insert("ThreadPool".to_string(), threadpool_ty);
         // Option type constructors
         let some_ty = self.fresh_var();
         self.env.insert("Some".to_string(), some_ty);

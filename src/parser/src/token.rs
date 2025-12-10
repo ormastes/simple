@@ -98,6 +98,7 @@ pub enum TokenKind {
     Async,
     Await,
     Yield,
+    Move,
     Const,
     Static,
     Type,
