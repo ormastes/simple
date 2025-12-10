@@ -1,6 +1,40 @@
 //! Interpreter tests - types
 
-use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
+use simple_driver::interpreter::{run_code, Interpreter, RunConfig, RunningType};
+
+/// Helper to run source and expect a compile/semantic error.
+/// The error message must contain `expected_error` substring.
+/// If compilation succeeds, the test fails.
+#[allow(dead_code)]
+fn run_expect_error(src: &str, expected_error: &str) {
+    let result = run_code(src, &[], "");
+    match result {
+        Err(e) => {
+            let err_msg = e.to_string();
+            assert!(
+                err_msg.contains(expected_error),
+                "Expected error containing '{}', got: {}",
+                expected_error,
+                err_msg
+            );
+        }
+        Ok(_) => panic!(
+            "Expected error containing '{}', but execution succeeded",
+            expected_error
+        ),
+    }
+}
+
+/// Helper to run source and expect any error.
+/// If execution succeeds, the test fails.
+#[allow(dead_code)]
+fn run_expect_any_error(src: &str) {
+    let result = run_code(src, &[], "");
+    assert!(
+        result.is_err(),
+        "Expected an error, but execution succeeded"
+    );
+}
 
 #[test]
 fn interpreter_enum_comparison_false() {
@@ -297,7 +331,6 @@ main = match s:
 }
 
 #[test]
-#[ignore = "match expression not yet implemented in parser"]
 fn interpreter_weak_enum_allows_wildcard() {
     // Normal (weak) enum should allow wildcard
     let code = r#"
@@ -424,7 +457,6 @@ main = a + b
 // is not yet implemented. These tests use standalone units as a foundation.
 
 #[test]
-#[ignore = "unit family syntax not yet implemented"]
 fn interpreter_unit_family_basic() {
     // Define a unit family with conversion factors
     let code = r#"
@@ -438,7 +470,7 @@ main = 1
 }
 
 #[test]
-#[ignore = "unit family syntax not yet implemented"]
+#[ignore = "unit conversion methods (.to_m()) not yet implemented"]
 fn interpreter_unit_family_to_base() {
     // Convert to base unit
     let code = r#"

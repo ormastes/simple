@@ -541,6 +541,26 @@ pub enum HirExprKind {
         expr: Box<HirExpr>,
         target: TypeId,
     },
+
+    // Lambda/closure
+    Lambda {
+        params: Vec<(String, TypeId)>,
+        body: Box<HirExpr>,
+        captures: Vec<usize>, // indices of captured locals
+    },
+
+    // Async/generator operations
+    Yield(Box<HirExpr>),
+    GeneratorCreate {
+        body: Box<HirExpr>, // lambda body
+    },
+    FutureCreate {
+        body: Box<HirExpr>,
+    },
+    Await(Box<HirExpr>),
+    ActorSpawn {
+        body: Box<HirExpr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

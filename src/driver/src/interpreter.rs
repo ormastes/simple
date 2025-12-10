@@ -12,12 +12,12 @@ use crate::Runner;
 /// Specifies which execution mode to use when running code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunningType {
-    /// Run code using the interpreter
+    /// Run code using the interpreter (default)
+    #[default]
     Interpreter,
     /// Compile to SMF then run the compiled binary
     Compiler,
-    /// Run both interpreter and compiler, compare results (default)
-    #[default]
+    /// Run both interpreter and compiler, compare results
     Both,
 }
 
@@ -43,7 +43,7 @@ pub struct RunConfig {
     pub timeout_ms: u64,
     /// If true, compile and run in memory (no disk I/O)
     pub in_memory: bool,
-    /// Execution mode: Interpreter, Compiler, or Both (default: Interpreter)
+    /// Execution mode: Interpreter (default), Compiler, or Both
     pub running_type: RunningType,
 }
 
@@ -207,9 +207,7 @@ pub fn run_code(code: &str, args: &[String], stdin: &str) -> Result<RunResult, S
         RunConfig {
             args: args.to_vec(),
             stdin: stdin.to_string(),
-            timeout_ms: 0,
-            in_memory: false,
-            running_type: RunningType::Interpreter,
+            ..Default::default()
         },
     )
 }

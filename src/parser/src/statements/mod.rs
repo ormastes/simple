@@ -180,12 +180,127 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse standalone unit type: `unit UserId: i64 as uid`
+    /// Parse unit definition: either standalone or family
+    /// Standalone: `unit UserId: i64 as uid`
+    /// Family: `unit length(base: f64): m = 1.0, km = 1000.0`
     pub(crate) fn parse_unit(&mut self) -> Result<Node, ParseError> {
+        use crate::ast::{UnitFamilyDef, UnitVariant};
+
         let start_span = self.current.span;
         self.expect(&TokenKind::Unit)?;
 
         let name = self.expect_identifier()?;
+
+        // Check if this is a unit family: unit name(base: Type): ...
+        if self.check(&TokenKind::LParen) {
+            // Unit family syntax
+            self.advance(); // consume '('
+
+            // Parse (base: Type) - we expect "base" as the identifier
+            let _base_name = self.expect_identifier()?; // "base"
+            self.expect(&TokenKind::Colon)?;
+            let base_type = self.parse_type()?;
+            self.expect(&TokenKind::RParen)?;
+
+            self.expect(&TokenKind::Colon)?;
+
+            // Parse variants: suffix = factor, suffix = factor, ...
+            // Can be on same line or indented block
+            let mut variants = Vec::new();
+
+            // Skip newline if present
+            if self.check(&TokenKind::Newline) {
+                self.advance();
+                // Check for indented block
+                if self.check(&TokenKind::Indent) {
+                    self.advance();
+                    // Parse indented variants
+                    while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                        // Skip newlines between variants
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                        if self.check(&TokenKind::Dedent) {
+                            break;
+                        }
+                        let suffix = self.expect_identifier()?;
+                        self.expect(&TokenKind::Assign)?;
+                        // Parse number (float or int)
+                        let factor = if let TokenKind::Float(f) = &self.current.kind {
+                            let val = *f;
+                            self.advance();
+                            val
+                        } else if let TokenKind::Integer(i) = &self.current.kind {
+                            let val = *i as f64;
+                            self.advance();
+                            val
+                        } else {
+                            return Err(ParseError::unexpected_token(
+                                "number",
+                                format!("{:?}", self.current.kind),
+                                self.current.span,
+                            ));
+                        };
+                        variants.push(UnitVariant { suffix, factor });
+
+                        // Skip comma or newline
+                        if self.check(&TokenKind::Comma) {
+                            self.advance();
+                        }
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                    }
+                    // Consume dedent
+                    if self.check(&TokenKind::Dedent) {
+                        self.advance();
+                    }
+                }
+            } else {
+                // Single line: m = 1.0, km = 1000.0
+                loop {
+                    let suffix = self.expect_identifier()?;
+                    self.expect(&TokenKind::Assign)?;
+                    // Parse number (float or int)
+                    let factor = if let TokenKind::Float(f) = &self.current.kind {
+                        let val = *f;
+                        self.advance();
+                        val
+                    } else if let TokenKind::Integer(i) = &self.current.kind {
+                        let val = *i as f64;
+                        self.advance();
+                        val
+                    } else {
+                        return Err(ParseError::unexpected_token(
+                            "number",
+                            format!("{:?}", self.current.kind),
+                            self.current.span,
+                        ));
+                    };
+                    variants.push(UnitVariant { suffix, factor });
+
+                    if !self.check(&TokenKind::Comma) {
+                        break;
+                    }
+                    self.advance(); // consume comma
+                }
+            }
+
+            return Ok(Node::UnitFamily(UnitFamilyDef {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                name,
+                base_type,
+                variants,
+                visibility: Visibility::Private,
+            }));
+        }
+
+        // Standalone unit syntax: unit UserId: i64 as uid
         self.expect(&TokenKind::Colon)?;
         let base_type = self.parse_type()?;
         self.expect(&TokenKind::As)?;

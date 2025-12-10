@@ -1,0 +1,887 @@
+//! Collection types: Array, Tuple, String, Dict and their FFI functions.
+
+use super::core::RuntimeValue;
+use super::heap::{HeapHeader, HeapObjectType};
+
+// ============================================================================
+// Heap-allocated collection structures
+// ============================================================================
+
+/// A heap-allocated string
+#[repr(C)]
+pub struct RuntimeString {
+    pub header: HeapHeader,
+    /// Length in bytes
+    pub len: u64,
+    /// Cached hash value
+    pub hash: u64,
+    // Followed by UTF-8 bytes (flexible array member)
+}
+
+impl RuntimeString {
+    /// Get the string data as a byte slice
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeString was properly allocated
+    /// with the correct length.
+    pub unsafe fn as_bytes(&self) -> &[u8] {
+        let data_ptr = (self as *const Self).add(1) as *const u8;
+        std::slice::from_raw_parts(data_ptr, self.len as usize)
+    }
+
+    /// Get the string data as a str
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeString contains valid UTF-8.
+    pub unsafe fn as_str(&self) -> &str {
+        std::str::from_utf8_unchecked(self.as_bytes())
+    }
+}
+
+/// A heap-allocated array
+#[repr(C)]
+pub struct RuntimeArray {
+    pub header: HeapHeader,
+    /// Number of elements
+    pub len: u64,
+    /// Capacity (allocated slots)
+    pub capacity: u64,
+    // Followed by RuntimeValue elements
+}
+
+impl RuntimeArray {
+    /// Get the elements as a slice
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeArray was properly allocated.
+    pub unsafe fn as_slice(&self) -> &[RuntimeValue] {
+        let data_ptr = (self as *const Self).add(1) as *const RuntimeValue;
+        std::slice::from_raw_parts(data_ptr, self.len as usize)
+    }
+
+    /// Get the elements as a mutable slice
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeArray was properly allocated.
+    pub unsafe fn as_mut_slice(&mut self) -> &mut [RuntimeValue] {
+        let data_ptr = (self as *mut Self).add(1) as *mut RuntimeValue;
+        std::slice::from_raw_parts_mut(data_ptr, self.len as usize)
+    }
+}
+
+/// A heap-allocated tuple (fixed-size array)
+#[repr(C)]
+pub struct RuntimeTuple {
+    pub header: HeapHeader,
+    /// Number of elements
+    pub len: u64,
+    // Followed by RuntimeValue elements
+}
+
+impl RuntimeTuple {
+    /// Get the elements as a slice
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeTuple was properly allocated.
+    pub unsafe fn as_slice(&self) -> &[RuntimeValue] {
+        let data_ptr = (self as *const Self).add(1) as *const RuntimeValue;
+        std::slice::from_raw_parts(data_ptr, self.len as usize)
+    }
+}
+
+/// A heap-allocated dictionary (hash map)
+#[repr(C)]
+pub struct RuntimeDict {
+    pub header: HeapHeader,
+    /// Number of entries
+    pub len: u64,
+    /// Capacity (number of slots)
+    pub capacity: u64,
+    // Followed by key-value pairs as (RuntimeValue, RuntimeValue)
+}
+
+// ============================================================================
+// Array FFI functions
+// ============================================================================
+
+/// Allocate a new array with the given capacity
+#[no_mangle]
+pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
+    let size = std::mem::size_of::<RuntimeArray>()
+        + capacity as usize * std::mem::size_of::<RuntimeValue>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeArray;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Array, size as u32);
+        (*ptr).len = 0;
+        (*ptr).capacity = capacity;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Get the length of an array
+#[no_mangle]
+pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {
+    if !array.is_heap() {
+        return -1;
+    }
+    let ptr = array.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Array {
+            return -1;
+        }
+        (*(ptr as *const RuntimeArray)).len as i64
+    }
+}
+
+/// Get an element from an array
+#[no_mangle]
+pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue {
+    if !array.is_heap() {
+        return RuntimeValue::NIL;
+    }
+    let ptr = array.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Array {
+            return RuntimeValue::NIL;
+        }
+        let arr = ptr as *const RuntimeArray;
+        let len = (*arr).len as i64;
+
+        // Handle negative indices
+        let idx = if index < 0 { len + index } else { index };
+        if idx < 0 || idx >= len {
+            return RuntimeValue::NIL;
+        }
+
+        (*arr).as_slice()[idx as usize]
+    }
+}
+
+/// Set an element in an array
+#[no_mangle]
+pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
+    if !array.is_heap() {
+        return false;
+    }
+    let ptr = array.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Array {
+            return false;
+        }
+        let arr = ptr as *mut RuntimeArray;
+        let len = (*arr).len as i64;
+
+        // Handle negative indices
+        let idx = if index < 0 { len + index } else { index };
+        if idx < 0 || idx >= len {
+            return false;
+        }
+
+        (*arr).as_mut_slice()[idx as usize] = value;
+        true
+    }
+}
+
+/// Push an element to an array
+#[no_mangle]
+pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> bool {
+    if !array.is_heap() {
+        return false;
+    }
+    let ptr = array.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Array {
+            return false;
+        }
+        let arr = ptr as *mut RuntimeArray;
+        if (*arr).len >= (*arr).capacity {
+            // Array is full - would need to reallocate
+            return false;
+        }
+
+        let data_ptr = (arr.add(1)) as *mut RuntimeValue;
+        *data_ptr.add((*arr).len as usize) = value;
+        (*arr).len += 1;
+        true
+    }
+}
+
+/// Pop an element from an array
+#[no_mangle]
+pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
+    if !array.is_heap() {
+        return RuntimeValue::NIL;
+    }
+    let ptr = array.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Array {
+            return RuntimeValue::NIL;
+        }
+        let arr = ptr as *mut RuntimeArray;
+        if (*arr).len == 0 {
+            return RuntimeValue::NIL;
+        }
+
+        (*arr).len -= 1;
+        let data_ptr = (arr.add(1)) as *const RuntimeValue;
+        *data_ptr.add((*arr).len as usize)
+    }
+}
+
+/// Clear all elements from an array
+#[no_mangle]
+pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
+    if !array.is_heap() {
+        return false;
+    }
+    let ptr = array.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Array {
+            return false;
+        }
+        let arr = ptr as *mut RuntimeArray;
+        (*arr).len = 0;
+        true
+    }
+}
+
+// ============================================================================
+// Tuple FFI functions
+// ============================================================================
+
+/// Allocate a new tuple with the given length
+#[no_mangle]
+pub extern "C" fn rt_tuple_new(len: u64) -> RuntimeValue {
+    let size =
+        std::mem::size_of::<RuntimeTuple>() + len as usize * std::mem::size_of::<RuntimeValue>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeTuple;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Tuple, size as u32);
+        (*ptr).len = len;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Get an element from a tuple
+#[no_mangle]
+pub extern "C" fn rt_tuple_get(tuple: RuntimeValue, index: u64) -> RuntimeValue {
+    if !tuple.is_heap() {
+        return RuntimeValue::NIL;
+    }
+    let ptr = tuple.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Tuple {
+            return RuntimeValue::NIL;
+        }
+        let tup = ptr as *const RuntimeTuple;
+        if index >= (*tup).len {
+            return RuntimeValue::NIL;
+        }
+
+        (*tup).as_slice()[index as usize]
+    }
+}
+
+/// Set an element in a tuple (used during construction)
+#[no_mangle]
+pub extern "C" fn rt_tuple_set(tuple: RuntimeValue, index: u64, value: RuntimeValue) -> bool {
+    if !tuple.is_heap() {
+        return false;
+    }
+    let ptr = tuple.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Tuple {
+            return false;
+        }
+        let tup = ptr as *mut RuntimeTuple;
+        if index >= (*tup).len {
+            return false;
+        }
+
+        let data_ptr = (tup.add(1)) as *mut RuntimeValue;
+        *data_ptr.add(index as usize) = value;
+        true
+    }
+}
+
+/// Get the length of a tuple
+#[no_mangle]
+pub extern "C" fn rt_tuple_len(tuple: RuntimeValue) -> i64 {
+    if !tuple.is_heap() {
+        return -1;
+    }
+    let ptr = tuple.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Tuple {
+            return -1;
+        }
+        (*(ptr as *const RuntimeTuple)).len as i64
+    }
+}
+
+// ============================================================================
+// String FFI functions
+// ============================================================================
+
+/// Create a string from UTF-8 bytes
+///
+/// # Safety
+/// The bytes must be valid UTF-8.
+#[no_mangle]
+pub extern "C" fn rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue {
+    if bytes.is_null() && len > 0 {
+        return RuntimeValue::NIL;
+    }
+
+    let size = std::mem::size_of::<RuntimeString>() + len as usize;
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc(layout) as *mut RuntimeString;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::String, size as u32);
+        (*ptr).len = len;
+        (*ptr).hash = 0; // TODO: Compute hash
+
+        // Copy string data
+        if len > 0 {
+            let data_ptr = ptr.add(1) as *mut u8;
+            std::ptr::copy_nonoverlapping(bytes, data_ptr, len as usize);
+        }
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Get the length of a string in bytes
+#[no_mangle]
+pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
+    if !string.is_heap() {
+        return -1;
+    }
+    let ptr = string.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::String {
+            return -1;
+        }
+        (*(ptr as *const RuntimeString)).len as i64
+    }
+}
+
+/// Get a pointer to the string data
+#[no_mangle]
+pub extern "C" fn rt_string_data(string: RuntimeValue) -> *const u8 {
+    if !string.is_heap() {
+        return std::ptr::null();
+    }
+    let ptr = string.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::String {
+            return std::ptr::null();
+        }
+        let str_ptr = ptr as *const RuntimeString;
+        str_ptr.add(1) as *const u8
+    }
+}
+
+/// Concatenate two strings
+#[no_mangle]
+pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue {
+    let len_a = rt_string_len(a);
+    let len_b = rt_string_len(b);
+
+    if len_a < 0 || len_b < 0 {
+        return RuntimeValue::NIL;
+    }
+
+    let total_len = len_a as u64 + len_b as u64;
+    let size = std::mem::size_of::<RuntimeString>() + total_len as usize;
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc(layout) as *mut RuntimeString;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::String, size as u32);
+        (*ptr).len = total_len;
+        (*ptr).hash = 0;
+
+        // Copy first string
+        let data_ptr = ptr.add(1) as *mut u8;
+        let data_a = rt_string_data(a);
+        if !data_a.is_null() && len_a > 0 {
+            std::ptr::copy_nonoverlapping(data_a, data_ptr, len_a as usize);
+        }
+
+        // Copy second string
+        let data_b = rt_string_data(b);
+        if !data_b.is_null() && len_b > 0 {
+            std::ptr::copy_nonoverlapping(data_b, data_ptr.add(len_a as usize), len_b as usize);
+        }
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+// ============================================================================
+// Dict FFI functions
+// ============================================================================
+
+/// Allocate a new dictionary with the given capacity
+#[no_mangle]
+pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
+    let capacity = capacity.max(8); // Minimum capacity
+    let size = std::mem::size_of::<RuntimeDict>()
+        + capacity as usize * 2 * std::mem::size_of::<RuntimeValue>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeDict;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Dict, size as u32);
+        (*ptr).len = 0;
+        (*ptr).capacity = capacity;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Get the length of a dictionary
+#[no_mangle]
+pub extern "C" fn rt_dict_len(dict: RuntimeValue) -> i64 {
+    if !dict.is_heap() {
+        return -1;
+    }
+    let ptr = dict.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Dict {
+            return -1;
+        }
+        (*(ptr as *const RuntimeDict)).len as i64
+    }
+}
+
+/// Simple hash function for RuntimeValue
+fn hash_value(v: RuntimeValue) -> u64 {
+    // Use the raw bits for hashing
+    let bits = v.to_raw();
+    // Simple FNV-1a-like hash
+    let mut hash = 0xcbf29ce484222325u64;
+    for i in 0..8 {
+        hash ^= (bits >> (i * 8)) & 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Get a value from a dictionary by key
+#[no_mangle]
+pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
+    if !dict.is_heap() {
+        return RuntimeValue::NIL;
+    }
+    let ptr = dict.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Dict {
+            return RuntimeValue::NIL;
+        }
+        let d = ptr as *const RuntimeDict;
+        let capacity = (*d).capacity;
+        if capacity == 0 {
+            return RuntimeValue::NIL;
+        }
+
+        let hash = hash_value(key);
+        let data_ptr = (d.add(1)) as *const RuntimeValue;
+
+        // Linear probing
+        for i in 0..capacity {
+            let idx = ((hash + i) % capacity) as usize;
+            let k = *data_ptr.add(idx * 2);
+            if k.is_nil() {
+                return RuntimeValue::NIL; // Key not found
+            }
+            if k == key {
+                return *data_ptr.add(idx * 2 + 1);
+            }
+        }
+        RuntimeValue::NIL
+    }
+}
+
+/// Set a value in a dictionary
+#[no_mangle]
+pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> bool {
+    if !dict.is_heap() || key.is_nil() {
+        return false;
+    }
+    let ptr = dict.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Dict {
+            return false;
+        }
+        let d = ptr as *mut RuntimeDict;
+        let capacity = (*d).capacity;
+        if capacity == 0 {
+            return false;
+        }
+
+        let hash = hash_value(key);
+        let data_ptr = (d.add(1)) as *mut RuntimeValue;
+
+        // Linear probing
+        for i in 0..capacity {
+            let idx = ((hash + i) % capacity) as usize;
+            let k = *data_ptr.add(idx * 2);
+            if k.is_nil() || k == key {
+                if k.is_nil() {
+                    (*d).len += 1;
+                }
+                *data_ptr.add(idx * 2) = key;
+                *data_ptr.add(idx * 2 + 1) = value;
+                return true;
+            }
+        }
+        false // Dict is full
+    }
+}
+
+/// Clear all entries from a dictionary
+#[no_mangle]
+pub extern "C" fn rt_dict_clear(dict: RuntimeValue) -> bool {
+    if !dict.is_heap() {
+        return false;
+    }
+    let ptr = dict.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Dict {
+            return false;
+        }
+        let d = ptr as *mut RuntimeDict;
+        let capacity = (*d).capacity;
+
+        // Zero out all entries
+        let data_ptr = (d.add(1)) as *mut RuntimeValue;
+        for i in 0..(capacity * 2) {
+            *data_ptr.add(i as usize) = RuntimeValue::NIL;
+        }
+        (*d).len = 0;
+        true
+    }
+}
+
+/// Get all keys from a dictionary as an array
+#[no_mangle]
+pub extern "C" fn rt_dict_keys(dict: RuntimeValue) -> RuntimeValue {
+    if !dict.is_heap() {
+        return RuntimeValue::NIL;
+    }
+    let ptr = dict.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Dict {
+            return RuntimeValue::NIL;
+        }
+        let d = ptr as *const RuntimeDict;
+        let capacity = (*d).capacity;
+        let len = (*d).len;
+
+        let result = rt_array_new(len);
+        if result.is_nil() {
+            return result;
+        }
+
+        let data_ptr = (d.add(1)) as *const RuntimeValue;
+        for i in 0..capacity {
+            let k = *data_ptr.add((i * 2) as usize);
+            if !k.is_nil() {
+                rt_array_push(result, k);
+            }
+        }
+        result
+    }
+}
+
+/// Get all values from a dictionary as an array
+#[no_mangle]
+pub extern "C" fn rt_dict_values(dict: RuntimeValue) -> RuntimeValue {
+    if !dict.is_heap() {
+        return RuntimeValue::NIL;
+    }
+    let ptr = dict.as_heap_ptr();
+    unsafe {
+        if (*ptr).object_type != HeapObjectType::Dict {
+            return RuntimeValue::NIL;
+        }
+        let d = ptr as *const RuntimeDict;
+        let capacity = (*d).capacity;
+        let len = (*d).len;
+
+        let result = rt_array_new(len);
+        if result.is_nil() {
+            return result;
+        }
+
+        let data_ptr = (d.add(1)) as *const RuntimeValue;
+        for i in 0..capacity {
+            let k = *data_ptr.add((i * 2) as usize);
+            if !k.is_nil() {
+                let v = *data_ptr.add((i * 2 + 1) as usize);
+                rt_array_push(result, v);
+            }
+        }
+        result
+    }
+}
+
+// ============================================================================
+// Generic collection operations
+// ============================================================================
+
+/// Index into a collection (array, tuple, string, dict)
+/// Returns NIL if out of bounds or wrong type
+#[no_mangle]
+pub extern "C" fn rt_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue {
+    if !collection.is_heap() {
+        return RuntimeValue::NIL;
+    }
+
+    let ptr = collection.as_heap_ptr();
+    unsafe {
+        match (*ptr).object_type {
+            HeapObjectType::Array => {
+                if index.is_int() {
+                    rt_array_get(collection, index.as_int())
+                } else {
+                    RuntimeValue::NIL
+                }
+            }
+            HeapObjectType::Tuple => {
+                if index.is_int() {
+                    let idx = index.as_int();
+                    if idx < 0 {
+                        RuntimeValue::NIL
+                    } else {
+                        rt_tuple_get(collection, idx as u64)
+                    }
+                } else {
+                    RuntimeValue::NIL
+                }
+            }
+            HeapObjectType::String => {
+                // String indexing returns character code
+                if index.is_int() {
+                    let str_ptr = ptr as *const RuntimeString;
+                    let len = (*str_ptr).len as i64;
+                    let idx = index.as_int();
+                    let idx = if idx < 0 { len + idx } else { idx };
+                    if idx < 0 || idx >= len {
+                        RuntimeValue::NIL
+                    } else {
+                        let data = str_ptr.add(1) as *const u8;
+                        RuntimeValue::from_int(*data.add(idx as usize) as i64)
+                    }
+                } else {
+                    RuntimeValue::NIL
+                }
+            }
+            // Dict indexing would go here
+            _ => RuntimeValue::NIL,
+        }
+    }
+}
+
+/// Set a value in a collection (array, dict)
+/// Returns true on success, false on error
+#[no_mangle]
+pub extern "C" fn rt_index_set(
+    collection: RuntimeValue,
+    index: RuntimeValue,
+    value: RuntimeValue,
+) -> bool {
+    if !collection.is_heap() {
+        return false;
+    }
+
+    let ptr = collection.as_heap_ptr();
+    unsafe {
+        match (*ptr).object_type {
+            HeapObjectType::Array => {
+                if index.is_int() {
+                    rt_array_set(collection, index.as_int(), value)
+                } else {
+                    false
+                }
+            }
+            // Dict indexing would go here
+            _ => false,
+        }
+    }
+}
+
+/// Slice a collection (array, tuple, string)
+/// Returns a new collection with elements from start to end (exclusive)
+#[no_mangle]
+pub extern "C" fn rt_slice(
+    collection: RuntimeValue,
+    start: i64,
+    end: i64,
+    step: i64,
+) -> RuntimeValue {
+    if !collection.is_heap() || step == 0 {
+        return RuntimeValue::NIL;
+    }
+
+    let ptr = collection.as_heap_ptr();
+    unsafe {
+        match (*ptr).object_type {
+            HeapObjectType::Array => {
+                let arr = ptr as *const RuntimeArray;
+                let len = (*arr).len as i64;
+
+                // Normalize start and end
+                let start = if start < 0 {
+                    (len + start).max(0)
+                } else {
+                    start.min(len)
+                };
+                let end = if end < 0 {
+                    (len + end).max(0)
+                } else {
+                    end.min(len)
+                };
+
+                if step > 0 && start >= end {
+                    return rt_array_new(0);
+                }
+                if step < 0 && start <= end {
+                    return rt_array_new(0);
+                }
+
+                // Calculate result length
+                let result_len = if step > 0 {
+                    ((end - start + step - 1) / step) as u64
+                } else {
+                    ((start - end - step - 1) / (-step)) as u64
+                };
+
+                let result = rt_array_new(result_len);
+                if result.is_nil() {
+                    return result;
+                }
+
+                let src_slice = (*arr).as_slice();
+                let mut idx = start;
+                while (step > 0 && idx < end) || (step < 0 && idx > end) {
+                    rt_array_push(result, src_slice[idx as usize]);
+                    idx += step;
+                }
+
+                result
+            }
+            HeapObjectType::String => {
+                let str_ptr = ptr as *const RuntimeString;
+                let len = (*str_ptr).len as i64;
+
+                // Normalize start and end
+                let start = if start < 0 {
+                    (len + start).max(0)
+                } else {
+                    start.min(len)
+                };
+                let end = if end < 0 {
+                    (len + end).max(0)
+                } else {
+                    end.min(len)
+                };
+
+                if step != 1 || start >= end {
+                    // Only support step=1 for strings for now
+                    return rt_string_new(std::ptr::null(), 0);
+                }
+
+                let data = str_ptr.add(1) as *const u8;
+                rt_string_new(data.add(start as usize), (end - start) as u64)
+            }
+            _ => RuntimeValue::NIL,
+        }
+    }
+}
+
+/// Check if a value is contained in a collection (array, dict, string)
+/// Returns true (1) if found, false (0) if not
+#[no_mangle]
+pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> u8 {
+    use super::ffi::rt_value_eq;
+
+    if !collection.is_heap() {
+        return 0;
+    }
+
+    let ptr = collection.as_heap_ptr();
+    unsafe {
+        match (*ptr).object_type {
+            HeapObjectType::Array => {
+                let arr = ptr as *const RuntimeArray;
+                let slice = (*arr).as_slice();
+                for item in slice {
+                    if rt_value_eq(*item, value) != 0 {
+                        return 1;
+                    }
+                }
+                0
+            }
+            HeapObjectType::Dict => {
+                // For dicts, 'in' checks if the key exists
+                let dict = ptr as *const RuntimeDict;
+                // Entries are stored after the RuntimeDict header as pairs of RuntimeValue
+                let entries_ptr = (dict as *const u8).add(std::mem::size_of::<RuntimeDict>())
+                    as *const RuntimeValue;
+                for i in 0..(*dict).len as usize {
+                    let key = *entries_ptr.add(i * 2);
+                    if rt_value_eq(key, value) != 0 {
+                        return 1;
+                    }
+                }
+                0
+            }
+            HeapObjectType::String => {
+                // For strings, check if value (as string) is a substring
+                // Simplified: only check if value is a single character in the string
+                if value.is_int() {
+                    let char_code = value.as_int();
+                    let str_ptr = ptr as *const RuntimeString;
+                    let data = (str_ptr.add(1)) as *const u8;
+                    for i in 0..(*str_ptr).len {
+                        if *data.add(i as usize) as i64 == char_code {
+                            return 1;
+                        }
+                    }
+                }
+                0
+            }
+            _ => 0,
+        }
+    }
+}

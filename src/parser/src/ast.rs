@@ -123,6 +123,7 @@ pub enum Node {
     Extern(ExternDef),
     Macro(MacroDef),
     Unit(UnitDef),
+    UnitFamily(UnitFamilyDef),
 
     // Statements
     Let(LetStmt),
@@ -275,6 +276,25 @@ pub struct UnitDef {
     pub name: String,    // e.g., "UserId"
     pub base_type: Type, // e.g., i64
     pub suffix: String,  // e.g., "uid" (for literals like 42_uid)
+    pub visibility: Visibility,
+}
+
+/// Unit variant in a unit family
+/// e.g., `m = 1.0` or `km = 1000.0`
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitVariant {
+    pub suffix: String,  // e.g., "m", "km"
+    pub factor: f64,     // conversion factor to base unit
+}
+
+/// Unit family definition: `unit length(base: f64): m = 1.0, km = 1000.0`
+/// Defines a family of related units with conversion factors
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitFamilyDef {
+    pub span: Span,
+    pub name: String,           // e.g., "length"
+    pub base_type: Type,        // e.g., f64
+    pub variants: Vec<UnitVariant>,
     pub visibility: Visibility,
 }
 

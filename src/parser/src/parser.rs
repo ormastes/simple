@@ -990,9 +990,8 @@ impl<'a> Parser<'a> {
         let mut pairs = Vec::new();
 
         while !self.check(&TokenKind::RBrace) {
-            if self.check(&TokenKind::Star) && self.peek_is(&TokenKind::Star) {
-                self.advance(); // first *
-                self.advance(); // second *
+            if self.check(&TokenKind::DoubleStar) {
+                self.advance(); // **
                 let spread_expr = self.parse_expression()?;
                 pairs.push((Expr::DictSpread(Box::new(spread_expr)), Expr::Nil));
             } else {

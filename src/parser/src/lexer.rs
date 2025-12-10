@@ -109,7 +109,15 @@ impl<'a> Lexer<'a> {
             ',' => TokenKind::Comma,
             ';' => TokenKind::Semicolon,
             '@' => TokenKind::At,
-            '#' => self.skip_comment(),
+            '#' => {
+                // Check if this is an attribute: #[
+                if self.peek() == Some('[') {
+                    TokenKind::Hash
+                } else {
+                    // Otherwise it's a comment
+                    self.skip_comment()
+                }
+            }
             '$' => TokenKind::Dollar,
             '\\' => {
                 // Line continuation: backslash followed by newline
@@ -384,7 +392,21 @@ impl<'a> Lexer<'a> {
                     indent = 0;
                 }
                 '#' => {
-                    // Comment line, skip to end
+                    // Check if this is an attribute: #[
+                    // At this point, peek() still returns '#' (the current char)
+                    // We need to advance past '#' and then peek to see if next is '['
+                    self.advance(); // Consume the '#'
+                    let next = self.peek();
+                    if next == Some('[') {
+                        // This is an attribute, not a comment
+                        // Return a Hash token directly since we already consumed '#'
+                        return Some(Token::new(
+                            TokenKind::Hash,
+                            Span::new(self.current_pos - 1, self.current_pos, self.line, self.column - 1),
+                            "#".to_string(),
+                        ));
+                    }
+                    // Comment line, skip to end (we already advanced past '#')
                     while let Some(c) = self.peek() {
                         if c == '\n' {
                             break;

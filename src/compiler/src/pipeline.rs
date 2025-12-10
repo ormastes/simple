@@ -116,6 +116,17 @@ impl CompilerPipeline {
         let mir_module = mir::lower_to_mir(&hir_module)
             .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
 
+        // Check if we have a main function. If not, fall back to interpreter mode.
+        // This handles cases like `main = 42` which are module-level constants,
+        // not function declarations.
+        let has_main_function = mir_module.functions.iter().any(|f| f.name == "main");
+
+        if !has_main_function {
+            // Fallback: evaluate via interpreter and wrap result
+            let main_value = evaluate_module(&ast_module.items)?;
+            return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
+        }
+
         // 5. Generate machine code via Cranelift
         let codegen = Codegen::new().map_err(|e| CompileError::Codegen(format!("{e}")))?;
         let object_code = codegen
@@ -407,4 +418,158 @@ fn push_struct<T: Copy>(buf: &mut Vec<u8>, value: &T) {
         std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>())
     };
     buf.extend_from_slice(bytes);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Debug helper to list ELF sections
+    fn list_elf_sections(elf_data: &[u8]) -> Vec<String> {
+        let mut sections = Vec::new();
+
+        if elf_data.len() < 64 || &elf_data[0..4] != b"\x7fELF" {
+            return sections;
+        }
+
+        let e_shoff = u64::from_le_bytes(elf_data[40..48].try_into().unwrap()) as usize;
+        let e_shentsize = u16::from_le_bytes(elf_data[58..60].try_into().unwrap()) as usize;
+        let e_shnum = u16::from_le_bytes(elf_data[60..62].try_into().unwrap()) as usize;
+        let e_shstrndx = u16::from_le_bytes(elf_data[62..64].try_into().unwrap()) as usize;
+
+        if e_shoff == 0 || e_shnum == 0 {
+            sections.push(format!("e_shoff={}, e_shnum={}", e_shoff, e_shnum));
+            return sections;
+        }
+
+        // Get string table
+        let shstrtab_hdr_offset = e_shoff + e_shstrndx * e_shentsize;
+        if shstrtab_hdr_offset + e_shentsize > elf_data.len() {
+            sections.push("shstrtab header out of bounds".to_string());
+            return sections;
+        }
+        let shstrtab_offset = u64::from_le_bytes(
+            elf_data[shstrtab_hdr_offset + 24..shstrtab_hdr_offset + 32]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let shstrtab_size = u64::from_le_bytes(
+            elf_data[shstrtab_hdr_offset + 32..shstrtab_hdr_offset + 40]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+
+        if shstrtab_offset + shstrtab_size > elf_data.len() {
+            sections.push(format!(
+                "shstrtab out of bounds: offset={}, size={}",
+                shstrtab_offset, shstrtab_size
+            ));
+            return sections;
+        }
+        let shstrtab = &elf_data[shstrtab_offset..shstrtab_offset + shstrtab_size];
+
+        for i in 0..e_shnum {
+            let sh_offset = e_shoff + i * e_shentsize;
+            if sh_offset + e_shentsize > elf_data.len() {
+                continue;
+            }
+
+            let sh_name = u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().unwrap())
+                as usize;
+
+            if sh_name < shstrtab.len() {
+                let name_end = shstrtab[sh_name..]
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(shstrtab.len() - sh_name);
+                let name =
+                    std::str::from_utf8(&shstrtab[sh_name..sh_name + name_end]).unwrap_or("?");
+
+                let sec_offset = u64::from_le_bytes(
+                    elf_data[sh_offset + 24..sh_offset + 32].try_into().unwrap(),
+                ) as usize;
+                let sec_size = u64::from_le_bytes(
+                    elf_data[sh_offset + 32..sh_offset + 40].try_into().unwrap(),
+                ) as usize;
+
+                sections.push(format!(
+                    "Section[{}]: '{}' offset={} size={}",
+                    i, name, sec_offset, sec_size
+                ));
+            }
+        }
+
+        sections
+    }
+
+    #[test]
+    fn test_elf_extraction_from_codegen() {
+        // Compile a simple function through Cranelift
+        // Note: "main = 42" is a module-level constant, not a function
+        // We need an actual function for codegen
+        let source = "fn main() -> i64:\n    return 42";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser.parse().expect("parse ok");
+
+        let hir_module = hir::lower(&ast_module).expect("hir lower");
+
+        // Debug: print HIR
+        eprintln!("HIR module: {} functions", hir_module.functions.len());
+        for func in &hir_module.functions {
+            eprintln!("  HIR func: {} (public={})", func.name, func.is_public());
+        }
+
+        let mir_module = mir::lower_to_mir(&hir_module).expect("mir lower");
+
+        // Debug: print MIR functions
+        eprintln!("MIR functions ({}):", mir_module.functions.len());
+        for func in &mir_module.functions {
+            eprintln!(
+                "  {} (public={}, entry={:?}, blocks={}, params={}, ret={:?})",
+                func.name,
+                func.is_public(),
+                func.entry_block,
+                func.blocks.len(),
+                func.params.len(),
+                func.return_type
+            );
+            for block in &func.blocks {
+                eprintln!("    Block {:?}: {} instructions", block.id, block.instructions.len());
+                for inst in &block.instructions {
+                    eprintln!("      {:?}", inst);
+                }
+                eprintln!("      Terminator: {:?}", block.terminator);
+            }
+        }
+
+        let codegen = crate::codegen::Codegen::new().expect("codegen new");
+        let object_code = codegen.compile_module(&mir_module).expect("compile ok");
+
+        // Check if it's ELF
+        assert!(
+            object_code.len() > 4 && &object_code[0..4] == b"\x7fELF",
+            "Expected ELF format, got first 4 bytes: {:?}",
+            &object_code[0..4.min(object_code.len())]
+        );
+
+        // List all sections for debugging
+        let sections = list_elf_sections(&object_code);
+        eprintln!("ELF sections:");
+        for s in &sections {
+            eprintln!("  {}", s);
+        }
+
+        // Try to extract .text section
+        let text_section = extract_elf_text_section(&object_code);
+        assert!(
+            text_section.is_some(),
+            "Failed to extract .text section from ELF. Sections: {:?}",
+            sections
+        );
+
+        let text = text_section.unwrap();
+        assert!(!text.is_empty(), "Extracted .text section is empty");
+        eprintln!("Extracted .text section size: {} bytes", text.len());
+        eprintln!("First 16 bytes: {:02x?}", &text[0..16.min(text.len())]);
+    }
 }

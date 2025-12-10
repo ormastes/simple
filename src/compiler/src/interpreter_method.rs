@@ -353,5 +353,35 @@ fn evaluate_method_call(
         }
         return Err(CompileError::Semantic(format!("unknown method {method} on {class}")));
     }
+
+    // Static method calls on class constructor (e.g. Calculator.add(...))
+    if let Value::Constructor { ref class_name } = recv_val {
+        if let Some(class_def) = classes.get(class_name) {
+            // Find static method (no self parameter)
+            if let Some(method_def) = class_def.methods.iter().find(|m| m.name == method) {
+                // Execute without self
+                let mut local_env = env.clone();
+                let mut positional_idx = 0;
+                for arg in args {
+                    let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                    if let Some(name) = &arg.name {
+                        local_env.insert(name.clone(), val);
+                    } else if positional_idx < method_def.params.len() {
+                        let param = &method_def.params[positional_idx];
+                        local_env.insert(param.name.clone(), val);
+                        positional_idx += 1;
+                    }
+                }
+                return match exec_block(&method_def.body, &mut local_env, functions, classes, enums, impl_methods) {
+                    Ok(Control::Return(v)) => Ok(v),
+                    Ok(_) => Ok(Value::Nil),
+                    Err(e) => Err(e),
+                };
+            }
+            return Err(CompileError::Semantic(format!("unknown static method {method} on class {class_name}")));
+        }
+        return Err(CompileError::Semantic(format!("unknown class {class_name}")));
+    }
+
     Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))
 }

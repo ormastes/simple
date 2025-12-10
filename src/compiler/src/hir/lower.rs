@@ -167,7 +167,8 @@ impl Lowerer {
                 | Node::Impl(_)
                 | Node::Extern(_)
                 | Node::Macro(_)
-                | Node::Unit(_) => {
+                | Node::Unit(_)
+                | Node::UnitFamily(_) => {
                     // These are handled at type-check time or runtime
                     // HIR lowering focuses on functions and struct types
                 }
@@ -546,6 +547,60 @@ impl Lowerer {
             }
 
             Expr::Call { callee, args } => {
+                // Check for special builtins: generator, future, spawn, await
+                if let Expr::Identifier(name) = callee.as_ref() {
+                    match name.as_str() {
+                        "generator" => {
+                            if args.len() != 1 {
+                                return Err(LowerError::Unsupported(
+                                    "generator expects exactly one argument (a lambda)".into(),
+                                ));
+                            }
+                            let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GeneratorCreate { body: body_hir },
+                                ty: TypeId::I64,
+                            });
+                        }
+                        "future" => {
+                            if args.len() != 1 {
+                                return Err(LowerError::Unsupported(
+                                    "future expects exactly one argument".into(),
+                                ));
+                            }
+                            let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                            return Ok(HirExpr {
+                                kind: HirExprKind::FutureCreate { body: body_hir },
+                                ty: TypeId::I64,
+                            });
+                        }
+                        "await" => {
+                            if args.len() != 1 {
+                                return Err(LowerError::Unsupported(
+                                    "await expects exactly one argument".into(),
+                                ));
+                            }
+                            let future_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                            return Ok(HirExpr {
+                                kind: HirExprKind::Await(future_hir),
+                                ty: TypeId::I64,
+                            });
+                        }
+                        _ => {} // Fall through to normal call handling
+                    }
+                }
+
+                // Check for spawn as a statement-like expression
+                if let Expr::Identifier(name) = callee.as_ref() {
+                    if name == "spawn" && args.len() == 1 {
+                        let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
+                        return Ok(HirExpr {
+                            kind: HirExprKind::ActorSpawn { body: body_hir },
+                            ty: TypeId::I64,
+                        });
+                    }
+                }
+
                 let func_hir = Box::new(self.lower_expr(callee, ctx)?);
                 let mut args_hir = Vec::new();
                 for arg in args {
@@ -655,6 +710,46 @@ impl Lowerer {
                         then_branch: then_hir,
                         else_branch: else_hir,
                     },
+                    ty,
+                })
+            }
+
+            Expr::Lambda { params, body } => {
+                // Track captured variables from outer scope
+                let captures: Vec<usize> = ctx.locals.iter().enumerate().map(|(i, _)| i).collect();
+
+                // Collect parameter names and types
+                let param_info: Vec<(String, TypeId)> = params
+                    .iter()
+                    .map(|p| (p.name.clone(), TypeId::I64)) // Default to I64 for untyped params
+                    .collect();
+
+                // Lower the lambda body
+                let body_hir = Box::new(self.lower_expr(body, ctx)?);
+                let body_ty = body_hir.ty;
+
+                Ok(HirExpr {
+                    kind: HirExprKind::Lambda {
+                        params: param_info,
+                        body: body_hir,
+                        captures,
+                    },
+                    ty: body_ty,
+                })
+            }
+
+            Expr::Yield(value) => {
+                let value_hir = if let Some(v) = value {
+                    Box::new(self.lower_expr(v, ctx)?)
+                } else {
+                    Box::new(HirExpr {
+                        kind: HirExprKind::Nil,
+                        ty: TypeId::NIL,
+                    })
+                };
+                let ty = value_hir.ty;
+                Ok(HirExpr {
+                    kind: HirExprKind::Yield(value_hir),
                     ty,
                 })
             }

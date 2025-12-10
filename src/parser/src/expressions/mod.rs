@@ -925,7 +925,7 @@ impl<'a> Parser<'a> {
                 }
 
                 // Check for dict spread: {**d1, **d2}
-                if self.check(&TokenKind::Star) && self.peek_is(&TokenKind::Star) {
+                if self.check(&TokenKind::DoubleStar) {
                     return self.parse_dict_with_spreads();
                 }
 
@@ -964,9 +964,8 @@ impl<'a> Parser<'a> {
                         break;
                     }
                     // Check for spread: **dict
-                    if self.check(&TokenKind::Star) && self.peek_is(&TokenKind::Star) {
-                        self.advance(); // first *
-                        self.advance(); // second *
+                    if self.check(&TokenKind::DoubleStar) {
+                        self.advance(); // **
                         let spread_expr = self.parse_expression()?;
                         // Use a sentinel key to mark spread
                         pairs.push((Expr::DictSpread(Box::new(spread_expr)), Expr::Nil));
@@ -1018,7 +1017,9 @@ impl<'a> Parser<'a> {
                 let condition = self.parse_expression()?;
                 self.expect(&TokenKind::Colon)?;
                 let then_branch = self.parse_expression()?;
-                let else_branch = if self.check(&TokenKind::Else) {
+                let else_branch = if self.check(&TokenKind::Elif) {
+                    Some(Box::new(self.parse_primary()?))
+                } else if self.check(&TokenKind::Else) {
                     self.advance();
                     self.expect(&TokenKind::Colon)?;
                     Some(Box::new(self.parse_expression()?))
@@ -1031,11 +1032,61 @@ impl<'a> Parser<'a> {
                     else_branch,
                 })
             }
+            TokenKind::Elif => {
+                self.advance();
+                let condition = self.parse_expression()?;
+                self.expect(&TokenKind::Colon)?;
+                let then_branch = self.parse_expression()?;
+                let else_branch = if self.check(&TokenKind::Elif) {
+                    Some(Box::new(self.parse_primary()?))
+                } else if self.check(&TokenKind::Else) {
+                    self.advance();
+                    self.expect(&TokenKind::Colon)?;
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                Ok(Expr::If {
+                    condition: Box::new(condition),
+                    then_branch: Box::new(then_branch),
+                    else_branch,
+                })
+            }
+            TokenKind::Match => {
+                self.advance();
+                let subject = self.parse_expression()?;
+                self.expect(&TokenKind::Colon)?;
+                if self.check(&TokenKind::Newline) {
+                    self.advance();
+                    self.expect(&TokenKind::Indent)?;
+                    let mut arms = Vec::new();
+                    while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                        if self.check(&TokenKind::Dedent) {
+                            break;
+                        }
+                        arms.push(self.parse_match_arm_expr()?);
+                    }
+                    if self.check(&TokenKind::Dedent) {
+                        self.advance();
+                    }
+                    Ok(Expr::Match {
+                        subject: Box::new(subject),
+                        arms,
+                    })
+                } else {
+                    Err(ParseError::unexpected_token(
+                        "newline after match",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ))
+                }
+            }
             TokenKind::Dollar => {
-                // Macro parameter reference: $name
                 self.advance();
                 let name = self.expect_identifier()?;
-                // Return as identifier with $ prefix for macro substitution
                 Ok(Expr::Identifier(format!("${}", name)))
             }
             _ => Err(ParseError::unexpected_token(
@@ -1044,5 +1095,33 @@ impl<'a> Parser<'a> {
                 self.current.span,
             )),
         }
+    }
+
+    fn parse_match_arm_expr(&mut self) -> Result<MatchArm, ParseError> {
+        use crate::token::Span;
+        let start_span = self.current.span;
+        let pattern = self.parse_pattern()?;
+        let guard = if self.check(&TokenKind::If) {
+            self.advance();
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+        self.expect(&TokenKind::FatArrow)?;
+        let body = if self.check(&TokenKind::Newline) {
+            self.parse_block()?
+        } else {
+            let expr = self.parse_expression()?;
+            Block {
+                span: self.previous.span,
+                statements: vec![Node::Expression(expr)],
+            }
+        };
+        Ok(MatchArm {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            pattern,
+            guard,
+            body,
+        })
     }
 }

@@ -4,7 +4,7 @@
 
 ```
 simple/
-├── Cargo.toml                     # Workspace definition
+├── Cargo.toml                     # Workspace definition (11 crates)
 ├── Makefile                       # Build automation (test, coverage, lint, etc.)
 ├── .jscpd.json                    # Code duplication detection config
 ├── CLAUDE.md                      # This file - development guide
@@ -29,7 +29,7 @@ simple/
 ├── verification/                  # Lean 4 formal verification projects
 │   ├── manual_pointer_borrow/     # Borrow checker model
 │   ├── gc_manual_borrow/          # GC safety model
-│   ├── async_compile/          # Effect tracking model
+│   ├── async_compile/             # Effect tracking model
 │   ├── nogc_compile/              # NoGC instruction model
 │   └── type_inference_compile/    # Type inference model
 │
@@ -44,10 +44,17 @@ simple/
     ├── parser/                    # Lexer, Parser, AST (depends: common)
     │   └── src/
     │       ├── lib.rs
-    │       ├── lexer.rs           # 943 lines - tokenization
-    │       ├── parser.rs          # 1747 lines - recursive descent
-    │       ├── ast.rs             # 389 lines - AST nodes
-    │       └── token.rs           # 170 lines - token types
+    │       ├── lexer.rs           # Tokenization with INDENT/DEDENT
+    │       ├── parser.rs          # Main parser entry point
+    │       ├── ast.rs             # AST node definitions
+    │       ├── token.rs           # Token types
+    │       ├── error.rs           # Parse error types
+    │       ├── expressions/       # Expression parsing (Pratt parser)
+    │       │   └── mod.rs
+    │       ├── statements/        # Statement parsing
+    │       │   └── mod.rs
+    │       └── types_def/         # Type parsing
+    │           └── mod.rs
     │
     ├── type/                      # Type checker/inference (HM scaffold)
     │   └── src/lib.rs             # Unification, generalize/instantiate, core expr inference
@@ -55,56 +62,101 @@ simple/
     ├── compiler/                  # HIR, MIR, Codegen (depends: parser, common, runtime)
     │   └── src/
     │       ├── lib.rs             # Compilation entry point
+    │       ├── pipeline.rs        # CompilerPipeline orchestration
+    │       ├── value.rs           # Value enum, Env, pointer wrappers
+    │       ├── effects.rs         # Effect checking (async safety)
+    │       ├── interpreter.rs     # Tree-walking interpreter (includes 8 modules)
+    │       ├── interpreter_*.rs   # Interpreter modules (call, control, helpers, method, macro, extern, context)
+    │       ├── interpreter_ffi.rs # FFI bridge for compiled↔interpreter
+    │       ├── value_bridge.rs    # FFI value marshalling (BridgeValue)
+    │       ├── compilability.rs   # Compilability analysis (20+ fallback reasons)
     │       ├── hir/               # High-level IR
     │       │   ├── mod.rs
     │       │   ├── types.rs       # Type system
     │       │   └── lower.rs       # AST → HIR lowering
     │       ├── mir/               # Mid-level IR
     │       │   ├── mod.rs
-    │       │   ├── types.rs       # 50+ MIR instructions, effects, patterns
+    │       │   ├── types.rs       # MIR types, effects, patterns
+    │       │   ├── instructions.rs # 50+ MIR instruction variants
+    │       │   ├── blocks.rs      # Basic block management
+    │       │   ├── function.rs    # Function-level MIR
+    │       │   ├── effects.rs     # Effect tracking and analysis
+    │       │   ├── generator.rs   # Generator state machine lowering
     │       │   └── lower.rs       # HIR → MIR lowering
     │       ├── codegen/
     │       │   ├── mod.rs
     │       │   ├── cranelift.rs   # AOT Cranelift backend
-    │       │   └── jit.rs         # JIT Cranelift backend
-    │       ├── value_bridge.rs    # FFI value marshalling (BridgeValue)
-    │       ├── interpreter_ffi.rs # Interpreter FFI for hybrid execution
-    │       └── compilability.rs   # Compilability analysis
+    │       │   ├── jit.rs         # JIT Cranelift backend
+    │       │   ├── runtime_ffi.rs # Shared FFI function specs (50+ functions)
+    │       │   └── types_util.rs  # Type conversion utilities
+    │       └── linker/            # SMF emission
+    │           ├── mod.rs
+    │           └── smf_writer.rs
     │
     ├── loader/                    # SMF binary loader (depends: common)
     │   └── src/
     │       ├── lib.rs
-    │       └── loader.rs          # SMF format handling
+    │       ├── loader.rs          # ModuleLoader
+    │       ├── module.rs          # LoadedModule
+    │       ├── registry.rs        # ModuleRegistry with symbol resolution
+    │       ├── smf/               # SMF format definitions
+    │       │   ├── mod.rs
+    │       │   ├── header.rs
+    │       │   ├── section.rs
+    │       │   ├── symbol.rs
+    │       │   └── reloc.rs
+    │       └── memory/            # Memory mapping
+    │           ├── mod.rs
+    │           ├── posix.rs
+    │           └── windows.rs
     │
     ├── native_loader/             # OS dylib loader (depends: common)
     │   └── src/lib.rs
     │
-    ├── lib/                       # Native stdlib (depends: native_loader)
-    │   └── src/
-    │       └── term.rs            # Terminal I/O
-    │
-    ├── log/                       # Tracing/log init (structured logging)
-    │   └── src/lib.rs             # simple_log::init(); tracing subscriber setup
-    │
     ├── runtime/                   # GC, concurrency, and runtime values
     │   └── src/
     │       ├── lib.rs             # Re-exports
-    │       ├── value.rs           # RuntimeValue (tagged pointers, collection FFI)
+    │       ├── value/             # Runtime value system (9 modules)
+    │       │   ├── mod.rs         # Re-exports all value types and 50+ FFI functions
+    │       │   ├── core.rs        # RuntimeValue - 64-bit tagged pointer
+    │       │   ├── tags.rs        # Tag constants
+    │       │   ├── heap.rs        # HeapHeader, HeapObjectType
+    │       │   ├── collections.rs # RuntimeArray, RuntimeTuple, RuntimeDict, RuntimeString + FFI
+    │       │   ├── objects.rs     # RuntimeObject, RuntimeClosure, RuntimeEnum + FFI
+    │       │   ├── ffi.rs         # Value conversion and core FFI
+    │       │   ├── actors.rs      # RuntimeActor + FFI (spawn/send/recv)
+    │       │   └── async_gen.rs   # RuntimeFuture, RuntimeGenerator + FFI
     │       ├── memory/
     │       │   ├── gc.rs          # GcRuntime + logging hooks
     │       │   └── no_gc.rs       # NoGcAllocator
     │       └── concurrency/
     │           └── mod.rs         # Actor scheduler
     │
+    ├── pkg/                       # Package manager (UV-style)
+    │   └── src/
+    │       ├── lib.rs             # Package manager entry
+    │       ├── manifest.rs        # simple.toml parsing
+    │       ├── lock.rs            # simple.lock format
+    │       ├── cache.rs           # Global cache with hard links
+    │       ├── version.rs         # Version and VersionReq
+    │       ├── resolver/          # Dependency resolution
+    │       │   └── graph.rs       # Topological ordering
+    │       └── commands/          # CLI: init, add, install, update, list, cache
+    │
+    ├── lib/                       # Native stdlib (depends: native_loader)
+    │   └── src/
+    │       └── io/term/mod.rs     # Terminal I/O
+    │
     └── driver/                    # CLI runner (depends: all)
         └── src/
             ├── lib.rs
-            ├── runner.rs          # Compile and execute
-            ├── watcher.rs         # File watching
             ├── main.rs            # CLI entry (run, --gc-log)
-            └── tests/
-                ├── runner_tests.rs
-                └── watcher_tests.rs
+            ├── runner.rs          # Compile and execute
+            ├── exec_core.rs       # Shared compile/load/run logic
+            ├── interpreter.rs     # High-level API with I/O capture
+            ├── dependency_cache.rs # Import/macro tracking
+            └── watcher/
+                └── mod.rs         # File watching for hot reload
 ```
 
 ## Compilation Pipeline
@@ -160,15 +212,16 @@ Source Code (.spl)
 | Component | Status |
 |-----------|--------|
 | Lexer | Complete |
-| Parser | Complete |
+| Parser | Complete (modular: expressions, statements, types_def) |
 | AST | Complete |
 | HIR | Complete (type-checked IR) |
-| MIR | Complete (50+ instructions) |
-| Codegen | Hybrid (Cranelift + Interpreter fallback) |
-| RuntimeValue | Complete (tagged pointers, collection FFI) |
+| MIR | Complete (50+ instructions, generator state machine lowering) |
+| Codegen | Hybrid (Cranelift + Interpreter fallback, 50+ runtime FFI functions) |
+| RuntimeValue | Complete (9 modules, tagged pointers, 50+ FFI functions) |
 | SMF Loader | Complete |
-| Driver | Complete |
-| Runtime/GC | Abfall-backed wrapper with optional logging (requires Rust 1.90+) |
+| Driver | Complete (exec_core, runner, interpreter layers) |
+| Runtime/GC | Abfall-backed wrapper with optional logging |
+| Package Manager | Complete (UV-style: manifest, lock, cache, resolution) |
 
 ### MIR Instruction Categories
 
@@ -424,7 +477,13 @@ Optional (requires npm): `npm install -g jscpd`
 
 ## Key Files for Current Work
 
-- `src/compiler/src/lib.rs` - Entry point, needs to actually compile
+- `src/compiler/src/lib.rs` - Compilation entry point
+- `src/compiler/src/pipeline.rs` - CompilerPipeline orchestration
 - `src/compiler/src/hir/mod.rs` - AST → HIR lowering
-- `src/compiler/src/codegen/cranelift.rs` - HIR → machine code
+- `src/compiler/src/mir/generator.rs` - Generator state machine lowering
+- `src/compiler/src/codegen/cranelift.rs` - MIR → machine code
+- `src/compiler/src/codegen/runtime_ffi.rs` - FFI function specs
+- `src/runtime/src/value/` - Runtime value system (9 modules)
+- `src/driver/src/exec_core.rs` - Shared compile/load/run logic
 - `src/driver/tests/runner_tests.rs` - System tests
+- `src/pkg/src/` - Package manager

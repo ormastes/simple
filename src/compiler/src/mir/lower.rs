@@ -1,5 +1,10 @@
-use super::types::{LocalKind, *};
-use crate::hir::{BinOp, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId, UnaryOp};
+use super::{
+    blocks::Terminator,
+    effects::{CallTarget, LocalKind},
+    function::{MirFunction, MirLocal, MirModule},
+    instructions::{BlockId, MirInst, VReg},
+};
+use crate::hir::{HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
 use thiserror::Error;
 
 //==============================================================================
@@ -674,6 +679,129 @@ impl MirLowerer {
                 })
             }
 
+            HirExprKind::Lambda {
+                params,
+                body,
+                captures,
+            } => {
+                // Lower the lambda body to get the result vreg
+                let body_reg = self.lower_expr(body)?;
+
+                // For now, create a simple closure with captures
+                // Each capture is 8 bytes (pointer-sized)
+                let closure_size = 8 + (captures.len() as u32 * 8);
+                let capture_offsets: Vec<u32> =
+                    (0..captures.len()).map(|i| 8 + (i as u32 * 8)).collect();
+                let capture_types: Vec<TypeId> = captures.iter().map(|_| TypeId::I64).collect();
+
+                // Load captured variables
+                let mut capture_regs = Vec::new();
+                for &local_idx in captures.iter() {
+                    let reg = self.with_func(|func, current_block| {
+                        let addr_reg = func.new_vreg();
+                        let val_reg = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::LocalAddr {
+                            dest: addr_reg,
+                            local_index: local_idx,
+                        });
+                        block.instructions.push(MirInst::Load {
+                            dest: val_reg,
+                            addr: addr_reg,
+                            ty: TypeId::I64,
+                        });
+                        val_reg
+                    })?;
+                    capture_regs.push(reg);
+                }
+
+                // Generate a unique function name for the lambda body
+                let func_name = format!("__lambda_{}", body_reg.0);
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ClosureCreate {
+                        dest,
+                        func_name,
+                        closure_size,
+                        capture_offsets,
+                        capture_types,
+                        captures: capture_regs,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::Yield(value) => {
+                let value_reg = self.lower_expr(value)?;
+
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Yield { value: value_reg });
+                    // Yield doesn't have a meaningful result, return the value register
+                    value_reg
+                })
+            }
+
+            HirExprKind::GeneratorCreate { body } => {
+                // Lower the body expression first to get any setup
+                let _body_reg = self.lower_expr(body)?;
+
+                // Create a new block for the generator body
+                let body_block = self.with_func(|func, _| func.new_block())?;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GeneratorCreate { dest, body_block });
+                    dest
+                })
+            }
+
+            HirExprKind::FutureCreate { body } => {
+                // Lower the body expression first
+                let _body_reg = self.lower_expr(body)?;
+
+                // Create a new block for the future body
+                let body_block = self.with_func(|func, _| func.new_block())?;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::FutureCreate { dest, body_block });
+                    dest
+                })
+            }
+
+            HirExprKind::Await(future) => {
+                let future_reg = self.lower_expr(future)?;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block
+                        .instructions
+                        .push(MirInst::Await { dest, future: future_reg });
+                    dest
+                })
+            }
+
+            HirExprKind::ActorSpawn { body } => {
+                // Lower the body expression first
+                let _body_reg = self.lower_expr(body)?;
+
+                // Create a new block for the actor body
+                let body_block = self.with_func(|func, _| func.new_block())?;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ActorSpawn { dest, body_block });
+                    dest
+                })
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }
@@ -711,7 +839,7 @@ pub fn lower_to_mir(hir: &HirModule) -> MirLowerResult<MirModule> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir;
+    use crate::hir::{self, BinOp};
     use simple_parser::Parser;
 
     fn compile_to_mir(source: &str) -> MirLowerResult<MirModule> {

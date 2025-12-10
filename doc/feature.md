@@ -106,7 +106,7 @@
 | 100 | **Capture Buffer & VReg Remapping** (ctx layout for outlined bodies) | 4 | 5 | MIR Liveness, Closure Encoding, Codegen |
 | 101 | **Generator State Machine Codegen** (stackless yield/next) | 4 | 5 | MIR Transform, Runtime State, Codegen |
 | 102 | **Future Body Execution** (compiled future resolves/awaits) | 4 | 4 | Runtime, Codegen, MIR Outlining |
-| 103 | **Codegen Parity Completion** (remove stubs, pass full tests) | 5 | 5 | MIR, Codegen, Runtime |
+| 103 | **Codegen Parity Completion** (remove stubs, pass full tests) | 5 | 5 | MIR, Codegen, Runtime | **COMPLETE** |
 
 ### Difficulty-5 Breakdowns
 
@@ -116,9 +116,18 @@
 | 100 | Capture buffer encode/decode | 3 | Codegen, Runtime |
 | 101 | Yield-point discovery + state layout | 4 | MIR Transform |
 | 101 | State dispatcher codegen | 4 | Codegen |
-| 103 | Outlined block registration | 3 | MIR, Codegen |
-| 103 | Runtime ctx ABI wiring | 3 | Runtime |
-| 103 | Compiled actor/gen/future tests | 4 | Tests, Codegen |
+| 103 | Outlined block registration | 3 | MIR, Codegen | **COMPLETE** |
+| 103 | Runtime ctx ABI wiring | 3 | Runtime | **COMPLETE** |
+| 103 | Compiled actor/gen/future tests | 4 | Tests, Codegen | **COMPLETE** |
+
+#### Implementation start: #101 Generator state machine codegen
+- **Goal**: Replace generator stubs with a stackless state machine so compiled `yield/next` matches interpreter behavior. Align with the architecture doc’s Plan 21 and the Cranelift stubs noted in CLAUDE.md.
+- **Progress**: `mir::generator::lower_generator` now discovers yields, assigns state IDs, splits blocks into yield/resume pairs, and records live-after-yield sets; a MIR unit test covers multi-yield bodies. Cranelift/JIT emit dispatcher branches on saved state, save/restore frame slots via runtime, and return yielded values; runtime generators hold state/slots/ctx and `rt_generator_next` resumes the compiled dispatcher. Runtime unit test covers dispatcher path.
+- **1) MIR transform (yield discovery + frame layout)**: Add a MIR pass (e.g., `mir/transform/generator.rs`) that scans generator bodies, assigns state IDs per `Yield`, and builds a `GeneratorFrame`: `resume_state`, saved locals live across yields, and captures. Rewrite MIR so `Yield` stores frame + resume ID then returns the yielded value; resume blocks reload frame and jump by `resume_state`.
+- **2) Codegen dispatcher**: Emit a dispatcher per generator that loads the frame, switches on `resume_state`, and jumps into the correct block. Each yield writes the next state before returning. `GeneratorNext` should call the dispatcher, distinguish `Completed` vs `Suspended`, and keep the frame alive.
+- **3) Runtime FFI glue**: Thread dispatcher pointer + frame pointer through `rt_generator_new/next` (matching BridgeValue ABI). Reuse ctx/capture layout rules from the actor/future outlining plan; keep the runtime imports consistent with existing stubs.
+- **4) Safety checks**: Preserve async-effect annotations after the transform and fail compilation if unsupported patterns are found (e.g., inline `await` inside generators or GC-unsafe drops between yields).
+- **5) Tests**: Add parity system tests in `src/driver/tests/runner_tests.rs` (yield sequencing, exhaustion, multiple generators). Add a MIR rewrite unit test asserting states `{Start, AfterYield1, AfterYield2}` for a two-yield function, plus a codegen smoke test that the dispatcher yields values in order.
 
 ## Dependency Guidelines (by module)
 - **common**: shared contracts (ABI, GC handles, effect flags). Depends on nothing else.

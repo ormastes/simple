@@ -1,5 +1,79 @@
 # Simple Language Specification
 
+## Execution Modes
+
+Simple supports two execution modes with different type requirements:
+
+### Compiler Mode (Native Codegen)
+- **Requires explicit type annotations** on all function parameters and return types (like Rust)
+- Compiles to native machine code via Cranelift
+- Faster execution, suitable for production
+- Example:
+  ```simple
+  fn add(a: i64, b: i64) -> i64:
+      return a + b
+  ```
+
+### Interpreter Mode
+- **Type annotations are optional** - types are inferred at runtime
+- Supports all language features including dynamic typing
+- Better for prototyping and scripting
+- Example:
+  ```simple
+  fn add(a, b):
+      return a + b
+  ```
+
+**Compatibility**: Code written for compiler mode (with types) runs in both modes. Code without type annotations only runs in interpreter mode.
+
+---
+
+## Testing Annotations
+
+Simple provides test helper functions for verifying expected errors. These are used in the test suite to validate error handling:
+
+### Test Helpers
+
+| Helper | Purpose | Example |
+|--------|---------|---------|
+| `run_expect(src, exit_code)` | Run and expect success with exit code | `run_expect("main = 42", 42)` |
+| `run_expect_interp(src, exit_code)` | Run interpreter-only (untyped code) | `run_expect_interp("fn f(x): x", 0)` |
+| `run_expect_error(src)` | Expect any error | `run_expect_error("let x = ")` |
+| `run_expect_compile_error(src, msg)` | Expect compile error containing message | `run_expect_compile_error(src, "type")` |
+| `run_expect_runtime_error(src, msg)` | Expect runtime error containing message | `run_expect_runtime_error(src, "divide")` |
+
+### Error Categories
+
+1. **Parse Errors**: Syntax errors detected during parsing
+   - Missing tokens, unexpected tokens, invalid syntax
+   - Example: `let x =` (missing value)
+
+2. **Semantic Errors**: Type and scope errors detected during compilation
+   - Type mismatches, undefined variables, invalid operations
+   - Example: `let x: i64 = "hello"` (type mismatch)
+
+3. **Runtime Errors**: Errors that occur during execution
+   - Division by zero, index out of bounds, pattern match exhaustion
+   - Example: `let x = 1 / 0` (division by zero)
+
+### Strong Enum Exhaustiveness
+
+Enums marked with `#[strong]` require exhaustive pattern matching without wildcards:
+
+```simple
+#[strong]
+enum Status:
+    Active
+    Inactive
+
+let s = Status::Active
+match s:
+    Status::Active => 1
+    Status::Inactive => 0   # Must list all variants, no _ allowed
+```
+
+---
+
 ## Syntax
 
 Simple is a statically typed programming language with a clean, high-level syntax. It uses indentation to define code blocks (similar to Python) instead of braces or end keywords. All statements indented at the same level belong to the same block, and a decrease in indentation signifies the end of the current block. Indentation makes the structure of code clear and enforceable by the language (not just a style choice). For example:

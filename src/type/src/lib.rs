@@ -967,6 +967,11 @@ impl TypeChecker {
                     let ty = self.fresh_var();
                     self.env.insert(u.name.clone(), ty);
                 }
+                Node::UnitFamily(uf) => {
+                    // Register unit family type
+                    let ty = self.fresh_var();
+                    self.env.insert(uf.name.clone(), ty);
+                }
                 Node::Impl(_) => {
                     // Impl blocks don't introduce new names
                 }

@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Signature, UserFuncName};
+use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings::{self, Configurable, Flags};
 use cranelift_codegen::Context;
@@ -11,8 +12,14 @@ use target_lexicon::Triple;
 use thiserror::Error;
 
 use crate::hir::{BinOp, TypeId, UnaryOp};
-use crate::mir::{MirFunction, MirInst, MirModule, Terminator, VReg};
+use crate::mir::{
+    lower_generator, LocalKind, MirFunction, MirInst, MirLocal, MirModule, Terminator, VReg,
+    Visibility,
+};
 use cranelift_codegen::ir::MemFlags;
+
+use super::runtime_ffi::RUNTIME_FUNCS;
+use super::types_util::{type_id_to_cranelift, type_id_size, type_to_cranelift};
 
 #[derive(Error, Debug)]
 pub enum CodegenError {
@@ -115,608 +122,170 @@ impl Codegen {
 
     /// Return a function address for an outlined MIR block. Panics if not declared.
     fn func_block_addr(
-        &mut self,
+        func_ids: &HashMap<String, cranelift_module::FuncId>,
+        module: &mut ObjectModule,
         parent_name: &str,
         block: crate::mir::BlockId,
         builder: &mut FunctionBuilder,
     ) -> cranelift_codegen::ir::Value {
         let name = format!("{}_outlined_{}", parent_name, block.0);
-        let func_id = *self
-            .func_ids
+        let func_id = *func_ids
             .get(&name)
             .unwrap_or_else(|| panic!("outlined function {name} not declared"));
-        let func_ref = self.module.declare_func_in_func(func_id, builder.func);
+        let func_ref = module.declare_func_in_func(func_id, builder.func);
         builder.ins().func_addr(types::I64, func_ref)
     }
 
-    /// Declare external runtime functions for FFI
+    /// Expand MIR with outlined functions for each body_block use.
+    fn expand_with_outlined(&self, mir: &MirModule) -> Vec<MirFunction> {
+        let mut functions = mir.functions.clone();
+        let mut seen = HashSet::new();
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum BodyKind {
+            Actor,
+            Generator,
+            Future,
+        }
+        for func in &mir.functions {
+            let live_ins_map = func.compute_live_ins();
+            for block in &func.blocks {
+                for inst in &block.instructions {
+                    let body_info = match inst {
+                        MirInst::ActorSpawn { body_block, .. } => {
+                            Some((*body_block, BodyKind::Actor))
+                        }
+                        MirInst::GeneratorCreate { body_block, .. } => {
+                            Some((*body_block, BodyKind::Generator))
+                        }
+                        MirInst::FutureCreate { body_block, .. } => {
+                            Some((*body_block, BodyKind::Future))
+                        }
+                        _ => None,
+                    };
+                    if let Some((body_block, kind)) = body_info {
+                        let name = format!("{}_outlined_{}", func.name, body_block.0);
+                        if seen.contains(&name) {
+                            continue;
+                        }
+                        seen.insert(name.clone());
+                        // Outline by cloning the parent function; switch entry to the body_block,
+                        // clear outlined metadata, force void return, and append ctx param.
+                        let mut outlined = func.clone();
+                        outlined.name = name.clone();
+                        outlined.visibility = Visibility::Private;
+                        outlined.entry_block = body_block;
+                        outlined.return_type = match kind {
+                            BodyKind::Generator | BodyKind::Future => crate::hir::TypeId::I64,
+                            BodyKind::Actor => crate::hir::TypeId::VOID,
+                        };
+                        outlined.outlined_bodies.clear();
+                        outlined.retain_reachable_from(body_block);
+                        // Only strip returns for actors (void bodies)
+                        if kind == BodyKind::Actor {
+                            for b in &mut outlined.blocks {
+                                if let Terminator::Return(Some(_)) = b.terminator {
+                                    b.terminator = Terminator::Return(None);
+                                }
+                            }
+                        }
+
+                        // For generators, parameter is the generator handle; others use ctx param.
+                        if kind == BodyKind::Generator {
+                            outlined.params.clear();
+                            outlined.params.push(MirLocal {
+                                name: "generator".to_string(),
+                                ty: crate::hir::TypeId::I64,
+                                kind: LocalKind::Parameter,
+                            });
+                        } else {
+                            outlined.params.push(MirLocal {
+                                name: "ctx".to_string(),
+                                ty: crate::hir::TypeId::I64,
+                                kind: LocalKind::Parameter,
+                            });
+                        }
+                        // Record outlined metadata on the original function for later ctx wiring.
+                        let mut live_ins: Vec<_> = live_ins_map
+                            .get(&body_block)
+                            .cloned()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .collect();
+                        live_ins.sort_by_key(|v| v.0);
+                        if let Some(orig) = functions.iter_mut().find(|f| f.name == func.name) {
+                            orig.outlined_bodies.insert(
+                                body_block,
+                                crate::mir::OutlinedBody {
+                                    name: name.clone(),
+                                    live_ins: live_ins.clone(),
+                                    frame_slots: None,
+                                },
+                            );
+                        }
+                        outlined.outlined_bodies.insert(
+                            body_block,
+                            crate::mir::OutlinedBody {
+                                name: name.clone(),
+                                live_ins: live_ins.clone(),
+                                frame_slots: None,
+                            },
+                        );
+                        let outlined = match kind {
+                            BodyKind::Generator => {
+                                let lowered = lower_generator(&outlined, body_block);
+                                let slots = lowered
+                                    .states
+                                    .iter()
+                                    .map(|s| s.live_after_yield.len())
+                                    .max()
+                                    .unwrap_or(0);
+                                if let Some(orig) = functions.iter_mut().find(|f| f.name == func.name)
+                                {
+                                    if let Some(meta) = orig.outlined_bodies.get_mut(&body_block) {
+                                        meta.frame_slots = Some(slots);
+                                    }
+                                }
+                                let mut lowered_func = lowered.rewritten;
+                                if let Some(meta) = lowered_func.outlined_bodies.get_mut(&body_block)
+                                {
+                                    meta.frame_slots = Some(slots);
+                                }
+                                lowered_func
+                            }
+                            _ => outlined,
+                        };
+                        functions.push(outlined);
+                    }
+                }
+            }
+        }
+        functions
+    }
+
+    /// Declare external runtime functions for FFI using shared specifications.
     fn declare_runtime_functions(
         module: &mut ObjectModule,
     ) -> CodegenResult<HashMap<&'static str, cranelift_module::FuncId>> {
         let mut funcs = HashMap::new();
         let call_conv = CallConv::SystemV;
 
-        // rt_array_new(capacity: u64) -> RuntimeValue (i64)
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_array_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_array_new", id);
-
-        // rt_array_push(array: RuntimeValue, value: RuntimeValue) -> bool (i8)
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_array_push", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_array_push", id);
-
-        // rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_array_get", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_array_get", id);
-
-        // rt_array_set(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_array_set", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_array_set", id);
-
-        // rt_array_pop(array: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_array_pop", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_array_pop", id);
-
-        // rt_tuple_new(len: u64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_tuple_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_tuple_new", id);
-
-        // rt_tuple_set(tuple: RuntimeValue, index: u64, value: RuntimeValue) -> bool
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_tuple_set", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_tuple_set", id);
-
-        // rt_tuple_get(tuple: RuntimeValue, index: u64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_tuple_get", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_tuple_get", id);
-
-        // rt_tuple_len(tuple: RuntimeValue) -> i64
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_tuple_len", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_tuple_len", id);
-
-        // rt_dict_len(dict: RuntimeValue) -> i64
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_dict_len", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_dict_len", id);
-
-        // rt_index_get(collection: RuntimeValue, index: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_index_get", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_index_get", id);
-
-        // rt_index_set(collection: RuntimeValue, index: RuntimeValue, value: RuntimeValue) -> bool
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_index_set", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_index_set", id);
-
-        // rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64)); // pointer
-        sig.params.push(AbiParam::new(types::I64)); // len
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_string_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_string_new", id);
-
-        // rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_string_concat", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_string_concat", id);
-
-        // rt_contains(collection: RuntimeValue, value: RuntimeValue) -> bool (i8)
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_contains", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_contains", id);
-
-        // rt_value_int(value: i64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_value_int", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_value_int", id);
-
-        // rt_value_float(value: f64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::F64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_value_float", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_value_float", id);
-
-        // rt_value_bool(value: bool) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I8));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_value_bool", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_value_bool", id);
-
-        // rt_value_nil() -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_value_nil", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_value_nil", id);
-
-        // rt_object_new(class_id: u32, field_count: u32) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_object_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_object_new", id);
-
-        // rt_object_field_get(object: RuntimeValue, field_index: u32) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_object_field_get", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_object_field_get", id);
-
-        // rt_object_field_set(object: RuntimeValue, field_index: u32, value: RuntimeValue) -> bool
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_object_field_set", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_object_field_set", id);
-
-        // rt_closure_new(func_ptr: *const u8, capture_count: u32) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64)); // pointer
-        sig.params.push(AbiParam::new(types::I32));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_closure_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_closure_new", id);
-
-        // rt_closure_set_capture(closure: RuntimeValue, index: u32, value: RuntimeValue) -> bool
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_closure_set_capture", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_closure_set_capture", id);
-
-        // rt_closure_get_capture(closure: RuntimeValue, index: u32) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_closure_get_capture", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_closure_get_capture", id);
-
-        // rt_closure_func_ptr(closure: RuntimeValue) -> *const u8
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_closure_func_ptr", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_closure_func_ptr", id);
-
-        // rt_enum_new(enum_id: u32, discriminant: u32, payload: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(types::I32));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_enum_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_enum_new", id);
-
-        // rt_enum_discriminant(value: RuntimeValue) -> i64
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_enum_discriminant", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_enum_discriminant", id);
-
-        // rt_enum_payload(value: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_enum_payload", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_enum_payload", id);
-
-        // rt_dict_new(capacity: u64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_dict_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_dict_new", id);
-
-        // rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: RuntimeValue) -> bool
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_dict_set", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_dict_set", id);
-
-        // rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_dict_get", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_dict_get", id);
-
-        // rt_slice(collection: RuntimeValue, start: i64, end: i64, step: i64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_slice", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_slice", id);
-
-        // =========================================================================
-        // Raw memory allocation (zero-cost struct support)
-        // =========================================================================
-
-        // rt_alloc(size: u64) -> *mut u8
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_alloc", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_alloc", id);
-
-        // rt_free(ptr: *mut u8, size: u64)
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_free", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_free", id);
-
-        // rt_ptr_to_value(ptr: *mut u8) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_ptr_to_value", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_ptr_to_value", id);
-
-        // rt_value_to_ptr(v: RuntimeValue) -> *mut u8
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_value_to_ptr", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_value_to_ptr", id);
-
-        // rt_wait(target: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_wait", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_wait", id);
-
-        // rt_future_new(body_func: u64, ctx: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_future_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_future_new", id);
-
-        // rt_future_await(future: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_future_await", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_future_await", id);
-
-        // rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_actor_spawn", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_actor_spawn", id);
-
-        // rt_actor_send(actor: RuntimeValue, message: RuntimeValue)
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_actor_send", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_actor_send", id);
-
-        // rt_actor_recv() -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_actor_recv", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_actor_recv", id);
-
-        // rt_generator_new(body_func: u64, ctx: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_generator_new", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_generator_new", id);
-
-        // rt_generator_yield(value: RuntimeValue)
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_generator_yield", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_generator_yield", id);
-
-        // rt_generator_next(generator: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_generator_next", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_generator_next", id);
-
-        // =====================================================================
-        // Dict/Array helper methods
-        // =====================================================================
-
-        // rt_dict_clear(dict: RuntimeValue) -> bool
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_dict_clear", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_dict_clear", id);
-
-        // rt_dict_keys(dict: RuntimeValue) -> RuntimeValue (array)
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_dict_keys", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_dict_keys", id);
-
-        // rt_dict_values(dict: RuntimeValue) -> RuntimeValue (array)
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_dict_values", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_dict_values", id);
-
-        // rt_array_clear(array: RuntimeValue) -> bool
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I8));
-        let id = module
-            .declare_function("rt_array_clear", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_array_clear", id);
-
-        // =====================================================================
-        // Interpreter bridge FFI
-        // =====================================================================
-
-        // rt_interp_call(name_ptr: *const u8, name_len: u64, args: RuntimeValue) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64)); // name_ptr
-        sig.params.push(AbiParam::new(types::I64)); // name_len
-        sig.params.push(AbiParam::new(types::I64)); // args (RuntimeValue array)
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_interp_call", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_interp_call", id);
-
-        // rt_interp_eval(expr_index: u64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_interp_eval", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_interp_eval", id);
-
-        // =====================================================================
-        // Error handling
-        // =====================================================================
-
-        // rt_function_not_found(name_ptr: *const u8, name_len: u64) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64)); // name_ptr
-        sig.params.push(AbiParam::new(types::I64)); // name_len
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_function_not_found", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_function_not_found", id);
-
-        // rt_method_not_found(type_ptr, type_len, method_ptr, method_len) -> RuntimeValue
-        let mut sig = Signature::new(call_conv);
-        sig.params.push(AbiParam::new(types::I64)); // type_ptr
-        sig.params.push(AbiParam::new(types::I64)); // type_len
-        sig.params.push(AbiParam::new(types::I64)); // method_ptr
-        sig.params.push(AbiParam::new(types::I64)); // method_len
-        sig.returns.push(AbiParam::new(types::I64));
-        let id = module
-            .declare_function("rt_method_not_found", Linkage::Import, &sig)
-            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-        funcs.insert("rt_method_not_found", id);
+        for spec in RUNTIME_FUNCS {
+            let sig = spec.build_signature(call_conv);
+            let id = module
+                .declare_function(spec.name, Linkage::Import, &sig)
+                .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
+            funcs.insert(spec.name, id);
+        }
 
         Ok(funcs)
     }
 
-    /// Convert TypeId to Cranelift type for zero-cost codegen
-    fn type_id_to_cranelift(type_id: TypeId) -> cranelift_codegen::ir::Type {
-        match type_id {
-            TypeId::VOID => types::I64, // Use I64 for void (no actual value)
-            TypeId::BOOL => types::I8,
-            TypeId::I8 => types::I8,
-            TypeId::I16 => types::I16,
-            TypeId::I32 => types::I32,
-            TypeId::I64 => types::I64,
-            TypeId::U8 => types::I8,
-            TypeId::U16 => types::I16,
-            TypeId::U32 => types::I32,
-            TypeId::U64 => types::I64,
-            TypeId::F32 => types::F32,
-            TypeId::F64 => types::F64,
-            TypeId::STRING => types::I64, // Pointer
-            TypeId::NIL => types::I64,    // Tagged value
-            _ => types::I64,              // All other types are pointers
-        }
-    }
-
-    /// Get the size in bytes for a TypeId
-    fn type_id_size(type_id: TypeId) -> u32 {
-        match type_id {
-            TypeId::VOID => 0,
-            TypeId::BOOL => 1,
-            TypeId::I8 | TypeId::U8 => 1,
-            TypeId::I16 | TypeId::U16 => 2,
-            TypeId::I32 | TypeId::U32 | TypeId::F32 => 4,
-            TypeId::I64 | TypeId::U64 | TypeId::F64 => 8,
-            TypeId::STRING | TypeId::NIL => 8,
-            _ => 8, // All other types are pointers
-        }
-    }
-
     pub fn compile_module(mut self, mir: &MirModule) -> CodegenResult<Vec<u8>> {
-        // Declare outlined bodies for body_block users (actor/generator/future)
-        self.declare_outlined_functions(mir)?;
+        // Expand with outlined functions for body_block users
+        let functions = self.expand_with_outlined(mir);
 
         // First pass: declare all functions
-        for func in &mir.functions {
+        for func in &functions {
             let sig = Self::build_signature(func);
             let linkage = if func.is_public() {
                 Linkage::Export
@@ -733,7 +302,7 @@ impl Codegen {
         }
 
         // Second pass: compile function bodies
-        for func in &mir.functions {
+        for func in &functions {
             self.compile_function(func)?;
         }
 
@@ -744,132 +313,24 @@ impl Codegen {
             .map_err(|e| CodegenError::ModuleError(e.to_string()))?)
     }
 
-    /// Declare trivial outlined functions for each body_block encountered.
-    fn declare_outlined_functions(&mut self, mir: &MirModule) -> CodegenResult<()> {
-        for func in &mir.functions {
-            for block in &func.blocks {
-                for inst in &block.instructions {
-                    let body_block_opt = match inst {
-                        MirInst::ActorSpawn { body_block, .. }
-                        | MirInst::GeneratorCreate { body_block, .. }
-                        | MirInst::FutureCreate { body_block, .. } => Some(*body_block),
-                        _ => None,
-                    };
-                    if let Some(body_block) = body_block_opt {
-                        let name = format!("{}_outlined_{}", func.name, body_block.0);
-                        if self.func_ids.contains_key(&name) {
-                            continue;
-                        }
-                        let mut sig = Signature::new(CallConv::SystemV);
-                        sig.params.push(AbiParam::new(types::I64)); // ctx
-                        let id = self
-                            .module
-                            .declare_function(&name, Linkage::Local, &sig)
-                            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-                        self.func_ids.insert(name.clone(), id);
-
-                        // Define trivial body: fn(ctx) { return; }
-                        let mut ctx = self.module.make_context();
-                        ctx.func.signature = sig;
-                        ctx.func.name = UserFuncName::user(0, id.as_u32());
-                        {
-                            let mut fb_ctx = FunctionBuilderContext::new();
-                            let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-                            let block = fb.create_block();
-                            fb.append_block_params_for_function_params(block);
-                            fb.switch_to_block(block);
-                            fb.seal_block(block);
-                            fb.ins().return_(&[]);
-                            fb.finalize();
-                        }
-                        self.module
-                            .define_function(id, &mut ctx)
-                            .map_err(|e| CodegenError::ModuleError(e.to_string()))?;
-                        self.module.clear_context(&mut ctx);
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
     fn build_signature(func: &MirFunction) -> Signature {
+        use cranelift_codegen::ir::AbiParam;
         let call_conv = CallConv::SystemV;
         let mut sig = Signature::new(call_conv);
 
         // Add parameters
         for param in &func.params {
-            let ty = Self::type_to_cranelift(param.ty);
+            let ty = type_to_cranelift(param.ty);
             sig.params.push(AbiParam::new(ty));
         }
 
         // Add return type
         if func.return_type != TypeId::VOID {
-            let ret_ty = Self::type_to_cranelift(func.return_type);
+            let ret_ty = type_to_cranelift(func.return_type);
             sig.returns.push(AbiParam::new(ret_ty));
         }
 
         sig
-    }
-
-    /// Very rough stub for block outlining: registers a new func_id if not present and returns func_addr.
-    /// This currently ignores captures and uses a void signature fn(ctx: i64). It will miscompile real bodies.
-    fn func_block_addr(
-        &mut self,
-        block: crate::mir::BlockId,
-        builder: &mut FunctionBuilder,
-    ) -> cranelift_codegen::ir::Value {
-        let name = format!("__block_{}", block.0);
-        if !self.func_ids.contains_key(&name) {
-            let sig = {
-                let mut s = Signature::new(CallConv::SystemV);
-                s.params.push(AbiParam::new(types::I64));
-                s
-            };
-            let id = self
-                .module
-                .declare_function(&name, Linkage::Local, &sig)
-                .expect("declare outlined");
-            self.func_ids.insert(name.clone(), id);
-            // define a trivial body that just returns
-            let mut ctx = self.module.make_context();
-            ctx.func.signature = sig;
-            ctx.func.name = UserFuncName::user(0, id.as_u32());
-            {
-                let mut fb_ctx = FunctionBuilderContext::new();
-                let mut fb = FunctionBuilder::new(&mut ctx.func, &mut fb_ctx);
-                let block = fb.create_block();
-                fb.switch_to_block(block);
-                fb.append_block_params_for_function_params(block);
-                fb.seal_block(block);
-                fb.ins().return_(&[]);
-                fb.finalize();
-            }
-            self.module
-                .define_function(id, &mut ctx)
-                .expect("define outlined");
-            self.module.clear_context(&mut ctx);
-        }
-
-        let func_id = self.func_ids[&name];
-        let func_ref = self.module.declare_func_in_func(func_id, builder.func);
-        builder.ins().func_addr(types::I64, func_ref)
-    }
-
-    fn type_to_cranelift(ty: TypeId) -> types::Type {
-        match ty {
-            TypeId::VOID => types::I64, // Void returns use I64 for ABI compatibility
-            TypeId::BOOL => types::I8,
-            TypeId::I8 | TypeId::U8 => types::I8,
-            TypeId::I16 | TypeId::U16 => types::I16,
-            TypeId::I32 | TypeId::U32 => types::I32,
-            TypeId::I64 | TypeId::U64 => types::I64,
-            TypeId::F32 => types::F32,
-            TypeId::F64 => types::F64,
-            TypeId::STRING => types::I64, // String pointer
-            TypeId::NIL => types::I64,    // Nil is pointer-sized
-            _ => types::I64,              // Custom types default to pointer-sized
-        }
     }
 
     fn compile_function(&mut self, func: &MirFunction) -> CodegenResult<()> {
@@ -891,7 +352,7 @@ impl Codegen {
 
         for (i, param) in func.params.iter().enumerate() {
             let var = Variable::from_u32(var_idx);
-            let ty = Self::type_to_cranelift(param.ty);
+            let ty = type_to_cranelift(param.ty);
             builder.declare_var(var, ty);
             variables.insert(i, var);
             var_idx += 1;
@@ -899,11 +360,14 @@ impl Codegen {
 
         for (i, local) in func.locals.iter().enumerate() {
             let var = Variable::from_u32(var_idx);
-            let ty = Self::type_to_cranelift(local.ty);
+            let ty = type_to_cranelift(local.ty);
             builder.declare_var(var, ty);
             variables.insert(func.params.len() + i, var);
             var_idx += 1;
         }
+
+        // Track values and blocks
+        let mut vreg_values: HashMap<VReg, cranelift_codegen::ir::Value> = HashMap::new();
 
         // Create blocks
         let mut blocks = HashMap::new();
@@ -924,16 +388,129 @@ impl Codegen {
             builder.def_var(var, val);
         }
 
+        // If this is an outlined body with captures, load them from ctx (last param).
+        if let Some(meta) = func.outlined_bodies.get(&func.entry_block) {
+            if !meta.live_ins.is_empty() {
+                let ctx_param = if func.generator_states.is_some() {
+                    let gen_param = builder.block_params(entry_block)[0];
+                    let get_ctx_id = self.runtime_funcs["rt_generator_get_ctx"];
+                    let get_ctx_ref =
+                        self.module.declare_func_in_func(get_ctx_id, builder.func);
+                    let call = builder.ins().call(get_ctx_ref, &[gen_param]);
+                    builder.inst_results(call)[0]
+                } else {
+                    builder.block_params(entry_block)[func.params.len().saturating_sub(1)]
+                };
+                let get_id = self.runtime_funcs["rt_array_get"];
+                let get_ref = self.module.declare_func_in_func(get_id, builder.func);
+                for (idx, reg) in meta.live_ins.iter().enumerate() {
+                    let idx_val = builder.ins().iconst(types::I64, idx as i64);
+                    let call = builder.ins().call(get_ref, &[ctx_param, idx_val]);
+                    let val = builder.inst_results(call)[0];
+                    vreg_values.insert(*reg, val);
+                }
+            }
+        }
+
+        let generator_states = func.generator_states.clone();
+        let generator_state_len = generator_states.as_ref().map(|s| s.len()).unwrap_or(0);
+        let generator_state_map = generator_states.as_ref().map(|states| {
+            let mut map = HashMap::new();
+            for s in states {
+                map.insert(s.yield_block, s.clone());
+            }
+            map
+        });
+        let generator_resume_map = generator_states.as_ref().map(|states| {
+            let mut map = HashMap::new();
+            for s in states {
+                map.insert(s.resume_block, s.clone());
+            }
+            map
+        });
+        let mut skip_entry_terminator = false;
+        if let Some(states) = &generator_states {
+            let generator_param = builder.block_params(entry_block)[0];
+            let get_state_id = self.runtime_funcs["rt_generator_get_state"];
+            let get_state_ref = self.module.declare_func_in_func(get_state_id, builder.func);
+            let call = builder.ins().call(get_state_ref, &[generator_param]);
+            let state_val = builder.inst_results(call)[0];
+
+            if let Some(entry_target) = func
+                .block(func.entry_block)
+                .and_then(|b| match b.terminator {
+                    Terminator::Jump(t) => Some(t),
+                    _ => None,
+                })
+            {
+                let target_block = *blocks.get(&entry_target).unwrap();
+                let mut targets = Vec::new();
+                targets.push(target_block);
+                for st in states {
+                    targets.push(*blocks.get(&st.resume_block).unwrap());
+                }
+                let default_block = func
+                    .generator_complete
+                    .and_then(|b| blocks.get(&b).copied())
+                    .unwrap_or(target_block);
+
+                let mut current_block = entry_block;
+                let mut is_first = true;
+                for (idx, tgt) in targets.iter().enumerate() {
+                    if !is_first {
+                        builder.switch_to_block(current_block);
+                    } else {
+                        is_first = false;
+                    }
+                    let is_last = idx == targets.len() - 1;
+                    let next_block = if is_last {
+                        default_block
+                    } else {
+                        builder.create_block()
+                    };
+                    let cmp =
+                        builder
+                            .ins()
+                            .icmp_imm(IntCC::Equal, state_val, idx as i64);
+                    builder
+                        .ins()
+                        .brif(cmp, *tgt, &[], next_block, &[]);
+                    builder.seal_block(current_block);
+                    if !is_last {
+                        current_block = next_block;
+                    }
+                }
+                builder.switch_to_block(default_block);
+                skip_entry_terminator = true;
+            }
+        }
+
         // Compile each block
-        let mut vreg_values: HashMap<VReg, cranelift_codegen::ir::Value> = HashMap::new();
         // Track which VReg holds the address of which local variable
         let mut local_addr_map: HashMap<VReg, usize> = HashMap::new();
 
         for mir_block in &func.blocks {
+            if generator_states.is_some() && mir_block.id == func.entry_block {
+                continue;
+            }
             let cl_block = *blocks.get(&mir_block.id).unwrap();
 
             if mir_block.id != func.entry_block {
                 builder.switch_to_block(cl_block);
+            }
+
+            if let Some(resume_map) = generator_resume_map.as_ref() {
+                if let Some(state) = resume_map.get(&mir_block.id) {
+                    let gen_param = builder.block_params(entry_block)[0];
+                    let load_id = self.runtime_funcs["rt_generator_load_slot"];
+                    let load_ref = self.module.declare_func_in_func(load_id, builder.func);
+                    for (idx, reg) in state.live_after_yield.iter().enumerate() {
+                        let idx_val = builder.ins().iconst(types::I64, idx as i64);
+                        let call = builder.ins().call(load_ref, &[gen_param, idx_val]);
+                        let val = builder.inst_results(call)[0];
+                        vreg_values.insert(*reg, val);
+                    }
+                }
             }
 
             // Compile instructions
@@ -1203,7 +780,7 @@ impl Codegen {
                         let alloc_ref = self.module.declare_func_in_func(alloc_id, builder.func);
 
                         // Calculate size based on type (default to 8 bytes for pointer-sized values)
-                        let size = Self::type_id_size(*ty) as i64;
+                        let size = type_id_size(*ty) as i64;
                         let size_val = builder.ins().iconst(types::I64, size.max(8));
                         let call = builder.ins().call(alloc_ref, &[size_val]);
                         let ptr = builder.inst_results(call)[0];
@@ -1677,11 +1254,11 @@ impl Codegen {
 
                         for param_ty in param_types {
                             sig.params
-                                .push(AbiParam::new(Self::type_id_to_cranelift(*param_ty)));
+                                .push(AbiParam::new(type_id_to_cranelift(*param_ty)));
                         }
                         if *return_type != TypeId::VOID {
                             sig.returns
-                                .push(AbiParam::new(Self::type_id_to_cranelift(*return_type)));
+                                .push(AbiParam::new(type_id_to_cranelift(*return_type)));
                         }
 
                         let sig_ref = builder.import_signature(sig);
@@ -1731,7 +1308,7 @@ impl Codegen {
                             field_offsets.iter().zip(field_types.iter()).enumerate()
                         {
                             let field_val = vreg_values[&field_values[i]];
-                            let cranelift_ty = Self::type_id_to_cranelift(*field_type);
+                            let cranelift_ty = type_id_to_cranelift(*field_type);
 
                             // Direct store at offset (zero-cost pointer arithmetic)
                             builder
@@ -1753,7 +1330,7 @@ impl Codegen {
                     } => {
                         // Zero-cost field access: pointer arithmetic + load
                         let obj_ptr = vreg_values[object];
-                        let cranelift_ty = Self::type_id_to_cranelift(*field_type);
+                        let cranelift_ty = type_id_to_cranelift(*field_type);
 
                         // Direct load at offset (single instruction)
                         let val = builder.ins().load(
@@ -1876,11 +1453,11 @@ impl Codegen {
                         sig.params.push(AbiParam::new(types::I64)); // receiver
                         for param_ty in param_types {
                             sig.params
-                                .push(AbiParam::new(Self::type_id_to_cranelift(*param_ty)));
+                                .push(AbiParam::new(type_id_to_cranelift(*param_ty)));
                         }
                         if *return_type != TypeId::VOID {
                             sig.returns
-                                .push(AbiParam::new(Self::type_id_to_cranelift(*return_type)));
+                                .push(AbiParam::new(type_id_to_cranelift(*return_type)));
                         }
 
                         let sig_ref = builder.import_signature(sig);
@@ -2424,16 +2001,42 @@ impl Codegen {
 
                     // Phase 6: Async/Generator instructions
                     MirInst::FutureCreate { dest, body_block } => {
-                        // Create a new future with body function pointer
-                        // TODO: outline body_block; use no-op stub for now
+                        // Create a new future with body function pointer and captured ctx.
                         let future_new_id = self.runtime_funcs["rt_future_new"];
                         let future_new_ref = self
                             .module
                             .declare_func_in_func(future_new_id, builder.func);
 
-                        let body_ptr = self.func_block_addr(&func.name, *body_block, builder);
-                        let nil_ctx = builder.ins().iconst(types::I64, 0);
-                        let call = builder.ins().call(future_new_ref, &[body_ptr, nil_ctx]);
+                        let body_ptr = Self::func_block_addr(
+                            &self.func_ids,
+                            &mut self.module,
+                            &func.name,
+                            *body_block,
+                            &mut builder,
+                        );
+                        let ctx_val = if let Some(meta) = func.outlined_bodies.get(body_block) {
+                            if meta.live_ins.is_empty() {
+                                builder.ins().iconst(types::I64, 0)
+                            } else {
+                                let cap = builder.ins().iconst(types::I64, meta.live_ins.len() as i64);
+                                let new_id = self.runtime_funcs["rt_array_new"];
+                                let new_ref =
+                                    self.module.declare_func_in_func(new_id, builder.func);
+                                let new_call = builder.ins().call(new_ref, &[cap]);
+                                let arr = builder.inst_results(new_call)[0];
+                                let push_id = self.runtime_funcs["rt_array_push"];
+                                let push_ref =
+                                    self.module.declare_func_in_func(push_id, builder.func);
+                                for reg in &meta.live_ins {
+                                    let val = vreg_values[reg];
+                                    let _ = builder.ins().call(push_ref, &[arr, val]);
+                                }
+                                arr
+                            }
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(future_new_ref, &[body_ptr, ctx_val]);
                         let result = builder.inst_results(call)[0];
                         vreg_values.insert(*dest, result);
                     }
@@ -2450,13 +2053,40 @@ impl Codegen {
                     }
 
                     MirInst::ActorSpawn { dest, body_block } => {
-                        // TODO: outline body_block to a real function pointer and capture ctx.
+                        // Outline body_block to a real function pointer and capture ctx.
                         let spawn_id = self.runtime_funcs["rt_actor_spawn"];
                         let spawn_ref = self.module.declare_func_in_func(spawn_id, builder.func);
 
-                        let body_ptr = self.func_block_addr(&func.name, *body_block, builder);
-                        let nil_ctx = builder.ins().iconst(types::I64, 0);
-                        let call = builder.ins().call(spawn_ref, &[body_ptr, nil_ctx]);
+                        let body_ptr = Self::func_block_addr(
+                            &self.func_ids,
+                            &mut self.module,
+                            &func.name,
+                            *body_block,
+                            &mut builder,
+                        );
+                        let ctx_val = if let Some(meta) = func.outlined_bodies.get(body_block) {
+                            if meta.live_ins.is_empty() {
+                                builder.ins().iconst(types::I64, 0)
+                            } else {
+                                let cap = builder.ins().iconst(types::I64, meta.live_ins.len() as i64);
+                                let new_id = self.runtime_funcs["rt_array_new"];
+                                let new_ref =
+                                    self.module.declare_func_in_func(new_id, builder.func);
+                                let new_call = builder.ins().call(new_ref, &[cap]);
+                                let arr = builder.inst_results(new_call)[0];
+                                let push_id = self.runtime_funcs["rt_array_push"];
+                                let push_ref =
+                                    self.module.declare_func_in_func(push_id, builder.func);
+                                for reg in &meta.live_ins {
+                                    let val = vreg_values[reg];
+                                    let _ = builder.ins().call(push_ref, &[arr, val]);
+                                }
+                                arr
+                            }
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        let call = builder.ins().call(spawn_ref, &[body_ptr, ctx_val]);
                         let result = builder.inst_results(call)[0];
                         vreg_values.insert(*dest, result);
                     }
@@ -2480,25 +2110,77 @@ impl Codegen {
                     }
 
                     MirInst::GeneratorCreate { dest, body_block } => {
-                        // Create a new generator with body function pointer
+                        // Create a new generator with body function pointer, frame slot count, and captured ctx.
                         let gen_new_id = self.runtime_funcs["rt_generator_new"];
                         let gen_new_ref =
                             self.module.declare_func_in_func(gen_new_id, builder.func);
 
-                        let body_ptr = self.func_block_addr(&func.name, *body_block, builder);
-                        let nil_ctx = builder.ins().iconst(types::I64, 0);
-                        let call = builder.ins().call(gen_new_ref, &[body_ptr, nil_ctx]);
+                        let body_ptr = Self::func_block_addr(
+                            &self.func_ids,
+                            &mut self.module,
+                            &func.name,
+                            *body_block,
+                            &mut builder,
+                        );
+
+                        let (ctx_val, slot_count) = if let Some(meta) = func.outlined_bodies.get(body_block) {
+                            let ctx = if meta.live_ins.is_empty() {
+                                builder.ins().iconst(types::I64, 0)
+                            } else {
+                                let cap = builder.ins().iconst(types::I64, meta.live_ins.len() as i64);
+                                let new_id = self.runtime_funcs["rt_array_new"];
+                                let new_ref =
+                                    self.module.declare_func_in_func(new_id, builder.func);
+                                let new_call = builder.ins().call(new_ref, &[cap]);
+                                let arr = builder.inst_results(new_call)[0];
+                                let push_id = self.runtime_funcs["rt_array_push"];
+                                let push_ref =
+                                    self.module.declare_func_in_func(push_id, builder.func);
+                                for reg in &meta.live_ins {
+                                    let val = vreg_values[reg];
+                                    let _ = builder.ins().call(push_ref, &[arr, val]);
+                                }
+                                arr
+                            };
+                            (ctx, meta.frame_slots.unwrap_or(0) as i64)
+                        } else {
+                            (builder.ins().iconst(types::I64, 0), 0)
+                        };
+                        let slots_val = builder.ins().iconst(types::I64, slot_count);
+                        let call = builder.ins().call(gen_new_ref, &[body_ptr, slots_val, ctx_val]);
                         let result = builder.inst_results(call)[0];
                         vreg_values.insert(*dest, result);
                     }
 
                     MirInst::Yield { value } => {
-                        // Emit yield value into generator buffer
-                        let yield_id = self.runtime_funcs["rt_generator_yield"];
-                        let yield_ref = self.module.declare_func_in_func(yield_id, builder.func);
+                        if let Some(state_map) = generator_state_map.as_ref() {
+                            if let Some(state) = state_map.get(&mir_block.id) {
+                                let gen_param = builder.block_params(entry_block)[0];
+                                let store_id = self.runtime_funcs["rt_generator_store_slot"];
+                                let store_ref =
+                                    self.module.declare_func_in_func(store_id, builder.func);
+                                for (idx, reg) in state.live_after_yield.iter().enumerate() {
+                                    let val = vreg_values[reg];
+                                    let idx_val = builder.ins().iconst(types::I64, idx as i64);
+                                    let _ = builder.ins().call(store_ref, &[gen_param, idx_val, val]);
+                                }
 
-                        let val = vreg_values[value];
-                        builder.ins().call(yield_ref, &[val]);
+                                let set_state_id = self.runtime_funcs["rt_generator_set_state"];
+                                let set_state_ref =
+                                    self.module.declare_func_in_func(set_state_id, builder.func);
+                                let next_state =
+                                    builder.ins().iconst(types::I64, (state.state_id + 1) as i64);
+                                let _ = builder.ins().call(set_state_ref, &[gen_param, next_state]);
+
+                                let val = vreg_values[value];
+                                builder.ins().return_(&[val]);
+                                continue;
+                            }
+                        }
+                        // Fallback (should not happen for lowered generators)
+                        builder
+                            .ins()
+                            .trap(cranelift_codegen::ir::TrapCode::unwrap_user(2));
                     }
 
                     MirInst::GeneratorNext { dest, generator } => {
@@ -2636,8 +2318,24 @@ impl Codegen {
             }
 
             // Compile terminator
+            if skip_entry_terminator && mir_block.id == func.entry_block {
+                continue;
+            }
             match &mir_block.terminator {
                 Terminator::Return(val) => {
+                    if generator_states.is_some() {
+                        let gen_param = builder.block_params(entry_block)[0];
+                        let set_state_id = self.runtime_funcs["rt_generator_set_state"];
+                        let set_state_ref =
+                            self.module.declare_func_in_func(set_state_id, builder.func);
+                        let done_state =
+                            builder.ins().iconst(types::I64, generator_state_len as i64);
+                        let _ = builder.ins().call(set_state_ref, &[gen_param, done_state]);
+                        let mark_id = self.runtime_funcs["rt_generator_mark_done"];
+                        let mark_ref =
+                            self.module.declare_func_in_func(mark_id, builder.func);
+                        let _ = builder.ins().call(mark_ref, &[gen_param]);
+                    }
                     if let Some(v) = val {
                         let ret_val = vreg_values[v];
                         builder.ins().return_(&[ret_val]);

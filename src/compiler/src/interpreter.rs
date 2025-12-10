@@ -16,7 +16,7 @@ use simple_common::actor::{ActorSpawner, Message, ThreadSpawner};
 use simple_parser::ast::{
     AssignOp, BinOp, Block, ClassDef, ContextStmt, Effect, EnumDef, Expr, ExternDef, FStringPart,
     FunctionDef, IfStmt, LambdaParam, MacroArg, MacroBody, MacroDef, MacroParam, MatchStmt, Node,
-    Pattern, PointerKind, RangeBound, Type, UnaryOp, UnitDef, WithStmt,
+    Pattern, PointerKind, RangeBound, Type, UnaryOp, UnitDef, UnitFamilyDef, WithStmt,
 };
 use tracing::instrument;
 
@@ -223,11 +223,21 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 }
             }
             Node::Struct(s) => {
-                env.insert(
+                // Register struct as a constructor-like callable
+                // Store in env as Constructor value so it can be called like Point(x, y)
+                env.insert(s.name.clone(), Value::Constructor { class_name: s.name.clone() });
+                // Also register as a class so instantiation works
+                classes.insert(
                     s.name.clone(),
-                    Value::Object {
-                        class: s.name.clone(),
-                        fields: HashMap::new(),
+                    ClassDef {
+                        span: s.span,
+                        name: s.name.clone(),
+                        generic_params: Vec::new(),
+                        fields: s.fields.clone(),
+                        methods: Vec::new(),
+                        parent: None,
+                        visibility: s.visibility,
+                        attributes: Vec::new(),
                     },
                 );
             }
@@ -236,13 +246,8 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             }
             Node::Class(c) => {
                 classes.insert(c.name.clone(), c.clone());
-                env.insert(
-                    c.name.clone(),
-                    Value::Object {
-                        class: c.name.clone(),
-                        fields: HashMap::new(),
-                    },
-                );
+                // Store in env as Constructor value so it can be called like MyClass()
+                env.insert(c.name.clone(), Value::Constructor { class_name: c.name.clone() });
             }
             Node::Impl(impl_block) => {
                 let type_name = get_type_name(&impl_block.target_type);
@@ -298,6 +303,24 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 // Register the unit type name and its suffix for later use
                 units.insert(u.suffix.clone(), u.clone());
                 env.insert(u.name.clone(), Value::Nil);
+            }
+            Node::UnitFamily(uf) => {
+                // Unit family defines multiple related units with conversion factors
+                // For now, register each variant as a standalone unit
+                // TODO: Store conversion factors for to_X() methods
+                for variant in &uf.variants {
+                    // Create a synthetic UnitDef for each variant
+                    let unit_def = UnitDef {
+                        span: uf.span,
+                        name: format!("{}_{}", uf.name, variant.suffix),
+                        base_type: uf.base_type.clone(),
+                        suffix: variant.suffix.clone(),
+                        visibility: uf.visibility,
+                    };
+                    units.insert(variant.suffix.clone(), unit_def);
+                }
+                // Store the family name for potential future use
+                env.insert(uf.name.clone(), Value::Nil);
             }
             Node::Let(_)
             | Node::Const(_)
@@ -845,6 +868,61 @@ pub(crate) fn evaluate_expr(
                 Ok(Value::Nil)
             }
         }
+        Expr::Match { subject, arms } => {
+            let subject_val = evaluate_expr(subject, env, functions, classes, enums, impl_methods)?;
+
+            // Check for strong enum - disallow wildcard/catch-all patterns
+            if let Value::Enum { enum_name, .. } = &subject_val {
+                if let Some(enum_def) = enums.get(enum_name) {
+                    let is_strong = enum_def.attributes.iter().any(|attr| attr.name == "strong");
+                    if is_strong {
+                        for arm in arms {
+                            if is_catch_all_pattern(&arm.pattern) {
+                                return Err(CompileError::Semantic(format!(
+                                    "strong enum '{}' does not allow wildcard or catch-all patterns in match",
+                                    enum_name
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+
+            for arm in arms {
+                let mut arm_bindings = HashMap::new();
+                if pattern_matches(&arm.pattern, &subject_val, &mut arm_bindings, enums)? {
+                    if let Some(guard) = &arm.guard {
+                        let mut guard_env = env.clone();
+                        for (name, value) in &arm_bindings {
+                            guard_env.insert(name.clone(), value.clone());
+                        }
+                        let guard_result = evaluate_expr(guard, &mut guard_env, functions, classes, enums, impl_methods)?;
+                        if !guard_result.truthy() {
+                            continue;
+                        }
+                    }
+                    let mut arm_env = env.clone();
+                    for (name, value) in arm_bindings {
+                        arm_env.insert(name, value);
+                    }
+                    let mut result = Value::Nil;
+                    for stmt in &arm.body.statements {
+                        match exec_node(stmt, &mut arm_env, functions, classes, enums, impl_methods)? {
+                            Control::Return(v) => return Ok(v),
+                            Control::Break(_) => return Ok(Value::Nil),
+                            Control::Continue => break,
+                            Control::Next => {
+                                if let Node::Expression(expr) = stmt {
+                                    result = evaluate_expr(expr, &mut arm_env, functions, classes, enums, impl_methods)?;
+                                }
+                            }
+                        }
+                    }
+                    return Ok(result);
+                }
+            }
+            Err(CompileError::Semantic("match exhausted: no pattern matched".into()))
+        }
         Expr::Call { callee, args } => {
             evaluate_call(callee, args, env, functions, classes, enums, impl_methods)
         }
@@ -865,13 +943,29 @@ pub(crate) fn evaluate_expr(
         Expr::FieldAccess { receiver, field } => {
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
                 .deref_pointer();
-            if let Value::Object { fields, .. } = recv_val {
-                fields
+            match recv_val {
+                Value::Object { ref fields, .. } => fields
                     .get(field)
                     .cloned()
-                    .ok_or_else(|| CompileError::Semantic(format!("unknown field {field}")))
-            } else {
-                Err(CompileError::Semantic("field access on non-object".into()))
+                    .ok_or_else(|| CompileError::Semantic(format!("unknown field {field}"))),
+                Value::Constructor { ref class_name } => {
+                    // Look up static method on class
+                    if let Some(class_def) = classes.get(class_name) {
+                        if let Some(method) = class_def.methods.iter().find(|m| &m.name == field) {
+                            // Return as a function value for call
+                            Ok(Value::Function {
+                                name: method.name.clone(),
+                                def: Box::new(method.clone()),
+                                captured_env: Env::new(),
+                            })
+                        } else {
+                            Err(CompileError::Semantic(format!("unknown method {field} on class {class_name}")))
+                        }
+                    } else {
+                        Err(CompileError::Semantic(format!("unknown class {class_name}")))
+                    }
+                }
+                _ => Err(CompileError::Semantic("field access on non-object".into())),
             }
         }
         Expr::StructInit { name, fields } => {

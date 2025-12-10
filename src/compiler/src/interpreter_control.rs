@@ -254,6 +254,15 @@ fn exec_for(
             }
             out
         }
+        Value::Array(items) => {
+            let mut out = Vec::new();
+            for v in items {
+                if let Value::Int(i) = v {
+                    out.push(i);
+                }
+            }
+            out
+        }
         _ => return Err(CompileError::Semantic("for expects range or array".into())),
     };
 

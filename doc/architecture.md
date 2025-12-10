@@ -5,7 +5,7 @@
 ```
 simple/
 ├── CLAUDE.md                # Development guide
-├── Cargo.toml               # Workspace definition
+├── Cargo.toml               # Workspace definition (11 crates)
 ├── Makefile                 # Build automation
 │
 ├── doc/                     # Documentation
@@ -24,13 +24,40 @@ simple/
 ├── verification/            # Lean 4 formal verification
 │   ├── manual_pointer_borrow/   # Borrow checker proofs
 │   ├── gc_manual_borrow/        # GC safety proofs
-│   ├── async_compile/        # Async safety proofs (non-blocking verification)
+│   ├── async_compile/           # Async safety proofs (non-blocking verification)
 │   ├── nogc_compile/            # NoGC instruction proofs
 │   └── type_inference_compile/  # Type inference proofs
 │
-├── src/                     # Source code (see below)
+├── src/                     # Source code (11 crates - see below)
 └── tests/                   # Integration tests
 ```
+
+## Execution Modes
+
+Simple supports two execution modes with different type requirements:
+
+| Mode | Type Annotations | Execution | Use Case |
+|------|-----------------|-----------|----------|
+| **Compiler** | Required (like Rust) | Native codegen via Cranelift | Production, performance |
+| **Interpreter** | Optional | Tree-walking interpreter | Prototyping, scripting |
+
+**Key principle**: Code with explicit types runs in BOTH modes. Code without types runs ONLY in interpreter mode.
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Source Code                        │
+├─────────────────────────────────────────────────────┤
+│  With types:     fn add(a: i64, b: i64) -> i64:    │  ──► Both modes
+│  Without types:  fn add(a, b):                      │  ──► Interpreter only
+└─────────────────────────────────────────────────────┘
+```
+
+The `driver` module provides `RunningType` enum:
+- `Interpreter` - Run via tree-walking interpreter (supports untyped code)
+- `Compiler` - Compile to native via HIR→MIR→Cranelift (requires types)
+- `Both` - Run both paths and verify parity (for testing)
+
+---
 
 ## Goals (grounded in feature list & language spec)
 - Feature work should stay locally scoped: each feature touches parser → compiler → runtime via narrow contracts in `src/common/`.
@@ -41,6 +68,7 @@ simple/
 - Logging should be structured, low-overhead, and opt-in: prefer `tracing` spans/fields over ad-hoc prints. Use `#[tracing::instrument]` on hot paths when diagnostics are needed; avoid pervasive logging in perf-sensitive code paths by default.
 - **Prevent Duplication**: Each concern belongs to exactly ONE module. If logic is needed in multiple places, define a shared abstraction in `common/` or create helper modules.
 - **Formal Verification**: Key invariants (borrow safety, GC safety, effects) are modeled in Lean 4 and implemented exactly in Rust.
+- **Type Requirements**: Compiler mode requires explicit type annotations on function parameters (like Rust). Interpreter mode supports dynamic typing.
 
 ---
 
@@ -83,6 +111,11 @@ simple/
                          │
                          ▼
                    ┌──────────┐
+                   │   pkg    │  ← Package manager (UV-style)
+                   └────┬─────┘
+                        │
+                        ▼
+                   ┌──────────┐
                    │  driver  │  ← Orchestrates everything
                    │  (also   │
                    │  lib/log)│
@@ -95,6 +128,7 @@ simple/
 - `loader` depends only on `common`
 - `runtime` depends only on `common`
 - `compiler` depends on parser, type, loader/smf, common (NOT runtime - uses ActorSpawner trait)
+- `pkg` (package manager) depends on common, may use loader for imports
 - `driver` depends on ALL modules and orchestrates execution
 
 ---
@@ -115,8 +149,14 @@ src/
 │   ├── token.rs         # Token enum and TokenKind
 │   ├── lexer.rs         # Tokenization with INDENT/DEDENT
 │   ├── ast.rs           # AST node definitions
-│   ├── parser.rs        # Recursive descent parser
-│   └── error.rs         # Parse error types (ParseError enum)
+│   ├── parser.rs        # Main parser entry point
+│   ├── error.rs         # Parse error types (ParseError enum)
+│   ├── expressions/     # Expression parsing (split for maintainability)
+│   │   └── mod.rs       # Pratt parser with binary operator macros
+│   ├── statements/      # Statement parsing
+│   │   └── mod.rs       # Variable decls, control flow, jump statements
+│   └── types_def/       # Type parsing
+│       └── mod.rs       # Type syntax parsing
 │
 ├── type/                # Type checking/inference
 │   └── lib.rs           # TypeChecker, Substitution, Type enum, unify()
@@ -127,31 +167,41 @@ src/
 │   ├── error.rs         # CompileError enum
 │   ├── pipeline.rs      # CompilerPipeline - orchestrates compilation
 │   ├── value.rs         # Value enum, Env, pointer wrappers
+│   ├── value_tests.rs   # Comprehensive value operation tests
 │   ├── effects.rs       # Effect checking (async safety, blocking detection)
-│   ├── interpreter.rs   # Tree-walking interpreter entry
+│   ├── interpreter.rs   # Tree-walking interpreter entry (includes 8 modules)
 │   ├── interpreter_call.rs    # Function call handling
+│   ├── interpreter_control.rs # Control flow handling (if/match/loop/break/return)
+│   ├── interpreter_helpers.rs # Common patterns extracted from expression eval
 │   ├── interpreter_method.rs  # Method dispatch handling
 │   ├── interpreter_macro.rs   # Macro expansion handling
 │   ├── interpreter_extern.rs  # External function handling
 │   ├── interpreter_context.rs # Context statement handling
+│   ├── interpreter_ffi.rs     # FFI bridge for compiled code (thread-local state)
+│   ├── value_bridge.rs        # FFI value marshalling (BridgeValue)
+│   ├── compilability.rs       # Compilability analysis (20+ fallback reasons)
 │   ├── hir/             # High-level IR
 │   │   ├── mod.rs
 │   │   ├── types.rs     # HIR type representations
 │   │   └── lower.rs     # AST → HIR lowering
 │   ├── mir/             # Mid-level IR
-│   │   ├── mod.rs
-│   │   ├── types.rs     # MIR types (50+ instructions, effects, patterns)
+│   │   ├── mod.rs       # Re-exports
+│   │   ├── types.rs     # MIR types, effects, patterns
+│   │   ├── instructions.rs  # 50+ MIR instruction variants
+│   │   ├── blocks.rs    # Basic block management
+│   │   ├── function.rs  # Function-level MIR
+│   │   ├── effects.rs   # Effect tracking and analysis
+│   │   ├── generator.rs # Generator state machine lowering
 │   │   └── lower.rs     # HIR → MIR lowering
 │   ├── codegen/         # Code generation
 │   │   ├── mod.rs
 │   │   ├── cranelift.rs # AOT Cranelift backend
-│   │   └── jit.rs       # JIT Cranelift backend
-│   ├── linker/          # SMF emission
-│   │   ├── mod.rs
-│   │   └── smf_writer.rs
-│   ├── value_bridge.rs  # FFI value marshalling (BridgeValue)
-│   ├── interpreter_ffi.rs # Interpreter FFI exports for fallback
-│   └── compilability.rs # Compilability analysis
+│   │   ├── jit.rs       # JIT Cranelift backend
+│   │   ├── runtime_ffi.rs   # Shared FFI function specs (50+ functions)
+│   │   └── types_util.rs    # Type conversion utilities (TypeId → Cranelift)
+│   └── linker/          # SMF emission
+│       ├── mod.rs
+│       └── smf_writer.rs
 │
 ├── loader/              # SMF binary loading
 │   ├── lib.rs           # Re-exports ModuleLoader, LoadedModule, ModuleRegistry
@@ -178,13 +228,42 @@ src/
 │
 ├── runtime/             # GC, concurrency, and runtime values
 │   ├── lib.rs           # Re-exports memory::gc, NoGcAllocator, RuntimeValue types
-│   ├── value.rs         # RuntimeValue (tagged pointer), heap types, FFI functions
+│   ├── value/           # Runtime value system (9 modules)
+│   │   ├── mod.rs       # Re-exports all value types and FFI functions
+│   │   ├── core.rs      # RuntimeValue - 64-bit tagged pointer
+│   │   ├── tags.rs      # Tag constants and definitions
+│   │   ├── heap.rs      # HeapHeader, HeapObjectType
+│   │   ├── collections.rs # RuntimeArray, RuntimeTuple, RuntimeDict, RuntimeString + FFI
+│   │   ├── objects.rs   # RuntimeObject, RuntimeClosure, RuntimeEnum + FFI
+│   │   ├── ffi.rs       # Value conversion and core FFI operations
+│   │   ├── actors.rs    # RuntimeActor + FFI (spawn/send/recv)
+│   │   └── async_gen.rs # RuntimeFuture, RuntimeGenerator + FFI (state machine)
 │   ├── memory/
 │   │   ├── mod.rs
 │   │   ├── gc.rs        # GcRuntime (Abfall wrapper, logging)
 │   │   └── no_gc.rs     # NoGcAllocator (GC-off profile)
 │   └── concurrency/
 │       └── mod.rs       # Scheduler, ScheduledSpawner, spawn_actor, send_to, join_actor
+│
+├── pkg/                 # Package manager (UV-style)
+│   ├── lib.rs           # Package manager entry
+│   ├── manifest.rs      # simple.toml manifest parsing
+│   ├── lock.rs          # simple.lock lock file format
+│   ├── cache.rs         # Global cache with hard links
+│   ├── version.rs       # Version and VersionReq types
+│   ├── error.rs         # PkgError, PkgResult types
+│   ├── linker.rs        # Dependency linking
+│   ├── resolver/        # Dependency resolution
+│   │   ├── mod.rs
+│   │   └── graph.rs     # Topological ordering
+│   └── commands/        # CLI subcommands
+│       ├── mod.rs
+│       ├── init.rs      # simple init
+│       ├── install.rs   # simple install
+│       ├── add.rs       # simple add <pkg>
+│       ├── update.rs    # simple update
+│       ├── list.rs      # simple list
+│       └── cache_cmd.rs # simple cache
 │
 ├── driver/              # CLI and orchestration
 │   ├── lib.rs           # Re-exports Runner, Interpreter, watch, run_code
@@ -272,11 +351,26 @@ src/
 - `enum TokenKind` - Token type enum
 - `struct Token` - Token with position
 
-**`parser.rs`** - Parsing
+**`parser.rs`** - Main parser entry point
 - `struct Parser<'a>` - Token stream → AST
+- Delegates to submodules for parsing
 
 **`error.rs`** - Errors
 - `enum ParseError` - Parse error types
+
+**`expressions/mod.rs`** - Expression parsing (private module)
+- Pratt parser with binary operator macros (`parse_binary_single!`, `parse_binary_multi!`)
+- `parse_expression()`, `parse_expression_or_assignment()`
+- Expression precedence climbing implementation
+
+**`statements/mod.rs`** - Statement parsing (private module)
+- Variable declarations: `parse_let()`, `parse_mut_let()`, `parse_const()`, `parse_static()`
+- Control flow: `parse_if()`, `parse_for()`, `parse_while()`, `parse_loop()`, `parse_match()`
+- Jump statements: `parse_return()`, `parse_break()`, `parse_continue()`
+- Special: `parse_context()`, `parse_with()`
+
+**`types_def/mod.rs`** - Type parsing (private module)
+- `parse_type()` and related type syntax
 
 **`ast.rs`** - AST nodes
 - `enum Visibility` - Pub/private
@@ -340,9 +434,37 @@ src/
 - `struct ManualHandleValue` - Handle wrapper
 - `struct BorrowValue`, `BorrowMutValue` - Borrow wrappers
 
-**`interpreter.rs`** - Interpreter entry
-- `enum Control` - Control flow (via include!)
-- Includes: `interpreter_call.rs`, `interpreter_method.rs`, `interpreter_macro.rs`, `interpreter_extern.rs`, `interpreter_context.rs`
+**`interpreter.rs`** - Interpreter entry (1364 lines)
+- `enum Control` - Control flow states
+- Thread-local state: ACTOR_SPAWNER, ACTOR_INBOX/OUTBOX, CONST_NAMES, etc.
+- Type definitions: Enums, ImplMethods, ExternFunctions, Macros, Units
+- Includes 8 modules via `include!`
+
+**`interpreter_call.rs`** - Function call handling (532 lines)
+- Call expression evaluation
+- Argument evaluation and function dispatch
+
+**`interpreter_control.rs`** - Control flow handling (522 lines)
+- Block execution, if/match/loop statement execution
+- Break/continue/return handling
+
+**`interpreter_helpers.rs`** - Helper functions (559 lines)
+- Common patterns extracted from expression evaluation
+- Reduces duplication across interpreter modules
+
+**`interpreter_method.rs`** - Method dispatch (357 lines)
+- Built-in method handling for arrays, dicts, strings, etc.
+- Method call resolution
+
+**`interpreter_macro.rs`** - Macro expansion (315 lines)
+- Macro pattern matching
+- User-defined macro expansion
+
+**`interpreter_extern.rs`** - External function handling (110 lines)
+- FFI function calls
+
+**`interpreter_context.rs`** - Context statement handling (51 lines)
+- DSL support via context blocks
 
 **`hir/types.rs`** - HIR types
 - `enum Signedness` - Signed/unsigned
@@ -371,15 +493,30 @@ src/
 - `struct EffectSet` - Set of effects with `is_pipeline_safe()` for async safety
 - `trait HasEffects` - Trait for types that report their effects
 - `enum BuiltinFunc`, `CallTarget` - Known functions with effect annotations
-- `struct BlockId`, `VReg`
-- `enum MirInst` - 50+ instruction variants (see MIR Instruction Summary below)
-- `enum Terminator` - Block terminators (Return, Jump, Branch, Unreachable)
-- `enum BlockBuildState`, `BlockBuildError`
-- `struct BlockBuilder`, `MirBlock`
-- `struct MirLocal`, `MirFunction`, `MirModule`
 - **Closure support**: `struct CapturedVar`, `enum CaptureMode` (ByValue, ByRef, ByMutRef)
 - **Pattern matching**: `enum MirPattern`, `enum MirLiteral`, `struct PatternBinding`, `enum BindingStep`
 - **F-strings**: `enum FStringPart` (Literal, Expr)
+
+**`mir/instructions.rs`** - MIR instruction definitions
+- `struct BlockId`, `VReg`
+- `enum MirInst` - 50+ instruction variants (see MIR Instruction Summary below)
+- `enum Terminator` - Block terminators (Return, Jump, Branch, Unreachable)
+
+**`mir/blocks.rs`** - Basic block management
+- `enum BlockBuildState`, `BlockBuildError`
+- `struct BlockBuilder`, `MirBlock`
+
+**`mir/function.rs`** - Function-level MIR
+- `struct MirLocal`, `MirFunction`, `MirModule`
+
+**`mir/effects.rs`** - Effect tracking and analysis
+- Effect analysis utilities
+- `CallTarget` effect annotations
+
+**`mir/generator.rs`** - Generator state machine lowering
+- `struct GeneratorState` - Per-yield state metadata
+- `struct GeneratorLowering` - Lowering result
+- `fn lower_generator(func, body_block)` - Rewrite generator bodies into state-machine-friendly shape
 
 **`mir/lower.rs`** - HIR→MIR
 - `struct LoopContext`
@@ -399,16 +536,31 @@ src/
 - Same instruction set as cranelift.rs
 - Memory-based module loading
 
+**`codegen/runtime_ffi.rs`** - Shared FFI function specifications
+- `struct RuntimeFuncSpec` - FFI function specification (name, params, returns)
+- `static RUNTIME_FUNCS: &[RuntimeFuncSpec]` - 50+ runtime function specs
+- Defines all runtime function signatures (arrays, tuples, dicts, strings, values, objects, actors, generators, futures)
+- Supports both AOT and JIT backends through shared spec
+
+**`codegen/types_util.rs`** - Type conversion utilities
+- `fn type_id_to_cranelift(type_id: TypeId) -> types::Type` - Map Simple types to Cranelift
+- `fn type_id_size(type_id: TypeId) -> u32` - Get type size in bytes
+- `fn type_to_cranelift(ty: TypeId) -> types::Type` - Alternative mapping
+- Zero-cost codegen without RuntimeValue boxing
+
 **`value_bridge.rs`** - FFI value marshalling
 - `struct BridgeValue` - FFI-safe value representation (64-bit tagged)
 - 23 tag constants for all value types
 - Conversions: `Value ↔ BridgeValue ↔ RuntimeValue`
 
-**`interpreter_ffi.rs`** - Interpreter FFI exports
+**`interpreter_ffi.rs`** - FFI bridge for compiled code (511 lines)
+- Thread-local interpreter state (environment, functions, classes)
+- `struct CompiledFnSignature` and `struct CompiledFn`
+- Registry: `register_compiled_fn()`, `unregister_compiled_fn()`
+- Entry points: `interp_eval_ffi()`, `interp_call_ffi()`
 - `simple_interp_init(module)` - Initialize interpreter context
 - `simple_interp_call(func_name, argc, argv)` - Call interpreter function
 - `simple_interp_eval_expr(expr_index)` - Evaluate expression via interpreter
-- Thread-local interpreter state for hybrid execution
 
 **`compilability.rs`** - Compilability analysis
 - `enum FallbackReason` - 20+ reasons for interpreter fallback
@@ -493,25 +645,58 @@ src/
 
 **`lib.rs`** - Re-exports
 - Re-exports `memory::gc`, `NoGcAllocator`
-- Re-exports `RuntimeValue` types and FFI functions
+- Re-exports `RuntimeValue` types and 50+ FFI functions
 
-**`value.rs`** - Runtime value representation for codegen
-- `mod tags` - Tag constants (TAG_INT, TAG_HEAP, TAG_FLOAT, TAG_SPECIAL)
-- `enum HeapObjectType` - String, Array, Dict, Tuple, Object, Closure, Enum, Future, Generator, Actor, Unique, Shared, Borrow
+**`value/mod.rs`** - Runtime value system (9 modules)
+- Aggregates all value types and FFI functions
+- Comprehensive re-export lists
+
+**`value/core.rs`** - Core RuntimeValue
+- `struct RuntimeValue(u64)` - 64-bit tagged pointer
+- Methods: `is_int()`, `as_int()`, `from_int()`, etc.
+
+**`value/tags.rs`** - Tag constants
+- `TAG_INT`, `TAG_HEAP`, `TAG_FLOAT`, `TAG_SPECIAL`
+
+**`value/heap.rs`** - Heap header management
 - `struct HeapHeader` - Common header for heap objects
-- `struct RuntimeValue` - 64-bit tagged pointer value
-- `struct RuntimeString`, `RuntimeArray`, `RuntimeTuple` - Heap collections
-- `struct RuntimeClosure` - Closure with captured values
+- `enum HeapObjectType` - String, Array, Dict, Tuple, Object, Closure, Enum, Future, Generator, Actor, Unique, Shared, Borrow
+
+**`value/collections.rs`** - Collection types + FFI
+- `struct RuntimeArray`, `RuntimeTuple`, `RuntimeDict`, `RuntimeString`
+- **FFI functions**:
+  - Array ops: `rt_array_new`, `rt_array_push`, `rt_array_get`, `rt_array_set`, `rt_array_pop`, `rt_array_clear`
+  - Tuple ops: `rt_tuple_new`, `rt_tuple_set`, `rt_tuple_get`, `rt_tuple_len`
+  - Dict ops: `rt_dict_new`, `rt_dict_set`, `rt_dict_get`, `rt_dict_len`, `rt_dict_clear`, `rt_dict_keys`, `rt_dict_values`
+  - String ops: `rt_string_new`, `rt_string_concat`, `rt_string_data`, `rt_string_len`
+
+**`value/objects.rs`** - Object/Closure/Enum types + FFI
 - `struct RuntimeObject` - Class/struct instance
+- `struct RuntimeClosure` - Closure with captured values
 - `struct RuntimeEnum` - Enum variant with payload
-- **FFI functions for codegen**:
-  - Value creation: `rt_value_int`, `rt_value_float`, `rt_value_bool`, `rt_value_nil`
-  - Value extraction: `rt_value_as_int`, `rt_value_as_float`, `rt_value_as_bool`
-  - Type checking: `rt_value_is_nil`, `rt_value_is_int`, `rt_value_is_float`, `rt_value_is_bool`, `rt_value_is_heap`, `rt_value_truthy`
-  - Array ops: `rt_array_new`, `rt_array_len`, `rt_array_get`, `rt_array_set`, `rt_array_push`, `rt_array_pop`
-  - Tuple ops: `rt_tuple_new`, `rt_tuple_len`, `rt_tuple_get`, `rt_tuple_set`
-  - String ops: `rt_string_new`, `rt_string_len`, `rt_string_data`, `rt_string_concat`
-  - Generic ops: `rt_index_get`, `rt_index_set`, `rt_slice`
+- **FFI functions**:
+  - Object ops: `rt_object_new`, `rt_object_field_get`, `rt_object_field_set`, `rt_object_class_id`, `rt_object_field_count`
+  - Closure ops: `rt_closure_new`, `rt_closure_set_capture`, `rt_closure_get_capture`, `rt_closure_func_ptr`
+  - Enum ops: `rt_enum_new`, `rt_enum_discriminant`, `rt_enum_payload`
+
+**`value/ffi.rs`** - Value conversion and core FFI
+- Memory: `rt_alloc`, `rt_free`, `rt_ptr_to_value`
+- Values: `rt_value_int`, `rt_value_float`, `rt_value_bool`, `rt_value_nil`
+- Extraction: `rt_value_as_int`, `rt_value_as_float`, `rt_value_as_bool`
+- Checking: `rt_value_eq`, `rt_value_truthy`
+- Fallback: `rt_interp_call`, `rt_interp_eval`
+
+**`value/actors.rs`** - Actor FFI
+- `struct RuntimeActor`
+- **FFI functions**: `rt_actor_spawn`, `rt_actor_send`, `rt_actor_recv`
+- Thread-local actor mailbox state
+
+**`value/async_gen.rs`** - Future and Generator FFI
+- `struct RuntimeFuture`, `struct RuntimeGenerator`
+- **FFI functions**:
+  - Future: `rt_future_new`, `rt_future_await`
+  - Generator: `rt_generator_new`, `rt_generator_next`, `rt_generator_get_state`, `rt_generator_set_state`
+  - Frame save/restore: `rt_generator_load_slot`, `rt_generator_store_slot`, `rt_generator_mark_done`, `rt_generator_get_ctx`
 
 **`memory/gc.rs`** - GC runtime
 - `enum GcLogEventKind`
@@ -527,6 +712,64 @@ src/
 - `fn spawn_actor<F>` - Spawn a new actor thread with mailbox setup
 - `fn send_to(id, msg)` - Send message to actor by ID (scheduler dispatch)
 - `fn join_actor(id)` - Join an actor by ID (scheduler join table)
+
+---
+
+### pkg/src/ (Package Manager)
+
+**`lib.rs`** - Package manager entry
+- Re-exports all public types and commands
+
+**`manifest.rs`** - Manifest parsing
+- `struct Manifest` - simple.toml representation
+- `struct Dependency` - Dependency specification (path, git, version)
+
+**`lock.rs`** - Lock file format
+- `struct LockFile` - simple.lock representation
+- `struct LockedDependency` - Resolved dependency with exact version
+
+**`cache.rs`** - Global cache
+- `struct Cache` - Global package cache with hard links
+- Methods: `get()`, `put()`, `list()`, `clean()`
+
+**`version.rs`** - Version handling
+- `struct Version` - Semantic version
+- `struct VersionReq` - Version requirement/constraint
+
+**`error.rs`** - Error types
+- `enum PkgError` - Package manager errors
+- `type PkgResult<T>` - Result alias
+
+**`linker.rs`** - Dependency linking
+- `struct Linker` - Links dependencies into project
+
+**`resolver/mod.rs`** - Dependency resolution
+- `struct Resolver` - Dependency resolver
+
+**`resolver/graph.rs`** - Dependency graph
+- `struct DepGraph` - Dependency graph with topological ordering
+- `fn topological_sort()` - Build order computation
+
+**`commands/mod.rs`** - CLI command entry
+- Re-exports all command handlers
+
+**`commands/init.rs`** - Project initialization
+- `fn init()` - Create new simple.toml
+
+**`commands/install.rs`** - Dependency installation
+- `fn install()` - Install all dependencies from lock file
+
+**`commands/add.rs`** - Add dependency
+- `fn add(name, version)` - Add dependency to manifest
+
+**`commands/update.rs`** - Update dependencies
+- `fn update()` - Update dependencies to latest compatible versions
+
+**`commands/list.rs`** - List dependencies
+- `fn list()` - Show dependency tree
+
+**`commands/cache_cmd.rs`** - Cache management
+- `fn cache_list()`, `fn cache_clean()` - Cache operations
 
 ---
 
@@ -588,10 +831,14 @@ src/
 
 **`exec_core.rs`** - Low-level execution engine (shared logic)
 - `struct ExecCore`
+  - `loader: SmfLoader` - SMF module loader
+  - `gc_alloc: Arc<dyn GcAllocator>` - GC allocator trait object
+  - `gc_runtime: Option<Arc<GcRuntime>>` - Optional GC runtime for logging
   - `new()`, `new_no_gc()` - Create with/without GC
   - `compile_source(source, out)` - Compile source to SMF file
   - `compile_file(path, out)` - Compile file to SMF
   - `compile_to_memory(source)` - Compile to bytes, no disk I/O
+  - `compile_to_memory_native(source)` - Compile to native code in memory
   - `load_module(path)` - Load SMF from file
   - `load_module_from_memory(bytes)` - Load SMF from memory
   - `run_smf(path)` - Run pre-compiled SMF file
@@ -599,6 +846,8 @@ src/
   - `run_source(source)` - Compile and run (uses temp file)
   - `run_source_in_memory(source)` - Compile and run, no disk I/O
   - `run_file(path)` - Auto-detect .spl/.smf and run
+  - `execute()` - Execute loaded module
+  - `collect_gc()` - Trigger GC collection
 
 **`runner.rs`** - Mid-level public API
 - `struct Runner`
@@ -683,6 +932,7 @@ src/
 ### runtime (depends: common)
 - GcAllocator implementation (Abfall wrapper)
 - Actor scheduler (ScheduledSpawner)
+- Runtime value FFI (50+ functions)
 - No compiler/parser dependencies
 
 ### compiler (depends: parser, type, loader/smf, common)
@@ -692,8 +942,15 @@ src/
 - **Does NOT depend on runtime** - uses `common::ActorSpawner` trait instead
 - This allows compiler to be runtime-agnostic
 
+### pkg (depends: common)
+- UV-style package manager
+- Manifest and lock file handling
+- Dependency resolution with topological ordering
+- Global cache with hard links
+- No parser/compiler/runtime dependencies
+
 ### driver (depends: all modules)
-- Uses loader, native_loader, compiler, runtime, common, lib (term-io), log
+- Uses loader, native_loader, compiler, runtime, common, lib (term-io), log, pkg
 - Orchestration only; no business logic
 - Wires up GcRuntime and provides it to compiler via trait
 
@@ -1186,6 +1443,9 @@ Install all tools: `make install-tools`
 | GC features | `common/gc.rs` trait + `runtime/memory/` impl | compiler (uses only) |
 | IO/stdlib | `lib/` | compiler/, runtime/ |
 | Hot reload | `loader/registry.rs` | compiler/, driver/ |
+| Package management | `pkg/` | compiler/, runtime/ |
+| Runtime FFI functions | `runtime/value/` | compiler/ (imports only) |
+| Generator state machine | `compiler/mir/generator.rs` + `runtime/value/async_gen.rs` | driver/ |
 
 ### Example: Adding a New Builtin Method (e.g., `array.sum()`)
 
