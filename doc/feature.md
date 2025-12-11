@@ -107,6 +107,14 @@
 | 101 | **Generator State Machine Codegen** (stackless yield/next) | 4 | 5 | MIR Transform, Runtime State, Codegen |
 | 102 | **Future Body Execution** (compiled future resolves/awaits) | 4 | 4 | Runtime, Codegen, MIR Outlining |
 | 103 | **Codegen Parity Completion** (remove stubs, pass full tests) | 5 | 5 | MIR, Codegen, Runtime | **COMPLETE** |
+| 104 | **Module Path Syntax** (dot-separated paths: `crate.sys.http`) | 5 | 2 | Parser, Semantic Analysis |
+| 105 | **Project Configuration** (`simple.toml` with profiles, features) | 5 | 3 | Parser, Compiler, Package Manager |
+| 106 | **Directory Manifest** (`__init__.spl` for directory-scoped modules) | 5 | 3 | Parser, Semantic Analysis, Loader |
+| 107 | **Import System** (`use`, `common use`, `export use`) | 5 | 4 | Parser, Semantic Analysis, Module Resolution |
+| 108 | **Macro Import/Export** (`auto import` for glob macro inclusion) | 4 | 3 | Parser, Macro System, Module Resolution |
+| 109 | **Visibility Control** (intersection of item/directory/parent visibility) | 4 | 3 | Semantic Analysis |
+| 110 | **Profile System** (reusable attribute/import bundles in `simple.toml`) | 3 | 2 | Parser, Compiler |
+| 111 | **Feature Flags** (compile-time feature toggles) | 3 | 2 | Parser, Compiler |
 
 ### Difficulty-5 Breakdowns
 
@@ -268,3 +276,31 @@ Features #97-98 provide advanced type safety and factory patterns:
 - **Strong Enums**: `#[strong]` attribute on enums disallows wildcard `_` patterns in match expressions, forcing exhaustive handling of all variants. Use `#[allow(wildcard)]` on specific match cases to opt-out.
 
 These features improve type safety by ensuring factory patterns work correctly with inheritance and preventing accidental catch-all patterns that miss new enum variants.
+
+### 10. Module System
+
+Features #104-111 provide a comprehensive module system with explicit visibility control and macro import semantics:
+
+- **Module Path Syntax** (#104): Dot-separated paths (`crate.sys.http`, `core.prelude.Option`) for all module references. No `/`, `::`, or string literals.
+- **Project Configuration** (#105): `simple.toml` at project root defines metadata, source root, profiles, and compile-time features.
+- **Directory Manifest** (#106): `__init__.spl` files declare directory-scoped modules with:
+  - Directory header (attributes, profile/feature annotations)
+  - Child module declarations (`pub mod`, `mod`)
+  - Directory prelude imports (`common use`)
+  - Public re-exports (`export use`)
+  - Macro auto-import declarations (`auto import`)
+- **Import System** (#107): Three import forms:
+  - `use module.Name` - Normal imports (single, group `{A,B}`, or glob `*`)
+  - `common use module.*` - Directory prelude applied to all files
+  - `export use module.Name` - Public re-exports defining directory API
+- **Macro Import/Export** (#108): Macros are not included in glob imports unless explicitly listed in `auto import`. This prevents accidental macro pollution while allowing intentional convenience imports.
+- **Visibility Control** (#109): Effective visibility is the intersection of item, directory, and ancestor visibility. Nothing bypasses `__init__.spl` controls.
+- **Profile System** (#110): Reusable bundles of attributes and imports in `simple.toml`:
+  ```toml
+  [profiles.server]
+  attributes = ["async", "strong"]
+  imports = ["crate.core.base.*", "crate.net.http.*"]
+  ```
+- **Feature Flags** (#111): Compile-time toggles for conditional compilation.
+
+This module system provides predictable static resolution, explicit macro importing, and directory-wide attribute/import control. See `doc/import_export_and__init__.md` for the complete specification.
