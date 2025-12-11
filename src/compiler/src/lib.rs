@@ -14,6 +14,7 @@ pub mod linker;
 pub mod mir;
 pub mod module_resolver;
 pub mod pipeline;
+pub mod project;
 pub mod value;
 pub mod value_bridge;
 
@@ -21,6 +22,7 @@ pub mod value_bridge;
 pub use error::CompileError;
 pub use interpreter::evaluate_module;
 pub use module_resolver::{DirectoryManifest, ModuleResolver, ResolvedModule};
+pub use project::ProjectContext;
 pub use pipeline::CompilerPipeline;
 pub use value::{
     BorrowMutValue,
