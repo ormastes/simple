@@ -31,20 +31,44 @@ use crate::codegen::Codegen;
 use crate::hir;
 use crate::interpreter::evaluate_module;
 use crate::mir;
+use crate::value::FUNC_MAIN;
+use crate::project::ProjectContext;
 use crate::CompileError;
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
 pub struct CompilerPipeline {
     gc: Option<Arc<dyn GcAllocator>>,
+    /// Optional project context for multi-file compilation
+    project: Option<ProjectContext>,
 }
 
 impl CompilerPipeline {
     pub fn new() -> Result<Self, CompileError> {
-        Ok(Self { gc: None })
+        Ok(Self { gc: None, project: None })
     }
 
     pub fn with_gc(gc: Arc<dyn GcAllocator>) -> Result<Self, CompileError> {
-        Ok(Self { gc: Some(gc) })
+        Ok(Self { gc: Some(gc), project: None })
+    }
+
+    /// Create a pipeline with a project context
+    pub fn with_project(project: ProjectContext) -> Result<Self, CompileError> {
+        Ok(Self { gc: None, project: Some(project) })
+    }
+
+    /// Create a pipeline with both GC and project context
+    pub fn with_gc_and_project(gc: Arc<dyn GcAllocator>, project: ProjectContext) -> Result<Self, CompileError> {
+        Ok(Self { gc: Some(gc), project: Some(project) })
+    }
+
+    /// Set the project context
+    pub fn set_project(&mut self, project: ProjectContext) {
+        self.project = Some(project);
+    }
+
+    /// Get the project context if set
+    pub fn project(&self) -> Option<&ProjectContext> {
+        self.project.as_ref()
     }
 
     /// Compile a Simple source file to an SMF at `out`.
@@ -56,6 +80,25 @@ impl CompilerPipeline {
             fs::read_to_string(source_path).map_err(|e| CompileError::Io(format!("{e}")))?;
         let smf_bytes = self.compile_source_to_memory(&source)?;
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
+    }
+
+    /// Compile a Simple source file with automatic project detection.
+    ///
+    /// This method searches parent directories for simple.toml and
+    /// sets up the project context for module resolution.
+    #[instrument(skip(self, source_path, out))]
+    pub fn compile_with_project_detection(
+        &mut self,
+        source_path: &Path,
+        out: &Path,
+    ) -> Result<(), CompileError> {
+        // Detect project context if not already set
+        if self.project.is_none() {
+            let project = ProjectContext::detect(source_path)?;
+            self.project = Some(project);
+        }
+
+        self.compile(source_path, out)
     }
 
     /// Compile source string to SMF bytes in memory (no disk I/O).
@@ -119,7 +162,7 @@ impl CompilerPipeline {
         // Check if we have a main function. If not, fall back to interpreter mode.
         // This handles cases like `main = 42` which are module-level constants,
         // not function declarations.
-        let has_main_function = mir_module.functions.iter().any(|f| f.name == "main");
+        let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
 
         if !has_main_function {
             // Fallback: evaluate via interpreter and wrap result
@@ -143,89 +186,9 @@ impl CompilerPipeline {
 /// This wraps the raw object code in an SMF container format that can be
 /// loaded and executed by the Simple runtime.
 pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
-    // For now, we use a simplified approach:
-    // The Cranelift object code is ELF format, but we need to extract the raw machine code
-    // and wrap it in SMF format.
-    //
-    // A proper implementation would:
-    // 1. Parse the ELF object file
-    // 2. Extract .text section
-    // 3. Process relocations
-    // 4. Build proper SMF with symbols
-    //
-    // For simplicity, we'll just embed the object code directly.
-    // This works because the SMF loader will memory-map and execute it.
-
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-
-    // Use the object code directly (it contains relocatable code)
-    // For proper execution, we need to extract just the machine code
-    // from the ELF object file format that Cranelift produces.
-    //
-    // The Cranelift ObjectModule produces ELF format, so we need to
-    // extract the actual code bytes. For now, use simple fallback.
+    // Extract the actual code bytes from the ELF object file format
     let code_bytes = extract_code_from_object(object_code);
-
-    if let Some(gc) = gc {
-        let _ = gc.alloc_bytes(&code_bytes);
-    }
-
-    let symbol_table_offset = code_offset + code_bytes.len() as u64;
-
-    let header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: simple_loader::smf::Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: SMF_FLAG_EXECUTABLE,
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 1,
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 0,
-        reserved: [0; 8],
-    };
-
-    let mut sec_name = [0u8; 16];
-    sec_name[..4].copy_from_slice(b"code");
-    let code_section = SmfSection {
-        section_type: SectionType::Code,
-        flags: SECTION_FLAG_READ | SECTION_FLAG_EXEC,
-        offset: code_offset,
-        size: code_bytes.len() as u64,
-        virtual_size: code_bytes.len() as u64,
-        alignment: 16,
-        name: sec_name,
-    };
-
-    let string_table = b"main\0".to_vec();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name("main"),
-        sym_type: SymbolType::Function,
-        binding: SymbolBinding::Global,
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(&code_bytes);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    buf
+    build_smf_with_code(&code_bytes, gc)
 }
 
 /// Extract machine code from Cranelift's ELF object output.
@@ -326,6 +289,7 @@ fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Write an SMF binary that returns the given value from main.
+#[allow(dead_code)]
 pub(crate) fn write_smf_with_return_value(
     path: &Path,
     return_value: i32,
@@ -337,10 +301,6 @@ pub(crate) fn write_smf_with_return_value(
 
 /// Generate SMF bytes in memory that returns the given value from main.
 pub fn generate_smf_bytes(return_value: i32, gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-
     // Generate x86-64 code to return the value
     // mov eax, imm32 = B8 + 4 bytes (little-endian)
     // ret = C3
@@ -351,12 +311,21 @@ pub fn generate_smf_bytes(return_value: i32, gc: Option<&Arc<dyn GcAllocator>>) 
         code.push(0xC3); // ret
         code
     };
+    build_smf_with_code(&code_bytes, gc)
+}
+
+/// Build an SMF module with the given code bytes and a main symbol.
+fn build_smf_with_code(code_bytes: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
+    let section_table_offset = SmfHeader::SIZE as u64;
+    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
+    let code_offset = section_table_offset + section_table_size;
+
     if let Some(gc) = gc {
-        let _ = gc.alloc_bytes(&code_bytes);
+        let _ = gc.alloc_bytes(code_bytes);
     }
     let symbol_table_offset = code_offset + code_bytes.len() as u64;
 
-    let mut header = SmfHeader {
+    let header = SmfHeader {
         magic: *SMF_MAGIC,
         version_major: 0,
         version_minor: 1,
@@ -400,12 +369,10 @@ pub fn generate_smf_bytes(return_value: i32, gc: Option<&Arc<dyn GcAllocator>>) 
         version: 0,
     };
 
-    header.symbol_table_offset = symbol_table_offset;
-
     let mut buf = Vec::new();
     push_struct(&mut buf, &header);
     push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(&code_bytes);
+    buf.extend_from_slice(code_bytes);
     push_struct(&mut buf, &symbol);
     buf.extend_from_slice(&string_table);
 
