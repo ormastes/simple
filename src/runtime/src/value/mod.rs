@@ -71,6 +71,20 @@ pub use ffi::{
     rt_value_truthy,
 };
 
+// Re-export I/O capture functions (for testing)
+pub use ffi::{
+    rt_capture_stderr_start, rt_capture_stdout_start, rt_capture_stderr_stop,
+    rt_capture_stdout_stop, rt_clear_captured_stderr, rt_clear_captured_stdout,
+    rt_get_captured_stderr, rt_get_captured_stdout, rt_is_stderr_capturing,
+    rt_is_stdout_capturing,
+};
+
+// Re-export print FFI functions
+pub use ffi::{
+    rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str,
+    rt_print_value, rt_println_str, rt_println_value,
+};
+
 // ============================================================================
 // Tests
 // ============================================================================

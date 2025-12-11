@@ -238,6 +238,7 @@ fn test_interpreter_run_custom_config() {
         timeout_ms: 10000,
         in_memory: true,
         running_type: RunningType::default(),
+        ..Default::default()
     };
 
     let result = interpreter.run("main = 88", config).expect("run ok");

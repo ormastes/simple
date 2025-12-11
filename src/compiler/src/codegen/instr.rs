@@ -119,7 +119,14 @@ pub fn compile_instruction<M: Module>(
 
         MirInst::Call { dest, target, args } => {
             let func_name = target.name();
-            if let Some(&callee_id) = ctx.func_ids.get(func_name) {
+
+            // Check if this is a built-in I/O function (print, println, etc.)
+            if let Some(result) = compile_builtin_io_call(ctx, builder, func_name, args, dest)? {
+                if let Some(d) = dest {
+                    ctx.vreg_values.insert(*d, result);
+                }
+            } else if let Some(&callee_id) = ctx.func_ids.get(func_name) {
+                // User-defined function
                 let callee_ref = ctx.module.declare_func_in_func(callee_id, builder.func);
                 let arg_vals: Vec<_> = args.iter().map(|a| ctx.vreg_values[a]).collect();
                 let call = builder.ins().call(callee_ref, &arg_vals);
@@ -435,6 +442,102 @@ fn compile_binop<M: Module>(
         BinOp::FloorDiv => builder.ins().sdiv(lhs, rhs),
     };
     Ok(val)
+}
+
+/// Compile built-in I/O function calls (print, println, eprint, eprintln, etc.)
+/// Returns Some(result_value) if the function was handled, None if not a built-in I/O function.
+fn compile_builtin_io_call<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    func_name: &str,
+    args: &[VReg],
+    _dest: &Option<VReg>,
+) -> InstrResult<Option<cranelift_codegen::ir::Value>> {
+    match func_name {
+        "print" | "println" | "eprint" | "eprintln" => {
+            // Determine which runtime function to use
+            let (print_value_fn, print_str_fn) = match func_name {
+                "print" => ("rt_print_value", "rt_print_str"),
+                "println" => ("rt_println_value", "rt_println_str"),
+                "eprint" => ("rt_eprint_value", "rt_eprint_str"),
+                "eprintln" => ("rt_eprintln_value", "rt_eprintln_str"),
+                _ => unreachable!(),
+            };
+
+            // For each argument, call the appropriate print function
+            for (i, arg) in args.iter().enumerate() {
+                // Add space between arguments (except first)
+                if i > 0 {
+                    // Print a space separator
+                    let space_data_id = ctx.module
+                        .declare_anonymous_data(true, false)
+                        .map_err(|e| e.to_string())?;
+                    let mut space_desc = cranelift_module::DataDescription::new();
+                    space_desc.define(b" ".to_vec().into_boxed_slice());
+                    ctx.module.define_data(space_data_id, &space_desc).map_err(|e| e.to_string())?;
+
+                    let space_gv = ctx.module.declare_data_in_func(space_data_id, builder.func);
+                    let space_ptr = builder.ins().global_value(types::I64, space_gv);
+                    let space_len = builder.ins().iconst(types::I64, 1);
+
+                    // Use the base print_str function (not println)
+                    let base_str_fn = match func_name {
+                        "println" => "rt_print_str",
+                        "eprintln" => "rt_eprint_str",
+                        _ => print_str_fn,
+                    };
+                    let print_str_id = ctx.runtime_funcs[base_str_fn];
+                    let print_str_ref = ctx.module.declare_func_in_func(print_str_id, builder.func);
+                    builder.ins().call(print_str_ref, &[space_ptr, space_len]);
+                }
+
+                // Print the argument value using rt_print_value / rt_println_value
+                // For the last arg of println/eprintln, use the ln variant
+                let is_last = i == args.len() - 1;
+                let fn_to_use = if is_last && (func_name == "println" || func_name == "eprintln") {
+                    print_value_fn
+                } else {
+                    // Use non-newline variant for intermediate args
+                    match func_name {
+                        "println" => "rt_print_value",
+                        "eprintln" => "rt_eprint_value",
+                        _ => print_value_fn,
+                    }
+                };
+
+                let print_id = ctx.runtime_funcs[fn_to_use];
+                let print_ref = ctx.module.declare_func_in_func(print_id, builder.func);
+                let arg_val = ctx.vreg_values[arg];
+                builder.ins().call(print_ref, &[arg_val]);
+            }
+
+            // Handle empty print (just prints nothing or newline)
+            if args.is_empty() && (func_name == "println" || func_name == "eprintln") {
+                // Print just a newline
+                let newline_data_id = ctx.module
+                    .declare_anonymous_data(true, false)
+                    .map_err(|e| e.to_string())?;
+                let mut newline_desc = cranelift_module::DataDescription::new();
+                newline_desc.define(b"\n".to_vec().into_boxed_slice());
+                ctx.module.define_data(newline_data_id, &newline_desc).map_err(|e| e.to_string())?;
+
+                let newline_gv = ctx.module.declare_data_in_func(newline_data_id, builder.func);
+                let newline_ptr = builder.ins().global_value(types::I64, newline_gv);
+                let newline_len = builder.ins().iconst(types::I64, 1);
+
+                let base_str_fn = if func_name == "println" { "rt_print_str" } else { "rt_eprint_str" };
+                let print_str_id = ctx.runtime_funcs[base_str_fn];
+                let print_str_ref = ctx.module.declare_func_in_func(print_str_id, builder.func);
+                builder.ins().call(print_str_ref, &[newline_ptr, newline_len]);
+            }
+
+            // Return nil (0) for void functions
+            let nil = builder.ins().iconst(types::I64, 0);
+            Ok(Some(nil))
+        }
+        // Not a built-in I/O function
+        _ => Ok(None),
+    }
 }
 
 fn compile_interp_call<M: Module>(

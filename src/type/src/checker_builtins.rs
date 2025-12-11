@@ -80,8 +80,12 @@ impl TypeChecker {
                 ret: Box::new(Type::Int),
             },
         );
+        // I/O prelude functions
         self.env.insert("print".to_string(), generic_fn.clone());
         self.env.insert("println".to_string(), generic_fn.clone());
+        self.env.insert("eprint".to_string(), generic_fn.clone());
+        self.env.insert("eprintln".to_string(), generic_fn.clone());
+        self.env.insert("input".to_string(), generic_fn.clone());
         // Channel type constructor
         self.env.insert("Channel".to_string(), generic_fn.clone());
         // ThreadPool constructor

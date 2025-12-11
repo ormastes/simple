@@ -123,6 +123,7 @@ fn test_interpreter_with_config() {
         timeout_ms: 1000,
         in_memory: false,
         running_type: RunningType::default(),
+        ..Default::default()
     };
     let result = interpreter.run("main = 99", config).expect("run ok");
     assert_eq!(result.exit_code, 99, "Should return 99");

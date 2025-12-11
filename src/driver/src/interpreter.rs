@@ -6,6 +6,10 @@
 //! The Interpreter uses Runner internally and adds I/O capture and configuration.
 
 use simple_runtime::gc::GcRuntime;
+use simple_runtime::value::{
+    rt_capture_stdout_start, rt_capture_stderr_start,
+    rt_capture_stdout_stop, rt_capture_stderr_stop,
+};
 
 use crate::Runner;
 
@@ -45,6 +49,8 @@ pub struct RunConfig {
     pub in_memory: bool,
     /// Execution mode: Interpreter (default), Compiler, or Both
     pub running_type: RunningType,
+    /// If true, capture stdout/stderr instead of printing to terminal
+    pub capture_output: bool,
 }
 
 /// Interpreter for running Simple code with I/O capture
@@ -73,7 +79,7 @@ impl Interpreter {
     ///
     /// # Arguments
     /// * `code` - Simple source code to run
-    /// * `config` - Execution configuration (args, stdin, timeout, in_memory, running_type)
+    /// * `config` - Execution configuration (args, stdin, timeout, in_memory, running_type, capture_output)
     ///
     /// # Returns
     /// * `Ok(RunResult)` - Execution result with exit code and captured output
@@ -82,6 +88,12 @@ impl Interpreter {
         // NOTE: args/stdin/timeout are accepted but not yet wired to the runtime.
         // Requires: (1) I/O builtins in runtime, (2) stdin/args context in interpreter
         let _ = (&config.args, &config.stdin, config.timeout_ms);
+
+        // Start capture if enabled
+        if config.capture_output {
+            rt_capture_stdout_start();
+            rt_capture_stderr_start();
+        }
 
         let exit_code = match config.running_type {
             RunningType::Interpreter => {
@@ -121,12 +133,17 @@ impl Interpreter {
             }
         };
 
-        // NOTE: stdout/stderr capture requires I/O builtins in the runtime.
-        // When print() builtin is added, it should write to a captured buffer.
+        // Stop capture and collect output
+        let (stdout, stderr) = if config.capture_output {
+            (rt_capture_stdout_stop(), rt_capture_stderr_stop())
+        } else {
+            (String::new(), String::new())
+        };
+
         Ok(RunResult {
             exit_code,
-            stdout: String::new(),
-            stderr: String::new(),
+            stdout,
+            stderr,
         })
     }
 
@@ -162,6 +179,37 @@ impl Interpreter {
             code,
             RunConfig {
                 in_memory: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Run code with output capture enabled
+    ///
+    /// This captures all stdout/stderr output into RunResult.stdout/stderr.
+    ///
+    /// # Arguments
+    /// * `code` - Simple source code to run
+    pub fn run_with_capture(&self, code: &str) -> Result<RunResult, String> {
+        self.run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Run code in memory with output capture enabled
+    ///
+    /// # Arguments
+    /// * `code` - Simple source code to run
+    pub fn run_in_memory_with_capture(&self, code: &str) -> Result<RunResult, String> {
+        self.run(
+            code,
+            RunConfig {
+                in_memory: true,
+                capture_output: true,
                 ..Default::default()
             },
         )

@@ -1,5 +1,10 @@
 // Extern function calls (part of interpreter module)
 
+// Import the runtime I/O capture functions
+use simple_runtime::value::{
+    rt_is_stdout_capturing, rt_is_stderr_capturing,
+};
+
 fn call_extern_function(
     name: &str,
     args: &[simple_parser::ast::Argument],
@@ -15,24 +20,60 @@ fn call_extern_function(
         .collect::<Result<Vec<_>, _>>()?;
 
     match name {
-        // I/O functions
+        // I/O functions - now use runtime capture system
         "print" => {
             check_async_violation("print")?;
-            for val in &evaluated {
-                print!("{}", val.to_display_string());
+            for (i, val) in evaluated.iter().enumerate() {
+                if i > 0 {
+                    print_to_stdout(" ");
+                }
+                print_to_stdout(&val.to_display_string());
             }
+            flush_stdout();
             Ok(Value::Nil)
         }
         "println" => {
             check_async_violation("println")?;
-            for val in &evaluated {
-                print!("{}", val.to_display_string());
+            for (i, val) in evaluated.iter().enumerate() {
+                if i > 0 {
+                    print_to_stdout(" ");
+                }
+                print_to_stdout(&val.to_display_string());
             }
-            println!();
+            print_to_stdout("\n");
+            flush_stdout();
+            Ok(Value::Nil)
+        }
+        "eprint" => {
+            check_async_violation("eprint")?;
+            for (i, val) in evaluated.iter().enumerate() {
+                if i > 0 {
+                    print_to_stderr(" ");
+                }
+                print_to_stderr(&val.to_display_string());
+            }
+            flush_stderr();
+            Ok(Value::Nil)
+        }
+        "eprintln" => {
+            check_async_violation("eprintln")?;
+            for (i, val) in evaluated.iter().enumerate() {
+                if i > 0 {
+                    print_to_stderr(" ");
+                }
+                print_to_stderr(&val.to_display_string());
+            }
+            print_to_stderr("\n");
+            flush_stderr();
             Ok(Value::Nil)
         }
         "input" => {
             check_async_violation("input")?;
+            // Print prompt if provided
+            if let Some(prompt) = evaluated.first() {
+                print_to_stdout(&prompt.to_display_string());
+                flush_stdout();
+            }
             use std::io::{self, BufRead};
             let stdin = io::stdin();
             let line = stdin.lock().lines().next()
@@ -106,5 +147,32 @@ fn call_extern_function(
 
         // Unknown extern function
         _ => Err(CompileError::Semantic(format!("unknown extern function: {}", name))),
+    }
+}
+
+// Helper functions for I/O that respect capture mode
+fn print_to_stdout(s: &str) {
+    unsafe {
+        simple_runtime::value::rt_print_str(s.as_ptr(), s.len() as u64);
+    }
+}
+
+fn print_to_stderr(s: &str) {
+    unsafe {
+        simple_runtime::value::rt_eprint_str(s.as_ptr(), s.len() as u64);
+    }
+}
+
+fn flush_stdout() {
+    use std::io::Write;
+    if !rt_is_stdout_capturing() {
+        let _ = std::io::stdout().flush();
+    }
+}
+
+fn flush_stderr() {
+    use std::io::Write;
+    if !rt_is_stderr_capturing() {
+        let _ = std::io::stderr().flush();
     }
 }

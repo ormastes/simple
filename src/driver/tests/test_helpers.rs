@@ -168,3 +168,109 @@ pub fn run_expect_any_error(src: &str, expected_error: &str) {
         ),
     }
 }
+
+// ============================================================================
+// Output capture helpers
+// ============================================================================
+
+/// Run source with output capture and return the result.
+#[allow(dead_code)]
+fn run_with_capture(src: &str) -> Result<simple_driver::interpreter::RunResult, String> {
+    let interpreter = Interpreter::new();
+    interpreter.run(
+        src,
+        RunConfig {
+            running_type: RunningType::Interpreter,
+            in_memory: true,
+            capture_output: true,
+            ..Default::default()
+        },
+    )
+}
+
+/// Run source and assert expected stdout output.
+/// Uses interpreter mode with output capture.
+#[allow(dead_code)]
+pub fn run_expect_stdout(src: &str, expected_stdout: &str) {
+    let result = run_with_capture(src).expect("run ok");
+    assert_eq!(
+        result.stdout, expected_stdout,
+        "Expected stdout '{}', got '{}'",
+        expected_stdout, result.stdout
+    );
+}
+
+/// Run source and assert expected stdout output with expected exit code.
+#[allow(dead_code)]
+pub fn run_expect_output(src: &str, expected_stdout: &str, expected_exit: i32) {
+    let result = run_with_capture(src).expect("run ok");
+    assert_eq!(
+        result.stdout, expected_stdout,
+        "Expected stdout '{}', got '{}'",
+        expected_stdout, result.stdout
+    );
+    assert_eq!(
+        result.exit_code, expected_exit,
+        "Expected exit code {}, got {}",
+        expected_exit, result.exit_code
+    );
+}
+
+/// Run source and assert stdout contains expected substring.
+#[allow(dead_code)]
+pub fn run_expect_stdout_contains(src: &str, expected: &str) {
+    let result = run_with_capture(src).expect("run ok");
+    assert!(
+        result.stdout.contains(expected),
+        "Expected stdout to contain '{}', got: '{}'",
+        expected,
+        result.stdout
+    );
+}
+
+/// Run source and assert stderr contains expected substring.
+#[allow(dead_code)]
+pub fn run_expect_stderr_contains(src: &str, expected: &str) {
+    let result = run_with_capture(src).expect("run ok");
+    assert!(
+        result.stderr.contains(expected),
+        "Expected stderr to contain '{}', got: '{}'",
+        expected,
+        result.stderr
+    );
+}
+
+/// Run source with stdin input and assert expected stdout.
+#[allow(dead_code)]
+pub fn run_with_io(src: &str, stdin: &str, expected_stdout: &str) {
+    let interpreter = Interpreter::new();
+    let result = interpreter
+        .run(
+            src,
+            RunConfig {
+                running_type: RunningType::Interpreter,
+                in_memory: true,
+                capture_output: true,
+                stdin: stdin.to_string(),
+                ..Default::default()
+            },
+        )
+        .expect("run ok");
+    assert_eq!(
+        result.stdout, expected_stdout,
+        "Expected stdout '{}', got '{}'",
+        expected_stdout, result.stdout
+    );
+}
+
+/// Run source and return captured stdout (for more complex assertions).
+#[allow(dead_code)]
+pub fn run_get_stdout(src: &str) -> String {
+    run_with_capture(src).expect("run ok").stdout
+}
+
+/// Run source and return captured stderr (for more complex assertions).
+#[allow(dead_code)]
+pub fn run_get_stderr(src: &str) -> String {
+    run_with_capture(src).expect("run ok").stderr
+}

@@ -6,6 +6,19 @@ pub mod value;
 pub use memory::gc;
 pub use memory::no_gc::NoGcAllocator;
 
+/// ABI version exported for dynamic library loading.
+///
+/// This function is called by DynamicSymbolProvider to verify that the
+/// loaded runtime library is compatible with the compiler/interpreter.
+///
+/// The version is encoded as: (major << 16) | minor
+/// - major: Breaking changes (signature changes, removed symbols)
+/// - minor: Additive changes (new symbols only)
+#[no_mangle]
+pub extern "C" fn simple_runtime_abi_version() -> u32 {
+    simple_common::AbiVersion::CURRENT.to_u32()
+}
+
 // Re-export runtime value types for codegen
 pub use value::{
     HeapHeader, HeapObjectType, RuntimeArray, RuntimeClosure, RuntimeEnum, RuntimeObject,

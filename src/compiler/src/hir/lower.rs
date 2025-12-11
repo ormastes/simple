@@ -453,6 +453,35 @@ impl Lowerer {
                 ty: TypeId::STRING,
             }),
 
+            Expr::FString(parts) => {
+                // Check if the FString is a simple literal (no interpolation)
+                // If so, convert it to a plain string
+                use simple_parser::ast::FStringPart;
+                let mut result = String::new();
+                let mut all_literal = true;
+                for part in parts {
+                    match part {
+                        FStringPart::Literal(s) => {
+                            result.push_str(s);
+                        }
+                        FStringPart::Expr(_) => {
+                            all_literal = false;
+                            break;
+                        }
+                    }
+                }
+                if all_literal {
+                    Ok(HirExpr {
+                        kind: HirExprKind::String(result),
+                        ty: TypeId::STRING,
+                    })
+                } else {
+                    Err(LowerError::Unsupported(format!(
+                        "FString with interpolation not yet supported in native compilation"
+                    )))
+                }
+            }
+
             Expr::Bool(b) => Ok(HirExpr {
                 kind: HirExprKind::Bool(*b),
                 ty: TypeId::BOOL,
@@ -552,7 +581,7 @@ impl Lowerer {
             }
 
             Expr::Call { callee, args } => {
-                // Check for special builtins: generator, future, spawn, await
+                // Check for special builtins: generator, future, spawn, await, print, etc.
                 if let Expr::Identifier(name) = callee.as_ref() {
                     match name.as_str() {
                         "generator" => {
@@ -589,6 +618,53 @@ impl Lowerer {
                             return Ok(HirExpr {
                                 kind: HirExprKind::Await(future_hir),
                                 ty: TypeId::I64,
+                            });
+                        }
+                        // Prelude I/O functions
+                        "print" | "println" | "eprint" | "eprintln" => {
+                            let mut args_hir = Vec::new();
+                            for arg in args {
+                                args_hir.push(self.lower_expr(&arg.value, ctx)?);
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: name.clone(),
+                                    args: args_hir,
+                                },
+                                ty: TypeId::NIL,
+                            });
+                        }
+                        // Prelude math functions
+                        "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
+                            let mut args_hir = Vec::new();
+                            for arg in args {
+                                args_hir.push(self.lower_expr(&arg.value, ctx)?);
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: name.clone(),
+                                    args: args_hir,
+                                },
+                                ty: TypeId::I64, // Math functions return i64
+                            });
+                        }
+                        // Prelude conversion functions
+                        "to_string" | "to_int" => {
+                            let mut args_hir = Vec::new();
+                            for arg in args {
+                                args_hir.push(self.lower_expr(&arg.value, ctx)?);
+                            }
+                            let ret_ty = if name == "to_string" {
+                                TypeId::STRING
+                            } else {
+                                TypeId::I64
+                            };
+                            return Ok(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: name.clone(),
+                                    args: args_hir,
+                                },
+                                ty: ret_ty,
                             });
                         }
                         _ => {} // Fall through to normal call handling

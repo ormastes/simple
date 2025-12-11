@@ -12,6 +12,9 @@ pub use manual_mem::{Handle, HandlePool, ManualGc, Shared, Unique, WeakPtr};
 pub mod actor;
 pub use actor::{ActorHandle, ActorSpawner, Message, ThreadSpawner};
 
+pub mod runtime_symbols;
+pub use runtime_symbols::{AbiVersion, RuntimeSymbolProvider, RUNTIME_SYMBOL_NAMES};
+
 /// Common interface for dynamically loaded modules.
 pub trait DynModule {
     /// Lookup a function symbol by name.
