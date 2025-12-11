@@ -5,7 +5,7 @@
 ```
 simple/
 ├── CLAUDE.md                # Development guide
-├── Cargo.toml               # Workspace definition (11 crates)
+├── Cargo.toml               # Workspace definition (12 crates)
 ├── Makefile                 # Build automation
 │
 ├── doc/                     # Documentation
@@ -28,7 +28,7 @@ simple/
 │   ├── nogc_compile/            # NoGC instruction proofs
 │   └── type_inference_compile/  # Type inference proofs
 │
-├── src/                     # Source code (11 crates - see below)
+├── src/                     # Source code (12 crates - see below)
 └── tests/                   # Integration tests
 ```
 
@@ -166,6 +166,8 @@ src/
 │   ├── lib.rs           # Re-exports CompilerPipeline, Value, CompileError
 │   ├── error.rs         # CompileError enum
 │   ├── pipeline.rs      # CompilerPipeline - orchestrates compilation
+│   ├── project.rs       # ProjectContext - project detection, simple.toml parsing
+│   ├── module_resolver.rs # ModuleResolver - path→file resolution, __init__.spl
 │   ├── value.rs         # Value enum, Env, pointer wrappers
 │   ├── value_tests.rs   # Comprehensive value operation tests
 │   ├── effects.rs       # Effect checking (async safety, blocking detection)
@@ -349,6 +351,7 @@ src/
 - `struct Span` - Source location range
 - `enum FStringToken` - F-string parts
 - `enum TokenKind` - Token type enum
+  - **Module system tokens**: `Mod`, `Use`, `Export`, `Common`, `Auto`, `Crate`
 - `struct Token` - Token with position
 
 **`parser.rs`** - Main parser entry point
@@ -367,6 +370,7 @@ src/
 - Variable declarations: `parse_let()`, `parse_mut_let()`, `parse_const()`, `parse_static()`
 - Control flow: `parse_if()`, `parse_for()`, `parse_while()`, `parse_loop()`, `parse_match()`
 - Jump statements: `parse_return()`, `parse_break()`, `parse_continue()`
+- Module system: `parse_use()`, `parse_mod()`, `parse_common_use()`, `parse_export_use()`, `parse_auto_import()`, `parse_module_path()`, `parse_import_target()`
 - Special: `parse_context()`, `parse_with()`
 
 **`types_def/mod.rs`** - Type parsing (private module)
@@ -378,6 +382,7 @@ src/
 - `enum RangeBound` - Range bounds
 - `enum SelfMode` - Self parameter modes
 - `enum Node` - Top-level AST node
+- **Module system**: `struct ModulePath`, `enum ImportTarget`, `struct ModDecl`, `struct UseStmt`, `struct CommonUseStmt`, `struct ExportUseStmt`, `struct AutoImportStmt`
 - `struct FunctionDef`, `Parameter`, `Block`
 - `struct StructDef`, `ClassDef`, `Field`
 - `struct EnumDef`, `EnumVariant`
@@ -420,6 +425,26 @@ src/
 
 **`pipeline.rs`** - Pipeline
 - `struct CompilerPipeline` - Orchestration
+- `with_project()`, `with_gc_and_project()` - Constructor with project context
+- `compile_with_project_detection()` - Auto-detect project from file path
+
+**`project.rs`** - Project detection and configuration
+- `struct ProjectContext` - Project-level configuration holder
+  - `root`, `source_root`, `name`, `resolver`, `features`, `profiles`
+- `fn new(root)` - Create from project root directory
+- `fn detect(file_path)` - Auto-detect project by searching for `simple.toml`
+- `fn single_file(path)` - Create context for single-file mode
+- `fn parse_manifest(content)` - Parse `simple.toml` content
+
+**`module_resolver.rs`** - Module path resolution
+- `struct ModuleResolver` - Resolves module paths to filesystem paths
+  - `project_root`, `source_root`, `manifests`, `features`, `profiles`
+- `fn resolve(path, from_file)` - Resolve module path to `ResolvedModule`
+- `fn load_manifest(dir_path)` - Load and parse `__init__.spl` directory manifest
+- `struct DirectoryManifest` - Parsed `__init__.spl` contents
+  - `name`, `attributes`, `child_modules`, `common_uses`, `exports`, `auto_imports`
+- `struct ChildModule` - Child module declaration (name, visibility, attributes)
+- `struct ResolvedModule` - Resolution result (path, module_path, is_directory, manifest)
 
 **`value.rs`** - Runtime values
 - `type Env` - Variable environment
@@ -1446,6 +1471,9 @@ Install all tools: `make install-tools`
 | Package management | `pkg/` | compiler/, runtime/ |
 | Runtime FFI functions | `runtime/value/` | compiler/ (imports only) |
 | Generator state machine | `compiler/mir/generator.rs` + `runtime/value/async_gen.rs` | driver/ |
+| Module system parsing | `parser/` (tokens, AST, statements) | compiler/ (stubs only) |
+| Project configuration | `compiler/project.rs` | driver/, runtime/ |
+| Module resolution | `compiler/module_resolver.rs` | driver/, parser/ |
 
 ### Example: Adding a New Builtin Method (e.g., `array.sum()`)
 

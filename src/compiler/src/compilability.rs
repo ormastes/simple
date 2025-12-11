@@ -8,6 +8,8 @@ use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::{BinOp, Block, Expr, FunctionDef, Node, UnaryOp};
 
+use crate::value::{ACTOR_BUILTINS, BLOCKING_BUILTINS, GENERATOR_BUILTINS};
+
 /// Reason why a construct requires interpreter fallback
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FallbackReason {
@@ -505,20 +507,17 @@ fn add_reason(reasons: &mut Vec<FallbackReason>, reason: FallbackReason) {
 
 /// Check if a builtin is blocking (can't be used in async)
 fn is_blocking_builtin(name: &str) -> bool {
-    matches!(
-        name,
-        "await" | "join" | "recv" | "sleep" | "input" | "read_file" | "write_file"
-    )
+    BLOCKING_BUILTINS.contains(&name)
 }
 
 /// Check if a builtin is an actor operation
 fn is_actor_builtin(name: &str) -> bool {
-    matches!(name, "spawn" | "send" | "recv" | "reply" | "join")
+    ACTOR_BUILTINS.contains(&name)
 }
 
 /// Check if a builtin is a generator operation
 fn is_generator_builtin(name: &str) -> bool {
-    matches!(name, "generator" | "next" | "collect")
+    GENERATOR_BUILTINS.contains(&name)
 }
 
 /// Get the set of currently compilable builtins

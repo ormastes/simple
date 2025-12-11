@@ -183,29 +183,13 @@ mod tests {
     use super::*;
     use crate::commands::init::init_project;
     use crate::commands::install::install_dependencies;
+    use crate::commands::test_helpers::{cleanup_test_project, setup_test_project};
     use crate::manifest::Dependency;
     use std::fs;
 
-    fn setup_test_project(name: &str) -> std::path::PathBuf {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "simple-list-test-{}-{}",
-            name,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).unwrap();
-
-        init_project(&temp_dir, Some(name)).unwrap();
-
-        temp_dir
-    }
-
     #[test]
     fn test_list_no_deps() {
-        let temp_dir = setup_test_project("list-empty");
+        let temp_dir = setup_test_project("list", "list-empty");
 
         // Create empty lock file
         let lock = LockFile::default();
@@ -214,12 +198,12 @@ mod tests {
         let packages = list_dependencies(&temp_dir).unwrap();
         assert!(packages.is_empty());
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_list_with_deps() {
-        let temp_dir = setup_test_project("list-deps");
+        let temp_dir = setup_test_project("list", "list-deps");
 
         // Create a path dependency
         let dep_dir = temp_dir.join("mylib");
@@ -238,12 +222,12 @@ mod tests {
         assert_eq!(packages[0].source_type, "path");
         assert!(packages[0].is_linked);
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_tree_simple() {
-        let temp_dir = setup_test_project("tree-simple");
+        let temp_dir = setup_test_project("list", "tree-simple");
 
         // Create a path dependency
         let dep_dir = temp_dir.join("mylib");
@@ -261,31 +245,14 @@ mod tests {
         assert_eq!(tree.children.len(), 1);
         assert_eq!(tree.children[0].name, "mylib");
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_tree_transitive() {
-        let temp_dir = setup_test_project("tree-trans");
+        use crate::commands::test_helpers::setup_transitive_deps;
 
-        // Create lib_b (no deps)
-        let lib_b = temp_dir.join("lib_b");
-        fs::create_dir_all(&lib_b).unwrap();
-        init_project(&lib_b, Some("lib_b")).unwrap();
-
-        // Create lib_a (depends on lib_b)
-        let lib_a = temp_dir.join("lib_a");
-        fs::create_dir_all(&lib_a).unwrap();
-        init_project(&lib_a, Some("lib_a")).unwrap();
-        let mut lib_a_manifest = Manifest::load(&lib_a.join("simple.toml")).unwrap();
-        lib_a_manifest.add_dependency("lib_b", Dependency::path("../lib_b"));
-        lib_a_manifest.save(&lib_a.join("simple.toml")).unwrap();
-
-        // Main project depends on lib_a
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
-        manifest.add_dependency("lib_a", Dependency::path("./lib_a"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
-
+        let (temp_dir, _lib_a, _lib_b) = setup_transitive_deps("list", "tree-trans");
         install_dependencies(&temp_dir).unwrap();
 
         let tree = dependency_tree(&temp_dir).unwrap();
@@ -294,7 +261,7 @@ mod tests {
         assert_eq!(tree.children[0].children.len(), 1);
         assert_eq!(tree.children[0].children[0].name, "lib_b");
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]

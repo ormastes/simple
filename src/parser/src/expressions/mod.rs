@@ -206,7 +206,7 @@ impl<'a> Parser<'a> {
 
     /// Parse comparisons with chaining support: a < b < c becomes (a < b) and (b < c)
     pub(crate) fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut left = self.parse_bitwise_or()?;
+        let left = self.parse_bitwise_or()?;
 
         // Check if there's a comparison operator
         let op = match &self.current.kind {
@@ -612,7 +612,7 @@ impl<'a> Parser<'a> {
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),
-            is_move: false,
+            move_mode: MoveMode::Copy,
         })
     }
 
@@ -655,7 +655,7 @@ impl<'a> Parser<'a> {
     /// Parse macro invocation arguments: !(args) or !{args} or ![args]
     pub(crate) fn parse_macro_args(&mut self) -> Result<Vec<MacroArg>, ParseError> {
         // Macros can use (), {}, or [] for their arguments
-        let (open, close) = if self.check(&TokenKind::LParen) {
+        let (_open, close) = if self.check(&TokenKind::LParen) {
             (TokenKind::LParen, TokenKind::RParen)
         } else if self.check(&TokenKind::LBrace) {
             (TokenKind::LBrace, TokenKind::RBrace)
@@ -821,7 +821,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Lambda {
                     params,
                     body: Box::new(body),
-                    is_move: false,
+                    move_mode: MoveMode::Copy,
                 })
             }
             TokenKind::Move => {
@@ -855,7 +855,7 @@ impl<'a> Parser<'a> {
                 Ok(Expr::Lambda {
                     params,
                     body: Box::new(body),
-                    is_move: true,
+                    move_mode: MoveMode::Move,
                 })
             }
             TokenKind::LParen => {
@@ -872,7 +872,7 @@ impl<'a> Parser<'a> {
                         return Ok(Expr::Lambda {
                             params: vec![],
                             body: Box::new(body),
-                            is_move: false,
+                            move_mode: MoveMode::Copy,
                         });
                     }
                     return Ok(Expr::Tuple(vec![]));

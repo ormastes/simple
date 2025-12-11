@@ -72,6 +72,7 @@ impl ResolvedPackage {
 
 /// A conflict detected during resolution
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Conflict {
     /// Package with conflicting requirements
     pub package: String,

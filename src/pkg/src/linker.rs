@@ -237,8 +237,12 @@ fn create_symlink(src: &Path, dst: &Path) -> PkgResult<()> {
     }
 }
 
-/// Try to create hard links for all files in a directory
-fn try_hard_link_dir(src: &Path, dst: &Path) -> PkgResult<()> {
+/// Walk a directory and apply a file operation to each file.
+/// Creates directories automatically.
+fn walk_dir_apply<F>(src: &Path, dst: &Path, file_op: F) -> PkgResult<()>
+where
+    F: Fn(&Path, &Path) -> PkgResult<()>,
+{
     std::fs::create_dir_all(dst)?;
 
     for entry in walkdir::WalkDir::new(src) {
@@ -252,42 +256,29 @@ fn try_hard_link_dir(src: &Path, dst: &Path) -> PkgResult<()> {
         if entry.file_type().is_dir() {
             std::fs::create_dir_all(&dst_path)?;
         } else if entry.file_type().is_file() {
-            // Try hard link
-            if let Err(e) = std::fs::hard_link(src_path, &dst_path) {
-                // Clean up partial work and fail
-                let _ = std::fs::remove_dir_all(dst);
-                return Err(PkgError::Link(format!(
-                    "Hard link failed for {}: {}",
-                    src_path.display(),
-                    e
-                )));
-            }
+            file_op(src_path, &dst_path)?;
         }
     }
 
     Ok(())
 }
 
+/// Try to create hard links for all files in a directory
+fn try_hard_link_dir(src: &Path, dst: &Path) -> PkgResult<()> {
+    walk_dir_apply(src, dst, |src_path, dst_path| {
+        std::fs::hard_link(src_path, dst_path).map_err(|e| {
+            let _ = std::fs::remove_dir_all(dst);
+            PkgError::Link(format!("Hard link failed for {}: {}", src_path.display(), e))
+        })
+    })
+}
+
 /// Copy a directory recursively
 fn copy_dir_all(src: &Path, dst: &Path) -> PkgResult<()> {
-    std::fs::create_dir_all(dst)?;
-
-    for entry in walkdir::WalkDir::new(src) {
-        let entry = entry.map_err(|e| PkgError::Link(e.to_string()))?;
-        let src_path = entry.path();
-        let rel_path = src_path
-            .strip_prefix(src)
-            .map_err(|e| PkgError::Link(e.to_string()))?;
-        let dst_path = dst.join(rel_path);
-
-        if entry.file_type().is_dir() {
-            std::fs::create_dir_all(&dst_path)?;
-        } else if entry.file_type().is_file() {
-            std::fs::copy(src_path, &dst_path)?;
-        }
-    }
-
-    Ok(())
+    walk_dir_apply(src, dst, |src_path, dst_path| {
+        std::fs::copy(src_path, dst_path)?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

@@ -273,7 +273,7 @@ impl SmfWriter {
         writer.add_code_section(".text", object_code.to_vec());
 
         // Add symbols for each function
-        for (i, func) in mir.functions.iter().enumerate() {
+        for (_i, func) in mir.functions.iter().enumerate() {
             let symbol = SmfSymbol {
                 name: func.name.clone(),
                 binding: if func.is_public() {

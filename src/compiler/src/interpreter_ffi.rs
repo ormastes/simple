@@ -168,6 +168,40 @@ pub fn clear_interpreter_state() {
 }
 
 // ============================================================================
+// Helper to access all thread-local state
+// ============================================================================
+
+/// Execute a closure with access to all interpreter thread-local state.
+/// This eliminates the deeply nested `.with()` calls throughout the module.
+fn with_interp_state<F, R>(f: F) -> R
+where
+    F: FnOnce(
+        &Env,
+        &HashMap<String, FunctionDef>,
+        &HashMap<String, ClassDef>,
+        &Enums,
+        &ImplMethods,
+    ) -> R,
+{
+    INTERP_ENV.with(|env| {
+        let env = env.borrow();
+        INTERP_FUNCTIONS.with(|funcs| {
+            let funcs = funcs.borrow();
+            INTERP_CLASSES.with(|classes| {
+                let classes = classes.borrow();
+                INTERP_ENUMS.with(|enums| {
+                    let enums = enums.borrow();
+                    INTERP_IMPL_METHODS.with(|impl_methods| {
+                        let impl_methods = impl_methods.borrow();
+                        f(&env, &funcs, &classes, &enums, &impl_methods)
+                    })
+                })
+            })
+        })
+    })
+}
+
+// ============================================================================
 // FFI entry points
 // ============================================================================
 
@@ -220,35 +254,11 @@ pub unsafe extern "C" fn simple_interp_call(
     };
 
     // Look up and call the function
-    let result = INTERP_FUNCTIONS.with(|funcs| {
-        let funcs = funcs.borrow();
+    let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name) {
-            INTERP_CLASSES.with(|classes| {
-                let classes = classes.borrow();
-                INTERP_ENUMS.with(|enums| {
-                    let enums = enums.borrow();
-                    INTERP_IMPL_METHODS.with(|impl_methods| {
-                        let impl_methods = impl_methods.borrow();
-                        INTERP_ENV.with(|env| {
-                            let env = env.borrow();
-                            call_interpreted_function(
-                                func,
-                                args.clone(),
-                                &env,
-                                &funcs,
-                                &classes,
-                                &enums,
-                                &impl_methods,
-                            )
-                        })
-                    })
-                })
-            })
+            call_interpreted_function(func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
-            Err(CompileError::Semantic(format!(
-                "function not found: {}",
-                name
-            )))
+            Err(CompileError::Semantic(format!("function not found: {}", name)))
         }
     });
 
@@ -310,21 +320,8 @@ pub unsafe extern "C" fn simple_interp_eval_expr(expr_ptr: *const Expr) -> Bridg
     }
     let expr = &*expr_ptr;
 
-    let result = INTERP_FUNCTIONS.with(|funcs| {
-        let funcs = funcs.borrow();
-        INTERP_CLASSES.with(|classes| {
-            let classes = classes.borrow();
-            INTERP_ENUMS.with(|enums| {
-                let enums = enums.borrow();
-                INTERP_IMPL_METHODS.with(|impl_methods| {
-                    let impl_methods = impl_methods.borrow();
-                    INTERP_ENV.with(|env| {
-                        let env = env.borrow();
-                        evaluate_expr(expr, &env, &funcs, &classes, &enums, &impl_methods)
-                    })
-                })
-            })
-        })
+    let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
+        evaluate_expr(expr, env, funcs, classes, enums, impl_methods)
     });
 
     match result {
@@ -401,56 +398,19 @@ pub unsafe extern "C" fn simple_interp_get_var(name: *const c_char) -> BridgeVal
 
 /// Call an interpreted function by name with Value arguments.
 pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, CompileError> {
-    INTERP_FUNCTIONS.with(|funcs| {
-        let funcs = funcs.borrow();
+    with_interp_state(|env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name) {
-            INTERP_CLASSES.with(|classes| {
-                let classes = classes.borrow();
-                INTERP_ENUMS.with(|enums| {
-                    let enums = enums.borrow();
-                    INTERP_IMPL_METHODS.with(|impl_methods| {
-                        let impl_methods = impl_methods.borrow();
-                        INTERP_ENV.with(|env| {
-                            let env = env.borrow();
-                            call_interpreted_function(
-                                func,
-                                args,
-                                &env,
-                                &funcs,
-                                &classes,
-                                &enums,
-                                &impl_methods,
-                            )
-                        })
-                    })
-                })
-            })
+            call_interpreted_function(func, args, env, funcs, classes, enums, impl_methods)
         } else {
-            Err(CompileError::Semantic(format!(
-                "function not found: {}",
-                name
-            )))
+            Err(CompileError::Semantic(format!("function not found: {}", name)))
         }
     })
 }
 
 /// Evaluate an expression using interpreter state.
 pub fn eval_expr_with_state(expr: &Expr) -> Result<Value, CompileError> {
-    INTERP_FUNCTIONS.with(|funcs| {
-        let funcs = funcs.borrow();
-        INTERP_CLASSES.with(|classes| {
-            let classes = classes.borrow();
-            INTERP_ENUMS.with(|enums| {
-                let enums = enums.borrow();
-                INTERP_IMPL_METHODS.with(|impl_methods| {
-                    let impl_methods = impl_methods.borrow();
-                    INTERP_ENV.with(|env| {
-                        let env = env.borrow();
-                        evaluate_expr(expr, &env, &funcs, &classes, &enums, &impl_methods)
-                    })
-                })
-            })
-        })
+    with_interp_state(|env, funcs, classes, enums, impl_methods| {
+        evaluate_expr(expr, env, funcs, classes, enums, impl_methods)
     })
 }
 

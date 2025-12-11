@@ -2,7 +2,26 @@
 //!
 //! This module handles resolving module paths to filesystem locations
 //! and managing directory manifests (__init__.spl files).
+//!
+//! ## Integration with dependency_tracker
+//!
+//! This module bridges the parser's AST types with the formally-verified
+//! types in `simple_dependency_tracker`. The formal models ensure:
+//!
+//! - Module resolution is unambiguous (no foo.spl + foo/__init__.spl conflicts)
+//! - Visibility is the intersection of item and ancestor visibility
+//! - Glob imports only include macros listed in `auto import`
 
+use simple_dependency_tracker::{
+    self as tracker,
+    resolution::ModPath,
+    visibility::{
+        DirManifest as TrackerDirManifest, ModDecl as TrackerModDecl, Visibility as TrackerVisibility,
+    },
+    macro_import::{AutoImport, MacroDirManifest, MacroExports, MacroSymbol},
+    graph::{ImportGraph, ImportKind},
+    symbol::ProjectSymbols,
+};
 use simple_parser::ast::{
     Attribute, AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, Module,
     ModulePath, Node, Visibility,
@@ -31,6 +50,58 @@ pub struct DirectoryManifest {
     pub exports: Vec<ExportUseStmt>,
     /// Macro auto-imports (auto import)
     pub auto_imports: Vec<AutoImportStmt>,
+}
+
+impl DirectoryManifest {
+    /// Convert to tracker's visibility DirManifest for formal model operations.
+    pub fn to_tracker_visibility_manifest(&self) -> TrackerDirManifest {
+        let mut manifest = TrackerDirManifest::new(&self.name);
+        for child in &self.child_modules {
+            manifest.add_child(TrackerModDecl::new(
+                &child.name,
+                child.visibility == Visibility::Public,
+            ));
+        }
+        // Add exports from export use statements
+        for export in &self.exports {
+            match &export.target {
+                ImportTarget::Single(name) => {
+                    manifest.add_export(tracker::visibility::SymbolId::new(name));
+                }
+                ImportTarget::Aliased { name, .. } => {
+                    manifest.add_export(tracker::visibility::SymbolId::new(name));
+                }
+                ImportTarget::Group(targets) => {
+                    for target in targets {
+                        if let ImportTarget::Single(name) = target {
+                            manifest.add_export(tracker::visibility::SymbolId::new(name));
+                        }
+                    }
+                }
+                ImportTarget::Glob => {
+                    // Glob exports are handled separately
+                }
+            }
+        }
+        manifest
+    }
+
+    /// Convert to tracker's macro DirManifest for formal model operations.
+    pub fn to_tracker_macro_manifest(&self) -> MacroDirManifest {
+        let mut manifest = MacroDirManifest::new(&self.name);
+        for auto_import in &self.auto_imports {
+            let module_path = auto_import.path.segments.join(".");
+            manifest.add_auto_import(AutoImport::new(&module_path, &auto_import.macro_name));
+        }
+        manifest
+    }
+
+    /// Check if a child module is public.
+    pub fn is_child_public(&self, name: &str) -> bool {
+        self.child_modules
+            .iter()
+            .any(|c| c.name == name && c.visibility == Visibility::Public)
+    }
 }
 
 /// A child module declaration from __init__.spl
@@ -70,6 +141,10 @@ pub struct ModuleResolver {
     features: HashSet<String>,
     /// Profile definitions (name -> (attributes, imports))
     profiles: HashMap<String, (Vec<String>, Vec<String>)>,
+    /// Import graph for cycle detection
+    import_graph: ImportGraph,
+    /// Project-wide symbol tables
+    project_symbols: ProjectSymbols,
 }
 
 impl ModuleResolver {
@@ -81,6 +156,8 @@ impl ModuleResolver {
             manifests: HashMap::new(),
             features: HashSet::new(),
             profiles: HashMap::new(),
+            import_graph: ImportGraph::new(),
+            project_symbols: ProjectSymbols::new(),
         }
     }
 
@@ -93,6 +170,8 @@ impl ModuleResolver {
             manifests: HashMap::new(),
             features: HashSet::new(),
             profiles: HashMap::new(),
+            import_graph: ImportGraph::new(),
+            project_symbols: ProjectSymbols::new(),
         }
     }
 
@@ -368,6 +447,84 @@ impl ModuleResolver {
         // For now, return empty
         Vec::new()
     }
+
+    /// Record an import in the import graph.
+    pub fn record_import(&mut self, from_module: &str, to_module: &str, kind: ImportKind) {
+        self.import_graph.add_import(from_module, to_module, kind);
+    }
+
+    /// Check for circular dependencies in the import graph.
+    pub fn check_circular_dependencies(&self) -> ResolveResult<()> {
+        self.import_graph.check_cycles().map_err(|e| {
+            CompileError::Semantic(format!("Circular dependency detected: {}", e))
+        })
+    }
+
+    /// Get the import graph.
+    pub fn import_graph(&self) -> &ImportGraph {
+        &self.import_graph
+    }
+
+    /// Get mutable access to project symbols.
+    pub fn project_symbols_mut(&mut self) -> &mut ProjectSymbols {
+        &mut self.project_symbols
+    }
+
+    /// Get project symbols.
+    pub fn project_symbols(&self) -> &ProjectSymbols {
+        &self.project_symbols
+    }
+
+    /// Convert a parser ModulePath to a tracker ModPath.
+    pub fn to_tracker_mod_path(path: &ModulePath) -> Option<ModPath> {
+        ModPath::parse(&path.segments.join("."))
+    }
+
+    /// Filter glob imports to only include auto-imported macros.
+    ///
+    /// This implements the formal model's `globImport` function.
+    pub fn filter_glob_import(
+        &self,
+        dir_manifest: &DirectoryManifest,
+        exports: &MacroExports,
+    ) -> Vec<MacroSymbol> {
+        let macro_manifest = dir_manifest.to_tracker_macro_manifest();
+        tracker::macro_import::glob_import(&macro_manifest, exports)
+    }
+
+    /// Calculate effective visibility using the formal model.
+    ///
+    /// This implements the formal model's `effectiveVisibility` function.
+    pub fn effective_visibility(
+        &self,
+        manifest: &DirectoryManifest,
+        module_name: &str,
+        symbol_name: &str,
+        symbol_visibility: Visibility,
+    ) -> TrackerVisibility {
+        let tracker_manifest = manifest.to_tracker_visibility_manifest();
+        let sym_id = tracker::visibility::SymbolId::new(symbol_name);
+
+        // Create a minimal module contents with just this symbol
+        let mut mc = tracker::visibility::ModuleContents::new();
+        mc.add_symbol(tracker::visibility::Symbol::new(
+            symbol_name,
+            if symbol_visibility == Visibility::Public {
+                TrackerVisibility::Public
+            } else {
+                TrackerVisibility::Private
+            },
+        ));
+
+        tracker::visibility::effective_visibility(&tracker_manifest, module_name, &mc, &sym_id)
+    }
+
+    /// Calculate ancestor visibility using the formal model.
+    ///
+    /// This implements the formal model's `ancestorVisibility` function.
+    pub fn ancestor_visibility(&self, path: &[TrackerVisibility]) -> TrackerVisibility {
+        tracker::visibility::ancestor_visibility(path)
+    }
 }
 
 #[cfg(test)]
@@ -539,5 +696,108 @@ auto import router.route
 
         assert!(resolver.is_feature_enabled("strict_null"));
         assert!(!resolver.is_feature_enabled("other_feature"));
+    }
+
+    #[test]
+    fn test_effective_visibility_formal_model() {
+        // This test demonstrates the integration with the formal verification model
+        // from verification/visibility_export/
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let http = src.join("http");
+        fs::create_dir_all(&http).unwrap();
+
+        let manifest_source = r#"
+mod http
+pub mod router
+mod internal
+export use router.Router
+"#;
+        fs::write(http.join("__init__.spl"), manifest_source).unwrap();
+
+        let mut resolver = ModuleResolver::new(
+            dir.path().to_path_buf(),
+            src,
+        );
+
+        let manifest = resolver.load_manifest(&http).unwrap();
+
+        // Public module + exported symbol = public effective visibility
+        let vis = resolver.effective_visibility(&manifest, "router", "Router", Visibility::Public);
+        assert_eq!(vis, TrackerVisibility::Public);
+
+        // Public module + unexported symbol = private effective visibility
+        let vis = resolver.effective_visibility(&manifest, "router", "helper", Visibility::Public);
+        assert_eq!(vis, TrackerVisibility::Private);
+
+        // Private module = private effective visibility
+        let vis = resolver.effective_visibility(&manifest, "internal", "Foo", Visibility::Public);
+        assert_eq!(vis, TrackerVisibility::Private);
+
+        // Private symbol = private effective visibility
+        let vis = resolver.effective_visibility(&manifest, "router", "Router", Visibility::Private);
+        assert_eq!(vis, TrackerVisibility::Private);
+    }
+
+    #[test]
+    fn test_macro_auto_import_formal_model() {
+        // This test demonstrates the integration with the formal verification model
+        // from verification/macro_auto_import/
+        use simple_dependency_tracker::macro_import::{MacroSymbol, SymKind};
+
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let http = src.join("http");
+        fs::create_dir_all(&http).unwrap();
+
+        let manifest_source = r#"
+mod http
+pub mod router
+auto import router.route
+"#;
+        fs::write(http.join("__init__.spl"), manifest_source).unwrap();
+
+        let mut resolver = ModuleResolver::new(
+            dir.path().to_path_buf(),
+            src,
+        );
+
+        let manifest = resolver.load_manifest(&http).unwrap();
+
+        // Create mock exports
+        let mut exports = MacroExports::new();
+        exports.add_non_macro(MacroSymbol::value("router", "Router"));
+        exports.add_macro(MacroSymbol::macro_def("router", "route"));
+        exports.add_macro(MacroSymbol::macro_def("router", "get"));
+
+        // Glob import should include:
+        // - All non-macros (Router)
+        // - Only auto-imported macros (route, not get)
+        let result = resolver.filter_glob_import(&manifest, &exports);
+
+        assert_eq!(result.len(), 2); // Router + route
+        assert!(result.iter().any(|s| s.name == "Router" && s.kind == SymKind::ValueOrType));
+        assert!(result.iter().any(|s| s.name == "route" && s.kind == SymKind::Macro));
+        assert!(!result.iter().any(|s| s.name == "get")); // Not in auto import
+    }
+
+    #[test]
+    fn test_circular_dependency_detection() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+
+        let mut resolver = ModuleResolver::new(
+            dir.path().to_path_buf(),
+            src,
+        );
+
+        // Create a cycle: a -> b -> c -> a
+        resolver.record_import("crate.a", "crate.b", ImportKind::Use);
+        resolver.record_import("crate.b", "crate.c", ImportKind::Use);
+        resolver.record_import("crate.c", "crate.a", ImportKind::Use);
+
+        let result = resolver.check_circular_dependencies();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Circular dependency"));
     }
 }

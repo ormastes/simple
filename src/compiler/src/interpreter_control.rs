@@ -2,6 +2,17 @@
 // Control flow execution functions for the interpreter
 // ============================================================================
 
+/// Handle loop control flow result. Returns Some if we should exit the loop.
+#[inline]
+fn handle_loop_control(ctrl: Control) -> Option<Result<Control, CompileError>> {
+    match ctrl {
+        Control::Next => None,
+        Control::Continue => None, // caller handles continue
+        Control::Break(_) => Some(Ok(Control::Next)),
+        ret @ Control::Return(_) => Some(Ok(ret)),
+    }
+}
+
 fn exec_if(
     if_stmt: &IfStmt,
     env: &mut Env,
@@ -62,12 +73,9 @@ fn exec_while(
             for (name, val) in bindings {
                 env.insert(name, val);
             }
-            match exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)? {
-                Control::Next => {}
-                Control::Continue => continue,
-                Control::Break(_) => break,
-                ret @ Control::Return(_) => return Ok(ret),
-            }
+            let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
+            if matches!(ctrl, Control::Continue) { continue; }
+            if let Some(result) = handle_loop_control(ctrl) { return result; }
         }
         return Ok(Control::Next);
     }
@@ -77,12 +85,9 @@ fn exec_while(
         if !evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?.truthy() {
             break;
         }
-        match exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)? {
-            Control::Next => {}
-            Control::Continue => continue,
-            Control::Break(_) => break,
-            ret @ Control::Return(_) => return Ok(ret),
-        }
+        let ctrl = exec_block(&while_stmt.body, env, functions, classes, enums, impl_methods)?;
+        if matches!(ctrl, Control::Continue) { continue; }
+        if let Some(result) = handle_loop_control(ctrl) { return result; }
     }
     Ok(Control::Next)
 }
@@ -96,14 +101,10 @@ fn exec_loop(
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
     loop {
-        match exec_block(&loop_stmt.body, env, functions, classes, enums, impl_methods)? {
-            Control::Next => {}
-            Control::Continue => continue,
-            Control::Break(_) => break,
-            ret @ Control::Return(_) => return Ok(ret),
-        }
+        let ctrl = exec_block(&loop_stmt.body, env, functions, classes, enums, impl_methods)?;
+        if matches!(ctrl, Control::Continue) { continue; }
+        if let Some(result) = handle_loop_control(ctrl) { return result; }
     }
-    Ok(Control::Next)
 }
 
 fn exec_context(
@@ -158,6 +159,26 @@ fn exec_with(
     result
 }
 
+/// Helper to execute a method body with self and fields bound
+fn exec_method_body(
+    method: &FunctionDef,
+    receiver: &Value,
+    fields: &HashMap<String, Value>,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let mut local_env = env.clone();
+    local_env.insert("self".to_string(), receiver.clone());
+    for (k, v) in fields {
+        local_env.insert(k.clone(), v.clone());
+    }
+    let result = exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods)?;
+    Ok(if let Control::Return(val) = result { val } else { Value::Nil })
+}
+
 /// Helper to call a method if it exists on an object
 fn call_method_if_exists(
     receiver: &Value,
@@ -172,38 +193,14 @@ fn call_method_if_exists(
     if let Value::Object { class, fields } = receiver {
         // Check if the class has the method
         if let Some(class_def) = classes.get(class) {
-            for method in &class_def.methods {
-                if method.name == method_name {
-                    // Call the method with self
-                    let mut local_env = env.clone();
-                    local_env.insert("self".to_string(), receiver.clone());
-                    // Add fields to the environment
-                    for (k, v) in fields {
-                        local_env.insert(k.clone(), v.clone());
-                    }
-                    let result = exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods)?;
-                    if let Control::Return(val) = result {
-                        return Ok(Some(val));
-                    }
-                    return Ok(Some(Value::Nil));
-                }
+            if let Some(method) = class_def.methods.iter().find(|m| m.name == method_name) {
+                return Ok(Some(exec_method_body(method, receiver, fields, env, functions, classes, enums, impl_methods)?));
             }
         }
         // Check impl_methods
         if let Some(methods) = impl_methods.get(class) {
-            for method in methods {
-                if method.name == method_name {
-                    let mut local_env = env.clone();
-                    local_env.insert("self".to_string(), receiver.clone());
-                    for (k, v) in fields {
-                        local_env.insert(k.clone(), v.clone());
-                    }
-                    let result = exec_block(&method.body, &mut local_env, functions, classes, enums, impl_methods)?;
-                    if let Control::Return(val) = result {
-                        return Ok(Some(val));
-                    }
-                    return Ok(Some(Value::Nil));
-                }
+            if let Some(method) = methods.iter().find(|m| m.name == method_name) {
+                return Ok(Some(exec_method_body(method, receiver, fields, env, functions, classes, enums, impl_methods)?));
             }
         }
     }
@@ -270,12 +267,9 @@ fn exec_for(
         if let Pattern::Identifier(name) = &for_stmt.pattern {
             env.insert(name.clone(), Value::Int(val));
         }
-        match exec_block(&for_stmt.body, env, functions, classes, enums, impl_methods)? {
-            Control::Next => {}
-            Control::Continue => continue,
-            Control::Break(_) => break,
-            ret @ Control::Return(_) => return Ok(ret),
-        }
+        let ctrl = exec_block(&for_stmt.body, env, functions, classes, enums, impl_methods)?;
+        if matches!(ctrl, Control::Continue) { continue; }
+        if let Some(result) = handle_loop_control(ctrl) { return result; }
     }
     Ok(Control::Next)
 }
@@ -301,7 +295,7 @@ fn exec_match(
     // Check for strong enum - disallow wildcard/catch-all patterns
     if let Value::Enum { enum_name, .. } = &subject {
         if let Some(enum_def) = enums.get(enum_name) {
-            let is_strong = enum_def.attributes.iter().any(|attr| attr.name == "strong");
+            let is_strong = enum_def.attributes.iter().any(|attr| attr.name == ATTR_STRONG);
             if is_strong {
                 for arm in &match_stmt.arms {
                     if is_catch_all_pattern(&arm.pattern) {

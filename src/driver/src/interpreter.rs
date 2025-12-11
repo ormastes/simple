@@ -79,7 +79,9 @@ impl Interpreter {
     /// * `Ok(RunResult)` - Execution result with exit code and captured output
     /// * `Err(String)` - Error message if compilation or execution failed
     pub fn run(&self, code: &str, config: RunConfig) -> Result<RunResult, String> {
-        let _ = (&config.args, &config.stdin, config.timeout_ms); // TODO: use when I/O is implemented
+        // NOTE: args/stdin/timeout are accepted but not yet wired to the runtime.
+        // Requires: (1) I/O builtins in runtime, (2) stdin/args context in interpreter
+        let _ = (&config.args, &config.stdin, config.timeout_ms);
 
         let exit_code = match config.running_type {
             RunningType::Interpreter => {
@@ -119,9 +121,11 @@ impl Interpreter {
             }
         };
 
+        // NOTE: stdout/stderr capture requires I/O builtins in the runtime.
+        // When print() builtin is added, it should write to a captured buffer.
         Ok(RunResult {
             exit_code,
-            stdout: String::new(), // TODO: capture when I/O builtins are implemented
+            stdout: String::new(),
             stderr: String::new(),
         })
     }

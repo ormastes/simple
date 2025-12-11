@@ -4,6 +4,56 @@ use super::core::RuntimeValue;
 use super::heap::{HeapHeader, HeapObjectType};
 
 // ============================================================================
+// Helper macros to reduce FFI boilerplate
+// ============================================================================
+
+/// Validate heap object type, returns None if invalid
+#[inline]
+fn validate_heap_obj(val: RuntimeValue, expected: HeapObjectType) -> Option<*mut HeapHeader> {
+    if !val.is_heap() { return None; }
+    let ptr = val.as_heap_ptr();
+    if unsafe { (*ptr).object_type != expected } { return None; }
+    Some(ptr)
+}
+
+/// Get typed pointer from heap object with validation, returning early if invalid
+macro_rules! as_typed_ptr {
+    ($val:expr, $expected:expr, $ty:ty, $ret:expr) => {{
+        match validate_heap_obj($val, $expected) {
+            Some(ptr) => ptr as *const $ty,
+            None => return $ret,
+        }
+    }};
+    (mut $val:expr, $expected:expr, $ty:ty, $ret:expr) => {{
+        match validate_heap_obj($val, $expected) {
+            Some(ptr) => ptr as *mut $ty,
+            None => return $ret,
+        }
+    }};
+}
+
+/// Normalize a Python-style index (handles negative indices)
+#[inline]
+fn normalize_index(index: i64, len: i64) -> i64 {
+    if index < 0 { len + index } else { index }
+}
+
+/// FNV-1a hash for strings (64-bit)
+/// This is a simple, fast hash suitable for hash tables.
+#[inline]
+fn fnv1a_hash(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET;
+    for &byte in bytes {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    hash
+}
+
+// ============================================================================
 // Heap-allocated collection structures
 // ============================================================================
 
@@ -128,38 +178,20 @@ pub extern "C" fn rt_array_new(capacity: u64) -> RuntimeValue {
 /// Get the length of an array
 #[no_mangle]
 pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {
-    if !array.is_heap() {
-        return -1;
-    }
-    let ptr = array.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Array {
-            return -1;
-        }
-        (*(ptr as *const RuntimeArray)).len as i64
-    }
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, -1);
+    unsafe { (*arr).len as i64 }
 }
 
 /// Get an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue {
-    if !array.is_heap() {
-        return RuntimeValue::NIL;
-    }
-    let ptr = array.as_heap_ptr();
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Array {
-            return RuntimeValue::NIL;
-        }
-        let arr = ptr as *const RuntimeArray;
         let len = (*arr).len as i64;
-
-        // Handle negative indices
-        let idx = if index < 0 { len + index } else { index };
+        let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
             return RuntimeValue::NIL;
         }
-
         (*arr).as_slice()[idx as usize]
     }
 }
@@ -167,23 +199,13 @@ pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue 
 /// Set an element in an array
 #[no_mangle]
 pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeValue) -> bool {
-    if !array.is_heap() {
-        return false;
-    }
-    let ptr = array.as_heap_ptr();
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Array {
-            return false;
-        }
-        let arr = ptr as *mut RuntimeArray;
         let len = (*arr).len as i64;
-
-        // Handle negative indices
-        let idx = if index < 0 { len + index } else { index };
+        let idx = normalize_index(index, len);
         if idx < 0 || idx >= len {
             return false;
         }
-
         (*arr).as_mut_slice()[idx as usize] = value;
         true
     }
@@ -192,20 +214,11 @@ pub extern "C" fn rt_array_set(array: RuntimeValue, index: i64, value: RuntimeVa
 /// Push an element to an array
 #[no_mangle]
 pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> bool {
-    if !array.is_heap() {
-        return false;
-    }
-    let ptr = array.as_heap_ptr();
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Array {
-            return false;
-        }
-        let arr = ptr as *mut RuntimeArray;
         if (*arr).len >= (*arr).capacity {
-            // Array is full - would need to reallocate
             return false;
         }
-
         let data_ptr = (arr.add(1)) as *mut RuntimeValue;
         *data_ptr.add((*arr).len as usize) = value;
         (*arr).len += 1;
@@ -216,19 +229,11 @@ pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> boo
 /// Pop an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
-    if !array.is_heap() {
-        return RuntimeValue::NIL;
-    }
-    let ptr = array.as_heap_ptr();
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Array {
-            return RuntimeValue::NIL;
-        }
-        let arr = ptr as *mut RuntimeArray;
         if (*arr).len == 0 {
             return RuntimeValue::NIL;
         }
-
         (*arr).len -= 1;
         let data_ptr = (arr.add(1)) as *const RuntimeValue;
         *data_ptr.add((*arr).len as usize)
@@ -238,15 +243,8 @@ pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
 /// Clear all elements from an array
 #[no_mangle]
 pub extern "C" fn rt_array_clear(array: RuntimeValue) -> bool {
-    if !array.is_heap() {
-        return false;
-    }
-    let ptr = array.as_heap_ptr();
+    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, false);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Array {
-            return false;
-        }
-        let arr = ptr as *mut RuntimeArray;
         (*arr).len = 0;
         true
     }
@@ -279,19 +277,11 @@ pub extern "C" fn rt_tuple_new(len: u64) -> RuntimeValue {
 /// Get an element from a tuple
 #[no_mangle]
 pub extern "C" fn rt_tuple_get(tuple: RuntimeValue, index: u64) -> RuntimeValue {
-    if !tuple.is_heap() {
-        return RuntimeValue::NIL;
-    }
-    let ptr = tuple.as_heap_ptr();
+    let tup = as_typed_ptr!(tuple, HeapObjectType::Tuple, RuntimeTuple, RuntimeValue::NIL);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Tuple {
-            return RuntimeValue::NIL;
-        }
-        let tup = ptr as *const RuntimeTuple;
         if index >= (*tup).len {
             return RuntimeValue::NIL;
         }
-
         (*tup).as_slice()[index as usize]
     }
 }
@@ -299,19 +289,11 @@ pub extern "C" fn rt_tuple_get(tuple: RuntimeValue, index: u64) -> RuntimeValue 
 /// Set an element in a tuple (used during construction)
 #[no_mangle]
 pub extern "C" fn rt_tuple_set(tuple: RuntimeValue, index: u64, value: RuntimeValue) -> bool {
-    if !tuple.is_heap() {
-        return false;
-    }
-    let ptr = tuple.as_heap_ptr();
+    let tup = as_typed_ptr!(mut tuple, HeapObjectType::Tuple, RuntimeTuple, false);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Tuple {
-            return false;
-        }
-        let tup = ptr as *mut RuntimeTuple;
         if index >= (*tup).len {
             return false;
         }
-
         let data_ptr = (tup.add(1)) as *mut RuntimeValue;
         *data_ptr.add(index as usize) = value;
         true
@@ -321,16 +303,8 @@ pub extern "C" fn rt_tuple_set(tuple: RuntimeValue, index: u64, value: RuntimeVa
 /// Get the length of a tuple
 #[no_mangle]
 pub extern "C" fn rt_tuple_len(tuple: RuntimeValue) -> i64 {
-    if !tuple.is_heap() {
-        return -1;
-    }
-    let ptr = tuple.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Tuple {
-            return -1;
-        }
-        (*(ptr as *const RuntimeTuple)).len as i64
-    }
+    let tup = as_typed_ptr!(tuple, HeapObjectType::Tuple, RuntimeTuple, -1);
+    unsafe { (*tup).len as i64 }
 }
 
 // ============================================================================
@@ -358,12 +332,14 @@ pub extern "C" fn rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue {
 
         (*ptr).header = HeapHeader::new(HeapObjectType::String, size as u32);
         (*ptr).len = len;
-        (*ptr).hash = 0; // TODO: Compute hash
 
-        // Copy string data
+        // Copy string data and compute hash
         if len > 0 {
             let data_ptr = ptr.add(1) as *mut u8;
             std::ptr::copy_nonoverlapping(bytes, data_ptr, len as usize);
+            (*ptr).hash = fnv1a_hash(std::slice::from_raw_parts(bytes, len as usize));
+        } else {
+            (*ptr).hash = 0;
         }
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
@@ -373,32 +349,15 @@ pub extern "C" fn rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue {
 /// Get the length of a string in bytes
 #[no_mangle]
 pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
-    if !string.is_heap() {
-        return -1;
-    }
-    let ptr = string.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::String {
-            return -1;
-        }
-        (*(ptr as *const RuntimeString)).len as i64
-    }
+    let str_ptr = as_typed_ptr!(string, HeapObjectType::String, RuntimeString, -1);
+    unsafe { (*str_ptr).len as i64 }
 }
 
 /// Get a pointer to the string data
 #[no_mangle]
 pub extern "C" fn rt_string_data(string: RuntimeValue) -> *const u8 {
-    if !string.is_heap() {
-        return std::ptr::null();
-    }
-    let ptr = string.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::String {
-            return std::ptr::null();
-        }
-        let str_ptr = ptr as *const RuntimeString;
-        str_ptr.add(1) as *const u8
-    }
+    let str_ptr = as_typed_ptr!(string, HeapObjectType::String, RuntimeString, std::ptr::null());
+    unsafe { str_ptr.add(1) as *const u8 }
 }
 
 /// Concatenate two strings
@@ -423,7 +382,6 @@ pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeV
 
         (*ptr).header = HeapHeader::new(HeapObjectType::String, size as u32);
         (*ptr).len = total_len;
-        (*ptr).hash = 0;
 
         // Copy first string
         let data_ptr = ptr.add(1) as *mut u8;
@@ -437,6 +395,13 @@ pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeV
         if !data_b.is_null() && len_b > 0 {
             std::ptr::copy_nonoverlapping(data_b, data_ptr.add(len_a as usize), len_b as usize);
         }
+
+        // Compute hash for concatenated string
+        (*ptr).hash = if total_len > 0 {
+            fnv1a_hash(std::slice::from_raw_parts(data_ptr, total_len as usize))
+        } else {
+            0
+        };
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
@@ -471,16 +436,8 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
 /// Get the length of a dictionary
 #[no_mangle]
 pub extern "C" fn rt_dict_len(dict: RuntimeValue) -> i64 {
-    if !dict.is_heap() {
-        return -1;
-    }
-    let ptr = dict.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Dict {
-            return -1;
-        }
-        (*(ptr as *const RuntimeDict)).len as i64
-    }
+    let d = as_typed_ptr!(dict, HeapObjectType::Dict, RuntimeDict, -1);
+    unsafe { (*d).len as i64 }
 }
 
 /// Simple hash function for RuntimeValue
@@ -499,15 +456,8 @@ fn hash_value(v: RuntimeValue) -> u64 {
 /// Get a value from a dictionary by key
 #[no_mangle]
 pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeValue {
-    if !dict.is_heap() {
-        return RuntimeValue::NIL;
-    }
-    let ptr = dict.as_heap_ptr();
+    let d = as_typed_ptr!(dict, HeapObjectType::Dict, RuntimeDict, RuntimeValue::NIL);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Dict {
-            return RuntimeValue::NIL;
-        }
-        let d = ptr as *const RuntimeDict;
         let capacity = (*d).capacity;
         if capacity == 0 {
             return RuntimeValue::NIL;
@@ -521,7 +471,7 @@ pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeV
             let idx = ((hash + i) % capacity) as usize;
             let k = *data_ptr.add(idx * 2);
             if k.is_nil() {
-                return RuntimeValue::NIL; // Key not found
+                return RuntimeValue::NIL;
             }
             if k == key {
                 return *data_ptr.add(idx * 2 + 1);
@@ -571,18 +521,9 @@ pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: Runt
 /// Clear all entries from a dictionary
 #[no_mangle]
 pub extern "C" fn rt_dict_clear(dict: RuntimeValue) -> bool {
-    if !dict.is_heap() {
-        return false;
-    }
-    let ptr = dict.as_heap_ptr();
+    let d = as_typed_ptr!(mut dict, HeapObjectType::Dict, RuntimeDict, false);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Dict {
-            return false;
-        }
-        let d = ptr as *mut RuntimeDict;
         let capacity = (*d).capacity;
-
-        // Zero out all entries
         let data_ptr = (d.add(1)) as *mut RuntimeValue;
         for i in 0..(capacity * 2) {
             *data_ptr.add(i as usize) = RuntimeValue::NIL;
@@ -592,67 +533,40 @@ pub extern "C" fn rt_dict_clear(dict: RuntimeValue) -> bool {
     }
 }
 
-/// Get all keys from a dictionary as an array
-#[no_mangle]
-pub extern "C" fn rt_dict_keys(dict: RuntimeValue) -> RuntimeValue {
-    if !dict.is_heap() {
-        return RuntimeValue::NIL;
-    }
-    let ptr = dict.as_heap_ptr();
+/// Iterate over dictionary entries, collecting results with a transform function
+fn dict_collect<F>(dict: RuntimeValue, transform: F) -> RuntimeValue
+where
+    F: Fn(*const RuntimeValue, usize) -> RuntimeValue,
+{
+    let d = as_typed_ptr!(dict, HeapObjectType::Dict, RuntimeDict, RuntimeValue::NIL);
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Dict {
-            return RuntimeValue::NIL;
-        }
-        let d = ptr as *const RuntimeDict;
         let capacity = (*d).capacity;
         let len = (*d).len;
-
         let result = rt_array_new(len);
         if result.is_nil() {
             return result;
         }
-
         let data_ptr = (d.add(1)) as *const RuntimeValue;
-        for i in 0..capacity {
-            let k = *data_ptr.add((i * 2) as usize);
+        for i in 0..capacity as usize {
+            let k = *data_ptr.add(i * 2);
             if !k.is_nil() {
-                rt_array_push(result, k);
+                rt_array_push(result, transform(data_ptr, i));
             }
         }
         result
     }
 }
 
+/// Get all keys from a dictionary as an array
+#[no_mangle]
+pub extern "C" fn rt_dict_keys(dict: RuntimeValue) -> RuntimeValue {
+    dict_collect(dict, |data_ptr, i| unsafe { *data_ptr.add(i * 2) })
+}
+
 /// Get all values from a dictionary as an array
 #[no_mangle]
 pub extern "C" fn rt_dict_values(dict: RuntimeValue) -> RuntimeValue {
-    if !dict.is_heap() {
-        return RuntimeValue::NIL;
-    }
-    let ptr = dict.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Dict {
-            return RuntimeValue::NIL;
-        }
-        let d = ptr as *const RuntimeDict;
-        let capacity = (*d).capacity;
-        let len = (*d).len;
-
-        let result = rt_array_new(len);
-        if result.is_nil() {
-            return result;
-        }
-
-        let data_ptr = (d.add(1)) as *const RuntimeValue;
-        for i in 0..capacity {
-            let k = *data_ptr.add((i * 2) as usize);
-            if !k.is_nil() {
-                let v = *data_ptr.add((i * 2 + 1) as usize);
-                rt_array_push(result, v);
-            }
-        }
-        result
-    }
+    dict_collect(dict, |data_ptr, i| unsafe { *data_ptr.add(i * 2 + 1) })
 }
 
 // ============================================================================
@@ -803,21 +717,10 @@ pub extern "C" fn rt_slice(
             HeapObjectType::String => {
                 let str_ptr = ptr as *const RuntimeString;
                 let len = (*str_ptr).len as i64;
-
-                // Normalize start and end
-                let start = if start < 0 {
-                    (len + start).max(0)
-                } else {
-                    start.min(len)
-                };
-                let end = if end < 0 {
-                    (len + end).max(0)
-                } else {
-                    end.min(len)
-                };
+                let start = normalize_index(start, len).max(0).min(len);
+                let end = normalize_index(end, len).max(0).min(len);
 
                 if step != 1 || start >= end {
-                    // Only support step=1 for strings for now
                     return rt_string_new(std::ptr::null(), 0);
                 }
 

@@ -181,52 +181,36 @@ pub fn list_installed(project_dir: &Path) -> PkgResult<Vec<(String, String)>> {
 mod tests {
     use super::*;
     use crate::commands::init::init_project;
+    use crate::commands::test_helpers::{cleanup_test_project, setup_test_project};
     use crate::manifest::Dependency;
     use std::fs;
 
-    fn setup_test_project(name: &str) -> PathBuf {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "simple-install-test-{}-{}",
-            name,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).unwrap();
-
-        init_project(&temp_dir, Some(name)).unwrap();
-
-        temp_dir
-    }
-
     #[test]
     fn test_install_no_deps() {
-        let temp_dir = setup_test_project("no-deps");
+        let temp_dir = setup_test_project("install", "no-deps");
 
         let result = install_dependencies(&temp_dir).unwrap();
         assert_eq!(result.installed, 0);
         assert_eq!(result.up_to_date, 0);
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_install_creates_lock_file() {
-        let temp_dir = setup_test_project("creates-lock");
+        let temp_dir = setup_test_project("install", "creates-lock");
 
         install_dependencies(&temp_dir).unwrap();
 
         let lock_path = temp_dir.join("simple.lock");
         assert!(lock_path.exists());
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_install_path_dependency() {
-        let temp_dir = setup_test_project("path-dep");
+        let temp_dir = setup_test_project("install", "path-dep");
 
         // Create a path dependency
         let dep_dir = temp_dir.join("mylib");
@@ -252,12 +236,12 @@ mod tests {
         let mylib = lock.find_package("mylib").unwrap();
         assert!(mylib.is_path());
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_install_idempotent() {
-        let temp_dir = setup_test_project("idempotent");
+        let temp_dir = setup_test_project("install", "idempotent");
 
         // Create a path dependency
         let dep_dir = temp_dir.join("mylib");
@@ -278,30 +262,14 @@ mod tests {
         assert_eq!(result2.installed, 0);
         assert_eq!(result2.up_to_date, 1);
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_install_transitive_deps() {
-        let temp_dir = setup_test_project("transitive");
+        use crate::commands::test_helpers::setup_transitive_deps;
 
-        // Create lib_b (no deps)
-        let lib_b = temp_dir.join("lib_b");
-        fs::create_dir_all(&lib_b).unwrap();
-        init_project(&lib_b, Some("lib_b")).unwrap();
-
-        // Create lib_a (depends on lib_b)
-        let lib_a = temp_dir.join("lib_a");
-        fs::create_dir_all(&lib_a).unwrap();
-        init_project(&lib_a, Some("lib_a")).unwrap();
-        let mut lib_a_manifest = Manifest::load(&lib_a.join("simple.toml")).unwrap();
-        lib_a_manifest.add_dependency("lib_b", Dependency::path("../lib_b"));
-        lib_a_manifest.save(&lib_a.join("simple.toml")).unwrap();
-
-        // Main project depends on lib_a
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
-        manifest.add_dependency("lib_a", Dependency::path("./lib_a"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        let (temp_dir, _lib_a, _lib_b) = setup_transitive_deps("install", "transitive");
 
         // Install
         let result = install_dependencies(&temp_dir).unwrap();
@@ -311,12 +279,12 @@ mod tests {
         assert!(temp_dir.join("deps/lib_a").exists() || temp_dir.join("deps/lib_a").is_symlink());
         assert!(temp_dir.join("deps/lib_b").exists() || temp_dir.join("deps/lib_b").is_symlink());
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_install_registry_skipped() {
-        let temp_dir = setup_test_project("registry-skip");
+        let temp_dir = setup_test_project("install", "registry-skip");
 
         // Add a registry dependency
         let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
@@ -332,12 +300,12 @@ mod tests {
             .iter()
             .any(|(name, _)| name == "http"));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_list_installed() {
-        let temp_dir = setup_test_project("list-installed");
+        let temp_dir = setup_test_project("install", "list-installed");
 
         // Create and install a path dependency
         let dep_dir = temp_dir.join("mylib");
@@ -354,7 +322,7 @@ mod tests {
         assert_eq!(installed.len(), 1);
         assert_eq!(installed[0].0, "mylib");
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
@@ -371,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_install_missing_path_dep() {
-        let temp_dir = setup_test_project("missing-dep");
+        let temp_dir = setup_test_project("install", "missing-dep");
 
         // Add a dependency to nonexistent path
         let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
@@ -381,6 +349,6 @@ mod tests {
         let result = install_dependencies(&temp_dir);
         assert!(result.is_err());
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 }

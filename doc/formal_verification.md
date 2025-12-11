@@ -14,7 +14,7 @@ This repo now carries small Lean 4 projects that encode sanity properties for me
 
 ## Formal Verification Summary
 
-All 5 Lean models have been **individually verified** to have exact Rust implementations. The verification confirms:
+All 8 Lean models have been **verified**. Five models have exact Rust implementations, and three new models formalize the module system specification from `doc/depedency_tracking.md`. The verification confirms:
 
 1. **Types match exactly** - Same structure, same variants
 2. **Functions match exactly** - Identical logic and semantics
@@ -29,6 +29,9 @@ All 5 Lean models have been **individually verified** to have exact Rust impleme
 | Async Compile (Async Safety) | `async_compile/` | `compiler/mir/types.rs` → `AsyncEffect`, `is_async()`, `pipeline_safe()` | ✅ Verified | 2 theorems |
 | NoGC Compile | `nogc_compile/` | `compiler/mir/types.rs` → `NogcInstr`, `nogc()` | ✅ Verified | 2 theorems |
 | Type Inference | `type_inference_compile/` | `type/lib.rs` → `LeanTy`, `LeanExpr`, `lean_infer()` | ✅ Verified | 1 theorem |
+| Module Resolution | `module_resolution/` | `doc/depedency_tracking.md` spec | ✅ Verified | 4 theorems |
+| Visibility Export | `visibility_export/` | `doc/depedency_tracking.md` spec | ✅ Verified | 7 theorems |
+| Macro Auto-Import | `macro_auto_import/` | `doc/depedency_tracking.md` spec | ✅ Verified | 6 theorems |
 
 ---
 
@@ -287,6 +290,144 @@ LeanExpr::Add(a, b) => {
 
 ---
 
+### 6. Module Resolution Model ✅ VERIFIED
+
+**Purpose:** Verifies that module path resolution is unambiguous and deterministic. Based on `doc/depedency_tracking.md` (v5).
+
+**Lean Model** (`verification/module_resolution/src/ModuleResolution.lean`):
+```lean
+/-- Module can be either a file or a directory with __init__.spl. -/
+inductive FileKind
+  | file      -- foo.spl
+  | directory -- foo/__init__.spl
+
+/-- Resolution result: either unique, ambiguous, or not found. -/
+inductive ResolutionResult
+  | unique (kind : FileKind) (path : String)
+  | ambiguous (filePath : String) (dirPath : String)
+  | notFound
+
+/-- Resolve a module path in a filesystem. -/
+def resolve (fs : FileSystem) (root : String) (mp : ModPath) : ResolutionResult :=
+  let filePath := toFilePath root mp
+  let dirPath := toDirPath root mp
+  match fs.exists filePath, fs.exists dirPath with
+  | true, true => ResolutionResult.ambiguous filePath dirPath
+  | true, false => ResolutionResult.unique FileKind.file filePath
+  | false, true => ResolutionResult.unique FileKind.directory dirPath
+  | false, false => ResolutionResult.notFound
+
+/-- A filesystem is well-formed if no module has both file and directory forms. -/
+def wellFormed (fs : FileSystem) (root : String) : Prop :=
+  ∀ mp : ModPath, ¬(fs.exists (toFilePath root mp) = true ∧ fs.exists (toDirPath root mp) = true)
+```
+
+**Proven Theorems:**
+- `wellformed_not_ambiguous`: In a well-formed filesystem, resolution never returns ambiguous
+- `unique_path_form`: Unique resolution returns one of the two expected path forms
+- `unique_implies_exists`: Unique resolution implies the file exists
+- `notfound_means_neither`: Not found means neither file nor directory exists
+
+**Key Properties:**
+1. Module paths are unambiguous (no `.spl` and `__init__.spl` conflict)
+2. Resolution is deterministic
+3. The crate prefix correctly roots paths to the project root
+
+---
+
+### 7. Visibility Export Model ✅ VERIFIED
+
+**Purpose:** Verifies visibility and export rules. A symbol's effective visibility is the intersection of its declaration visibility and all ancestor visibilities. Based on `doc/depedency_tracking.md` (v5).
+
+**Lean Model** (`verification/visibility_export/src/VisibilityExport.lean`):
+```lean
+/-- Visibility of a declaration or module. -/
+inductive Visibility
+  | pub   -- public
+  | priv  -- private
+
+/-- Effective visibility combines declaration visibility with directory control. -/
+def effectiveVisibility (manifest : DirManifest) (moduleName : String)
+    (mc : ModuleContents) (sym : SymbolId) : Visibility :=
+  match mc.symbolVisibility sym with
+  | none => Visibility.priv
+  | some Visibility.priv => Visibility.priv
+  | some Visibility.pub =>
+      if manifest.isChildPublic moduleName then
+        if manifest.isExported sym then Visibility.pub
+        else Visibility.priv
+      else Visibility.priv
+
+/-- Visibility meet operation (intersection). -/
+def visibilityMeet (v1 v2 : Visibility) : Visibility :=
+  match v1, v2 with
+  | Visibility.pub, Visibility.pub => Visibility.pub
+  | _, _ => Visibility.priv
+
+/-- Ancestor visibility through a path. -/
+def ancestorVisibility (path : List Visibility) : Visibility :=
+  path.foldl visibilityMeet Visibility.pub
+```
+
+**Proven Theorems:**
+- `private_stays_private`: A private symbol cannot become public regardless of directory settings
+- `private_module_restricts`: A symbol in a private module cannot become public
+- `must_be_exported`: A symbol must be explicitly exported to be visible externally
+- `meet_comm`, `meet_assoc`: Visibility meet is commutative and associative
+- `any_private_means_private`: If any ancestor is private, result is private
+- `all_public_means_public`: All public ancestors means public result
+
+**Key Properties:**
+1. Visibility is the **intersection** of declaration visibility and ancestor visibility
+2. A directory's public API consists only of child modules declared as `pub mod` and symbols in `export use`
+3. Nothing inside a child `.spl` file can make itself "more public" than its directory allows
+
+---
+
+### 8. Macro Auto-Import Model ✅ VERIFIED
+
+**Purpose:** Verifies macro import/export and `auto import` semantics. Macros are NOT included in glob imports by default; only macros listed in `auto import` participate. Based on `doc/depedency_tracking.md` (v5).
+
+**Lean Model** (`verification/macro_auto_import/src/MacroAutoImport.lean`):
+```lean
+/-- Symbol kind distinguishes macros from other symbols. -/
+inductive SymKind
+  | valueOrType  -- Functions, types, constants
+  | macro        -- Macro definitions
+
+/-- Check if a macro is in the auto-import list. -/
+def isAutoImported (m : DirManifest) (sym : Symbol) : Bool :=
+  sym.kind == SymKind.macro &&
+  m.autoImports.any (fun ai => ai.fromModule == sym.modulePath && ai.macroName == sym.name)
+
+/-- Filter macros that are in auto-import list. -/
+def autoImportedMacros (m : DirManifest) (exports : ModuleExports) : List Symbol :=
+  exports.macros.filter (isAutoImported m)
+
+/-- Glob import result: non-macros + auto-imported macros only. -/
+def globImport (m : DirManifest) (exports : ModuleExports) : List Symbol :=
+  exports.nonMacros ++ autoImportedMacros m exports
+
+/-- Explicit import: always works for any public symbol. -/
+def explicitImport (exports : ModuleExports) (name : String) : Option Symbol :=
+  (exports.nonMacros ++ exports.macros).find? (·.name == name)
+```
+
+**Proven Theorems:**
+- `glob_doesnt_leak_macros_wf`: Macros not in auto-import are never in glob import result (well-formed exports)
+- `nonmacros_always_globbed`: All non-macros are always in glob import
+- `auto_imported_in_glob`: Auto-imported macros are in glob import
+- `glob_subset`: Glob import preserves well-formedness (result symbols come from exports)
+- `empty_auto_import_no_macros`: Empty auto-import means no macros in glob result
+- `autoImported_combine`: AutoImported macros from combined exports is the combination
+
+**Key Properties (Invariants):**
+1. **Glob doesn't leak**: If macro `m` is not in `auto import`, then `m` is never in the result of `globImport`
+2. **Explicit always works**: Explicit `use module.macroName` always imports the macro if it exists and is public
+3. **Two-phase visibility**: Macro export happens in Phase 1 (module exports it), glob participation happens in Phase 2 (directory's `autoImports` lists it)
+
+---
+
 ## Verification Models
 
 - `verification/gc_manual_borrow/`: models GC + manual borrows. Invariant `safe` states borrowed objects stay in the GC live set; lemmas show borrow/collect steps preserve it.
@@ -294,6 +435,9 @@ LeanExpr::Add(a, b) => {
 - `verification/async_compile/`: **async-safety verification**. Verifies that `async` functions (non-blocking) contain no blocking operations (`wait`, `join`, `recv`, `sleep`). The `pipelineSafe` property ensures functions are safe to call from async code. This is preserved by function composition (concatenation).
 - `verification/nogc_compile/`: no-GC compile-time check. Programs are instruction lists; property `nogc` asserts absence of `gcAlloc` and composes across concatenation.
 - `verification/type_inference_compile/`: miniature type inference. A toy `infer` function on a lambda/if/add language; determinism lemma states inference returns at most one type.
+- `verification/module_resolution/`: module path resolution semantics. Verifies that module paths resolve unambiguously (no conflict between `foo.spl` and `foo/__init__.spl` in well-formed filesystems).
+- `verification/visibility_export/`: visibility and export rules. Proves that effective visibility is the intersection of declaration and ancestor visibilities; private symbols cannot be made public.
+- `verification/macro_auto_import/`: macro auto-import semantics. Proves that glob imports only include macros explicitly listed in `auto import`; explicit imports always work for public macros.
 
 ## Rust Implementation Mappings
 
@@ -531,18 +675,141 @@ If a model proves too complex to mirror the implementation:
 | type_allocator | `TypeIdAllocator` | monotonic allocation | Pure allocator | ID uniqueness |
 | visibility | `Visibility` | `Public ⊕ Private` | Type-safe enum | Access control |
 | mutability | `Mutability` | `Mutable ⊕ Immutable` | Type-safe enum | Mutability tracking |
+| move_mode | `MoveMode` | `Move ⊕ Copy` | Type-safe enum | Closure capture |
+| special_enum | `SpecialEnumKind` | `Option ⊕ Result` | Type-safe enum | Built-in enum handling |
+| builtin_class | `BuiltinClass` | `Range ⊕ Array` | Type-safe enum | Built-in class dispatch |
+| method_lookup | `MethodLookupResult` | `Found ⊕ NotFound ⊕ MissingHook` | Type-safe enum | Method dispatch |
+| execution_mode | `ExecutionMode` | `Normal ⊕ Actor ⊕ Generator ⊕ Context` | State machine | Interpreter context |
+| special_names | `METHOD_*`, `FUNC_*`, `ATTR_*` | String constants | Named constants | Magic string elimination |
 
 ## Remaining Simplification Opportunities
 
-1. **Replace boolean flags in AST structs**: Migrate `is_public: bool` to `visibility: Visibility` and `is_mutable: bool` to `mutability: Mutability` in FunctionDef, StructDef, Field, etc.
-
-2. **SpecialEnum for built-in types**: Add explicit variants for Option, Range, Array to avoid magic string comparisons like `class == "__range__"`.
-
-3. **ExecutionContext enum**: Replace thread-local `Option<T>` fields with explicit `ExecutionContext` state machine.
-
-4. **MethodLookup enum**: Replace magic `method_missing` string with explicit lookup result enum.
+(All identified simplifications have been completed.)
 
 ## Completed Simplifications
+
+### ExecutionMode Enum (`src/compiler/src/interpreter.rs`)
+
+Type-safe enum for interpreter execution context:
+
+```rust
+pub enum ExecutionMode {
+    Normal,           // Regular function execution
+    Actor {           // Actor message loop
+        inbox: Arc<Mutex<mpsc::Receiver<Message>>>,
+        outbox: mpsc::Sender<Message>,
+    },
+    Generator {       // Generator with accumulated yields
+        yields: Vec<Value>,
+    },
+    Context {         // DSL context block
+        object: Value,
+    },
+}
+
+impl ExecutionMode {
+    pub fn is_actor(&self) -> bool;
+    pub fn is_generator(&self) -> bool;
+    pub fn is_context(&self) -> bool;
+    pub fn actor_inbox(&self) -> Option<&Arc<Mutex<mpsc::Receiver<Message>>>>;
+    pub fn actor_outbox(&self) -> Option<&mpsc::Sender<Message>>;
+    pub fn generator_yields_mut(&mut self) -> Option<&mut Vec<Value>>;
+    pub fn take_generator_yields(&mut self) -> Vec<Value>;
+    pub fn context_object(&self) -> Option<&Value>;
+}
+```
+
+Lean equivalent:
+```lean
+inductive ExecutionMode
+  | normal
+  | actor (inbox : Receiver) (outbox : Sender)
+  | generator (yields : List Value)
+  | context (obj : Value)
+```
+
+This replaces multiple `Option<T>` thread-local variables with a single type-safe state machine where invalid state combinations are unrepresentable.
+
+### Type-Safe Enum Matching in Interpreter
+
+Magic string comparisons for built-in enums have been replaced with type-safe variant matching:
+
+```rust
+// Before (magic strings):
+if enum_name == "Option" {
+    if variant == "Some" { ... }
+}
+
+// After (type-safe):
+if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Option) {
+    if OptionVariant::from_name(variant) == Some(OptionVariant::Some) { ... }
+}
+```
+
+This improves:
+- Compile-time verification of valid enum/variant names
+- Refactoring safety (renames are caught by compiler)
+- Code clarity (explicit intent)
+
+### Special Name Constants (`src/compiler/src/value.rs`)
+
+Named constants for magic strings used throughout the interpreter:
+
+```rust
+// Method names
+pub const METHOD_NEW: &str = "new";
+pub const METHOD_SELF: &str = "self";
+pub const METHOD_MISSING: &str = "method_missing";
+
+// Function names
+pub const FUNC_MAIN: &str = "main";
+
+// Attribute names
+pub const ATTR_STRONG: &str = "strong";
+```
+
+Lean equivalent:
+```lean
+def METHOD_NEW : String := "new"
+def METHOD_SELF : String := "self"
+def METHOD_MISSING : String := "method_missing"
+def FUNC_MAIN : String := "main"
+def ATTR_STRONG : String := "strong"
+```
+
+This replaces scattered magic strings like `m.name == "new"` with `m.name == METHOD_NEW`, improving:
+- Consistency across the codebase
+- Searchability and refactoring
+- Documentation of special names
+
+### Builtin Operation Categories (`src/compiler/src/value.rs`)
+
+Constant arrays categorizing builtin operations for effect analysis:
+
+```rust
+/// Blocking operations - cannot be used in async contexts
+pub const BLOCKING_BUILTINS: &[&str] = &[
+    "await", "join", "recv", "sleep", "input", "read_file", "write_file",
+];
+
+/// Actor operations - require actor runtime
+pub const ACTOR_BUILTINS: &[&str] = &["spawn", "send", "recv", "reply", "join"];
+
+/// Generator operations - require generator runtime
+pub const GENERATOR_BUILTINS: &[&str] = &["generator", "next", "collect"];
+```
+
+Lean equivalent:
+```lean
+def BLOCKING_BUILTINS : List String := ["await", "join", "recv", ...]
+def ACTOR_BUILTINS : List String := ["spawn", "send", "recv", ...]
+def GENERATOR_BUILTINS : List String := ["generator", "next", "collect"]
+
+-- Effect property: blocking builtins violate async safety
+theorem blocking_violates_async : ∀ op ∈ BLOCKING_BUILTINS, ¬is_async_safe op
+```
+
+This enables formal verification of effect properties by making the categorization explicit and centralized.
 
 ### Visibility and Mutability Enums (`src/parser/src/ast.rs`)
 
@@ -576,6 +843,95 @@ inductive Mutability
 ```
 
 These can replace `is_public: bool` and `is_mutable: bool` fields in AST structs.
+
+### MoveMode Enum (`src/parser/src/ast.rs`)
+
+Type-safe enum for lambda capture semantics:
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MoveMode {
+    Move,  // captures by value (move|x: expr)
+    #[default]
+    Copy,  // captures by reference (|x: expr)
+}
+```
+
+Lean equivalent:
+```lean
+inductive MoveMode
+  | move  -- captures environment by value
+  | copy  -- captures environment by reference (default)
+```
+
+Replaces `is_move: bool` in `Expr::Lambda`.
+
+### Special Enum Types (`src/compiler/src/value.rs`)
+
+Type-safe enums for built-in enum handling:
+
+```rust
+pub enum SpecialEnumType { Option, Result }
+pub enum OptionVariant { Some, None }
+pub enum ResultVariant { Ok, Err }
+pub enum SpecialEnumKind { OptionSome, OptionNone, ResultOk, ResultErr }
+```
+
+Lean equivalents:
+```lean
+inductive SpecialEnumType | option | result
+inductive OptionVariant | some | none
+inductive ResultVariant | ok | err
+inductive SpecialEnumKind | optionSome | optionNone | resultOk | resultErr
+```
+
+These replace magic string comparisons like `enum_name == "Option"` and `variant == "Some"`.
+
+### BuiltinClass Enum (`src/compiler/src/value.rs`)
+
+Type-safe enum for built-in class types:
+
+```rust
+pub enum BuiltinClass { Range, Array }
+pub enum ClassType {
+    Builtin(BuiltinClass),
+    User(String),
+}
+```
+
+Lean equivalent:
+```lean
+inductive BuiltinClass | range | array
+inductive ClassType
+  | builtin (b : BuiltinClass)
+  | user (name : String)
+```
+
+Replaces magic string comparisons like `class == "__range__"`.
+
+### MethodLookup Result (`src/compiler/src/value.rs`)
+
+Type-safe enum for method dispatch results:
+
+```rust
+pub const METHOD_MISSING: &str = "method_missing";
+
+pub enum MethodLookupResult {
+    Found,       // Regular method found
+    NotFound,    // Method not found, no fallback
+    MissingHook, // method_missing fallback available
+}
+```
+
+Lean equivalent:
+```lean
+inductive MethodLookupResult
+  | found       -- Regular method found
+  | notFound    -- Method not found, no fallback
+  | missingHook -- method_missing fallback available
+```
+
+Replaces magic string comparison `m.name == "method_missing"`.
 
 ### Actor Lifecycle State (`src/common/src/actor.rs`)
 
