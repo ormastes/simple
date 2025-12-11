@@ -107,14 +107,34 @@
 | 101 | **Generator State Machine Codegen** (stackless yield/next) | 4 | 5 | MIR Transform, Runtime State, Codegen |
 | 102 | **Future Body Execution** (compiled future resolves/awaits) | 4 | 4 | Runtime, Codegen, MIR Outlining |
 | 103 | **Codegen Parity Completion** (remove stubs, pass full tests) | 5 | 5 | MIR, Codegen, Runtime | **COMPLETE** |
-| 104 | **Module Path Syntax** (dot-separated paths: `crate.sys.http`) | 5 | 2 | Parser, Semantic Analysis |
-| 105 | **Project Configuration** (`simple.toml` with profiles, features) | 5 | 3 | Parser, Compiler, Package Manager |
-| 106 | **Directory Manifest** (`__init__.spl` for directory-scoped modules) | 5 | 3 | Parser, Semantic Analysis, Loader |
-| 107 | **Import System** (`use`, `common use`, `export use`) | 5 | 4 | Parser, Semantic Analysis, Module Resolution |
-| 108 | **Macro Import/Export** (`auto import` for glob macro inclusion) | 4 | 3 | Parser, Macro System, Module Resolution |
+| 104 | **Module Path Syntax** (dot-separated paths: `crate.sys.http`) | 5 | 2 | Parser, Semantic Analysis | **PARSING COMPLETE** |
+| 105 | **Project Configuration** (`simple.toml` with profiles, features) | 5 | 3 | Parser, Compiler, Package Manager | **PARSING COMPLETE** |
+| 106 | **Directory Manifest** (`__init__.spl` for directory-scoped modules) | 5 | 3 | Parser, Semantic Analysis, Loader | **PARSING COMPLETE** |
+| 107 | **Import System** (`use`, `common use`, `export use`) | 5 | 4 | Parser, Semantic Analysis, Module Resolution | **PARSING COMPLETE** |
+| 108 | **Macro Import/Export** (`auto import` for glob macro inclusion) | 4 | 3 | Parser, Macro System, Module Resolution | **PARSING COMPLETE** |
 | 109 | **Visibility Control** (intersection of item/directory/parent visibility) | 4 | 3 | Semantic Analysis |
-| 110 | **Profile System** (reusable attribute/import bundles in `simple.toml`) | 3 | 2 | Parser, Compiler |
-| 111 | **Feature Flags** (compile-time feature toggles) | 3 | 2 | Parser, Compiler |
+| 110 | **Profile System** (reusable attribute/import bundles in `simple.toml`) | 3 | 2 | Parser, Compiler | **PARSING COMPLETE** |
+| 111 | **Feature Flags** (compile-time feature toggles) | 3 | 2 | Parser, Compiler | **PARSING COMPLETE** |
+| 112 | **Dependency Tracker Crate** (module resolution, visibility, macro import) | 5 | 4 | Dependency Tracker, Compiler | **COMPLETE** |
+| 113 | **Module Resolution Implementation** (formal model: `module_resolution`) | 5 | 3 | Dependency Tracker | **COMPLETE** |
+| 114 | **Visibility Export Implementation** (formal model: `visibility_export`) | 4 | 3 | Dependency Tracker | **COMPLETE** |
+| 115 | **Macro Auto-Import Implementation** (formal model: `macro_auto_import`) | 4 | 3 | Dependency Tracker | **COMPLETE** |
+| 116 | **Symbol Resolution** (cross-module symbol lookup) | 5 | 4 | Dependency Tracker, Compiler | **IN PROGRESS** |
+| 117 | **Circular Dependency Detection** (import graph cycle detection) | 4 | 3 | Dependency Tracker | **COMPLETE** |
+| 118 | **SIMD Vector Types** (`vec[N, T]` fixed-size SIMD vectors) | 5 | 4 | Parser, Type System, Codegen |
+| 119 | **SIMD Arithmetic** (lane-wise +, -, *, /, comparisons) | 5 | 3 | Codegen, Runtime |
+| 120 | **SIMD Reductions** (sum, product, min, max, all, any) | 4 | 3 | Codegen, Runtime |
+| 121 | **SIMD Shuffles** (swizzle, blend, gather, scatter) | 4 | 4 | Codegen, Runtime |
+| 122 | **SIMD Load/Store** (aligned load, masked load/store) | 5 | 3 | Codegen, Runtime |
+| 123 | **SIMD Math Functions** (sqrt, abs, fma, floor, ceil) | 4 | 3 | Codegen, Runtime |
+| 124 | **GPU Context** (device discovery, context creation) | 5 | 4 | Runtime, GPU Backend |
+| 125 | **GPU Buffers** (alloc, upload, download, map) | 5 | 4 | Runtime, GPU Backend |
+| 126 | **GPU Kernels** (`#[gpu]` attribute for compute kernels) | 5 | 5 | Parser, Compiler, SPIR-V Codegen |
+| 127 | **GPU Launch** (kernel dispatch, work groups, sync) | 5 | 4 | Runtime, GPU Backend |
+| 128 | **GPU Intrinsics** (global_id, local_id, barrier, atomics) | 4 | 4 | Codegen, SPIR-V |
+| 129 | **GPU Shared Memory** (`shared let` for work group local storage) | 4 | 4 | Codegen, SPIR-V |
+| 130 | **Parallel Iterators** (par_map, par_reduce, par_filter) | 4 | 3 | Runtime, SIMD/GPU Backend |
+| 131 | **Hardware Detection** (SIMD/GPU feature queries, fallbacks) | 4 | 2 | Runtime |
 
 ### Difficulty-5 Breakdowns
 
@@ -127,6 +147,55 @@
 | 103 | Outlined block registration | 3 | MIR, Codegen | **COMPLETE** |
 | 103 | Runtime ctx ABI wiring | 3 | Runtime | **COMPLETE** |
 | 103 | Compiled actor/gen/future tests | 4 | Tests, Codegen | **COMPLETE** |
+| 112 | FileSystem abstraction (well-formedness check) | 2 | Dependency Tracker | **COMPLETE** |
+| 112 | ModPath/Segment types with validation | 2 | Dependency Tracker | **COMPLETE** |
+| 112 | Resolution result types (unique/ambiguous/notFound) | 2 | Dependency Tracker | **COMPLETE** |
+| 113 | toFilePath/toDirPath conversion | 2 | Dependency Tracker | **COMPLETE** |
+| 113 | resolve() with file/directory detection | 3 | Dependency Tracker | **COMPLETE** |
+| 113 | wellFormed filesystem invariant check | 2 | Dependency Tracker | **COMPLETE** |
+| 114 | Visibility enum (pub/priv) | 1 | Dependency Tracker | **COMPLETE** |
+| 114 | DirManifest structure | 2 | Dependency Tracker | **COMPLETE** |
+| 114 | effectiveVisibility calculation | 3 | Dependency Tracker | **COMPLETE** |
+| 114 | ancestorVisibility fold | 2 | Dependency Tracker | **COMPLETE** |
+| 115 | SymKind enum (valueOrType/macro) | 1 | Dependency Tracker | **COMPLETE** |
+| 115 | isAutoImported check | 2 | Dependency Tracker | **COMPLETE** |
+| 115 | globImport filtering | 3 | Dependency Tracker | **COMPLETE** |
+| 115 | explicitImport lookup | 2 | Dependency Tracker | **COMPLETE** |
+| 116 | SymbolTable per module | 3 | Dependency Tracker | **COMPLETE** |
+| 116 | Import graph construction | 3 | Dependency Tracker | **COMPLETE** |
+| 116 | Cross-module symbol lookup | 4 | Dependency Tracker | Pending |
+| 117 | Import graph cycle detection (DFS) | 3 | Dependency Tracker | **COMPLETE** |
+| 118 | VecType AST node (`vec[N, T]` parsing) | 2 | Parser |
+| 118 | SIMD type representation in Type System | 3 | Type System |
+| 118 | Cranelift SIMD type mapping | 3 | Codegen |
+| 118 | vec literal parsing and lowering | 2 | Parser, HIR |
+| 119 | Lane-wise arithmetic codegen (+, -, *, /) | 2 | Codegen |
+| 119 | Comparison ops returning bool vector | 2 | Codegen |
+| 121 | Swizzle parsing (v.xyzw syntax) | 2 | Parser |
+| 121 | shuffle/blend intrinsic codegen | 3 | Codegen |
+| 121 | gather/scatter runtime functions | 3 | Runtime |
+| 126 | `#[gpu]` attribute parsing | 2 | Parser |
+| 126 | GPU function validation (restricted subset) | 3 | Semantic Analysis |
+| 126 | SPIR-V IR lowering | 4 | Codegen |
+| 126 | Kernel caching and JIT | 3 | Runtime |
+| 127 | Work group size computation | 2 | Runtime |
+| 127 | Argument marshalling (buffer refs) | 3 | Runtime |
+
+### Module System Implementation Progress (#104-111)
+
+| Sub-feature | Difficulty | Scope | Status |
+|-------------|------------|-------|--------|
+| Module path tokenization (Mod, Use, Export, Common, Auto, Crate) | 1 | Lexer | **COMPLETE** |
+| Module AST nodes (ModulePath, ImportTarget, UseStmt, etc.) | 2 | Parser | **COMPLETE** |
+| Module statement parsing (use, mod, common use, export use, auto import) | 2 | Parser | **COMPLETE** |
+| HIR/Interpreter stubs for module nodes | 1 | Compiler | **COMPLETE** |
+| ModuleResolver (path→file resolution) | 3 | Compiler | **COMPLETE** |
+| DirectoryManifest (__init__.spl parsing) | 3 | Compiler | **COMPLETE** |
+| ProjectContext (simple.toml parsing, project detection) | 3 | Compiler | **COMPLETE** |
+| Pipeline integration (compile_with_project_detection) | 2 | Compiler | **COMPLETE** |
+| Symbol resolution (use statements affect scope) | 4 | Semantic Analysis | Pending |
+| Visibility intersection logic | 3 | Semantic Analysis | Pending |
+| Multi-file compilation | 4 | Compiler | Pending |
 
 #### Implementation start: #101 Generator state machine codegen
 - **Goal**: Replace generator stubs with a stackless state machine so compiled `yield/next` matches interpreter behavior. Align with the architecture doc’s Plan 21 and the Cranelift stubs noted in CLAUDE.md.

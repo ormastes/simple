@@ -18,43 +18,7 @@ impl<'a> Parser<'a> {
     // === Struct ===
 
     pub(crate) fn parse_struct(&mut self) -> Result<Node, ParseError> {
-        let start_span = self.current.span;
-        self.expect(&TokenKind::Struct)?;
-        let name = self.expect_identifier()?;
-        // Parse optional generic parameters: struct Foo<T, U>:
-        let generic_params = self.parse_generic_params()?;
-        self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
-
-        let mut fields = Vec::new();
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                break;
-            }
-            fields.push(self.parse_field()?);
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
-
-        Ok(Node::Struct(StructDef {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
-            name,
-            generic_params,
-            fields,
-            visibility: Visibility::Private,
-            attributes: vec![],
-        }))
+        self.parse_struct_with_attrs(vec![])
     }
 
     pub(crate) fn parse_struct_with_attrs(
@@ -64,34 +28,11 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
-        // Parse optional generic parameters: struct Foo<T, U>:
         let generic_params = self.parse_generic_params()?;
-        self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
-
-        let mut fields = Vec::new();
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                break;
-            }
-            fields.push(self.parse_field()?);
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
+        let fields = self.parse_indented_fields()?;
 
         Ok(Node::Struct(StructDef {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: self.make_span(start_span),
             name,
             generic_params,
             fields,
@@ -103,65 +44,7 @@ impl<'a> Parser<'a> {
     // === Class ===
 
     pub(crate) fn parse_class(&mut self) -> Result<Node, ParseError> {
-        let start_span = self.current.span;
-        self.expect(&TokenKind::Class)?;
-        let name = self.expect_identifier()?;
-        // Parse optional generic parameters: class Foo<T, U>
-        let generic_params = self.parse_generic_params()?;
-
-        let parent = if self.check(&TokenKind::LParen) {
-            self.advance();
-            let p = self.expect_identifier()?;
-            self.expect(&TokenKind::RParen)?;
-            Some(p)
-        } else {
-            None
-        };
-
-        self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
-
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
-
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                break;
-            }
-
-            if self.check(&TokenKind::Fn) || self.check(&TokenKind::Pub) {
-                let item = self.parse_item()?;
-                if let Node::Function(f) = item {
-                    methods.push(f);
-                }
-            } else {
-                fields.push(self.parse_field()?);
-            }
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
-
-        Ok(Node::Class(ClassDef {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
-            name,
-            generic_params,
-            fields,
-            methods,
-            parent,
-            visibility: Visibility::Private,
-            attributes: vec![],
-        }))
+        self.parse_class_with_attrs(vec![])
     }
 
     pub(crate) fn parse_class_with_attrs(
@@ -171,7 +54,6 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Class)?;
         let name = self.expect_identifier()?;
-        // Parse optional generic parameters: class Foo<T, U>
         let generic_params = self.parse_generic_params()?;
 
         let parent = if self.check(&TokenKind::LParen) {
@@ -183,42 +65,10 @@ impl<'a> Parser<'a> {
             None
         };
 
-        self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
-
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
-
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                break;
-            }
-
-            if self.check(&TokenKind::Fn) || self.check(&TokenKind::Pub) {
-                let item = self.parse_item()?;
-                if let Node::Function(f) = item {
-                    methods.push(f);
-                }
-            } else {
-                fields.push(self.parse_field()?);
-            }
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
+        let (fields, methods) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Class(ClassDef {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: self.make_span(start_span),
             name,
             generic_params,
             fields,
@@ -232,54 +82,32 @@ impl<'a> Parser<'a> {
     // === Enum ===
 
     pub(crate) fn parse_enum(&mut self) -> Result<Node, ParseError> {
-        let start_span = self.current.span;
-        self.expect(&TokenKind::Enum)?;
-        let name = self.expect_identifier()?;
-        // Parse optional generic parameters: enum Result<T, E>
-        let generic_params = self.parse_generic_params()?;
-        self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
-
-        let mut variants = Vec::new();
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                break;
-            }
-            variants.push(self.parse_enum_variant()?);
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
-
-        Ok(Node::Enum(EnumDef {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
-            name,
-            generic_params,
-            variants,
-            visibility: Visibility::Private,
-            attributes: vec![],
-        }))
+        self.parse_enum_with_attrs(vec![])
     }
 
     pub(crate) fn parse_enum_with_attrs(
         &mut self,
-        attrs: Vec<Attribute>,
+        attributes: Vec<Attribute>,
     ) -> Result<Node, ParseError> {
-        let mut node = self.parse_enum()?;
-        if let Node::Enum(ref mut e) = node {
-            e.attributes = attrs;
-        }
-        Ok(node)
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Enum)?;
+        let name = self.expect_identifier()?;
+        let generic_params = self.parse_generic_params()?;
+
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        let variants = self.parse_indented_items(|p| p.parse_enum_variant())?;
+
+        Ok(Node::Enum(EnumDef {
+            span: self.make_span(start_span),
+            name,
+            generic_params,
+            variants,
+            visibility: Visibility::Private,
+            attributes,
+        }))
     }
 
     pub(crate) fn parse_enum_variant(&mut self) -> Result<EnumVariant, ParseError> {
@@ -306,12 +134,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(EnumVariant {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: self.make_span(start_span),
             name,
             fields,
         })
@@ -323,37 +146,12 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Trait)?;
         let name = self.expect_identifier()?;
-        // Parse optional generic parameters: trait Foo<T>
         let generic_params = self.parse_generic_params()?;
-        self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
 
-        let mut methods = Vec::new();
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                break;
-            }
-            let item = self.parse_function()?;
-            if let Node::Function(f) = item {
-                methods.push(f);
-            }
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
+        let methods = self.parse_indented_methods()?;
 
         Ok(Node::Trait(TraitDef {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: self.make_span(start_span),
             name,
             generic_params,
             methods,
@@ -377,35 +175,10 @@ impl<'a> Parser<'a> {
             (None, Type::Simple(first_name))
         };
 
-        self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
-
-        let mut methods = Vec::new();
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                break;
-            }
-            let item = self.parse_function()?;
-            if let Node::Function(f) = item {
-                methods.push(f);
-            }
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
+        let methods = self.parse_indented_methods()?;
 
         Ok(Node::Impl(ImplBlock {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: self.make_span(start_span),
             target_type,
             trait_name,
             methods,
@@ -418,42 +191,11 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Actor)?;
         let name = self.expect_identifier()?;
-        self.expect(&TokenKind::Colon)?;
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
 
-        let mut fields = Vec::new();
-        let mut methods = Vec::new();
-
-        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
-            while self.check(&TokenKind::Newline) {
-                self.advance();
-            }
-            if self.check(&TokenKind::Dedent) {
-                break;
-            }
-
-            if self.check(&TokenKind::Fn) || self.check(&TokenKind::Pub) {
-                let item = self.parse_item()?;
-                if let Node::Function(f) = item {
-                    methods.push(f);
-                }
-            } else {
-                fields.push(self.parse_field()?);
-            }
-        }
-
-        if self.check(&TokenKind::Dedent) {
-            self.advance();
-        }
+        let (fields, methods) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Actor(ActorDef {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: self.make_span(start_span),
             name,
             fields,
             methods,
@@ -496,17 +238,114 @@ impl<'a> Parser<'a> {
         }
 
         Ok(Field {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: self.make_span(start_span),
             name,
             ty,
             default,
             mutability,
             visibility,
         })
+    }
+
+    // === Helper methods to reduce duplication ===
+
+    /// Create a span from start_span to the current position
+    fn make_span(&self, start_span: Span) -> Span {
+        Span::new(
+            start_span.start,
+            self.previous.span.end,
+            start_span.line,
+            start_span.column,
+        )
+    }
+
+    /// Skip newlines until we hit a non-newline token
+    fn skip_newlines(&mut self) {
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+    }
+
+    /// Consume dedent if present
+    fn consume_dedent(&mut self) {
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+    }
+
+    /// Parse a colon-newline-indent sequence
+    fn expect_block_start(&mut self) -> Result<(), ParseError> {
+        self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+        Ok(())
+    }
+
+    /// Parse indented items with a custom parser function
+    fn parse_indented_items<T, F>(&mut self, mut parse_item: F) -> Result<Vec<T>, ParseError>
+    where
+        F: FnMut(&mut Self) -> Result<T, ParseError>,
+    {
+        let mut items = Vec::new();
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
+            items.push(parse_item(self)?);
+        }
+        self.consume_dedent();
+        Ok(items)
+    }
+
+    /// Parse fields in an indented block (struct)
+    fn parse_indented_fields(&mut self) -> Result<Vec<Field>, ParseError> {
+        self.expect_block_start()?;
+        self.parse_indented_items(|p| p.parse_field())
+    }
+
+    /// Parse methods in an indented block (trait, impl)
+    fn parse_indented_methods(&mut self) -> Result<Vec<FunctionDef>, ParseError> {
+        self.expect_block_start()?;
+        let mut methods = Vec::new();
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
+            let item = self.parse_function()?;
+            if let Node::Function(f) = item {
+                methods.push(f);
+            }
+        }
+        self.consume_dedent();
+        Ok(methods)
+    }
+
+    /// Parse fields and methods in an indented block (class, actor)
+    fn parse_indented_fields_and_methods(
+        &mut self,
+    ) -> Result<(Vec<Field>, Vec<FunctionDef>), ParseError> {
+        self.expect_block_start()?;
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
+
+            if self.check(&TokenKind::Fn) || self.check(&TokenKind::Pub) {
+                let item = self.parse_item()?;
+                if let Node::Function(f) = item {
+                    methods.push(f);
+                }
+            } else {
+                fields.push(self.parse_field()?);
+            }
+        }
+        self.consume_dedent();
+        Ok((fields, methods))
     }
 }

@@ -19,12 +19,7 @@ impl GclessAllocator {
 
 impl GcAllocator for GclessAllocator {
     fn alloc_bytes(&self, bytes: &[u8]) -> usize {
-        let mut buf = Vec::with_capacity(bytes.len());
-        buf.extend_from_slice(bytes);
-        let boxed: Box<[u8]> = buf.into_boxed_slice();
-        let ptr = boxed.as_ptr() as usize;
-        self.allocations.lock().unwrap().push(boxed);
-        ptr
+        super::alloc_bytes_tracked(bytes, &self.allocations)
     }
 
     fn collect(&self) {

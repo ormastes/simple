@@ -55,6 +55,7 @@ pub struct JitCompiler {
     /// Runtime function IDs for calling FFI functions
     runtime_funcs: HashMap<&'static str, cranelift_module::FuncId>,
     /// Lazily created no-op body stub used when we don't outline a body_block yet.
+    #[allow(dead_code)]
     body_stub: Option<cranelift_module::FuncId>,
 }
 
@@ -96,6 +97,7 @@ impl JitCompiler {
     }
 
     /// Create or return a no-op body stub (fn() -> void) and return its FuncId.
+    #[allow(dead_code)]
     fn ensure_body_stub(&mut self) -> JitResult<cranelift_module::FuncId> {
         if let Some(id) = self.body_stub {
             return Ok(id);
@@ -855,7 +857,7 @@ impl JitCompiler {
                         // and use rt_string_new to allocate it
                         let func_name_bytes = func_name.as_bytes();
                         let string_new_id = self.runtime_funcs["rt_string_new"];
-                        let string_new_ref = self
+                        let _string_new_ref = self
                             .module
                             .declare_func_in_func(string_new_id, builder.func);
 
@@ -2408,84 +2410,5 @@ impl Default for JitCompiler {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hir;
-    use crate::mir::lower_to_mir;
-    use simple_parser::Parser;
-
-    fn jit_compile(source: &str) -> JitResult<JitCompiler> {
-        let mut parser = Parser::new(source);
-        let ast = parser.parse().expect("parse failed");
-        let hir_module = hir::lower(&ast).expect("hir lower failed");
-        let mir_module = lower_to_mir(&hir_module).expect("mir lower failed");
-
-        let mut jit = JitCompiler::new()?;
-        jit.compile_module(&mir_module)?;
-        Ok(jit)
-    }
-
-    #[test]
-    fn test_jit_simple_return() {
-        let jit = jit_compile("fn answer() -> i64:\n    return 42\n").unwrap();
-        let result = unsafe { jit.call_i64_void("answer").unwrap() };
-        assert_eq!(result, 42);
-    }
-
-    #[test]
-    fn test_jit_add() {
-        let jit = jit_compile("fn add(a: i64, b: i64) -> i64:\n    return a + b\n").unwrap();
-        let result = unsafe { jit.call_i64_i64_i64("add", 10, 32).unwrap() };
-        assert_eq!(result, 42);
-    }
-
-    #[test]
-    fn test_jit_subtract() {
-        let jit = jit_compile("fn sub(a: i64, b: i64) -> i64:\n    return a - b\n").unwrap();
-        let result = unsafe { jit.call_i64_i64_i64("sub", 50, 8).unwrap() };
-        assert_eq!(result, 42);
-    }
-
-    #[test]
-    fn test_jit_multiply() {
-        let jit = jit_compile("fn mul(a: i64, b: i64) -> i64:\n    return a * b\n").unwrap();
-        let result = unsafe { jit.call_i64_i64_i64("mul", 6, 7).unwrap() };
-        assert_eq!(result, 42);
-    }
-
-    #[test]
-    fn test_jit_negate() {
-        let jit = jit_compile("fn neg(x: i64) -> i64:\n    return -x\n").unwrap();
-        let result = unsafe { jit.call_i64_i64("neg", -42).unwrap() };
-        assert_eq!(result, 42);
-    }
-
-    #[test]
-    fn test_jit_conditional() {
-        let jit = jit_compile(
-            "fn max(a: i64, b: i64) -> i64:\n    if a > b:\n        return a\n    else:\n        return b\n"
-        ).unwrap();
-
-        let result1 = unsafe { jit.call_i64_i64_i64("max", 42, 10).unwrap() };
-        assert_eq!(result1, 42);
-
-        let result2 = unsafe { jit.call_i64_i64_i64("max", 10, 42).unwrap() };
-        assert_eq!(result2, 42);
-    }
-
-    #[test]
-    fn test_jit_recursive_factorial() {
-        let jit = jit_compile(
-            r#"fn factorial(n: i64) -> i64:
-    if n <= 1:
-        return 1
-    else:
-        return n * factorial(n - 1)
-"#,
-        )
-        .unwrap();
-
-        let result = unsafe { jit.call_i64_i64("factorial", 5).unwrap() };
-        assert_eq!(result, 120);
-    }
-}
+#[path = "jit_tests.rs"]
+mod tests;

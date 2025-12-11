@@ -68,6 +68,8 @@ simple/
     │   └── src/
     │       ├── lib.rs             # Compilation entry point
     │       ├── pipeline.rs        # CompilerPipeline orchestration
+    │       ├── project.rs         # ProjectContext - project detection & config
+    │       ├── module_resolver.rs # ModuleResolver - path→file resolution
     │       ├── value.rs           # Value enum, Env, pointer wrappers
     │       ├── effects.rs         # Effect checking (async safety)
     │       ├── interpreter.rs     # Tree-walking interpreter (main entry)
@@ -170,9 +172,10 @@ simple/
         │   ├── dependency_cache.rs # Import/macro tracking
         │   └── watcher/
         │       └── mod.rs         # File watching for hot reload
-        └── tests/                 # Driver integration tests (16 files)
+        └── tests/                 # Driver integration tests (17 files)
             ├── runner_tests.rs         # Core runner tests
             ├── runner_async_tests.rs   # Async/concurrency tests
+            ├── module_tests.rs         # Module system tests (19 tests)
             ├── watcher_tests.rs        # File watcher tests
             └── interpreter_*.rs        # Interpreter tests (13 files)
                                         # async, basic, bindings, collections,
@@ -243,6 +246,7 @@ Source Code (.spl)
 | Driver | Complete (exec_core, runner, interpreter layers) |
 | Runtime/GC | Abfall-backed wrapper with optional logging |
 | Package Manager | Complete (UV-style: manifest, lock, cache, resolution) |
+| Module System | Parsing complete, resolution infrastructure ready |
 
 ### MIR Instruction Categories
 
@@ -488,9 +492,16 @@ Optional (requires npm): `npm install -g jscpd`
 - `src/driver/tests/runner_tests.rs` - Core runner tests
 - `src/driver/tests/interpreter_*.rs` - Interpreter tests (13 files)
 
+### Module System
+- `src/compiler/src/project.rs` - ProjectContext (project detection, simple.toml parsing)
+- `src/compiler/src/module_resolver.rs` - ModuleResolver (path→file resolution, __init__.spl parsing)
+- `src/parser/src/ast.rs` - Module AST nodes (ModulePath, ImportTarget, UseStmt, etc.)
+- `src/driver/tests/module_tests.rs` - Module system tests (19 tests)
+
 ### Package Manager
 - `src/pkg/src/` - UV-style package manager
 
 ### Documentation
 - `doc/codegen_technical.md` - Codegen implementation details
+- `doc/import_export_and__init__.md` - Module system specification
 - `doc/status/` - Feature implementation status (79+ files)

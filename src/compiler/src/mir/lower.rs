@@ -680,7 +680,7 @@ impl MirLowerer {
             }
 
             HirExprKind::Lambda {
-                params,
+                params: _params,
                 body,
                 captures,
             } => {

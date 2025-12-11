@@ -89,29 +89,13 @@ pub fn update_package(dir: &Path, name: &str) -> PkgResult<UpdateResult> {
 mod tests {
     use super::*;
     use crate::commands::init::init_project;
+    use crate::commands::test_helpers::{cleanup_test_project, setup_test_project};
     use crate::manifest::Dependency;
     use std::fs;
 
-    fn setup_test_project(name: &str) -> std::path::PathBuf {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "simple-update-test-{}-{}",
-            name,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).unwrap();
-
-        init_project(&temp_dir, Some(name)).unwrap();
-
-        temp_dir
-    }
-
     #[test]
     fn test_update_all() {
-        let temp_dir = setup_test_project("update-all");
+        let temp_dir = setup_test_project("update", "update-all");
 
         // Create a path dependency
         let dep_dir = temp_dir.join("mylib");
@@ -130,12 +114,12 @@ mod tests {
         assert_eq!(result.updated.len(), 1);
         assert!(result.updated.contains(&"mylib".to_string()));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_update_specific_package() {
-        let temp_dir = setup_test_project("update-specific");
+        let temp_dir = setup_test_project("update", "update-specific");
 
         // Create two path dependencies
         let lib_a = temp_dir.join("lib_a");
@@ -158,22 +142,22 @@ mod tests {
         let result = update_package(&temp_dir, "lib_a").unwrap();
         assert!(result.updated.contains(&"lib_a".to_string()));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_update_nonexistent_package() {
-        let temp_dir = setup_test_project("update-nonexistent");
+        let temp_dir = setup_test_project("update", "update-nonexistent");
 
         let result = update_package(&temp_dir, "nonexistent");
         assert!(matches!(result, Err(PkgError::PackageNotFound(_))));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_update_removes_old_lock() {
-        let temp_dir = setup_test_project("update-lock");
+        let temp_dir = setup_test_project("update", "update-lock");
 
         // Create a path dependency
         let dep_dir = temp_dir.join("mylib");
@@ -194,6 +178,6 @@ mod tests {
 
         assert!(temp_dir.join("simple.lock").exists());
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 }
