@@ -42,6 +42,10 @@ and         or          not         true        false        nil
 
 # Special
 context     macro       handle_pool gen_code
+
+# Module System
+mod         use         export      common      auto
+import      crate       profile     feature
 ```
 
 ### Operators and Punctuation
@@ -204,6 +208,12 @@ module.exports = grammar({
       $.type_alias,
       $.unit_family,
       $.unit_standalone,
+      // Module system
+      $.module_declaration,
+      $.use_statement,
+      $.common_use_statement,
+      $.export_use_statement,
+      $.auto_import_statement,
     ),
 
     //=========================================================================
@@ -661,6 +671,66 @@ module.exports = grammar({
       optional($.type_parameters),
       '=',
       $.type,
+      $._newline,
+    ),
+
+    //=========================================================================
+    // MODULE SYSTEM
+    //=========================================================================
+
+    // Module declaration: mod name or pub mod name
+    // Used in __init__.spl for directory manifest
+    module_declaration: $ => seq(
+      optional($.visibility),
+      optional(repeat($.attribute)),
+      'mod',
+      $.identifier,
+      $._newline,
+    ),
+
+    // Module path: crate.sys.http or sys.http.router
+    module_path: $ => sep1($.identifier, '.'),
+
+    // Import path item: single name, glob (*), or group ({A, B})
+    import_item: $ => choice(
+      $.identifier,                           // Single name
+      '*',                                    // Glob import
+      seq('{', commaSep1($.identifier), '}'), // Group import
+    ),
+
+    // Normal import: use crate.sys.http.Router
+    use_statement: $ => seq(
+      'use',
+      $.module_path,
+      optional(seq('.', $.import_item)),
+      $._newline,
+    ),
+
+    // Directory prelude: common use crate.core.base.*
+    common_use_statement: $ => seq(
+      'common',
+      'use',
+      $.module_path,
+      optional(seq('.', $.import_item)),
+      $._newline,
+    ),
+
+    // Public re-export: export use router.Router
+    export_use_statement: $ => seq(
+      'export',
+      'use',
+      $.module_path,
+      optional(seq('.', $.import_item)),
+      $._newline,
+    ),
+
+    // Macro auto-import (one per line): auto import router.route
+    auto_import_statement: $ => seq(
+      'auto',
+      'import',
+      $.module_path,
+      '.',
+      $.identifier,
       $._newline,
     ),
 
@@ -2140,6 +2210,108 @@ match score:
         let tree = parser.parse(source, None).unwrap();
         assert!(!tree.root_node().has_error());
     }
+
+    #[test]
+    fn test_parse_module_declaration() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+#[strong]
+mod sys
+
+pub mod http
+mod internal
+#[no_gc]
+pub mod driver
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_use_statements() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+use crate.core.prelude.Option
+use crate.time.Instant
+use crate.net.http.{Client, Request}
+use crate.net.http.*
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_common_use() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+common use crate.core.base.*
+common use crate.net.Url
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_export_use() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+export use router.Router
+export use router.{Client, Request}
+export use router.*
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_auto_import() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        let source = r#"
+auto import router.route
+auto import router.route_get
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
+
+    #[test]
+    fn test_parse_init_spl() {
+        let mut parser = Parser::new();
+        parser.set_language(language()).unwrap();
+
+        // Complete __init__.spl example
+        let source = r#"
+#[profile("server")]
+mod http
+
+pub mod router
+
+export use router.Router
+export use router.route
+export use router.route_get
+
+auto import router.route
+auto import router.route_get
+"#;
+
+        let tree = parser.parse(source, None).unwrap();
+        assert!(!tree.root_node().has_error());
+    }
 }
 ```
 
@@ -2633,6 +2805,8 @@ impl Visitor for HandlePoolCollector {
   "context" "macro" "handle_pool" "gen_code"
   "pub" "priv" "extern" "static" "const" "global"
   "where" "as" "in" "is"
+  ; Module system keywords
+  "mod" "use" "export" "common" "auto" "import" "crate"
 ] @keyword
 
 ; Operators

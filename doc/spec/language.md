@@ -3694,6 +3694,253 @@ In summary, the standard library gives you everything you need to be productive:
 
 ---
 
+## Modules and Imports
+
+Simple uses a dot-separated module path system with explicit visibility control and macro import semantics. The module system is designed for predictable static resolution, explicit macro importing, and directory-wide attribute control.
+
+### Module Path Syntax
+
+Module paths use dot separators (never `/`, `::`, or string literals):
+
+```simple
+crate.sys.http
+crate.core.base
+sys.http.router
+core.prelude.Option
+```
+
+All paths resolve inside the project root specified in `simple.toml`.
+
+### Project Configuration (simple.toml)
+
+The `simple.toml` file at the project root controls project metadata, source root, profiles, and compile-time features:
+
+```toml
+[project]
+name = "my_app"
+version = "0.1.0"
+root = "src"
+
+[profiles.embedded]
+attributes = ["no_gc", "strong"]
+imports = [
+  "crate.core.base.*",
+  "crate.core.no_std.*"
+]
+
+[profiles.server]
+attributes = ["async", "strong"]
+imports = [
+  "crate.core.base.*",
+  "crate.net.http.*",
+  "crate.time.*"
+]
+
+[features]
+strict_null = true
+new_async = true
+```
+
+With `root = "src"`, module `crate.sys.http` resolves to `src/sys/http.spl` or `src/sys/http/__init__.spl`.
+
+### Directory Manifest (__init__.spl)
+
+Any directory containing `__init__.spl` is a directory-scoped module. Only these constructs are allowed at the top level:
+
+1. Directory header (attributes and module declaration)
+2. Child module declarations
+3. Directory prelude imports (`common use`)
+4. Public re-exports (`export use`)
+5. Macro auto-import declarations (`auto import`)
+
+No functions, types, variables, or normal code definitions belong in `__init__.spl`.
+
+#### Directory Header
+
+```simple
+#[no_gc, strong]
+#[profile("server")]
+#[feature("strict_null")]
+mod http
+```
+
+The identifier after `mod` must match the directory name. Attributes flow into all files and subdirectories unless overridden.
+
+#### Child Modules
+
+```simple
+pub mod router           # Public - part of directory's API
+mod internal             # Private - internal only
+#[no_gc]
+pub mod driver           # Public with additional attribute
+```
+
+Resolution for `mod router` inside directory `http/`:
+- `http/router.spl`, or
+- `http/router/__init__.spl`
+
+If both exist, it's a compile error.
+
+### Import System
+
+#### Normal Imports (use)
+
+```simple
+use crate.core.prelude.Option        # Single symbol
+use crate.time.Instant
+use crate.net.http.{Client, Request} # Multiple symbols
+use crate.net.http.*                 # Glob import (non-macros only by default)
+```
+
+#### Directory Prelude (common use)
+
+Applies imports to every file directly under the directory:
+
+```simple
+common use crate.core.base.*
+common use crate.net.Url
+```
+
+Per-file opt-out:
+
+```simple
+#[no_common_imports]
+mod somefile
+```
+
+#### Public Re-exports (export use)
+
+Defines what the directory exports to others:
+
+```simple
+export use router.Router
+export use router.{Client, Request}
+export use router.*                  # Glob, non-macro items only
+```
+
+### Macro Import/Export
+
+Macros behave like named values but are **not** included in glob imports unless explicitly listed in `auto import`.
+
+#### Defining Macros
+
+```simple
+# router.spl
+pub macro route(path: Str, handler):
+    # ...
+
+pub macro route_get(path: Str, handler):
+    # ...
+```
+
+#### Exporting Macros
+
+Macros must be exported by name (never by `*`):
+
+```simple
+export use router.route
+export use router.route_get
+```
+
+#### Importing Macros
+
+```simple
+use crate.sys.http.route      # Explicit import
+use crate.sys.http.route_get
+```
+
+#### Auto Import (Macro Glob Inclusion)
+
+Only allowed in `__init__.spl`. Makes specific macros available in glob imports:
+
+```simple
+auto import router.route
+auto import router.route_get
+# route_debug intentionally NOT auto-imported
+```
+
+With this declaration, `use crate.sys.http.*` imports `Router`, `route`, and `route_get`, but `route_debug` must be imported explicitly.
+
+### Visibility Rules
+
+Effective visibility is the intersection of:
+1. Item declaration (`pub` or not)
+2. Directory visibility
+3. Parent/ancestor visibility
+
+A directory's public API consists only of:
+- Child modules declared as `pub mod` in its `__init__.spl`
+- Symbols re-exported via `export use`
+
+Nothing inside a child `.spl` file can bypass `__init__.spl` visibility controls.
+
+### Complete Module Example
+
+Directory structure:
+```
+src/
+  sys/
+    __init__.spl
+    http/
+      __init__.spl
+      router.spl
+```
+
+**src/sys/__init__.spl**:
+```simple
+#[strong]
+mod sys
+
+pub mod http
+```
+
+**src/sys/http/router.spl**:
+```simple
+pub struct Router:
+    # ...
+
+pub macro route(path: Str, handler):
+    # ...
+
+pub macro route_get(path: Str, handler):
+    # ...
+```
+
+**src/sys/http/__init__.spl**:
+```simple
+#[profile("server")]
+mod http
+
+pub mod router
+
+# Public API
+export use router.Router
+export use router.route
+export use router.route_get
+
+# Macros included in glob imports
+auto import router.route
+auto import router.route_get
+```
+
+**User code**:
+```simple
+use crate.sys.http.*              # imports Router, route, route_get
+use crate.sys.http.route_debug    # explicit import for non-auto macros
+```
+
+### Macro Behavior Summary
+
+| Operation | Default Behavior | With `auto import` |
+|-----------|------------------|---------------------|
+| `use module.*` | imports non-macros only | imports named macros too |
+| `common use module.*` | non-macros only | includes listed macros |
+| `export use module.*` | exports non-macros only | exports listed macros |
+| `use module.name` | imports explicitly | always allowed |
+| `export use module.name` | exports explicitly | always allowed |
+
+---
+
 ## Sources
 
 - Bernd Klein, Python Indentation Principle – Python uses indentation to define code blocks (no braces), which Simple adopts for cleaner syntax.

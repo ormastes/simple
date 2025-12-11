@@ -18,9 +18,10 @@ simple/
 │   ├── codegen_technical.md       # Codegen implementation details
 │   ├── feature.md                 # Feature list with importance/difficulty ratings
 │   ├── formal_verification.md     # Lean 4 formal verification docs
+│   ├── import_export_and__init__.md  # Module system specification (v4)
 │   ├── test.md                    # Test policy (mock control, coverage, test levels)
 │   ├── spec/                      # Language specifications
-│   │   ├── language.md            # Language specification
+│   │   ├── language.md            # Language specification (includes module system)
 │   │   └── lexer_parser.md        # Parser/lexer specification
 │   ├── design/                    # Design documents
 │   │   ├── memory.md              # Memory management design
