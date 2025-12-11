@@ -82,6 +82,12 @@ impl<'a> Parser<'a> {
             TokenKind::Unit => self.parse_unit(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
+            // Module system (Features #104-111)
+            TokenKind::Use => self.parse_use(),
+            TokenKind::Mod => self.parse_mod(Visibility::Private, vec![]),
+            TokenKind::Common => self.parse_common_use(),
+            TokenKind::Export => self.parse_export_use(),
+            TokenKind::Auto => self.parse_auto_import(),
             TokenKind::If => self.parse_if(),
             TokenKind::Match => self.parse_match_stmt(),
             TokenKind::For => self.parse_for(),
@@ -189,8 +195,9 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            TokenKind::Mod => self.parse_mod(Visibility::Public, vec![]),
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, trait, actor, const, static, type, extern, or macro after 'pub'",
+                "fn, struct, class, enum, trait, actor, const, static, type, extern, macro, or mod after 'pub'",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),
@@ -338,8 +345,9 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.parse_pub_item_with_attrs(attributes)
             }
+            TokenKind::Mod => self.parse_mod(Visibility::Private, attributes),
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, or pub after attributes",
+                "fn, struct, class, enum, mod, or pub after attributes",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),
@@ -420,8 +428,9 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            TokenKind::Mod => self.parse_mod(Visibility::Public, attributes),
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, or class after pub with attributes",
+                "fn, struct, class, or mod after pub with attributes",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),
@@ -1285,6 +1294,115 @@ mod tests {
             } else {
                 panic!("Expected tuple pattern");
             }
+        }
+    }
+
+    // === Module System Tests (Features #104-111) ===
+
+    #[test]
+    fn test_use_single_item() {
+        let module = parse("use crate.core.Option").unwrap();
+        if let Node::UseStmt(stmt) = &module.items[0] {
+            assert_eq!(stmt.path.segments, vec!["crate".to_string(), "core".to_string()]);
+            assert!(matches!(&stmt.target, ImportTarget::Single(name) if name == "Option"));
+        } else {
+            panic!("Expected use statement");
+        }
+    }
+
+    #[test]
+    fn test_use_group_items() {
+        let module = parse("use crate.core.{Option, Result}").unwrap();
+        if let Node::UseStmt(stmt) = &module.items[0] {
+            assert_eq!(stmt.path.segments, vec!["crate".to_string(), "core".to_string()]);
+            if let ImportTarget::Group(targets) = &stmt.target {
+                assert_eq!(targets.len(), 2);
+            } else {
+                panic!("Expected group import");
+            }
+        } else {
+            panic!("Expected use statement");
+        }
+    }
+
+    #[test]
+    fn test_use_glob() {
+        let module = parse("use crate.core.*").unwrap();
+        if let Node::UseStmt(stmt) = &module.items[0] {
+            assert_eq!(stmt.path.segments, vec!["crate".to_string(), "core".to_string()]);
+            assert!(matches!(&stmt.target, ImportTarget::Glob));
+        } else {
+            panic!("Expected use statement");
+        }
+    }
+
+    #[test]
+    fn test_use_with_alias() {
+        let module = parse("use crate.core.Option as Opt").unwrap();
+        if let Node::UseStmt(stmt) = &module.items[0] {
+            if let ImportTarget::Aliased { name, alias } = &stmt.target {
+                assert_eq!(name, "Option");
+                assert_eq!(alias, "Opt");
+            } else {
+                panic!("Expected aliased import");
+            }
+        } else {
+            panic!("Expected use statement");
+        }
+    }
+
+    #[test]
+    fn test_mod_declaration() {
+        let module = parse("mod router").unwrap();
+        if let Node::ModDecl(decl) = &module.items[0] {
+            assert_eq!(decl.name, "router");
+            assert_eq!(decl.visibility, Visibility::Private);
+        } else {
+            panic!("Expected mod declaration");
+        }
+    }
+
+    #[test]
+    fn test_pub_mod_declaration() {
+        let module = parse("pub mod router").unwrap();
+        if let Node::ModDecl(decl) = &module.items[0] {
+            assert_eq!(decl.name, "router");
+            assert_eq!(decl.visibility, Visibility::Public);
+        } else {
+            panic!("Expected mod declaration");
+        }
+    }
+
+    #[test]
+    fn test_common_use() {
+        let module = parse("common use crate.core.base.*").unwrap();
+        if let Node::CommonUseStmt(stmt) = &module.items[0] {
+            assert_eq!(stmt.path.segments, vec!["crate".to_string(), "core".to_string(), "base".to_string()]);
+            assert!(matches!(&stmt.target, ImportTarget::Glob));
+        } else {
+            panic!("Expected common use statement");
+        }
+    }
+
+    #[test]
+    fn test_export_use() {
+        let module = parse("export use router.Router").unwrap();
+        if let Node::ExportUseStmt(stmt) = &module.items[0] {
+            assert_eq!(stmt.path.segments, vec!["router".to_string()]);
+            assert!(matches!(&stmt.target, ImportTarget::Single(name) if name == "Router"));
+        } else {
+            panic!("Expected export use statement");
+        }
+    }
+
+    #[test]
+    fn test_auto_import() {
+        let module = parse("auto import router.route").unwrap();
+        if let Node::AutoImportStmt(stmt) = &module.items[0] {
+            assert_eq!(stmt.path.segments, vec!["router".to_string()]);
+            assert_eq!(stmt.macro_name, "route");
+        } else {
+            panic!("Expected auto import statement");
         }
     }
 }

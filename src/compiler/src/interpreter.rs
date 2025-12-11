@@ -536,6 +536,16 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             Node::Continue(_) => {
                 return Err(CompileError::Semantic("continue outside of loop".into()));
             }
+            // Module system nodes - parsed but not interpreted at this level
+            // Module resolution happens before interpretation
+            Node::ModDecl(_)
+            | Node::UseStmt(_)
+            | Node::CommonUseStmt(_)
+            | Node::ExportUseStmt(_)
+            | Node::AutoImportStmt(_) => {
+                // Module system is handled by the module resolver
+                // These are no-ops in the interpreter
+            }
         }
     }
 

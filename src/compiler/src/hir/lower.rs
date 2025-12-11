@@ -5,6 +5,7 @@ use simple_parser::{self as ast, Expr, Module, Node, Pattern, Type};
 use thiserror::Error;
 
 use super::types::*;
+use crate::value::BUILTIN_SPAWN;
 
 //==============================================================================
 // Lowering Errors (for formal verification)
@@ -58,6 +59,7 @@ pub type LowerResult<T> = Result<T, LowerError>;
 struct FunctionContext {
     locals: Vec<LocalVar>,
     local_map: HashMap<String, usize>,
+    #[allow(dead_code)]
     return_type: TypeId,
 }
 
@@ -70,13 +72,8 @@ impl FunctionContext {
         }
     }
 
-    fn add_local(&mut self, name: String, ty: TypeId, is_mutable: bool) -> usize {
+    fn add_local(&mut self, name: String, ty: TypeId, mutability: Mutability) -> usize {
         let index = self.locals.len();
-        let mutability = if is_mutable {
-            Mutability::Mutable
-        } else {
-            Mutability::Immutable
-        };
         self.locals.push(LocalVar {
             name: name.clone(),
             ty,
@@ -190,6 +187,14 @@ impl Lowerer {
                     // Statement nodes at module level are not supported in HIR
                     // They should be inside function bodies
                 }
+                // Module system nodes (parsed but not lowered at this level)
+                Node::ModDecl(_)
+                | Node::UseStmt(_)
+                | Node::CommonUseStmt(_)
+                | Node::ExportUseStmt(_)
+                | Node::AutoImportStmt(_) => {
+                    // Module system is handled by the module resolver, not HIR
+                }
             }
         }
 
@@ -301,7 +306,7 @@ impl Lowerer {
             } else {
                 return Err(LowerError::MissingParameterType(param.name.clone()));
             };
-            ctx.add_local(param.name.clone(), ty, param.mutability.is_mutable());
+            ctx.add_local(param.name.clone(), ty, param.mutability);
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();
@@ -352,7 +357,7 @@ impl Lowerer {
                 let name = Self::extract_pattern_name(&let_stmt.pattern)
                     .ok_or_else(|| LowerError::Unsupported("complex pattern in let".to_string()))?;
 
-                let local_index = ctx.add_local(name, ty, let_stmt.mutability.is_mutable());
+                let local_index = ctx.add_local(name, ty, let_stmt.mutability);
 
                 Ok(vec![HirStmt::Let {
                     local_index,
@@ -592,7 +597,7 @@ impl Lowerer {
 
                 // Check for spawn as a statement-like expression
                 if let Expr::Identifier(name) = callee.as_ref() {
-                    if name == "spawn" && args.len() == 1 {
+                    if name == BUILTIN_SPAWN && args.len() == 1 {
                         let body_hir = Box::new(self.lower_expr(&args[0].value, ctx)?);
                         return Ok(HirExpr {
                             kind: HirExprKind::ActorSpawn { body: body_hir },

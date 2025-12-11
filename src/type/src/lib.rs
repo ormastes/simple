@@ -1000,6 +1000,14 @@ impl TypeChecker {
                 | Node::Expression(_) => {
                     // Statement nodes at module level are checked in second pass
                 }
+                // Module system nodes (parsed but not type-checked at this level)
+                Node::ModDecl(_)
+                | Node::UseStmt(_)
+                | Node::CommonUseStmt(_)
+                | Node::ExportUseStmt(_)
+                | Node::AutoImportStmt(_) => {
+                    // Module system nodes don't introduce type bindings directly
+                }
             }
         }
         // Second pass: check all nodes
@@ -1375,7 +1383,7 @@ impl TypeChecker {
                     Type::Array(elem) => Ok(*elem),
                     Type::Str => Ok(Type::Str), // String indexing returns string/char
                     Type::Dict { value, .. } => Ok(*value),
-                    Type::Tuple(types) => {
+                    Type::Tuple(_types) => {
                         // Tuple indexing - type depends on index literal
                         // For now, return fresh var since we don't know which element
                         Ok(self.fresh_var())

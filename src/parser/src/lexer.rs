@@ -70,7 +70,7 @@ impl<'a> Lexer<'a> {
         let start_line = self.line;
         let start_column = self.column;
 
-        let Some((pos, ch)) = self.advance() else {
+        let Some((_pos, ch)) = self.advance() else {
             // Generate remaining DEDENTs at EOF
             while self.indent_stack.len() > 1 {
                 self.indent_stack.pop();
@@ -848,6 +848,12 @@ impl<'a> Lexer<'a> {
             "import" => TokenKind::Import,
             "from" => TokenKind::From,
             "as" => TokenKind::As,
+            "mod" => TokenKind::Mod,
+            "use" => TokenKind::Use,
+            "export" => TokenKind::Export,
+            "common" => TokenKind::Common,
+            "auto" => TokenKind::Auto,
+            "crate" => TokenKind::Crate,
             "in" => TokenKind::In,
             "is" => TokenKind::Is,
             "not" => TokenKind::Not,
@@ -1278,6 +1284,47 @@ mod tests {
                 TokenKind::Identifier("x".to_string()),
                 TokenKind::Newline,
                 TokenKind::Identifier("y".to_string()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    // === Module System Keywords Tests ===
+
+    #[test]
+    fn test_module_keywords() {
+        assert_eq!(tokenize("use"), vec![TokenKind::Use, TokenKind::Eof]);
+        assert_eq!(tokenize("mod"), vec![TokenKind::Mod, TokenKind::Eof]);
+        assert_eq!(tokenize("export"), vec![TokenKind::Export, TokenKind::Eof]);
+        assert_eq!(tokenize("common"), vec![TokenKind::Common, TokenKind::Eof]);
+        assert_eq!(tokenize("auto"), vec![TokenKind::Auto, TokenKind::Eof]);
+        assert_eq!(tokenize("crate"), vec![TokenKind::Crate, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn test_use_statement_tokens() {
+        assert_eq!(
+            tokenize("use crate.core.Option"),
+            vec![
+                TokenKind::Use,
+                TokenKind::Crate,
+                TokenKind::Dot,
+                TokenKind::Identifier("core".to_string()),
+                TokenKind::Dot,
+                TokenKind::Identifier("Option".to_string()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn test_mod_declaration_tokens() {
+        assert_eq!(
+            tokenize("pub mod router"),
+            vec![
+                TokenKind::Pub,
+                TokenKind::Mod,
+                TokenKind::Identifier("router".to_string()),
                 TokenKind::Eof,
             ]
         );
