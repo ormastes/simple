@@ -1126,6 +1126,22 @@ impl<'a> Parser<'a> {
                 let name = self.expect_identifier()?;
                 Ok(Expr::Identifier(format!("${}", name)))
             }
+            // Allow vec! macro invocation even though vec is now a keyword
+            TokenKind::Vec => {
+                self.advance();
+                // If followed by !, it's a macro invocation
+                if self.check(&TokenKind::Bang) {
+                    self.advance(); // consume !
+                    let args = self.parse_macro_args()?;
+                    Ok(Expr::MacroInvocation {
+                        name: "vec".to_string(),
+                        args,
+                    })
+                } else {
+                    // Otherwise return as an identifier (for backward compatibility)
+                    Ok(Expr::Identifier("vec".to_string()))
+                }
+            }
             _ => Err(ParseError::unexpected_token(
                 "expression",
                 format!("{:?}", self.current.kind),
