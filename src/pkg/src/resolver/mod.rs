@@ -190,13 +190,18 @@ version = "1.0.0"
         fs::write(dir.join("simple.toml"), content).unwrap();
     }
 
+    /// Load manifest and resolve dependencies
+    fn resolve_from_dir(dir: &Path) -> DependencyGraph {
+        let manifest = Manifest::load(&dir.join("simple.toml")).unwrap();
+        resolve(&manifest, dir).unwrap()
+    }
+
     #[test]
     fn test_resolve_no_deps() {
         let temp = temp_dir("no-deps");
         create_manifest(&temp, "myapp", &[]);
 
-        let manifest = Manifest::load(&temp.join("simple.toml")).unwrap();
-        let graph = resolve(&manifest, &temp).unwrap();
+        let graph = resolve_from_dir(&temp);
 
         assert!(graph.is_empty());
 
@@ -211,8 +216,7 @@ version = "1.0.0"
         create_manifest(&temp, "myapp", &[("mylib", "./mylib")]);
         create_manifest(&lib_dir, "mylib", &[]);
 
-        let manifest = Manifest::load(&temp.join("simple.toml")).unwrap();
-        let graph = resolve(&manifest, &temp).unwrap();
+        let graph = resolve_from_dir(&temp);
 
         assert_eq!(graph.len(), 1);
         assert!(graph.contains("mylib"));
@@ -234,8 +238,7 @@ version = "1.0.0"
         create_manifest(&lib_a, "lib_a", &[("lib_b", "../lib_b")]);
         create_manifest(&lib_b, "lib_b", &[]);
 
-        let manifest = Manifest::load(&temp.join("simple.toml")).unwrap();
-        let graph = resolve(&manifest, &temp).unwrap();
+        let graph = resolve_from_dir(&temp);
 
         assert_eq!(graph.len(), 2);
         assert!(graph.contains("lib_a"));
@@ -310,8 +313,7 @@ json = "^2.0"
 "#;
         fs::write(temp.join("simple.toml"), content).unwrap();
 
-        let manifest = Manifest::load(&temp.join("simple.toml")).unwrap();
-        let graph = resolve(&manifest, &temp).unwrap();
+        let graph = resolve_from_dir(&temp);
 
         assert_eq!(graph.len(), 2);
         assert!(graph.contains("http"));
@@ -340,8 +342,7 @@ json = "^2.0"
         create_manifest(&lib_b, "lib_b", &[("lib_c", "../lib_c")]);
         create_manifest(&lib_c, "lib_c", &[]);
 
-        let manifest = Manifest::load(&temp.join("simple.toml")).unwrap();
-        let graph = resolve(&manifest, &temp).unwrap();
+        let graph = resolve_from_dir(&temp);
 
         // lib_c should only appear once
         assert_eq!(graph.len(), 3);

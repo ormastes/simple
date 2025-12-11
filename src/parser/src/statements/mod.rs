@@ -103,6 +103,34 @@ impl<'a> Parser<'a> {
         Ok((name, ty, value))
     }
 
+    /// Parse optional let-pattern syntax: `let PATTERN =`
+    /// Used by if-let and while-let constructs
+    fn parse_optional_let_pattern(&mut self) -> Result<(Option<Pattern>, Expr), ParseError> {
+        if self.check(&TokenKind::Let) {
+            self.advance();
+            let pattern = self.parse_pattern()?;
+            self.expect(&TokenKind::Assign)?;
+            let expr = self.parse_expression()?;
+            Ok((Some(pattern), expr))
+        } else {
+            Ok((None, self.parse_expression()?))
+        }
+    }
+
+    /// Parse use path and target (shared by use, common use, export use)
+    fn parse_use_path_and_target(&mut self) -> Result<(ModulePath, ImportTarget), ParseError> {
+        let path = self.parse_module_path()?;
+        if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
+            let target = self.parse_import_target(None)?;
+            Ok((path, target))
+        } else {
+            let mut segments = path.segments;
+            let last = segments.pop().unwrap_or_default();
+            let target = self.parse_import_target(Some(last))?;
+            Ok((ModulePath::new(segments), target))
+        }
+    }
+
     pub(crate) fn parse_const(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Const)?;
@@ -242,9 +270,23 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        // Standalone unit syntax: unit UserId: i64 as uid
+        // Standalone unit syntax:
+        // Single-base: unit UserId: i64 as uid
+        // Multi-base:  unit IpAddr: str | u32 as ip
         self.expect(&TokenKind::Colon)?;
+
+        // Parse base type (can be a union type for multi-base)
+        // parse_type() handles union types: str | u32 -> Type::Union([str, u32])
         let base_type = self.parse_type()?;
+
+        // Convert to base_types Vec:
+        // - Single type: [Type]
+        // - Union type: [Type1, Type2, ...]
+        let base_types = match base_type {
+            Type::Union(types) => types,
+            other => vec![other],
+        };
+
         self.expect(&TokenKind::As)?;
         let suffix = self.expect_identifier()?;
 
@@ -256,7 +298,7 @@ impl<'a> Parser<'a> {
                 start_span.column,
             ),
             name,
-            base_type,
+            base_types,
             suffix,
             visibility: Visibility::Private,
         }))
@@ -297,17 +339,7 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::If)?;
 
-        // Check for if-let syntax: if let PATTERN = EXPR:
-        let (let_pattern, condition) = if self.check(&TokenKind::Let) {
-            self.advance();
-            let pattern = self.parse_pattern()?;
-            self.expect(&TokenKind::Assign)?;
-            let expr = self.parse_expression()?;
-            (Some(pattern), expr)
-        } else {
-            (None, self.parse_expression()?)
-        };
-
+        let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
         let then_block = self.parse_block()?;
 
@@ -370,17 +402,7 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::While)?;
 
-        // Check for while-let syntax: while let PATTERN = EXPR:
-        let (let_pattern, condition) = if self.check(&TokenKind::Let) {
-            self.advance();
-            let pattern = self.parse_pattern()?;
-            self.expect(&TokenKind::Assign)?;
-            let expr = self.parse_expression()?;
-            (Some(pattern), expr)
-        } else {
-            (None, self.parse_expression()?)
-        };
-
+        let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
         let body = self.parse_block()?;
 
@@ -789,25 +811,10 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_use(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Use)?;
-
-        let path = self.parse_module_path()?;
-
-        // Determine if we stopped at */{ or at a single item
-        let (final_path, target) = if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
-            // parse_module_path stopped after consuming the dot before */{}
-            let target = self.parse_import_target(None)?;
-            (path, target)
-        } else {
-            // Last segment of path is the item being imported
-            let mut segments = path.segments;
-            let last = segments.pop().unwrap_or_default();
-            let target = self.parse_import_target(Some(last))?;
-            (ModulePath::new(segments), target)
-        };
-
+        let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::UseStmt(UseStmt {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
-            path: final_path,
+            path,
             target,
         }))
     }
@@ -816,9 +823,7 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_mod(&mut self, visibility: Visibility, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mod)?;
-
         let name = self.expect_identifier()?;
-
         Ok(Node::ModDecl(ModDecl {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
@@ -832,24 +837,10 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Common)?;
         self.expect(&TokenKind::Use)?;
-
-        let path = self.parse_module_path()?;
-
-        // Determine if we stopped at */{ or at a single item
-        let (final_path, target) = if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
-            let target = self.parse_import_target(None)?;
-            (path, target)
-        } else {
-            // Last segment of path is the item being imported
-            let mut segments = path.segments;
-            let last = segments.pop().unwrap_or_default();
-            let target = self.parse_import_target(Some(last))?;
-            (ModulePath::new(segments), target)
-        };
-
+        let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::CommonUseStmt(CommonUseStmt {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
-            path: final_path,
+            path,
             target,
         }))
     }
@@ -859,24 +850,10 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Export)?;
         self.expect(&TokenKind::Use)?;
-
-        let path = self.parse_module_path()?;
-
-        // Determine if we stopped at */{ or at a single item
-        let (final_path, target) = if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
-            let target = self.parse_import_target(None)?;
-            (path, target)
-        } else {
-            // Last segment of path is the item being imported
-            let mut segments = path.segments;
-            let last = segments.pop().unwrap_or_default();
-            let target = self.parse_import_target(Some(last))?;
-            (ModulePath::new(segments), target)
-        };
-
+        let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::ExportUseStmt(ExportUseStmt {
             span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
-            path: final_path,
+            path,
             target,
         }))
     }

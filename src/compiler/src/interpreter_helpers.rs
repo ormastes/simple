@@ -217,6 +217,22 @@ fn bind_lambda_param(captured: &Env, params: &[String], value: &Value) -> Env {
     env
 }
 
+/// Helper for array predicate operations (filter, find, any, all)
+fn with_lambda_predicate<F>(
+    func: Value,
+    operation: &str,
+    mut process: F,
+) -> Result<Value, CompileError>
+where
+    F: FnMut(&[String], &Expr, &Env) -> Result<Value, CompileError>,
+{
+    if let Value::Lambda { params, body, env: captured } = func {
+        process(&params, &body, &captured)
+    } else {
+        Err(CompileError::Semantic(format!("{operation} expects lambda argument")))
+    }
+}
+
 /// Array filter: keep elements where lambda returns truthy
 fn eval_array_filter(
     arr: &[Value],
@@ -226,18 +242,16 @@ fn eval_array_filter(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = func {
+    with_lambda_predicate(func, "filter", |params, body, captured| {
         let mut results = Vec::new();
         for item in arr {
-            let local_env = bind_lambda_param(&captured, &params, item);
-            if evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let local_env = bind_lambda_param(captured, params, item);
+            if evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 results.push(item.clone());
             }
         }
         Ok(Value::Array(results))
-    } else {
-        Err(CompileError::Semantic("filter expects lambda argument".into()))
-    }
+    })
 }
 
 /// Array reduce: fold over elements with accumulator
@@ -277,17 +291,15 @@ fn eval_array_find(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = func {
+    with_lambda_predicate(func, "find", |params, body, captured| {
         for item in arr {
-            let local_env = bind_lambda_param(&captured, &params, item);
-            if evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let local_env = bind_lambda_param(captured, params, item);
+            if evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(item.clone());
             }
         }
         Ok(Value::Nil)
-    } else {
-        Err(CompileError::Semantic("find expects lambda argument".into()))
-    }
+    })
 }
 
 /// Array any: return true if any element satisfies lambda
@@ -299,17 +311,15 @@ fn eval_array_any(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = func {
+    with_lambda_predicate(func, "any", |params, body, captured| {
         for item in arr {
-            let local_env = bind_lambda_param(&captured, &params, item);
-            if evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let local_env = bind_lambda_param(captured, params, item);
+            if evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(Value::Bool(true));
             }
         }
         Ok(Value::Bool(false))
-    } else {
-        Err(CompileError::Semantic("any expects lambda argument".into()))
-    }
+    })
 }
 
 /// Array all: return true if all elements satisfy lambda
@@ -321,17 +331,15 @@ fn eval_array_all(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = func {
+    with_lambda_predicate(func, "all", |params, body, captured| {
         for item in arr {
-            let local_env = bind_lambda_param(&captured, &params, item);
-            if !evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            let local_env = bind_lambda_param(captured, params, item);
+            if !evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(Value::Bool(false));
             }
         }
         Ok(Value::Bool(true))
-    } else {
-        Err(CompileError::Semantic("all expects lambda argument".into()))
-    }
+    })
 }
 
 /// Dict map_values: apply lambda to each value
@@ -506,6 +514,113 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
     }
 }
 
+// === Helper functions to reduce duplication in interpreter.rs ===
+
+/// Handle functional update expression: target.&method(args)
+/// Returns Ok(Some(new_value)) if successfully processed, Ok(None) if not applicable
+fn handle_functional_update(
+    target: &Expr,
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<(String, Value)>, CompileError> {
+    if let Expr::Identifier(name) = target {
+        let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
+        if is_const {
+            return Err(CompileError::Semantic(format!(
+                "cannot use functional update on const '{name}'"
+            )));
+        }
+        let recv_val = env.get(name).cloned().ok_or_else(|| {
+            CompileError::Semantic(format!("undefined variable: {name}"))
+        })?;
+        let method_call = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier(name.clone())),
+            method: method.to_string(),
+            args: args.to_vec(),
+        };
+        let result = evaluate_expr(&method_call, env, functions, classes, enums, impl_methods)?;
+        let new_value = match (&recv_val, &result) {
+            (Value::Array(_), Value::Array(_)) => result,
+            (Value::Dict(_), Value::Dict(_)) => result,
+            (Value::Str(_), Value::Str(_)) => result,
+            (Value::Tuple(_), Value::Tuple(_)) => result,
+            (Value::Object { .. }, Value::Object { .. }) => result,
+            _ => env.get(name).cloned().unwrap_or(recv_val),
+        };
+        Ok(Some((name.clone(), new_value)))
+    } else {
+        Err(CompileError::Semantic(
+            "functional update target must be an identifier".into(),
+        ))
+    }
+}
+
+/// Handle method call on object with self-update tracking
+/// Returns (result, optional_updated_self) where updated_self is the object with mutations
+fn handle_method_call_with_self_update(
+    value_expr: &Expr,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Value, Option<(String, Value)>), CompileError> {
+    if let Expr::MethodCall { receiver, method, args } = value_expr {
+        if let Expr::Identifier(obj_name) = receiver.as_ref() {
+            if let Some(Value::Object { .. }) = env.get(obj_name) {
+                let (result, updated_self) = evaluate_method_call_with_self_update(
+                    receiver, method, args, env, functions, classes, enums, impl_methods
+                )?;
+                if let Some(new_self) = updated_self {
+                    return Ok((result, Some((obj_name.clone(), new_self))));
+                }
+                return Ok((result, None));
+            }
+        }
+    }
+    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+    Ok((result, None))
+}
+
+/// Bind a single pattern element from a let statement
+/// Updates const names set if the binding is immutable
+fn bind_let_pattern_element(
+    pat: &Pattern,
+    val: Value,
+    is_mutable: bool,
+    env: &mut Env,
+) {
+    match pat {
+        Pattern::Identifier(name) => {
+            env.insert(name.clone(), val);
+            if !is_mutable {
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+            }
+        }
+        Pattern::MutIdentifier(name) => {
+            env.insert(name.clone(), val);
+        }
+        _ => {}
+    }
+}
+
+/// Bind a collection pattern (tuple or array) from a let statement
+fn bind_collection_pattern(
+    patterns: &[Pattern],
+    values: Vec<Value>,
+    is_mutable: bool,
+    env: &mut Env,
+) {
+    for (pat, val) in patterns.iter().zip(values.into_iter()) {
+        bind_let_pattern_element(pat, val, is_mutable, env);
+    }
+}
+
 /// Normalize a Python-style index (handling negative indices)
 fn normalize_index(idx: i64, len: i64) -> i64 {
     if idx < 0 {
@@ -543,4 +658,199 @@ fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step: i64) -> V
         }
         result
     }
+}
+
+/// Convert a Control result to a Value result for function return.
+/// This is used by multiple interpreter modules to handle function return values.
+pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<Value, CompileError> {
+    match result {
+        Ok(Control::Return(v)) => Ok(v),
+        Ok(Control::Next) => Ok(Value::Nil),
+        Ok(Control::Break(_)) => Err(CompileError::Semantic("break outside loop".into())),
+        Ok(Control::Continue) => Err(CompileError::Semantic("continue outside loop".into())),
+        Err(e) => Err(e),
+    }
+}
+
+/// Iterate over items with pattern binding and optional condition filtering.
+/// Returns a vector of environments for items that match the pattern and pass the condition.
+/// This is used by both ListComprehension and DictComprehension to avoid code duplication.
+fn comprehension_iterate(
+    iterable: &Value,
+    pattern: &Pattern,
+    condition: &Option<Box<Expr>>,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Vec<Env>, CompileError> {
+    let items = iter_to_vec(iterable)?;
+    let mut result = Vec::new();
+
+    for item in items {
+        // Create a new scope with the pattern binding
+        let mut inner_env = env.clone();
+        if !bind_pattern(pattern, &item, &mut inner_env) {
+            continue;
+        }
+
+        // Check condition if present
+        if let Some(cond) = condition {
+            let cond_val = evaluate_expr(
+                cond,
+                &mut inner_env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            if !cond_val.truthy() {
+                continue;
+            }
+        }
+
+        result.push(inner_env);
+    }
+
+    Ok(result)
+}
+
+// ============================================================================
+// Effect management helpers
+// ============================================================================
+
+/// Execute a closure with the given function's effect context.
+/// Saves the current effect, sets the function's effect if present,
+/// executes the closure, and restores the previous effect.
+fn with_effect_context<F, T>(func_effect: &Option<simple_parser::ast::Effect>, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    let prev_effect = CURRENT_EFFECT.with(|cell| cell.borrow().clone());
+    if func_effect.is_some() {
+        CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = func_effect.clone());
+    }
+
+    let result = f();
+
+    CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = prev_effect);
+    result
+}
+
+// ============================================================================
+// Async execution helpers (reduce duplication in spawn_isolated, async, pool.submit)
+// ============================================================================
+
+/// Cloned interpreter context for async execution.
+/// Used to pass execution context across thread boundaries.
+#[derive(Clone)]
+struct ClonedContext {
+    functions: HashMap<String, FunctionDef>,
+    classes: HashMap<String, ClassDef>,
+    enums: Enums,
+    impl_methods: ImplMethods,
+}
+
+impl ClonedContext {
+    /// Clone context from references
+    fn from_refs(
+        functions: &HashMap<String, FunctionDef>,
+        classes: &HashMap<String, ClassDef>,
+        enums: &Enums,
+        impl_methods: &ImplMethods,
+    ) -> Self {
+        Self {
+            functions: functions.clone(),
+            classes: classes.clone(),
+            enums: enums.clone(),
+            impl_methods: impl_methods.clone(),
+        }
+    }
+}
+
+/// Execute a callable (Function or Lambda) with a single argument.
+/// If base_env is provided, it's used as the base environment (for spawn_isolated).
+/// Otherwise, the callable's captured_env is used (for pool.submit).
+/// Returns Ok(value) or Err(error_message).
+fn execute_callable_with_arg(
+    callable: Value,
+    arg: Value,
+    base_env: Option<&Env>,
+    ctx: &ClonedContext,
+) -> Result<Value, String> {
+    match callable {
+        Value::Function { ref def, ref captured_env, .. } => {
+            // Use base_env if provided (spawn_isolated), otherwise use captured_env (pool.submit)
+            let mut local_env = base_env.cloned().unwrap_or_else(|| captured_env.clone());
+            if let Some(first_param) = def.params.first() {
+                local_env.insert(first_param.name.clone(), arg);
+            }
+            match exec_block(&def.body, &mut local_env, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods) {
+                Ok(Control::Return(v)) => Ok(v),
+                Ok(_) => Ok(Value::Nil),
+                Err(e) => Err(format!("{:?}", e)),
+            }
+        }
+        Value::Lambda { ref params, ref body, ref env } => {
+            // For lambdas, always use the captured env (they are closures)
+            let mut local_env = env.clone();
+            if let Some(first_param) = params.first() {
+                local_env.insert(first_param.clone(), arg);
+            }
+            evaluate_expr(&body, &local_env, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods)
+                .map_err(|e| format!("{:?}", e))
+        }
+        _ => Err("expected a function or lambda".into()),
+    }
+}
+
+/// Create a FutureValue that executes a callable with an argument.
+/// Uses the callable's captured environment.
+/// Clones all necessary context for thread-safe execution.
+fn spawn_future_with_callable(
+    callable: Value,
+    arg: Value,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> FutureValue {
+    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    FutureValue::new(move || execute_callable_with_arg(callable, arg, None, &ctx))
+}
+
+/// Create a FutureValue that executes a callable with an argument and outer environment.
+/// Uses the outer environment as the base (for spawn_isolated semantics).
+/// Clones all necessary context for thread-safe execution.
+fn spawn_future_with_callable_and_env(
+    callable: Value,
+    arg: Value,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> FutureValue {
+    let env_clone = env.clone();
+    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    FutureValue::new(move || execute_callable_with_arg(callable, arg, Some(&env_clone), &ctx))
+}
+
+/// Create a FutureValue that evaluates an expression.
+/// Clones all necessary context for thread-safe execution.
+fn spawn_future_with_expr(
+    expr: Expr,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> FutureValue {
+    let env_clone = env.clone();
+    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    FutureValue::new(move || {
+        evaluate_expr(&expr, &env_clone, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods)
+            .map_err(|e| format!("{:?}", e))
+    })
 }

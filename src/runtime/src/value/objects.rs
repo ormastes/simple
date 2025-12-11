@@ -1,7 +1,7 @@
 //! Object types: Object, Closure, Enum and their FFI functions.
 
 use super::core::RuntimeValue;
-use super::heap::{HeapHeader, HeapObjectType};
+use super::heap::{get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
 
 // ============================================================================
 // Heap-allocated object structures
@@ -28,6 +28,15 @@ impl RuntimeClosure {
     pub unsafe fn captures(&self) -> &[RuntimeValue] {
         let data_ptr = (self as *const Self).add(1) as *const RuntimeValue;
         std::slice::from_raw_parts(data_ptr, self.capture_count as usize)
+    }
+
+    /// Get the captured values as a mutable slice
+    ///
+    /// # Safety
+    /// The caller must ensure the RuntimeClosure was properly allocated.
+    pub unsafe fn captures_mut(&mut self) -> &mut [RuntimeValue] {
+        let data_ptr = (self as *mut Self).add(1) as *mut RuntimeValue;
+        std::slice::from_raw_parts_mut(data_ptr, self.capture_count as usize)
     }
 }
 
@@ -108,19 +117,13 @@ pub extern "C" fn rt_object_new(class_id: u32, field_count: u32) -> RuntimeValue
 /// Get a field from an object by index
 #[no_mangle]
 pub extern "C" fn rt_object_field_get(object: RuntimeValue, field_index: u32) -> RuntimeValue {
-    if !object.is_heap() {
+    let Some(obj) = get_typed_ptr::<RuntimeObject>(object, HeapObjectType::Object) else {
         return RuntimeValue::NIL;
-    }
-    let ptr = object.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Object {
-            return RuntimeValue::NIL;
-        }
-        let obj = ptr as *const RuntimeObject;
         if field_index >= (*obj).field_count {
             return RuntimeValue::NIL;
         }
-
         (*obj).fields()[field_index as usize]
     }
 }
@@ -132,19 +135,13 @@ pub extern "C" fn rt_object_field_set(
     field_index: u32,
     value: RuntimeValue,
 ) -> bool {
-    if !object.is_heap() {
+    let Some(obj) = get_typed_ptr_mut::<RuntimeObject>(object, HeapObjectType::Object) else {
         return false;
-    }
-    let ptr = object.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Object {
-            return false;
-        }
-        let obj = ptr as *mut RuntimeObject;
         if field_index >= (*obj).field_count {
             return false;
         }
-
         (*obj).fields_mut()[field_index as usize] = value;
         true
     }
@@ -153,31 +150,15 @@ pub extern "C" fn rt_object_field_set(
 /// Get the class ID of an object
 #[no_mangle]
 pub extern "C" fn rt_object_class_id(object: RuntimeValue) -> i64 {
-    if !object.is_heap() {
-        return -1;
-    }
-    let ptr = object.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Object {
-            return -1;
-        }
-        (*(ptr as *const RuntimeObject)).class_id as i64
-    }
+    get_typed_ptr::<RuntimeObject>(object, HeapObjectType::Object)
+        .map_or(-1, |p| unsafe { (*p).class_id as i64 })
 }
 
 /// Get the field count of an object
 #[no_mangle]
 pub extern "C" fn rt_object_field_count(object: RuntimeValue) -> i64 {
-    if !object.is_heap() {
-        return -1;
-    }
-    let ptr = object.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Object {
-            return -1;
-        }
-        (*(ptr as *const RuntimeObject)).field_count as i64
-    }
+    get_typed_ptr::<RuntimeObject>(object, HeapObjectType::Object)
+        .map_or(-1, |p| unsafe { (*p).field_count as i64 })
 }
 
 // ============================================================================
@@ -213,21 +194,14 @@ pub extern "C" fn rt_closure_set_capture(
     index: u32,
     value: RuntimeValue,
 ) -> bool {
-    if !closure.is_heap() {
+    let Some(clos) = get_typed_ptr_mut::<RuntimeClosure>(closure, HeapObjectType::Closure) else {
         return false;
-    }
-    let ptr = closure.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Closure {
-            return false;
-        }
-        let clos = ptr as *mut RuntimeClosure;
         if index >= (*clos).capture_count {
             return false;
         }
-
-        let data_ptr = (clos.add(1)) as *mut RuntimeValue;
-        *data_ptr.add(index as usize) = value;
+        (*clos).captures_mut()[index as usize] = value;
         true
     }
 }
@@ -235,19 +209,13 @@ pub extern "C" fn rt_closure_set_capture(
 /// Get a captured variable from a closure
 #[no_mangle]
 pub extern "C" fn rt_closure_get_capture(closure: RuntimeValue, index: u32) -> RuntimeValue {
-    if !closure.is_heap() {
+    let Some(clos) = get_typed_ptr::<RuntimeClosure>(closure, HeapObjectType::Closure) else {
         return RuntimeValue::NIL;
-    }
-    let ptr = closure.as_heap_ptr();
+    };
     unsafe {
-        if (*ptr).object_type != HeapObjectType::Closure {
-            return RuntimeValue::NIL;
-        }
-        let clos = ptr as *const RuntimeClosure;
         if index >= (*clos).capture_count {
             return RuntimeValue::NIL;
         }
-
         (*clos).captures()[index as usize]
     }
 }
@@ -255,16 +223,8 @@ pub extern "C" fn rt_closure_get_capture(closure: RuntimeValue, index: u32) -> R
 /// Get the function pointer from a closure
 #[no_mangle]
 pub extern "C" fn rt_closure_func_ptr(closure: RuntimeValue) -> *const u8 {
-    if !closure.is_heap() {
-        return std::ptr::null();
-    }
-    let ptr = closure.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Closure {
-            return std::ptr::null();
-        }
-        (*(ptr as *const RuntimeClosure)).func_ptr
-    }
+    get_typed_ptr::<RuntimeClosure>(closure, HeapObjectType::Closure)
+        .map_or(std::ptr::null(), |p| unsafe { (*p).func_ptr })
 }
 
 // ============================================================================
@@ -299,29 +259,13 @@ pub extern "C" fn rt_enum_new(
 /// Get the discriminant of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_discriminant(value: RuntimeValue) -> i64 {
-    if !value.is_heap() {
-        return -1;
-    }
-    let ptr = value.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Enum {
-            return -1;
-        }
-        (*(ptr as *const RuntimeEnum)).discriminant as i64
-    }
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
+        .map_or(-1, |p| unsafe { (*p).discriminant as i64 })
 }
 
 /// Get the payload of an enum value
 #[no_mangle]
 pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
-    if !value.is_heap() {
-        return RuntimeValue::NIL;
-    }
-    let ptr = value.as_heap_ptr();
-    unsafe {
-        if (*ptr).object_type != HeapObjectType::Enum {
-            return RuntimeValue::NIL;
-        }
-        (*(ptr as *const RuntimeEnum)).payload
-    }
+    get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
+        .map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
 }

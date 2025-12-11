@@ -50,21 +50,26 @@ pub fn run_expect_parity(src: &str, expected: i32) {
     run_expect(src, expected);
 }
 
-/// Helper to run source and expect a compile error.
-/// The error message must contain `expected_error` substring.
-/// If compilation succeeds, the test fails.
+/// Run source with interpreter and return the result
 #[allow(dead_code)]
-pub fn run_expect_compile_error(src: &str, expected_error: &str) {
+fn run_interpreter(src: &str) -> Result<simple_driver::interpreter::RunResult, String> {
     let interpreter = Interpreter::new();
-    let result = interpreter.run(
+    interpreter.run(
         src,
         RunConfig {
             running_type: RunningType::Interpreter,
             in_memory: true,
             ..Default::default()
         },
-    );
-    match result {
+    )
+}
+
+/// Helper to run source and expect a compile error.
+/// The error message must contain `expected_error` substring.
+/// If compilation succeeds, the test fails.
+#[allow(dead_code)]
+pub fn run_expect_compile_error(src: &str, expected_error: &str) {
+    match run_interpreter(src) {
         Err(e) => {
             let err_msg = e.to_string();
             assert!(
@@ -85,16 +90,7 @@ pub fn run_expect_compile_error(src: &str, expected_error: &str) {
 /// If compilation succeeds, the test fails.
 #[allow(dead_code)]
 pub fn run_expect_compile_error_at(src: &str, expected_error: &str, line: usize) {
-    let interpreter = Interpreter::new();
-    let result = interpreter.run(
-        src,
-        RunConfig {
-            running_type: RunningType::Interpreter,
-            in_memory: true,
-            ..Default::default()
-        },
-    );
-    match result {
+    match run_interpreter(src) {
         Err(e) => {
             let err_msg = e.to_string();
             assert!(
@@ -125,16 +121,7 @@ pub fn run_expect_compile_error_at(src: &str, expected_error: &str, line: usize)
 /// If execution succeeds without error, the test fails.
 #[allow(dead_code)]
 pub fn run_expect_runtime_error(src: &str, expected_error: &str) {
-    let interpreter = Interpreter::new();
-    let result = interpreter.run(
-        src,
-        RunConfig {
-            running_type: RunningType::Interpreter,
-            in_memory: true,
-            ..Default::default()
-        },
-    );
-    match result {
+    match run_interpreter(src) {
         Err(e) => {
             let err_msg = e.to_string();
             assert!(
@@ -155,17 +142,8 @@ pub fn run_expect_runtime_error(src: &str, expected_error: &str) {
 /// If execution succeeds, the test fails.
 #[allow(dead_code)]
 pub fn run_expect_error(src: &str) {
-    let interpreter = Interpreter::new();
-    let result = interpreter.run(
-        src,
-        RunConfig {
-            running_type: RunningType::Interpreter,
-            in_memory: true,
-            ..Default::default()
-        },
-    );
     assert!(
-        result.is_err(),
+        run_interpreter(src).is_err(),
         "Expected an error, but execution succeeded"
     );
 }
@@ -174,16 +152,7 @@ pub fn run_expect_error(src: &str) {
 /// Also checks that the error contains the expected substring.
 #[allow(dead_code)]
 pub fn run_expect_any_error(src: &str, expected_error: &str) {
-    let interpreter = Interpreter::new();
-    let result = interpreter.run(
-        src,
-        RunConfig {
-            running_type: RunningType::Interpreter,
-            in_memory: true,
-            ..Default::default()
-        },
-    );
-    match result {
+    match run_interpreter(src) {
         Err(e) => {
             let err_msg = e.to_string();
             assert!(

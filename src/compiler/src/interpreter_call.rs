@@ -121,54 +121,13 @@ fn evaluate_call(
                 } else {
                     Value::Nil
                 };
-
-                // Clone everything needed for the thread
-                let env_clone = env.clone();
-                let funcs_clone = functions.clone();
-                let classes_clone = classes.clone();
-                let enums_clone = enums.clone();
-                let impls_clone = impl_methods.clone();
-
-                let future = FutureValue::new(move || {
-                    match func_val {
-                        Value::Function { def, .. } => {
-                            // Execute with the arg value directly
-                            let mut local_env = env_clone.clone();
-                            if !def.params.is_empty() {
-                                local_env.insert(def.params[0].name.clone(), arg_val);
-                            }
-                            exec_block(&def.body, &mut local_env, &funcs_clone, &classes_clone, &enums_clone, &impls_clone)
-                                .map(|ctrl| match ctrl {
-                                    Control::Return(v) => v,
-                                    _ => Value::Nil,
-                                })
-                                .map_err(|e| format!("{:?}", e))
-                        }
-                        Value::Lambda { params, body, env: captured } => {
-                            let mut local_env = captured.clone();
-                            if !params.is_empty() {
-                                local_env.insert(params[0].clone(), arg_val);
-                            }
-                            evaluate_expr(&body, &local_env, &funcs_clone, &classes_clone, &enums_clone, &impls_clone)
-                                .map_err(|e| format!("{:?}", e))
-                        }
-                        _ => Err("spawn_isolated requires a function or lambda".into()),
-                    }
-                });
+                // Use spawn_future_with_callable_and_env to capture outer environment
+                let future = spawn_future_with_callable_and_env(func_val, arg_val, env, functions, classes, enums, impl_methods);
                 return Ok(Value::Future(future));
             }
             "async" | "future" => {
                 let inner_expr = args.get(0).ok_or_else(|| CompileError::Semantic("async expects an expression".into()))?;
-                let expr_clone = inner_expr.value.clone();
-                let env_clone = env.clone();
-                let funcs = functions.clone();
-                let classes_clone = classes.clone();
-                let enums_clone = enums.clone();
-                let impls_clone = impl_methods.clone();
-                let future = FutureValue::new(move || {
-                    evaluate_expr(&expr_clone, &env_clone, &funcs, &classes_clone, &enums_clone, &impls_clone)
-                        .map_err(|e| format!("{:?}", e))
-                });
+                let future = spawn_future_with_expr(inner_expr.value.clone(), env, functions, classes, enums, impl_methods);
                 return Ok(Value::Future(future));
             }
             "is_ready" => {
@@ -412,16 +371,9 @@ fn exec_function(
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
-    let prev_effect = CURRENT_EFFECT.with(|cell| cell.borrow().clone());
-    if func.effect.is_some() {
-        CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = func.effect.clone());
-    }
-
-    let result = exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx);
-
-    CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = prev_effect);
-
-    result
+    with_effect_context(&func.effect, || {
+        exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx)
+    })
 }
 
 /// Execute a function with a captured environment for closure semantics
@@ -435,33 +387,21 @@ fn exec_function_with_captured_env(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    let prev_effect = CURRENT_EFFECT.with(|cell| cell.borrow().clone());
-    if func.effect.is_some() {
-        CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = func.effect.clone());
-    }
+    with_effect_context(&func.effect, || {
+        // Start with the captured environment (for closure variables)
+        let mut local_env = captured_env.clone();
 
-    // Start with the captured environment (for closure variables)
-    let mut local_env = captured_env.clone();
+        // Bind arguments
+        let self_mode = simple_parser::ast::SelfMode::IncludeSelf;
+        let bound_args = bind_args(&func.params, args, outer_env, functions, classes, enums, impl_methods, self_mode)?;
+        for (name, value) in bound_args {
+            local_env.insert(name, value);
+        }
 
-    // Bind arguments
-    let self_mode = simple_parser::ast::SelfMode::IncludeSelf;
-    let bound_args = bind_args(&func.params, args, outer_env, functions, classes, enums, impl_methods, self_mode)?;
-    for (name, value) in bound_args {
-        local_env.insert(name, value);
-    }
-
-    // Execute the function body
-    let result = exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods);
-
-    CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = prev_effect);
-
-    match result {
-        Ok(Control::Return(v)) => Ok(v),
-        Ok(Control::Next) => Ok(Value::Nil),
-        Ok(Control::Break(_)) => Err(CompileError::Semantic("break outside loop".into())),
-        Ok(Control::Continue) => Err(CompileError::Semantic("continue outside loop".into())),
-        Err(e) => Err(e),
-    }
+        // Execute the function body
+        let result = exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods);
+        control_to_value(result)
+    })
 }
 
 fn exec_function_inner(

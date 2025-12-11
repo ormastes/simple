@@ -300,14 +300,16 @@ pub struct EnumVariant {
     pub fields: Option<Vec<Type>>, // None = unit, Some = tuple/struct
 }
 
-/// Standalone unit type definition: `unit UserId: i64 as uid`
+/// Standalone unit type definition
+/// Single-base: `unit UserId: i64 as uid`
+/// Multi-base:  `unit IpAddr: str | u32 as ip` (accepts string or numeric literals)
 /// Creates a newtype wrapper with literal suffix support
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnitDef {
     pub span: Span,
-    pub name: String,    // e.g., "UserId"
-    pub base_type: Type, // e.g., i64
-    pub suffix: String,  // e.g., "uid" (for literals like 42_uid)
+    pub name: String,          // e.g., "UserId" or "IpAddr"
+    pub base_types: Vec<Type>, // e.g., [i64] or [str, u32] for multi-base units
+    pub suffix: String,        // e.g., "uid" or "ip" (for literals like 42_uid or "127.0.0.1"_ip)
     pub visibility: Visibility,
 }
 
@@ -648,7 +650,8 @@ pub enum Expr {
     TypedInteger(i64, NumericSuffix), // 42i32, 100_km
     TypedFloat(f64, NumericSuffix),   // 3.14f32, 100.0_m
     String(String),
-    FString(Vec<FStringPart>), // f"hello {name}!" interpolated strings
+    TypedString(String, String), // "127.0.0.1"_ip - string with unit suffix
+    FString(Vec<FStringPart>),   // f"hello {name}!" interpolated strings
     Bool(bool),
     Nil,
     Symbol(String),
@@ -943,95 +946,5 @@ pub struct AutoImportStmt {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_expr_integer() {
-        let expr = Expr::Integer(42);
-        assert_eq!(expr, Expr::Integer(42));
-    }
-
-    #[test]
-    fn test_binary_expr() {
-        let expr = Expr::Binary {
-            op: BinOp::Add,
-            left: Box::new(Expr::Integer(1)),
-            right: Box::new(Expr::Integer(2)),
-        };
-        if let Expr::Binary { op, .. } = expr {
-            assert_eq!(op, BinOp::Add);
-        } else {
-            panic!("Expected Binary expression");
-        }
-    }
-
-    #[test]
-    fn test_function_def() {
-        let func = FunctionDef {
-            span: Span::new(0, 10, 1, 1),
-            name: "add".to_string(),
-            generic_params: vec![],
-            params: vec![Parameter {
-                span: Span::new(4, 5, 1, 5),
-                name: "a".to_string(),
-                ty: Some(Type::Simple("Int".to_string())),
-                default: None,
-                mutability: Mutability::Immutable,
-            }],
-            return_type: Some(Type::Simple("Int".to_string())),
-            body: Block::default(),
-            visibility: Visibility::Private,
-            effect: None,
-            decorators: vec![],
-            attributes: vec![],
-        };
-        assert_eq!(func.name, "add");
-        assert_eq!(func.params.len(), 1);
-    }
-
-    #[test]
-    fn test_generic_function_def() {
-        let func = FunctionDef {
-            span: Span::new(0, 20, 1, 1),
-            name: "identity".to_string(),
-            generic_params: vec!["T".to_string()],
-            params: vec![Parameter {
-                span: Span::new(10, 11, 1, 11),
-                name: "x".to_string(),
-                ty: Some(Type::Simple("T".to_string())),
-                default: None,
-                mutability: Mutability::Immutable,
-            }],
-            return_type: Some(Type::Simple("T".to_string())),
-            body: Block::default(),
-            visibility: Visibility::Private,
-            effect: None,
-            decorators: vec![],
-            attributes: vec![],
-        };
-        assert_eq!(func.name, "identity");
-        assert_eq!(func.generic_params, vec!["T"]);
-    }
-
-    #[test]
-    fn test_generic_struct_def() {
-        let s = StructDef {
-            span: Span::new(0, 30, 1, 1),
-            name: "Box".to_string(),
-            generic_params: vec!["T".to_string()],
-            fields: vec![Field {
-                span: Span::new(10, 20, 2, 5),
-                name: "value".to_string(),
-                ty: Type::Simple("T".to_string()),
-                default: None,
-                mutability: Mutability::Immutable,
-                visibility: Visibility::Private,
-            }],
-            visibility: Visibility::Private,
-            attributes: vec![],
-        };
-        assert_eq!(s.name, "Box");
-        assert_eq!(s.generic_params, vec!["T"]);
-    }
-}
+#[path = "ast_tests.rs"]
+mod tests;

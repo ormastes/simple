@@ -10,7 +10,9 @@ inductive Effect
 def is_async (e : Effect) : Bool :=
   match e with
   | Effect.wait => false
-  | _ => true
+  -- Explicit: compute and io are async-safe
+  | Effect.compute => true
+  | Effect.io => true
 
 def pipelineSafe (es : List Effect) : Prop :=
   ∀ e, e ∈ es → is_async e = true

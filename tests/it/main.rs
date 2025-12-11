@@ -14,6 +14,7 @@ fn init() {
 }
 
 mod compiler_integration;
+mod compiler_integration2;
 mod driver_integration;
 
 #[test]

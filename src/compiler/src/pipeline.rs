@@ -30,6 +30,7 @@ use tracing::instrument;
 use crate::codegen::Codegen;
 use crate::hir;
 use crate::interpreter::evaluate_module;
+use crate::lint::{LintChecker, LintConfig, LintDiagnostic};
 use crate::mir;
 use crate::value::FUNC_MAIN;
 use crate::project::ProjectContext;
@@ -40,35 +41,92 @@ pub struct CompilerPipeline {
     gc: Option<Arc<dyn GcAllocator>>,
     /// Optional project context for multi-file compilation
     project: Option<ProjectContext>,
+    /// Lint configuration (can be set independently of project)
+    lint_config: Option<LintConfig>,
+    /// Lint diagnostics from the last compilation
+    lint_diagnostics: Vec<LintDiagnostic>,
 }
 
 impl CompilerPipeline {
     pub fn new() -> Result<Self, CompileError> {
-        Ok(Self { gc: None, project: None })
+        Ok(Self {
+            gc: None,
+            project: None,
+            lint_config: None,
+            lint_diagnostics: Vec::new(),
+        })
     }
 
     pub fn with_gc(gc: Arc<dyn GcAllocator>) -> Result<Self, CompileError> {
-        Ok(Self { gc: Some(gc), project: None })
+        Ok(Self {
+            gc: Some(gc),
+            project: None,
+            lint_config: None,
+            lint_diagnostics: Vec::new(),
+        })
     }
 
     /// Create a pipeline with a project context
     pub fn with_project(project: ProjectContext) -> Result<Self, CompileError> {
-        Ok(Self { gc: None, project: Some(project) })
+        let lint_config = Some(project.lint_config.clone());
+        Ok(Self {
+            gc: None,
+            project: Some(project),
+            lint_config,
+            lint_diagnostics: Vec::new(),
+        })
     }
 
     /// Create a pipeline with both GC and project context
     pub fn with_gc_and_project(gc: Arc<dyn GcAllocator>, project: ProjectContext) -> Result<Self, CompileError> {
-        Ok(Self { gc: Some(gc), project: Some(project) })
+        let lint_config = Some(project.lint_config.clone());
+        Ok(Self {
+            gc: Some(gc),
+            project: Some(project),
+            lint_config,
+            lint_diagnostics: Vec::new(),
+        })
     }
 
     /// Set the project context
     pub fn set_project(&mut self, project: ProjectContext) {
+        self.lint_config = Some(project.lint_config.clone());
         self.project = Some(project);
     }
 
     /// Get the project context if set
     pub fn project(&self) -> Option<&ProjectContext> {
         self.project.as_ref()
+    }
+
+    /// Set the lint configuration explicitly
+    pub fn set_lint_config(&mut self, config: LintConfig) {
+        self.lint_config = Some(config);
+    }
+
+    /// Get the lint configuration
+    pub fn lint_config(&self) -> Option<&LintConfig> {
+        self.lint_config.as_ref()
+    }
+
+    /// Get lint diagnostics from the last compilation
+    pub fn lint_diagnostics(&self) -> &[LintDiagnostic] {
+        &self.lint_diagnostics
+    }
+
+    /// Take lint diagnostics (clears internal storage)
+    pub fn take_lint_diagnostics(&mut self) -> Vec<LintDiagnostic> {
+        std::mem::take(&mut self.lint_diagnostics)
+    }
+
+    /// Check if the last compilation had lint errors
+    pub fn has_lint_errors(&self) -> bool {
+        self.lint_diagnostics.iter().any(|d| d.is_error())
+    }
+
+    /// Check if the last compilation had lint warnings
+    pub fn has_lint_warnings(&self) -> bool {
+        self.lint_diagnostics.iter().any(|d| d.is_warning())
     }
 
     /// Compile a Simple source file to an SMF at `out`.
@@ -104,13 +162,20 @@ impl CompilerPipeline {
     /// Compile source string to SMF bytes in memory (no disk I/O).
     ///
     /// This uses the interpreter mode which supports all language features.
+    /// Lint diagnostics are stored and can be retrieved via `lint_diagnostics()`.
     #[instrument(skip(self, source))]
     pub fn compile_source_to_memory(&mut self, source: &str) -> Result<Vec<u8>, CompileError> {
+        // Clear previous lint diagnostics
+        self.lint_diagnostics.clear();
+
         // Parse to ensure the source is syntactically valid.
         let mut parser = simple_parser::Parser::new(source);
         let module = parser
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
+
+        // Run lint checks
+        self.run_lint_checks(&module.items)?;
 
         // Type inference/checking (features #13/#14 scaffolding)
         type_check(&module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
@@ -119,6 +184,33 @@ impl CompilerPipeline {
         let main_value = evaluate_module(&module.items)?;
 
         Ok(generate_smf_bytes(main_value, self.gc.as_ref()))
+    }
+
+    /// Run lint checks on AST items.
+    ///
+    /// Stores diagnostics in `self.lint_diagnostics`.
+    /// Returns an error if any lint is set to deny level.
+    fn run_lint_checks(&mut self, items: &[simple_parser::ast::Node]) -> Result<(), CompileError> {
+        let mut checker = if let Some(ref config) = self.lint_config {
+            LintChecker::with_config(config.clone())
+        } else {
+            LintChecker::new()
+        };
+
+        checker.check_module(items);
+        self.lint_diagnostics = checker.take_diagnostics();
+
+        // If any lint has deny level, return an error
+        if self.has_lint_errors() {
+            let errors: Vec<String> = self.lint_diagnostics
+                .iter()
+                .filter(|d| d.is_error())
+                .map(|d| d.format())
+                .collect();
+            return Err(CompileError::Lint(errors.join("\n")));
+        }
+
+        Ok(())
     }
 
     /// Compile a Simple source file to an SMF at `out` using native codegen.
@@ -137,25 +229,32 @@ impl CompilerPipeline {
     ///
     /// This generates actual machine code rather than using the interpreter.
     /// The resulting SMF can be executed directly.
+    /// Lint diagnostics are stored and can be retrieved via `lint_diagnostics()`.
     #[instrument(skip(self, source))]
     pub fn compile_source_to_memory_native(
         &mut self,
         source: &str,
     ) -> Result<Vec<u8>, CompileError> {
+        // Clear previous lint diagnostics
+        self.lint_diagnostics.clear();
+
         // 1. Parse source to AST
         let mut parser = simple_parser::Parser::new(source);
         let ast_module = parser
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
 
-        // 2. Type check
+        // 2. Run lint checks
+        self.run_lint_checks(&ast_module.items)?;
+
+        // 3. Type check
         type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
 
-        // 3. Lower AST to HIR
+        // 4. Lower AST to HIR
         let hir_module = hir::lower(&ast_module)
             .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
 
-        // 4. Lower HIR to MIR
+        // 5. Lower HIR to MIR
         let mir_module = mir::lower_to_mir(&hir_module)
             .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
 
@@ -170,13 +269,13 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
-        // 5. Generate machine code via Cranelift
+        // 6. Generate machine code via Cranelift
         let codegen = Codegen::new().map_err(|e| CompileError::Codegen(format!("{e}")))?;
         let object_code = codegen
             .compile_module(&mir_module)
             .map_err(|e| CompileError::Codegen(format!("{e}")))?;
 
-        // 6. Wrap object code in SMF format
+        // 7. Wrap object code in SMF format
         Ok(generate_smf_from_object(&object_code, self.gc.as_ref()))
     }
 }
@@ -538,5 +637,134 @@ mod tests {
         assert!(!text.is_empty(), "Extracted .text section is empty");
         eprintln!("Extracted .text section size: {} bytes", text.len());
         eprintln!("First 16 bytes: {:02x?}", &text[0..16.min(text.len())]);
+    }
+
+    // ============== Lint Integration Tests ==============
+
+    #[test]
+    fn test_pipeline_lint_warnings_collected() {
+        // Public function with primitive param should generate warning
+        let source = r#"
+pub fn get_value(x: i64) -> i64:
+    return x
+
+main = 0
+"#;
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        let _ = pipeline.compile_source_to_memory(source);
+
+        // Should have lint warnings (default level is Warn)
+        assert!(pipeline.has_lint_warnings());
+        assert!(!pipeline.has_lint_errors());
+
+        let diagnostics = pipeline.lint_diagnostics();
+        assert!(!diagnostics.is_empty());
+        // Should warn about primitive_api for both param and return type
+        assert!(diagnostics.iter().any(|d| d.message.contains("i64")));
+    }
+
+    #[test]
+    fn test_pipeline_lint_deny_fails_compilation() {
+        // Public function with primitive param + deny level should fail
+        let source = r#"
+pub fn get_value(x: i64) -> i64:
+    return x
+
+main = 0
+"#;
+        let mut config = LintConfig::new();
+        config.set_level(crate::lint::LintName::PrimitiveApi, crate::lint::LintLevel::Deny);
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        pipeline.set_lint_config(config);
+
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_err());
+
+        match result {
+            Err(CompileError::Lint(msg)) => {
+                assert!(msg.contains("primitive"));
+            }
+            _ => panic!("Expected Lint error"),
+        }
+    }
+
+    #[test]
+    fn test_pipeline_lint_allow_suppresses() {
+        // With allow level, no warnings/errors should be generated
+        let source = r#"
+pub fn get_value(x: i64) -> i64:
+    return x
+
+main = 0
+"#;
+        let mut config = LintConfig::new();
+        config.set_level(crate::lint::LintName::PrimitiveApi, crate::lint::LintLevel::Allow);
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        pipeline.set_lint_config(config);
+
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_ok());
+
+        // No warnings or errors
+        assert!(!pipeline.has_lint_warnings());
+        assert!(!pipeline.has_lint_errors());
+    }
+
+    #[test]
+    fn test_pipeline_private_function_no_lint() {
+        // Private functions don't trigger primitive_api lint
+        let source = r#"
+fn internal_compute(x: i64) -> i64:
+    return x
+
+main = 0
+"#;
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_ok());
+
+        // No warnings for private functions
+        assert!(!pipeline.has_lint_warnings());
+    }
+
+    #[test]
+    fn test_pipeline_diagnostics_cleared_on_recompile() {
+        let source_with_warning = r#"
+pub fn get_value(x: i64) -> i64:
+    return x
+
+main = 0
+"#;
+        let source_clean = r#"
+main = 42
+"#;
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+
+        // First compile - should have warnings
+        let _ = pipeline.compile_source_to_memory(source_with_warning);
+        assert!(pipeline.has_lint_warnings());
+
+        // Second compile - should clear previous diagnostics
+        let _ = pipeline.compile_source_to_memory(source_clean);
+        assert!(!pipeline.has_lint_warnings());
+    }
+
+    #[test]
+    fn test_pipeline_native_lint_integration() {
+        // Native compilation should also run lint checks
+        let source = r#"
+pub fn compute(x: i64) -> i64:
+    return x * 2
+
+main = 0
+"#;
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        let _ = pipeline.compile_source_to_memory_native(source);
+
+        // Should have lint warnings
+        assert!(pipeline.has_lint_warnings());
     }
 }

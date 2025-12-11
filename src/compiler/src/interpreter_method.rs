@@ -391,41 +391,7 @@ fn evaluate_method_call(
                 // pool.submit(func, arg) - submit a task to the pool
                 let func_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
                 let arg_val = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
-
-                // For proper execution, we need to call the function in a thread
-                // Clone all the context needed
-                let func_clone = func_val.clone();
-                let arg_clone = arg_val.clone();
-                let _env_clone = env.clone();
-                let funcs_clone = functions.clone();
-                let classes_clone = classes.clone();
-                let enums_clone = enums.clone();
-                let impls_clone = impl_methods.clone();
-
-                let future = FutureValue::new(move || {
-                    match func_clone {
-                        Value::Function { ref def, ref captured_env, .. } => {
-                            let mut local_env = captured_env.clone();
-                            if let Some(first_param) = def.params.first() {
-                                local_env.insert(first_param.name.clone(), arg_clone);
-                            }
-                            match exec_block(&def.body, &mut local_env, &funcs_clone, &classes_clone, &enums_clone, &impls_clone) {
-                                Ok(Control::Return(v)) => Ok(v),
-                                Ok(_) => Ok(Value::Nil),
-                                Err(e) => Err(format!("{:?}", e)),
-                            }
-                        }
-                        Value::Lambda { ref params, ref body, ref env } => {
-                            let mut local_env = env.clone();
-                            if let Some(first_param) = params.first() {
-                                local_env.insert(first_param.clone(), arg_clone);
-                            }
-                            evaluate_expr(&body, &local_env, &funcs_clone, &classes_clone, &enums_clone, &impls_clone)
-                                .map_err(|e| format!("{:?}", e))
-                        }
-                        _ => Err("submit expects a function or lambda".into()),
-                    }
-                });
+                let future = spawn_future_with_callable(func_val, arg_val, functions, classes, enums, impl_methods);
                 return Ok(Value::Future(future));
             }
             _ => return Err(CompileError::Semantic(format!("unknown method {method} on ThreadPool"))),

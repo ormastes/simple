@@ -20,77 +20,49 @@ pub trait SimdIntrinsics {
     fn simd_div(a: Self, b: Self) -> Self;
 }
 
-impl SimdIntrinsics for F32x4 {
-    #[inline]
-    fn simd_add(a: Self, b: Self) -> Self {
-        a + b
-    }
-
-    #[inline]
-    fn simd_sub(a: Self, b: Self) -> Self {
-        a - b
-    }
-
-    #[inline]
-    fn simd_mul(a: Self, b: Self) -> Self {
-        a * b
-    }
-
-    #[inline]
-    fn simd_div(a: Self, b: Self) -> Self {
-        a / b
-    }
+/// Implement SimdIntrinsics for types that support standard arithmetic operators.
+macro_rules! impl_simd_intrinsics_std {
+    ($($ty:ty),+) => {
+        $(
+            impl SimdIntrinsics for $ty {
+                #[inline]
+                fn simd_add(a: Self, b: Self) -> Self { a + b }
+                #[inline]
+                fn simd_sub(a: Self, b: Self) -> Self { a - b }
+                #[inline]
+                fn simd_mul(a: Self, b: Self) -> Self { a * b }
+                #[inline]
+                fn simd_div(a: Self, b: Self) -> Self { a / b }
+            }
+        )+
+    };
 }
 
-impl SimdIntrinsics for F32x8 {
-    #[inline]
-    fn simd_add(a: Self, b: Self) -> Self {
-        a + b
-    }
+impl_simd_intrinsics_std!(F32x4, F32x8);
 
-    #[inline]
-    fn simd_sub(a: Self, b: Self) -> Self {
-        a - b
-    }
-
-    #[inline]
-    fn simd_mul(a: Self, b: Self) -> Self {
-        a * b
-    }
-
-    #[inline]
-    fn simd_div(a: Self, b: Self) -> Self {
-        a / b
-    }
+/// Implement SimdIntrinsics for types with custom div (integer types without Div trait)
+macro_rules! impl_simd_intrinsics_int {
+    ($ty:ty, $div_expr:expr) => {
+        impl SimdIntrinsics for $ty {
+            #[inline]
+            fn simd_add(a: Self, b: Self) -> Self { a + b }
+            #[inline]
+            fn simd_sub(a: Self, b: Self) -> Self { a - b }
+            #[inline]
+            fn simd_mul(a: Self, b: Self) -> Self { a * b }
+            #[inline]
+            fn simd_div(a: Self, b: Self) -> Self { $div_expr(a, b) }
+        }
+    };
 }
 
-impl SimdIntrinsics for I32x4 {
-    #[inline]
-    fn simd_add(a: Self, b: Self) -> Self {
-        a + b
-    }
-
-    #[inline]
-    fn simd_sub(a: Self, b: Self) -> Self {
-        a - b
-    }
-
-    #[inline]
-    fn simd_mul(a: Self, b: Self) -> Self {
-        a * b
-    }
-
-    #[inline]
-    fn simd_div(a: Self, b: Self) -> Self {
-        // Integer division lane-wise
-        I32x4([
-            a.0[0] / b.0[0],
-            a.0[1] / b.0[1],
-            a.0[2] / b.0[2],
-            a.0[3] / b.0[3],
-        ])
-    }
-}
+// I32x4 needs lane-wise division since it doesn't implement Div
+impl_simd_intrinsics_int!(I32x4, |a: I32x4, b: I32x4| I32x4([
+    a.0[0] / b.0[0],
+    a.0[1] / b.0[1],
+    a.0[2] / b.0[2],
+    a.0[3] / b.0[3],
+]));
 
 /// Represents a SIMD instruction for the MIR/codegen layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

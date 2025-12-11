@@ -43,6 +43,45 @@ pub mod test_helpers {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Setup a project with a single path dependency
+    /// Returns (temp_dir, dep_dir)
+    pub fn setup_with_path_dep(prefix: &str, name: &str, dep_name: &str) -> (PathBuf, PathBuf) {
+        use crate::manifest::{Dependency, Manifest};
+
+        let temp_dir = setup_test_project(prefix, name);
+        let dep_dir = temp_dir.join(dep_name);
+        fs::create_dir_all(&dep_dir).unwrap();
+        init_project(&dep_dir, Some(dep_name)).unwrap();
+
+        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        manifest.add_dependency(dep_name, Dependency::path(&format!("./{}", dep_name)));
+        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+
+        (temp_dir, dep_dir)
+    }
+
+    /// Setup a project with two independent path dependencies
+    /// Returns (temp_dir, lib_a_path, lib_b_path)
+    pub fn setup_two_path_deps(prefix: &str, name: &str) -> (PathBuf, PathBuf, PathBuf) {
+        use crate::manifest::{Dependency, Manifest};
+
+        let temp_dir = setup_test_project(prefix, name);
+
+        let lib_a = temp_dir.join("lib_a");
+        let lib_b = temp_dir.join("lib_b");
+        fs::create_dir_all(&lib_a).unwrap();
+        fs::create_dir_all(&lib_b).unwrap();
+        init_project(&lib_a, Some("lib_a")).unwrap();
+        init_project(&lib_b, Some("lib_b")).unwrap();
+
+        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
+        manifest.add_dependency("lib_a", Dependency::path("./lib_a"));
+        manifest.add_dependency("lib_b", Dependency::path("./lib_b"));
+        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+
+        (temp_dir, lib_a, lib_b)
+    }
+
     /// Setup a transitive dependency chain: main -> lib_a -> lib_b
     /// Returns (temp_dir, lib_a_path, lib_b_path)
     pub fn setup_transitive_deps(prefix: &str, name: &str) -> (PathBuf, PathBuf, PathBuf) {

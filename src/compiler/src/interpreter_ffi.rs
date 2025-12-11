@@ -13,7 +13,7 @@ use simple_parser::ast::{ClassDef, Expr, FunctionDef, Node, Visibility};
 use simple_parser::token::Span;
 
 use crate::error::CompileError;
-use crate::interpreter::{evaluate_expr, evaluate_module, exec_block, Control, Enums, ImplMethods};
+use crate::interpreter::{evaluate_expr, evaluate_module, exec_block, control_to_value, Enums, ImplMethods};
 use crate::value::{Env, Value};
 use crate::value_bridge::BridgeValue;
 
@@ -300,13 +300,7 @@ fn call_interpreted_function(
         enums,
         impl_methods,
     );
-    match result {
-        Ok(Control::Return(v)) => Ok(v),
-        Ok(Control::Next) => Ok(Value::Nil),
-        Ok(Control::Break(_)) => Err(CompileError::Semantic("break outside loop".into())),
-        Ok(Control::Continue) => Err(CompileError::Semantic("continue outside loop".into())),
-        Err(e) => Err(e),
-    }
+    control_to_value(result)
 }
 
 /// Evaluate a single expression via the interpreter.

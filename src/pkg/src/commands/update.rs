@@ -88,25 +88,11 @@ pub fn update_package(dir: &Path, name: &str) -> PkgResult<UpdateResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::init::init_project;
-    use crate::commands::test_helpers::{cleanup_test_project, setup_test_project};
-    use crate::manifest::Dependency;
-    use std::fs;
+    use crate::commands::test_helpers::{cleanup_test_project, setup_test_project, setup_with_path_dep, setup_two_path_deps};
 
     #[test]
     fn test_update_all() {
-        let temp_dir = setup_test_project("update", "update-all");
-
-        // Create a path dependency
-        let dep_dir = temp_dir.join("mylib");
-        fs::create_dir_all(&dep_dir).unwrap();
-        init_project(&dep_dir, Some("mylib")).unwrap();
-
-        // Add and install
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
-        manifest.add_dependency("mylib", Dependency::path("./mylib"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
-
+        let (temp_dir, _dep_dir) = setup_with_path_dep("update", "update-all", "mylib");
         install_dependencies(&temp_dir).unwrap();
 
         // Update all
@@ -119,23 +105,7 @@ mod tests {
 
     #[test]
     fn test_update_specific_package() {
-        let temp_dir = setup_test_project("update", "update-specific");
-
-        // Create two path dependencies
-        let lib_a = temp_dir.join("lib_a");
-        let lib_b = temp_dir.join("lib_b");
-
-        fs::create_dir_all(&lib_a).unwrap();
-        fs::create_dir_all(&lib_b).unwrap();
-        init_project(&lib_a, Some("lib_a")).unwrap();
-        init_project(&lib_b, Some("lib_b")).unwrap();
-
-        // Add both
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
-        manifest.add_dependency("lib_a", Dependency::path("./lib_a"));
-        manifest.add_dependency("lib_b", Dependency::path("./lib_b"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
-
+        let (temp_dir, _lib_a, _lib_b) = setup_two_path_deps("update", "update-specific");
         install_dependencies(&temp_dir).unwrap();
 
         // Update just lib_a
@@ -157,17 +127,7 @@ mod tests {
 
     #[test]
     fn test_update_removes_old_lock() {
-        let temp_dir = setup_test_project("update", "update-lock");
-
-        // Create a path dependency
-        let dep_dir = temp_dir.join("mylib");
-        fs::create_dir_all(&dep_dir).unwrap();
-        init_project(&dep_dir, Some("mylib")).unwrap();
-
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
-        manifest.add_dependency("mylib", Dependency::path("./mylib"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
-
+        let (temp_dir, _dep_dir) = setup_with_path_dep("update", "update-lock", "mylib");
         install_dependencies(&temp_dir).unwrap();
 
         // Lock file should exist
