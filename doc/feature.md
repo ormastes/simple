@@ -95,7 +95,7 @@
 | 89 | **Composite Units** (`unit velocity = length / time`) | 4 | 4 | Type System, Codegen |
 | 90 | **Composite Type Inference** (auto-infer `length / time → velocity`) | 5 | 4 | Type System |
 | 91 | **Standalone Units** (`unit UserId: i64 as uid`) | 3 | 2 | Parser, Type System |
-| 92 | **Primitive API Warnings** (warn on public primitive fields/params/returns) | 4 | 2 | Semantic Analysis, Linter |
+| 92 | **Primitive API Warnings** (warn on public primitive fields/params/returns) | 4 | 2 | Semantic Analysis, Linter | **COMPLETE** |
 | 93 | **Hexadecimal Literals** (`0xFF`, `0x1A2B`) | 5 | 1 | Lexer |
 | 94 | **Binary Literals** (`0b1010`, `0b1111_0000`) | 4 | 1 | Lexer |
 | 95 | **Octal Literals** (`0o755`, `0o17`) | 3 | 1 | Lexer |
@@ -135,6 +135,26 @@
 | 129 | **GPU Shared Memory** (`shared let` for work group local storage) | 4 | 4 | Codegen, SPIR-V |
 | 130 | **Parallel Iterators** (par_map, par_reduce, par_filter) | 4 | 3 | Runtime, SIMD/GPU Backend |
 | 131 | **Hardware Detection** (SIMD/GPU feature queries, fallbacks) | 4 | 2 | Runtime |
+| 200 | **Bare String Lint** (`bare_string` warning for public APIs using `str`) | 4 | 2 | Semantic Analysis, Linter |
+| 201 | **String Unit Suffixes** (`"path"_file`, `"ip"_ip` string postfixes) | 4 | 2 | Lexer, Parser |
+| 202 | **FilePath Unit Type** (platform-aware file paths with mingw support) | 4 | 3 | Parser, Type System, Stdlib |
+| 203 | **Drive Letter Support** (mingw-style `C:/path` parsing) | 3 | 2 | FilePath implementation |
+| 204 | **IpAddr Unit Type** (IPv4/IPv6 address validation) | 4 | 3 | Parser, Type System, Stdlib |
+| 205 | **Port Unit Type** (network port with u16 base) | 4 | 1 | Parser, Type System |
+| 206 | **SocketAddr Unit Type** (IP + Port combination) | 4 | 2 | Type System |
+| 207 | **Url Unit Type** (generic URL with components) | 4 | 3 | Type System, Stdlib |
+| 208 | **HttpUrl Unit Type** (HTTP/HTTPS URL validation) | 4 | 2 | Type System |
+| 209 | **FtpUrl Unit Type** (FTP URL validation) | 3 | 2 | Type System |
+| 210 | **TCP Async API** (TcpListener, TcpStream) | 5 | 4 | Runtime, Stdlib, async |
+| 211 | **UDP Async API** (UdpSocket) | 4 | 3 | Runtime, Stdlib, async |
+| 212 | **HTTP Client** (HttpClient, HttpRequest, HttpResponse) | 5 | 4 | Stdlib, TCP, TLS |
+| 213 | **FTP Client** (FtpClient with upload/download) | 3 | 4 | Stdlib, TCP |
+| 214 | **StatusCode Unit** (HTTP status code type) | 3 | 1 | Type System |
+| 215 | **HeaderName/Value Units** (HTTP header types) | 3 | 1 | Type System |
+| 216 | **ByteCount Unit Family** (bytes, kb, mb, gb, tb) | 4 | 2 | Type System |
+| 217 | **async_nogc Default Profile** (async + no_gc as default) | 4 | 1 | Compiler, Profile System |
+| 218 | **File System Async API** (async fs read/write/list) | 5 | 4 | Runtime, Stdlib, async |
+| 219 | **Multi-Base Unit Types** (`unit IpAddr: str | u32 as ip` - multiple literal forms) | 4 | 3 | Parser, Type System |
 
 ### Difficulty-5 Breakdowns
 
@@ -180,6 +200,39 @@
 | 126 | Kernel caching and JIT | 3 | Runtime |
 | 127 | Work group size computation | 2 | Runtime |
 | 127 | Argument marshalling (buffer refs) | 3 | Runtime |
+
+### Primitive API Lint Implementation (#92)
+
+| Sub-feature | Difficulty | Scope | Status |
+|-------------|------------|-------|--------|
+| LintLevel enum (Allow, Warn, Deny) | 1 | Compiler | **COMPLETE** |
+| LintName enum (PrimitiveApi, BareBool) | 1 | Compiler | **COMPLETE** |
+| LintConfig with attribute parsing | 2 | Compiler | **COMPLETE** |
+| LintChecker with AST traversal | 2 | Compiler | **COMPLETE** |
+| Primitive type detection (i8-i64, u8-u64, f32-f64, bool) | 1 | Compiler | **COMPLETE** |
+| Public function parameter checking | 2 | Compiler | **COMPLETE** |
+| Public function return type checking | 2 | Compiler | **COMPLETE** |
+| Public struct/class field checking | 2 | Compiler | **COMPLETE** |
+| Public enum variant field checking | 2 | Compiler | **COMPLETE** |
+| Public trait method signature checking | 2 | Compiler | **COMPLETE** |
+| Nested type checking (Option[T], Array[T], etc.) | 2 | Compiler | **COMPLETE** |
+| Attribute inheritance (#[deny/warn/allow]) | 2 | Compiler | **COMPLETE** |
+| Diagnostic formatting with suggestions | 1 | Compiler | **COMPLETE** |
+| Integration with Pipeline | 2 | Compiler | **COMPLETE** |
+| simple.toml lint configuration | 2 | Compiler | **COMPLETE** |
+
+**Checked Primitive Types:**
+- Numeric: `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `f32`, `f64`
+- Boolean: `bool` (separate `bare_bool` lint with enum suggestion)
+- String: `str`, `String` (separate `bare_string` lint with unit type suggestion)
+
+**Lint Attributes:**
+- `#[allow(primitive_api)]` - Suppress warning for low-level/FFI code
+- `#[warn(primitive_api)]` - Emit warning (default)
+- `#[deny(primitive_api)]` - Treat as compile error (recommended for stdlib)
+- `#[allow(bare_string)]` - Allow bare strings (for fmt/log modules)
+- `#[warn(bare_string)]` - Emit warning for bare strings (default)
+- `#[deny(bare_string)]` - Treat as compile error (recommended for stdlib)
 
 ### Module System Implementation Progress (#104-111)
 

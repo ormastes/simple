@@ -52,6 +52,8 @@ pub enum TokenKind {
     String(String),             // Legacy: plain string (for backward compat)
     FString(Vec<FStringToken>), // "hello {expr}" interpolated strings (now default for double quotes)
     RawString(String),          // 'raw string' - no escapes, no interpolation
+    TypedString(String, String), // "value"_suffix - string with unit suffix (e.g., "127.0.0.1"_ip)
+    TypedRawString(String, String), // 'value'_suffix - raw string with unit suffix
     Bool(bool),
     Nil,
     Symbol(String), // :symbol

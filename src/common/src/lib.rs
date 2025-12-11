@@ -6,7 +6,8 @@ pub mod config_env;
 pub use config_env::ConfigEnv;
 
 pub mod manual;
-pub use manual::{Handle, HandlePool, ManualGc, Shared, Unique, WeakPtr};
+pub mod manual_mem;
+pub use manual_mem::{Handle, HandlePool, ManualGc, Shared, Unique, WeakPtr};
 
 pub mod actor;
 pub use actor::{ActorHandle, ActorSpawner, Message, ThreadSpawner};

@@ -203,17 +203,9 @@ mod tests {
 
     #[test]
     fn test_list_with_deps() {
-        let temp_dir = setup_test_project("list", "list-deps");
+        use crate::commands::test_helpers::setup_with_path_dep;
 
-        // Create a path dependency
-        let dep_dir = temp_dir.join("mylib");
-        fs::create_dir_all(&dep_dir).unwrap();
-        init_project(&dep_dir, Some("mylib")).unwrap();
-
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
-        manifest.add_dependency("mylib", Dependency::path("./mylib"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
-
+        let (temp_dir, _dep_dir) = setup_with_path_dep("list", "list-deps", "mylib");
         install_dependencies(&temp_dir).unwrap();
 
         let packages = list_dependencies(&temp_dir).unwrap();
@@ -227,17 +219,9 @@ mod tests {
 
     #[test]
     fn test_tree_simple() {
-        let temp_dir = setup_test_project("list", "tree-simple");
+        use crate::commands::test_helpers::setup_with_path_dep;
 
-        // Create a path dependency
-        let dep_dir = temp_dir.join("mylib");
-        fs::create_dir_all(&dep_dir).unwrap();
-        init_project(&dep_dir, Some("mylib")).unwrap();
-
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
-        manifest.add_dependency("mylib", Dependency::path("./mylib"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
-
+        let (temp_dir, _dep_dir) = setup_with_path_dep("list", "tree-simple", "mylib");
         install_dependencies(&temp_dir).unwrap();
 
         let tree = dependency_tree(&temp_dir).unwrap();

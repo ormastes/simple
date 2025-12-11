@@ -95,14 +95,19 @@ impl LowererState {
         }
     }
 
+    /// Returns an error if in Idle state
+    fn idle_state_error() -> MirLowerError {
+        MirLowerError::InvalidState {
+            expected: "Lowering".to_string(),
+            found: "Idle".to_string(),
+        }
+    }
+
     /// Get loop stack (returns error if idle)
     pub fn try_loop_stack(&self) -> MirLowerResult<&Vec<LoopContext>> {
         match self {
             LowererState::Lowering { loop_stack, .. } => Ok(loop_stack),
-            LowererState::Idle => Err(MirLowerError::InvalidState {
-                expected: "Lowering".to_string(),
-                found: "Idle".to_string(),
-            }),
+            LowererState::Idle => Err(Self::idle_state_error()),
         }
     }
 
@@ -110,10 +115,7 @@ impl LowererState {
     pub fn try_loop_stack_mut(&mut self) -> MirLowerResult<&mut Vec<LoopContext>> {
         match self {
             LowererState::Lowering { loop_stack, .. } => Ok(loop_stack),
-            LowererState::Idle => Err(MirLowerError::InvalidState {
-                expected: "Lowering".to_string(),
-                found: "Idle".to_string(),
-            }),
+            LowererState::Idle => Err(Self::idle_state_error()),
         }
     }
 
@@ -124,10 +126,7 @@ impl LowererState {
                 *current_block = block;
                 Ok(())
             }
-            LowererState::Idle => Err(MirLowerError::InvalidState {
-                expected: "Lowering".to_string(),
-                found: "Idle".to_string(),
-            }),
+            LowererState::Idle => Err(Self::idle_state_error()),
         }
     }
 
@@ -239,43 +238,20 @@ impl MirLowerer {
 
     /// Set current block - explicit state mutation
     fn set_current_block(&mut self, block: BlockId) -> MirLowerResult<()> {
-        match &mut self.state {
-            LowererState::Lowering { current_block, .. } => {
-                *current_block = block;
-                Ok(())
-            }
-            LowererState::Idle => Err(MirLowerError::InvalidState {
-                expected: "Lowering".to_string(),
-                found: "Idle".to_string(),
-            }),
-        }
+        self.state.try_set_current_block(block)
     }
 
     /// Push loop context - for break/continue handling
     fn push_loop(&mut self, ctx: LoopContext) -> MirLowerResult<()> {
-        match &mut self.state {
-            LowererState::Lowering { loop_stack, .. } => {
-                loop_stack.push(ctx);
-                Ok(())
-            }
-            LowererState::Idle => Err(MirLowerError::InvalidState {
-                expected: "Lowering".to_string(),
-                found: "Idle".to_string(),
-            }),
-        }
+        self.state.try_loop_stack_mut().map(|stack| stack.push(ctx))
     }
 
     /// Pop loop context
     fn pop_loop(&mut self) -> MirLowerResult<LoopContext> {
-        match &mut self.state {
-            LowererState::Lowering { loop_stack, .. } => {
-                loop_stack.pop().ok_or(MirLowerError::BreakOutsideLoop)
-            }
-            LowererState::Idle => Err(MirLowerError::InvalidState {
-                expected: "Lowering".to_string(),
-                found: "Idle".to_string(),
-            }),
-        }
+        self.state
+            .try_loop_stack_mut()?
+            .pop()
+            .ok_or(MirLowerError::BreakOutsideLoop)
     }
 
     /// Get current loop context (for break/continue)

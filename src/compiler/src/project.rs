@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::CompileError;
+use crate::lint::{LintConfig, LintLevel, LintName};
 use crate::module_resolver::ModuleResolver;
 
 /// Project context holding all project-level configuration
@@ -24,6 +25,8 @@ pub struct ProjectContext {
     pub features: HashSet<String>,
     /// Profile definitions: name -> (attributes, imports)
     pub profiles: HashMap<String, (Vec<String>, Vec<String>)>,
+    /// Lint configuration from simple.toml
+    pub lint_config: LintConfig,
 }
 
 impl ProjectContext {
@@ -62,6 +65,7 @@ impl ProjectContext {
             resolver,
             features: HashSet::new(),
             profiles: HashMap::new(),
+            lint_config: LintConfig::new(),
         })
     }
 
@@ -140,6 +144,20 @@ impl ProjectContext {
             }
         }
 
+        // Parse lint configuration
+        let mut lint_config = LintConfig::new();
+        if let Some(lint_table) = toml.get("lint").and_then(|v| v.as_table()) {
+            for (lint_name, level_value) in lint_table {
+                if let Some(lint) = LintName::from_str(lint_name) {
+                    if let Some(level_str) = level_value.as_str() {
+                        if let Some(level) = LintLevel::from_str(level_str) {
+                            lint_config.set_level(lint, level);
+                        }
+                    }
+                }
+            }
+        }
+
         // Create resolver with features and profiles
         let resolver = ModuleResolver::new(root.to_path_buf(), source_root.clone())
             .with_features(features.clone())
@@ -152,6 +170,7 @@ impl ProjectContext {
             resolver,
             features,
             profiles,
+            lint_config,
         })
     }
 
@@ -171,6 +190,7 @@ impl ProjectContext {
             resolver: ModuleResolver::single_file(file_path),
             features: HashSet::new(),
             profiles: HashMap::new(),
+            lint_config: LintConfig::new(),
         }
     }
 
@@ -210,6 +230,11 @@ impl ProjectContext {
     /// Get the main entry point file
     pub fn main_file(&self) -> PathBuf {
         self.source_root.join("main.spl")
+    }
+
+    /// Get the lint configuration
+    pub fn lint_config(&self) -> &LintConfig {
+        &self.lint_config
     }
 }
 
@@ -331,5 +356,55 @@ version = "1.0.0"
 
         let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
         assert_eq!(ctx.name, "myapp");
+    }
+
+    #[test]
+    fn test_lint_configuration() {
+        let dir = create_test_project();
+        let manifest = r#"
+[project]
+name = "myapp"
+
+[lint]
+primitive_api = "deny"
+bare_bool = "allow"
+"#;
+        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
+
+        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Deny);
+        assert_eq!(ctx.lint_config.get_level(LintName::BareBool), LintLevel::Allow);
+    }
+
+    #[test]
+    fn test_lint_configuration_warn() {
+        let dir = create_test_project();
+        let manifest = r#"
+[project]
+name = "myapp"
+
+[lint]
+primitive_api = "warn"
+"#;
+        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
+
+        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
+        // bare_bool uses default (Warn)
+        assert_eq!(ctx.lint_config.get_level(LintName::BareBool), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_lint_default_without_section() {
+        let dir = create_test_project();
+        let manifest = r#"
+[project]
+name = "myapp"
+"#;
+        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
+
+        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        // Without [lint] section, defaults apply
+        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
     }
 }

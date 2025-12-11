@@ -1,6 +1,6 @@
 //! Common execution core shared between Runner and Interpreter
 //!
-//! Eliminates duplication of GC setup, compilation, and execution logic.
+//! Eliminates duplication of GC setup, compilation, loading, and execution logic.
 
 use std::fs;
 use std::path::Path;
@@ -61,6 +61,10 @@ impl ExecCore {
         }
     }
 
+    // =========================================================================
+    // Compilation methods
+    // =========================================================================
+
     /// Compile source string to SMF file
     pub fn compile_source(&self, source: &str, out: &Path) -> Result<(), String> {
         let smf_bytes = self.compile_to_memory(source)?;
@@ -94,6 +98,10 @@ impl ExecCore {
             .map_err(|e| format!("compile failed: {e}"))
     }
 
+    // =========================================================================
+    // Loading methods
+    // =========================================================================
+
     /// Load an SMF module from file
     pub fn load_module(&self, path: &Path) -> Result<LoadedModule, String> {
         self.loader
@@ -108,63 +116,64 @@ impl ExecCore {
             .map_err(|e| format!("load failed: {e}"))
     }
 
+    // =========================================================================
+    // Unified execution helper (reduces duplication)
+    // =========================================================================
+
+    /// Execute a loaded module and collect GC afterward
+    fn execute_and_gc(&self, module: &LoadedModule) -> Result<i32, String> {
+        let exit = run_main(module)?;
+        self.collect_gc();
+        Ok(exit)
+    }
+
+    // =========================================================================
+    // Run methods (all use execute_and_gc internally)
+    // =========================================================================
+
     /// Compile and run source string, return exit code (uses temp file)
     pub fn run_source(&self, source: &str) -> Result<i32, String> {
         let tmp = TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
         let out = tmp.path().join("module.smf");
-
         self.compile_source(source, &out)?;
         let module = self.load_module(&out)?;
-        let exit = run_main(&module)?;
-        self.collect_gc();
-        Ok(exit)
+        self.execute_and_gc(&module)
     }
 
     /// Compile and run source string in memory (no disk I/O)
     pub fn run_source_in_memory(&self, source: &str) -> Result<i32, String> {
         let smf_bytes = self.compile_to_memory(source)?;
         let module = self.load_module_from_memory(&smf_bytes)?;
-        let exit = run_main(&module)?;
-        self.collect_gc();
-        Ok(exit)
+        self.execute_and_gc(&module)
     }
 
     /// Compile using native codegen and run source string (uses temp file)
     pub fn run_source_native(&self, source: &str) -> Result<i32, String> {
         let tmp = TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
         let out = tmp.path().join("module.smf");
-
         let smf_bytes = self.compile_to_memory_native(source)?;
         fs::write(&out, smf_bytes).map_err(|e| format!("write smf: {e}"))?;
         let module = self.load_module(&out)?;
-        let exit = run_main(&module)?;
-        self.collect_gc();
-        Ok(exit)
+        self.execute_and_gc(&module)
     }
 
     /// Compile using native codegen and run source string in memory (no disk I/O)
     pub fn run_source_in_memory_native(&self, source: &str) -> Result<i32, String> {
         let smf_bytes = self.compile_to_memory_native(source)?;
         let module = self.load_module_from_memory(&smf_bytes)?;
-        let exit = run_main(&module)?;
-        self.collect_gc();
-        Ok(exit)
+        self.execute_and_gc(&module)
     }
 
     /// Run SMF from memory buffer
     pub fn run_smf_from_memory(&self, bytes: &[u8]) -> Result<i32, String> {
         let module = self.load_module_from_memory(bytes)?;
-        let exit = run_main(&module)?;
-        self.collect_gc();
-        Ok(exit)
+        self.execute_and_gc(&module)
     }
 
     /// Run a pre-compiled SMF file directly
     pub fn run_smf(&self, path: &Path) -> Result<i32, String> {
         let module = self.load_module(path)?;
-        let exit = run_main(&module)?;
-        self.collect_gc();
-        Ok(exit)
+        self.execute_and_gc(&module)
     }
 
     /// Run a file, auto-detecting type by extension (.spl or .smf)
@@ -177,9 +186,7 @@ impl ExecCore {
                 let out_path = path.with_extension("smf");
                 self.compile_file(path, &out_path)?;
                 let module = self.load_module(&out_path)?;
-                let exit = run_main(&module)?;
-                self.collect_gc();
-                Ok(exit)
+                self.execute_and_gc(&module)
             }
             other => Err(format!(
                 "unsupported file extension '.{}': expected '.spl' or '.smf'",

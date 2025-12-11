@@ -551,3 +551,12 @@ The `#[gpu]` attribute triggers special compilation:
 2. **Occupancy**: Choose work group sizes for good GPU utilization
 3. **Memory coalescing**: Access patterns affect performance
 4. **Vectorization**: Compiler auto-vectorizes where possible
+
+---
+
+## Related Specifications
+
+- [Types](types.md)
+- [Memory and Ownership](memory.md)
+- [Standard Library](stdlib.md)
+- [Concurrency](concurrency.md)

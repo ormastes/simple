@@ -147,49 +147,14 @@ fn extract_crate_name(path: &Path) -> String {
 }
 
 /// Extract type name from impl line.
-fn extract_impl_type(line: &str) -> Option<String> {
-    // impl TypeName { or impl TypeName<T> {
-    let line = line.trim_start_matches("impl ");
-    let line = line.trim();
-
-    // Remove generic parameters
-    let type_name = if let Some(idx) = line.find('<') {
-        &line[..idx]
-    } else if let Some(idx) = line.find('{') {
-        &line[..idx]
-    } else if let Some(idx) = line.find(' ') {
-        &line[..idx]
-    } else {
-        line
-    };
-
-    let type_name = type_name.trim();
-    if type_name.is_empty() || type_name == "Default" {
-        None
-    } else {
-        Some(type_name.to_string())
-    }
-}
-
-/// Extract type name from struct/enum definition.
-fn extract_type_name(line: &str) -> Option<String> {
-    let line = line.trim_start_matches("pub struct ");
-    let line = line.trim_start_matches("pub enum ");
-    let line = line.trim();
-
-    let type_name = if let Some(idx) = line.find('<') {
-        &line[..idx]
-    } else if let Some(idx) = line.find('{') {
-        &line[..idx]
-    } else if let Some(idx) = line.find('(') {
-        &line[..idx]
-    } else if let Some(idx) = line.find(';') {
-        &line[..idx]
-    } else if let Some(idx) = line.find(' ') {
-        &line[..idx]
-    } else {
-        line
-    };
+/// Extract identifier from line, stopping at first delimiter
+fn extract_identifier(line: &str, delimiters: &[char]) -> Option<String> {
+    let type_name = delimiters
+        .iter()
+        .filter_map(|&c| line.find(c))
+        .min()
+        .map(|idx| &line[..idx])
+        .unwrap_or(line);
 
     let type_name = type_name.trim();
     if type_name.is_empty() {
@@ -197,6 +162,23 @@ fn extract_type_name(line: &str) -> Option<String> {
     } else {
         Some(type_name.to_string())
     }
+}
+
+fn extract_impl_type(line: &str) -> Option<String> {
+    // impl TypeName { or impl TypeName<T> {
+    let line = line.trim_start_matches("impl ").trim();
+    let result = extract_identifier(line, &['<', '{', ' ']);
+    // Filter out Default trait impl
+    result.filter(|s| s != "Default")
+}
+
+/// Extract type name from struct/enum definition.
+fn extract_type_name(line: &str) -> Option<String> {
+    let line = line
+        .trim_start_matches("pub struct ")
+        .trim_start_matches("pub enum ")
+        .trim();
+    extract_identifier(line, &['<', '{', '(', ';', ' '])
 }
 
 /// Extract function name from fn definition.

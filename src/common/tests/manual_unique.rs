@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use simple_common::manual::{HandlePool, ManualGc, Unique, WeakPtr};
+use simple_common::manual_mem::{HandlePool, ManualGc, Unique, WeakPtr};
 
 #[derive(Clone)]
 struct DropCounter {

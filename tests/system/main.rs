@@ -14,7 +14,18 @@ fn init() {
 }
 
 mod cli_tests;
+mod core_tests;
+mod coverage_tests;
+mod coverage_tests2;
+mod execution_tests;
+mod feature_tests_advanced;
+mod feature_tests_basic;
+mod integration_tests;
+mod integration_tests2;
+mod memory_tests;
 mod runner_tests;
+mod smf_tests;
+mod struct_coverage_tests;
 
 #[test]
 fn validate_config() {

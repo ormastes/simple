@@ -1,9 +1,24 @@
-//! Effect tracking for formal verification.
+//! Effect tracking for formal verification and production use.
 //!
-//! This module provides explicit effect tracking that maps directly to the
-//! Lean 4 formal verification models:
-//! - `verification/async_compile/` for blocking operation detection
-//! - `verification/nogc_compile/` for GC allocation detection
+//! This module is organized in two sections:
+//!
+//! ## Section 1: Lean-Aligned Core (for formal verification)
+//! Types and functions that map EXACTLY to the Lean 4 formal models:
+//! - `AsyncEffect`, `is_async()`, `pipeline_safe()` → `verification/async_compile/`
+//! - `NogcInstr`, `nogc()` → `verification/nogc_compile/`
+//!
+//! ## Section 2: Production Helpers
+//! Convenience types for production use that build on the core:
+//! - `Effect` - Combined effect type (async + gc concerns)
+//! - `EffectSet` - Effect tracking for instruction sequences
+//! - `BuiltinFunc`, `CallTarget`, `LocalKind` - Production conveniences
+//!
+//! When modifying Lean models, update Section 1 to match exactly.
+//! Section 2 types are Rust-only conveniences.
+
+//##############################################################################
+//# SECTION 1: LEAN-ALIGNED CORE (Formal Verification)
+//##############################################################################
 
 //==============================================================================
 // AsyncEffect - Exact match to AsyncCompile.lean
@@ -30,9 +45,13 @@ pub enum AsyncEffect {
     Wait,
 }
 
-/// Lean: def is_async (e : Effect) : Bool := match e with | Effect.wait => false | _ => true
+/// Lean: def is_async (e : Effect) : Bool := match e with | wait => false | compute => true | io => true
 pub fn is_async(e: AsyncEffect) -> bool {
-    !matches!(e, AsyncEffect::Wait)
+    match e {
+        AsyncEffect::Wait => false,
+        // Explicit: compute and io are async-safe
+        AsyncEffect::Compute | AsyncEffect::Io => true,
+    }
 }
 
 /// Lean: def pipelineSafe (es : List Effect) : Prop := ∀ e, e ∈ es → is_async e = true
@@ -117,12 +136,17 @@ pub fn nogc_singleton(i: &NogcInstr) -> bool {
     !matches!(i, NogcInstr::GcAlloc)
 }
 
+//##############################################################################
+//# SECTION 2: PRODUCTION HELPERS (Rust-only conveniences)
+//##############################################################################
+
 //==============================================================================
 // Effect - Combined type for production use
 //==============================================================================
 
 /// Effect marker for instructions (combined for production use).
-/// Maps directly to the Lean `Effect` inductive type with GcAlloc added.
+/// Combines async safety (from AsyncCompile.lean) and GC safety (from NogcCompile.lean)
+/// into a single enum for convenient tracking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
     /// Pure computation, no side effects
@@ -252,20 +276,13 @@ pub trait HasEffects {
 }
 
 //==============================================================================
-// Builtin Functions (for formal verification)
+// Builtin Functions (production convenience)
 //==============================================================================
 // Explicit enumeration of known builtin functions with their effects.
-// This enables exhaustive pattern matching in Lean proofs.
-//
-// Lean equivalent:
-//   inductive BuiltinFunc
-//     | await | wait | join | recv | sleep  -- blocking
-//     | gcAlloc | gcNew | box              -- gc allocating
-//     | print | println | read | write | send | spawn -- io
-//     | other (name : String)              -- user-defined
+// NOTE: This is a Rust-only convenience type. There is no Lean equivalent.
 
 /// Known builtin functions with statically-known effects.
-/// For formal verification, having an explicit enum is better than string matching.
+/// Production convenience for categorizing function calls by effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinFunc {
     // Blocking operations
@@ -351,17 +368,13 @@ impl BuiltinFunc {
 }
 
 //==============================================================================
-// Call Target with Effect Information
+// Call Target with Effect Information (production convenience)
 //==============================================================================
 // For more precise effect tracking, calls are tagged with their effect category.
 // This allows distinguishing pure computation from I/O and blocking operations.
-//
-// Lean equivalent:
-//   inductive CallTarget
-//     | builtin (func : BuiltinFunc)
-//     | user (name : String)
+// NOTE: This is a Rust-only convenience type. There is no Lean equivalent.
 
-/// Call target with effect annotation for precise verification.
+/// Call target with effect annotation for production use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallTarget {
     /// Pure function - no side effects, can be reordered or eliminated
@@ -423,17 +436,15 @@ impl CallTarget {
 }
 
 //==============================================================================
-// Local Variable Kind (for formal verification)
+// Local Variable Kind (production convenience)
 //==============================================================================
-// Distinguishing parameters from local variables helps with verification:
+// Distinguishing parameters from local variables helps with code generation:
 // - Parameters have defined values at function entry
 // - Locals may be uninitialized until assigned
-//
-// Lean equivalent:
-//   inductive LocalKind | parameter | local
+// NOTE: This is a Rust-only convenience type. There is no Lean equivalent.
 
 /// Distinguishes function parameters from local variables.
-/// For formal verification, parameters are known to be initialized at entry.
+/// Production convenience for tracking initialization state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LocalKind {
     /// Function parameter - initialized at function entry

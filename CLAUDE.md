@@ -10,6 +10,24 @@ simple/
 ├── CLAUDE.md                      # This file - development guide
 ├── public_api.yml                 # Public API definitions for coverage
 │
+├── lib/                           # Simple standard library (written in Simple)
+│   └── std/                       # stdlib root
+│       ├── __init__.spl           # Root manifest with #[deny(primitive_api)]
+│       ├── core/                  # Variant-agnostic pure core
+│       ├── core_nogc/             # Variant-agnostic, explicit #[no_gc]
+│       ├── simd/                  # Cross-platform SIMD & vector math
+│       ├── host/                  # OS-based stdlib overlays
+│       ├── bare/                  # Baremetal stdlib overlays
+│       ├── gpu/                   # GPU device & host APIs
+│       └── tools/                 # Diagnostics, testing, reflection
+│
+├── native_lib/                    # Native implementations (written in Rust)
+│   ├── core/                      # Memory allocation, GC interface, math intrinsics
+│   ├── io/                        # Filesystem, networking, terminal I/O
+│   ├── sys/                       # Args, env, process, time
+│   ├── sync/                      # Mutexes, channels, atomics
+│   └── ffi/                       # FFI bridge and type conversions
+│
 ├── log/                           # Logging crate (tracing wrapper)
 │   └── src/lib.rs                 # simple_log::init() entry point
 │
@@ -21,7 +39,18 @@ simple/
 │   ├── import_export_and__init__.md  # Module system specification (v4)
 │   ├── test.md                    # Test policy (mock control, coverage, test levels)
 │   ├── spec/                      # Language specifications
-│   │   ├── language.md            # Language specification (includes module system)
+│   │   ├── language.md            # Spec index with quick reference
+│   │   ├── syntax.md              # Lexical structure, literals, operators
+│   │   ├── types.md               # Type system, mutability, primitive warnings
+│   │   ├── units.md               # Unit types, semantic typing, lint policy
+│   │   ├── data_structures.md     # Structs, classes, enums, unions
+│   │   ├── functions.md           # Functions, pattern matching, constructors
+│   │   ├── traits.md              # Traits and implementations
+│   │   ├── memory.md              # Memory management, ownership, pointers
+│   │   ├── concurrency.md         # Actors, async/await, threads, futures
+│   │   ├── metaprogramming.md     # Macros, DSL, decorators, comprehensions
+│   │   ├── stdlib.md              # Standard library spec (lib/, native_lib/)
+│   │   ├── gpu_simd.md            # GPU and SIMD specification
 │   │   └── lexer_parser.md        # Parser/lexer specification
 │   ├── design/                    # Design documents
 │   │   ├── memory.md              # Memory management design
@@ -157,10 +186,6 @@ simple/
     │       ├── resolver/          # Dependency resolution
     │       │   └── graph.rs       # Topological ordering
     │       └── commands/          # CLI: init, add, install, update, list, cache
-    │
-    ├── lib/                       # Native stdlib (depends: native_loader)
-    │   └── src/
-    │       └── io/term/mod.rs     # Terminal I/O
     │
     └── driver/                    # CLI runner (depends: all)
         ├── src/

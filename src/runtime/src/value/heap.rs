@@ -43,3 +43,56 @@ impl HeapHeader {
         }
     }
 }
+
+// ============================================================================
+// Shared heap validation utilities
+// ============================================================================
+
+use super::core::RuntimeValue;
+
+/// Validate heap object type, returns None if invalid
+///
+/// This is a shared helper to reduce boilerplate in FFI functions.
+#[inline]
+pub fn validate_heap_obj(val: RuntimeValue, expected: HeapObjectType) -> Option<*mut HeapHeader> {
+    if !val.is_heap() {
+        return None;
+    }
+    let ptr = val.as_heap_ptr();
+    if unsafe { (*ptr).object_type != expected } {
+        return None;
+    }
+    Some(ptr)
+}
+
+/// Get typed pointer from heap object with validation.
+/// Returns None if the value is not a valid heap object of the expected type.
+#[inline]
+pub fn get_typed_ptr<T>(val: RuntimeValue, expected: HeapObjectType) -> Option<*const T> {
+    validate_heap_obj(val, expected).map(|ptr| ptr as *const T)
+}
+
+/// Get mutable typed pointer from heap object with validation.
+/// Returns None if the value is not a valid heap object of the expected type.
+#[inline]
+pub fn get_typed_ptr_mut<T>(val: RuntimeValue, expected: HeapObjectType) -> Option<*mut T> {
+    validate_heap_obj(val, expected).map(|ptr| ptr as *mut T)
+}
+
+/// Macro to get typed pointer with early return on invalid type.
+/// Usage: `let ptr = as_typed_ptr!(val, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);`
+#[macro_export]
+macro_rules! as_typed_ptr {
+    ($val:expr, $expected:expr, $ty:ty, $ret:expr) => {{
+        match $crate::value::heap::get_typed_ptr::<$ty>($val, $expected) {
+            Some(ptr) => ptr,
+            None => return $ret,
+        }
+    }};
+    (mut $val:expr, $expected:expr, $ty:ty, $ret:expr) => {{
+        match $crate::value::heap::get_typed_ptr_mut::<$ty>($val, $expected) {
+            Some(ptr) => ptr,
+            None => return $ret,
+        }
+    }};
+}

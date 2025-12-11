@@ -14,6 +14,9 @@ pub enum CompileError {
     Semantic(String),
     #[error("codegen: {0}")]
     Codegen(String),
+    /// Lint errors (when lint is set to deny level)
+    #[error("lint: {0}")]
+    Lint(String),
     /// Error from ? operator that should be propagated as a return value
     #[error("try: early return")]
     TryError(Value),

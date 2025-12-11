@@ -5,6 +5,16 @@ use std::path::Path;
 use crate::error::{PkgError, PkgResult};
 use crate::manifest::{Dependency, DependencyDetail, Manifest};
 
+/// Load manifest from dir, returning error if not found
+fn load_manifest(dir: &Path) -> PkgResult<(std::path::PathBuf, Manifest)> {
+    let manifest_path = dir.join("simple.toml");
+    if !manifest_path.exists() {
+        return Err(PkgError::ManifestNotFound(manifest_path.display().to_string()));
+    }
+    let manifest = Manifest::load(&manifest_path)?;
+    Ok((manifest_path, manifest))
+}
+
 /// Options for adding a dependency
 #[derive(Debug, Default)]
 pub struct AddOptions {
@@ -28,15 +38,7 @@ pub struct AddOptions {
 
 /// Add a dependency to the project manifest
 pub fn add_dependency(dir: &Path, name: &str, options: AddOptions) -> PkgResult<()> {
-    let manifest_path = dir.join("simple.toml");
-
-    if !manifest_path.exists() {
-        return Err(PkgError::ManifestNotFound(
-            manifest_path.display().to_string(),
-        ));
-    }
-
-    let mut manifest = Manifest::load(&manifest_path)?;
+    let (manifest_path, mut manifest) = load_manifest(dir)?;
 
     // Create the dependency
     let dep = create_dependency(&options)?;
@@ -96,15 +98,7 @@ fn create_dependency(options: &AddOptions) -> PkgResult<Dependency> {
 
 /// Remove a dependency from the project manifest
 pub fn remove_dependency(dir: &Path, name: &str, dev: bool) -> PkgResult<bool> {
-    let manifest_path = dir.join("simple.toml");
-
-    if !manifest_path.exists() {
-        return Err(PkgError::ManifestNotFound(
-            manifest_path.display().to_string(),
-        ));
-    }
-
-    let mut manifest = Manifest::load(&manifest_path)?;
+    let (manifest_path, mut manifest) = load_manifest(dir)?;
 
     let removed = if dev {
         manifest.dev_dependencies.remove(name).is_some()
@@ -122,28 +116,12 @@ pub fn remove_dependency(dir: &Path, name: &str, dev: bool) -> PkgResult<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::test_helpers::{cleanup_test_project, setup_test_project};
     use std::fs;
-
-    fn setup_test_project() -> std::path::PathBuf {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "simple-add-test-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let _ = fs::remove_dir_all(&temp_dir);
-        fs::create_dir_all(&temp_dir).unwrap();
-
-        let manifest = Manifest::new("test-project");
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
-
-        temp_dir
-    }
 
     #[test]
     fn test_add_version_dependency() {
-        let temp_dir = setup_test_project();
+        let temp_dir = setup_test_project("add", "version");
 
         add_dependency(
             &temp_dir,
@@ -160,12 +138,12 @@ mod tests {
         let dep = manifest.dependencies.get("http").unwrap();
         assert_eq!(dep.version_str(), Some("1.0"));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_add_path_dependency() {
-        let temp_dir = setup_test_project();
+        let temp_dir = setup_test_project("add", "path");
 
         add_dependency(
             &temp_dir,
@@ -182,12 +160,12 @@ mod tests {
         assert!(dep.is_path());
         assert_eq!(dep.get_path(), Some("../mylib"));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_add_git_dependency() {
-        let temp_dir = setup_test_project();
+        let temp_dir = setup_test_project("add", "git");
 
         add_dependency(
             &temp_dir,
@@ -205,12 +183,12 @@ mod tests {
         assert!(dep.is_git());
         assert_eq!(dep.get_git(), Some("https://github.com/user/json"));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_add_dev_dependency() {
-        let temp_dir = setup_test_project();
+        let temp_dir = setup_test_project("add", "dev");
 
         add_dependency(
             &temp_dir,
@@ -227,12 +205,12 @@ mod tests {
         assert!(!manifest.dependencies.contains_key("test-utils"));
         assert!(manifest.dev_dependencies.contains_key("test-utils"));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_remove_dependency() {
-        let temp_dir = setup_test_project();
+        let temp_dir = setup_test_project("add", "remove");
 
         // Add a dependency first
         add_dependency(
@@ -252,12 +230,18 @@ mod tests {
         let manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
         assert!(!manifest.dependencies.contains_key("http"));
 
-        let _ = fs::remove_dir_all(&temp_dir);
+        cleanup_test_project(&temp_dir);
     }
 
     #[test]
     fn test_add_no_manifest() {
-        let temp_dir = std::env::temp_dir().join("simple-add-test-no-manifest");
+        let temp_dir = std::env::temp_dir().join(format!(
+            "simple-add-test-no-manifest-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(&temp_dir).unwrap();
 

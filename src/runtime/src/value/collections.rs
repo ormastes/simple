@@ -1,32 +1,23 @@
 //! Collection types: Array, Tuple, String, Dict and their FFI functions.
 
 use super::core::RuntimeValue;
-use super::heap::{HeapHeader, HeapObjectType};
+use super::heap::{get_typed_ptr, get_typed_ptr_mut, HeapHeader, HeapObjectType};
 
 // ============================================================================
 // Helper macros to reduce FFI boilerplate
 // ============================================================================
 
-/// Validate heap object type, returns None if invalid
-#[inline]
-fn validate_heap_obj(val: RuntimeValue, expected: HeapObjectType) -> Option<*mut HeapHeader> {
-    if !val.is_heap() { return None; }
-    let ptr = val.as_heap_ptr();
-    if unsafe { (*ptr).object_type != expected } { return None; }
-    Some(ptr)
-}
-
 /// Get typed pointer from heap object with validation, returning early if invalid
 macro_rules! as_typed_ptr {
     ($val:expr, $expected:expr, $ty:ty, $ret:expr) => {{
-        match validate_heap_obj($val, $expected) {
-            Some(ptr) => ptr as *const $ty,
+        match get_typed_ptr::<$ty>($val, $expected) {
+            Some(ptr) => ptr,
             None => return $ret,
         }
     }};
     (mut $val:expr, $expected:expr, $ty:ty, $ret:expr) => {{
-        match validate_heap_obj($val, $expected) {
-            Some(ptr) => ptr as *mut $ty,
+        match get_typed_ptr_mut::<$ty>($val, $expected) {
+            Some(ptr) => ptr,
             None => return $ret,
         }
     }};
@@ -86,6 +77,22 @@ impl RuntimeString {
     pub unsafe fn as_str(&self) -> &str {
         std::str::from_utf8_unchecked(self.as_bytes())
     }
+}
+
+/// Allocate a RuntimeString with given length (no data copied).
+/// Returns None if allocation fails.
+/// # Safety
+/// The caller must initialize the string data and hash.
+unsafe fn alloc_runtime_string(len: u64) -> Option<*mut RuntimeString> {
+    let size = std::mem::size_of::<RuntimeString>() + len as usize;
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+    let ptr = std::alloc::alloc(layout) as *mut RuntimeString;
+    if ptr.is_null() {
+        return None;
+    }
+    (*ptr).header = HeapHeader::new(HeapObjectType::String, size as u32);
+    (*ptr).len = len;
+    Some(ptr)
 }
 
 /// A heap-allocated array
@@ -321,17 +328,10 @@ pub extern "C" fn rt_string_new(bytes: *const u8, len: u64) -> RuntimeValue {
         return RuntimeValue::NIL;
     }
 
-    let size = std::mem::size_of::<RuntimeString>() + len as usize;
-    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
-
     unsafe {
-        let ptr = std::alloc::alloc(layout) as *mut RuntimeString;
-        if ptr.is_null() {
+        let Some(ptr) = alloc_runtime_string(len) else {
             return RuntimeValue::NIL;
-        }
-
-        (*ptr).header = HeapHeader::new(HeapObjectType::String, size as u32);
-        (*ptr).len = len;
+        };
 
         // Copy string data and compute hash
         if len > 0 {
@@ -371,17 +371,11 @@ pub extern "C" fn rt_string_concat(a: RuntimeValue, b: RuntimeValue) -> RuntimeV
     }
 
     let total_len = len_a as u64 + len_b as u64;
-    let size = std::mem::size_of::<RuntimeString>() + total_len as usize;
-    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
     unsafe {
-        let ptr = std::alloc::alloc(layout) as *mut RuntimeString;
-        if ptr.is_null() {
+        let Some(ptr) = alloc_runtime_string(total_len) else {
             return RuntimeValue::NIL;
-        }
-
-        (*ptr).header = HeapHeader::new(HeapObjectType::String, size as u32);
-        (*ptr).len = total_len;
+        };
 
         // Copy first string
         let data_ptr = ptr.add(1) as *mut u8;

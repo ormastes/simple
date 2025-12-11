@@ -228,7 +228,7 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::Integer(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Nil => {}
 
         // Typed literals
-        Expr::TypedInteger(_, _) | Expr::TypedFloat(_, _) => {}
+        Expr::TypedInteger(_, _) | Expr::TypedFloat(_, _) | Expr::TypedString(_, _) => {}
 
         // String literals are compilable, but string operations may not be
         Expr::String(_) => {}

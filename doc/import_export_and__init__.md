@@ -183,6 +183,7 @@ Example:
 #[no_gc, strong]
 #[profile("server")]
 #[feature("strict_null")]
+#[deny(primitive_api)]
 mod http
 
 Rules:
@@ -201,6 +202,8 @@ Attributes may include:
 
 #[feature("name")]
 
+#[allow(lint_name)] / #[deny(lint_name)] / #[warn(lint_name)]
+
 
 Profiles inject attributes + common use lines defined in simple.toml.
 
@@ -208,6 +211,14 @@ Profiles inject attributes + common use lines defined in simple.toml.
 Attribute inheritance:
 
 Attributes flow into all files and subdirectories unless overridden.
+
+**Lint Inheritance:**
+
+Lint control attributes (`#[allow(...)]`, `#[deny(...)]`, `#[warn(...)]`) in `__init__.spl` apply to:
+- All files directly in that directory
+- All child directories (unless overridden in their `__init__.spl`)
+
+This allows the standard library to enforce strict type safety by placing `#[deny(primitive_api)]` in its root `__init__.spl`.
 
 
 
@@ -493,4 +504,60 @@ auto import location	N/A	only in __init__.spl
 
 ---
 
-If you want this split into two Markdown files, or you want a formal EBNF grammar, tell me and I’ll generate it.
+## 10. Standard Library Structure
+
+The Simple standard library is organized under `lib/std/`:
+
+```
+simple/
+├── lib/                    # Simple standard library (written in Simple)
+│   └── std/                # stdlib root
+│       ├── __init__.spl    # Root manifest with #[deny(primitive_api)]
+│       ├── core/           # Variant-agnostic pure core
+│       ├── host/           # OS-based stdlib overlays
+│       ├── bare/           # Baremetal stdlib overlays
+│       └── gpu/            # GPU device & host APIs
+│
+└── native_lib/             # Native implementations (written in Rust)
+    ├── core/               # Memory allocation, GC interface
+    ├── io/                 # Filesystem, networking, terminal
+    ├── sys/                # Args, env, process, time
+    └── sync/               # Mutexes, channels, atomics
+```
+
+### lib/std/__init__.spl
+
+```simple
+#[deny(primitive_api)]
+mod std
+
+pub mod core
+pub mod core_nogc
+pub mod simd
+pub mod host
+pub mod bare
+pub mod gpu
+pub mod tools
+
+# Common imports for all stdlib modules
+common use core.option.Option
+common use core.result.Result
+```
+
+### Native Integration
+
+Simple stdlib modules call into `native_lib/` through `extern` declarations:
+
+```simple
+# lib/std/host/async_gc/io/fs.spl
+extern fn native_read_file(path: &str) -> Result[Bytes, IoError]
+
+pub fn read_file(path: FilePath) -> Result[Bytes, IoError]:
+    return native_read_file(path.as_str())
+```
+
+See [Standard Library Specification](spec/stdlib.md) for complete details.
+
+---
+
+If you want this split into two Markdown files, or you want a formal EBNF grammar, tell me and I'll generate it.

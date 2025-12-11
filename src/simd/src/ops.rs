@@ -79,8 +79,13 @@ pub fn sum_f32(data: &[f32]) -> f32 {
     result
 }
 
-/// Find maximum value in f32 array using SIMD.
-pub fn max_f32(data: &[f32]) -> Option<f32> {
+/// Helper for reduction operations on f32 arrays using SIMD.
+fn reduce_f32_helper(
+    data: &[f32],
+    scalar_reduce: fn(f32, f32) -> f32,
+    simd_combine: fn(F32x4, F32x4) -> F32x4,
+    simd_reduce: fn(F32x4) -> f32,
+) -> Option<f32> {
     if data.is_empty() {
         return None;
     }
@@ -88,53 +93,44 @@ pub fn max_f32(data: &[f32]) -> Option<f32> {
     let chunks = data.len() / 4;
 
     if chunks == 0 {
-        return data.iter().cloned().reduce(f32::max);
+        return data.iter().cloned().reduce(scalar_reduce);
     }
 
-    let mut max_vec = F32x4::load(data, 0);
+    let mut acc = F32x4::load(data, 0);
 
     for i in 1..chunks {
         let v = F32x4::load(data, i * 4);
-        max_vec = max_vec.max(v);
+        acc = simd_combine(acc, v);
     }
 
-    let mut result = max_vec.max_element();
+    let mut result = simd_reduce(acc);
 
     // Handle remainder
     for i in (chunks * 4)..data.len() {
-        result = result.max(data[i]);
+        result = scalar_reduce(result, data[i]);
     }
 
     Some(result)
 }
 
+/// Find maximum value in f32 array using SIMD.
+pub fn max_f32(data: &[f32]) -> Option<f32> {
+    reduce_f32_helper(
+        data,
+        f32::max,
+        |a, b| a.max(b),
+        |v| v.max_element(),
+    )
+}
+
 /// Find minimum value in f32 array using SIMD.
 pub fn min_f32(data: &[f32]) -> Option<f32> {
-    if data.is_empty() {
-        return None;
-    }
-
-    let chunks = data.len() / 4;
-
-    if chunks == 0 {
-        return data.iter().cloned().reduce(f32::min);
-    }
-
-    let mut min_vec = F32x4::load(data, 0);
-
-    for i in 1..chunks {
-        let v = F32x4::load(data, i * 4);
-        min_vec = min_vec.min(v);
-    }
-
-    let mut result = min_vec.min_element();
-
-    // Handle remainder
-    for i in (chunks * 4)..data.len() {
-        result = result.min(data[i]);
-    }
-
-    Some(result)
+    reduce_f32_helper(
+        data,
+        f32::min,
+        |a, b| a.min(b),
+        |v| v.min_element(),
+    )
 }
 
 /// Scale all elements in an f32 array by a constant.
@@ -160,8 +156,14 @@ pub fn add_scalar_f32(data: &mut [f32], value: f32) {
     }
 }
 
-/// Element-wise addition of two arrays.
-pub fn add_arrays_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+/// Helper for element-wise binary operations on two arrays.
+fn binop_arrays_f32(
+    a: &[f32],
+    b: &[f32],
+    out: &mut [f32],
+    simd_op: fn(F32x4, F32x4) -> F32x4,
+    scalar_op: fn(f32, f32) -> f32,
+) {
     assert_eq!(a.len(), b.len());
     assert_eq!(a.len(), out.len());
 
@@ -170,33 +172,23 @@ pub fn add_arrays_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
     for i in 0..chunks {
         let va = F32x4::load(a, i * 4);
         let vb = F32x4::load(b, i * 4);
-        let result = va + vb;
+        let result = simd_op(va, vb);
         result.store(out, i * 4);
     }
 
-    // Handle remainder
     for i in (chunks * 4)..a.len() {
-        out[i] = a[i] + b[i];
+        out[i] = scalar_op(a[i], b[i]);
     }
+}
+
+/// Element-wise addition of two arrays.
+pub fn add_arrays_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
+    binop_arrays_f32(a, b, out, std::ops::Add::add, std::ops::Add::add)
 }
 
 /// Element-wise multiplication of two arrays.
 pub fn mul_arrays_f32(a: &[f32], b: &[f32], out: &mut [f32]) {
-    assert_eq!(a.len(), b.len());
-    assert_eq!(a.len(), out.len());
-
-    let chunks = a.len() / 4;
-
-    for i in 0..chunks {
-        let va = F32x4::load(a, i * 4);
-        let vb = F32x4::load(b, i * 4);
-        let result = va * vb;
-        result.store(out, i * 4);
-    }
-
-    for i in (chunks * 4)..a.len() {
-        out[i] = a[i] * b[i];
-    }
+    binop_arrays_f32(a, b, out, std::ops::Mul::mul, std::ops::Mul::mul)
 }
 
 /// Apply fused multiply-add to arrays: out = a * b + c.
