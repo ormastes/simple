@@ -12,6 +12,7 @@ pub mod interpreter;
 pub mod interpreter_ffi;
 pub mod linker;
 pub mod mir;
+pub mod module_resolver;
 pub mod pipeline;
 pub mod value;
 pub mod value_bridge;
@@ -19,6 +20,7 @@ pub mod value_bridge;
 // Re-export main types
 pub use error::CompileError;
 pub use interpreter::evaluate_module;
+pub use module_resolver::{DirectoryManifest, ModuleResolver, ResolvedModule};
 pub use pipeline::CompilerPipeline;
 pub use value::{
     BorrowMutValue,
