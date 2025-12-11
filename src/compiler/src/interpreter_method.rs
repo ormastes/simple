@@ -246,14 +246,16 @@ fn evaluate_method_call(
         }
     }
 
-    // Built-in methods for Option
+    // Built-in methods for Option and Result using type-safe variants
     if let Value::Enum { enum_name, variant, payload } = &recv_val {
-        if enum_name == "Option" {
+        // Use typed enum matching for Option
+        if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Option) {
+            let opt_variant = OptionVariant::from_name(variant);
             match method {
-                "is_some" => return Ok(Value::Bool(variant == "Some")),
-                "is_none" => return Ok(Value::Bool(variant == "None")),
+                "is_some" => return Ok(Value::Bool(opt_variant == Some(OptionVariant::Some))),
+                "is_none" => return Ok(Value::Bool(opt_variant == Some(OptionVariant::None))),
                 "unwrap" => {
-                    if variant == "Some" {
+                    if opt_variant == Some(OptionVariant::Some) {
                         if let Some(val) = payload {
                             return Ok(val.as_ref().clone());
                         }
@@ -261,7 +263,7 @@ fn evaluate_method_call(
                     return Err(CompileError::Semantic("called unwrap on None".into()));
                 }
                 "unwrap_or" => {
-                    if variant == "Some" {
+                    if opt_variant == Some(OptionVariant::Some) {
                         if let Some(val) = payload {
                             return Ok(val.as_ref().clone());
                         }
@@ -274,18 +276,19 @@ fn evaluate_method_call(
                 _ => {}
             }
         }
-        // Built-in methods for Result
-        if enum_name == "Result" {
+        // Use typed enum matching for Result
+        if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Result) {
+            let res_variant = ResultVariant::from_name(variant);
             match method {
-                "is_ok" => return Ok(Value::Bool(variant == "Ok")),
-                "is_err" => return Ok(Value::Bool(variant == "Err")),
+                "is_ok" => return Ok(Value::Bool(res_variant == Some(ResultVariant::Ok))),
+                "is_err" => return Ok(Value::Bool(res_variant == Some(ResultVariant::Err))),
                 "unwrap" => {
-                    if variant == "Ok" {
+                    if res_variant == Some(ResultVariant::Ok) {
                         if let Some(val) = payload {
                             return Ok(val.as_ref().clone());
                         }
                     }
-                    if variant == "Err" {
+                    if res_variant == Some(ResultVariant::Err) {
                         if let Some(err_val) = payload {
                             return Err(CompileError::Semantic(format!("called unwrap on Err: {}", err_val.to_display_string())));
                         }
@@ -293,7 +296,7 @@ fn evaluate_method_call(
                     return Err(CompileError::Semantic("called unwrap on Err".into()));
                 }
                 "unwrap_or" => {
-                    if variant == "Ok" {
+                    if res_variant == Some(ResultVariant::Ok) {
                         if let Some(val) = payload {
                             return Ok(val.as_ref().clone());
                         }
@@ -301,7 +304,7 @@ fn evaluate_method_call(
                     return eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods);
                 }
                 "unwrap_err" => {
-                    if variant == "Err" {
+                    if res_variant == Some(ResultVariant::Err) {
                         if let Some(val) = payload {
                             return Ok(val.as_ref().clone());
                         }
@@ -309,32 +312,16 @@ fn evaluate_method_call(
                     return Err(CompileError::Semantic("called unwrap_err on Ok".into()));
                 }
                 "ok" => {
-                    if variant == "Ok" {
-                        return Ok(Value::Enum {
-                            enum_name: "Option".into(),
-                            variant: "Some".into(),
-                            payload: payload.clone(),
-                        });
+                    if res_variant == Some(ResultVariant::Ok) {
+                        return Ok(payload.as_ref().map(|p| Value::some(p.as_ref().clone())).unwrap_or_else(Value::none));
                     }
-                    return Ok(Value::Enum {
-                        enum_name: "Option".into(),
-                        variant: "None".into(),
-                        payload: None,
-                    });
+                    return Ok(Value::none());
                 }
                 "err" => {
-                    if variant == "Err" {
-                        return Ok(Value::Enum {
-                            enum_name: "Option".into(),
-                            variant: "Some".into(),
-                            payload: payload.clone(),
-                        });
+                    if res_variant == Some(ResultVariant::Err) {
+                        return Ok(payload.as_ref().map(|p| Value::some(p.as_ref().clone())).unwrap_or_else(Value::none));
                     }
-                    return Ok(Value::Enum {
-                        enum_name: "Option".into(),
-                        variant: "None".into(),
-                        payload: None,
-                    });
+                    return Ok(Value::none());
                 }
                 _ => {}
             }
@@ -398,7 +385,7 @@ fn evaluate_method_call(
     }
 
     // ThreadPool methods (submit)
-    if let Value::ThreadPool(ref pool) = recv_val {
+    if let Value::ThreadPool(ref _pool) = recv_val {
         match method {
             "submit" => {
                 // pool.submit(func, arg) - submit a task to the pool
@@ -409,7 +396,7 @@ fn evaluate_method_call(
                 // Clone all the context needed
                 let func_clone = func_val.clone();
                 let arg_clone = arg_val.clone();
-                let env_clone = env.clone();
+                let _env_clone = env.clone();
                 let funcs_clone = functions.clone();
                 let classes_clone = classes.clone();
                 let enums_clone = enums.clone();

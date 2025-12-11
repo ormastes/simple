@@ -20,6 +20,35 @@ fn build_method_missing_args(method: &str, args: &[simple_parser::ast::Argument]
     ]
 }
 
+/// Internal helper: find and execute a method by name on a class/struct object.
+/// Searches in class_def methods first, then impl_methods.
+/// Returns Ok(Some(value)) if method found, Ok(None) if not found.
+fn find_method_and_exec(
+    method_name: &str,
+    args: &[simple_parser::ast::Argument],
+    class: &str,
+    fields: &HashMap<String, Value>,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    // Check class methods
+    if let Some(class_def) = classes.get(class) {
+        if let Some(func) = class_def.methods.iter().find(|m| m.name == method_name) {
+            return Ok(Some(exec_function(func, args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
+        }
+    }
+    // Check impl methods
+    if let Some(methods) = impl_methods.get(class) {
+        if let Some(func) = methods.iter().find(|m| m.name == method_name) {
+            return Ok(Some(exec_function(func, args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
+        }
+    }
+    Ok(None)
+}
+
 /// Find and execute a method on a class/struct object.
 /// Searches in class_def methods first, then impl_methods.
 /// Returns Ok(Some(value)) if method found, Ok(None) if not found.
@@ -34,19 +63,7 @@ fn find_and_exec_method<'a>(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
-    // Check class methods
-    if let Some(class_def) = classes.get(class) {
-        if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
-            return Ok(Some(exec_function(func, args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
-        }
-    }
-    // Check impl methods
-    if let Some(methods) = impl_methods.get(class) {
-        if let Some(func) = methods.iter().find(|m| m.name == method) {
-            return Ok(Some(exec_function(func, args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
-        }
-    }
-    Ok(None)
+    find_method_and_exec(method, args, class, fields, env, functions, classes, enums, impl_methods)
 }
 
 /// Try to call method_missing hook on a class/struct object.
@@ -63,19 +80,7 @@ fn try_method_missing<'a>(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     let mm_args = build_method_missing_args(method, args);
-    // Check class methods for method_missing
-    if let Some(class_def) = classes.get(class) {
-        if let Some(mm_func) = class_def.methods.iter().find(|m| m.name == "method_missing") {
-            return Ok(Some(exec_function(mm_func, &mm_args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
-        }
-    }
-    // Check impl methods for method_missing
-    if let Some(methods) = impl_methods.get(class) {
-        if let Some(mm_func) = methods.iter().find(|m| m.name == "method_missing") {
-            return Ok(Some(exec_function(mm_func, &mm_args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
-        }
-    }
-    Ok(None)
+    find_method_and_exec(METHOD_MISSING, &mm_args, class, fields, env, functions, classes, enums, impl_methods)
 }
 
 /// Create a range object with start, end, and bound type fields.
@@ -203,6 +208,15 @@ fn eval_array_map(
     Ok(Value::Array(results))
 }
 
+/// Setup environment with single parameter binding for a lambda
+fn bind_lambda_param(captured: &Env, params: &[String], value: &Value) -> Env {
+    let mut env = captured.clone();
+    if let Some(param) = params.first() {
+        env.insert(param.clone(), value.clone());
+    }
+    env
+}
+
 /// Array filter: keep elements where lambda returns truthy
 fn eval_array_filter(
     arr: &[Value],
@@ -215,12 +229,8 @@ fn eval_array_filter(
     if let Value::Lambda { params, body, env: captured } = func {
         let mut results = Vec::new();
         for item in arr {
-            let mut local_env = captured.clone();
-            if let Some(param) = params.first() {
-                local_env.insert(param.clone(), item.clone());
-            }
-            let keep = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-            if keep.truthy() {
+            let local_env = bind_lambda_param(&captured, &params, item);
+            if evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 results.push(item.clone());
             }
         }
@@ -269,12 +279,8 @@ fn eval_array_find(
 ) -> Result<Value, CompileError> {
     if let Value::Lambda { params, body, env: captured } = func {
         for item in arr {
-            let mut local_env = captured.clone();
-            if let Some(param) = params.first() {
-                local_env.insert(param.clone(), item.clone());
-            }
-            let matches = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-            if matches.truthy() {
+            let local_env = bind_lambda_param(&captured, &params, item);
+            if evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(item.clone());
             }
         }
@@ -295,12 +301,8 @@ fn eval_array_any(
 ) -> Result<Value, CompileError> {
     if let Value::Lambda { params, body, env: captured } = func {
         for item in arr {
-            let mut local_env = captured.clone();
-            if let Some(param) = params.first() {
-                local_env.insert(param.clone(), item.clone());
-            }
-            let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-            if result.truthy() {
+            let local_env = bind_lambda_param(&captured, &params, item);
+            if evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(Value::Bool(true));
             }
         }
@@ -321,12 +323,8 @@ fn eval_array_all(
 ) -> Result<Value, CompileError> {
     if let Value::Lambda { params, body, env: captured } = func {
         for item in arr {
-            let mut local_env = captured.clone();
-            if let Some(param) = params.first() {
-                local_env.insert(param.clone(), item.clone());
-            }
-            let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-            if !result.truthy() {
+            let local_env = bind_lambda_param(&captured, &params, item);
+            if !evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 return Ok(Value::Bool(false));
             }
         }
@@ -348,10 +346,7 @@ fn eval_dict_map_values(
     if let Value::Lambda { params, body, env: captured } = func {
         let mut new_map = HashMap::new();
         for (k, v) in map {
-            let mut local_env = captured.clone();
-            if let Some(param) = params.first() {
-                local_env.insert(param.clone(), v.clone());
-            }
+            let local_env = bind_lambda_param(&captured, &params, v);
             let new_val = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
             new_map.insert(k.clone(), new_val);
         }
@@ -380,8 +375,7 @@ fn eval_dict_filter(
             } else if let Some(param) = params.first() {
                 local_env.insert(param.clone(), v.clone());
             }
-            let keep = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-            if keep.truthy() {
+            if evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 new_map.insert(k.clone(), v.clone());
             }
         }
@@ -410,7 +404,8 @@ fn eval_option_map(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if variant == "Some" {
+    // Use type-safe variant matching
+    if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
         if let Some(val) = payload {
             let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             if let Value::Lambda { params, body, env: captured } = func_arg {
@@ -419,19 +414,11 @@ fn eval_option_map(
                     local_env.insert(param.clone(), val.as_ref().clone());
                 }
                 let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-                return Ok(Value::Enum {
-                    enum_name: "Option".into(),
-                    variant: "Some".into(),
-                    payload: Some(Box::new(result)),
-                });
+                return Ok(Value::some(result));
             }
         }
     }
-    Ok(Value::Enum {
-        enum_name: "Option".into(),
-        variant: "None".into(),
-        payload: None,
-    })
+    Ok(Value::none())
 }
 
 // === Helper functions for comprehensions and slicing ===

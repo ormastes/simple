@@ -14,9 +14,9 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use simple_common::actor::{ActorSpawner, Message, ThreadSpawner};
 use simple_parser::ast::{
-    AssignOp, BinOp, Block, ClassDef, ContextStmt, Effect, EnumDef, Expr, ExternDef, FStringPart,
+    AssignOp, BinOp, Block, ClassDef, ContextStmt, EnumDef, Expr, ExternDef, FStringPart,
     FunctionDef, IfStmt, LambdaParam, MacroArg, MacroBody, MacroDef, MacroParam, MatchStmt, Node,
-    Pattern, PointerKind, RangeBound, Type, UnaryOp, UnitDef, UnitFamilyDef, WithStmt,
+    Pattern, PointerKind, RangeBound, Type, UnaryOp, UnitDef, WithStmt,
 };
 use tracing::instrument;
 
@@ -24,11 +24,104 @@ use crate::effects::{check_async_violation, CURRENT_EFFECT};
 use crate::error::CompileError;
 use crate::value::{
     BorrowMutValue, BorrowValue, ChannelValue, Env, FutureValue, GeneratorValue, ManualHandleValue,
-    ManualSharedValue, ManualUniqueValue, ManualWeakValue, ThreadPoolValue, Value, BUILTIN_ARRAY,
-    BUILTIN_RANGE,
+    ManualSharedValue, ManualUniqueValue, ManualWeakValue, OptionVariant, ResultVariant,
+    SpecialEnumType, ThreadPoolValue, Value, ATTR_STRONG, BUILTIN_ARRAY, BUILTIN_CHANNEL,
+    BUILTIN_RANGE, METHOD_MISSING, METHOD_NEW, METHOD_SELF,
 };
 
+//==============================================================================
+// Execution Context (for formal verification)
+//==============================================================================
+// This enum models the interpreter's execution mode as an explicit state machine.
+// Each variant represents a distinct execution context with its own requirements.
+//
+// Lean equivalent:
+// ```lean
+// inductive ExecutionMode
+//   | normal                                         -- Regular function execution
+//   | actor (inbox : Receiver) (outbox : Sender)    -- Actor message loop
+//   | generator (yields : List Value)                -- Generator with accumulated yields
+//   | context (obj : Value)                          -- DSL context block
+// ```
+
+/// Execution mode for the interpreter
+///
+/// Models the current execution context as a state machine.
+/// Invalid state combinations are unrepresentable.
+#[derive(Debug, Clone)]
+pub enum ExecutionMode {
+    /// Normal function execution (no special context)
+    Normal,
+    /// Actor execution with message channels
+    Actor {
+        inbox: Arc<Mutex<mpsc::Receiver<Message>>>,
+        outbox: mpsc::Sender<Message>,
+    },
+    /// Generator execution accumulating yield values
+    Generator { yields: Vec<Value> },
+    /// Context block with DSL object
+    Context { object: Value },
+}
+
+impl ExecutionMode {
+    /// Check if running in actor mode
+    pub fn is_actor(&self) -> bool {
+        matches!(self, ExecutionMode::Actor { .. })
+    }
+
+    /// Check if running in generator mode
+    pub fn is_generator(&self) -> bool {
+        matches!(self, ExecutionMode::Generator { .. })
+    }
+
+    /// Check if running in context mode
+    pub fn is_context(&self) -> bool {
+        matches!(self, ExecutionMode::Context { .. })
+    }
+
+    /// Get actor inbox if in actor mode
+    pub fn actor_inbox(&self) -> Option<&Arc<Mutex<mpsc::Receiver<Message>>>> {
+        match self {
+            ExecutionMode::Actor { inbox, .. } => Some(inbox),
+            _ => None,
+        }
+    }
+
+    /// Get actor outbox if in actor mode
+    pub fn actor_outbox(&self) -> Option<&mpsc::Sender<Message>> {
+        match self {
+            ExecutionMode::Actor { outbox, .. } => Some(outbox),
+            _ => None,
+        }
+    }
+
+    /// Get mutable yields if in generator mode
+    pub fn generator_yields_mut(&mut self) -> Option<&mut Vec<Value>> {
+        match self {
+            ExecutionMode::Generator { yields } => Some(yields),
+            _ => None,
+        }
+    }
+
+    /// Take yields from generator mode, returning empty vec if not generator
+    pub fn take_generator_yields(&mut self) -> Vec<Value> {
+        match self {
+            ExecutionMode::Generator { yields } => std::mem::take(yields),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get context object if in context mode
+    pub fn context_object(&self) -> Option<&Value> {
+        match self {
+            ExecutionMode::Context { object } => Some(object),
+            _ => None,
+        }
+    }
+}
+
 // Thread-local state for interpreter execution
+// Note: EXECUTION_MODE provides type-safe state; legacy fields kept for compatibility
 thread_local! {
     pub(crate) static ACTOR_SPAWNER: ThreadSpawner = ThreadSpawner::new();
     pub(crate) static ACTOR_INBOX: RefCell<Option<Arc<Mutex<mpsc::Receiver<Message>>>>> = RefCell::new(None);
@@ -41,6 +134,8 @@ thread_local! {
     pub(crate) static GENERATOR_YIELDS: RefCell<Option<Vec<Value>>> = RefCell::new(None);
     /// User-defined macros
     pub(crate) static USER_MACROS: RefCell<HashMap<String, MacroDef>> = RefCell::new(HashMap::new());
+    /// Type-safe execution mode (new, replaces Option fields above)
+    pub(crate) static EXECUTION_MODE: RefCell<ExecutionMode> = RefCell::new(ExecutionMode::Normal);
 }
 
 /// Stores enum definitions: name -> EnumDef
@@ -58,10 +153,25 @@ pub(crate) type Macros = HashMap<String, MacroDef>;
 /// Stores unit type definitions: suffix -> UnitDef
 pub(crate) type Units = HashMap<String, UnitDef>;
 
+/// Stores unit family definitions: family_name -> (base_type, variants with factors)
+/// Used for to_X() conversion methods between related units
+pub(crate) type UnitFamilies = HashMap<String, UnitFamilyInfo>;
+
+/// Information about a unit family for conversion support
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields used when to_X() method dispatch is implemented
+pub(crate) struct UnitFamilyInfo {
+    /// Base type (e.g., f64)
+    pub base_type: Type,
+    /// Map of suffix -> conversion factor to base unit
+    pub conversions: HashMap<String, f64>,
+}
+
 /// Control flow for statement execution.
 pub(crate) enum Control {
     Next,
     Return(Value),
+    #[allow(dead_code)]
     Break(Option<Value>),
     Continue,
 }
@@ -71,7 +181,7 @@ pub(crate) enum Control {
 fn call_value_with_args(
     callee: &Value,
     args: Vec<Value>,
-    env: &Env,
+    _env: &Env,
     functions: &HashMap<String, FunctionDef>,
     classes: &HashMap<String, ClassDef>,
     enums: &Enums,
@@ -143,6 +253,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
     let mut extern_functions: ExternFunctions = HashMap::new();
     let mut macros: Macros = HashMap::new();
     let mut units: Units = HashMap::new();
+    let mut unit_families: UnitFamilies = HashMap::new();
 
     // First pass: register all functions (needed for decorator lookup)
     for item in items {
@@ -307,8 +418,8 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             }
             Node::UnitFamily(uf) => {
                 // Unit family defines multiple related units with conversion factors
-                // For now, register each variant as a standalone unit
-                // TODO: Store conversion factors for to_X() methods
+                // Register each variant as a standalone unit
+                let mut conversions = HashMap::new();
                 for variant in &uf.variants {
                     // Create a synthetic UnitDef for each variant
                     let unit_def = UnitDef {
@@ -319,8 +430,18 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                         visibility: uf.visibility,
                     };
                     units.insert(variant.suffix.clone(), unit_def);
+                    // Store conversion factor for to_X() methods
+                    conversions.insert(variant.suffix.clone(), variant.factor);
                 }
-                // Store the family name for potential future use
+                // Store the family with all conversion factors
+                unit_families.insert(
+                    uf.name.clone(),
+                    UnitFamilyInfo {
+                        base_type: uf.base_type.clone(),
+                        conversions,
+                    },
+                );
+                // Store the family name for reference
                 env.insert(uf.name.clone(), Value::Nil);
             }
             Node::Let(_)
@@ -397,7 +518,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 if let Expr::MethodCall { receiver, method, args } = expr {
                     if let Expr::Identifier(name) = receiver.as_ref() {
                         if let Some(Value::Object { .. }) = env.get(name).cloned() {
-                            let (result, updated_self) = evaluate_method_call_with_self_update(
+                            let (_result, updated_self) = evaluate_method_call_with_self_update(
                                 receiver, method, args, &env, &functions, &classes, &enums, &impl_methods
                             )?;
                             if let Some(new_self) = updated_self {
@@ -699,7 +820,7 @@ pub(crate) fn exec_node(
                 if let Expr::Identifier(name) = receiver.as_ref() {
                     if let Some(Value::Object { .. }) = env.get(name).cloned() {
                         // Execute method with self context
-                        let (result, updated_self) = evaluate_method_call_with_self_update(
+                        let (_result, updated_self) = evaluate_method_call_with_self_update(
                             receiver, method, args, env, functions, classes, enums, impl_methods
                         )?;
                         // Update the object in the environment with any mutations to self
@@ -808,12 +929,9 @@ pub(crate) fn evaluate_expr(
         }
         Expr::Symbol(s) => Ok(Value::Symbol(s.clone())),
         Expr::Identifier(name) => {
-            if name == "None" {
-                return Ok(Value::Enum {
-                    enum_name: "Option".into(),
-                    variant: "None".into(),
-                    payload: None,
-                });
+            // Check for Option::None literal using type-safe variant
+            if name == OptionVariant::None.as_str() {
+                return Ok(Value::none());
             }
             // First check env for local variables and closures
             if let Some(val) = env.get(name) {
@@ -951,7 +1069,7 @@ pub(crate) fn evaluate_expr(
                 UnaryOp::Deref => Ok(val.deref_pointer()),
             }
         }
-        Expr::Lambda { params, body, is_move } => {
+        Expr::Lambda { params, body, move_mode } => {
             let names: Vec<String> = params
                 .iter()
                 .map(|LambdaParam { name, .. }| name.clone())
@@ -959,7 +1077,7 @@ pub(crate) fn evaluate_expr(
             // For move closures, we capture by value (clone the environment)
             // For regular closures, we share the environment reference
             // In the interpreter, both behave the same since we clone env anyway
-            let captured_env = if *is_move {
+            let captured_env = if move_mode.is_move() {
                 // Move closure: capture a snapshot of current env
                 env.clone()
             } else {
@@ -990,7 +1108,7 @@ pub(crate) fn evaluate_expr(
             // Check for strong enum - disallow wildcard/catch-all patterns
             if let Value::Enum { enum_name, .. } = &subject_val {
                 if let Some(enum_def) = enums.get(enum_name) {
-                    let is_strong = enum_def.attributes.iter().any(|attr| attr.name == "strong");
+                    let is_strong = enum_def.attributes.iter().any(|attr| attr.name == ATTR_STRONG);
                     if is_strong {
                         for arm in arms {
                             if is_catch_all_pattern(&arm.pattern) {
@@ -1528,54 +1646,46 @@ pub(crate) fn evaluate_expr(
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             match val {
                 Value::Enum {
-                    enum_name,
-                    variant,
-                    payload,
-                } if enum_name == "Result" => {
-                    match variant.as_str() {
-                        "Ok" => {
+                    ref enum_name,
+                    ref variant,
+                    ref payload,
+                } if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Result) => {
+                    match ResultVariant::from_name(variant) {
+                        Some(ResultVariant::Ok) => {
                             if let Some(inner_val) = payload {
-                                Ok(*inner_val)
+                                Ok(inner_val.as_ref().clone())
                             } else {
                                 Ok(Value::Nil)
                             }
                         }
-                        "Err" => {
+                        Some(ResultVariant::Err) => {
                             // Return the Err as a TryError that should be propagated
-                            Err(CompileError::TryError(Value::Enum {
-                                enum_name,
-                                variant,
-                                payload,
-                            }))
+                            Err(CompileError::TryError(val))
                         }
-                        _ => Err(CompileError::Semantic(format!(
+                        None => Err(CompileError::Semantic(format!(
                             "invalid Result variant: {}",
                             variant
                         ))),
                     }
                 }
                 Value::Enum {
-                    enum_name,
-                    variant,
-                    payload,
-                } if enum_name == "Option" => {
-                    match variant.as_str() {
-                        "Some" => {
+                    ref enum_name,
+                    ref variant,
+                    ref payload,
+                } if SpecialEnumType::from_name(enum_name) == Some(SpecialEnumType::Option) => {
+                    match OptionVariant::from_name(variant) {
+                        Some(OptionVariant::Some) => {
                             if let Some(inner_val) = payload {
-                                Ok(*inner_val)
+                                Ok(inner_val.as_ref().clone())
                             } else {
                                 Ok(Value::Nil)
                             }
                         }
-                        "None" => {
+                        Some(OptionVariant::None) => {
                             // Return None as a TryError
-                            Err(CompileError::TryError(Value::Enum {
-                                enum_name,
-                                variant,
-                                payload,
-                            }))
+                            Err(CompileError::TryError(val))
                         }
-                        _ => Err(CompileError::Semantic(format!(
+                        None => Err(CompileError::Semantic(format!(
                             "invalid Option variant: {}",
                             variant
                         ))),
@@ -1586,6 +1696,7 @@ pub(crate) fn evaluate_expr(
                 )),
             }
         }
+        #[allow(unreachable_patterns)]
         _ => Err(CompileError::Semantic(format!(
             "unsupported expression type: {:?}",
             expr

@@ -20,34 +20,18 @@ fn evaluate_call(
             }
             "Some" => {
                 let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-                return Ok(Value::Enum {
-                    enum_name: "Option".into(),
-                    variant: "Some".into(),
-                    payload: Some(Box::new(val)),
-                });
+                return Ok(Value::some(val));
             }
             "None" => {
-                return Ok(Value::Enum {
-                    enum_name: "Option".into(),
-                    variant: "None".into(),
-                    payload: None,
-                });
+                return Ok(Value::none());
             }
             "Ok" => {
                 let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-                return Ok(Value::Enum {
-                    enum_name: "Result".into(),
-                    variant: "Ok".into(),
-                    payload: Some(Box::new(val)),
-                });
+                return Ok(Value::ok(val));
             }
             "Err" => {
                 let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-                return Ok(Value::Enum {
-                    enum_name: "Result".into(),
-                    variant: "Err".into(),
-                    payload: Some(Box::new(val)),
-                });
+                return Ok(Value::err(val));
             }
             "len" => {
                 let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
@@ -148,11 +132,6 @@ fn evaluate_call(
                 let future = FutureValue::new(move || {
                     match func_val {
                         Value::Function { def, .. } => {
-                            // Create argument from the value
-                            let arg = simple_parser::ast::Argument {
-                                name: None,
-                                value: Expr::Integer(0), // Dummy, we'll substitute the value
-                            };
                             // Execute with the arg value directly
                             let mut local_env = env_clone.clone();
                             if !def.params.is_empty() {
@@ -298,7 +277,7 @@ fn evaluate_call(
     // Handle generic type constructors like Channel[int]()
     if let Expr::Index { receiver, .. } = callee.as_ref() {
         if let Expr::Identifier(name) = receiver.as_ref() {
-            if name == "Channel" {
+            if name == BUILTIN_CHANNEL {
                 // Create a channel - ignore the type parameter for runtime (type erasure)
                 // Check for buffer argument
                 let buffer_size = args.iter().find_map(|arg| {
@@ -351,7 +330,7 @@ fn bind_args(
 ) -> Result<HashMap<String, Value>, CompileError> {
     let params_to_bind: Vec<_> = params
         .iter()
-        .filter(|p| !(self_mode.should_skip_self() && p.name == "self"))
+        .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
         .collect();
 
     let mut bound = HashMap::new();
@@ -559,7 +538,7 @@ fn instantiate_class(
     }
 
     // Look for 'new' constructor method
-    if let Some(new_method) = class_def.methods.iter().find(|m| m.name == "new") {
+    if let Some(new_method) = class_def.methods.iter().find(|m| m.name == METHOD_NEW) {
         // Call the constructor with self
         let self_val = Value::Object {
             class: class_name.to_string(),
@@ -567,7 +546,7 @@ fn instantiate_class(
         };
 
         let mut local_env = env.clone();
-        local_env.insert("self".to_string(), self_val);
+        local_env.insert(METHOD_SELF.to_string(), self_val);
 
         // Add fields to environment so constructor can access them
         for (k, v) in &fields {

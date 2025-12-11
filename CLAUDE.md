@@ -4,14 +4,18 @@
 
 ```
 simple/
-├── Cargo.toml                     # Workspace definition (11 crates)
+├── Cargo.toml                     # Workspace definition (12 crates)
 ├── Makefile                       # Build automation (test, coverage, lint, etc.)
 ├── .jscpd.json                    # Code duplication detection config
 ├── CLAUDE.md                      # This file - development guide
 ├── public_api.yml                 # Public API definitions for coverage
 │
+├── log/                           # Logging crate (tracing wrapper)
+│   └── src/lib.rs                 # simple_log::init() entry point
+│
 ├── doc/                           # Documentation
 │   ├── architecture.md            # Design principles and dependency rules
+│   ├── codegen_technical.md       # Codegen implementation details
 │   ├── feature.md                 # Feature list with importance/difficulty ratings
 │   ├── formal_verification.md     # Lean 4 formal verification docs
 │   ├── test.md                    # Test policy (mock control, coverage, test levels)
@@ -22,7 +26,7 @@ simple/
 │   │   ├── memory.md              # Memory management design
 │   │   ├── type_inference.md      # Type inference design
 │   │   └── concurrency.md         # Concurrency design
-│   ├── status/                    # Feature implementation status
+│   ├── status/                    # Feature implementation status (79+ files)
 │   ├── plans/                     # Implementation plans
 │   └── research/                  # Research notes
 │
@@ -65,9 +69,15 @@ simple/
     │       ├── pipeline.rs        # CompilerPipeline orchestration
     │       ├── value.rs           # Value enum, Env, pointer wrappers
     │       ├── effects.rs         # Effect checking (async safety)
-    │       ├── interpreter.rs     # Tree-walking interpreter (includes 8 modules)
-    │       ├── interpreter_*.rs   # Interpreter modules (call, control, helpers, method, macro, extern, context)
-    │       ├── interpreter_ffi.rs # FFI bridge for compiled↔interpreter
+    │       ├── interpreter.rs     # Tree-walking interpreter (main entry)
+    │       ├── interpreter_call.rs     # Function call handling
+    │       ├── interpreter_control.rs  # Control flow (if, match, loops)
+    │       ├── interpreter_context.rs  # Execution context management
+    │       ├── interpreter_extern.rs   # External function bindings
+    │       ├── interpreter_ffi.rs      # FFI bridge for compiled↔interpreter
+    │       ├── interpreter_helpers.rs  # Utility functions
+    │       ├── interpreter_macro.rs    # Macro expansion
+    │       ├── interpreter_method.rs   # Method dispatch
     │       ├── value_bridge.rs    # FFI value marshalling (BridgeValue)
     │       ├── compilability.rs   # Compilability analysis (20+ fallback reasons)
     │       ├── hir/               # High-level IR
@@ -127,7 +137,9 @@ simple/
     │       │   ├── actors.rs      # RuntimeActor + FFI (spawn/send/recv)
     │       │   └── async_gen.rs   # RuntimeFuture, RuntimeGenerator + FFI
     │       ├── memory/
+    │       │   ├── mod.rs         # Memory allocation abstraction
     │       │   ├── gc.rs          # GcRuntime + logging hooks
+    │       │   ├── gcless.rs      # GC-less allocator wrapper
     │       │   └── no_gc.rs       # NoGcAllocator
     │       └── concurrency/
     │           └── mod.rs         # Actor scheduler
@@ -148,15 +160,23 @@ simple/
     │       └── io/term/mod.rs     # Terminal I/O
     │
     └── driver/                    # CLI runner (depends: all)
-        └── src/
-            ├── lib.rs
-            ├── main.rs            # CLI entry (run, --gc-log)
-            ├── runner.rs          # Compile and execute
-            ├── exec_core.rs       # Shared compile/load/run logic
-            ├── interpreter.rs     # High-level API with I/O capture
-            ├── dependency_cache.rs # Import/macro tracking
-            └── watcher/
-                └── mod.rs         # File watching for hot reload
+        ├── src/
+        │   ├── lib.rs
+        │   ├── main.rs            # CLI entry (run, --gc-log)
+        │   ├── runner.rs          # Compile and execute
+        │   ├── exec_core.rs       # Shared compile/load/run logic
+        │   ├── interpreter.rs     # High-level API with I/O capture
+        │   ├── dependency_cache.rs # Import/macro tracking
+        │   └── watcher/
+        │       └── mod.rs         # File watching for hot reload
+        └── tests/                 # Driver integration tests (16 files)
+            ├── runner_tests.rs         # Core runner tests
+            ├── runner_async_tests.rs   # Async/concurrency tests
+            ├── watcher_tests.rs        # File watcher tests
+            └── interpreter_*.rs        # Interpreter tests (13 files)
+                                        # async, basic, bindings, collections,
+                                        # control, expressions, extern, jit,
+                                        # macros, memory, oop, strings, types
 ```
 
 ## Compilation Pipeline
@@ -302,38 +322,6 @@ Green  → Minimal implementation to pass
 Refactor → Clean up, maintain passing tests
 ```
 
-## Current Feature: Integer Literals (#1)
-
-**Goal**: Make `main = 42` return 42 instead of always 0.
-
-### What Works Now
-```rust
-// This test passes but is wrong - compiler ignores source
-runner.run_source("main = 0").expect("run ok");  // Returns 0
-runner.run_source("main = 42").expect("run ok"); // Also returns 0!
-```
-
-### What We're Implementing
-```rust
-// After implementation:
-assert_eq!(runner.run_source("main = 42")?, 42);
-assert_eq!(runner.run_source("main = 0")?, 0);
-assert_eq!(runner.run_source("main = -1")?, -1);  // Future
-```
-
-### Implementation Plan
-
-1. **System Test** (runner_tests.rs)
-   - `runner.run_source("main = 42")` should return 42
-
-2. **HIR Lowering** (hir/mod.rs)
-   - Parse AST integer literal → HIR integer constant
-   - Track integer type (i32 for now)
-
-3. **Cranelift Codegen** (codegen/cranelift.rs)
-   - Generate `iconst` instruction
-   - Return value from main function
-
 ## Running Tests
 
 ```bash
@@ -475,15 +463,33 @@ Optional (requires npm): `npm install -g jscpd`
 - Keep system tests fast and isolated: no network, only temp directories, and avoid assuming a specific shell. Use plain-text assertions for errors so failures are legible in CI logs.
 - System tests must use `init_system_tests!()` - no mocks allowed.
 
-## Key Files for Current Work
+## Key Files
 
+### Compiler Core
 - `src/compiler/src/lib.rs` - Compilation entry point
 - `src/compiler/src/pipeline.rs` - CompilerPipeline orchestration
 - `src/compiler/src/hir/mod.rs` - AST → HIR lowering
 - `src/compiler/src/mir/generator.rs` - Generator state machine lowering
-- `src/compiler/src/codegen/cranelift.rs` - MIR → machine code
-- `src/compiler/src/codegen/runtime_ffi.rs` - FFI function specs
+- `src/compiler/src/codegen/cranelift.rs` - AOT Cranelift backend
+- `src/compiler/src/codegen/jit.rs` - JIT Cranelift backend
+- `src/compiler/src/codegen/runtime_ffi.rs` - FFI function specs (50+ functions)
+
+### Interpreter
+- `src/compiler/src/interpreter.rs` - Main interpreter entry
+- `src/compiler/src/interpreter_*.rs` - 8 interpreter modules
+
+### Runtime
 - `src/runtime/src/value/` - Runtime value system (9 modules)
+- `src/runtime/src/memory/` - Memory management (4 modules)
+
+### Driver & Tests
 - `src/driver/src/exec_core.rs` - Shared compile/load/run logic
-- `src/driver/tests/runner_tests.rs` - System tests
-- `src/pkg/src/` - Package manager
+- `src/driver/tests/runner_tests.rs` - Core runner tests
+- `src/driver/tests/interpreter_*.rs` - Interpreter tests (13 files)
+
+### Package Manager
+- `src/pkg/src/` - UV-style package manager
+
+### Documentation
+- `doc/codegen_technical.md` - Codegen implementation details
+- `doc/status/` - Feature implementation status (79+ files)

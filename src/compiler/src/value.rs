@@ -17,20 +17,198 @@ use simple_parser::ast::{Expr, FunctionDef};
 use crate::error::CompileError;
 
 //==============================================================================
-// Magic Class Names (for formal verification)
+// Magic Names (for formal verification)
 //==============================================================================
-// These constants define the special class names used by the interpreter.
+// These constants define the special names used by the interpreter.
 // Making them constants ensures consistency and enables Lean verification.
 //
 // Lean equivalent:
 //   def BUILTIN_RANGE : String := "__range__"
 //   def BUILTIN_ARRAY : String := "__array__"
+//   def METHOD_NEW : String := "new"
+//   def METHOD_SELF : String := "self"
+//   def METHOD_MISSING : String := "method_missing"
+//   def FUNC_MAIN : String := "main"
+//   def ATTR_STRONG : String := "strong"
 
 /// Magic class name for range objects created by range() or `..` syntax
 pub const BUILTIN_RANGE: &str = "__range__";
 
 /// Magic class name for array-like objects
 pub const BUILTIN_ARRAY: &str = "__array__";
+
+//==============================================================================
+// Special Method Names (for formal verification)
+//==============================================================================
+
+/// Constructor method name
+pub const METHOD_NEW: &str = "new";
+
+/// Self parameter name
+pub const METHOD_SELF: &str = "self";
+
+/// Method missing hook name (Ruby-style metaprogramming)
+pub const METHOD_MISSING: &str = "method_missing";
+
+/// Entry point function name
+pub const FUNC_MAIN: &str = "main";
+
+//==============================================================================
+// Special Attribute Names (for formal verification)
+//==============================================================================
+
+/// Strong enum attribute (enforces exhaustive matching)
+pub const ATTR_STRONG: &str = "strong";
+
+//==============================================================================
+// Built-in Type/Function Names (for formal verification)
+//==============================================================================
+
+/// Channel constructor name
+pub const BUILTIN_CHANNEL: &str = "Channel";
+
+/// Spawn function name for actor creation
+pub const BUILTIN_SPAWN: &str = "spawn";
+
+/// User-facing Range class name (alias for BUILTIN_RANGE)
+pub const CLASS_RANGE: &str = "Range";
+
+/// User-facing Array class name (alias for BUILTIN_ARRAY)
+pub const CLASS_ARRAY: &str = "Array";
+
+//==============================================================================
+// Builtin Operation Categories (for formal verification)
+//==============================================================================
+// These arrays define categories of builtin operations for effect analysis.
+// Making them constants enables Lean verification of effect properties.
+
+/// Blocking operations - cannot be used in async contexts
+pub const BLOCKING_BUILTINS: &[&str] = &[
+    "await", "join", "recv", "sleep", "input", "read_file", "write_file",
+];
+
+/// Actor operations - require actor runtime
+pub const ACTOR_BUILTINS: &[&str] = &["spawn", "send", "recv", "reply", "join"];
+
+/// Generator operations - require generator runtime
+pub const GENERATOR_BUILTINS: &[&str] = &["generator", "next", "collect"];
+
+/// Built-in class types with special handling.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive BuiltinClass
+///   | range   -- Range objects (start..end)
+///   | array   -- Array-like objects
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinClass {
+    /// Range type: represents a range of values
+    Range,
+    /// Array type: built-in array wrapper
+    Array,
+}
+
+impl BuiltinClass {
+    /// Try to parse a class name as a built-in class.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "__range__" | "Range" => Some(BuiltinClass::Range),
+            "__array__" | "Array" => Some(BuiltinClass::Array),
+            _ => None,
+        }
+    }
+
+    /// Get the internal string name of this built-in class.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BuiltinClass::Range => BUILTIN_RANGE,
+            BuiltinClass::Array => BUILTIN_ARRAY,
+        }
+    }
+
+    /// Check if the given class name matches this built-in class.
+    pub fn matches(&self, name: &str) -> bool {
+        match self {
+            BuiltinClass::Range => name == BUILTIN_RANGE || name == CLASS_RANGE,
+            BuiltinClass::Array => name == BUILTIN_ARRAY || name == CLASS_ARRAY,
+        }
+    }
+}
+
+/// Classification of a class type - either builtin or user-defined.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive ClassType
+///   | builtin (b : BuiltinClass)
+///   | user (name : String)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassType {
+    /// A built-in class with special handling
+    Builtin(BuiltinClass),
+    /// A user-defined class
+    User(String),
+}
+
+impl ClassType {
+    /// Classify a class name as either builtin or user-defined.
+    pub fn from_name(name: &str) -> Self {
+        match BuiltinClass::from_name(name) {
+            Some(builtin) => ClassType::Builtin(builtin),
+            None => ClassType::User(name.to_string()),
+        }
+    }
+
+    /// Check if this is a built-in class.
+    pub fn is_builtin(&self) -> bool {
+        matches!(self, ClassType::Builtin(_))
+    }
+
+    /// Check if this is the range type.
+    pub fn is_range(&self) -> bool {
+        matches!(self, ClassType::Builtin(BuiltinClass::Range))
+    }
+}
+
+//==============================================================================
+// Method Lookup (for formal verification)
+//==============================================================================
+// These types replace magic string "method_missing" with explicit enum variants.
+// This makes method dispatch logic verifiable.
+// Note: METHOD_MISSING constant is defined above with other special names.
+
+/// Result of looking up a method on a type.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive MethodLookupResult
+///   | found           -- Regular method found
+///   | notFound        -- Method not found, no fallback
+///   | missingHook     -- method_missing fallback available
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MethodLookupResult {
+    /// Regular method was found
+    Found,
+    /// Method not found and no method_missing hook
+    NotFound,
+    /// Method not found but method_missing hook is available
+    MissingHook,
+}
+
+impl MethodLookupResult {
+    /// Check if a method was found (either direct or via method_missing).
+    pub fn is_callable(&self) -> bool {
+        matches!(self, MethodLookupResult::Found | MethodLookupResult::MissingHook)
+    }
+
+    /// Check if this is the method_missing fallback.
+    pub fn is_missing_hook(&self) -> bool {
+        matches!(self, MethodLookupResult::MissingHook)
+    }
+}
 
 /// Variable environment for compile-time evaluation
 pub type Env = HashMap<String, Value>;
@@ -114,6 +292,158 @@ impl From<&str> for VariantName {
 impl From<String> for VariantName {
     fn from(s: String) -> Self {
         Self(s)
+    }
+}
+
+//==============================================================================
+// Special Enum Types (for formal verification)
+//==============================================================================
+// These enums replace magic string comparisons for built-in enum types.
+// This enables more precise verification and eliminates string-based dispatch.
+
+/// Built-in enum types with special handling.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive SpecialEnumType
+///   | option  -- Option<T> (Some/None)
+///   | result  -- Result<T, E> (Ok/Err)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialEnumType {
+    /// Option type: Some(T) | None
+    Option,
+    /// Result type: Ok(T) | Err(E)
+    Result,
+}
+
+impl SpecialEnumType {
+    /// Try to parse an enum name as a special enum type.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Option" => Some(SpecialEnumType::Option),
+            "Result" => Some(SpecialEnumType::Result),
+            _ => None,
+        }
+    }
+
+    /// Get the string name of this special enum type.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SpecialEnumType::Option => "Option",
+            SpecialEnumType::Result => "Result",
+        }
+    }
+}
+
+/// Option enum variants.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive OptionVariant
+///   | some
+///   | none
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionVariant {
+    Some,
+    None,
+}
+
+impl OptionVariant {
+    /// Try to parse a variant name as an Option variant.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Some" => Some(OptionVariant::Some),
+            "None" => Some(OptionVariant::None),
+            _ => None,
+        }
+    }
+
+    /// Get the string name of this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            OptionVariant::Some => "Some",
+            OptionVariant::None => "None",
+        }
+    }
+}
+
+/// Result enum variants.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive ResultVariant
+///   | ok
+///   | err
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultVariant {
+    Ok,
+    Err,
+}
+
+impl ResultVariant {
+    /// Try to parse a variant name as a Result variant.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Ok" => Some(ResultVariant::Ok),
+            "Err" => Some(ResultVariant::Err),
+            _ => None,
+        }
+    }
+
+    /// Get the string name of this variant.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ResultVariant::Ok => "Ok",
+            ResultVariant::Err => "Err",
+        }
+    }
+}
+
+/// Represents the kind of special enum value, combining type and variant.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive SpecialEnumValue
+///   | optionSome (payload : Value)
+///   | optionNone
+///   | resultOk (payload : Value)
+///   | resultErr (payload : Value)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialEnumKind {
+    /// Option::Some
+    OptionSome,
+    /// Option::None
+    OptionNone,
+    /// Result::Ok
+    ResultOk,
+    /// Result::Err
+    ResultErr,
+}
+
+impl SpecialEnumKind {
+    /// Try to parse enum_name and variant as a special enum kind.
+    pub fn from_names(enum_name: &str, variant: &str) -> Option<Self> {
+        match (enum_name, variant) {
+            ("Option", "Some") => Some(SpecialEnumKind::OptionSome),
+            ("Option", "None") => Some(SpecialEnumKind::OptionNone),
+            ("Result", "Ok") => Some(SpecialEnumKind::ResultOk),
+            ("Result", "Err") => Some(SpecialEnumKind::ResultErr),
+            _ => None,
+        }
+    }
+
+    /// Check if this is an Option variant.
+    pub fn is_option(&self) -> bool {
+        matches!(self, SpecialEnumKind::OptionSome | SpecialEnumKind::OptionNone)
+    }
+
+    /// Check if this is a Result variant.
+    pub fn is_result(&self) -> bool {
+        matches!(self, SpecialEnumKind::ResultOk | SpecialEnumKind::ResultErr)
     }
 }
 
@@ -628,6 +958,46 @@ impl Value {
                     false
                 }
             }
+        }
+    }
+
+    // ========================================================================
+    // Option/Result enum constructors (reduce duplication across interpreter)
+    // ========================================================================
+
+    /// Create Option::Some(value)
+    pub fn some(val: Value) -> Value {
+        Value::Enum {
+            enum_name: SpecialEnumType::Option.as_str().into(),
+            variant: OptionVariant::Some.as_str().into(),
+            payload: Some(Box::new(val)),
+        }
+    }
+
+    /// Create Option::None
+    pub fn none() -> Value {
+        Value::Enum {
+            enum_name: SpecialEnumType::Option.as_str().into(),
+            variant: OptionVariant::None.as_str().into(),
+            payload: None,
+        }
+    }
+
+    /// Create Result::Ok(value)
+    pub fn ok(val: Value) -> Value {
+        Value::Enum {
+            enum_name: SpecialEnumType::Result.as_str().into(),
+            variant: ResultVariant::Ok.as_str().into(),
+            payload: Some(Box::new(val)),
+        }
+    }
+
+    /// Create Result::Err(value)
+    pub fn err(val: Value) -> Value {
+        Value::Enum {
+            enum_name: SpecialEnumType::Result.as_str().into(),
+            variant: ResultVariant::Err.as_str().into(),
+            payload: Some(Box::new(val)),
         }
     }
 }
