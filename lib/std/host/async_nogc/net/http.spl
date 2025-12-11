@@ -1,0 +1,438 @@
+# HTTP Client - Async HTTP/HTTPS client
+
+use units.net.*
+use units.url.*
+use units.size.*
+use units.time.*
+use io.fs.IoError
+
+# HTTP method enum
+enum HttpMethod:
+    Get
+    Post
+    Put
+    Delete
+    Patch
+    Head
+    Options
+    Connect
+    Trace
+
+impl HttpMethod:
+    fn to_str(self) -> str:
+        match self:
+            case Get: return "GET"
+            case Post: return "POST"
+            case Put: return "PUT"
+            case Delete: return "DELETE"
+            case Patch: return "PATCH"
+            case Head: return "HEAD"
+            case Options: return "OPTIONS"
+            case Connect: return "CONNECT"
+            case Trace: return "TRACE"
+
+# HTTP status code
+unit StatusCode: u16 as status
+
+impl StatusCode:
+    fn from_u16(code: u16) -> StatusCode:
+        return code_status
+
+    fn to_u16(self) -> u16:
+        return self as u16
+
+    fn is_informational(self) -> bool:
+        let code = self as u16
+        return code >= 100 and code < 200
+
+    fn is_success(self) -> bool:
+        let code = self as u16
+        return code >= 200 and code < 300
+
+    fn is_redirect(self) -> bool:
+        let code = self as u16
+        return code >= 300 and code < 400
+
+    fn is_client_error(self) -> bool:
+        let code = self as u16
+        return code >= 400 and code < 500
+
+    fn is_server_error(self) -> bool:
+        let code = self as u16
+        return code >= 500 and code < 600
+
+    fn reason_phrase(self) -> str:
+        match self as u16:
+            case 200: return "OK"
+            case 201: return "Created"
+            case 204: return "No Content"
+            case 301: return "Moved Permanently"
+            case 302: return "Found"
+            case 304: return "Not Modified"
+            case 400: return "Bad Request"
+            case 401: return "Unauthorized"
+            case 403: return "Forbidden"
+            case 404: return "Not Found"
+            case 405: return "Method Not Allowed"
+            case 408: return "Request Timeout"
+            case 429: return "Too Many Requests"
+            case 500: return "Internal Server Error"
+            case 502: return "Bad Gateway"
+            case 503: return "Service Unavailable"
+            case 504: return "Gateway Timeout"
+            case _: return "Unknown"
+
+    # Common status codes
+    fn ok() -> StatusCode:
+        return 200_status
+
+    fn created() -> StatusCode:
+        return 201_status
+
+    fn no_content() -> StatusCode:
+        return 204_status
+
+    fn bad_request() -> StatusCode:
+        return 400_status
+
+    fn unauthorized() -> StatusCode:
+        return 401_status
+
+    fn forbidden() -> StatusCode:
+        return 403_status
+
+    fn not_found() -> StatusCode:
+        return 404_status
+
+    fn internal_server_error() -> StatusCode:
+        return 500_status
+
+# HTTP header name
+unit HeaderName: str as header
+
+impl HeaderName:
+    fn from_str(s: str) -> HeaderName:
+        return s.to_lower()_header
+
+    # Common headers
+    fn content_type() -> HeaderName:
+        return "content-type"_header
+
+    fn content_length() -> HeaderName:
+        return "content-length"_header
+
+    fn authorization() -> HeaderName:
+        return "authorization"_header
+
+    fn user_agent() -> HeaderName:
+        return "user-agent"_header
+
+    fn accept() -> HeaderName:
+        return "accept"_header
+
+    fn host() -> HeaderName:
+        return "host"_header
+
+    fn connection() -> HeaderName:
+        return "connection"_header
+
+    fn cache_control() -> HeaderName:
+        return "cache-control"_header
+
+    fn cookie() -> HeaderName:
+        return "cookie"_header
+
+    fn set_cookie() -> HeaderName:
+        return "set-cookie"_header
+
+# HTTP header value
+unit HeaderValue: str as hval
+
+impl HeaderValue:
+    fn from_str(s: str) -> HeaderValue:
+        return s_hval
+
+    # Common content types
+    fn json() -> HeaderValue:
+        return "application/json"_hval
+
+    fn form() -> HeaderValue:
+        return "application/x-www-form-urlencoded"_hval
+
+    fn multipart() -> HeaderValue:
+        return "multipart/form-data"_hval
+
+    fn text() -> HeaderValue:
+        return "text/plain"_hval
+
+    fn html() -> HeaderValue:
+        return "text/html"_hval
+
+    fn xml() -> HeaderValue:
+        return "application/xml"_hval
+
+# HTTP headers collection
+struct Headers:
+    entries: Array[(HeaderName, HeaderValue)]
+
+impl Headers:
+    fn new() -> Headers:
+        return Headers { entries: [] }
+
+    fn get(self, name: HeaderName) -> Option[HeaderValue]:
+        let lower_name = (name as str).to_lower()
+        for (n, v) in self.entries:
+            if (n as str) == lower_name:
+                return Some(v)
+        return None
+
+    fn set(self, name: HeaderName, value: HeaderValue):
+        let lower_name = (name as str).to_lower()_header
+        # Remove existing
+        self.entries = self.entries.filter(|(n, _)| (n as str) != (lower_name as str))
+        self.entries.push((lower_name, value))
+
+    fn append(self, name: HeaderName, value: HeaderValue):
+        let lower_name = (name as str).to_lower()_header
+        self.entries.push((lower_name, value))
+
+    fn remove(self, name: HeaderName):
+        let lower_name = (name as str).to_lower()
+        self.entries = self.entries.filter(|(n, _)| (n as str) != lower_name)
+
+    fn contains(self, name: HeaderName) -> bool:
+        return self.get(name).is_some()
+
+    fn iter(self) -> Array[(HeaderName, HeaderValue)]:
+        return self.entries
+
+# HTTP error type
+enum HttpError:
+    ConnectionFailed(IoError)
+    Timeout
+    InvalidUrl
+    TooManyRedirects
+    InvalidResponse
+    InvalidHeader
+    BodyTooLarge
+    Cancelled
+    TlsError(str)
+    Other(str)
+
+impl HttpError:
+    fn message(self) -> str:
+        match self:
+            case ConnectionFailed(e): return f"connection failed: {e.message()}"
+            case Timeout: return "request timed out"
+            case InvalidUrl: return "invalid URL"
+            case TooManyRedirects: return "too many redirects"
+            case InvalidResponse: return "invalid response"
+            case InvalidHeader: return "invalid header"
+            case BodyTooLarge: return "response body too large"
+            case Cancelled: return "request cancelled"
+            case TlsError(msg): return f"TLS error: {msg}"
+            case Other(msg): return msg
+
+# HTTP request builder
+pub struct HttpRequest:
+    method: HttpMethod
+    url: HttpUrl
+    headers: Headers
+    body: Option[Bytes]
+    timeout: Option[Duration]
+    follow_redirects: bool
+    max_redirects: u32
+
+impl HttpRequest:
+    fn new(method: HttpMethod, url: HttpUrl) -> HttpRequest:
+        return HttpRequest {
+            method: method,
+            url: url,
+            headers: Headers::new(),
+            body: None,
+            timeout: None,
+            follow_redirects: true,
+            max_redirects: 10
+        }
+
+    # Convenience constructors
+    pub fn get(url: HttpUrl) -> HttpRequest:
+        return HttpRequest::new(HttpMethod::Get, url)
+
+    pub fn post(url: HttpUrl) -> HttpRequest:
+        return HttpRequest::new(HttpMethod::Post, url)
+
+    pub fn put(url: HttpUrl) -> HttpRequest:
+        return HttpRequest::new(HttpMethod::Put, url)
+
+    pub fn delete(url: HttpUrl) -> HttpRequest:
+        return HttpRequest::new(HttpMethod::Delete, url)
+
+    pub fn patch(url: HttpUrl) -> HttpRequest:
+        return HttpRequest::new(HttpMethod::Patch, url)
+
+    pub fn head(url: HttpUrl) -> HttpRequest:
+        return HttpRequest::new(HttpMethod::Head, url)
+
+    # Builder methods
+    pub fn header(self, name: HeaderName, value: HeaderValue) -> HttpRequest:
+        self.headers.set(name, value)
+        return self
+
+    pub fn body(self, data: Bytes) -> HttpRequest:
+        self.body = Some(data)
+        return self
+
+    pub fn json_body(self, data: &Bytes) -> HttpRequest:
+        self.headers.set(HeaderName::content_type(), HeaderValue::json())
+        self.body = Some(data.clone())
+        return self
+
+    pub fn form_body(self, params: Array[(str, str)]) -> HttpRequest:
+        self.headers.set(HeaderName::content_type(), HeaderValue::form())
+        let mut body = ""
+        let mut first = true
+        for (k, v) in params:
+            if not first:
+                body = body + "&"
+            body = body + k.url_encode() + "=" + v.url_encode()
+            first = false
+        self.body = Some(body.to_bytes())
+        return self
+
+    pub fn timeout(self, duration: Duration) -> HttpRequest:
+        self.timeout = Some(duration)
+        return self
+
+    pub fn no_follow_redirects(self) -> HttpRequest:
+        self.follow_redirects = false
+        return self
+
+    pub fn max_redirects(self, n: u32) -> HttpRequest:
+        self.max_redirects = n
+        return self
+
+    pub fn bearer_auth(self, token: str) -> HttpRequest:
+        self.headers.set(HeaderName::authorization(), f"Bearer {token}"_hval)
+        return self
+
+    pub fn basic_auth(self, username: str, password: str) -> HttpRequest:
+        let credentials = f"{username}:{password}".to_base64()
+        self.headers.set(HeaderName::authorization(), f"Basic {credentials}"_hval)
+        return self
+
+# HTTP response
+pub struct HttpResponse:
+    status: StatusCode
+    headers: Headers
+    body_data: Bytes
+    url: HttpUrl
+
+impl HttpResponse:
+    pub fn status(self) -> StatusCode:
+        return self.status
+
+    pub fn header(self, name: HeaderName) -> Option[HeaderValue]:
+        return self.headers.get(name)
+
+    pub fn headers(self) -> Headers:
+        return self.headers
+
+    pub fn body(self) -> &Bytes:
+        return &self.body_data
+
+    pub fn text(self) -> Result[Text, HttpError]:
+        match self.body_data.to_utf8():
+            case Ok(s): return Ok(s_text)
+            case Err(_): return Err(HttpError::InvalidResponse)
+
+    pub fn json[T: Deserialize](self) -> Result[T, JsonError]:
+        return json::parse(self.body_data)
+
+    pub fn url(self) -> HttpUrl:
+        return self.url
+
+    pub fn content_length(self) -> Option[ByteCount]:
+        match self.headers.get(HeaderName::content_length()):
+            case Some(v):
+                match (v as str).parse_u64():
+                    case Ok(n): return Some(n_bytes)
+                    case Err(_): return None
+            case None:
+                return None
+
+    pub fn content_type(self) -> Option[HeaderValue]:
+        return self.headers.get(HeaderName::content_type())
+
+    pub fn is_success(self) -> bool:
+        return self.status.is_success()
+
+    pub fn is_redirect(self) -> bool:
+        return self.status.is_redirect()
+
+# HTTP client
+pub struct HttpClient:
+    default_timeout: Option[Duration]
+    default_headers: Headers
+    follow_redirects: bool
+    max_redirects: u32
+
+impl HttpClient:
+    pub fn new() -> HttpClient:
+        return HttpClient {
+            default_timeout: None,
+            default_headers: Headers::new(),
+            follow_redirects: true,
+            max_redirects: 10
+        }
+
+    pub fn with_timeout(timeout: Duration) -> HttpClient:
+        let mut client = HttpClient::new()
+        client.default_timeout = Some(timeout)
+        return client
+
+    pub fn set_default_header(self, name: HeaderName, value: HeaderValue) -> HttpClient:
+        self.default_headers.set(name, value)
+        return self
+
+    pub fn set_user_agent(self, agent: str) -> HttpClient:
+        self.default_headers.set(HeaderName::user_agent(), agent_hval)
+        return self
+
+    # Send request
+    pub async fn send(self, request: HttpRequest) -> Result[HttpResponse, HttpError]:
+        # Merge default headers
+        for (name, value) in self.default_headers.iter():
+            if not request.headers.contains(name):
+                request.headers.set(name, value)
+
+        # Use default timeout if not set
+        let timeout = request.timeout.or(self.default_timeout)
+
+        return native_http_send(request, timeout)
+
+    # Convenience methods
+    pub async fn get(self, url: HttpUrl) -> Result[HttpResponse, HttpError]:
+        return self.send(HttpRequest::get(url))
+
+    pub async fn post(self, url: HttpUrl, body: Bytes) -> Result[HttpResponse, HttpError]:
+        return self.send(HttpRequest::post(url).body(body))
+
+    pub async fn post_json(self, url: HttpUrl, body: &Bytes) -> Result[HttpResponse, HttpError]:
+        return self.send(HttpRequest::post(url).json_body(body))
+
+    pub async fn put(self, url: HttpUrl, body: Bytes) -> Result[HttpResponse, HttpError]:
+        return self.send(HttpRequest::put(url).body(body))
+
+    pub async fn delete(self, url: HttpUrl) -> Result[HttpResponse, HttpError]:
+        return self.send(HttpRequest::delete(url))
+
+# Global convenience functions
+pub async fn get(url: HttpUrl) -> Result[HttpResponse, HttpError]:
+    return HttpClient::new().get(url)
+
+pub async fn post(url: HttpUrl, body: Bytes) -> Result[HttpResponse, HttpError]:
+    return HttpClient::new().post(url, body)
+
+# Native function declarations
+extern fn native_http_send(request: HttpRequest, timeout: Option[Duration]) -> Result[HttpResponse, HttpError]

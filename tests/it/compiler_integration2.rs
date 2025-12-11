@@ -734,6 +734,7 @@ fn test_interpreter_various_configs() {
         timeout_ms: 5000,
         in_memory: true,
         running_type: RunningType::default(),
+        ..Default::default()
     };
     let r2 = interpreter.run("main = 2", config2);
     assert!(r2.is_ok());

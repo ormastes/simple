@@ -561,6 +561,12 @@ pub enum HirExprKind {
     ActorSpawn {
         body: Box<HirExpr>,
     },
+
+    // Built-in function calls (prelude functions like print, println, etc.)
+    BuiltinCall {
+        name: String,
+        args: Vec<HirExpr>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -225,6 +225,7 @@ fn test_run_config_fields() {
         timeout_ms: 5000,
         in_memory: false,
         running_type: RunningType::default(),
+        ..Default::default()
     };
 
     assert_eq!(config.args.len(), 2);

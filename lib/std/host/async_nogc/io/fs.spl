@@ -1,0 +1,298 @@
+# File System API - Async file operations
+# All functions use semantic types - no bare strings!
+
+use units.file.*
+use units.size.*
+use units.time.*
+
+# I/O Error type
+enum IoError:
+    NotFound
+    PermissionDenied
+    AlreadyExists
+    InvalidPath
+    IsDirectory
+    NotDirectory
+    DirectoryNotEmpty
+    ReadOnly
+    FileTooLarge
+    OutOfSpace
+    Interrupted
+    TimedOut
+    ConnectionRefused
+    ConnectionReset
+    BrokenPipe
+    WouldBlock
+    InvalidData
+    UnexpectedEof
+    Other(str)
+
+impl IoError:
+    fn message(self) -> str:
+        match self:
+            case NotFound: return "file or directory not found"
+            case PermissionDenied: return "permission denied"
+            case AlreadyExists: return "file or directory already exists"
+            case InvalidPath: return "invalid path"
+            case IsDirectory: return "is a directory"
+            case NotDirectory: return "not a directory"
+            case DirectoryNotEmpty: return "directory not empty"
+            case ReadOnly: return "read-only file system"
+            case FileTooLarge: return "file too large"
+            case OutOfSpace: return "out of disk space"
+            case Interrupted: return "operation interrupted"
+            case TimedOut: return "operation timed out"
+            case ConnectionRefused: return "connection refused"
+            case ConnectionReset: return "connection reset"
+            case BrokenPipe: return "broken pipe"
+            case WouldBlock: return "operation would block"
+            case InvalidData: return "invalid data"
+            case UnexpectedEof: return "unexpected end of file"
+            case Other(msg): return msg
+
+# File metadata
+struct FileMetadata:
+    size: ByteCount
+    modified: Option[Timestamp]
+    created: Option[Timestamp]
+    accessed: Option[Timestamp]
+    file_type: FileType
+    permissions: FileMode
+    readonly: bool
+
+enum FileType:
+    File
+    Directory
+    Symlink
+    Other
+
+# Timestamp (nanoseconds since Unix epoch)
+unit Timestamp: u64 as ts
+
+# Directory entry
+struct DirEntry:
+    path: FilePath
+    name: FileName
+    file_type: FileType
+
+# Directory entries iterator
+struct DirEntries:
+    entries: Array[DirEntry]
+    index: u64
+
+impl DirEntries:
+    fn next(self) -> Option[DirEntry]:
+        if self.index >= self.entries.len():
+            return None
+        let entry = self.entries[self.index]
+        self.index = self.index + 1
+        return Some(entry)
+
+# Text type (UTF-8 validated string)
+unit Text: str as text
+
+# ===============================
+# File System Operations
+# ===============================
+
+# Read entire file as bytes
+pub async fn read(path: FilePath) -> Result[Bytes, IoError]:
+    # Native implementation
+    return native_fs_read(path)
+
+# Read entire file as text (UTF-8)
+pub async fn read_text(path: FilePath) -> Result[Text, IoError]:
+    let bytes = await read(path)?
+    match bytes.to_utf8():
+        case Ok(s): return Ok(s_text)
+        case Err(_): return Err(IoError::InvalidData)
+
+# Write bytes to file (creates or overwrites)
+pub async fn write(path: FilePath, data: &Bytes) -> Result[ByteCount, IoError]:
+    return native_fs_write(path, data)
+
+# Write text to file (UTF-8)
+pub async fn write_text(path: FilePath, text: &Text) -> Result[ByteCount, IoError]:
+    let bytes = (text as str).to_bytes()
+    return await write(path, &bytes)
+
+# Append bytes to file
+pub async fn append(path: FilePath, data: &Bytes) -> Result[ByteCount, IoError]:
+    return native_fs_append(path, data)
+
+# Append text to file
+pub async fn append_text(path: FilePath, text: &Text) -> Result[ByteCount, IoError]:
+    let bytes = (text as str).to_bytes()
+    return await append(path, &bytes)
+
+# ===============================
+# Directory Operations
+# ===============================
+
+# Create directory
+pub async fn create_dir(path: DirPath) -> Result[(), IoError]:
+    return native_fs_create_dir(path, false)
+
+# Create directory and all parent directories
+pub async fn create_dir_all(path: DirPath) -> Result[(), IoError]:
+    return native_fs_create_dir(path, true)
+
+# Remove file
+pub async fn remove(path: FilePath) -> Result[(), IoError]:
+    return native_fs_remove_file(path)
+
+# Remove empty directory
+pub async fn remove_dir(path: DirPath) -> Result[(), IoError]:
+    return native_fs_remove_dir(path, false)
+
+# Remove directory and all contents
+pub async fn remove_dir_all(path: DirPath) -> Result[(), IoError]:
+    return native_fs_remove_dir(path, true)
+
+# Rename file or directory
+pub async fn rename(from: FilePath, to: FilePath) -> Result[(), IoError]:
+    return native_fs_rename(from, to)
+
+# Copy file
+pub async fn copy(from: FilePath, to: FilePath) -> Result[ByteCount, IoError]:
+    return native_fs_copy(from, to)
+
+# ===============================
+# Metadata Operations
+# ===============================
+
+# Check if path exists
+pub async fn exists(path: FilePath) -> bool:
+    match native_fs_metadata(path):
+        case Ok(_): return true
+        case Err(_): return false
+
+# Get file metadata
+pub async fn metadata(path: FilePath) -> Result[FileMetadata, IoError]:
+    return native_fs_metadata(path)
+
+# List directory contents
+pub async fn read_dir(path: DirPath) -> Result[DirEntries, IoError]:
+    return native_fs_read_dir(path)
+
+# ===============================
+# File Handle Operations
+# ===============================
+
+# Open modes
+enum OpenMode:
+    Read
+    Write
+    Append
+    ReadWrite
+    Create
+    CreateNew
+    Truncate
+
+# File handle for streaming operations
+struct File:
+    handle: i64
+    path: FilePath
+    mode: OpenMode
+
+impl File:
+    # Open file with mode
+    pub async fn open(path: FilePath, mode: OpenMode) -> Result[File, IoError]:
+        let handle = native_fs_open(path, mode)?
+        return Ok(File { handle: handle, path: path, mode: mode })
+
+    # Read convenience methods
+    pub async fn open_read(path: FilePath) -> Result[File, IoError]:
+        return File::open(path, OpenMode::Read)
+
+    pub async fn open_write(path: FilePath) -> Result[File, IoError]:
+        return File::open(path, OpenMode::Write)
+
+    pub async fn create(path: FilePath) -> Result[File, IoError]:
+        return File::open(path, OpenMode::Create)
+
+    # Read up to `buf.len()` bytes
+    pub async fn read(self, buf: &mut Bytes) -> Result[ByteCount, IoError]:
+        return native_file_read(self.handle, buf)
+
+    # Read exact number of bytes
+    pub async fn read_exact(self, buf: &mut Bytes) -> Result[(), IoError]:
+        let mut read_total: u64 = 0
+        let target = buf.len()
+        while read_total < target:
+            let remaining = target - read_total
+            let slice = buf.slice_mut(read_total, target)
+            let n = await self.read(&mut slice)?
+            if (n as u64) == 0:
+                return Err(IoError::UnexpectedEof)
+            read_total = read_total + (n as u64)
+        return Ok(())
+
+    # Write bytes
+    pub async fn write(self, data: &Bytes) -> Result[ByteCount, IoError]:
+        return native_file_write(self.handle, data)
+
+    # Write all bytes
+    pub async fn write_all(self, data: &Bytes) -> Result[(), IoError]:
+        let mut written: u64 = 0
+        let total = data.len()
+        while written < total:
+            let slice = data.slice(written, total)
+            let n = await self.write(&slice)?
+            written = written + (n as u64)
+        return Ok(())
+
+    # Flush buffers
+    pub async fn flush(self) -> Result[(), IoError]:
+        return native_file_flush(self.handle)
+
+    # Seek position
+    pub async fn seek(self, pos: SeekFrom) -> Result[ByteCount, IoError]:
+        return native_file_seek(self.handle, pos)
+
+    # Get current position
+    pub async fn position(self) -> Result[ByteCount, IoError]:
+        return self.seek(SeekFrom::Current(0))
+
+    # Get file size
+    pub async fn size(self) -> Result[ByteCount, IoError]:
+        let current = await self.position()?
+        let end = await self.seek(SeekFrom::End(0))?
+        await self.seek(SeekFrom::Start(current as u64))?
+        return Ok(end)
+
+    # Sync to disk
+    pub async fn sync_all(self) -> Result[(), IoError]:
+        return native_file_sync(self.handle)
+
+    # Close file
+    pub async fn close(self) -> Result[(), IoError]:
+        return native_file_close(self.handle)
+
+# Seek position
+enum SeekFrom:
+    Start(u64)
+    End(i64)
+    Current(i64)
+
+# ===============================
+# Native function declarations
+# ===============================
+
+extern fn native_fs_read(path: FilePath) -> Result[Bytes, IoError]
+extern fn native_fs_write(path: FilePath, data: &Bytes) -> Result[ByteCount, IoError]
+extern fn native_fs_append(path: FilePath, data: &Bytes) -> Result[ByteCount, IoError]
+extern fn native_fs_create_dir(path: DirPath, recursive: bool) -> Result[(), IoError]
+extern fn native_fs_remove_file(path: FilePath) -> Result[(), IoError]
+extern fn native_fs_remove_dir(path: DirPath, recursive: bool) -> Result[(), IoError]
+extern fn native_fs_rename(from: FilePath, to: FilePath) -> Result[(), IoError]
+extern fn native_fs_copy(from: FilePath, to: FilePath) -> Result[ByteCount, IoError]
+extern fn native_fs_metadata(path: FilePath) -> Result[FileMetadata, IoError]
+extern fn native_fs_read_dir(path: DirPath) -> Result[DirEntries, IoError]
+extern fn native_fs_open(path: FilePath, mode: OpenMode) -> Result[i64, IoError]
+extern fn native_file_read(handle: i64, buf: &mut Bytes) -> Result[ByteCount, IoError]
+extern fn native_file_write(handle: i64, data: &Bytes) -> Result[ByteCount, IoError]
+extern fn native_file_flush(handle: i64) -> Result[(), IoError]
+extern fn native_file_seek(handle: i64, pos: SeekFrom) -> Result[ByteCount, IoError]
+extern fn native_file_sync(handle: i64) -> Result[(), IoError]
+extern fn native_file_close(handle: i64) -> Result[(), IoError]

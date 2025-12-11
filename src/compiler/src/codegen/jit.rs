@@ -4,6 +4,7 @@
 //! the interpreter to compile hot paths to native code at runtime.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use cranelift_jit::{JITBuilder, JITModule};
 
@@ -17,6 +18,11 @@ use super::common_backend::{
 pub use super::common_backend::BackendError as JitError;
 pub type JitResult<T> = BackendResult<T>;
 
+// Re-export provider types for convenience
+pub use simple_native_loader::{
+    default_runtime_provider, static_provider, RuntimeLoadMode, RuntimeSymbolProvider,
+};
+
 /// JIT compiler for Simple functions.
 ///
 /// Compiles MIR functions to native code that can be executed directly.
@@ -24,6 +30,9 @@ pub struct JitCompiler {
     backend: CodegenBackend<JITModule>,
     /// Map of function names to their native function pointers
     compiled_funcs: HashMap<String, *const u8>,
+    /// Runtime symbol provider (kept alive for the lifetime of the compiler)
+    #[allow(dead_code)]
+    provider: Arc<dyn RuntimeSymbolProvider>,
 }
 
 // Safety: The compiled function pointers are only valid while JitCompiler is alive
@@ -31,19 +40,45 @@ pub struct JitCompiler {
 unsafe impl Send for JitCompiler {}
 
 impl JitCompiler {
-    /// Create a new JIT compiler.
+    /// Create a new JIT compiler with the default runtime provider.
+    ///
+    /// Uses `default_runtime_provider()` which:
+    /// - In debug builds: tries dynamic loading first, falls back to static
+    /// - In release builds: uses static linking
     pub fn new() -> JitResult<Self> {
+        Self::with_provider(default_runtime_provider())
+    }
+
+    /// Create a new JIT compiler with a specific runtime symbol provider.
+    ///
+    /// This allows customizing how runtime FFI symbols are resolved:
+    /// - `StaticSymbolProvider`: Zero-cost, compiled-in symbols
+    /// - `DynamicSymbolProvider`: Load from shared library
+    /// - `ChainedProvider`: Multiple libraries, first match wins
+    pub fn with_provider(provider: Arc<dyn RuntimeSymbolProvider>) -> JitResult<Self> {
         let settings = BackendSettings::jit();
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+
+        // Register runtime FFI symbols from the provider
+        register_runtime_symbols_from_provider(&mut builder, provider.as_ref());
+
         let module = JITModule::new(builder);
         let backend = CodegenBackend::with_module(module)?;
 
         Ok(Self {
             backend,
             compiled_funcs: HashMap::new(),
+            provider,
         })
+    }
+
+    /// Create a new JIT compiler with static symbol resolution only.
+    ///
+    /// This is the most efficient option with zero runtime lookup cost.
+    pub fn new_static() -> JitResult<Self> {
+        Self::with_provider(static_provider())
     }
 
     /// Compile a MIR module and return function pointers.
@@ -119,6 +154,24 @@ impl JitCompiler {
 impl Default for JitCompiler {
     fn default() -> Self {
         Self::new().expect("Failed to create JIT compiler")
+    }
+}
+
+/// Register runtime FFI function symbols with the JIT builder from a provider.
+///
+/// This allows the JIT to resolve external function calls to runtime FFI functions
+/// like print, array operations, etc. The symbols are obtained from the provider,
+/// which can be static (compiled-in) or dynamic (loaded from shared library).
+fn register_runtime_symbols_from_provider(
+    builder: &mut JITBuilder,
+    provider: &dyn RuntimeSymbolProvider,
+) {
+    use simple_native_loader::RUNTIME_SYMBOL_NAMES;
+
+    for &name in RUNTIME_SYMBOL_NAMES {
+        if let Some(ptr) = provider.get_symbol(name) {
+            builder.symbol(name, ptr);
+        }
     }
 }
 

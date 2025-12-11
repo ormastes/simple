@@ -118,11 +118,136 @@ fn interpreter_run_with_stdin() {
 }
 
 #[test]
-fn interpreter_result_has_empty_stdout() {
-    // For now, stdout capture is not implemented
+fn interpreter_result_has_empty_stdout_when_no_capture() {
+    // Without capture_output, stdout/stderr are empty
     let result = run_code("main = 1", &[], "").unwrap();
     assert!(result.stdout.is_empty());
     assert!(result.stderr.is_empty());
+}
+
+// ============= Print Output Capture Tests =============
+// Note: print/println/eprint/eprintln are now prelude functions - no extern fn needed
+
+#[test]
+fn interpreter_captures_print_output() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+println("hello")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "hello\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn interpreter_captures_multiple_prints() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+print("a")
+print("b")
+println("c")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "abc\n");
+}
+
+#[test]
+fn interpreter_captures_print_with_multiple_args() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+println("x", "y", "z")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "x y z\n");
+}
+
+#[test]
+fn interpreter_captures_print_with_values() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+let x = 42
+println("value:", x)
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "value: 42\n");
+}
+
+#[test]
+fn interpreter_captures_stderr() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+eprintln("error message")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stderr, "error message\n");
+    assert_eq!(result.stdout, "");
+}
+
+#[test]
+fn interpreter_captures_mixed_stdout_stderr() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+println("out1")
+eprintln("err1")
+println("out2")
+main = 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "out1\nout2\n");
+    assert_eq!(result.stderr, "err1\n");
 }
 
 // ============= Running Type Tests =============
@@ -184,4 +309,73 @@ fn main() -> i64:
         )
         .unwrap();
     assert_eq!(result.exit_code, 100);
+}
+
+// ============= Compiler Mode Print Tests =============
+// These tests verify that print works in native codegen (compiler) mode
+
+#[test]
+fn compiler_mode_captures_println() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    println("hello from compiler")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "hello from compiler\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_captures_multiple_args() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    println("a", "b", "c")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stdout, "a b c\n");
+    assert_eq!(result.exit_code, 0);
+}
+
+#[test]
+fn compiler_mode_captures_stderr() {
+    let interpreter = Interpreter::new();
+    let code = r#"
+fn main() -> i64:
+    eprintln("error from compiler")
+    return 0
+"#;
+    let result = interpreter
+        .run(
+            code,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(result.stderr, "error from compiler\n");
+    assert_eq!(result.exit_code, 0);
 }

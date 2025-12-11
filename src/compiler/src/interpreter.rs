@@ -230,12 +230,43 @@ fn call_value_with_args(
     }
 }
 
+/// Built-in extern functions that are always available without explicit declaration.
+/// These are the "prelude" functions - print, math, and conversion utilities.
+pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
+    // I/O functions
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "input",
+    // Math functions
+    "abs",
+    "min",
+    "max",
+    "sqrt",
+    "floor",
+    "ceil",
+    "pow",
+    // Conversion functions
+    "to_string",
+    "to_int",
+    // Process control
+    "exit",
+];
+
 /// Evaluate the module and return the `main` binding as an i32.
 #[instrument(skip(items))]
 pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
     // Clear const names and extern functions from previous runs
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
-    EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().clear());
+    EXTERN_FUNCTIONS.with(|cell| {
+        let mut externs = cell.borrow_mut();
+        externs.clear();
+        // Pre-populate with prelude functions (always available)
+        for &name in PRELUDE_EXTERN_FUNCTIONS {
+            externs.insert(name.to_string());
+        }
+    });
 
     let mut env = Env::new();
     let mut functions: HashMap<String, FunctionDef> = HashMap::new();

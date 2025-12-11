@@ -577,6 +577,18 @@ impl MirLowerer {
                 })
             }
 
+            HirExprKind::String(s) => {
+                let s = s.clone();
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block
+                        .instructions
+                        .push(MirInst::ConstString { dest, value: s });
+                    dest
+                })
+            }
+
             HirExprKind::Local(idx) => {
                 let idx = *idx;
                 self.with_func(|func, current_block| {
@@ -774,6 +786,27 @@ impl MirLowerer {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::ActorSpawn { dest, body_block });
+                    dest
+                })
+            }
+
+            HirExprKind::BuiltinCall { name, args } => {
+                // Lower all arguments
+                let mut arg_regs = Vec::new();
+                for arg in args {
+                    arg_regs.push(self.lower_expr(arg)?);
+                }
+
+                // Create a call to the builtin function
+                let target = CallTarget::from_name(name);
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target,
+                        args: arg_regs,
+                    });
                     dest
                 })
             }

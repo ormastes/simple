@@ -1,0 +1,219 @@
+# Fixed-Size String - Stack-allocated string with fixed capacity
+# No heap allocation, UTF-8 validated
+
+# Fixed-capacity string (stack allocated)
+pub struct FixedString[const N: u64]:
+    data: [u8; N]
+    len: u64
+
+impl FixedString[const N: u64]:
+    # Create empty fixed string
+    pub fn new() -> FixedString[N]:
+        return FixedString {
+            data: [0_u8; N],
+            len: 0
+        }
+
+    # Create from string slice
+    pub fn from_str(s: &str) -> Result[FixedString[N], FixedStringError]:
+        let mut fs = FixedString[N]::new()
+        if s.len() > N:
+            return Err(FixedStringError::TooLong)
+        for i in 0..s.len():
+            fs.data[i] = s.byte_at(i)
+        fs.len = s.len()
+        return Ok(fs)
+
+    # Create from string slice, truncating if too long
+    pub fn from_str_truncate(s: &str) -> FixedString[N]:
+        let mut fs = FixedString[N]::new()
+        let copy_len = s.len().min(N)
+        for i in 0..copy_len:
+            fs.data[i] = s.byte_at(i)
+        fs.len = copy_len
+        return fs
+
+    # Get capacity
+    pub fn capacity(self) -> u64:
+        return N
+
+    # Get current length in bytes
+    pub fn len(self) -> u64:
+        return self.len
+
+    # Check if empty
+    pub fn is_empty(self) -> bool:
+        return self.len == 0
+
+    # Check if full
+    pub fn is_full(self) -> bool:
+        return self.len == N
+
+    # Get remaining capacity
+    pub fn remaining(self) -> u64:
+        return N - self.len
+
+    # Push single byte (returns false if full)
+    pub fn push_byte(self, byte: u8) -> bool:
+        if self.len >= N:
+            return false
+        self.data[self.len] = byte
+        self.len = self.len + 1
+        return true
+
+    # Push character (UTF-8 encoded, may be multi-byte)
+    pub fn push_char(self, ch: char) -> bool:
+        let bytes = ch.encode_utf8()
+        if self.len + bytes.len() > N:
+            return false
+        for b in bytes:
+            self.data[self.len] = b
+            self.len = self.len + 1
+        return true
+
+    # Push string slice
+    pub fn push_str(self, s: &str) -> bool:
+        if self.len + s.len() > N:
+            return false
+        for i in 0..s.len():
+            self.data[self.len + i] = s.byte_at(i)
+        self.len = self.len + s.len()
+        return true
+
+    # Try push string with Result
+    pub fn try_push_str(self, s: &str) -> Result[(), FixedStringError]:
+        if self.len + s.len() > N:
+            return Err(FixedStringError::TooLong)
+        self.push_str(s)
+        return Ok(())
+
+    # Pop last byte
+    pub fn pop_byte(self) -> Option[u8]:
+        if self.len == 0:
+            return None
+        self.len = self.len - 1
+        return Some(self.data[self.len])
+
+    # Clear all content
+    pub fn clear(self):
+        self.len = 0
+
+    # Truncate to length
+    pub fn truncate(self, len: u64):
+        if len < self.len:
+            self.len = len
+
+    # Get as string slice
+    pub fn as_str(self) -> &str:
+        return str::from_utf8_unchecked(&self.data[0..self.len])
+
+    # Get as bytes slice
+    pub fn as_bytes(self) -> &[u8]:
+        return &self.data[0..self.len]
+
+    # Get byte at index
+    pub fn byte_at(self, index: u64) -> Option[u8]:
+        if index >= self.len:
+            return None
+        return Some(self.data[index])
+
+    # Check if starts with prefix
+    pub fn starts_with(self, prefix: &str) -> bool:
+        if prefix.len() > self.len:
+            return false
+        for i in 0..prefix.len():
+            if self.data[i] != prefix.byte_at(i):
+                return false
+        return true
+
+    # Check if ends with suffix
+    pub fn ends_with(self, suffix: &str) -> bool:
+        if suffix.len() > self.len:
+            return false
+        let offset = self.len - suffix.len()
+        for i in 0..suffix.len():
+            if self.data[offset + i] != suffix.byte_at(i):
+                return false
+        return true
+
+    # Check if contains substring
+    pub fn contains(self, needle: &str) -> bool:
+        return self.find(needle).is_some()
+
+    # Find substring
+    pub fn find(self, needle: &str) -> Option[u64]:
+        if needle.len() > self.len or needle.is_empty():
+            return None
+
+        let end = self.len - needle.len() + 1
+        for i in 0..end:
+            let mut found = true
+            for j in 0..needle.len():
+                if self.data[i + j] != needle.byte_at(j):
+                    found = false
+                    break
+            if found:
+                return Some(i)
+        return None
+
+    # Compare equality
+    pub fn eq(self, other: &str) -> bool:
+        if self.len != other.len():
+            return false
+        for i in 0..self.len:
+            if self.data[i] != other.byte_at(i):
+                return false
+        return true
+
+    # Trim whitespace from start and end
+    pub fn trim(self) -> &str:
+        let mut start: u64 = 0
+        let mut end = self.len
+
+        while start < end and self.data[start].is_whitespace():
+            start = start + 1
+
+        while end > start and self.data[end - 1].is_whitespace():
+            end = end - 1
+
+        return str::from_utf8_unchecked(&self.data[start..end])
+
+    # Convert to uppercase (ASCII only)
+    pub fn to_uppercase(self):
+        for i in 0..self.len:
+            let b = self.data[i]
+            if b >= 'a' as u8 and b <= 'z' as u8:
+                self.data[i] = b - 32
+
+    # Convert to lowercase (ASCII only)
+    pub fn to_lowercase(self):
+        for i in 0..self.len:
+            let b = self.data[i]
+            if b >= 'A' as u8 and b <= 'Z' as u8:
+                self.data[i] = b + 32
+
+# Fixed string error type
+enum FixedStringError:
+    TooLong
+    InvalidUtf8
+
+impl FixedStringError:
+    fn message(self) -> str:
+        match self:
+            case TooLong: return "string too long for fixed capacity"
+            case InvalidUtf8: return "invalid UTF-8 sequence"
+
+# Common type aliases
+type FixedString16 = FixedString[16]
+type FixedString32 = FixedString[32]
+type FixedString64 = FixedString[64]
+type FixedString128 = FixedString[128]
+type FixedString256 = FixedString[256]
+type FixedString512 = FixedString[512]
+type FixedString1024 = FixedString[1024]
+
+# Path-sized fixed string
+type PathString = FixedString[4096]
+
+# Name-sized fixed string
+type NameString = FixedString[256]

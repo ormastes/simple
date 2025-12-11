@@ -521,6 +521,7 @@ fn test_interpreter_run_pub_func_integration() {
         timeout_ms: 0,
         in_memory: true,
         running_type: RunningType::default(),
+        ..Default::default()
     };
     let result = interpreter.run("main = 30", config);
     assert!(result.is_ok());
