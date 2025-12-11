@@ -84,6 +84,12 @@ pub enum TokenKind {
     Import,
     From,
     As,
+    Mod,       // mod (module declaration)
+    Use,       // use (import)
+    Export,    // export (re-export)
+    Common,    // common (directory prelude)
+    Auto,      // auto (auto import)
+    Crate,     // crate (module root)
     In,
     Is,
     Not,

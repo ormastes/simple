@@ -13,77 +13,60 @@ use crate::token::{Span, TokenKind};
 use super::Parser;
 
 impl<'a> Parser<'a> {
+    /// Helper to parse a number (float or int) as f64.
+    fn parse_number_as_f64(&mut self) -> Result<f64, ParseError> {
+        if let TokenKind::Float(f) = &self.current.kind {
+            let val = *f;
+            self.advance();
+            Ok(val)
+        } else if let TokenKind::Integer(i) = &self.current.kind {
+            let val = *i as f64;
+            self.advance();
+            Ok(val)
+        } else {
+            Err(ParseError::unexpected_token(
+                "number",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ))
+        }
+    }
+
+    /// Helper to parse a unit variant (suffix = factor)
+    fn parse_unit_variant(&mut self) -> Result<UnitVariant, ParseError> {
+        let suffix = self.expect_identifier()?;
+        self.expect(&TokenKind::Assign)?;
+        let factor = self.parse_number_as_f64()?;
+        Ok(UnitVariant { suffix, factor })
+    }
     // === Variable Declarations ===
 
     pub(crate) fn parse_mut_let(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mut)?;
         self.expect(&TokenKind::Let)?;
-
-        let pattern = self.parse_pattern()?;
-
-        let ty = if self.check(&TokenKind::Colon) {
-            self.advance();
-            Some(self.parse_type()?)
-        } else {
-            None
-        };
-
-        let value = if self.check(&TokenKind::Assign) {
-            self.advance();
-            Some(self.parse_expression()?)
-        } else {
-            None
-        };
-
-        Ok(Node::Let(LetStmt {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
-            pattern,
-            ty,
-            value,
-            mutability: Mutability::Mutable,
-        }))
+        self.parse_let_impl(start_span, Mutability::Mutable)
     }
 
     pub(crate) fn parse_let(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Let)?;
-
         let mutability = if self.check(&TokenKind::Mut) {
             self.advance();
             Mutability::Mutable
         } else {
             Mutability::Immutable
         };
+        self.parse_let_impl(start_span, mutability)
+    }
 
+    fn parse_let_impl(&mut self, start_span: Span, mutability: Mutability) -> Result<Node, ParseError> {
         let pattern = self.parse_pattern()?;
-
-        let ty = if self.check(&TokenKind::Colon) {
-            self.advance();
-            Some(self.parse_type()?)
-        } else {
-            None
-        };
-
-        let value = if self.check(&TokenKind::Assign) {
-            self.advance();
-            Some(self.parse_expression()?)
-        } else {
-            None
-        };
+        let ty = self.parse_optional_type_annotation()?;
+        let value = self.parse_optional_assignment()?;
 
         Ok(Node::Let(LetStmt {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             pattern,
             ty,
             value,
@@ -91,29 +74,42 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse optional type annotation `: Type`
+    fn parse_optional_type_annotation(&mut self) -> Result<Option<Type>, ParseError> {
+        if self.check(&TokenKind::Colon) {
+            self.advance();
+            Ok(Some(self.parse_type()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Parse optional assignment `= expr`
+    fn parse_optional_assignment(&mut self) -> Result<Option<Expr>, ParseError> {
+        if self.check(&TokenKind::Assign) {
+            self.advance();
+            Ok(Some(self.parse_expression()?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Helper to parse name, type annotation, and assigned value for const/static
+    fn parse_named_value(&mut self) -> Result<(String, Option<Type>, Expr), ParseError> {
+        let name = self.expect_identifier()?;
+        let ty = self.parse_optional_type_annotation()?;
+        self.expect(&TokenKind::Assign)?;
+        let value = self.parse_expression()?;
+        Ok((name, ty, value))
+    }
+
     pub(crate) fn parse_const(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Const)?;
-
-        let name = self.expect_identifier()?;
-
-        let ty = if self.check(&TokenKind::Colon) {
-            self.advance();
-            Some(self.parse_type()?)
-        } else {
-            None
-        };
-
-        self.expect(&TokenKind::Assign)?;
-        let value = self.parse_expression()?;
+        let (name, ty, value) = self.parse_named_value()?;
 
         Ok(Node::Const(ConstStmt {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
             ty,
             value,
@@ -124,33 +120,16 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_static(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Static)?;
-
         let mutability = if self.check(&TokenKind::Mut) {
             self.advance();
             Mutability::Mutable
         } else {
             Mutability::Immutable
         };
-
-        let name = self.expect_identifier()?;
-
-        let ty = if self.check(&TokenKind::Colon) {
-            self.advance();
-            Some(self.parse_type()?)
-        } else {
-            None
-        };
-
-        self.expect(&TokenKind::Assign)?;
-        let value = self.parse_expression()?;
+        let (name, ty, value) = self.parse_named_value()?;
 
         Ok(Node::Static(StaticStmt {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
             name,
             ty,
             value,
@@ -184,7 +163,7 @@ impl<'a> Parser<'a> {
     /// Standalone: `unit UserId: i64 as uid`
     /// Family: `unit length(base: f64): m = 1.0, km = 1000.0`
     pub(crate) fn parse_unit(&mut self) -> Result<Node, ParseError> {
-        use crate::ast::{UnitFamilyDef, UnitVariant};
+        use crate::ast::UnitFamilyDef;
 
         let start_span = self.current.span;
         self.expect(&TokenKind::Unit)?;
@@ -223,25 +202,7 @@ impl<'a> Parser<'a> {
                         if self.check(&TokenKind::Dedent) {
                             break;
                         }
-                        let suffix = self.expect_identifier()?;
-                        self.expect(&TokenKind::Assign)?;
-                        // Parse number (float or int)
-                        let factor = if let TokenKind::Float(f) = &self.current.kind {
-                            let val = *f;
-                            self.advance();
-                            val
-                        } else if let TokenKind::Integer(i) = &self.current.kind {
-                            let val = *i as f64;
-                            self.advance();
-                            val
-                        } else {
-                            return Err(ParseError::unexpected_token(
-                                "number",
-                                format!("{:?}", self.current.kind),
-                                self.current.span,
-                            ));
-                        };
-                        variants.push(UnitVariant { suffix, factor });
+                        variants.push(self.parse_unit_variant()?);
 
                         // Skip comma or newline
                         if self.check(&TokenKind::Comma) {
@@ -259,26 +220,7 @@ impl<'a> Parser<'a> {
             } else {
                 // Single line: m = 1.0, km = 1000.0
                 loop {
-                    let suffix = self.expect_identifier()?;
-                    self.expect(&TokenKind::Assign)?;
-                    // Parse number (float or int)
-                    let factor = if let TokenKind::Float(f) = &self.current.kind {
-                        let val = *f;
-                        self.advance();
-                        val
-                    } else if let TokenKind::Integer(i) = &self.current.kind {
-                        let val = *i as f64;
-                        self.advance();
-                        val
-                    } else {
-                        return Err(ParseError::unexpected_token(
-                            "number",
-                            format!("{:?}", self.current.kind),
-                            self.current.span,
-                        ));
-                    };
-                    variants.push(UnitVariant { suffix, factor });
-
+                    variants.push(self.parse_unit_variant()?);
                     if !self.check(&TokenKind::Comma) {
                         break;
                     }
@@ -752,5 +694,209 @@ impl<'a> Parser<'a> {
             };
             Ok(MacroParam::Literal(lit))
         }
+    }
+
+    // === Module System (Features #104-111) ===
+
+    /// Parse a module path: crate.sys.http.router
+    /// Returns the segments as a vector
+    pub(crate) fn parse_module_path(&mut self) -> Result<ModulePath, ParseError> {
+        let mut segments = Vec::new();
+
+        // First segment (could be 'crate' keyword or identifier)
+        if self.check(&TokenKind::Crate) {
+            self.advance();
+            segments.push("crate".to_string());
+        } else {
+            segments.push(self.expect_identifier()?);
+        }
+
+        // Parse dot-separated segments
+        while self.check(&TokenKind::Dot) {
+            self.advance();
+
+            // Check for glob: module.*
+            if self.check(&TokenKind::Star) {
+                break; // Stop, let caller handle *
+            }
+
+            // Check for group: module.{A, B}
+            if self.check(&TokenKind::LBrace) {
+                break; // Stop, let caller handle {}
+            }
+
+            segments.push(self.expect_identifier()?);
+        }
+
+        Ok(ModulePath::new(segments))
+    }
+
+    /// Parse an import target: single item, alias, group, or glob
+    /// Called after the module path is parsed
+    pub(crate) fn parse_import_target(&mut self, last_segment: Option<String>) -> Result<ImportTarget, ParseError> {
+        // Check for glob: *
+        if self.check(&TokenKind::Star) {
+            self.advance();
+            return Ok(ImportTarget::Glob);
+        }
+
+        // Check for group: {A, B, C}
+        if self.check(&TokenKind::LBrace) {
+            self.advance();
+            let mut targets = Vec::new();
+
+            while !self.check(&TokenKind::RBrace) {
+                let name = self.expect_identifier()?;
+                let target = if self.check(&TokenKind::As) {
+                    self.advance();
+                    let alias = self.expect_identifier()?;
+                    ImportTarget::Aliased { name, alias }
+                } else {
+                    ImportTarget::Single(name)
+                };
+                targets.push(target);
+
+                if !self.check(&TokenKind::RBrace) {
+                    self.expect(&TokenKind::Comma)?;
+                }
+            }
+            self.expect(&TokenKind::RBrace)?;
+            return Ok(ImportTarget::Group(targets));
+        }
+
+        // Single item (already parsed as last segment of path)
+        if let Some(name) = last_segment {
+            // Check for alias: as NewName
+            if self.check(&TokenKind::As) {
+                self.advance();
+                let alias = self.expect_identifier()?;
+                return Ok(ImportTarget::Aliased { name, alias });
+            }
+            return Ok(ImportTarget::Single(name));
+        }
+
+        Err(ParseError::unexpected_token(
+            "import target",
+            format!("{:?}", self.current.kind),
+            self.current.span,
+        ))
+    }
+
+    /// Parse use statement: use crate.module.Item
+    /// use crate.module.{A, B}
+    /// use crate.module.*
+    /// use crate.module.Item as Alias
+    pub(crate) fn parse_use(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Use)?;
+
+        let path = self.parse_module_path()?;
+
+        // Determine if we stopped at */{ or at a single item
+        let (final_path, target) = if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
+            // parse_module_path stopped after consuming the dot before */{}
+            let target = self.parse_import_target(None)?;
+            (path, target)
+        } else {
+            // Last segment of path is the item being imported
+            let mut segments = path.segments;
+            let last = segments.pop().unwrap_or_default();
+            let target = self.parse_import_target(Some(last))?;
+            (ModulePath::new(segments), target)
+        };
+
+        Ok(Node::UseStmt(UseStmt {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            path: final_path,
+            target,
+        }))
+    }
+
+    /// Parse mod declaration: mod name or pub mod name
+    pub(crate) fn parse_mod(&mut self, visibility: Visibility, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Mod)?;
+
+        let name = self.expect_identifier()?;
+
+        Ok(Node::ModDecl(ModDecl {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            name,
+            visibility,
+            attributes,
+        }))
+    }
+
+    /// Parse common use: common use crate.module.*
+    pub(crate) fn parse_common_use(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Common)?;
+        self.expect(&TokenKind::Use)?;
+
+        let path = self.parse_module_path()?;
+
+        // Determine if we stopped at */{ or at a single item
+        let (final_path, target) = if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
+            let target = self.parse_import_target(None)?;
+            (path, target)
+        } else {
+            // Last segment of path is the item being imported
+            let mut segments = path.segments;
+            let last = segments.pop().unwrap_or_default();
+            let target = self.parse_import_target(Some(last))?;
+            (ModulePath::new(segments), target)
+        };
+
+        Ok(Node::CommonUseStmt(CommonUseStmt {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            path: final_path,
+            target,
+        }))
+    }
+
+    /// Parse export use: export use router.Router
+    pub(crate) fn parse_export_use(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Export)?;
+        self.expect(&TokenKind::Use)?;
+
+        let path = self.parse_module_path()?;
+
+        // Determine if we stopped at */{ or at a single item
+        let (final_path, target) = if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
+            let target = self.parse_import_target(None)?;
+            (path, target)
+        } else {
+            // Last segment of path is the item being imported
+            let mut segments = path.segments;
+            let last = segments.pop().unwrap_or_default();
+            let target = self.parse_import_target(Some(last))?;
+            (ModulePath::new(segments), target)
+        };
+
+        Ok(Node::ExportUseStmt(ExportUseStmt {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            path: final_path,
+            target,
+        }))
+    }
+
+    /// Parse auto import: auto import router.route
+    pub(crate) fn parse_auto_import(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Auto)?;
+        self.expect(&TokenKind::Import)?;
+
+        let path = self.parse_module_path()?;
+
+        // Last segment is the macro name
+        let mut segments = path.segments;
+        let macro_name = segments.pop().unwrap_or_default();
+
+        Ok(Node::AutoImportStmt(AutoImportStmt {
+            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            path: ModulePath::new(segments),
+            macro_name,
+        }))
     }
 }
