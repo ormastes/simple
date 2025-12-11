@@ -878,6 +878,9 @@ impl<'a> Lexer<'a> {
             "context" => TokenKind::Context,
             "with" => TokenKind::With,
             "macro" => TokenKind::Macro,
+            "vec" => TokenKind::Vec,
+            "shared" => TokenKind::Shared,
+            "gpu" => TokenKind::Gpu,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
         }

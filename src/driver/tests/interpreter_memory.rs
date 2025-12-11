@@ -87,8 +87,8 @@ main = a + b
 fn interpreter_weak_pointer_from_shared() {
     // Weak pointer from shared - needs downgrade method
     let code = r#"
-let shared = new * 42
-let weak = new - shared
+let shared_ptr = new * 42
+let weak = new - shared_ptr
 main = 42
 "#;
     let result = run_code(code, &[], "").unwrap();

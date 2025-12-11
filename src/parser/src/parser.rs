@@ -694,6 +694,37 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // Handle SIMD vector type: vec[N, T]
+        if self.check(&TokenKind::Vec) {
+            self.advance();
+            self.expect(&TokenKind::LBracket)?;
+
+            // Parse lane count (must be an integer literal)
+            let lanes = match &self.current.kind {
+                TokenKind::Integer(n) => {
+                    let lanes = *n as u32;
+                    self.advance();
+                    lanes
+                }
+                _ => {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "lane count (2, 4, 8, or 16)".to_string(),
+                        found: format!("{:?}", self.current.kind),
+                        span: self.current.span.clone(),
+                    });
+                }
+            };
+
+            self.expect(&TokenKind::Comma)?;
+            let element = self.parse_type()?;
+            self.expect(&TokenKind::RBracket)?;
+
+            return Ok(Type::Simd {
+                lanes,
+                element: Box::new(element),
+            });
+        }
+
         // Simple or generic type
         let name = self.expect_identifier()?;
 
@@ -1403,6 +1434,94 @@ mod tests {
             assert_eq!(stmt.macro_name, "route");
         } else {
             panic!("Expected auto import statement");
+        }
+    }
+
+    // === SIMD Type Tests ===
+
+    #[test]
+    fn test_simd_type_f32x4() {
+        // In Simple language, let uses typed patterns, so the type is in the pattern
+        let module = parse("let v: vec[4, f32] = x").unwrap();
+        if let Node::Let(stmt) = &module.items[0] {
+            if let Pattern::Typed { pattern, ty } = &stmt.pattern {
+                assert!(matches!(pattern.as_ref(), Pattern::Identifier(n) if n == "v"));
+                if let Type::Simd { lanes, element } = ty {
+                    assert_eq!(*lanes, 4);
+                    assert!(matches!(element.as_ref(), Type::Simple(n) if n == "f32"));
+                } else {
+                    panic!("Expected SIMD type in typed pattern, got {:?}", ty);
+                }
+            } else {
+                panic!("Expected typed pattern, got {:?}", stmt.pattern);
+            }
+        } else {
+            panic!("Expected let statement");
+        }
+    }
+
+    #[test]
+    fn test_simd_type_i32x8() {
+        let module = parse("let v: vec[8, i32] = x").unwrap();
+        if let Node::Let(stmt) = &module.items[0] {
+            if let Pattern::Typed { ty, .. } = &stmt.pattern {
+                if let Type::Simd { lanes, element } = ty {
+                    assert_eq!(*lanes, 8);
+                    assert!(matches!(element.as_ref(), Type::Simple(n) if n == "i32"));
+                } else {
+                    panic!("Expected SIMD type in typed pattern, got {:?}", ty);
+                }
+            } else {
+                panic!("Expected typed pattern");
+            }
+        } else {
+            panic!("Expected let statement");
+        }
+    }
+
+    #[test]
+    fn test_simd_type_f64x2() {
+        let module = parse("let v: vec[2, f64] = x").unwrap();
+        if let Node::Let(stmt) = &module.items[0] {
+            if let Pattern::Typed { ty, .. } = &stmt.pattern {
+                if let Type::Simd { lanes, element } = ty {
+                    assert_eq!(*lanes, 2);
+                    assert!(matches!(element.as_ref(), Type::Simple(n) if n == "f64"));
+                } else {
+                    panic!("Expected SIMD type in typed pattern, got {:?}", ty);
+                }
+            } else {
+                panic!("Expected typed pattern");
+            }
+        } else {
+            panic!("Expected let statement");
+        }
+    }
+
+    #[test]
+    fn test_simd_function_param() {
+        let source = "fn add_vectors(a: vec[4, f32], b: vec[4, f32]) -> vec[4, f32]:\n    return a";
+        let module = parse(source).unwrap();
+        if let Node::Function(func) = &module.items[0] {
+            assert_eq!(func.params.len(), 2);
+
+            // Check first param
+            if let Some(Type::Simd { lanes, element }) = &func.params[0].ty {
+                assert_eq!(*lanes, 4);
+                assert!(matches!(element.as_ref(), Type::Simple(n) if n == "f32"));
+            } else {
+                panic!("Expected SIMD type for first param");
+            }
+
+            // Check return type
+            if let Some(Type::Simd { lanes, element }) = &func.return_type {
+                assert_eq!(*lanes, 4);
+                assert!(matches!(element.as_ref(), Type::Simple(n) if n == "f32"));
+            } else {
+                panic!("Expected SIMD return type");
+            }
+        } else {
+            panic!("Expected function definition");
         }
     }
 }

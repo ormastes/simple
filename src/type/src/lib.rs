@@ -349,6 +349,11 @@ pub enum Type {
         target: Box<Type>,
         args: Option<Vec<Type>>,
     },
+    /// SIMD vector type: vec[N, T]
+    Simd {
+        lanes: u32,
+        element: Box<Type>,
+    },
 }
 
 impl Type {
@@ -380,6 +385,10 @@ impl Type {
             Type::Optional(inner) => Type::Optional(Box::new(inner.apply_subst(subst))),
             Type::Borrow(inner) => Type::Borrow(Box::new(inner.apply_subst(subst))),
             Type::BorrowMut(inner) => Type::BorrowMut(Box::new(inner.apply_subst(subst))),
+            Type::Simd { lanes, element } => Type::Simd {
+                lanes: *lanes,
+                element: Box::new(element.apply_subst(subst)),
+            },
             _ => self.clone(),
         }
     }
@@ -399,6 +408,7 @@ impl Type {
             Type::Optional(inner) => inner.contains_var(var_id),
             Type::Borrow(inner) => inner.contains_var(var_id),
             Type::BorrowMut(inner) => inner.contains_var(var_id),
+            Type::Simd { element, .. } => element.contains_var(var_id),
             _ => false,
         }
     }
@@ -789,6 +799,13 @@ impl TypeChecker {
                 Type::Constructor {
                     target: Box::new(target_type),
                     args: args_types,
+                }
+            }
+            AstType::Simd { lanes, element } => {
+                let elem_type = self.ast_type_to_type(element);
+                Type::Simd {
+                    lanes: *lanes,
+                    element: Box::new(elem_type),
                 }
             }
         }

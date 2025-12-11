@@ -113,7 +113,10 @@ pub enum TokenKind {
     Context,
     With, // with (for context managers)
     Macro,
-    Bang, // ! (for macro invocations)
+    Bang,   // ! (for macro invocations)
+    Vec,    // vec (for SIMD vector types)
+    Shared, // shared (for GPU shared memory)
+    Gpu,    // gpu (for GPU intrinsics namespace)
 
     // Operators
     Plus,        // +

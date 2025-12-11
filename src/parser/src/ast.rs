@@ -615,6 +615,12 @@ pub enum Type {
         /// Optional argument types constraint: Constructor[Widget, (str, i32)]
         args: Option<Vec<Type>>,
     },
+    /// SIMD vector type: vec[N, T] where N is lane count, T is element type
+    /// Supported: vec[2|4|8|16, f32|f64|i32|i64|i16|i8]
+    Simd {
+        lanes: u32,
+        element: Box<Type>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
