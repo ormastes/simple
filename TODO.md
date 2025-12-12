@@ -169,12 +169,23 @@ DONE (stdlib) - Bare metal stdlib exists in lib/std/bare/:
 - Teardown bin from settlement SMF
 - Float-less, OS alloc-less, thread-less, GC-less variants
 
-## 32-bit support
-### TODO: 32-bit architecture support
-- 32-bit x86 (i686) target in Cranelift codegen
-- 32-bit ARM (armv7) target
-- Pointer size handling (usize/isize as 4 bytes)
+## Multi-architecture support
+### TODO: Additional architecture targets
+**32-bit targets:**
+- x86 (i686)
+- ARM (armv7)
+- RISC-V 32 (riscv32)
+
+**64-bit targets (beyond x86_64):**
+- ARM64 (aarch64)
+- RISC-V 64 (riscv64)
+
+**Implementation tasks:**
+- Cranelift codegen backend for each target
+- Pointer size handling (usize/isize as 4 bytes on 32-bit)
 - Runtime value representation for 32-bit (currently uses 64-bit tagged pointers)
 - SMF format compatibility (32-bit vs 64-bit sections)
-- Settlement loader for 32-bit executables
+- Settlement loader for each architecture
+- Executable stub for each target
 - Test infrastructure for cross-compilation
+- CI/CD for multi-architecture builds
