@@ -2,6 +2,8 @@
 
 use cranelift_object::{ObjectBuilder, ObjectModule};
 
+use simple_common::target::Target;
+
 use crate::mir::MirModule;
 
 use super::common_backend::{
@@ -18,8 +20,16 @@ pub struct Codegen {
 }
 
 impl Codegen {
+    /// Create a new codegen for the host target.
     pub fn new() -> CodegenResult<Self> {
-        let settings = BackendSettings::aot();
+        Self::for_target(Target::host())
+    }
+
+    /// Create a new codegen for a specific target.
+    ///
+    /// This enables cross-compilation to different architectures.
+    pub fn for_target(target: Target) -> CodegenResult<Self> {
+        let settings = BackendSettings::aot_for_target(target);
         let (_flags, isa) = create_isa_and_flags(&settings)?;
 
         let builder = ObjectBuilder::new(
@@ -30,11 +40,17 @@ impl Codegen {
         .map_err(|e| BackendError::ModuleError(e.to_string()))?;
 
         let module = ObjectModule::new(builder);
-        let backend = CodegenBackend::with_module(module)?;
+        let backend = CodegenBackend::with_module_and_target(module, target)?;
 
         Ok(Self { backend })
     }
 
+    /// Get the target this codegen is compiling for.
+    pub fn target(&self) -> &Target {
+        self.backend.target()
+    }
+
+    /// Compile a MIR module to object code.
     pub fn compile_module(mut self, mir: &MirModule) -> CodegenResult<Vec<u8>> {
         // Compile all functions
         self.backend.compile_all_functions(mir)?;
@@ -46,6 +62,7 @@ impl Codegen {
             .map_err(|e| BackendError::ModuleError(e.to_string()))
     }
 
+    /// Finish compilation and get the raw object code.
     pub fn get_object_code(self) -> Vec<u8> {
         let product = self.backend.module.finish();
         product.emit().unwrap()

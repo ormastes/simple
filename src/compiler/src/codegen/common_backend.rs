@@ -13,6 +13,8 @@ use cranelift_module::{Linkage, Module};
 use target_lexicon::Triple;
 use thiserror::Error;
 
+use simple_common::target::{Target, TargetArch};
+
 use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirModule};
 
@@ -34,6 +36,9 @@ pub enum BackendError {
 
     #[error("Module error: {0}")]
     ModuleError(String),
+
+    #[error("Unsupported target architecture: {0}")]
+    UnsupportedTarget(String),
 }
 
 pub type BackendResult<T> = Result<T, BackendError>;
@@ -47,12 +52,14 @@ pub struct CodegenBackend<M: Module> {
     pub func_ids: HashMap<String, cranelift_module::FuncId>,
     pub runtime_funcs: HashMap<&'static str, cranelift_module::FuncId>,
     pub body_stub: Option<cranelift_module::FuncId>,
+    pub target: Target,
 }
 
 /// Settings for creating a codegen backend
 pub struct BackendSettings {
     pub opt_level: &'static str,
     pub is_pic: bool,
+    pub target: Target,
 }
 
 impl Default for BackendSettings {
@@ -60,26 +67,58 @@ impl Default for BackendSettings {
         Self {
             opt_level: "speed",
             is_pic: false,
+            target: Target::host(),
         }
     }
 }
 
 impl BackendSettings {
-    /// Settings for AOT compilation
+    /// Settings for AOT compilation (host target)
     pub fn aot() -> Self {
         Self {
             opt_level: "speed",
             is_pic: false,
+            target: Target::host(),
         }
     }
 
-    /// Settings for JIT compilation
+    /// Settings for AOT compilation with a specific target
+    pub fn aot_for_target(target: Target) -> Self {
+        Self {
+            opt_level: "speed",
+            is_pic: false,
+            target,
+        }
+    }
+
+    /// Settings for JIT compilation (always host target)
     pub fn jit() -> Self {
         Self {
             opt_level: "speed",
             is_pic: true,
+            target: Target::host(),
         }
     }
+
+    /// Set the target architecture
+    pub fn with_target(mut self, target: Target) -> Self {
+        self.target = target;
+        self
+    }
+
+    /// Set the optimization level
+    pub fn with_opt_level(mut self, level: &'static str) -> Self {
+        self.opt_level = level;
+        self
+    }
+}
+
+/// Convert TargetArch to target_lexicon::Triple
+fn target_arch_to_triple(arch: TargetArch) -> BackendResult<Triple> {
+    let triple_str = arch.triple_str();
+    triple_str
+        .parse()
+        .map_err(|e: target_lexicon::ParseError| BackendError::UnsupportedTarget(e.to_string()))
 }
 
 /// Create ISA and flags from settings
@@ -98,6 +137,35 @@ pub fn create_isa_and_flags(
     }
 
     let flags = Flags::new(settings_builder);
+
+    // Use the target from settings, or default to host
+    let triple = target_arch_to_triple(settings.target.arch)?;
+
+    let isa = cranelift_codegen::isa::lookup(triple)
+        .map_err(|e| BackendError::Compilation(e.to_string()))?
+        .finish(flags.clone())
+        .map_err(|e| BackendError::Compilation(e.to_string()))?;
+
+    Ok((flags, isa))
+}
+
+/// Create ISA and flags for the host target (backwards compatibility)
+pub fn create_host_isa_and_flags(
+    opt_level: &str,
+    is_pic: bool,
+) -> BackendResult<(Flags, std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>)> {
+    let mut settings_builder = settings::builder();
+    settings_builder
+        .set("opt_level", opt_level)
+        .map_err(|e| BackendError::Compilation(e.to_string()))?;
+
+    if is_pic {
+        settings_builder
+            .set("is_pic", "true")
+            .map_err(|e| BackendError::Compilation(e.to_string()))?;
+    }
+
+    let flags = Flags::new(settings_builder);
     let triple = Triple::host();
 
     let isa = cranelift_codegen::isa::lookup(triple)
@@ -109,8 +177,13 @@ pub fn create_isa_and_flags(
 }
 
 impl<M: Module> CodegenBackend<M> {
-    /// Create a new backend with a pre-configured module
-    pub fn with_module(mut module: M) -> BackendResult<Self> {
+    /// Create a new backend with a pre-configured module (uses host target)
+    pub fn with_module(module: M) -> BackendResult<Self> {
+        Self::with_module_and_target(module, Target::host())
+    }
+
+    /// Create a new backend with a pre-configured module and target
+    pub fn with_module_and_target(mut module: M, target: Target) -> BackendResult<Self> {
         let ctx = module.make_context();
         let runtime_funcs = Self::declare_runtime_functions(&mut module)?;
 
@@ -120,7 +193,13 @@ impl<M: Module> CodegenBackend<M> {
             func_ids: HashMap::new(),
             runtime_funcs,
             body_stub: None,
+            target,
         })
+    }
+
+    /// Get the target this backend is compiling for
+    pub fn target(&self) -> &Target {
+        &self.target
     }
 
     /// Declare external runtime functions for FFI using shared specifications.

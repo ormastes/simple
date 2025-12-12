@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use simple_common::gc::GcAllocator;
+use simple_common::target::Target;
 use simple_compiler::CompilerPipeline;
 use simple_loader::loader::ModuleLoader as SmfLoader;
 use simple_loader::LoadedModule;
@@ -94,12 +95,37 @@ impl ExecCore {
         fs::write(out, smf_bytes).map_err(|e| format!("write smf: {e}"))
     }
 
+    /// Compile source string to SMF file for a specific target architecture.
+    /// This enables cross-compilation.
+    pub fn compile_source_for_target(
+        &self,
+        source: &str,
+        out: &Path,
+        target: Target,
+    ) -> Result<(), String> {
+        let smf_bytes = self.compile_to_memory_for_target(source, target)?;
+        fs::write(out, smf_bytes).map_err(|e| format!("write smf: {e}"))
+    }
+
     /// Compile source string to SMF bytes in memory (no disk I/O)
     pub fn compile_to_memory(&self, source: &str) -> Result<Vec<u8>, String> {
         let mut compiler =
             CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
         compiler
             .compile_source_to_memory(source)
+            .map_err(|e| format!("compile failed: {e}"))
+    }
+
+    /// Compile source string to SMF bytes for a specific target architecture.
+    pub fn compile_to_memory_for_target(
+        &self,
+        source: &str,
+        target: Target,
+    ) -> Result<Vec<u8>, String> {
+        let mut compiler =
+            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        compiler
+            .compile_source_to_memory_for_target(source, target)
             .map_err(|e| format!("compile failed: {e}"))
     }
 
