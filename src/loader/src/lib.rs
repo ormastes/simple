@@ -51,9 +51,18 @@ pub mod loader;
 pub mod memory;
 pub mod module;
 pub mod registry;
+pub mod settlement;
 pub mod smf;
+pub mod startup;
 
 pub use loader::{LoadError, ModuleLoader};
 pub use module::LoadedModule;
 pub use registry::ModuleRegistry;
+pub use settlement::{
+    BuildError, BuildOptions, ModuleHandle, NativeHandle, NativeLibManager, NativeLibSpec,
+    Settlement, SettlementBuilder, SettlementConfig, SettlementError, SettlementModule,
+    SlotAllocator, SlotRange, FunctionTable, GlobalTable, TypeTable, TableIndex,
+    create_executable, find_stub,
+};
 pub use simple_common::{DynLoader, DynModule};
+pub use startup::{LoadedSettlement, StartupError, StartupLoader, settlement_main};

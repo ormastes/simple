@@ -6,8 +6,10 @@
 use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
 
 /// Helper to run source and assert expected exit code.
-/// Runs BOTH interpreter and native codegen paths to ensure parity.
+/// Runs BOTH modes: interpreter and JIT compiler.
 /// Code must have explicit type annotations (Rust-style).
+/// Note: AOT executable mode is not included because it doesn't support
+/// all features (arrays, complex indexing, etc.) yet.
 pub fn run_expect(src: &str, expected: i32) {
     let interpreter = Interpreter::new();
     let result = interpreter
@@ -15,6 +17,25 @@ pub fn run_expect(src: &str, expected: i32) {
             src,
             RunConfig {
                 running_type: RunningType::Both,
+                in_memory: true,
+                ..Default::default()
+            },
+        )
+        .expect("run ok");
+    assert_eq!(result.exit_code, expected);
+}
+
+/// Helper to run source and assert expected exit code.
+/// Runs ALL three modes: interpreter, JIT, and AOT executable.
+/// Use this only for simple code that AOT can handle (no arrays, complex indexing).
+#[allow(dead_code)]
+pub fn run_expect_all(src: &str, expected: i32) {
+    let interpreter = Interpreter::new();
+    let result = interpreter
+        .run(
+            src,
+            RunConfig {
+                running_type: RunningType::All,
                 in_memory: true,
                 ..Default::default()
             },

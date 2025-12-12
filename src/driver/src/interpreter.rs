@@ -5,6 +5,15 @@
 //!
 //! The Interpreter uses Runner internally and adds I/O capture and configuration.
 
+use std::process::Command;
+use std::sync::Arc;
+use tempfile::TempDir;
+
+use simple_loader::{
+    Settlement, SettlementConfig, SettlementBuilder, BuildOptions,
+    find_stub, create_executable,
+};
+use simple_loader::memory::PlatformAllocator;
 use simple_runtime::gc::GcRuntime;
 use simple_runtime::value::{
     rt_capture_stdout_start, rt_capture_stderr_start,
@@ -19,10 +28,14 @@ pub enum RunningType {
     /// Run code using the interpreter (default)
     #[default]
     Interpreter,
-    /// Compile to SMF then run the compiled binary
+    /// Compile to native code via JIT and run (in-memory, no SMF)
     Compiler,
-    /// Run both interpreter and compiler, compare results
+    /// AOT compile to SMF file, then load and execute
+    CompileAndRun,
+    /// Run both interpreter and compiler (JIT), compare results
     Both,
+    /// Run all three modes (interpreter, JIT, AOT), compare results
+    All,
 }
 
 /// Result of running Simple code
@@ -110,6 +123,9 @@ impl Interpreter {
                     self.runner.run_source_native(code)?
                 }
             }
+            RunningType::CompileAndRun => {
+                self.run_compile_and_run(code)?
+            }
             RunningType::Both => {
                 let interp_result = if config.in_memory {
                     self.runner.run_source_in_memory(code)?
@@ -131,6 +147,35 @@ impl Interpreter {
                 }
                 interp_result
             }
+            RunningType::All => {
+                let interp_result = if config.in_memory {
+                    self.runner.run_source_in_memory(code)?
+                } else {
+                    self.runner.run_source(code)?
+                };
+
+                let compiler_result = if config.in_memory {
+                    self.runner.run_source_in_memory_native(code)?
+                } else {
+                    self.runner.run_source_native(code)?
+                };
+
+                let exe_result = self.run_compile_and_run(code)?;
+
+                if interp_result != compiler_result {
+                    return Err(format!(
+                        "Interpreter and JIT compiler results differ: interpreter={}, jit={}",
+                        interp_result, compiler_result
+                    ));
+                }
+                if interp_result != exe_result {
+                    return Err(format!(
+                        "Interpreter and AOT executable results differ: interpreter={}, exe={}",
+                        interp_result, exe_result
+                    ));
+                }
+                interp_result
+            }
         };
 
         // Stop capture and collect output
@@ -145,6 +190,79 @@ impl Interpreter {
             stdout,
             stderr,
         })
+    }
+
+    /// Run code via AOT compile → settlement → executable → run.
+    ///
+    /// This method:
+    /// 1. Compiles the source to SMF bytes
+    /// 2. Loads the SMF as a module
+    /// 3. Creates a Settlement and adds the module
+    /// 4. Packages the settlement as an executable
+    /// 5. Runs the executable and returns the exit code
+    fn run_compile_and_run(&self, code: &str) -> Result<i32, String> {
+        // Create temp directory for all artifacts
+        let tmp = TempDir::new().map_err(|e| format!("tempdir: {e}"))?;
+
+        // Compile source to SMF bytes
+        let smf_bytes = self.runner.compile_to_memory(code)?;
+
+        // Load the module
+        let loader = simple_loader::ModuleLoader::new();
+        let module = loader
+            .load_from_memory(&smf_bytes)
+            .map_err(|e| format!("load module: {e}"))?;
+
+        // Create a settlement
+        let allocator = Arc::new(PlatformAllocator::new());
+        let config = SettlementConfig {
+            code_region_size: 4 * 1024 * 1024, // 4MB
+            data_region_size: 2 * 1024 * 1024, // 2MB
+            reloadable: false,
+            executable: true,
+        };
+
+        let mut settlement = Settlement::new(config, allocator)
+            .map_err(|e| format!("create settlement: {e}"))?;
+
+        // Add the module to the settlement
+        settlement
+            .add_module(&module)
+            .map_err(|e| format!("add module: {e}"))?;
+
+        // Create executable
+        let exe_path = tmp.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+
+        create_executable(&settlement, &exe_path)
+            .map_err(|e| format!("create executable: {e}"))?;
+
+        // Make executable on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&exe_path)
+                .map_err(|e| format!("get perms: {e}"))?
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&exe_path, perms)
+                .map_err(|e| format!("set perms: {e}"))?;
+        }
+
+        // Run the executable
+        let output = Command::new(&exe_path)
+            .output()
+            .map_err(|e| format!("run exe: {e}"))?;
+
+        // Get exit code
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        // Check for runtime errors (look for "error:" or "panic" in stderr)
+        let stderr_str = String::from_utf8_lossy(&output.stderr);
+        if exit_code == -1 || stderr_str.contains("Load error:") || stderr_str.contains("Execution error:") {
+            return Err(format!("Executable failed (exit={}): {}", exit_code, stderr_str));
+        }
+
+        Ok(exit_code)
     }
 
     /// Run code with just stdin input
