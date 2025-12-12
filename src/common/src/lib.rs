@@ -185,3 +185,6 @@ impl<L: DynLoader + Default> Default for ModuleRegistry<L> {
 }
 
 pub mod gc;
+
+pub mod target;
+pub use target::{PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError};

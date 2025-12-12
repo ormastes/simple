@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use simple_common::target::Target;
 use simple_runtime::gc::GcRuntime;
 use tracing::instrument;
 
@@ -73,6 +74,18 @@ impl Runner {
     #[instrument(skip(self, source))]
     pub fn compile_to_smf(&self, source: &str, out: &Path) -> Result<(), String> {
         self.core.compile_source(source, out)
+    }
+
+    /// Compile source to an SMF at the given path for a specific target architecture.
+    /// This enables cross-compilation to different architectures.
+    #[instrument(skip(self, source))]
+    pub fn compile_to_smf_for_target(
+        &self,
+        source: &str,
+        out: &Path,
+        target: Target,
+    ) -> Result<(), String> {
+        self.core.compile_source_for_target(source, out, target)
     }
 
     /// Compile source to SMF bytes in memory (no disk I/O).

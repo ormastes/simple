@@ -8,6 +8,35 @@ use super::tags;
 /// This is the primary value type used in compiled code. It can represent
 /// all Simple Language values in a single 64-bit word, with heap-allocated
 /// objects stored as tagged pointers.
+///
+/// # Architecture Support
+///
+/// RuntimeValue always uses 64 bits regardless of the target architecture.
+/// This design choice ensures:
+/// - Consistent semantics across 32-bit and 64-bit platforms
+/// - Full 61-bit integer range on all architectures
+/// - Simpler codegen (no architecture-specific value representations)
+///
+/// On 32-bit platforms, this means:
+/// - Values are 8 bytes (two 32-bit words)
+/// - Heap pointers only use the lower 32 bits (upper 32 bits are zero)
+/// - Slightly higher memory usage, but consistent behavior
+///
+/// # Value Layout
+///
+/// ```text
+/// 64-bit word:
+/// ┌─────────────────────────────────────────────────────────────┬─────┐
+/// │                       Payload (61 bits)                     │ Tag │
+/// │                                                             │(3b) │
+/// └─────────────────────────────────────────────────────────────┴─────┘
+///
+/// Tags:
+/// - 0b000 (TAG_INT):     Integer (payload is signed 61-bit value)
+/// - 0b001 (TAG_HEAP):    Heap pointer (payload is 61-bit aligned pointer)
+/// - 0b010 (TAG_FLOAT):   Float (payload is upper 61 bits of f64)
+/// - 0b011 (TAG_SPECIAL): Special values (nil, bool, symbols)
+/// ```
 #[repr(transparent)]
 #[derive(Clone, Copy)]
 pub struct RuntimeValue(pub(crate) u64);
@@ -189,15 +218,34 @@ impl RuntimeValue {
     // Heap pointer operations
     // =========================================================================
 
+    /// Convert a pointer to u64 (works on both 32-bit and 64-bit platforms).
+    #[inline]
+    fn ptr_to_u64<T>(ptr: *const T) -> u64 {
+        // On 32-bit: usize is 4 bytes, so this zero-extends to 64 bits
+        // On 64-bit: usize is 8 bytes, direct conversion
+        ptr as usize as u64
+    }
+
+    /// Convert u64 to pointer (works on both 32-bit and 64-bit platforms).
+    #[inline]
+    fn u64_to_ptr<T>(value: u64) -> *mut T {
+        // On 32-bit: truncates to lower 32 bits (which is correct since
+        //            upper 32 bits should be zero for valid 32-bit pointers)
+        // On 64-bit: direct conversion
+        value as usize as *mut T
+    }
+
     /// Create a heap pointer value
     ///
     /// # Safety
-    /// The pointer must be valid and properly aligned.
+    /// The pointer must be valid and properly aligned (8-byte alignment).
+    /// On 32-bit systems, only the lower 32 bits of the pointer are used.
     #[inline]
     pub unsafe fn from_heap_ptr(ptr: *mut HeapHeader) -> Self {
         debug_assert!(!ptr.is_null());
-        debug_assert!(ptr as u64 & tags::TAG_MASK == 0, "pointer not aligned");
-        Self((ptr as u64) | tags::TAG_HEAP)
+        let ptr_bits = Self::ptr_to_u64(ptr);
+        debug_assert!(ptr_bits & tags::TAG_MASK == 0, "pointer not aligned");
+        Self(ptr_bits | tags::TAG_HEAP)
     }
 
     /// Check if this is a heap pointer
@@ -210,7 +258,7 @@ impl RuntimeValue {
     #[inline]
     pub fn as_heap_ptr(self) -> *mut HeapHeader {
         if self.is_heap() {
-            (self.0 & !tags::TAG_MASK) as *mut HeapHeader
+            Self::u64_to_ptr(self.0 & !tags::TAG_MASK)
         } else {
             std::ptr::null_mut()
         }

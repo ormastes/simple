@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
+use simple_common::target::{Target, TargetArch};
 use simple_driver::runner::Runner;
 use simple_driver::watcher::watch;
 use simple_log;
@@ -29,8 +30,9 @@ fn print_help() {
     eprintln!("  simple <file.spl>           Run source file");
     eprintln!("  simple <file.smf>           Run compiled binary");
     eprintln!("  simple -c \"code\"            Run code string");
-    eprintln!("  simple compile <src> [-o <out>]  Compile to SMF");
+    eprintln!("  simple compile <src> [-o <out>] [--target <arch>]  Compile to SMF");
     eprintln!("  simple watch <file.spl>     Watch and auto-recompile");
+    eprintln!("  simple targets              List available target architectures");
     eprintln!();
     eprintln!("Package Management:");
     eprintln!("  simple init [name]          Create a new project");
@@ -52,6 +54,15 @@ fn print_help() {
     eprintln!("  -c <code>      Run code string");
     eprintln!("  --gc-log       Enable verbose GC logging");
     eprintln!("  --gc=off       Disable garbage collection");
+    eprintln!("  --target <arch>  Target architecture for cross-compilation");
+    eprintln!();
+    eprintln!("Target Architectures:");
+    eprintln!("  x86_64   64-bit x86 (default on most systems)");
+    eprintln!("  aarch64  64-bit ARM (Apple Silicon, ARM servers)");
+    eprintln!("  i686     32-bit x86");
+    eprintln!("  armv7    32-bit ARM");
+    eprintln!("  riscv64  64-bit RISC-V");
+    eprintln!("  riscv32  32-bit RISC-V");
     eprintln!();
     eprintln!("Add Options:");
     eprintln!("  --path <path>  Add as path dependency");
@@ -64,6 +75,7 @@ fn print_help() {
     eprintln!("  simple hello.spl            # Run source");
     eprintln!("  simple -c \"main = 42\"       # Run expression");
     eprintln!("  simple compile app.spl      # Compile to app.smf");
+    eprintln!("  simple compile app.spl --target aarch64  # Cross-compile");
     eprintln!("  simple watch app.spl        # Watch for changes");
     eprintln!("  simple init myapp           # Create new project");
     eprintln!("  simple add http \"1.0\"       # Add dependency");
@@ -182,7 +194,7 @@ fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
     }
 }
 
-fn compile_file(source: &PathBuf, output: Option<PathBuf>) -> i32 {
+fn compile_file(source: &PathBuf, output: Option<PathBuf>, target: Option<Target>) -> i32 {
     let runner = Runner::new();
     let out_path = output.unwrap_or_else(|| source.with_extension("smf"));
 
@@ -194,7 +206,15 @@ fn compile_file(source: &PathBuf, output: Option<PathBuf>) -> i32 {
         }
     };
 
-    match runner.compile_to_smf(&source_content, &out_path) {
+    // Use target-specific compilation if target is specified
+    let result = if let Some(target) = target {
+        println!("Cross-compiling for target: {}", target);
+        runner.compile_to_smf_for_target(&source_content, &out_path, target)
+    } else {
+        runner.compile_to_smf(&source_content, &out_path)
+    };
+
+    match result {
         Ok(()) => {
             println!("Compiled {} -> {}", source.display(), out_path.display());
             0
@@ -204,6 +224,25 @@ fn compile_file(source: &PathBuf, output: Option<PathBuf>) -> i32 {
             1
         }
     }
+}
+
+fn list_targets() -> i32 {
+    println!("Available target architectures:");
+    println!();
+    println!("Host architecture: {} (default)", TargetArch::host());
+    println!();
+    println!("64-bit targets:");
+    println!("  x86_64   - AMD/Intel 64-bit");
+    println!("  aarch64  - ARM 64-bit (Apple Silicon, ARM servers)");
+    println!("  riscv64  - RISC-V 64-bit");
+    println!();
+    println!("32-bit targets:");
+    println!("  i686     - Intel/AMD 32-bit");
+    println!("  armv7    - ARM 32-bit");
+    println!("  riscv32  - RISC-V 32-bit");
+    println!();
+    println!("Usage: simple compile <source.spl> --target <arch>");
+    0
 }
 
 fn watch_file(path: &PathBuf) -> i32 {
@@ -261,7 +300,7 @@ fn main() {
         "compile" => {
             if args.len() < 2 {
                 eprintln!("error: compile requires a source file");
-                eprintln!("Usage: simple compile <source.spl> [-o <output.smf>]");
+                eprintln!("Usage: simple compile <source.spl> [-o <output.smf>] [--target <arch>]");
                 std::process::exit(1);
             }
             let source = PathBuf::from(&args[1]);
@@ -270,7 +309,24 @@ fn main() {
                 .position(|a| a == "-o")
                 .and_then(|i| args.get(i + 1))
                 .map(PathBuf::from);
-            std::process::exit(compile_file(&source, output));
+
+            // Parse --target flag
+            let target = args
+                .iter()
+                .position(|a| a == "--target")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| {
+                    s.parse::<TargetArch>().map_err(|e| {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }).unwrap()
+                })
+                .map(|arch| Target::new(arch, simple_common::target::TargetOS::host()));
+
+            std::process::exit(compile_file(&source, output, target));
+        }
+        "targets" => {
+            std::process::exit(list_targets());
         }
         "watch" => {
             if args.len() < 2 {

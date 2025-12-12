@@ -170,22 +170,43 @@ DONE (stdlib) - Bare metal stdlib exists in lib/std/bare/:
 - Float-less, OS alloc-less, thread-less, GC-less variants
 
 ## Multi-architecture support
-### TODO: Additional architecture targets
-**32-bit targets:**
-- x86 (i686)
-- ARM (armv7)
-- RISC-V 32 (riscv32)
+### DONE: Core multi-architecture infrastructure
+**TargetArch abstraction (src/common/src/target.rs):**
+- `TargetArch` enum: X86_64, Aarch64, X86 (i686), Arm (armv7), Riscv64, Riscv32
+- `PointerSize` enum: Bits32, Bits64
+- `TargetConfig` struct with architecture-specific constants
+- `Target` struct combining arch and OS
+- Host architecture detection via `TargetArch::host()`
+- Target string parsing (e.g., "x86_64-linux", "aarch64")
 
-**64-bit targets (beyond x86_64):**
-- ARM64 (aarch64)
-- RISC-V 64 (riscv64)
+**SMF format updates (src/loader/src/smf/header.rs):**
+- Extended `Arch` enum with all supported architectures
+- Extended `Platform` enum (Linux, Windows, MacOS, FreeBSD, None)
+- Conversion methods between Target types and SMF types
 
-**Implementation tasks:**
-- Cranelift codegen backend for each target
-- Pointer size handling (usize/isize as 4 bytes on 32-bit)
-- Runtime value representation for 32-bit (currently uses 64-bit tagged pointers)
-- SMF format compatibility (32-bit vs 64-bit sections)
-- Settlement loader for each architecture
-- Executable stub for each target
-- Test infrastructure for cross-compilation
+**Cranelift codegen updates:**
+- `BackendSettings` now includes target configuration
+- `create_isa_and_flags` supports arbitrary targets via triple string
+- `Codegen::for_target(target)` enables cross-compilation
+- `CodegenBackend` stores target information
+
+**RuntimeValue 32-bit support:**
+- Documented architecture support in core.rs
+- Added portable `ptr_to_u64` and `u64_to_ptr` helper functions
+- 32-bit platforms use 64-bit values for consistent semantics
+
+**CompilerPipeline cross-compilation:**
+- `compile_source_to_memory_for_target(source, target)` method
+- `generate_smf_bytes_for_target` generates arch-specific code
+- Architecture-specific return value code generation (x86, ARM, RISC-V)
+
+**CLI integration:**
+- `simple compile <src> --target <arch>` flag
+- `simple targets` command to list available architectures
+- Target architecture help in `--help` output
+
+### TODO: Advanced multi-architecture features
+- Cross-platform testing infrastructure
 - CI/CD for multi-architecture builds
+- Native runtime library cross-compilation
+- Settlement loader architecture validation
