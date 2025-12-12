@@ -210,3 +210,10 @@ DONE (stdlib) - Bare metal stdlib exists in lib/std/bare/:
 - CI/CD for multi-architecture builds
 - Native runtime library cross-compilation
 - Settlement loader architecture validation
+
+### POSTPONED: 32-bit architecture support
+**Status:** Deferred - see doc/research/codegen_backend_comparison.md
+**Reason:** Cranelift does not support 32-bit (ARM32 was removed). Options:
+1. Add LLVM backend (~5k LOC, 3-5 weeks) - Recommended
+2. Implement Cranelift 32-bit (~21k LOC, 6-12 months) - Not practical
+**Current:** Infrastructure ready (TargetArch enum, SMF headers), but no native codegen for i686/armv7/riscv32
