@@ -124,6 +124,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         parent: None,
                         visibility: Visibility::Public,
                         attributes: vec![],
+                        doc_comment: None,
                     },
                 );
             }

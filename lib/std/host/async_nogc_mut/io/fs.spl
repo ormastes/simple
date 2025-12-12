@@ -1,81 +1,14 @@
-# File System API - Async file operations
+# File System API - Async file operations (Mutable Variant)
 # All functions use semantic types - no bare strings!
 
 use units.file.*
 use units.size.*
 use units.time.*
+use host.common.io.error.IoError
+use host.common.io.types.*
+use core.traits.*
 
-# I/O Error type
-enum IoError:
-    NotFound
-    PermissionDenied
-    AlreadyExists
-    InvalidPath
-    IsDirectory
-    NotDirectory
-    DirectoryNotEmpty
-    ReadOnly
-    FileTooLarge
-    OutOfSpace
-    Interrupted
-    TimedOut
-    ConnectionRefused
-    ConnectionReset
-    BrokenPipe
-    WouldBlock
-    InvalidData
-    UnexpectedEof
-    Other(str)
-
-impl IoError:
-    fn message(self) -> str:
-        match self:
-            case NotFound: return "file or directory not found"
-            case PermissionDenied: return "permission denied"
-            case AlreadyExists: return "file or directory already exists"
-            case InvalidPath: return "invalid path"
-            case IsDirectory: return "is a directory"
-            case NotDirectory: return "not a directory"
-            case DirectoryNotEmpty: return "directory not empty"
-            case ReadOnly: return "read-only file system"
-            case FileTooLarge: return "file too large"
-            case OutOfSpace: return "out of disk space"
-            case Interrupted: return "operation interrupted"
-            case TimedOut: return "operation timed out"
-            case ConnectionRefused: return "connection refused"
-            case ConnectionReset: return "connection reset"
-            case BrokenPipe: return "broken pipe"
-            case WouldBlock: return "operation would block"
-            case InvalidData: return "invalid data"
-            case UnexpectedEof: return "unexpected end of file"
-            case Other(msg): return msg
-
-# File metadata
-struct FileMetadata:
-    size: ByteCount
-    modified: Option[Timestamp]
-    created: Option[Timestamp]
-    accessed: Option[Timestamp]
-    file_type: FileType
-    permissions: FileMode
-    readonly: bool
-
-enum FileType:
-    File
-    Directory
-    Symlink
-    Other
-
-# Timestamp (nanoseconds since Unix epoch)
-unit Timestamp: u64 as ts
-
-# Directory entry
-struct DirEntry:
-    path: FilePath
-    name: FileName
-    file_type: FileType
-
-# Directory entries iterator
+# Directory entries iterator (mutable variant)
 struct DirEntries:
     entries: Array[DirEntry]
     index: u64
@@ -88,16 +21,12 @@ impl DirEntries:
         self.index = self.index + 1
         return Some(entry)
 
-# Text type (UTF-8 validated string)
-unit Text: str as text
-
 # ===============================
 # File System Operations
 # ===============================
 
 # Read entire file as bytes
 pub async fn read(path: FilePath) -> Result[Bytes, IoError]:
-    # Native implementation
     return native_fs_read(path)
 
 # Read entire file as text (UTF-8)
@@ -150,12 +79,12 @@ pub async fn remove_dir_all(path: DirPath) -> Result[(), IoError]:
     return native_fs_remove_dir(path, true)
 
 # Rename file or directory
-pub async fn rename(from: FilePath, to: FilePath) -> Result[(), IoError]:
-    return native_fs_rename(from, to)
+pub async fn rename(src: FilePath, dst: FilePath) -> Result[(), IoError]:
+    return native_fs_rename(src, dst)
 
 # Copy file
-pub async fn copy(from: FilePath, to: FilePath) -> Result[ByteCount, IoError]:
-    return native_fs_copy(from, to)
+pub async fn copy(src: FilePath, dst: FilePath) -> Result[ByteCount, IoError]:
+    return native_fs_copy(src, dst)
 
 # ===============================
 # Metadata Operations
@@ -178,16 +107,6 @@ pub async fn read_dir(path: DirPath) -> Result[DirEntries, IoError]:
 # ===============================
 # File Handle Operations
 # ===============================
-
-# Open modes
-enum OpenMode:
-    Read
-    Write
-    Append
-    ReadWrite
-    Create
-    CreateNew
-    Truncate
 
 # File handle for streaming operations
 struct File:
@@ -269,12 +188,6 @@ impl File:
     pub async fn close(self) -> Result[(), IoError]:
         return native_file_close(self.handle)
 
-# Seek position
-enum SeekFrom:
-    Start(u64)
-    End(i64)
-    Current(i64)
-
 # ===============================
 # Native function declarations
 # ===============================
@@ -285,8 +198,8 @@ extern fn native_fs_append(path: FilePath, data: &Bytes) -> Result[ByteCount, Io
 extern fn native_fs_create_dir(path: DirPath, recursive: bool) -> Result[(), IoError]
 extern fn native_fs_remove_file(path: FilePath) -> Result[(), IoError]
 extern fn native_fs_remove_dir(path: DirPath, recursive: bool) -> Result[(), IoError]
-extern fn native_fs_rename(from: FilePath, to: FilePath) -> Result[(), IoError]
-extern fn native_fs_copy(from: FilePath, to: FilePath) -> Result[ByteCount, IoError]
+extern fn native_fs_rename(src: FilePath, dst: FilePath) -> Result[(), IoError]
+extern fn native_fs_copy(src: FilePath, dst: FilePath) -> Result[ByteCount, IoError]
 extern fn native_fs_metadata(path: FilePath) -> Result[FileMetadata, IoError]
 extern fn native_fs_read_dir(path: DirPath) -> Result[DirEntries, IoError]
 extern fn native_fs_open(path: FilePath, mode: OpenMode) -> Result[i64, IoError]
@@ -296,3 +209,50 @@ extern fn native_file_flush(handle: i64) -> Result[(), IoError]
 extern fn native_file_seek(handle: i64, pos: SeekFrom) -> Result[ByteCount, IoError]
 extern fn native_file_sync(handle: i64) -> Result[(), IoError]
 extern fn native_file_close(handle: i64) -> Result[(), IoError]
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+impl Read for File:
+    fn read(self, buf: &mut [u8]) -> Result[usize, IoError]:
+        let mut bytes = Bytes::from_slice(buf)
+        match native_file_read(self.handle, &mut bytes):
+            case Ok(count):
+                buf.copy_from_slice(&bytes.as_slice())
+                Ok(count as usize)
+            case Err(e): Err(e)
+
+impl Write for File:
+    fn write(self, buf: &[u8]) -> Result[usize, IoError]:
+        let bytes = Bytes::from_slice(buf)
+        match native_file_write(self.handle, &bytes):
+            case Ok(count): Ok(count as usize)
+            case Err(e): Err(e)
+
+    fn flush(self) -> Result[(), IoError]:
+        native_file_flush(self.handle)
+
+impl Seek for File:
+    fn seek(self, pos: core.traits.SeekFrom) -> Result[u64, IoError]:
+        let local_pos = match pos:
+            case core.traits.SeekFrom::Start(n): SeekFrom::Start(n)
+            case core.traits.SeekFrom::End(n): SeekFrom::End(n)
+            case core.traits.SeekFrom::Current(n): SeekFrom::Current(n)
+        match native_file_seek(self.handle, local_pos):
+            case Ok(count): Ok(count as u64)
+            case Err(e): Err(e)
+
+impl Drop for File:
+    fn drop(self):
+        native_file_close(self.handle)
+
+# DirEntries implements Iterator
+impl Iterator for DirEntries:
+    type Item = DirEntry
+    fn next(self) -> Option[Self::Item]:
+        if self.index >= self.entries.len() as u64:
+            return None
+        let entry = self.entries[self.index as usize]
+        self.index = self.index + 1
+        return Some(entry)

@@ -180,6 +180,9 @@ pub enum TokenKind {
     Indent,
     Dedent,
 
+    // Documentation
+    DocComment(String), // /** ... */ or ## line comment
+
     // Special
     Eof,
     Error(String),

@@ -338,7 +338,18 @@ fn evaluate_method_call(
         if let Some(result) = try_method_missing(method, args, &class, &fields, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
-        return Err(CompileError::Semantic(format!("unknown method {method} on {class}")));
+        // Collect available methods for typo suggestion
+        let mut available_methods: Vec<&str> = Vec::new();
+        if let Some(methods) = impl_methods.get(&class) {
+            available_methods.extend(methods.iter().map(|m| m.name.as_str()));
+        }
+        // Add built-in methods for common types
+        available_methods.extend(["new", "to_string", "clone", "equals"].iter().copied());
+        let mut msg = format!("unknown method {method} on {class}");
+        if let Some(suggestion) = crate::error::typo::format_suggestion(method, available_methods) {
+            msg.push_str(&format!("; {}", suggestion));
+        }
+        return Err(CompileError::Semantic(msg));
     }
 
     // Future methods (join, await, get, is_ready)
@@ -350,7 +361,14 @@ fn evaluate_method_call(
             "is_ready" => {
                 return Ok(Value::Bool(future.is_ready()));
             }
-            _ => return Err(CompileError::Semantic(format!("unknown method {method} on Future"))),
+            _ => {
+                let available = ["join", "await", "get", "is_ready"];
+                let mut msg = format!("unknown method {method} on Future");
+                if let Some(suggestion) = crate::error::typo::format_suggestion(method, available.iter().copied()) {
+                    msg.push_str(&format!("; {}", suggestion));
+                }
+                return Err(CompileError::Semantic(msg));
+            }
         }
     }
 
@@ -380,7 +398,14 @@ fn evaluate_method_call(
                     },
                 });
             }
-            _ => return Err(CompileError::Semantic(format!("unknown method {method} on Channel"))),
+            _ => {
+                let available = ["send", "recv", "try_recv"];
+                let mut msg = format!("unknown method {method} on Channel");
+                if let Some(suggestion) = crate::error::typo::format_suggestion(method, available.iter().copied()) {
+                    msg.push_str(&format!("; {}", suggestion));
+                }
+                return Err(CompileError::Semantic(msg));
+            }
         }
     }
 
@@ -394,7 +419,14 @@ fn evaluate_method_call(
                 let future = spawn_future_with_callable(func_val, arg_val, functions, classes, enums, impl_methods);
                 return Ok(Value::Future(future));
             }
-            _ => return Err(CompileError::Semantic(format!("unknown method {method} on ThreadPool"))),
+            _ => {
+                let available = ["submit"];
+                let mut msg = format!("unknown method {method} on ThreadPool");
+                if let Some(suggestion) = crate::error::typo::format_suggestion(method, available.iter().copied()) {
+                    msg.push_str(&format!("; {}", suggestion));
+                }
+                return Err(CompileError::Semantic(msg));
+            }
         }
     }
 
@@ -422,9 +454,26 @@ fn evaluate_method_call(
                     Err(e) => Err(e),
                 };
             }
-            return Err(CompileError::Semantic(format!("unknown static method {method} on class {class_name}")));
+            // Collect available static methods for suggestion
+            let available: Vec<&str> = class_def
+                .methods
+                .iter()
+                .filter(|m| !m.params.iter().any(|p| p.name == "self"))
+                .map(|m| m.name.as_str())
+                .collect();
+            let mut msg = format!("unknown static method {method} on class {class_name}");
+            if let Some(suggestion) = crate::error::typo::format_suggestion(method, available) {
+                msg.push_str(&format!("; {}", suggestion));
+            }
+            return Err(CompileError::Semantic(msg));
         }
-        return Err(CompileError::Semantic(format!("unknown class {class_name}")));
+        // Collect available classes for suggestion
+        let available: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
+        let mut msg = format!("unknown class {class_name}");
+        if let Some(suggestion) = crate::error::typo::format_suggestion(class_name, available) {
+            msg.push_str(&format!("; {}", suggestion));
+        }
+        return Err(CompileError::Semantic(msg));
     }
 
     Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))
@@ -455,8 +504,17 @@ fn evaluate_method_call_with_self_update(
             // method_missing returns just a result, self is not mutated
             return Ok((result, None));
         }
-        // Fall back to regular method call if not found
-        return Err(CompileError::Semantic(format!("unknown method {method} on {class}")));
+        // Collect available methods for typo suggestion
+        let mut available_methods: Vec<&str> = Vec::new();
+        if let Some(methods) = impl_methods.get(&class) {
+            available_methods.extend(methods.iter().map(|m| m.name.as_str()));
+        }
+        available_methods.extend(["new", "to_string", "clone", "equals"].iter().copied());
+        let mut msg = format!("unknown method {method} on {class}");
+        if let Some(suggestion) = crate::error::typo::format_suggestion(method, available_methods) {
+            msg.push_str(&format!("; {}", suggestion));
+        }
+        return Err(CompileError::Semantic(msg));
     }
 
     // For non-objects, just use regular method call

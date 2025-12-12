@@ -145,6 +145,109 @@ fn call_extern_function(
             std::process::exit(code);
         }
 
+        // =====================================================================
+        // Native Filesystem Operations (lib/std/host/async_nogc/io/fs.spl)
+        // =====================================================================
+        "native_fs_read" => {
+            check_async_violation("native_fs_read")?;
+            native_fs_read(&evaluated)
+        }
+        "native_fs_write" => {
+            check_async_violation("native_fs_write")?;
+            native_fs_write(&evaluated)
+        }
+        "native_fs_append" => {
+            check_async_violation("native_fs_append")?;
+            native_fs_append(&evaluated)
+        }
+        "native_fs_create_dir" => {
+            check_async_violation("native_fs_create_dir")?;
+            native_fs_create_dir(&evaluated)
+        }
+        "native_fs_remove_file" => {
+            check_async_violation("native_fs_remove_file")?;
+            native_fs_remove_file(&evaluated)
+        }
+        "native_fs_remove_dir" => {
+            check_async_violation("native_fs_remove_dir")?;
+            native_fs_remove_dir(&evaluated)
+        }
+        "native_fs_rename" => {
+            check_async_violation("native_fs_rename")?;
+            native_fs_rename(&evaluated)
+        }
+        "native_fs_copy" => {
+            check_async_violation("native_fs_copy")?;
+            native_fs_copy(&evaluated)
+        }
+        "native_fs_metadata" => {
+            check_async_violation("native_fs_metadata")?;
+            native_fs_metadata(&evaluated)
+        }
+        "native_fs_read_dir" => {
+            check_async_violation("native_fs_read_dir")?;
+            native_fs_read_dir(&evaluated)
+        }
+        "native_fs_open" => {
+            check_async_violation("native_fs_open")?;
+            native_fs_open(&evaluated)
+        }
+        "native_file_read" => {
+            check_async_violation("native_file_read")?;
+            native_file_read(&evaluated)
+        }
+        "native_file_write" => {
+            check_async_violation("native_file_write")?;
+            native_file_write(&evaluated)
+        }
+        "native_file_flush" => {
+            check_async_violation("native_file_flush")?;
+            native_file_flush(&evaluated)
+        }
+        "native_file_seek" => {
+            check_async_violation("native_file_seek")?;
+            native_file_seek(&evaluated)
+        }
+        "native_file_sync" => {
+            check_async_violation("native_file_sync")?;
+            native_file_sync(&evaluated)
+        }
+        "native_file_close" => {
+            check_async_violation("native_file_close")?;
+            native_file_close(&evaluated)
+        }
+
+        // =====================================================================
+        // Native Terminal Operations (lib/std/host/async_nogc/io/term.spl)
+        // =====================================================================
+        "native_stdin" => native_stdin(&evaluated),
+        "native_stdout" => native_stdout(&evaluated),
+        "native_stderr" => native_stderr(&evaluated),
+        "native_is_tty" => native_is_tty(&evaluated),
+        "native_enable_raw_mode" => native_enable_raw_mode(&evaluated),
+        "native_disable_raw_mode" => native_disable_raw_mode(&evaluated),
+        "native_get_term_size" => native_get_term_size(&evaluated),
+        "native_term_write" => {
+            check_async_violation("native_term_write")?;
+            native_term_write(&evaluated)
+        }
+        "native_term_read" => {
+            check_async_violation("native_term_read")?;
+            native_term_read(&evaluated)
+        }
+        "native_term_read_timeout" => {
+            check_async_violation("native_term_read_timeout")?;
+            native_term_read_timeout(&evaluated)
+        }
+        "native_term_flush" => {
+            check_async_violation("native_term_flush")?;
+            native_term_flush(&evaluated)
+        }
+        "native_term_poll" => {
+            check_async_violation("native_term_poll")?;
+            native_term_poll(&evaluated)
+        }
+
         // Unknown extern function
         _ => Err(CompileError::Semantic(format!("unknown extern function: {}", name))),
     }

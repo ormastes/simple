@@ -38,6 +38,7 @@ impl<'a> Parser<'a> {
             fields,
             visibility: Visibility::Private,
             attributes,
+            doc_comment: None,
         }))
     }
 
@@ -76,6 +77,7 @@ impl<'a> Parser<'a> {
             parent,
             visibility: Visibility::Private,
             attributes,
+            doc_comment: None,
         }))
     }
 
@@ -107,6 +109,7 @@ impl<'a> Parser<'a> {
             variants,
             visibility: Visibility::Private,
             attributes,
+            doc_comment: None,
         }))
     }
 
@@ -156,6 +159,7 @@ impl<'a> Parser<'a> {
             generic_params,
             methods,
             visibility: Visibility::Private,
+            doc_comment: None,
         }))
     }
 

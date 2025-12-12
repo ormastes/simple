@@ -512,3 +512,66 @@ fn test_typed_string_url() {
         panic!("Expected let statement");
     }
 }
+
+
+// === Doc Comment Tests ===
+
+#[test]
+fn test_doc_comment_on_function() {
+    let source = r#"/** Adds two numbers together */
+fn add(x: Int, y: Int) -> Int:
+    return x + y"#;
+    let module = parse(source).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert_eq!(func.name, "add");
+        assert!(func.doc_comment.is_some());
+        let doc = func.doc_comment.as_ref().unwrap();
+        assert_eq!(doc.content, "Adds two numbers together");
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_doc_comment_line_style() {
+    let source = r#"## Multiplies two numbers
+fn multiply(x: Int, y: Int) -> Int:
+    return x * y"#;
+    let module = parse(source).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert_eq!(func.name, "multiply");
+        assert!(func.doc_comment.is_some());
+        let doc = func.doc_comment.as_ref().unwrap();
+        assert_eq!(doc.content, "Multiplies two numbers");
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_doc_comment_on_struct() {
+    let source = r#"/** A point in 2D space */
+struct Point:
+    x: Int
+    y: Int"#;
+    let module = parse(source).unwrap();
+    if let Node::Struct(s) = &module.items[0] {
+        assert_eq!(s.name, "Point");
+        assert!(s.doc_comment.is_some());
+        let doc = s.doc_comment.as_ref().unwrap();
+        assert_eq!(doc.content, "A point in 2D space");
+    } else {
+        panic!("Expected struct");
+    }
+}
+
+#[test]
+fn test_function_without_doc_comment() {
+    let source = "fn no_doc():\n    pass";
+    let module = parse(source).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert!(func.doc_comment.is_none());
+    } else {
+        panic!("Expected function");
+    }
+}

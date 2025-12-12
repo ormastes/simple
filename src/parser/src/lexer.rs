@@ -113,8 +113,12 @@ impl<'a> Lexer<'a> {
                 // Check if this is an attribute: #[
                 if self.peek() == Some('[') {
                     TokenKind::Hash
+                } else if self.peek() == Some('#') {
+                    // Doc comment: ## ...
+                    self.advance(); // consume second '#'
+                    return self.read_doc_line_comment(start_pos, start_line, start_column);
                 } else {
-                    // Otherwise it's a comment
+                    // Otherwise it's a regular comment
                     self.skip_comment()
                 }
             }
@@ -159,7 +163,17 @@ impl<'a> Lexer<'a> {
                 }
             }
             '/' => {
-                if self.check('/') {
+                if self.check('*') {
+                    self.advance(); // consume '*'
+                    if self.peek() == Some('*') && self.peek_ahead(1) != Some('/') {
+                        // Doc comment /** ... */
+                        self.advance(); // consume second '*'
+                        return self.read_doc_block_comment(start_pos, start_line, start_column);
+                    } else {
+                        // Regular block comment /* ... */
+                        self.skip_block_comment()
+                    }
+                } else if self.check('/') {
                     self.advance();
                     TokenKind::DoubleSlash
                 } else if self.check('=') {
@@ -280,6 +294,10 @@ impl<'a> Lexer<'a> {
         self.chars.peek().map(|(_, ch)| *ch)
     }
 
+    fn peek_ahead(&self, n: usize) -> Option<char> {
+        self.source[self.current_pos..].chars().nth(n)
+    }
+
     fn check(&mut self, expected: char) -> bool {
         self.peek() == Some(expected)
     }
@@ -368,6 +386,138 @@ impl<'a> Lexer<'a> {
         self.next_token().kind
     }
 
+    fn skip_block_comment(&mut self) -> TokenKind {
+        // Skip until */ is found, supporting nested block comments
+        let mut depth = 1;
+        while depth > 0 {
+            match self.advance() {
+                Some((_, '*')) => {
+                    if self.peek() == Some('/') {
+                        self.advance(); // consume '/'
+                        depth -= 1;
+                    }
+                }
+                Some((_, '/')) => {
+                    if self.peek() == Some('*') {
+                        self.advance(); // consume '*'
+                        depth += 1;
+                    }
+                }
+                Some((_, '\n')) => {
+                    self.line += 1;
+                    self.column = 1;
+                }
+                Some(_) => {}
+                None => {
+                    // Unterminated block comment - just return next token
+                    // TODO: Could add an error token here
+                    break;
+                }
+            }
+        }
+        // Return next token instead of comment
+        self.next_token().kind
+    }
+
+    fn read_doc_block_comment(
+        &mut self,
+        start_pos: usize,
+        start_line: usize,
+        start_column: usize,
+    ) -> Token {
+        // Read doc comment content until */ is found
+        let mut content = String::new();
+        let mut depth = 1;
+        while depth > 0 {
+            match self.advance() {
+                Some((_, '*')) => {
+                    if self.peek() == Some('/') {
+                        self.advance(); // consume '/'
+                        depth -= 1;
+                        if depth > 0 {
+                            content.push_str("*/");
+                        }
+                    } else {
+                        content.push('*');
+                    }
+                }
+                Some((_, '/')) => {
+                    if self.peek() == Some('*') {
+                        self.advance(); // consume '*'
+                        depth += 1;
+                        content.push_str("/*");
+                    } else {
+                        content.push('/');
+                    }
+                }
+                Some((_, '\n')) => {
+                    self.line += 1;
+                    self.column = 1;
+                    content.push('\n');
+                }
+                Some((_, ch)) => {
+                    content.push(ch);
+                }
+                None => {
+                    // Unterminated doc comment
+                    break;
+                }
+            }
+        }
+        // Trim leading/trailing whitespace from each line and remove leading *
+        let cleaned = content
+            .lines()
+            .map(|line| {
+                let trimmed = line.trim();
+                if trimmed.starts_with('*') {
+                    trimmed[1..].trim_start()
+                } else {
+                    trimmed
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+
+        Token::new(
+            TokenKind::DocComment(cleaned),
+            Span::new(start_pos, self.current_pos, start_line, start_column),
+            self.source[start_pos..self.current_pos].to_string(),
+        )
+    }
+
+    fn read_doc_line_comment(
+        &mut self,
+        start_pos: usize,
+        start_line: usize,
+        start_column: usize,
+    ) -> Token {
+        // Read doc comment content until end of line
+        let mut content = String::new();
+        // Skip leading whitespace after ##
+        while let Some(ch) = self.peek() {
+            if ch == ' ' || ch == '\t' {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        // Read until newline
+        while let Some(ch) = self.peek() {
+            if ch == '\n' {
+                break;
+            }
+            content.push(ch);
+            self.advance();
+        }
+        Token::new(
+            TokenKind::DocComment(content.trim().to_string()),
+            Span::new(start_pos, self.current_pos, start_line, start_column),
+            self.source[start_pos..self.current_pos].to_string(),
+        )
+    }
+
     fn handle_indentation(&mut self) -> Option<Token> {
         let start_pos = self.current_pos;
         let start_line = self.line;
@@ -395,6 +545,7 @@ impl<'a> Lexer<'a> {
                     // Check if this is an attribute: #[
                     // At this point, peek() still returns '#' (the current char)
                     // We need to advance past '#' and then peek to see if next is '['
+                    let hash_start = self.current_pos;
                     self.advance(); // Consume the '#'
                     let next = self.peek();
                     if next == Some('[') {
@@ -406,7 +557,33 @@ impl<'a> Lexer<'a> {
                             "#".to_string(),
                         ));
                     }
-                    // Comment line, skip to end (we already advanced past '#')
+                    if next == Some('#') {
+                        // Doc comment ## - emit DocComment token
+                        self.advance(); // Consume second '#'
+                        // Skip leading whitespace
+                        while let Some(c) = self.peek() {
+                            if c == ' ' || c == '\t' {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        // Read content until newline
+                        let mut content = String::new();
+                        while let Some(c) = self.peek() {
+                            if c == '\n' {
+                                break;
+                            }
+                            content.push(c);
+                            self.advance();
+                        }
+                        return Some(Token::new(
+                            TokenKind::DocComment(content.trim().to_string()),
+                            Span::new(hash_start, self.current_pos, self.line, self.column),
+                            self.source[hash_start..self.current_pos].to_string(),
+                        ));
+                    }
+                    // Regular comment line, skip to end (we already advanced past '#')
                     while let Some(c) = self.peek() {
                         if c == '\n' {
                             break;
@@ -419,6 +596,125 @@ impl<'a> Lexer<'a> {
                         self.column = 1;
                     }
                     indent = 0;
+                }
+                '/' => {
+                    // Check if this is a block comment: /* or //
+                    let slash_start = self.current_pos;
+                    let slash_start_line = self.line;
+                    let slash_start_col = self.column;
+                    self.advance(); // Consume the '/'
+                    if self.peek() == Some('*') {
+                        self.advance(); // Consume the '*'
+                        // Check for doc comment /** (but not /**/)
+                        if self.peek() == Some('*') && self.peek_ahead(1) != Some('/') {
+                            // Doc comment /** ... */
+                            self.advance(); // Consume second '*'
+                            let mut content = String::new();
+                            let mut depth = 1;
+                            while depth > 0 {
+                                match self.advance() {
+                                    Some((_, '*')) => {
+                                        if self.peek() == Some('/') {
+                                            self.advance();
+                                            depth -= 1;
+                                            if depth > 0 {
+                                                content.push_str("*/");
+                                            }
+                                        } else {
+                                            content.push('*');
+                                        }
+                                    }
+                                    Some((_, '/')) => {
+                                        if self.peek() == Some('*') {
+                                            self.advance();
+                                            depth += 1;
+                                            content.push_str("/*");
+                                        } else {
+                                            content.push('/');
+                                        }
+                                    }
+                                    Some((_, '\n')) => {
+                                        self.line += 1;
+                                        self.column = 1;
+                                        content.push('\n');
+                                    }
+                                    Some((_, ch)) => {
+                                        content.push(ch);
+                                    }
+                                    None => break,
+                                }
+                            }
+                            // Clean up the content
+                            let cleaned = content
+                                .lines()
+                                .map(|line| {
+                                    let trimmed = line.trim();
+                                    if trimmed.starts_with('*') {
+                                        trimmed[1..].trim_start()
+                                    } else {
+                                        trimmed
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                                .trim()
+                                .to_string();
+                            return Some(Token::new(
+                                TokenKind::DocComment(cleaned),
+                                Span::new(slash_start, self.current_pos, slash_start_line, slash_start_col),
+                                self.source[slash_start..self.current_pos].to_string(),
+                            ));
+                        }
+                        // Regular block comment /* ... */
+                        let mut depth = 1;
+                        while depth > 0 {
+                            match self.advance() {
+                                Some((_, '*')) => {
+                                    if self.peek() == Some('/') {
+                                        self.advance();
+                                        depth -= 1;
+                                    }
+                                }
+                                Some((_, '/')) => {
+                                    if self.peek() == Some('*') {
+                                        self.advance();
+                                        depth += 1;
+                                    }
+                                }
+                                Some((_, '\n')) => {
+                                    self.line += 1;
+                                    self.column = 1;
+                                }
+                                Some(_) => {}
+                                None => break,
+                            }
+                        }
+                        indent = 0;
+                    } else if self.peek() == Some('/') {
+                        // Double slash // - return DoubleSlash token
+                        self.advance(); // Consume second '/'
+                        return Some(Token::new(
+                            TokenKind::DoubleSlash,
+                            Span::new(self.current_pos - 2, self.current_pos, self.line, self.column - 2),
+                            "//".to_string(),
+                        ));
+                    } else if self.peek() == Some('=') {
+                        // Slash assign /=
+                        self.advance(); // Consume '='
+                        return Some(Token::new(
+                            TokenKind::SlashAssign,
+                            Span::new(self.current_pos - 2, self.current_pos, self.line, self.column - 2),
+                            "/=".to_string(),
+                        ));
+                    } else {
+                        // Not a block comment, it's a slash token
+                        // Return a Slash token directly since we already consumed '/'
+                        return Some(Token::new(
+                            TokenKind::Slash,
+                            Span::new(self.current_pos - 1, self.current_pos, self.line, self.column - 1),
+                            "/".to_string(),
+                        ));
+                    }
                 }
                 _ => break,
             }
