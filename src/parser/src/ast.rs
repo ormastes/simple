@@ -204,6 +204,27 @@ pub struct Attribute {
     pub args: Option<Vec<Expr>>, // Optional arguments: #[name(arg1, arg2)]
 }
 
+/// Documentation comment parsed from block comments /** ... */ or line comments starting with ##
+///
+/// Doc comments are used directly as API descriptions. Parameters should have
+/// descriptive names (self-documenting). Inline comments can be added to params
+/// and return types in the code itself.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DocComment {
+    /// The documentation text (used directly as API description)
+    pub content: String,
+}
+
+impl DocComment {
+    /// Create a DocComment from raw content.
+    /// The content is used directly as the API description.
+    pub fn new(content: String) -> Self {
+        DocComment {
+            content: content.trim().to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
     pub span: Span,
@@ -219,6 +240,8 @@ pub struct FunctionDef {
     pub decorators: Vec<Decorator>,
     /// Attributes applied to the function: #[inline], #[deprecated]
     pub attributes: Vec<Attribute>,
+    /// Documentation comment for API doc generation
+    pub doc_comment: Option<DocComment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -255,6 +278,8 @@ pub struct StructDef {
     pub visibility: Visibility,
     /// Attributes applied to the struct: #[derive(Debug)]
     pub attributes: Vec<Attribute>,
+    /// Documentation comment for API doc generation
+    pub doc_comment: Option<DocComment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -269,6 +294,8 @@ pub struct ClassDef {
     pub visibility: Visibility,
     /// Attributes applied to the class: #[deprecated]
     pub attributes: Vec<Attribute>,
+    /// Documentation comment for API doc generation
+    pub doc_comment: Option<DocComment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -291,6 +318,8 @@ pub struct EnumDef {
     pub visibility: Visibility,
     /// Attributes like #[strong]
     pub attributes: Vec<Attribute>,
+    /// Documentation comment for API doc generation
+    pub doc_comment: Option<DocComment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -340,6 +369,8 @@ pub struct TraitDef {
     pub generic_params: Vec<String>,
     pub methods: Vec<FunctionDef>,
     pub visibility: Visibility,
+    /// Documentation comment for API doc generation
+    pub doc_comment: Option<DocComment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

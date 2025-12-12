@@ -14,16 +14,21 @@ pub mod lint;
 pub mod linker;
 pub mod mir;
 pub mod module_resolver;
+pub mod monomorphize;
 pub mod pipeline;
 pub mod project;
 pub mod value;
 pub mod value_bridge;
 
 // Re-export main types
-pub use error::CompileError;
+pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
 pub use interpreter::evaluate_module;
 pub use lint::{LintChecker, LintConfig, LintDiagnostic, LintLevel, LintName};
 pub use module_resolver::{DirectoryManifest, ModuleResolver, ResolvedModule};
+pub use monomorphize::{
+    monomorphize_module, CallSiteAnalyzer, ConcreteType, Monomorphizer,
+    MonomorphizationTable, PointerKind, SpecializationKey, TypeBindings,
+};
 pub use project::ProjectContext;
 pub use pipeline::CompilerPipeline;
 pub use value::{

@@ -536,7 +536,17 @@ fn handle_functional_update(
             )));
         }
         let recv_val = env.get(name).cloned().ok_or_else(|| {
-            CompileError::Semantic(format!("undefined variable: {name}"))
+            let known_names: Vec<&str> = env
+                .keys()
+                .map(|s| s.as_str())
+                .chain(functions.keys().map(|s| s.as_str()))
+                .chain(classes.keys().map(|s| s.as_str()))
+                .collect();
+            let mut msg = format!("undefined variable: {name}");
+            if let Some(suggestion) = crate::error::typo::format_suggestion(name, known_names) {
+                msg.push_str(&format!("; {}", suggestion));
+            }
+            CompileError::Semantic(msg)
         })?;
         let method_call = Expr::MethodCall {
             receiver: Box::new(Expr::Identifier(name.clone())),

@@ -373,6 +373,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                         parent: None,
                         visibility: s.visibility,
                         attributes: Vec::new(),
+                        doc_comment: None,
                     },
                 );
             }
@@ -418,6 +419,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                         parent: None,
                         visibility: a.visibility,
                         attributes: vec![],
+                        doc_comment: None,
                     },
                 );
                 env.insert(
@@ -649,9 +651,18 @@ pub(crate) fn exec_node(
                         }
                         Ok(Control::Next)
                     } else {
-                        Err(CompileError::Semantic(format!(
-                            "undefined variable '{obj_name}'"
-                        )))
+                        // Collect all known names for typo suggestion
+                        let known_names: Vec<&str> = env
+                            .keys()
+                            .map(|s| s.as_str())
+                            .chain(functions.keys().map(|s| s.as_str()))
+                            .chain(classes.keys().map(|s| s.as_str()))
+                            .collect();
+                        let mut msg = format!("undefined variable '{obj_name}'");
+                        if let Some(suggestion) = crate::error::typo::format_suggestion(obj_name, known_names) {
+                            msg.push_str(&format!("; {}", suggestion));
+                        }
+                        Err(CompileError::Semantic(msg))
                     }
                 } else {
                     Err(CompileError::Semantic(
@@ -807,4 +818,5 @@ include!("interpreter_call.rs");
 include!("interpreter_method.rs");
 include!("interpreter_macro.rs");
 include!("interpreter_extern.rs");
+include!("interpreter_native_io.rs");
 include!("interpreter_context.rs");

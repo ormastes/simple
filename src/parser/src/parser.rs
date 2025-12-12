@@ -61,20 +61,23 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
+        // Check for doc comment before item
+        let doc_comment = self.try_parse_doc_comment();
+
         match &self.current.kind {
-            TokenKind::Hash => self.parse_attributed_item(),
-            TokenKind::At => self.parse_decorated_function(),
-            TokenKind::Fn => self.parse_function(),
-            TokenKind::Async => self.parse_async_function(),
-            TokenKind::Struct => self.parse_struct(),
-            TokenKind::Class => self.parse_class(),
-            TokenKind::Enum => self.parse_enum(),
-            TokenKind::Trait => self.parse_trait(),
+            TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
+            TokenKind::At => self.parse_decorated_function_with_doc(doc_comment),
+            TokenKind::Fn => self.parse_function_with_doc(doc_comment),
+            TokenKind::Async => self.parse_async_function_with_doc(doc_comment),
+            TokenKind::Struct => self.parse_struct_with_doc(doc_comment),
+            TokenKind::Class => self.parse_class_with_doc(doc_comment),
+            TokenKind::Enum => self.parse_enum_with_doc(doc_comment),
+            TokenKind::Trait => self.parse_trait_with_doc(doc_comment),
             TokenKind::Impl => self.parse_impl(),
             TokenKind::Actor => self.parse_actor(),
             TokenKind::Pub => {
                 self.advance();
-                self.parse_pub_item()
+                self.parse_pub_item_with_doc(doc_comment)
             }
             TokenKind::Mut => self.parse_mut_let(),
             TokenKind::Let => self.parse_let(),
@@ -101,6 +104,75 @@ impl<'a> Parser<'a> {
             TokenKind::Context => self.parse_context(),
             TokenKind::With => self.parse_with(),
             _ => self.parse_expression_or_assignment(),
+        }
+    }
+
+    /// Try to parse a doc comment if one is present.
+    /// Returns None if no doc comment, Some(DocComment) if found.
+    fn try_parse_doc_comment(&mut self) -> Option<DocComment> {
+        // Skip newlines before doc comment
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        if let TokenKind::DocComment(content) = &self.current.kind {
+            let content = content.clone();
+            self.advance();
+            // Skip newlines after doc comment
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            Some(DocComment::new(content))
+        } else {
+            None
+        }
+    }
+
+    fn parse_pub_item_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        match &self.current.kind {
+            TokenKind::Fn => {
+                let mut node = self.parse_function_with_doc(doc_comment)?;
+                if let Node::Function(ref mut f) = node {
+                    f.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Async => {
+                let mut node = self.parse_async_function_with_doc(doc_comment)?;
+                if let Node::Function(ref mut f) = node {
+                    f.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Struct => {
+                let mut node = self.parse_struct_with_doc(doc_comment)?;
+                if let Node::Struct(ref mut s) = node {
+                    s.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Class => {
+                let mut node = self.parse_class_with_doc(doc_comment)?;
+                if let Node::Class(ref mut c) = node {
+                    c.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Enum => {
+                let mut node = self.parse_enum_with_doc(doc_comment)?;
+                if let Node::Enum(ref mut e) = node {
+                    e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Trait => {
+                let mut node = self.parse_trait_with_doc(doc_comment)?;
+                if let Node::Trait(ref mut t) = node {
+                    t.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            _ => self.parse_pub_item(),
         }
     }
 
@@ -259,6 +331,7 @@ impl<'a> Parser<'a> {
             effect: None,
             decorators,
             attributes: vec![],
+            doc_comment: None,
         }))
     }
 
@@ -301,7 +374,80 @@ impl<'a> Parser<'a> {
             effect: None,
             decorators,
             attributes,
+            doc_comment: None,
         }))
+    }
+
+    // === Doc Comment Variants ===
+
+    fn parse_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_function()?;
+        if let Node::Function(ref mut f) = node {
+            f.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    fn parse_async_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_async_function()?;
+        if let Node::Function(ref mut f) = node {
+            f.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    fn parse_decorated_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_decorated_function()?;
+        if let Node::Function(ref mut f) = node {
+            f.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    fn parse_struct_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_struct()?;
+        if let Node::Struct(ref mut s) = node {
+            s.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    fn parse_class_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_class()?;
+        if let Node::Class(ref mut c) = node {
+            c.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    fn parse_enum_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_enum()?;
+        if let Node::Enum(ref mut e) = node {
+            e.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    fn parse_trait_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_trait()?;
+        if let Node::Trait(ref mut t) = node {
+            t.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    fn parse_attributed_item_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_attributed_item()?;
+        // Set doc_comment on the parsed item
+        match &mut node {
+            Node::Function(f) => f.doc_comment = doc_comment,
+            Node::Struct(s) => s.doc_comment = doc_comment,
+            Node::Class(c) => c.doc_comment = doc_comment,
+            Node::Enum(e) => e.doc_comment = doc_comment,
+            Node::Trait(t) => t.doc_comment = doc_comment,
+            _ => {}
+        }
+        Ok(node)
     }
 
     /// Parse an attributed item: #[attr] fn/struct/class/etc

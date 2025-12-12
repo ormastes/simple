@@ -213,14 +213,14 @@ for p in printables:
 
 | Trait | Purpose | Key Method |
 |-------|---------|------------|
-| `Eq` | Equality comparison | `equals(other: Self) -> bool` |
-| `Ord` | Ordering comparison | `compare(other: Self) -> i32` |
+| `Eq` | Equality comparison | `eq(other: &Self) -> bool` |
+| `Ord` | Ordering comparison | `cmp(other: &Self) -> Ordering` |
 | `Hash` | Hash computation | `hash() -> u64` |
 | `Clone` | Deep copying | `clone() -> Self` |
-| `Debug` | Debug representation | `debug() -> String` |
-| `Display` | User-facing representation | `display() -> String` |
+| `Debug` | Debug representation | `debug_fmt() -> str` |
+| `Display` | User-facing representation | `fmt() -> str` |
 | `Default` | Default value | `default() -> Self` |
-| `Iterator` | Iteration | `next() -> Option[Self.Item]` |
+| `Iterator` | Iteration | `next() -> Option[Self::Item]` |
 
 ### Deriving Traits
 
@@ -268,9 +268,78 @@ See [Unit Types](units.md) for the complete type safety policy.
 
 ---
 
+## Collection Traits
+
+Simple provides a hierarchy of traits for collections that enable generic programming over `List`, `Array`, `Slice`, and `String`.
+
+### Trait Hierarchy
+
+```
+Iterable[T]                    # Can produce iterator
+    │
+    ├── Collection[T]          # Has length, can check containment
+    │       │
+    │       ├── Sequence[T]    # Indexed access (read)
+    │       │       │
+    │       │       ├── MutSequence[T]     # Indexed write
+    │       │       │
+    │       │       └── ImmutSequence[T]   # Functional updates
+    │       │
+    │       └── Growable[T]    # Can add/remove (List only)
+    │
+    └── Sliceable[T]           # Can create slices
+```
+
+### Collection Trait Summary
+
+| Trait | Purpose | Key Methods |
+|-------|---------|-------------|
+| `Iterable[T]` | Iteration support | `iter()`, `into_iter()` |
+| `Collection[T]` | Sized container | `len()`, `is_empty()`, `contains()` |
+| `Sequence[T]` | Indexed read | `get()`, `first()`, `last()`, `find()` |
+| `MutSequence[T]` | Indexed write | `set()`, `swap()`, `sort()`, `reverse()` |
+| `ImmutSequence[T]` | Functional ops | `with_index()`, `sorted()`, `filtered()`, `mapped()` |
+| `Growable[T]` | Add/remove | `push()`, `pop()`, `insert()`, `remove()`, `clear()` |
+| `Sliceable[T]` | Slice views | `as_slice()`, `as_mut_slice()` |
+
+### Implementations
+
+| Type | Iterable | Collection | Sequence | MutSequence | ImmutSequence | Growable | Sliceable |
+|------|----------|------------|----------|-------------|---------------|----------|-----------|
+| `List[T]` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `Array[T, N]` | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ |
+| `Slice[T]` | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ | ✓ |
+| `String` | ✓ | ✓ | ✓ | ✗ | ✓ | ✗ | ✓ |
+
+### Generic Programming Example
+
+```simple
+# Works with List, Array, Slice, String
+fn sum[C: Sequence[T], T: Add[Output=T] + Default](seq: C) -> T:
+    seq.fold(T::default(), |acc, x| acc + x)
+
+# Works with List and Array
+fn find_max[C: Sequence[T], T: Ord](seq: C) -> Option[T]:
+    seq.max()
+
+# Works with any mutable sequence
+fn reverse_in_place[C: MutSequence[T], T](seq: &mut C):
+    seq.reverse()
+
+# Only List (Growable) can use push
+fn append_all[C: Growable[T], T: Clone](dest: &mut C, items: Slice[T]):
+    for item in items:
+        dest.push(item.clone())
+```
+
+See [Primitive as Object](primitive_as_obj.md) for full collection trait definitions.
+
+---
+
 ## Related Specifications
 
 - [Data Structures](data_structures.md)
 - [Functions](functions.md)
 - [Types](types.md)
 - [Unit Types](units.md)
+- [Primitive as Object](primitive_as_obj.md)

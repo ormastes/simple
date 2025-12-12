@@ -23,14 +23,16 @@ Simple is statically typed, but it features type inference to reduce verbosity. 
 
 ### Compound Types
 
-| Type | Syntax | Description |
-|------|--------|-------------|
-| Tuples | `(T1, T2, ...)` | Fixed-size heterogeneous collections |
-| Arrays | `[T]` | Dynamic-size homogeneous collections |
-| Fixed arrays | `[T; N]` | Fixed-size homogeneous collections |
-| Dictionaries | `{Key: Value}` | Key-value mappings |
-| Functions | `fn(T1, T2) -> R` | Function types |
-| Generics | `List[T]` | Parameterized types |
+| Type | Syntax | Object Type | Description |
+|------|--------|-------------|-------------|
+| Tuples | `(T1, T2, ...)` | `Tuple` | Fixed-size heterogeneous collections |
+| Lists | `[T]` | `List[T]` | Dynamic-size homogeneous collections |
+| Fixed arrays | `[T; N]` | `Array[T, N]` | Fixed-size homogeneous collections |
+| Dictionaries | `{Key: Value}` | `Map[K, V]` | Key-value mappings |
+| Functions | `fn(T1, T2) -> R` | `Fn[Args, R]` | Function types |
+| Generics | `List[T]` | - | Parameterized types |
+
+**Note:** Primitive syntax like `[]` and `[T; N]` is promoted to full object types. See [Primitive as Object](primitive_as_obj.md) for details.
 
 ---
 
@@ -438,3 +440,4 @@ The compiler maintains a **unit algebra** based on composite definitions:
 - [Syntax](syntax.md)
 - [Data Structures](data_structures.md)
 - [Memory and Ownership](memory.md)
+- [Primitive as Object](primitive_as_obj.md)

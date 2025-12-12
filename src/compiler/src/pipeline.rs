@@ -32,6 +32,7 @@ use crate::hir;
 use crate::interpreter::evaluate_module;
 use crate::lint::{LintChecker, LintConfig, LintDiagnostic};
 use crate::mir;
+use crate::monomorphize::monomorphize_module;
 use crate::value::FUNC_MAIN;
 use crate::project::ProjectContext;
 use crate::CompileError;
@@ -174,6 +175,9 @@ impl CompilerPipeline {
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
 
+        // Monomorphization: specialize generic functions for concrete types
+        let module = monomorphize_module(&module);
+
         // Run lint checks
         self.run_lint_checks(&module.items)?;
 
@@ -244,17 +248,20 @@ impl CompilerPipeline {
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
 
-        // 2. Run lint checks
+        // 2. Monomorphization: specialize generic functions for concrete types
+        let ast_module = monomorphize_module(&ast_module);
+
+        // 3. Run lint checks
         self.run_lint_checks(&ast_module.items)?;
 
-        // 3. Type check
+        // 4. Type check
         type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
 
-        // 4. Lower AST to HIR
+        // 5. Lower AST to HIR
         let hir_module = hir::lower(&ast_module)
             .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
 
-        // 5. Lower HIR to MIR
+        // 6. Lower HIR to MIR
         let mir_module = mir::lower_to_mir(&hir_module)
             .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
 
@@ -269,13 +276,13 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
-        // 6. Generate machine code via Cranelift
+        // 7. Generate machine code via Cranelift
         let codegen = Codegen::new().map_err(|e| CompileError::Codegen(format!("{e}")))?;
         let object_code = codegen
             .compile_module(&mir_module)
             .map_err(|e| CompileError::Codegen(format!("{e}")))?;
 
-        // 7. Wrap object code in SMF format
+        // 8. Wrap object code in SMF format
         Ok(generate_smf_from_object(&object_code, self.gc.as_ref()))
     }
 }

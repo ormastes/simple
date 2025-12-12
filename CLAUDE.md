@@ -13,12 +13,17 @@ simple/
 ├── lib/                           # Simple standard library (written in Simple)
 │   └── std/                       # stdlib root
 │       ├── __init__.spl           # Root manifest with #[deny(primitive_api)]
-│       ├── core/                  # Variant-agnostic pure core
-│       ├── core_nogc/             # Variant-agnostic, explicit #[no_gc]
+│       ├── core/                  # Variant-agnostic pure core (mutable)
+│       ├── core_immut/            # Variant-agnostic, #[immutable]
+│       ├── core_nogc/             # Variant-agnostic, #[no_gc] (mutable)
+│       ├── core_nogc_immut/       # Variant-agnostic, #[no_gc] + #[immutable]
 │       ├── simd/                  # Cross-platform SIMD & vector math
 │       ├── host/                  # OS-based stdlib overlays
-│       ├── bare/                  # Baremetal stdlib overlays
+│       │   └── async_nogc_mut/    # DEFAULT: async + no_gc + mutable
+│       ├── bare/                  # Baremetal (single variant: async+nogc+immut)
 │       ├── gpu/                   # GPU device & host APIs
+│       │   ├── kernel/            # Device-side (single: async+nogc+immut)
+│       │   └── host/async_nogc_mut/  # Host-side GPU control
 │       └── tools/                 # Diagnostics, testing, reflection
 │
 ├── native_lib/                    # Native implementations (written in Rust)

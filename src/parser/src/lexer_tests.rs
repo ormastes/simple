@@ -382,6 +382,92 @@ fn test_line_comment() {
     );
 }
 
+#[test]
+fn test_block_comment() {
+    assert_eq!(
+        tokenize("x /* comment */ y"),
+        vec![
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier("y".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn test_block_comment_multiline() {
+    assert_eq!(
+        tokenize("x /* multi\nline\ncomment */ y"),
+        vec![
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier("y".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn test_block_comment_nested() {
+    assert_eq!(
+        tokenize("x /* outer /* inner */ outer */ y"),
+        vec![
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Identifier("y".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn test_block_comment_at_line_start() {
+    assert_eq!(
+        tokenize("/* comment */\nx"),
+        vec![
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn test_doc_block_comment() {
+    assert_eq!(
+        tokenize("/** This is a doc comment */\nx"),
+        vec![
+            TokenKind::DocComment("This is a doc comment".to_string()),
+            TokenKind::Newline,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn test_doc_block_comment_multiline() {
+    assert_eq!(
+        tokenize("/**\n * Line 1\n * Line 2\n */\nx"),
+        vec![
+            TokenKind::DocComment("Line 1\nLine 2".to_string()),
+            TokenKind::Newline,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn test_doc_line_comment() {
+    assert_eq!(
+        tokenize("## This is a doc comment\nx"),
+        vec![
+            TokenKind::DocComment("This is a doc comment".to_string()),
+            TokenKind::Newline,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
 // === Module System Keywords Tests ===
 
 #[test]

@@ -79,3 +79,36 @@ fn test_jit_recursive_factorial() {
     let result = unsafe { jit.call_i64_i64("factorial", 5).unwrap() };
     assert_eq!(result, 120);
 }
+
+#[test]
+fn test_jit_println_capture() {
+    use simple_runtime::value::{
+        rt_capture_stdout_start, rt_capture_stdout_stop,
+    };
+
+    // Use static provider explicitly to avoid TLS issues with dynamic loading
+    let mut jit = JitCompiler::new_static().unwrap();
+
+    let mut parser = simple_parser::Parser::new(
+        r#"fn greet() -> i64:
+    println("hello jit")
+    return 0
+"#,
+    );
+    let ast = parser.parse().expect("parse failed");
+    let hir_module = crate::hir::lower(&ast).expect("hir lower failed");
+    let mir_module = crate::mir::lower_to_mir(&hir_module).expect("mir lower failed");
+    jit.compile_module(&mir_module).unwrap();
+
+    // Start capture
+    rt_capture_stdout_start();
+
+    // Call the JIT function
+    let result = unsafe { jit.call_i64_void("greet").unwrap() };
+
+    // Stop capture and get result
+    let captured = rt_capture_stdout_stop();
+
+    assert_eq!(result, 0);
+    assert_eq!(captured, "hello jit\n", "JIT println should be captured, got: '{}'", captured);
+}

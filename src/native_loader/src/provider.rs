@@ -51,19 +51,16 @@ impl Default for RuntimeLoadMode {
 impl RuntimeLoadMode {
     /// Get the default mode based on the build profile.
     ///
-    /// - Debug builds: Try dynamic first, fall back to static
-    /// - Release builds: Static only
+    /// Always uses static linking to avoid TLS split-brain issues where
+    /// the capture start/stop functions set TLS in the static copy while
+    /// the print functions check TLS in the dynamic copy.
     ///
-    /// This allows debug builds to pick up runtime changes without
-    /// recompilation, while release builds get zero-overhead static linking.
+    /// Previously, debug builds tried dynamic loading first, but this
+    /// caused output capture to fail in JIT-compiled code.
     pub fn default_for_profile() -> Self {
-        if cfg!(debug_assertions) {
-            // Debug: try dynamic first, fall back to static
-            Self::Chained(vec![Self::Dynamic, Self::Static])
-        } else {
-            // Release: static only for performance
-            Self::Static
-        }
+        // Always use static linking to ensure TLS consistency
+        // between capture functions and print functions
+        Self::Static
     }
 
     /// Create a mode that tries multiple paths before falling back to static.

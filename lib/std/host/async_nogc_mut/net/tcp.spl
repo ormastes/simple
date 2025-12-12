@@ -3,7 +3,8 @@
 use units.net.*
 use units.size.*
 use units.time.*
-use io.fs.IoError
+use host.common.io.error.IoError
+use host.common.net.types.Shutdown
 
 # TCP Listener - accepts incoming connections
 pub struct TcpListener:
@@ -143,12 +144,6 @@ impl TcpStream:
     pub async fn peek(self, buf: &mut Bytes) -> Result[ByteCount, IoError]:
         return native_tcp_peek(self.handle, buf)
 
-# Shutdown modes
-enum Shutdown:
-    Read
-    Write
-    Both
-
 # Native function declarations
 extern fn native_tcp_bind(addr: SocketAddr) -> Result[i64, IoError]
 extern fn native_tcp_accept(handle: i64) -> Result[(i64, SocketAddr), IoError]
@@ -166,3 +161,37 @@ extern fn native_tcp_set_read_timeout(handle: i64, timeout: Option[Duration]) ->
 extern fn native_tcp_set_write_timeout(handle: i64, timeout: Option[Duration]) -> Result[(), IoError]
 extern fn native_tcp_get_nodelay(handle: i64) -> Result[bool, IoError]
 extern fn native_tcp_peek(handle: i64, buf: &mut Bytes) -> Result[ByteCount, IoError]
+
+# ============================================
+# Trait Implementations
+# ============================================
+
+use core.traits.*
+
+impl Read for TcpStream:
+    fn read(self, buf: &mut [u8]) -> Result[usize, IoError]:
+        let mut bytes = Bytes::from_slice(buf)
+        match native_tcp_read(self.handle, &mut bytes):
+            case Ok(count):
+                buf.copy_from_slice(&bytes.as_slice())
+                Ok(count as usize)
+            case Err(e): Err(e)
+
+impl Write for TcpStream:
+    fn write(self, buf: &[u8]) -> Result[usize, IoError]:
+        let bytes = Bytes::from_slice(buf)
+        match native_tcp_write(self.handle, &bytes):
+            case Ok(count): Ok(count as usize)
+            case Err(e): Err(e)
+
+    fn flush(self) -> Result[(), IoError]:
+        native_tcp_flush(self.handle)
+
+impl Drop for TcpStream:
+    fn drop(self):
+        native_tcp_close(self.handle)
+
+impl Drop for TcpListener:
+    fn drop(self):
+        native_tcp_close(self.handle)
+

@@ -66,9 +66,18 @@ pub(crate) fn evaluate_expr(
                     class_name: name.clone(),
                 });
             }
-            Err(CompileError::Semantic(format!(
-                "undefined variable: {name}"
-            )))
+            // Collect all known names for typo suggestion
+            let known_names: Vec<&str> = env
+                .keys()
+                .map(|s| s.as_str())
+                .chain(functions.keys().map(|s| s.as_str()))
+                .chain(classes.keys().map(|s| s.as_str()))
+                .collect();
+            let mut msg = format!("undefined variable: {name}");
+            if let Some(suggestion) = crate::error::typo::format_suggestion(name, known_names) {
+                msg.push_str(&format!("; {}", suggestion));
+            }
+            Err(CompileError::Semantic(msg))
         }
         Expr::New { kind, expr } => {
             let inner = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;

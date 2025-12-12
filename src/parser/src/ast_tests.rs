@@ -39,6 +39,7 @@ fn test_function_def() {
         effect: None,
         decorators: vec![],
         attributes: vec![],
+        doc_comment: None,
     };
     assert_eq!(func.name, "add");
     assert_eq!(func.params.len(), 1);
@@ -63,6 +64,7 @@ fn test_generic_function_def() {
         effect: None,
         decorators: vec![],
         attributes: vec![],
+        doc_comment: None,
     };
     assert_eq!(func.name, "identity");
     assert_eq!(func.generic_params, vec!["T"]);
@@ -84,7 +86,20 @@ fn test_generic_struct_def() {
         }],
         visibility: Visibility::Private,
         attributes: vec![],
+        doc_comment: None,
     };
     assert_eq!(s.name, "Box");
     assert_eq!(s.generic_params, vec!["T"]);
+}
+
+#[test]
+fn test_doc_comment() {
+    let doc = DocComment::new("This is a function description.\nIt spans multiple lines.".to_string());
+    assert_eq!(doc.content, "This is a function description.\nIt spans multiple lines.");
+}
+
+#[test]
+fn test_doc_comment_trimming() {
+    let doc = DocComment::new("  \n  Description with whitespace  \n  ".to_string());
+    assert_eq!(doc.content, "Description with whitespace");
 }

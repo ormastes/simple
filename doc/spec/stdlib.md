@@ -85,7 +85,7 @@ Three orthogonal axes define how a compilation unit is built:
 The effective variant of a compilation unit is the combination:
 
 ```
-(platform, concurrency, memory)
+(platform, concurrency, memory, mutability)
 ```
 
 Some common combinations are named:
@@ -93,10 +93,14 @@ Some common combinations are named:
 | Name | Definition |
 |------|------------|
 | `host_async_gc` | (platform_host, async, gc) |
+| `host_async_nogc` | (platform_host, async, no_gc) - **DEFAULT** |
 | `host_sync_gc` | (platform_host, sync, gc) |
 | `host_sync_nogc` | (platform_host, sync, no_gc) |
+| `bare_async_nogc` | (platform_baremetal, async, no_gc) - **DEFAULT for baremetal** |
 | `bare_sync_nogc` | (platform_baremetal, sync, no_gc) |
-| `gpu_kernel` | (platform_gpu, sync, no_gc) + role gpu_kernel |
+| `gpu_kernel` | (platform_gpu, async, no_gc) + role gpu_kernel - **DEFAULT for GPU kernels** |
+| `gpu_kernel_sync` | (platform_gpu, sync, no_gc) + role gpu_kernel |
+| `gpu_host_async_nogc` | (platform_host, async, no_gc) for GPU host-side helpers - **DEFAULT** |
 | `gpu_host_async_gc` | (platform_host, async, gc) for GPU host-side helpers |
 
 ### 2.3 Attributes
@@ -106,10 +110,81 @@ The following attributes participate in variant selection:
 - `#[platform_host]`, `#[platform_baremetal]`, `#[platform_gpu]`
 - `#[async]`, `#[sync]`
 - `#[gc]`, `#[no_gc]`
+- `#[mutable]`, `#[immutable]` (mutability mode)
 - Optional: `#[strong]` (language safety mode)
 - Optional: `#[gpu_kernel]` (marks device-side GPU kernels)
 
+#### 2.3.1 Mutability Modes
+
+| Attribute | Description |
+|-----------|-------------|
+| `#[mutable]` | Default. Variables are mutable unless declared `let` |
+| `#[immutable]` | Variables are immutable by default, use `var` for mutable |
+
+The `#[immutable]` attribute is recommended for:
+- Functional programming style
+- GPU kernels (reduces synchronization complexity)
+- Concurrent code (safer data sharing)
+
 If multiple attributes conflict (e.g. both `#[async]` and `#[sync]`), compilation fails.
+
+#### 2.3.2 Immutable Interface Design Patterns
+
+When designing APIs for immutable modules (`#[immutable]`), follow these patterns:
+
+**Mutable vs Immutable Method Signatures:**
+
+| Operation | Mutable Pattern | Immutable Pattern |
+|-----------|-----------------|-------------------|
+| Append | `fn push(self, v: T) -> bool` | `fn push(self, v: T) -> Option[Self]` |
+| Remove | `fn pop(self) -> Option[T]` | `fn pop(self) -> Option[(T, Self)]` |
+| Update | `fn set(self, i: u64, v: T)` | `fn with(self, i: u64, v: T) -> Self` |
+| Clear | `fn clear(self)` | `fn cleared() -> Self` |
+| Sort | `fn sort(self)` | `fn sorted(self) -> Self` |
+
+**Example - Mutable API (core_nogc/fixed_vec.spl):**
+```simple
+# Mutates in-place, returns success indicator
+pub fn push(self, value: T) -> bool:
+    if self.len >= N:
+        return false
+    self.data[self.len] = value
+    self.len = self.len + 1
+    return true
+```
+
+**Example - Immutable API (core_nogc_immut/static_vec.spl):**
+```simple
+# Returns new vector with element appended
+fn push(self, val: T) -> Option[StaticVec[T, N]]:
+    if self._len < N:
+        var new_data = self._data
+        new_data[self._len] = val
+        Some(StaticVec { _data: new_data, _len: self._len + 1 })
+    else:
+        None
+```
+
+**Persistent Data Structures (core_immut/persistent.spl):**
+
+For GC-enabled immutable modules, use structural sharing:
+```simple
+enum List[T]:
+    Nil
+    Cons(T, Box[List[T]])
+
+fn prepend(self, x: T) -> List[T]:
+    List.Cons(x, Box.new(self))  # Reuses existing list
+```
+
+**Guidelines:**
+1. Immutable methods return new instances; original remains unchanged
+2. Use `Option[Self]` for operations that may fail (capacity exceeded)
+3. Use tuples `(extracted_value, new_collection)` for pop-like operations
+4. Prefer verbs ending in `-ed` for transformation methods: `sorted`, `filtered`, `mapped`
+5. Use `with_*` prefix for update methods: `with_element`, `with_capacity`
+
+See [Immutable Interface Design Research](../research/immutable_interface_design.md) for detailed patterns.
 
 ### 2.4 Profiles (simple.toml)
 
@@ -131,19 +206,42 @@ imports   = ["std.*", "std.net.*"]
 attributes = ["platform_host", "async", "gc", "strong"]
 imports   = ["std.*"]
 
+[profiles.functional]
+# Functional programming: async + gc + immutable
+attributes = ["platform_host", "async", "gc", "strong", "immutable"]
+imports   = ["std.*", "std.core_immut.*"]
+
 [profiles.cli]
 attributes = ["platform_host", "sync", "no_gc", "strong"]
 imports   = ["std.*"]
 
 [profiles.baremetal]
+# Baremetal: async + no_gc (cooperative scheduling, no OS)
+attributes = ["platform_baremetal", "async", "no_gc", "strong"]
+imports   = ["std.*"]
+
+[profiles.baremetal_sync]
+# Baremetal with blocking execution
 attributes = ["platform_baremetal", "sync", "no_gc", "strong"]
 imports   = ["std.*"]
 
 [profiles.gpu_kernel]
+# GPU kernels: async + no_gc + immutable (default)
+attributes = ["platform_gpu", "async", "no_gc", "strong", "gpu_kernel", "immutable"]
+imports   = ["std.gpu.kernel.*"]
+
+[profiles.gpu_kernel_sync]
+# GPU kernels with sync execution
 attributes = ["platform_gpu", "sync", "no_gc", "strong", "gpu_kernel"]
 imports   = ["std.gpu.kernel.*"]
 
 [profiles.gpu_host]
+# GPU host-side: async + no_gc (default)
+attributes = ["platform_host", "async", "no_gc", "strong"]
+imports   = ["std.*", "std.gpu.host.*"]
+
+[profiles.gpu_host_gc]
+# GPU host-side with GC (convenience)
 attributes = ["platform_host", "async", "gc", "strong"]
 imports   = ["std.*", "std.gpu.host.*"]
 ```
@@ -176,15 +274,19 @@ simple/
 │       ├── core_nogc/      # variant-agnostic, explicit #[no_gc]
 │       ├── simd/           # cross-platform SIMD & vector math
 │       ├── host/           # OS-based stdlib overlays
+│       │   ├── async_nogc/ # DEFAULT
 │       │   ├── async_gc/
-│       │   ├── sync_gc/
-│       │   └── sync_nogc/
+│       │   ├── sync_nogc/
+│       │   └── sync_gc/
 │       ├── bare/           # baremetal stdlib overlays
+│       │   ├── async_nogc/ # DEFAULT (cooperative async)
 │       │   └── sync_nogc/
 │       ├── gpu/            # GPU device & host APIs
 │       │   ├── kernel/
+│       │   │   ├── async_nogc/  # DEFAULT (async GPU operations)
 │       │   │   └── sync_nogc/
 │       │   └── host/
+│       │       ├── async_nogc/  # DEFAULT
 │       │       ├── async_gc/
 │       │       └── sync_gc/
 │       └── tools/          # diagnostics, testing, reflection
@@ -235,36 +337,113 @@ simple/
 ```
 lib/std/
 ├── __init__.spl        # Root manifest with #[deny(primitive_api, bare_string, bare_bool)]
-├── core/               # Variant-agnostic pure core
-├── core_nogc/          # Variant-agnostic, explicit #[no_gc]
+├── prelude.spl         # Auto-imported into every file
+├── core/               # Variant-agnostic pure core (mutable default)
+│   ├── __init__.spl
+│   ├── option.spl
+│   ├── result.spl
+│   └── traits.spl
+├── core_immut/         # Variant-agnostic, explicit #[immutable]
+│   ├── __init__.spl
+│   ├── functional.spl  # compose, curry, flip, identity
+│   ├── pure.spl        # pure Option/Result transformations
+│   └── persistent.spl  # persistent data structures (List, etc.)
+├── core_nogc/          # Variant-agnostic, explicit #[no_gc] (mutable)
+│   ├── __init__.spl
+│   ├── arena.spl
+│   ├── bump.spl
+│   ├── fixed_vec.spl
+│   └── fixed_string.spl
+├── core_nogc_immut/    # Variant-agnostic, #[no_gc] + #[immutable]
+│   ├── __init__.spl
+│   ├── functional.spl  # pure functions (stack-only)
+│   ├── static_vec.spl  # immutable API fixed-capacity vector
+│   └── static_string.spl  # immutable API fixed-capacity string
 ├── units/              # Unit type definitions
 │   ├── __init__.spl
-│   ├── ids.spl         # UserId, SessionId, etc.
-│   ├── file.spl        # FilePath, FileName, FileExt, DirPath
-│   ├── net.spl         # IpAddr, Port, SocketAddr, MacAddr
-│   ├── url.spl         # Url, HttpUrl, FtpUrl, Host, UrlPath
-│   ├── size.spl        # ByteCount, kb, mb, gb
-│   └── physical/       # length, time, mass, etc.
-├── simd/               # Cross-platform SIMD & vector math
+│   ├── ids.spl
+│   ├── file.spl
+│   ├── net.spl
+│   ├── url.spl
+│   ├── size.spl
+│   └── time.spl
+├── simd/               # Cross-platform SIMD & vector math (single variant)
+│   ├── __init__.spl
+│   ├── types.spl
+│   ├── ops.spl
+│   └── matrix.spl
 ├── host/               # OS-based stdlib overlays
-│   ├── async_nogc/     # DEFAULT: async + no_gc
-│   │   ├── io/         # fs, buf
-│   │   └── net/        # tcp, udp, http, ftp
-│   ├── async_gc/       # async + gc (convenience)
-│   ├── sync_nogc/      # blocking + no_gc
-│   └── sync_gc/        # blocking + gc
-├── bare/               # Baremetal stdlib overlays
-│   └── sync_nogc/
-├── gpu/                # GPU device & host APIs
-│   ├── kernel/
-│   │   └── sync_nogc/
-│   └── host/
-│       ├── async_gc/
-│       └── sync_gc/
-└── tools/              # Diagnostics, testing, reflection, DSL helpers
+│   ├── async_nogc_mut/     # DEFAULT: async + no_gc + mutable
+│   │   ├── __init__.spl
+│   │   ├── io/
+│   │   │   ├── __init__.spl
+│   │   │   ├── fs.spl
+│   │   │   ├── buf.spl
+│   │   │   ├── term.spl
+│   │   │   └── term_style.spl
+│   │   └── net/
+│   │       ├── __init__.spl
+│   │       ├── tcp.spl
+│   │       ├── udp.spl
+│   │       ├── http.spl
+│   │       └── ftp.spl
+│   ├── async_gc_mut/       # async + gc + mutable
+│   ├── async_gc_immut/     # async + gc + immutable (functional style)
+│   ├── sync_nogc_mut/      # blocking + no_gc + mutable
+│   └── sync_gc_mut/        # blocking + gc + mutable
+├── bare/               # Baremetal (single variant: async + nogc + immutable)
+│   ├── __init__.spl    # #[variant(platform_baremetal, async, no_gc, immutable)]
+│   ├── hal/
+│   │   ├── __init__.spl
+│   │   ├── gpio.spl
+│   │   ├── uart.spl
+│   │   ├── timer.spl
+│   │   ├── spi.spl
+│   │   └── i2c.spl
+│   ├── io/
+│   │   ├── __init__.spl
+│   │   └── serial.spl
+│   ├── time.spl
+│   ├── mem.spl
+│   └── async/
+│       ├── __init__.spl
+│       ├── executor.spl
+│       └── waker.spl
+├── gpu/                # GPU APIs
+│   ├── kernel/         # Device-side (single variant: async + nogc + immutable)
+│   │   ├── __init__.spl    # #[gpu_kernel, immutable]
+│   │   ├── core.spl        # thread/block/grid indices
+│   │   ├── memory.spl      # global/shared/local access
+│   │   ├── simd.spl        # GPU-adapted SIMD
+│   │   ├── math.spl        # fast math, fused ops
+│   │   ├── atomics.spl     # device atomics
+│   │   └── reduce.spl      # warp/block reductions
+│   └── host/           # Host-side control
+│       ├── async_nogc_mut/     # DEFAULT: async + no_gc + mutable
+│       │   ├── __init__.spl
+│       │   ├── device.spl
+│       │   ├── buffer.spl
+│       │   ├── kernel.spl
+│       │   └── stream.spl
+│       └── async_gc_mut/       # async + gc + mutable
+└── tools/              # Diagnostics, testing, reflection
+    ├── __init__.spl
+    ├── test.spl
+    └── reflect.spl
 ```
 
-**Note:** `async_nogc` is the default and most complete variant. Other variants may have fewer modules available.
+**Variant Naming Convention:**
+- Format: `{concurrency}_{memory}_{mutability}`
+- Example: `async_nogc_mut` = async + no_gc + mutable
+- Single variant folders: no suffix needed, config in `__init__.spl`
+
+**Default Variants by Platform:**
+| Platform | Default Variant | Rationale |
+|----------|-----------------|-----------|
+| host | `async_nogc_mut` | Async I/O, predictable memory, mutable for typical apps |
+| bare | (single) `async_nogc_immut` | Interrupt-driven, no heap, immutable for safety |
+| gpu/kernel | (single) `async_nogc_immut` | Parallel execution, immutable for race-freedom |
+| gpu/host | `async_nogc_mut` | Async GPU control, mutable for buffer management |
 
 ### Native Library (`native_lib/`)
 
@@ -350,18 +529,31 @@ Typical modules (some present only in async_gc or sync_gc):
 
 ### 4.2 lib/std/bare - Baremetal Stdlib
 
+**Default variant: `async_nogc`** - Cooperative async scheduling without OS support.
+
 Modules:
 - `startup` - reset handler, entry point helpers
 - `hal.gpio`, `hal.uart`, `hal.timer`, `hal.spi`, `hal.i2c`
 - `io.serial` - basic UART print/read helpers
 - `time` - tick-based time (no wall-clock)
 - `mem` - volatile memory access, MMIO helpers
+- `async.executor` - cooperative single-threaded executor
+- `async.waker` - manual waker for interrupt-driven async
 
-All baremetal modules MUST be `#[platform_baremetal, sync, no_gc]`.
+**Async Rationale for Baremetal:**
+- Interrupt-driven I/O maps naturally to async/await
+- Cooperative scheduling without OS threads
+- No heap allocation required (stack-based futures)
+- Better power efficiency (sleep between events)
+
+All baremetal modules MUST be `#[platform_baremetal, no_gc]`.
+Default is `#[async]`; use `#[sync]` for blocking variants.
 
 ### 4.3 lib/std/gpu - GPU Kernel + Host GPU Control
 
 #### 4.3.1 std.gpu.kernel.* (device side)
+
+**Default variant: `async_nogc` + `#[immutable]`**
 
 - `std.gpu.kernel.core` - thread/block/grid indices, warp size, lane id
 - `std.gpu.kernel.memory` - global/shared/local memory access primitives
@@ -370,16 +562,34 @@ All baremetal modules MUST be `#[platform_baremetal, sync, no_gc]`.
 - `std.gpu.kernel.atomics` - device atomics
 - `std.gpu.kernel.reduce` - warp/block reductions, scans
 
-All MUST be `#[platform_gpu, sync, no_gc, gpu_kernel]`.
+**Async Rationale for GPU Kernels:**
+- GPU operations are inherently parallel and asynchronous
+- Kernel launches don't block the host thread
+- Data transfers happen asynchronously
+- Synchronization is explicit (barriers, events)
+
+All MUST be `#[platform_gpu, no_gc, gpu_kernel]`.
+Default is `#[async, immutable]`; use `#[sync]` for explicit synchronous kernels.
 
 #### 4.3.2 std.gpu.host.* (host side)
+
+**Default variant: `async_nogc`**
 
 - `std.gpu.host.device` - enumerate devices, query properties
 - `std.gpu.host.buffer` - allocate/free device buffers, upload/download
 - `std.gpu.host.kernel` - compile/launch kernels, configure grid/block dims
 - `std.gpu.host.stream` - async streams/queues; integration with async runtime
 
-These modules are typically `#[platform_host, async, gc]` (or sync_gc variants).
+**Async Rationale for GPU Host:**
+- Non-blocking kernel launches
+- Overlapped data transfers
+- Integration with host async runtime
+- Efficient multi-GPU orchestration
+
+Available variants:
+- `async_nogc` - DEFAULT: async + no_gc (predictable performance)
+- `async_gc` - async + gc (convenience for scripts)
+- `sync_gc` - blocking + gc (simple sequential code)
 
 ---
 
