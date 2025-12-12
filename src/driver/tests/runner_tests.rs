@@ -17,6 +17,19 @@ fn runner_compiles_and_runs_stub() {
     run_expect("main = 0", 0);
 }
 
+/// Test AOT executable mode specifically (all 3 modes: interpreter, JIT, AOT)
+#[test]
+fn runner_aot_executable_works() {
+    use crate::test_helpers::run_expect_all;
+    // Simple integer returns work in AOT
+    run_expect_all("main = 42", 42);
+    run_expect_all("main = 0", 0);
+    run_expect_all("main = 100", 100);
+    // Simple arithmetic works in AOT
+    run_expect_all("main = 1 + 2", 3);
+    run_expect_all("main = 10 * 5", 50);
+}
+
 #[test]
 fn runner_returns_integer_literal_value() {
     run_expect("main = 42", 42);
