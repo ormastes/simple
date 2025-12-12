@@ -38,6 +38,9 @@ mod buffer;
 mod kernel;
 mod intrinsics;
 mod error;
+mod parallel;
+mod optimize;
+pub mod backend;
 
 pub use device::*;
 pub use context::*;
@@ -45,3 +48,6 @@ pub use buffer::*;
 pub use kernel::*;
 pub use intrinsics::*;
 pub use error::*;
+pub use parallel::*;
+pub use optimize::*;
+pub use backend::{Backend, get_backend, get_backend_by_type};

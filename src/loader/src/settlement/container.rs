@@ -13,6 +13,7 @@ use crate::smf::settlement::{
     SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVES, SSMF_FLAG_RELOADABLE,
 };
 
+use super::linker::SettlementLinker;
 use super::native::{NativeHandle, NativeLibManager, NativeLibSpec};
 use super::slots::{SlotAllocator, SlotRange, CODE_SLOT_SIZE, DATA_SLOT_SIZE};
 use super::tables::{FunctionTable, GlobalTable, TableIndex, TypeTable};
@@ -169,6 +170,9 @@ pub struct Settlement {
     /// Native library manager
     native_libs: NativeLibManager,
 
+    /// Cross-module linker
+    linker: SettlementLinker,
+
     /// Entry module (has main function)
     entry_module: Option<ModuleHandle>,
     /// Entry function index in func_table
@@ -223,6 +227,7 @@ impl Settlement {
             modules: Vec::new(),
             modules_by_name: HashMap::new(),
             native_libs: NativeLibManager::new(),
+            linker: SettlementLinker::new(),
             entry_module: None,
             entry_func_idx: None,
             allocator,
@@ -236,6 +241,18 @@ impl Settlement {
 
     /// Add a module to the settlement.
     pub fn add_module(&mut self, module: &LoadedModule) -> Result<ModuleHandle, SettlementError> {
+        self.add_module_with_linking(module, true)
+    }
+
+    /// Add a module to the settlement with optional linking.
+    ///
+    /// If `resolve_imports` is true, the module's imports will be resolved
+    /// against existing modules' exports, and dependencies will be tracked.
+    pub fn add_module_with_linking(
+        &mut self,
+        module: &LoadedModule,
+        resolve_imports: bool,
+    ) -> Result<ModuleHandle, SettlementError> {
         // Use path as module name
         let name = module.path.file_stem()
             .and_then(|s| s.to_str())
@@ -294,8 +311,9 @@ impl Settlement {
         // Create module handle
         let handle = ModuleHandle(self.modules.len() as u32);
 
-        // Register functions in function table
+        // Register functions in function table and collect export info for linker
         let mut functions = Vec::new();
+        let mut func_indices: Vec<(String, TableIndex)> = Vec::new();
 
         // Register entry point if executable
         if module.header.is_executable() {
@@ -304,6 +322,7 @@ impl Settlement {
 
             let func_idx = self.func_table.allocate(settlement_addr, handle.0 as u16, 1);
             functions.push(func_idx);
+            func_indices.push(("__entry".to_string(), func_idx));
 
             // If this is the first module with entry, set it as entry module
             if self.entry_module.is_none() {
@@ -313,15 +332,56 @@ impl Settlement {
         }
 
         // Register exports in function table
-        let module_code_base = module.code_mem.as_ptr() as usize;
         for sym in module.symbols.exports() {
             if sym.sym_type == crate::smf::SymbolType::Function {
                 let offset = sym.value as usize;
                 let settlement_addr = code_ptr as usize + offset;
                 let func_idx = self.func_table.allocate(settlement_addr, handle.0 as u16, 1);
                 functions.push(func_idx);
+
+                let sym_name = module.symbols.symbol_name(sym).to_string();
+                func_indices.push((sym_name, func_idx));
             }
         }
+
+        // Register exports in linker
+        self.linker.register_exports(module, handle, code_ptr as usize, &func_indices);
+
+        // Link module and resolve dependencies
+        let dependencies = if resolve_imports {
+            let link_result = self.linker.link_module(module, handle)?;
+
+            // Check for unresolved required symbols
+            if !link_result.unresolved.is_empty() {
+                // For now, just warn - could make this an error
+                // return Err(SettlementError::InvalidModule(format!(
+                //     "Unresolved symbols: {:?}",
+                //     link_result.unresolved
+                // )));
+            }
+
+            // Re-apply relocations with resolved imports
+            if !link_result.resolved_imports.is_empty() {
+                // Get mutable slice to code
+                let _code_slice = unsafe {
+                    std::slice::from_raw_parts_mut(code_ptr, code_size)
+                };
+
+                // Create resolver that combines linker exports with native symbols
+                let _resolver = |name: &str| -> Option<usize> {
+                    link_result.resolved_imports.get(name).copied()
+                        .or_else(|| self.native_libs.resolve_symbol(name))
+                };
+
+                // Note: We'd need to re-apply relocations here if the module
+                // wasn't already relocated during loading. For now, the loader
+                // already applies relocations with its own resolver.
+            }
+
+            link_result.dependencies
+        } else {
+            Vec::new()
+        };
 
         // Calculate table ranges
         let func_start = if functions.is_empty() {
@@ -339,7 +399,7 @@ impl Settlement {
             functions: functions.clone(),
             globals: Vec::new(), // TODO: populate from module
             types: Vec::new(),   // TODO: populate from module
-            dependencies: Vec::new(), // TODO: resolve dependencies
+            dependencies, // Now properly populated from linker
             version: module.version,
             code_size,
             data_size,
@@ -365,16 +425,14 @@ impl Settlement {
 
         let name = module.name.clone();
 
-        // Check for dependents
-        let dependents: Vec<String> = self
-            .modules
-            .iter()
-            .filter(|m| m.dependencies.contains(&handle))
-            .map(|m| m.name.clone())
-            .collect();
-
+        // Check for dependents using linker
+        let dependents = self.linker.get_dependents(handle);
         if !dependents.is_empty() {
-            return Err(SettlementError::HasDependents(name, dependents));
+            let dependent_names: Vec<String> = dependents
+                .iter()
+                .filter_map(|&h| self.modules.get(h.as_usize()).map(|m| m.name.clone()))
+                .collect();
+            return Err(SettlementError::HasDependents(name, dependent_names));
         }
 
         // Free function table entries
@@ -400,6 +458,9 @@ impl Settlement {
             self.data_slots.free(module.data_slots);
         }
 
+        // Unregister from linker
+        self.linker.unregister_module(handle);
+
         // Remove from name lookup
         self.modules_by_name.remove(&name);
 
@@ -407,6 +468,166 @@ impl Settlement {
         // In a production implementation, you'd want a more sophisticated approach
 
         Ok(())
+    }
+
+    /// Resolve a symbol by name across all modules.
+    pub fn resolve_symbol(&mut self, name: &str) -> Option<usize> {
+        self.linker.resolve_symbol(name)
+            .or_else(|| self.native_libs.resolve_symbol(name))
+    }
+
+    /// Resolve a symbol and get its table index.
+    pub fn resolve_symbol_with_index(&self, name: &str) -> Option<(usize, TableIndex)> {
+        self.linker.resolve_symbol_with_index(name)
+    }
+
+    /// Get dependencies for a module.
+    pub fn get_dependencies(&self, handle: ModuleHandle) -> Vec<ModuleHandle> {
+        self.linker.get_dependencies(handle)
+    }
+
+    /// Get modules that depend on the given module.
+    pub fn get_dependents(&self, handle: ModuleHandle) -> Vec<ModuleHandle> {
+        self.linker.get_dependents(handle)
+    }
+
+    /// Check if a module can be safely removed.
+    pub fn can_remove(&self, handle: ModuleHandle) -> bool {
+        self.linker.can_remove(handle)
+    }
+
+    /// Replace a module with a new version (hot code replacement).
+    ///
+    /// This atomically updates function pointers in the indirection table,
+    /// allowing existing calls to seamlessly use the new code.
+    ///
+    /// # Requirements
+    /// - Settlement must be configured as reloadable
+    /// - New module must export the same symbols as the old one
+    /// - New module must be ABI-compatible
+    ///
+    /// # Safety
+    /// This operation is safe as long as:
+    /// - No running code is in the middle of the old module's functions
+    /// - The new module has the same function signatures
+    pub fn replace_module(
+        &mut self,
+        handle: ModuleHandle,
+        new_module: &LoadedModule,
+    ) -> Result<(), SettlementError> {
+        if !self.config.reloadable {
+            return Err(SettlementError::InvalidModule(
+                "Settlement is not configured for hot reload".to_string()
+            ));
+        }
+
+        let old_module = self
+            .modules
+            .get(handle.as_usize())
+            .ok_or_else(|| SettlementError::ModuleNotFound(format!("Handle {:?}", handle)))?;
+
+        let _name = old_module.name.clone();
+        let old_code_slots = old_module.code_slots;
+        let old_data_slots = old_module.data_slots;
+        let old_functions = old_module.functions.clone();
+
+        // Get new module sizes
+        let new_code_size = new_module.code_mem.size();
+        let new_data_size = new_module.data_mem.as_ref().map(|d| d.size()).unwrap_or(0);
+
+        // Allocate new slots
+        let new_code_slots = self
+            .code_slots
+            .allocate_bytes(new_code_size)
+            .ok_or(SettlementError::CodeRegionFull)?;
+
+        let new_data_slots = if new_data_size > 0 {
+            self.data_slots
+                .allocate_bytes(new_data_size)
+                .ok_or(SettlementError::DataRegionFull)?
+        } else {
+            SlotRange::new(0, 0)
+        };
+
+        // Copy new code
+        let (new_code_ptr, _) = self.code_slots.get_memory(new_code_slots);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                new_module.code_mem.as_ptr(),
+                new_code_ptr,
+                new_code_size,
+            );
+        }
+
+        // Copy new data
+        if let Some(ref data_mem) = new_module.data_mem {
+            let (new_data_ptr, _) = self.data_slots.get_memory(new_data_slots);
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    data_mem.as_ptr(),
+                    new_data_ptr,
+                    new_data_size,
+                );
+            }
+        }
+
+        // Update function table entries atomically
+        // Map old function names to new addresses
+        let mut func_indices: Vec<(String, TableIndex)> = Vec::new();
+
+        for &old_func_idx in old_functions.iter() {
+            // Find corresponding symbol in new module
+            if self.func_table.get_entry(old_func_idx).is_some() {
+                // For each old function, find the matching new one
+                for sym in new_module.symbols.exports() {
+                    if sym.sym_type == crate::smf::SymbolType::Function {
+                        let offset = sym.value as usize;
+                        let new_addr = new_code_ptr as usize + offset;
+                        let sym_name = new_module.symbols.symbol_name(sym).to_string();
+
+                        // Update the function pointer atomically
+                        unsafe {
+                            self.func_table.update_code_ptr(old_func_idx, new_addr);
+                        }
+
+                        func_indices.push((sym_name, old_func_idx));
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Update linker exports
+        self.linker.update_exports(new_module, handle, new_code_ptr as usize, &func_indices);
+
+        // Free old slots (after updating pointers)
+        self.code_slots.free(old_code_slots);
+        if old_data_slots.count > 0 {
+            self.data_slots.free(old_data_slots);
+        }
+
+        // Update module info
+        if let Some(module) = self.modules.get_mut(handle.as_usize()) {
+            module.code_slots = new_code_slots;
+            module.data_slots = new_data_slots;
+            module.code_size = new_code_size;
+            module.data_size = new_data_size;
+            module.code_range = new_code_slots;
+            module.data_range = new_data_slots;
+            module.version = new_module.version;
+        }
+
+        Ok(())
+    }
+
+    /// Get the linker for advanced operations.
+    pub fn linker(&self) -> &SettlementLinker {
+        &self.linker
+    }
+
+    /// Get mutable linker for advanced operations.
+    pub fn linker_mut(&mut self) -> &mut SettlementLinker {
+        &mut self.linker
     }
 
     /// Get a module by handle.

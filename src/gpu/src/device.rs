@@ -9,6 +9,8 @@ pub enum GpuBackend {
     Wgpu,
     /// NVIDIA CUDA backend.
     Cuda,
+    /// AMD ROCm/HIP backend.
+    Rocm,
     /// Apple Metal backend.
     Metal,
     /// Vulkan compute backend.

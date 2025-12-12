@@ -83,6 +83,12 @@ pub struct SettlementHeader {
     /// Size of string table
     pub string_table_size: u64,
 
+    // Dependency table
+    /// Offset to dependency table
+    pub dep_table_offset: u64,
+    /// Size of dependency table
+    pub dep_table_size: u64,
+
     // Debug and resources (optional, at end)
     /// Offset to debug info (0 if none)
     pub debug_offset: u64,
@@ -290,6 +296,10 @@ pub struct ModuleTableEntry {
     pub type_start: u32,
     /// Number of types from this module
     pub type_count: u32,
+    /// Offset into dependency table for this module's dependencies
+    pub dep_start: u32,
+    /// Number of dependencies
+    pub dep_count: u32,
 }
 
 impl ModuleTableEntry {

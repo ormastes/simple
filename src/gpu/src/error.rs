@@ -56,6 +56,30 @@ pub enum GpuError {
     /// Feature not supported.
     #[error("Feature not supported: {0}")]
     FeatureNotSupported(String),
+
+    /// Invalid device index.
+    #[error("Invalid device index: {0}")]
+    InvalidDevice(usize),
+
+    /// Invalid buffer handle.
+    #[error("Invalid buffer handle")]
+    InvalidBuffer,
+
+    /// Invalid kernel handle.
+    #[error("Invalid kernel handle")]
+    InvalidKernel,
+
+    /// Invalid stream handle.
+    #[error("Invalid stream handle")]
+    InvalidStream,
+
+    /// Invalid event handle.
+    #[error("Invalid event handle")]
+    InvalidEvent,
+
+    /// Backend-specific error.
+    #[error("Backend error: {0}")]
+    BackendError(String),
 }
 
 /// Result type for GPU operations.

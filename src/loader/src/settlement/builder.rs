@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use crate::smf::settlement::{
     SettlementHeader, ModuleTableEntry, NativeLibEntry, FuncTableEntry, GlobalTableEntry, TypeTableEntry,
-    SSMF_MAGIC, SSMF_VERSION, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVE_LIBS,
+    DependencyEntry, SSMF_MAGIC, SSMF_VERSION, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVE_LIBS,
 };
 use crate::settlement::Settlement;
 
@@ -256,6 +256,9 @@ impl SettlementBuilder {
         settlement: &Settlement,
         output: &mut W,
     ) -> Result<(), BuildError> {
+        // Build dependency table first (needed for module table)
+        let (dep_entries, dep_offsets) = self.build_dependency_table(settlement);
+
         // Collect all data that needs to be written
         let string_table = self.build_string_table(settlement);
         let code_data = settlement.code_region_slice();
@@ -263,7 +266,7 @@ impl SettlementBuilder {
         let func_entries = settlement.func_table_slice();
         let global_entries = settlement.global_table_slice();
         let type_entries = settlement.type_table_slice();
-        let module_entries = self.build_module_table(settlement, &string_table);
+        let module_entries = self.build_module_table(settlement, &string_table, &dep_offsets);
         let native_lib_entries = self.build_native_lib_table(settlement, &string_table);
 
         // Calculate offsets
@@ -317,6 +320,11 @@ impl SettlementBuilder {
         // Native library table
         let native_libs_offset = current_offset;
         let native_libs_size = (native_lib_entries.len() * std::mem::size_of::<NativeLibEntry>()) as u64;
+        current_offset += native_libs_size;
+
+        // Dependency table
+        let dep_table_offset = current_offset;
+        let dep_table_size = (dep_entries.len() * std::mem::size_of::<DependencyEntry>()) as u64;
 
         // Build flags
         let mut flags = 0u16;
@@ -353,6 +361,8 @@ impl SettlementBuilder {
             native_libs_size,
             string_table_offset,
             string_table_size: string_table_data.len() as u64,
+            dep_table_offset,
+            dep_table_size,
             module_count: module_entries.len() as u32,
             native_lib_count: native_lib_entries.len() as u32,
             entry_module_idx,
@@ -455,6 +465,17 @@ impl SettlementBuilder {
             output.write_all(entry_bytes)?;
         }
 
+        // Write dependency table
+        for entry in &dep_entries {
+            let entry_bytes = unsafe {
+                std::slice::from_raw_parts(
+                    entry as *const DependencyEntry as *const u8,
+                    std::mem::size_of::<DependencyEntry>(),
+                )
+            };
+            output.write_all(entry_bytes)?;
+        }
+
         Ok(())
     }
 
@@ -490,9 +511,19 @@ impl SettlementBuilder {
         table.data.clone()
     }
 
-    /// Build the module table.
-    fn build_module_table(&self, settlement: &Settlement, strings: &StringTable) -> Vec<ModuleTableEntry> {
+    /// Build the module table with dependency offsets.
+    fn build_module_table(
+        &self,
+        settlement: &Settlement,
+        strings: &StringTable,
+        dep_offsets: &HashMap<String, (u32, u32)>, // module_name -> (dep_start, dep_count)
+    ) -> Vec<ModuleTableEntry> {
         settlement.iter_modules().map(|module| {
+            let (dep_start, dep_count) = dep_offsets
+                .get(&module.name)
+                .copied()
+                .unwrap_or((0, 0));
+
             ModuleTableEntry {
                 name_offset: strings.offset(&module.name) as u32,
                 version: module.version,
@@ -508,8 +539,38 @@ impl SettlementBuilder {
                 global_count: module.global_table_range.1 as u32,
                 type_start: module.type_table_range.0.0,
                 type_count: module.type_table_range.1 as u32,
+                dep_start,
+                dep_count,
             }
         }).collect()
+    }
+
+    /// Build the dependency table.
+    ///
+    /// Returns (dependency_entries, module_dep_offsets)
+    /// where module_dep_offsets maps module_name -> (start_index, count)
+    fn build_dependency_table(&self, settlement: &Settlement) -> (Vec<DependencyEntry>, HashMap<String, (u32, u32)>) {
+        let mut entries = Vec::new();
+        let mut offsets = HashMap::new();
+
+        for module in settlement.iter_modules() {
+            let start = entries.len() as u32;
+            let count = module.dependencies.len() as u32;
+
+            for &dep_handle in &module.dependencies {
+                // Find the module index (which is the handle value)
+                if let Some(dep_module) = settlement.get_module(dep_handle) {
+                    entries.push(DependencyEntry {
+                        module_idx: dep_handle.0,
+                        required_version: dep_module.version,
+                    });
+                }
+            }
+
+            offsets.insert(module.name.clone(), (start, count));
+        }
+
+        (entries, offsets)
     }
 
     /// Build the native library table.

@@ -47,9 +47,13 @@
 //! └──────────────────────────────────────────────────────┘
 //! ```
 
+pub mod arch_validate;
+pub mod cross_test;
 pub mod loader;
 pub mod memory;
 pub mod module;
+pub mod native_cross;
+pub mod package;
 pub mod registry;
 pub mod settlement;
 pub mod smf;
@@ -57,12 +61,31 @@ pub mod startup;
 
 pub use loader::{LoadError, ModuleLoader};
 pub use module::LoadedModule;
+pub use package::{
+    LoadedPackage, ManifestSection, PackageError, PackageOptions, PackageReader,
+    PackageTrailer, PackageWriter, ResourceEntry, SPK_MAGIC, SPK_VERSION,
+    extract_resource, list_resources,
+};
 pub use registry::ModuleRegistry;
 pub use settlement::{
     BuildError, BuildOptions, ModuleHandle, NativeHandle, NativeLibManager, NativeLibSpec,
     Settlement, SettlementBuilder, SettlementConfig, SettlementError, SettlementModule,
     SlotAllocator, SlotRange, FunctionTable, GlobalTable, TypeTable, TableIndex,
+    SettlementLinker, ExportedSymbol, ImportedSymbol, LinkResult,
     create_executable, find_stub,
 };
 pub use simple_common::{DynLoader, DynModule};
 pub use startup::{LoadedSettlement, StartupError, StartupLoader, settlement_main};
+
+// Multi-architecture support
+pub use arch_validate::{
+    ArchValidator, ValidationResult, ValidationError, ValidationWarning,
+    is_compatible, is_native, native_target, supported_compile_targets, supported_execute_targets,
+};
+pub use cross_test::{
+    TargetFixture, TestMatrix, CrossTestResults, TestOutcome, CiConfig,
+};
+pub use native_cross::{
+    CrossCompileError, Toolchain, NativeLibConfig, NativeLibBuilder, ToolchainRegistry,
+    build_for_targets,
+};

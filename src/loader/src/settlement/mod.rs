@@ -5,15 +5,18 @@
 //! - Uses indirection tables for function/global access (enabling hot reload)
 //! - Supports native library embedding (static) or loading (shared)
 //! - Can be packaged as an executable
+//! - Links multiple modules together with dependency tracking
 
 mod builder;
 mod container;
+mod linker;
 mod native;
 mod slots;
 mod tables;
 
 pub use builder::*;
 pub use container::*;
+pub use linker::*;
 pub use native::*;
 pub use slots::*;
 pub use tables::*;
