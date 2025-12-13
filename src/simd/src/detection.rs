@@ -79,7 +79,7 @@ impl SimdFeatures {
             avx: false,
             avx2: false,
             avx512f: false,
-            fma: true, // NEON includes FMA
+            fma: true,  // NEON includes FMA
             neon: true, // NEON is always available on AArch64
         }
     }

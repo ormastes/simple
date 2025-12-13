@@ -3,11 +3,10 @@
 //! These tables enable hot-reload by providing a level of indirection
 //! for function calls and global access.
 
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::smf::settlement::{
-    FuncTableEntry, GlobalTableEntry, TypeTableEntry,
-    FUNC_FLAG_TOMBSTONE, FUNC_FLAG_VALID,
+    FuncTableEntry, GlobalTableEntry, TypeTableEntry, FUNC_FLAG_TOMBSTONE, FUNC_FLAG_VALID,
 };
 
 /// A handle to an entry in an indirection table.
@@ -204,24 +203,16 @@ impl FunctionTable {
         self.inner.get(idx)
     }
 
-    /// Get number of entries.
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// Check if empty.
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    /// Get raw slice for serialization.
-    pub fn as_slice(&self) -> &[FuncTableEntry] {
-        self.inner.as_slice()
-    }
-
     /// Iterate over valid entries.
     pub fn iter_valid(&self) -> impl Iterator<Item = (TableIndex, &FuncTableEntry)> {
         self.inner.iter().filter(|(_, e)| e.is_valid())
+    }
+}
+
+impl std::ops::Deref for FunctionTable {
+    type Target = IndirectionTable<FuncTableEntry>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -286,20 +277,12 @@ impl GlobalTable {
     pub fn get_entry(&self, idx: TableIndex) -> Option<&GlobalTableEntry> {
         self.inner.get(idx)
     }
+}
 
-    /// Get number of entries.
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// Check if empty.
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    /// Get raw slice for serialization.
-    pub fn as_slice(&self) -> &[GlobalTableEntry] {
-        self.inner.as_slice()
+impl std::ops::Deref for GlobalTable {
+    type Target = IndirectionTable<GlobalTableEntry>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 
@@ -358,20 +341,12 @@ impl TypeTable {
     pub fn get_entry(&self, idx: TableIndex) -> Option<&TypeTableEntry> {
         self.inner.get(idx)
     }
+}
 
-    /// Get number of entries.
-    pub fn len(&self) -> usize {
-        self.inner.len()
-    }
-
-    /// Check if empty.
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
-    }
-
-    /// Get raw slice for serialization.
-    pub fn as_slice(&self) -> &[TypeTableEntry] {
-        self.inner.as_slice()
+impl std::ops::Deref for TypeTable {
+    type Target = IndirectionTable<TypeTableEntry>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
     }
 }
 

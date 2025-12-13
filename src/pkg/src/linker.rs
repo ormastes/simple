@@ -268,7 +268,11 @@ fn try_hard_link_dir(src: &Path, dst: &Path) -> PkgResult<()> {
     walk_dir_apply(src, dst, |src_path, dst_path| {
         std::fs::hard_link(src_path, dst_path).map_err(|e| {
             let _ = std::fs::remove_dir_all(dst);
-            PkgError::Link(format!("Hard link failed for {}: {}", src_path.display(), e))
+            PkgError::Link(format!(
+                "Hard link failed for {}: {}",
+                src_path.display(),
+                e
+            ))
         })
     })
 }

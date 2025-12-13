@@ -61,14 +61,13 @@ impl ImportGraph {
         let from = from.into();
         let to = to.into();
 
-        self.edges.entry(from.clone()).or_default().insert(to.clone());
+        self.edges
+            .entry(from.clone())
+            .or_default()
+            .insert(to.clone());
         self.edges.entry(to.clone()).or_default(); // Ensure target exists
 
-        self.detailed_edges.push(ImportEdge {
-            from,
-            to,
-            kind,
-        });
+        self.detailed_edges.push(ImportEdge { from, to, kind });
     }
 
     /// Add a `use` import edge.
@@ -372,8 +371,14 @@ mod tests {
         let edges = graph.all_edges();
         assert_eq!(edges.len(), 3);
 
-        assert!(edges.iter().any(|e| e.from == "a" && e.to == "b" && e.kind == ImportKind::Use));
-        assert!(edges.iter().any(|e| e.from == "a" && e.to == "c" && e.kind == ImportKind::CommonUse));
-        assert!(edges.iter().any(|e| e.from == "a" && e.to == "d" && e.kind == ImportKind::ExportUse));
+        assert!(edges
+            .iter()
+            .any(|e| e.from == "a" && e.to == "b" && e.kind == ImportKind::Use));
+        assert!(edges
+            .iter()
+            .any(|e| e.from == "a" && e.to == "c" && e.kind == ImportKind::CommonUse));
+        assert!(edges
+            .iter()
+            .any(|e| e.from == "a" && e.to == "d" && e.kind == ImportKind::ExportUse));
     }
 }

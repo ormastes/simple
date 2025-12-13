@@ -553,14 +553,19 @@ impl<'a> Lexer<'a> {
                         // Return a Hash token directly since we already consumed '#'
                         return Some(Token::new(
                             TokenKind::Hash,
-                            Span::new(self.current_pos - 1, self.current_pos, self.line, self.column - 1),
+                            Span::new(
+                                self.current_pos - 1,
+                                self.current_pos,
+                                self.line,
+                                self.column - 1,
+                            ),
                             "#".to_string(),
                         ));
                     }
                     if next == Some('#') {
                         // Doc comment ## - emit DocComment token
                         self.advance(); // Consume second '#'
-                        // Skip leading whitespace
+                                        // Skip leading whitespace
                         while let Some(c) = self.peek() {
                             if c == ' ' || c == '\t' {
                                 self.advance();
@@ -605,7 +610,7 @@ impl<'a> Lexer<'a> {
                     self.advance(); // Consume the '/'
                     if self.peek() == Some('*') {
                         self.advance(); // Consume the '*'
-                        // Check for doc comment /** (but not /**/)
+                                        // Check for doc comment /** (but not /**/)
                         if self.peek() == Some('*') && self.peek_ahead(1) != Some('/') {
                             // Doc comment /** ... */
                             self.advance(); // Consume second '*'
@@ -661,7 +666,12 @@ impl<'a> Lexer<'a> {
                                 .to_string();
                             return Some(Token::new(
                                 TokenKind::DocComment(cleaned),
-                                Span::new(slash_start, self.current_pos, slash_start_line, slash_start_col),
+                                Span::new(
+                                    slash_start,
+                                    self.current_pos,
+                                    slash_start_line,
+                                    slash_start_col,
+                                ),
                                 self.source[slash_start..self.current_pos].to_string(),
                             ));
                         }
@@ -695,7 +705,12 @@ impl<'a> Lexer<'a> {
                         self.advance(); // Consume second '/'
                         return Some(Token::new(
                             TokenKind::DoubleSlash,
-                            Span::new(self.current_pos - 2, self.current_pos, self.line, self.column - 2),
+                            Span::new(
+                                self.current_pos - 2,
+                                self.current_pos,
+                                self.line,
+                                self.column - 2,
+                            ),
                             "//".to_string(),
                         ));
                     } else if self.peek() == Some('=') {
@@ -703,7 +718,12 @@ impl<'a> Lexer<'a> {
                         self.advance(); // Consume '='
                         return Some(Token::new(
                             TokenKind::SlashAssign,
-                            Span::new(self.current_pos - 2, self.current_pos, self.line, self.column - 2),
+                            Span::new(
+                                self.current_pos - 2,
+                                self.current_pos,
+                                self.line,
+                                self.column - 2,
+                            ),
                             "/=".to_string(),
                         ));
                     } else {
@@ -711,7 +731,12 @@ impl<'a> Lexer<'a> {
                         // Return a Slash token directly since we already consumed '/'
                         return Some(Token::new(
                             TokenKind::Slash,
-                            Span::new(self.current_pos - 1, self.current_pos, self.line, self.column - 1),
+                            Span::new(
+                                self.current_pos - 1,
+                                self.current_pos,
+                                self.line,
+                                self.column - 1,
+                            ),
                             "/".to_string(),
                         ));
                     }
@@ -1238,6 +1263,7 @@ impl<'a> Lexer<'a> {
             "continue" => TokenKind::Continue,
             "return" => TokenKind::Return,
             "match" => TokenKind::Match,
+            "case" => TokenKind::Case,
             "struct" => TokenKind::Struct,
             "class" => TokenKind::Class,
             "enum" => TokenKind::Enum,
@@ -1306,7 +1332,6 @@ impl<'a> Lexer<'a> {
         }
     }
 }
-
 
 #[cfg(test)]
 #[path = "lexer_tests.rs"]

@@ -45,6 +45,11 @@ impl MemoryAllocator for PosixAllocator {
         Ok(ExecutableMemory {
             ptr: ptr as *mut u8,
             size: aligned_size,
+            dealloc: |ptr, size| {
+                unsafe {
+                    munmap(ptr as *mut _, size);
+                }
+            },
         })
     }
 
@@ -56,13 +61,5 @@ impl MemoryAllocator for PosixAllocator {
 
     fn free(&self, mem: ExecutableMemory) -> std::io::Result<()> {
         default_free(mem)
-    }
-}
-
-impl Drop for ExecutableMemory {
-    fn drop(&mut self) {
-        unsafe {
-            munmap(self.ptr as *mut _, self.size);
-        }
     }
 }

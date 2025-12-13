@@ -114,33 +114,52 @@ impl MemoryLayout {
 
 /// STM32F103 (Blue Pill) - 64KB flash, 20KB RAM.
 pub const STM32F103: MemoryLayout = MemoryLayout::simple(
-    0x0800_0000, 64 * 1024,  // 64KB Flash
-    0x2000_0000, 20 * 1024,  // 20KB RAM
-).with_stack_size(2048);
+    0x0800_0000,
+    64 * 1024, // 64KB Flash
+    0x2000_0000,
+    20 * 1024, // 20KB RAM
+)
+.with_stack_size(2048);
 
 /// STM32F4xx - 512KB flash, 128KB RAM.
 pub const STM32F4: MemoryLayout = MemoryLayout::simple(
-    0x0800_0000, 512 * 1024,  // 512KB Flash
-    0x2000_0000, 128 * 1024,  // 128KB RAM
-).with_stack_size(8192).with_heap_size(32 * 1024);
+    0x0800_0000,
+    512 * 1024, // 512KB Flash
+    0x2000_0000,
+    128 * 1024, // 128KB RAM
+)
+.with_stack_size(8192)
+.with_heap_size(32 * 1024);
 
 /// nRF52832 - 512KB flash, 64KB RAM.
 pub const NRF52832: MemoryLayout = MemoryLayout::simple(
-    0x0000_0000, 512 * 1024,  // 512KB Flash
-    0x2000_0000, 64 * 1024,   // 64KB RAM
-).with_stack_size(4096).with_heap_size(16 * 1024);
+    0x0000_0000,
+    512 * 1024, // 512KB Flash
+    0x2000_0000,
+    64 * 1024, // 64KB RAM
+)
+.with_stack_size(4096)
+.with_heap_size(16 * 1024);
 
 /// ESP32-C3 (RISC-V) - 4MB flash, 400KB RAM.
 pub const ESP32_C3: MemoryLayout = MemoryLayout::simple(
-    0x4200_0000, 4 * 1024 * 1024,  // 4MB Flash
-    0x3FC8_0000, 400 * 1024,       // 400KB RAM
-).with_stack_size(8192).with_heap_size(64 * 1024);
+    0x4200_0000,
+    4 * 1024 * 1024, // 4MB Flash
+    0x3FC8_0000,
+    400 * 1024, // 400KB RAM
+)
+.with_stack_size(8192)
+.with_heap_size(64 * 1024);
 
 /// Generic RISC-V (QEMU virt) - 128MB RAM.
 pub const RISCV_QEMU: MemoryLayout = MemoryLayout::simple(
-    0x8000_0000, 128 * 1024 * 1024,  // 128MB (RAM as flash)
-    0x8800_0000, 128 * 1024 * 1024,  // 128MB RAM
-).with_stack_size(65536).with_heap_size(1024 * 1024);
+    0x8000_0000,
+    128 * 1024 * 1024, // 128MB (RAM as flash)
+    0x8800_0000,
+    128 * 1024 * 1024, // 128MB RAM
+)
+.with_stack_size(65536)
+.with_heap_size(1024 * 1024);
 
 // Note: Linker script generation requires std and is only used at build time on the host.
 // Use the pre-written linker scripts in linker/cortex-m.ld or linker/riscv.ld,

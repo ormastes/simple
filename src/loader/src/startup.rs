@@ -9,13 +9,10 @@ use std::path::Path;
 use std::sync::Arc;
 
 use crate::memory::{ExecutableMemory, MemoryAllocator, PlatformAllocator, Protection};
+use crate::settlement::{FunctionTable, GlobalTable, NativeLibManager, TableIndex};
 use crate::smf::settlement::{
-    SettlementHeader, NativeLibEntry,
-    SSMF_MAGIC, SSMF_FLAG_EXECUTABLE,
-    NATIVE_LIB_SHARED, NATIVE_LIB_SYSTEM,
-};
-use crate::settlement::{
-    FunctionTable, GlobalTable, NativeLibManager, TableIndex,
+    NativeLibEntry, SettlementHeader, NATIVE_LIB_SHARED, NATIVE_LIB_SYSTEM, SSMF_FLAG_EXECUTABLE,
+    SSMF_MAGIC,
 };
 
 /// Errors that can occur during startup loading.
@@ -39,7 +36,9 @@ impl std::fmt::Display for StartupError {
             StartupError::InvalidHeader => write!(f, "Invalid settlement header"),
             StartupError::MemoryAllocationFailed => write!(f, "Memory allocation failed"),
             StartupError::NoEntryPoint => write!(f, "No entry point defined"),
-            StartupError::NativeLibLoadFailed(name) => write!(f, "Failed to load native lib: {}", name),
+            StartupError::NativeLibLoadFailed(name) => {
+                write!(f, "Failed to load native lib: {}", name)
+            }
         }
     }
 }
@@ -55,14 +54,17 @@ impl From<std::io::Error> for StartupError {
 /// A loaded settlement ready for execution.
 pub struct LoadedSettlement {
     /// Executable memory for code
+    #[allow(dead_code)]
     code_mem: ExecutableMemory,
     /// Executable memory for data (read-write)
+    #[allow(dead_code)]
     data_mem: ExecutableMemory,
     /// Function table
     func_table: FunctionTable,
     /// Global table
     global_table: GlobalTable,
     /// Native library manager
+    #[allow(dead_code)]
     native_libs: NativeLibManager,
     /// Entry point function pointer
     entry_fn: Option<*const u8>,
@@ -173,7 +175,11 @@ impl StartupLoader {
     }
 
     /// Load a settlement from an open file at the given offset.
-    fn load_from_file(&self, file: &mut File, offset: u64) -> Result<LoadedSettlement, StartupError> {
+    fn load_from_file(
+        &self,
+        file: &mut File,
+        offset: u64,
+    ) -> Result<LoadedSettlement, StartupError> {
         // Seek to settlement start
         file.seek(SeekFrom::Start(offset))?;
 
@@ -189,12 +195,14 @@ impl StartupLoader {
         }
 
         // Allocate code memory
-        let code_mem = self.allocator
+        let code_mem = self
+            .allocator
             .allocate(header.code_size as usize, 4096)
             .map_err(|_| StartupError::MemoryAllocationFailed)?;
 
         // Allocate data memory
-        let data_mem = self.allocator
+        let data_mem = self
+            .allocator
             .allocate(header.data_size as usize, 4096)
             .map_err(|_| StartupError::MemoryAllocationFailed)?;
 
@@ -235,7 +243,8 @@ impl StartupLoader {
 
         // Calculate entry point
         let entry_fn = if header.entry_func_idx != u32::MAX {
-            func_table.get_code_ptr(TableIndex(header.entry_func_idx))
+            func_table
+                .get_code_ptr(TableIndex(header.entry_func_idx))
                 .map(|p| p as *const u8)
         } else {
             None
@@ -258,9 +267,8 @@ impl StartupLoader {
         file.read_exact(&mut buf)?;
 
         // Safety: SettlementHeader is repr(C) and contains only primitive types
-        let header: SettlementHeader = unsafe {
-            std::ptr::read_unaligned(buf.as_ptr() as *const SettlementHeader)
-        };
+        let header: SettlementHeader =
+            unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const SettlementHeader) };
 
         Ok(header)
     }
@@ -284,15 +292,16 @@ impl StartupLoader {
 
         file.seek(SeekFrom::Start(base_offset + header.func_table_offset))?;
 
-        let entry_count = header.func_table_size as usize / std::mem::size_of::<crate::smf::settlement::FuncTableEntry>();
+        let entry_count = header.func_table_size as usize
+            / std::mem::size_of::<crate::smf::settlement::FuncTableEntry>();
 
         for _ in 0..entry_count {
-            let mut entry_buf = [0u8; std::mem::size_of::<crate::smf::settlement::FuncTableEntry>()];
+            let mut entry_buf =
+                [0u8; std::mem::size_of::<crate::smf::settlement::FuncTableEntry>()];
             file.read_exact(&mut entry_buf)?;
 
-            let entry: crate::smf::settlement::FuncTableEntry = unsafe {
-                std::ptr::read_unaligned(entry_buf.as_ptr() as *const _)
-            };
+            let entry: crate::smf::settlement::FuncTableEntry =
+                unsafe { std::ptr::read_unaligned(entry_buf.as_ptr() as *const _) };
 
             if entry.is_valid() {
                 // Convert relative offset to absolute address
@@ -323,15 +332,16 @@ impl StartupLoader {
 
         file.seek(SeekFrom::Start(base_offset + header.global_table_offset))?;
 
-        let entry_count = header.global_table_size as usize / std::mem::size_of::<crate::smf::settlement::GlobalTableEntry>();
+        let entry_count = header.global_table_size as usize
+            / std::mem::size_of::<crate::smf::settlement::GlobalTableEntry>();
 
         for _ in 0..entry_count {
-            let mut entry_buf = [0u8; std::mem::size_of::<crate::smf::settlement::GlobalTableEntry>()];
+            let mut entry_buf =
+                [0u8; std::mem::size_of::<crate::smf::settlement::GlobalTableEntry>()];
             file.read_exact(&mut entry_buf)?;
 
-            let entry: crate::smf::settlement::GlobalTableEntry = unsafe {
-                std::ptr::read_unaligned(entry_buf.as_ptr() as *const _)
-            };
+            let entry: crate::smf::settlement::GlobalTableEntry =
+                unsafe { std::ptr::read_unaligned(entry_buf.as_ptr() as *const _) };
 
             // Convert relative offset to absolute address
             let absolute_addr = loaded_data_base + entry.data_ptr;
@@ -361,22 +371,29 @@ impl StartupLoader {
             let mut entry_buf = [0u8; std::mem::size_of::<NativeLibEntry>()];
             file.read_exact(&mut entry_buf)?;
 
-            let entry: NativeLibEntry = unsafe {
-                std::ptr::read_unaligned(entry_buf.as_ptr() as *const _)
-            };
+            let entry: NativeLibEntry =
+                unsafe { std::ptr::read_unaligned(entry_buf.as_ptr() as *const _) };
 
             // Read library name from string table
-            let name = self.read_string(file, base_offset + header.string_table_offset + entry.name_offset as u64)?;
+            let name = self.read_string(
+                file,
+                base_offset + header.string_table_offset + entry.name_offset as u64,
+            )?;
 
             match entry.lib_type {
                 NATIVE_LIB_SHARED => {
                     // Read path from string table
-                    let path = self.read_string(file, base_offset + header.string_table_offset + entry.path_offset as u64)?;
-                    manager.add_shared(&name, Path::new(&path))
+                    let path = self.read_string(
+                        file,
+                        base_offset + header.string_table_offset + entry.path_offset as u64,
+                    )?;
+                    manager
+                        .add_shared(&name, Path::new(&path))
                         .map_err(|e| StartupError::NativeLibLoadFailed(e))?;
                 }
                 NATIVE_LIB_SYSTEM => {
-                    manager.add_system(&name)
+                    manager
+                        .add_system(&name)
                         .map_err(|e| StartupError::NativeLibLoadFailed(e))?;
                 }
                 _ => {
@@ -427,15 +444,13 @@ impl Default for StartupLoader {
 /// executable stub. It loads and executes the settlement.
 pub fn settlement_main() -> i32 {
     match StartupLoader::load_from_self() {
-        Ok(settlement) => {
-            match unsafe { settlement.execute() } {
-                Ok(code) => code,
-                Err(e) => {
-                    eprintln!("Execution error: {}", e);
-                    1
-                }
+        Ok(settlement) => match unsafe { settlement.execute() } {
+            Ok(code) => code,
+            Err(e) => {
+                eprintln!("Execution error: {}", e);
+                1
             }
-        }
+        },
         Err(e) => {
             eprintln!("Load error: {}", e);
             1

@@ -1,6 +1,7 @@
 //! Panic Handler for Embedded Systems
 //!
 //! Provides panic handling strategies for no_std environments.
+#![allow(static_mut_refs)]
 
 use core::panic::PanicInfo;
 
@@ -17,9 +18,11 @@ pub enum PanicStrategy {
 
 /// Current panic strategy (can be overridden).
 #[cfg(feature = "panic-reset")]
+#[allow(dead_code)]
 static PANIC_STRATEGY: PanicStrategy = PanicStrategy::Reset;
 
 #[cfg(not(feature = "panic-reset"))]
+#[allow(dead_code)]
 static PANIC_STRATEGY: PanicStrategy = PanicStrategy::Halt;
 
 /// Default panic handler.
@@ -89,6 +92,7 @@ fn panic(_info: &PanicInfo) -> ! {
 }
 
 /// Halt the processor.
+#[allow(dead_code)]
 fn halt() -> ! {
     loop {
         #[cfg(feature = "arm-cortex-m")]
@@ -107,6 +111,7 @@ fn halt() -> ! {
 }
 
 /// Reset the processor.
+#[allow(dead_code)]
 fn reset() -> ! {
     #[cfg(feature = "arm-cortex-m")]
     {
@@ -123,6 +128,7 @@ fn reset() -> ! {
 }
 
 /// Abort execution (halt with debug breakpoint).
+#[allow(dead_code)]
 fn abort() -> ! {
     #[cfg(debug_assertions)]
     unsafe {

@@ -422,10 +422,7 @@ fn test_block_comment_nested() {
 fn test_block_comment_at_line_start() {
     assert_eq!(
         tokenize("/* comment */\nx"),
-        vec![
-            TokenKind::Identifier("x".to_string()),
-            TokenKind::Eof,
-        ]
+        vec![TokenKind::Identifier("x".to_string()), TokenKind::Eof,]
     );
 }
 
@@ -568,7 +565,10 @@ fn test_raw_string_unit_suffix() {
     // Raw string without suffix
     assert_eq!(
         tokenize(r#"'127.0.0.1'"#),
-        vec![TokenKind::RawString("127.0.0.1".to_string()), TokenKind::Eof]
+        vec![
+            TokenKind::RawString("127.0.0.1".to_string()),
+            TokenKind::Eof
+        ]
     );
 }
 

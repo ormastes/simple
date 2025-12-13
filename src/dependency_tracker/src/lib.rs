@@ -16,24 +16,24 @@
 //! 2. **Visibility**: Effective visibility is intersection of item and ancestor visibility
 //! 3. **Macro Import**: Glob imports only include macros listed in `auto import`
 
-pub mod resolution;
-pub mod visibility;
-pub mod macro_import;
-pub mod symbol;
 pub mod graph;
+pub mod macro_import;
+pub mod resolution;
+pub mod symbol;
+pub mod visibility;
 
 // Re-export main types
-pub use resolution::{
-    FileKind, FileSystem, ModPath, ResolutionResult, Segment, resolve, to_dir_path, to_file_path,
-    well_formed,
-};
-pub use visibility::{
-    DirManifest, EffectiveVisibility, ModDecl, ModuleContents, Symbol, SymbolId, Visibility,
-    ancestor_visibility, effective_visibility, visibility_meet,
-};
+pub use graph::{CyclicDependencyError, ImportEdge, ImportGraph};
 pub use macro_import::{
-    AutoImport, MacroExports, SymKind, auto_imported_macros, explicit_import, glob_import,
-    is_auto_imported,
+    auto_imported_macros, explicit_import, glob_import, is_auto_imported, AutoImport, MacroExports,
+    SymKind,
 };
-pub use symbol::{SymbolTable, SymbolEntry, SymbolKind};
-pub use graph::{ImportGraph, ImportEdge, CyclicDependencyError};
+pub use resolution::{
+    resolve, to_dir_path, to_file_path, well_formed, FileKind, FileSystem, ModPath,
+    ResolutionResult, Segment,
+};
+pub use symbol::{SymbolEntry, SymbolKind, SymbolTable};
+pub use visibility::{
+    ancestor_visibility, effective_visibility, visibility_meet, DirManifest, EffectiveVisibility,
+    ModDecl, ModuleContents, Symbol, SymbolId, Visibility,
+};

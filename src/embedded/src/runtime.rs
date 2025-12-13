@@ -207,19 +207,43 @@ pub extern "C" fn abort() -> ! {
 
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    ptr::copy_nonoverlapping(src, dest, n);
+    // Avoid calling into compiler-builtins memcpy to prevent recursion when the
+    // intrinsic lowers back to this symbol. Do a simple forward byte copy.
+    let mut i = 0;
+    while i < n {
+        *dest.add(i) = *src.add(i);
+        i += 1;
+    }
     dest
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    ptr::copy(src, dest, n);
+    // Handle overlap manually: choose direction based on pointer order.
+    if dest as usize <= src as usize {
+        let mut i = 0;
+        while i < n {
+            *dest.add(i) = *src.add(i);
+            i += 1;
+        }
+    } else {
+        let mut i = n;
+        while i != 0 {
+            i -= 1;
+            *dest.add(i) = *src.add(i);
+        }
+    }
     dest
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
-    ptr::write_bytes(dest, c as u8, n);
+    let byte = c as u8;
+    let mut i = 0;
+    while i < n {
+        *dest.add(i) = byte;
+        i += 1;
+    }
     dest
 }
 

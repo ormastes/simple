@@ -428,14 +428,11 @@ impl Backend for CudaBackend {
                 max_work_group_invocations: self
                     .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?
                     as u32,
-                max_work_groups_x: self
-                    .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?
+                max_work_groups_x: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?
                     as u32,
-                max_work_groups_y: self
-                    .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?
+                max_work_groups_y: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?
                     as u32,
-                max_work_groups_z: self
-                    .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?
+                max_work_groups_z: self.get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?
                     as u32,
                 shared_memory_size: self
                     .get_attribute(device, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?
@@ -473,23 +470,29 @@ impl Backend for CudaBackend {
         Ok(())
     }
 
-    fn memcpy(
-        &self,
-        dst: *mut u8,
-        src: *const u8,
-        size: usize,
-        kind: MemcpyKind,
-    ) -> GpuResult<()> {
+    fn memcpy(&self, dst: *mut u8, src: *const u8, size: usize, kind: MemcpyKind) -> GpuResult<()> {
         unsafe {
             match kind {
                 MemcpyKind::HostToDevice => {
-                    cuda_check(cuMemcpyHtoD_v2(dst as CUdeviceptr, src as *const c_void, size))?;
+                    cuda_check(cuMemcpyHtoD_v2(
+                        dst as CUdeviceptr,
+                        src as *const c_void,
+                        size,
+                    ))?;
                 }
                 MemcpyKind::DeviceToHost => {
-                    cuda_check(cuMemcpyDtoH_v2(dst as *mut c_void, src as CUdeviceptr, size))?;
+                    cuda_check(cuMemcpyDtoH_v2(
+                        dst as *mut c_void,
+                        src as CUdeviceptr,
+                        size,
+                    ))?;
                 }
                 MemcpyKind::DeviceToDevice => {
-                    cuda_check(cuMemcpyDtoD_v2(dst as CUdeviceptr, src as CUdeviceptr, size))?;
+                    cuda_check(cuMemcpyDtoD_v2(
+                        dst as CUdeviceptr,
+                        src as CUdeviceptr,
+                        size,
+                    ))?;
                 }
                 MemcpyKind::HostToHost => {
                     std::ptr::copy_nonoverlapping(src, dst, size);
@@ -572,16 +575,14 @@ impl Backend for CudaBackend {
         let mut function: CUfunction = ptr::null_mut();
 
         unsafe {
-            cuda_check(cuModuleLoadData(&mut module, binary.as_ptr() as *const c_void))?;
-
-            let c_name = CString::new(name).map_err(|_| {
-                GpuError::InvalidArgument("Invalid kernel name".to_string())
-            })?;
-            cuda_check(cuModuleGetFunction(
-                &mut function,
-                module,
-                c_name.as_ptr(),
+            cuda_check(cuModuleLoadData(
+                &mut module,
+                binary.as_ptr() as *const c_void,
             ))?;
+
+            let c_name = CString::new(name)
+                .map_err(|_| GpuError::InvalidArgument("Invalid kernel name".to_string()))?;
+            cuda_check(cuModuleGetFunction(&mut function, module, c_name.as_ptr()))?;
         }
 
         let handle = self.next_handle();
@@ -636,10 +637,8 @@ impl Backend for CudaBackend {
 
         unsafe {
             // Convert args to mutable pointers (CUDA API requirement)
-            let mut kernel_params: Vec<*mut c_void> = args
-                .iter()
-                .map(|&p| p as *mut c_void)
-                .collect();
+            let mut kernel_params: Vec<*mut c_void> =
+                args.iter().map(|&p| p as *mut c_void).collect();
 
             cuda_check(cuLaunchKernel(
                 info,

@@ -18,7 +18,9 @@ pub enum GpuError {
     AllocationFailed(String),
 
     /// Buffer access out of bounds.
-    #[error("Buffer access out of bounds: offset {offset}, size {size}, buffer size {buffer_size}")]
+    #[error(
+        "Buffer access out of bounds: offset {offset}, size {size}, buffer size {buffer_size}"
+    )]
     OutOfBounds {
         offset: usize,
         size: usize,

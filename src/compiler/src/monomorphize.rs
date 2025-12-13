@@ -219,7 +219,8 @@ impl MonomorphizationTable {
         let key = SpecializationKey::new(name, type_args);
 
         if !self.processed.contains(&key) && !self.specialized_functions.contains_key(&key) {
-            self.pending_functions.push_back((key.clone(), original.clone()));
+            self.pending_functions
+                .push_back((key.clone(), original.clone()));
         }
 
         key.mangled_name()
@@ -235,7 +236,8 @@ impl MonomorphizationTable {
         let key = SpecializationKey::new(name, type_args);
 
         if !self.processed.contains(&key) && !self.specialized_structs.contains_key(&key) {
-            self.pending_structs.push_back((key.clone(), original.clone()));
+            self.pending_structs
+                .push_back((key.clone(), original.clone()));
         }
 
         key.mangled_name()
@@ -251,7 +253,8 @@ impl MonomorphizationTable {
         let key = SpecializationKey::new(name, type_args);
 
         if !self.processed.contains(&key) && !self.specialized_classes.contains_key(&key) {
-            self.pending_classes.push_back((key.clone(), original.clone()));
+            self.pending_classes
+                .push_back((key.clone(), original.clone()));
         }
 
         key.mangled_name()
@@ -305,7 +308,9 @@ impl MonomorphizationTable {
     }
 
     /// Get all specialized functions.
-    pub fn specialized_functions(&self) -> impl Iterator<Item = (&SpecializationKey, &FunctionDef)> {
+    pub fn specialized_functions(
+        &self,
+    ) -> impl Iterator<Item = (&SpecializationKey, &FunctionDef)> {
         self.specialized_functions.iter()
     }
 
@@ -325,6 +330,7 @@ impl MonomorphizationTable {
 /// Processes generic definitions and generates specialized versions.
 pub struct Monomorphizer<'a> {
     /// The module being processed
+    #[allow(dead_code)]
     module: &'a Module,
 
     /// Generic function definitions (name -> def)
@@ -483,7 +489,11 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Substitute type parameters in a block.
-    fn substitute_in_block(&mut self, block: &Block, bindings: &HashMap<String, ConcreteType>) -> Block {
+    fn substitute_in_block(
+        &mut self,
+        block: &Block,
+        bindings: &HashMap<String, ConcreteType>,
+    ) -> Block {
         Block {
             span: block.span,
             statements: self.substitute_in_nodes(&block.statements, bindings),
@@ -600,9 +610,12 @@ impl<'a> Monomorphizer<'a> {
                     }
                 }
             }
-            AstType::Tuple(elems) => {
-                AstType::Tuple(elems.iter().map(|e| self.substitute_ast_type(e, bindings)).collect())
-            }
+            AstType::Tuple(elems) => AstType::Tuple(
+                elems
+                    .iter()
+                    .map(|e| self.substitute_ast_type(e, bindings))
+                    .collect(),
+            ),
             AstType::Array { element, size } => AstType::Array {
                 element: Box::new(self.substitute_ast_type(element, bindings)),
                 size: size.clone(),
@@ -612,7 +625,9 @@ impl<'a> Monomorphizer<'a> {
                     .iter()
                     .map(|p| self.substitute_ast_type(p, bindings))
                     .collect(),
-                ret: ret.as_ref().map(|r| Box::new(self.substitute_ast_type(r, bindings))),
+                ret: ret
+                    .as_ref()
+                    .map(|r| Box::new(self.substitute_ast_type(r, bindings))),
             },
             AstType::Pointer { kind, inner } => AstType::Pointer {
                 kind: *kind,
@@ -621,12 +636,19 @@ impl<'a> Monomorphizer<'a> {
             AstType::Optional(inner) => {
                 AstType::Optional(Box::new(self.substitute_ast_type(inner, bindings)))
             }
-            AstType::Union(types) => {
-                AstType::Union(types.iter().map(|t| self.substitute_ast_type(t, bindings)).collect())
-            }
+            AstType::Union(types) => AstType::Union(
+                types
+                    .iter()
+                    .map(|t| self.substitute_ast_type(t, bindings))
+                    .collect(),
+            ),
             AstType::Constructor { target, args } => AstType::Constructor {
                 target: Box::new(self.substitute_ast_type(target, bindings)),
-                args: args.as_ref().map(|a| a.iter().map(|t| self.substitute_ast_type(t, bindings)).collect()),
+                args: args.as_ref().map(|a| {
+                    a.iter()
+                        .map(|t| self.substitute_ast_type(t, bindings))
+                        .collect()
+                }),
             },
             AstType::Simd { lanes, element } => AstType::Simd {
                 lanes: *lanes,
@@ -648,7 +670,11 @@ impl<'a> Monomorphizer<'a> {
     }
 
     /// Substitute type parameters in a single node.
-    fn substitute_in_node(&mut self, node: &Node, bindings: &HashMap<String, ConcreteType>) -> Node {
+    fn substitute_in_node(
+        &mut self,
+        node: &Node,
+        bindings: &HashMap<String, ConcreteType>,
+    ) -> Node {
         match node {
             Node::Let(let_stmt) => {
                 let mut new_let = let_stmt.clone();
@@ -660,9 +686,7 @@ impl<'a> Monomorphizer<'a> {
                 }
                 Node::Let(new_let)
             }
-            Node::Expression(expr) => {
-                Node::Expression(self.substitute_in_expr(expr, bindings))
-            }
+            Node::Expression(expr) => Node::Expression(self.substitute_in_expr(expr, bindings)),
             Node::Return(ret) => {
                 let mut new_ret = ret.clone();
                 if let Some(val) = &ret.value {
@@ -712,7 +736,11 @@ impl<'a> Monomorphizer<'a> {
     /// This recursively traverses the expression tree and replaces type parameters
     /// with their concrete types. For calls to generic functions, it requests
     /// specialization and rewrites the call to use the mangled name.
-    fn substitute_in_expr(&mut self, expr: &Expr, bindings: &HashMap<String, ConcreteType>) -> Expr {
+    fn substitute_in_expr(
+        &mut self,
+        expr: &Expr,
+        bindings: &HashMap<String, ConcreteType>,
+    ) -> Expr {
         match expr {
             // Function calls - check for generic function calls
             Expr::Call { callee, args } => {
@@ -740,7 +768,11 @@ impl<'a> Monomorphizer<'a> {
                 operand: Box::new(self.substitute_in_expr(operand, bindings)),
             },
             // Method calls
-            Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => Expr::MethodCall {
                 receiver: Box::new(self.substitute_in_expr(receiver, bindings)),
                 method: method.clone(),
                 args: args
@@ -788,7 +820,11 @@ impl<'a> Monomorphizer<'a> {
                     .collect(),
             ),
             // Lambda expression
-            Expr::Lambda { params, body, move_mode } => {
+            Expr::Lambda {
+                params,
+                body,
+                move_mode,
+            } => {
                 let new_params: Vec<simple_parser::ast::LambdaParam> = params
                     .iter()
                     .map(|p| simple_parser::ast::LambdaParam {
@@ -804,7 +840,11 @@ impl<'a> Monomorphizer<'a> {
                 }
             }
             // If expression
-            Expr::If { condition, then_branch, else_branch } => Expr::If {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => Expr::If {
                 condition: Box::new(self.substitute_in_expr(condition, bindings)),
                 then_branch: Box::new(self.substitute_in_expr(then_branch, bindings)),
                 else_branch: else_branch
@@ -1019,7 +1059,11 @@ impl<'a> CallSiteAnalyzer<'a> {
             Expr::Lambda { body, .. } => {
                 self.analyze_expr(body);
             }
-            Expr::If { condition, then_branch, else_branch } => {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 self.analyze_expr(condition);
                 self.analyze_expr(then_branch);
                 if let Some(else_expr) = else_branch {
@@ -1082,7 +1126,9 @@ impl<'a> CallSiteAnalyzer<'a> {
             AstType::Tuple(elems) => elems.iter().any(|e| self.type_uses_param(e, param)),
             AstType::Function { params, ret } => {
                 params.iter().any(|p| self.type_uses_param(p, param))
-                    || ret.as_ref().map_or(false, |r| self.type_uses_param(r, param))
+                    || ret
+                        .as_ref()
+                        .map_or(false, |r| self.type_uses_param(r, param))
             }
             AstType::Optional(inner) => self.type_uses_param(inner, param),
             AstType::Pointer { inner, .. } => self.type_uses_param(inner, param),
@@ -1096,7 +1142,9 @@ impl<'a> CallSiteAnalyzer<'a> {
             Expr::Integer(_) | Expr::TypedInteger(_, _) => Some(ConcreteType::Int),
             Expr::Float(_) | Expr::TypedFloat(_, _) => Some(ConcreteType::Float),
             Expr::Bool(_) => Some(ConcreteType::Bool),
-            Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => Some(ConcreteType::String),
+            Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => {
+                Some(ConcreteType::String)
+            }
             Expr::Nil => Some(ConcreteType::Nil),
             Expr::Identifier(name) => self.type_context.get(name).cloned(),
             Expr::Array(elems) => {
@@ -1109,10 +1157,8 @@ impl<'a> CallSiteAnalyzer<'a> {
                 }
             }
             Expr::Tuple(elems) => {
-                let elem_types: Option<Vec<_>> = elems
-                    .iter()
-                    .map(|e| self.infer_concrete_type(e))
-                    .collect();
+                let elem_types: Option<Vec<_>> =
+                    elems.iter().map(|e| self.infer_concrete_type(e)).collect();
                 elem_types.map(ConcreteType::Tuple)
             }
             _ => None,
@@ -1169,7 +1215,7 @@ pub fn monomorphize_module(module: &Module) -> Module {
     mono.process_pending();
 
     // Step 4: Create new module with rewritten calls and specialized functions
-    let mut rewriter = CallSiteRewriter::new(&mono.generic_functions, &call_rewrites);
+    let rewriter = CallSiteRewriter::new(&mono.generic_functions, &call_rewrites);
     let mut new_items = Vec::new();
 
     // Add all non-generic items from original module with rewritten calls
@@ -1270,7 +1316,11 @@ impl<'a> CallSiteRewriter<'a> {
     fn rewrite_block(&self, block: &Block) -> Block {
         Block {
             span: block.span,
-            statements: block.statements.iter().map(|n| self.rewrite_node(n)).collect(),
+            statements: block
+                .statements
+                .iter()
+                .map(|n| self.rewrite_node(n))
+                .collect(),
         }
     }
 
@@ -1325,7 +1375,11 @@ impl<'a> CallSiteRewriter<'a> {
                 op: *op,
                 operand: Box::new(self.rewrite_expr(operand)),
             },
-            Expr::MethodCall { receiver, method, args } => Expr::MethodCall {
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => Expr::MethodCall {
                 receiver: Box::new(self.rewrite_expr(receiver)),
                 method: method.clone(),
                 args: args
@@ -1352,12 +1406,20 @@ impl<'a> CallSiteRewriter<'a> {
                     .map(|(k, v)| (self.rewrite_expr(k), self.rewrite_expr(v)))
                     .collect(),
             ),
-            Expr::Lambda { params, body, move_mode } => Expr::Lambda {
+            Expr::Lambda {
+                params,
+                body,
+                move_mode,
+            } => Expr::Lambda {
                 params: params.clone(),
                 body: Box::new(self.rewrite_expr(body)),
                 move_mode: *move_mode,
             },
-            Expr::If { condition, then_branch, else_branch } => Expr::If {
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => Expr::If {
                 condition: Box::new(self.rewrite_expr(condition)),
                 then_branch: Box::new(self.rewrite_expr(then_branch)),
                 else_branch: else_branch.as_ref().map(|e| Box::new(self.rewrite_expr(e))),
@@ -1407,7 +1469,9 @@ impl<'a> CallSiteRewriter<'a> {
             AstType::Tuple(elems) => elems.iter().any(|e| self.type_uses_param(e, param)),
             AstType::Function { params, ret } => {
                 params.iter().any(|p| self.type_uses_param(p, param))
-                    || ret.as_ref().map_or(false, |r| self.type_uses_param(r, param))
+                    || ret
+                        .as_ref()
+                        .map_or(false, |r| self.type_uses_param(r, param))
             }
             AstType::Optional(inner) => self.type_uses_param(inner, param),
             AstType::Pointer { inner, .. } => self.type_uses_param(inner, param),
@@ -1420,17 +1484,22 @@ impl<'a> CallSiteRewriter<'a> {
             Expr::Integer(_) | Expr::TypedInteger(_, _) => Some(ConcreteType::Int),
             Expr::Float(_) | Expr::TypedFloat(_, _) => Some(ConcreteType::Float),
             Expr::Bool(_) => Some(ConcreteType::Bool),
-            Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => Some(ConcreteType::String),
+            Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => {
+                Some(ConcreteType::String)
+            }
             Expr::Nil => Some(ConcreteType::Nil),
             Expr::Array(elems) => {
                 if let Some(first) = elems.first() {
-                    Some(ConcreteType::Array(Box::new(self.infer_concrete_type(first)?)))
+                    Some(ConcreteType::Array(Box::new(
+                        self.infer_concrete_type(first)?,
+                    )))
                 } else {
                     None
                 }
             }
             Expr::Tuple(elems) => {
-                let elem_types: Option<Vec<_>> = elems.iter().map(|e| self.infer_concrete_type(e)).collect();
+                let elem_types: Option<Vec<_>> =
+                    elems.iter().map(|e| self.infer_concrete_type(e)).collect();
                 elem_types.map(ConcreteType::Tuple)
             }
             _ => None,
@@ -1465,9 +1534,7 @@ fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
             params: params.iter().map(concrete_to_ast_type).collect(),
             ret: Some(Box::new(concrete_to_ast_type(ret))),
         },
-        ConcreteType::Optional(inner) => {
-            AstType::Optional(Box::new(concrete_to_ast_type(inner)))
-        }
+        ConcreteType::Optional(inner) => AstType::Optional(Box::new(concrete_to_ast_type(inner))),
         ConcreteType::Pointer { kind, inner } => {
             let ast_kind = match kind {
                 PointerKind::Unique => simple_parser::ast::PointerKind::Unique,
@@ -1492,7 +1559,10 @@ fn concrete_to_ast_type(concrete: &ConcreteType) -> AstType {
 /// Convert an AST Type to a ConcreteType.
 ///
 /// Uses bindings to resolve type parameters.
-pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteType>) -> ConcreteType {
+pub fn ast_type_to_concrete(
+    ty: &AstType,
+    bindings: &HashMap<String, ConcreteType>,
+) -> ConcreteType {
     match ty {
         AstType::Simple(name) => {
             // Check if it's a type parameter
@@ -1526,15 +1596,25 @@ pub fn ast_type_to_concrete(ty: &AstType, bindings: &HashMap<String, ConcreteTyp
                 args: concrete_args,
             }
         }
-        AstType::Tuple(elems) => {
-            ConcreteType::Tuple(elems.iter().map(|e| ast_type_to_concrete(e, bindings)).collect())
-        }
+        AstType::Tuple(elems) => ConcreteType::Tuple(
+            elems
+                .iter()
+                .map(|e| ast_type_to_concrete(e, bindings))
+                .collect(),
+        ),
         AstType::Array { element, size: _ } => {
             ConcreteType::Array(Box::new(ast_type_to_concrete(element, bindings)))
         }
         AstType::Function { params, ret } => ConcreteType::Function {
-            params: params.iter().map(|p| ast_type_to_concrete(p, bindings)).collect(),
-            ret: Box::new(ret.as_ref().map(|r| ast_type_to_concrete(r, bindings)).unwrap_or(ConcreteType::Nil)),
+            params: params
+                .iter()
+                .map(|p| ast_type_to_concrete(p, bindings))
+                .collect(),
+            ret: Box::new(
+                ret.as_ref()
+                    .map(|r| ast_type_to_concrete(r, bindings))
+                    .unwrap_or(ConcreteType::Nil),
+            ),
         },
         AstType::Optional(inner) => {
             ConcreteType::Optional(Box::new(ast_type_to_concrete(inner, bindings)))
@@ -1583,10 +1663,7 @@ mod tests {
         let key = SpecializationKey::new("identity", vec![ConcreteType::Int]);
         assert_eq!(key.mangled_name(), "identity$Int");
 
-        let key2 = SpecializationKey::new(
-            "swap",
-            vec![ConcreteType::Int, ConcreteType::String],
-        );
+        let key2 = SpecializationKey::new("swap", vec![ConcreteType::Int, ConcreteType::String]);
         assert_eq!(key2.mangled_name(), "swap$Int_String");
     }
 
@@ -1660,7 +1737,10 @@ mod tests {
         bindings.insert("T".to_string(), ConcreteType::Int);
 
         let param_ty = AstType::Simple("T".to_string());
-        assert_eq!(ast_type_to_concrete(&param_ty, &bindings), ConcreteType::Int);
+        assert_eq!(
+            ast_type_to_concrete(&param_ty, &bindings),
+            ConcreteType::Int
+        );
 
         let generic_ty = AstType::Generic {
             name: "List".to_string(),
@@ -1688,9 +1768,10 @@ main = identity(42)
         let mono_module = monomorphize_module(&module);
 
         // Verify we have the specialized function
-        let has_specialized = mono_module.items.iter().any(|item| {
-            matches!(item, Node::Function(f) if f.name == "identity$Int")
-        });
+        let has_specialized = mono_module
+            .items
+            .iter()
+            .any(|item| matches!(item, Node::Function(f) if f.name == "identity$Int"));
         assert!(has_specialized, "Should have identity$Int function");
 
         // Check that generic identity was removed
@@ -1708,6 +1789,9 @@ main = identity(42)
             }
             false
         });
-        assert!(call_rewritten, "Call site should be rewritten to identity$Int");
+        assert!(
+            call_rewritten,
+            "Call site should be rewritten to identity$Int"
+        );
     }
 }

@@ -45,13 +45,21 @@ macro_rules! impl_simd_intrinsics_int {
     ($ty:ty, $div_expr:expr) => {
         impl SimdIntrinsics for $ty {
             #[inline]
-            fn simd_add(a: Self, b: Self) -> Self { a + b }
+            fn simd_add(a: Self, b: Self) -> Self {
+                a + b
+            }
             #[inline]
-            fn simd_sub(a: Self, b: Self) -> Self { a - b }
+            fn simd_sub(a: Self, b: Self) -> Self {
+                a - b
+            }
             #[inline]
-            fn simd_mul(a: Self, b: Self) -> Self { a * b }
+            fn simd_mul(a: Self, b: Self) -> Self {
+                a * b
+            }
             #[inline]
-            fn simd_div(a: Self, b: Self) -> Self { $div_expr(a, b) }
+            fn simd_div(a: Self, b: Self) -> Self {
+                $div_expr(a, b)
+            }
         }
     };
 }

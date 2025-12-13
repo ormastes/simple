@@ -54,7 +54,10 @@ impl Context {
     }
 
     /// Map a buffer for CPU access.
-    pub fn map<'a, T: Clone + Default>(&self, buffer: &'a mut Buffer<T>) -> GpuResult<MappedBuffer<'a, T>> {
+    pub fn map<'a, T: Clone + Default>(
+        &self,
+        buffer: &'a mut Buffer<T>,
+    ) -> GpuResult<MappedBuffer<'a, T>> {
         Ok(MappedBuffer::new(buffer))
     }
 
@@ -226,7 +229,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(*results.lock().unwrap(), vec![0, 2, 4, 6, 8, 10, 12, 14, 16, 18]);
+        assert_eq!(
+            *results.lock().unwrap(),
+            vec![0, 2, 4, 6, 8, 10, 12, 14, 16, 18]
+        );
     }
 
     #[test]

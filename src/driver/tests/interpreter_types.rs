@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 //! Interpreter tests - types
 
 use simple_driver::interpreter::{run_code, Interpreter, RunConfig, RunningType};
@@ -472,7 +474,7 @@ main = 1
 #[test]
 #[ignore = "unit conversion methods (.to_m()) not yet implemented"]
 fn interpreter_unit_family_to_base() {
-    // Convert to base unit
+    // Convert to base unit (placeholder until conversions are implemented)
     let code = r#"
 unit length(base: f64): m = 1.0, km = 1000.0
 

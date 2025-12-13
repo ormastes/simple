@@ -3,9 +3,9 @@
 //! This module provides comprehensive validation to ensure loaded modules
 //! are compatible with the current host architecture.
 
-use simple_common::target::{Target, TargetArch, TargetOS, TargetConfig};
+use simple_common::target::{Target, TargetArch, TargetConfig, TargetOS};
 
-use crate::smf::header::{SmfHeader, Arch, Platform};
+use crate::smf::header::{Arch, Platform, SmfHeader};
 use crate::smf::settlement::SettlementHeader;
 
 /// Result of architecture validation.
@@ -108,17 +108,32 @@ pub enum ValidationError {
 impl std::fmt::Display for ValidationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ValidationError::ArchMismatch { module_arch, host_arch } => {
-                write!(f, "Architecture mismatch: module is {}, host is {}",
-                    module_arch, host_arch)
+            ValidationError::ArchMismatch {
+                module_arch,
+                host_arch,
+            } => {
+                write!(
+                    f,
+                    "Architecture mismatch: module is {}, host is {}",
+                    module_arch, host_arch
+                )
             }
             ValidationError::PlatformMismatch { module_os, host_os } => {
-                write!(f, "Platform mismatch: module is for {}, host is {}",
-                    module_os, host_os)
+                write!(
+                    f,
+                    "Platform mismatch: module is for {}, host is {}",
+                    module_os, host_os
+                )
             }
-            ValidationError::PointerSizeMismatch { module_bits, host_bits } => {
-                write!(f, "Pointer size mismatch: module is {}-bit, host is {}-bit",
-                    module_bits, host_bits)
+            ValidationError::PointerSizeMismatch {
+                module_bits,
+                host_bits,
+            } => {
+                write!(
+                    f,
+                    "Pointer size mismatch: module is {}-bit, host is {}-bit",
+                    module_bits, host_bits
+                )
             }
             ValidationError::InvalidArch(v) => {
                 write!(f, "Invalid architecture value in header: {}", v)
@@ -158,7 +173,10 @@ impl std::fmt::Display for ValidationWarning {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ValidationWarning::AnyPlatform => {
-                write!(f, "Module targets 'any' platform - may have portability issues")
+                write!(
+                    f,
+                    "Module targets 'any' platform - may have portability issues"
+                )
             }
             ValidationWarning::EndianMismatch => {
                 write!(f, "Module may have been built with different endianness")
@@ -223,7 +241,9 @@ impl ArchValidator {
             Some(arch) => arch.to_target_arch(),
             None => {
                 result.passed = false;
-                result.errors.push(ValidationError::InvalidArch(header.arch));
+                result
+                    .errors
+                    .push(ValidationError::InvalidArch(header.arch));
                 return result;
             }
         };
@@ -233,7 +253,9 @@ impl ArchValidator {
             Some(platform) => platform.to_target_os(),
             None => {
                 result.passed = false;
-                result.errors.push(ValidationError::InvalidPlatform(header.platform));
+                result
+                    .errors
+                    .push(ValidationError::InvalidPlatform(header.platform));
                 return result;
             }
         };
@@ -262,7 +284,9 @@ impl ArchValidator {
             Some(arch) => arch.to_target_arch(),
             None => {
                 result.passed = false;
-                result.errors.push(ValidationError::InvalidArch(header.arch));
+                result
+                    .errors
+                    .push(ValidationError::InvalidArch(header.arch));
                 return result;
             }
         };
@@ -459,7 +483,10 @@ mod tests {
         let result = validator.validate_target(Target::new(TargetArch::X86, TargetOS::Linux));
         assert!(result.is_err());
         // Should have both arch mismatch and 32-bit support error
-        assert!(result.errors.iter().any(|e| matches!(e, ValidationError::ArchMismatch { .. })));
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| matches!(e, ValidationError::ArchMismatch { .. })));
     }
 
     #[test]

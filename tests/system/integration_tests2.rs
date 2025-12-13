@@ -1,3 +1,5 @@
+#![allow(unused_imports, unused_variables, unused_mut)]
+
 //! Integration tests: SMF types, ModuleRegistry, CompilerPipeline, Parser
 //! Tests for loader and compiler pipeline integration
 
@@ -678,4 +680,3 @@ fn test_env_scoping_integration() {
     assert_eq!(child.get("child_var"), Some(&Value::Int(200)));
     assert!(parent.get("child_var").is_none());
 }
-

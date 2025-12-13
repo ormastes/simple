@@ -3,15 +3,14 @@ use simple_runtime::{
 };
 
 use simple_compiler::codegen::JitCompiler;
+use simple_compiler::hir::TypeId;
 use simple_compiler::mir::{
     lower_generator, BlockId, LocalKind, MirBlock, MirFunction, MirInst, MirLocal, MirModule,
     Terminator, VReg,
 };
-use simple_compiler::hir::TypeId;
 use simple_parser::Visibility;
 
 #[test]
-#[ignore = "Requires stable block layout hookup; dispatcher path covered in runtime test"]
 fn jit_generator_dispatcher_yields_and_restores() {
     // Build a minimal generator body that yields 1, stores 10 across the yield, then yields 10.
     let mut func = MirFunction::new("gen_dispatcher".into(), TypeId::I64, Visibility::Public);
@@ -57,10 +56,20 @@ fn jit_generator_dispatcher_yields_and_restores() {
     // Create runtime generator with compiled dispatcher pointer and run it.
     let gen = rt_generator_new(func_ptr as u64, slot_count, RuntimeValue::NIL);
     let first = rt_generator_next(gen);
-    assert_eq!(rt_value_as_int(first), 1);
+    assert_eq!(
+        rt_value_as_int(first),
+        1,
+        "first raw {}",
+        first.to_raw()
+    );
 
     let second = rt_generator_next(gen);
-    assert_eq!(rt_value_as_int(second), 10);
+    assert_eq!(
+        rt_value_as_int(second),
+        10,
+        "second raw {}",
+        second.to_raw()
+    );
 
     let exhausted = rt_generator_next(gen);
     assert!(rt_value_is_nil(exhausted));

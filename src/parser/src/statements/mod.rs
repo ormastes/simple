@@ -60,13 +60,22 @@ impl<'a> Parser<'a> {
         self.parse_let_impl(start_span, mutability)
     }
 
-    fn parse_let_impl(&mut self, start_span: Span, mutability: Mutability) -> Result<Node, ParseError> {
+    fn parse_let_impl(
+        &mut self,
+        start_span: Span,
+        mutability: Mutability,
+    ) -> Result<Node, ParseError> {
         let pattern = self.parse_pattern()?;
         let ty = self.parse_optional_type_annotation()?;
         let value = self.parse_optional_assignment()?;
 
         Ok(Node::Let(LetStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             pattern,
             ty,
             value,
@@ -137,7 +146,12 @@ impl<'a> Parser<'a> {
         let (name, ty, value) = self.parse_named_value()?;
 
         Ok(Node::Const(ConstStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             name,
             ty,
             value,
@@ -157,7 +171,12 @@ impl<'a> Parser<'a> {
         let (name, ty, value) = self.parse_named_value()?;
 
         Ok(Node::Static(StaticStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             name,
             ty,
             value,
@@ -584,6 +603,9 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
         let start_span = self.current.span;
+        if self.check(&TokenKind::Case) {
+            self.advance();
+        }
         let pattern = self.parse_pattern()?;
 
         let guard = if self.check(&TokenKind::If) {
@@ -593,17 +615,27 @@ impl<'a> Parser<'a> {
             None
         };
 
-        self.expect(&TokenKind::FatArrow)?;
-
-        // Body can be single expression or block
-        let body = if self.check(&TokenKind::Newline) {
+        let body = if self.check(&TokenKind::FatArrow) {
+            self.advance();
+            // Body can be single expression or block
+            if self.check(&TokenKind::Newline) {
+                self.parse_block()?
+            } else {
+                let expr = self.parse_expression()?;
+                Block {
+                    span: self.previous.span,
+                    statements: vec![Node::Expression(expr)],
+                }
+            }
+        } else if self.check(&TokenKind::Colon) {
+            self.advance();
             self.parse_block()?
         } else {
-            let expr = self.parse_expression()?;
-            Block {
-                span: self.previous.span,
-                statements: vec![Node::Expression(expr)],
-            }
+            return Err(ParseError::unexpected_token(
+                "match arm",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
         };
 
         Ok(MatchArm {
@@ -755,7 +787,10 @@ impl<'a> Parser<'a> {
 
     /// Parse an import target: single item, alias, group, or glob
     /// Called after the module path is parsed
-    pub(crate) fn parse_import_target(&mut self, last_segment: Option<String>) -> Result<ImportTarget, ParseError> {
+    pub(crate) fn parse_import_target(
+        &mut self,
+        last_segment: Option<String>,
+    ) -> Result<ImportTarget, ParseError> {
         // Check for glob: *
         if self.check(&TokenKind::Star) {
             self.advance();
@@ -813,19 +848,33 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Use)?;
         let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::UseStmt(UseStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             path,
             target,
         }))
     }
 
     /// Parse mod declaration: mod name or pub mod name
-    pub(crate) fn parse_mod(&mut self, visibility: Visibility, attributes: Vec<Attribute>) -> Result<Node, ParseError> {
+    pub(crate) fn parse_mod(
+        &mut self,
+        visibility: Visibility,
+        attributes: Vec<Attribute>,
+    ) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mod)?;
         let name = self.expect_identifier()?;
         Ok(Node::ModDecl(ModDecl {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             name,
             visibility,
             attributes,
@@ -839,7 +888,12 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Use)?;
         let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::CommonUseStmt(CommonUseStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             path,
             target,
         }))
@@ -852,7 +906,12 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Use)?;
         let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::ExportUseStmt(ExportUseStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             path,
             target,
         }))
@@ -871,7 +930,12 @@ impl<'a> Parser<'a> {
         let macro_name = segments.pop().unwrap_or_default();
 
         Ok(Node::AutoImportStmt(AutoImportStmt {
-            span: Span::new(start_span.start, self.previous.span.end, start_span.line, start_span.column),
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
             path: ModulePath::new(segments),
             macro_name,
         }))

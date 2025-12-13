@@ -33,10 +33,7 @@ impl ExecCore {
     }
 
     /// Create with a GC runtime and custom symbol provider
-    pub fn with_gc_and_provider(
-        gc: GcRuntime,
-        provider: Arc<dyn RuntimeSymbolProvider>,
-    ) -> Self {
+    pub fn with_gc_and_provider(gc: GcRuntime, provider: Arc<dyn RuntimeSymbolProvider>) -> Self {
         let gc = Arc::new(gc);
         Self {
             loader: SmfLoader::new(),
@@ -223,7 +220,8 @@ impl ExecCore {
         let hir_module = hir::lower(&ast).map_err(|e| format!("HIR lowering error: {}", e))?;
 
         // Lower to MIR
-        let mir_module = lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
+        let mir_module =
+            lower_to_mir(&hir_module).map_err(|e| format!("MIR lowering error: {}", e))?;
 
         // Check if we have a proper main function
         let has_main_function = mir_module.functions.iter().any(|f| f.name == "main");

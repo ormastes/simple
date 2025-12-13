@@ -1,6 +1,8 @@
+#![allow(unused_imports, dead_code, unused_variables)]
 //! Comprehensive lexer unit tests
 
 use simple_parser::lexer::Lexer;
+
 use simple_parser::token::{FStringToken, Span, Token, TokenKind};
 
 fn tokenize(source: &str) -> Vec<TokenKind> {
@@ -571,4 +573,3 @@ fn test_keyword_trait() {
 fn test_keyword_impl() {
     assert_eq!(tokenize("impl"), vec![TokenKind::Impl, TokenKind::Eof]);
 }
-

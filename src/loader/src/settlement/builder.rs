@@ -8,11 +8,12 @@ use std::fs::File;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use crate::smf::settlement::{
-    SettlementHeader, ModuleTableEntry, NativeLibEntry, FuncTableEntry, GlobalTableEntry, TypeTableEntry,
-    DependencyEntry, SSMF_MAGIC, SSMF_VERSION, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVE_LIBS,
-};
 use crate::settlement::Settlement;
+use crate::smf::settlement::{
+    DependencyEntry, FuncTableEntry, GlobalTableEntry, ModuleTableEntry, NativeLibEntry,
+    SettlementHeader, TypeTableEntry, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVE_LIBS, SSMF_MAGIC,
+    SSMF_VERSION,
+};
 
 /// Find the simple-stub executable.
 /// Looks in several locations:
@@ -145,13 +146,21 @@ impl BuildOptions {
     /// Get the architecture code for the current platform.
     pub fn current_arch() -> u8 {
         #[cfg(target_arch = "x86_64")]
-        { 1 }
+        {
+            1
+        }
         #[cfg(target_arch = "aarch64")]
-        { 2 }
+        {
+            2
+        }
         #[cfg(target_arch = "x86")]
-        { 3 }
+        {
+            3
+        }
         #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "x86")))]
-        { 0 }
+        {
+            0
+        }
     }
 
     /// Create options for building a standalone executable.
@@ -304,7 +313,8 @@ impl SettlementBuilder {
 
         // Global table
         let global_table_offset = current_offset;
-        let global_table_size = (global_entries.len() * std::mem::size_of::<GlobalTableEntry>()) as u64;
+        let global_table_size =
+            (global_entries.len() * std::mem::size_of::<GlobalTableEntry>()) as u64;
         current_offset += global_table_size;
 
         // Type table
@@ -314,12 +324,14 @@ impl SettlementBuilder {
 
         // Module table
         let module_table_offset = current_offset;
-        let module_table_size = (module_entries.len() * std::mem::size_of::<ModuleTableEntry>()) as u64;
+        let module_table_size =
+            (module_entries.len() * std::mem::size_of::<ModuleTableEntry>()) as u64;
         current_offset += module_table_size;
 
         // Native library table
         let native_libs_offset = current_offset;
-        let native_libs_size = (native_lib_entries.len() * std::mem::size_of::<NativeLibEntry>()) as u64;
+        let native_libs_size =
+            (native_lib_entries.len() * std::mem::size_of::<NativeLibEntry>()) as u64;
         current_offset += native_libs_size;
 
         // Dependency table
@@ -383,7 +395,11 @@ impl SettlementBuilder {
         output.write_all(&string_table_data)?;
 
         // Pad to alignment
-        self.write_padding(output, string_table_offset + string_table_data.len() as u64, code_offset)?;
+        self.write_padding(
+            output,
+            string_table_offset + string_table_data.len() as u64,
+            code_offset,
+        )?;
 
         // Write code
         output.write_all(code_data)?;
@@ -480,7 +496,12 @@ impl SettlementBuilder {
     }
 
     /// Write padding bytes to align to a target offset.
-    fn write_padding<W: Write>(&self, output: &mut W, current: u64, target: u64) -> Result<(), BuildError> {
+    fn write_padding<W: Write>(
+        &self,
+        output: &mut W,
+        current: u64,
+        target: u64,
+    ) -> Result<(), BuildError> {
         if target > current {
             let padding = vec![0u8; (target - current) as usize];
             output.write_all(&padding)?;
@@ -518,38 +539,42 @@ impl SettlementBuilder {
         strings: &StringTable,
         dep_offsets: &HashMap<String, (u32, u32)>, // module_name -> (dep_start, dep_count)
     ) -> Vec<ModuleTableEntry> {
-        settlement.iter_modules().map(|module| {
-            let (dep_start, dep_count) = dep_offsets
-                .get(&module.name)
-                .copied()
-                .unwrap_or((0, 0));
+        settlement
+            .iter_modules()
+            .map(|module| {
+                let (dep_start, dep_count) =
+                    dep_offsets.get(&module.name).copied().unwrap_or((0, 0));
 
-            ModuleTableEntry {
-                name_offset: strings.offset(&module.name) as u32,
-                version: module.version,
-                flags: 0,
-                _reserved: 0,
-                code_start: module.code_range.start as u32,
-                code_end: (module.code_range.start + module.code_range.count) as u32,
-                data_start: module.data_range.start as u32,
-                data_end: (module.data_range.start + module.data_range.count) as u32,
-                func_start: module.func_table_range.0.0,
-                func_count: module.func_table_range.1 as u32,
-                global_start: module.global_table_range.0.0,
-                global_count: module.global_table_range.1 as u32,
-                type_start: module.type_table_range.0.0,
-                type_count: module.type_table_range.1 as u32,
-                dep_start,
-                dep_count,
-            }
-        }).collect()
+                ModuleTableEntry {
+                    name_offset: strings.offset(&module.name) as u32,
+                    version: module.version,
+                    flags: 0,
+                    _reserved: 0,
+                    code_start: module.code_range.start as u32,
+                    code_end: (module.code_range.start + module.code_range.count) as u32,
+                    data_start: module.data_range.start as u32,
+                    data_end: (module.data_range.start + module.data_range.count) as u32,
+                    func_start: module.func_table_range.0 .0,
+                    func_count: module.func_table_range.1 as u32,
+                    global_start: module.global_table_range.0 .0,
+                    global_count: module.global_table_range.1 as u32,
+                    type_start: module.type_table_range.0 .0,
+                    type_count: module.type_table_range.1 as u32,
+                    dep_start,
+                    dep_count,
+                }
+            })
+            .collect()
     }
 
     /// Build the dependency table.
     ///
     /// Returns (dependency_entries, module_dep_offsets)
     /// where module_dep_offsets maps module_name -> (start_index, count)
-    fn build_dependency_table(&self, settlement: &Settlement) -> (Vec<DependencyEntry>, HashMap<String, (u32, u32)>) {
+    fn build_dependency_table(
+        &self,
+        settlement: &Settlement,
+    ) -> (Vec<DependencyEntry>, HashMap<String, (u32, u32)>) {
         let mut entries = Vec::new();
         let mut offsets = HashMap::new();
 
@@ -574,21 +599,29 @@ impl SettlementBuilder {
     }
 
     /// Build the native library table.
-    fn build_native_lib_table(&self, settlement: &Settlement, strings: &StringTable) -> Vec<NativeLibEntry> {
-        settlement.native_libs().iter().map(|(_, lib)| {
-            NativeLibEntry {
-                name_offset: strings.offset(&lib.name) as u32,
-                lib_type: lib.lib_type,
-                flags: 0,
-                reserved: [0; 2],
-                data_offset: 0, // Would be set for static libs
-                data_size: 0,
-                path_offset: 0, // Would be set for shared libs
-                symbol_count: 0,
-                symbols_offset: 0,
-                _reserved: 0,
-            }
-        }).collect()
+    fn build_native_lib_table(
+        &self,
+        settlement: &Settlement,
+        strings: &StringTable,
+    ) -> Vec<NativeLibEntry> {
+        settlement
+            .native_libs()
+            .iter()
+            .map(|(_, lib)| {
+                NativeLibEntry {
+                    name_offset: strings.offset(&lib.name) as u32,
+                    lib_type: lib.lib_type,
+                    flags: 0,
+                    reserved: [0; 2],
+                    data_offset: 0, // Would be set for static libs
+                    data_size: 0,
+                    path_offset: 0, // Would be set for shared libs
+                    symbol_count: 0,
+                    symbols_offset: 0,
+                    _reserved: 0,
+                }
+            })
+            .collect()
     }
 
     /// Write a minimal executable stub.

@@ -14,17 +14,18 @@
 
 use simple_dependency_tracker::{
     self as tracker,
-    resolution::ModPath,
-    visibility::{
-        DirManifest as TrackerDirManifest, ModDecl as TrackerModDecl, Visibility as TrackerVisibility,
-    },
-    macro_import::{AutoImport, MacroDirManifest, MacroExports, MacroSymbol},
     graph::{ImportGraph, ImportKind},
+    macro_import::{AutoImport, MacroDirManifest, MacroExports, MacroSymbol},
+    resolution::ModPath,
     symbol::ProjectSymbols,
+    visibility::{
+        DirManifest as TrackerDirManifest, ModDecl as TrackerModDecl,
+        Visibility as TrackerVisibility,
+    },
 };
 use simple_parser::ast::{
-    Attribute, AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, Module,
-    ModulePath, Node, Visibility,
+    Attribute, AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, Module, ModulePath,
+    Node, Visibility,
 };
 use simple_parser::Parser;
 use std::collections::{HashMap, HashSet};
@@ -182,10 +183,7 @@ impl ModuleResolver {
     }
 
     /// Set profile definitions
-    pub fn with_profiles(
-        mut self,
-        profiles: HashMap<String, (Vec<String>, Vec<String>)>,
-    ) -> Self {
+    pub fn with_profiles(mut self, profiles: HashMap<String, (Vec<String>, Vec<String>)>) -> Self {
         self.profiles = profiles;
         self
     }
@@ -331,7 +329,11 @@ impl ModuleResolver {
     }
 
     /// Extract manifest information from parsed AST
-    fn extract_manifest(&self, module: &Module, dir_path: &Path) -> ResolveResult<DirectoryManifest> {
+    fn extract_manifest(
+        &self,
+        module: &Module,
+        dir_path: &Path,
+    ) -> ResolveResult<DirectoryManifest> {
         let dir_name = dir_path
             .file_name()
             .and_then(|s| s.to_str())
@@ -455,9 +457,9 @@ impl ModuleResolver {
 
     /// Check for circular dependencies in the import graph.
     pub fn check_circular_dependencies(&self) -> ResolveResult<()> {
-        self.import_graph.check_cycles().map_err(|e| {
-            CompileError::Semantic(format!("Circular dependency detected: {}", e))
-        })
+        self.import_graph
+            .check_cycles()
+            .map_err(|e| CompileError::Semantic(format!("Circular dependency detected: {}", e)))
     }
 
     /// Get the import graph.
@@ -530,23 +532,13 @@ impl ModuleResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::create_test_project;
     use std::fs;
-    use tempfile::TempDir;
-
-    fn create_test_project() -> TempDir {
-        let dir = TempDir::new().unwrap();
-        let src = dir.path().join("src");
-        fs::create_dir_all(&src).unwrap();
-        dir
-    }
 
     #[test]
     fn test_resolver_creation() {
         let dir = create_test_project();
-        let resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            dir.path().join("src"),
-        );
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src"));
         assert_eq!(resolver.project_root(), dir.path());
         assert_eq!(resolver.source_root(), dir.path().join("src"));
     }
@@ -566,10 +558,7 @@ mod tests {
         // Create a module file
         fs::write(src.join("utils.spl"), "fn helper(): 42").unwrap();
 
-        let resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            src.clone(),
-        );
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
 
         let path = ModulePath::new(vec!["crate".into(), "utils".into()]);
         let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
@@ -588,10 +577,7 @@ mod tests {
         // Create __init__.spl
         fs::write(http.join("__init__.spl"), "mod http\npub mod router").unwrap();
 
-        let resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            src.clone(),
-        );
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
 
         let path = ModulePath::new(vec!["crate".into(), "http".into()]);
         let resolved = resolver.resolve(&path, &src.join("main.spl")).unwrap();
@@ -609,10 +595,7 @@ mod tests {
 
         fs::write(http.join("router.spl"), "struct Router:").unwrap();
 
-        let resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            src.clone(),
-        );
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
 
         let path = ModulePath::new(vec![
             "crate".into(),
@@ -630,10 +613,7 @@ mod tests {
         let dir = create_test_project();
         let src = dir.path().join("src");
 
-        let resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            src.clone(),
-        );
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
 
         let path = ModulePath::new(vec!["crate".into(), "nonexistent".into()]);
         let result = resolver.resolve(&path, &src.join("main.spl"));
@@ -664,10 +644,7 @@ auto import router.route
 "#;
         fs::write(http.join("__init__.spl"), manifest_source).unwrap();
 
-        let mut resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            src,
-        );
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
 
         let manifest = resolver.load_manifest(&http).unwrap();
 
@@ -688,11 +665,8 @@ auto import router.route
         let mut features = HashSet::new();
         features.insert("strict_null".into());
 
-        let resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            dir.path().join("src"),
-        )
-        .with_features(features);
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), dir.path().join("src"))
+            .with_features(features);
 
         assert!(resolver.is_feature_enabled("strict_null"));
         assert!(!resolver.is_feature_enabled("other_feature"));
@@ -715,10 +689,7 @@ export use router.Router
 "#;
         fs::write(http.join("__init__.spl"), manifest_source).unwrap();
 
-        let mut resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            src,
-        );
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
 
         let manifest = resolver.load_manifest(&http).unwrap();
 
@@ -757,10 +728,7 @@ auto import router.route
 "#;
         fs::write(http.join("__init__.spl"), manifest_source).unwrap();
 
-        let mut resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            src,
-        );
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
 
         let manifest = resolver.load_manifest(&http).unwrap();
 
@@ -776,8 +744,12 @@ auto import router.route
         let result = resolver.filter_glob_import(&manifest, &exports);
 
         assert_eq!(result.len(), 2); // Router + route
-        assert!(result.iter().any(|s| s.name == "Router" && s.kind == SymKind::ValueOrType));
-        assert!(result.iter().any(|s| s.name == "route" && s.kind == SymKind::Macro));
+        assert!(result
+            .iter()
+            .any(|s| s.name == "Router" && s.kind == SymKind::ValueOrType));
+        assert!(result
+            .iter()
+            .any(|s| s.name == "route" && s.kind == SymKind::Macro));
         assert!(!result.iter().any(|s| s.name == "get")); // Not in auto import
     }
 
@@ -786,10 +758,7 @@ auto import router.route
         let dir = create_test_project();
         let src = dir.path().join("src");
 
-        let mut resolver = ModuleResolver::new(
-            dir.path().to_path_buf(),
-            src,
-        );
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
 
         // Create a cycle: a -> b -> c -> a
         resolver.record_import("crate.a", "crate.b", ImportKind::Use);
@@ -798,6 +767,9 @@ auto import router.route
 
         let result = resolver.check_circular_dependencies();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Circular dependency"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Circular dependency"));
     }
 }

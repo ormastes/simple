@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::visibility::Visibility;
 use crate::macro_import::SymKind;
+use crate::visibility::Visibility;
 
 /// The kind of a symbol entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -372,16 +372,12 @@ impl<T, const N: usize> StaticVec<T, N> {
 
     /// Get slice.
     pub fn as_slice(&self) -> &[T] {
-        unsafe {
-            core::slice::from_raw_parts(self.data.as_ptr() as *const T, self.len)
-        }
+        unsafe { core::slice::from_raw_parts(self.data.as_ptr() as *const T, self.len) }
     }
 
     /// Get mutable slice.
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe {
-            core::slice::from_raw_parts_mut(self.data.as_mut_ptr() as *mut T, self.len)
-        }
+        unsafe { core::slice::from_raw_parts_mut(self.data.as_mut_ptr() as *mut T, self.len) }
     }
 }
 

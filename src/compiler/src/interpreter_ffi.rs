@@ -13,7 +13,9 @@ use simple_parser::ast::{ClassDef, Expr, FunctionDef, Node, Visibility};
 use simple_parser::token::Span;
 
 use crate::error::CompileError;
-use crate::interpreter::{evaluate_expr, evaluate_module, exec_block, control_to_value, Enums, ImplMethods};
+use crate::interpreter::{
+    control_to_value, evaluate_expr, evaluate_module, exec_block, Enums, ImplMethods,
+};
 use crate::value::{Env, Value};
 use crate::value_bridge::BridgeValue;
 
@@ -259,7 +261,10 @@ pub unsafe extern "C" fn simple_interp_call(
         if let Some(func) = funcs.get(name) {
             call_interpreted_function(func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
-            Err(CompileError::Semantic(format!("function not found: {}", name)))
+            Err(CompileError::Semantic(format!(
+                "function not found: {}",
+                name
+            )))
         }
     });
 
@@ -397,7 +402,10 @@ pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, Compi
         if let Some(func) = funcs.get(name) {
             call_interpreted_function(func, args, env, funcs, classes, enums, impl_methods)
         } else {
-            Err(CompileError::Semantic(format!("function not found: {}", name)))
+            Err(CompileError::Semantic(format!(
+                "function not found: {}",
+                name
+            )))
         }
     })
 }

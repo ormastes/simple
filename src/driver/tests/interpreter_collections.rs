@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 //! Interpreter tests - collections
 
 use simple_driver::interpreter::{run_code, Interpreter, RunConfig};
@@ -644,4 +646,3 @@ main = increment(10)
     // increment(10) = 11, then * 3 = 33
     assert_eq!(result.exit_code, 33);
 }
-

@@ -144,7 +144,9 @@ pub mod typo {
             _ => 3,
         };
 
-        find_similar(name, candidates, max_distance).into_iter().next()
+        find_similar(name, candidates, max_distance)
+            .into_iter()
+            .next()
     }
 
     /// Format a suggestion message for a typo.
@@ -188,10 +190,19 @@ pub mod typo {
         fn test_suggest_name() {
             let candidates = ["println", "print", "printf", "sprint"];
 
-            assert_eq!(suggest_name("pritn", candidates.iter().copied()), Some("print"));
+            assert_eq!(
+                suggest_name("pritn", candidates.iter().copied()),
+                Some("print")
+            );
             // "printl" has distance 1 to both "print" and "println", alphabetically "print" comes first
-            assert_eq!(suggest_name("printl", candidates.iter().copied()), Some("print"));
-            assert_eq!(suggest_name("printlnn", candidates.iter().copied()), Some("println"));
+            assert_eq!(
+                suggest_name("printl", candidates.iter().copied()),
+                Some("print")
+            );
+            assert_eq!(
+                suggest_name("printlnn", candidates.iter().copied()),
+                Some("println")
+            );
             assert_eq!(suggest_name("xyz", candidates.iter().copied()), None);
         }
 
@@ -199,7 +210,10 @@ pub mod typo {
         fn test_format_suggestion() {
             let candidates = ["foo", "bar", "baz"];
 
-            assert_eq!(format_suggestion("fo", candidates.iter().copied()), Some("did you mean 'foo'?".to_string()));
+            assert_eq!(
+                format_suggestion("fo", candidates.iter().copied()),
+                Some("did you mean 'foo'?".to_string())
+            );
             assert_eq!(format_suggestion("xyz", candidates.iter().copied()), None);
         }
     }
@@ -569,7 +583,10 @@ mod tests {
         let err = CompileError::semantic_with_context("undefined variable: x", ctx);
         let diag = err.to_diagnostic();
 
-        assert!(diag.code.as_ref().is_some_and(|c| c == codes::UNDEFINED_VARIABLE));
+        assert!(diag
+            .code
+            .as_ref()
+            .is_some_and(|c| c == codes::UNDEFINED_VARIABLE));
         assert!(!diag.help.is_empty());
     }
 

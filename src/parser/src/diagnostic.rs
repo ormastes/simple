@@ -183,7 +183,10 @@ impl Diagnostic {
             "{}{}{}{}: {}{}",
             severity_color,
             self.severity.name(),
-            self.code.as_ref().map(|c| format!("[{}]", c)).unwrap_or_default(),
+            self.code
+                .as_ref()
+                .map(|c| format!("[{}]", c))
+                .unwrap_or_default(),
             reset,
             bold,
             self.message
@@ -199,8 +202,7 @@ impl Diagnostic {
             let file = self.file.as_deref().unwrap_or("<source>");
             output.push_str(&format!(
                 "  {}-->{} {}:{}:{}\n",
-                blue, reset,
-                file, label.span.line, label.span.column
+                blue, reset, file, label.span.line, label.span.column
             ));
 
             // Show source line with line number
@@ -212,15 +214,20 @@ impl Diagnostic {
                 // Empty line with just the bar
                 output.push_str(&format!(
                     "  {:>width$} {}|{}\n",
-                    "", blue, reset,
+                    "",
+                    blue,
+                    reset,
                     width = line_num_width
                 ));
 
                 // The source line
                 output.push_str(&format!(
                     "  {}{:>width$}{} {}|{} {}\n",
-                    blue, line_num, reset,
-                    blue, reset,
+                    blue,
+                    line_num,
+                    reset,
+                    blue,
+                    reset,
                     line_str,
                     width = line_num_width
                 ));
@@ -234,11 +241,15 @@ impl Diagnostic {
                 let len = (label.span.end - label.span.start).max(1);
 
                 let spaces = " ".repeat(col);
-                let underline = underline_char.to_string().repeat(len.min(line_str.len().saturating_sub(col)));
+                let underline = underline_char
+                    .to_string()
+                    .repeat(len.min(line_str.len().saturating_sub(col)));
 
                 output.push_str(&format!(
                     "  {:>width$} {}|{} {}{}{} {}\n",
-                    "", blue, reset,
+                    "",
+                    blue,
+                    reset,
                     spaces,
                     underline_color,
                     underline,
@@ -251,20 +262,22 @@ impl Diagnostic {
 
         // Notes
         for note in &self.notes {
-            let note_color = if use_color { Severity::Note.color() } else { "" };
-            output.push_str(&format!(
-                "  {}= note:{} {}\n",
-                note_color, reset, note
-            ));
+            let note_color = if use_color {
+                Severity::Note.color()
+            } else {
+                ""
+            };
+            output.push_str(&format!("  {}= note:{} {}\n", note_color, reset, note));
         }
 
         // Help
         for help in &self.help {
-            let help_color = if use_color { Severity::Help.color() } else { "" };
-            output.push_str(&format!(
-                "  {}= help:{} {}\n",
-                help_color, reset, help
-            ));
+            let help_color = if use_color {
+                Severity::Help.color()
+            } else {
+                ""
+            };
+            output.push_str(&format!("  {}= help:{} {}\n", help_color, reset, help));
         }
 
         output
@@ -367,12 +380,18 @@ impl Diagnostics {
 
     /// Get the number of errors.
     pub fn error_count(&self) -> usize {
-        self.items.iter().filter(|d| d.severity == Severity::Error).count()
+        self.items
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count()
     }
 
     /// Get the number of warnings.
     pub fn warning_count(&self) -> usize {
-        self.items.iter().filter(|d| d.severity == Severity::Warning).count()
+        self.items
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count()
     }
 
     /// Format all diagnostics.
@@ -383,44 +402,49 @@ impl Diagnostics {
             output.push('\n');
         }
 
-        // Summary
+        self.append_summary(&mut output, use_color);
+        output
+    }
+
+    /// Append error/warning summary
+    fn append_summary(&self, output: &mut String, use_color: bool) {
         let errors = self.error_count();
         let warnings = self.warning_count();
-        if errors > 0 || warnings > 0 {
-            if use_color {
-                if errors > 0 {
-                    output.push_str(&format!(
-                        "\x1b[1;31merror\x1b[0m: aborting due to {} previous error{}\n",
-                        errors,
-                        if errors == 1 { "" } else { "s" }
-                    ));
-                }
-                if warnings > 0 {
-                    output.push_str(&format!(
-                        "\x1b[1;33mwarning\x1b[0m: {} warning{} emitted\n",
-                        warnings,
-                        if warnings == 1 { "" } else { "s" }
-                    ));
-                }
-            } else {
-                if errors > 0 {
-                    output.push_str(&format!(
-                        "error: aborting due to {} previous error{}\n",
-                        errors,
-                        if errors == 1 { "" } else { "s" }
-                    ));
-                }
-                if warnings > 0 {
-                    output.push_str(&format!(
-                        "warning: {} warning{} emitted\n",
-                        warnings,
-                        if warnings == 1 { "" } else { "s" }
-                    ));
-                }
-            }
+        if errors == 0 && warnings == 0 {
+            return;
         }
 
-        output
+        if use_color {
+            if errors > 0 {
+                output.push_str(&format!(
+                    "\x1b[1;31merror\x1b[0m: aborting due to {} previous error{}\n",
+                    errors,
+                    if errors == 1 { "" } else { "s" }
+                ));
+            }
+            if warnings > 0 {
+                output.push_str(&format!(
+                    "\x1b[1;33mwarning\x1b[0m: {} warning{} emitted\n",
+                    warnings,
+                    if warnings == 1 { "" } else { "s" }
+                ));
+            }
+        } else {
+            if errors > 0 {
+                output.push_str(&format!(
+                    "error: aborting due to {} previous error{}\n",
+                    errors,
+                    if errors == 1 { "" } else { "s" }
+                ));
+            }
+            if warnings > 0 {
+                output.push_str(&format!(
+                    "warning: {} warning{} emitted\n",
+                    warnings,
+                    if warnings == 1 { "" } else { "s" }
+                ));
+            }
+        }
     }
 
     /// Format all diagnostics with source from multiple files.
@@ -442,43 +466,7 @@ impl Diagnostics {
             output.push('\n');
         }
 
-        // Summary
-        let errors = self.error_count();
-        let warnings = self.warning_count();
-        if errors > 0 || warnings > 0 {
-            if use_color {
-                if errors > 0 {
-                    output.push_str(&format!(
-                        "\x1b[1;31merror\x1b[0m: aborting due to {} previous error{}\n",
-                        errors,
-                        if errors == 1 { "" } else { "s" }
-                    ));
-                }
-                if warnings > 0 {
-                    output.push_str(&format!(
-                        "\x1b[1;33mwarning\x1b[0m: {} warning{} emitted\n",
-                        warnings,
-                        if warnings == 1 { "" } else { "s" }
-                    ));
-                }
-            } else {
-                if errors > 0 {
-                    output.push_str(&format!(
-                        "error: aborting due to {} previous error{}\n",
-                        errors,
-                        if errors == 1 { "" } else { "s" }
-                    ));
-                }
-                if warnings > 0 {
-                    output.push_str(&format!(
-                        "warning: {} warning{} emitted\n",
-                        warnings,
-                        if warnings == 1 { "" } else { "s" }
-                    ));
-                }
-            }
-        }
-
+        self.append_summary(&mut output, use_color);
         output
     }
 

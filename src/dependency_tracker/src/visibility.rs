@@ -206,7 +206,7 @@ pub fn effective_visibility(
     sym: &SymbolId,
 ) -> Visibility {
     match mc.symbol_visibility(sym) {
-        None => Visibility::Private, // Symbol not found
+        None => Visibility::Private,                      // Symbol not found
         Some(Visibility::Private) => Visibility::Private, // Declaration is private
         Some(Visibility::Public) => {
             // Symbol is declared public; check if directory allows export
@@ -268,7 +268,8 @@ pub fn visibility_meet(v1: Visibility, v2: Visibility) -> Visibility {
 ///
 /// This computes the effective visibility by folding visibility_meet over the path.
 pub fn ancestor_visibility(path: &[Visibility]) -> Visibility {
-    path.iter().fold(Visibility::Public, |acc, &v| visibility_meet(acc, v))
+    path.iter()
+        .fold(Visibility::Public, |acc, &v| visibility_meet(acc, v))
 }
 
 #[cfg(test)]
@@ -393,12 +394,21 @@ mod tests {
 
     #[test]
     fn meet_private_absorbs() {
-        assert_eq!(visibility_meet(Visibility::Private, Visibility::Public), Visibility::Private);
-        assert_eq!(visibility_meet(Visibility::Public, Visibility::Private), Visibility::Private);
+        assert_eq!(
+            visibility_meet(Visibility::Private, Visibility::Public),
+            Visibility::Private
+        );
+        assert_eq!(
+            visibility_meet(Visibility::Public, Visibility::Private),
+            Visibility::Private
+        );
     }
 
     #[test]
     fn meet_public_identity() {
-        assert_eq!(visibility_meet(Visibility::Public, Visibility::Public), Visibility::Public);
+        assert_eq!(
+            visibility_meet(Visibility::Public, Visibility::Public),
+            Visibility::Public
+        );
     }
 }

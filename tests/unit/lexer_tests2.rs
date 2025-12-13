@@ -1,6 +1,8 @@
+#![allow(unused_imports, unused_variables)]
 //! Lexer unit tests - Part 2
 
 use simple_parser::lexer::Lexer;
+
 use simple_parser::token::{FStringToken, Span, Token, TokenKind};
 
 fn tokenize(source: &str) -> Vec<TokenKind> {

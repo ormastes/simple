@@ -21,10 +21,8 @@ pub unsafe extern "C" fn _start() -> ! {
         ".option norelax",
         "la gp, __global_pointer$",
         ".option pop",
-
         // Set up stack pointer
         "la sp, __stack_top",
-
         // Clear bss
         "la a0, __bss_start",
         "la a1, __bss_end",
@@ -34,7 +32,6 @@ pub unsafe extern "C" fn _start() -> ! {
         "addi a0, a0, 4",
         "j 1b",
         "2:",
-
         // Copy data section
         "la a0, __data_start",
         "la a1, __data_end",
@@ -47,18 +44,14 @@ pub unsafe extern "C" fn _start() -> ! {
         "addi a2, a2, 4",
         "j 3b",
         "4:",
-
         // Call Rust init
         "call __riscv_init",
-
         // Call main
         "call main",
-
         // If main returns, halt
         "5:",
         "wfi",
         "j 5b",
-
         options(noreturn)
     );
 
@@ -69,10 +62,8 @@ pub unsafe extern "C" fn _start() -> ! {
         ".option norelax",
         "la gp, __global_pointer$",
         ".option pop",
-
         // Set up stack pointer
         "la sp, __stack_top",
-
         // Clear bss
         "la a0, __bss_start",
         "la a1, __bss_end",
@@ -82,7 +73,6 @@ pub unsafe extern "C" fn _start() -> ! {
         "addi a0, a0, 8",
         "j 1b",
         "2:",
-
         // Copy data section
         "la a0, __data_start",
         "la a1, __data_end",
@@ -95,18 +85,14 @@ pub unsafe extern "C" fn _start() -> ! {
         "addi a2, a2, 8",
         "j 3b",
         "4:",
-
         // Call Rust init
         "call __riscv_init",
-
         // Call main
         "call main",
-
         // If main returns, halt
         "5:",
         "wfi",
         "j 5b",
-
         options(noreturn)
     );
 
@@ -127,10 +113,7 @@ pub unsafe extern "C" fn __riscv_init() {
             static mut __heap_start: u8;
             static __heap_size: usize;
         }
-        crate::runtime::init_heap(
-            &mut __heap_start as *mut u8,
-            __heap_size,
-        );
+        crate::runtime::init_heap(&mut __heap_start as *mut u8, __heap_size);
     }
 
     // Late initialization
@@ -162,12 +145,10 @@ pub unsafe extern "C" fn _trap_handler() -> ! {
         "sw t4, 13*4(sp)",
         "sw t5, 14*4(sp)",
         "sw t6, 15*4(sp)",
-
         // Read cause and handle
         "csrr a0, mcause",
         "csrr a1, mepc",
         "call __trap_handler_rust",
-
         // Restore context
         "lw ra, 0*4(sp)",
         "lw t0, 1*4(sp)",
@@ -186,9 +167,7 @@ pub unsafe extern "C" fn _trap_handler() -> ! {
         "lw t5, 14*4(sp)",
         "lw t6, 15*4(sp)",
         "addi sp, sp, 32*4",
-
         "mret",
-
         options(noreturn)
     );
 
@@ -212,12 +191,10 @@ pub unsafe extern "C" fn _trap_handler() -> ! {
         "sd t4, 13*8(sp)",
         "sd t5, 14*8(sp)",
         "sd t6, 15*8(sp)",
-
         // Read cause and handle
         "csrr a0, mcause",
         "csrr a1, mepc",
         "call __trap_handler_rust",
-
         // Restore context
         "ld ra, 0*8(sp)",
         "ld t0, 1*8(sp)",
@@ -236,9 +213,7 @@ pub unsafe extern "C" fn _trap_handler() -> ! {
         "ld t5, 14*8(sp)",
         "ld t6, 15*8(sp)",
         "addi sp, sp, 32*8",
-
         "mret",
-
         options(noreturn)
     );
 

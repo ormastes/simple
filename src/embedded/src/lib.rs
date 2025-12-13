@@ -51,7 +51,7 @@ pub mod arm;
 pub mod riscv;
 
 // Re-exports
-pub use memory::{MemoryRegion, MemoryLayout};
+pub use memory::{MemoryLayout, MemoryRegion};
 pub use runtime::{EmbeddedRuntime, RuntimeConfig};
 
 /// Entry point attribute macro placeholder.
@@ -78,6 +78,7 @@ macro_rules! entry {
 ///
 /// This function must only be called once, at program startup.
 #[inline(never)]
+#[allow(static_mut_refs)]
 pub unsafe fn init() {
     // Clear BSS
     extern "C" {

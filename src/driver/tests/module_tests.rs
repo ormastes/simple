@@ -10,7 +10,7 @@
 //! - Visibility control
 
 mod test_helpers;
-use test_helpers::{run_expect_interp, run_expect_compile_error};
+use test_helpers::{run_expect_compile_error, run_expect_interp};
 
 // =============================================================================
 // Feature #104: Module Path Syntax

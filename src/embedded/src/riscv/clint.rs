@@ -89,9 +89,11 @@ impl Clint {
         #[cfg(feature = "riscv32")]
         {
             loop {
-                let hi1 = unsafe { ((self.mtime_addr() as usize + 4) as *const u32).read_volatile() };
+                let hi1 =
+                    unsafe { ((self.mtime_addr() as usize + 4) as *const u32).read_volatile() };
                 let lo = unsafe { (self.mtime_addr() as *const u32).read_volatile() };
-                let hi2 = unsafe { ((self.mtime_addr() as usize + 4) as *const u32).read_volatile() };
+                let hi2 =
+                    unsafe { ((self.mtime_addr() as usize + 4) as *const u32).read_volatile() };
                 if hi1 == hi2 {
                     return ((hi1 as u64) << 32) | (lo as u64);
                 }

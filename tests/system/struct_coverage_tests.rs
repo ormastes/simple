@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables, unused_comparisons, deprecated)]
 //! Class/Struct method coverage tests
 //! Coverage for GcRuntime, Concurrency, BlockBuilder, MirModule, etc.
 

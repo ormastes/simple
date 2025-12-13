@@ -94,8 +94,12 @@ fn test_generic_struct_def() {
 
 #[test]
 fn test_doc_comment() {
-    let doc = DocComment::new("This is a function description.\nIt spans multiple lines.".to_string());
-    assert_eq!(doc.content, "This is a function description.\nIt spans multiple lines.");
+    let doc =
+        DocComment::new("This is a function description.\nIt spans multiple lines.".to_string());
+    assert_eq!(
+        doc.content,
+        "This is a function description.\nIt spans multiple lines."
+    );
 }
 
 #[test]

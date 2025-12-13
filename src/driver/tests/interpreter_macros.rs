@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+
 //! Interpreter tests - macros
 
 use simple_driver::interpreter::{run_code, Interpreter, RunConfig};

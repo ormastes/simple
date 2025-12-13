@@ -23,8 +23,8 @@ mod collections;
 mod core;
 mod ffi;
 mod heap;
-pub mod tags;
 mod objects;
+pub mod tags;
 
 // Re-export core types
 pub use core::RuntimeValue;
@@ -73,10 +73,9 @@ pub use ffi::{
 
 // Re-export I/O capture functions (for testing)
 pub use ffi::{
-    rt_capture_stderr_start, rt_capture_stdout_start, rt_capture_stderr_stop,
+    rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start,
     rt_capture_stdout_stop, rt_clear_captured_stderr, rt_clear_captured_stdout,
-    rt_get_captured_stderr, rt_get_captured_stdout, rt_is_stderr_capturing,
-    rt_is_stdout_capturing,
+    rt_get_captured_stderr, rt_get_captured_stdout, rt_is_stderr_capturing, rt_is_stdout_capturing,
 };
 
 // Re-export print FFI functions

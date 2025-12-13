@@ -68,6 +68,8 @@ impl Protection {
 pub struct ExecutableMemory {
     pub(crate) ptr: *mut u8,
     pub(crate) size: usize,
+    /// Function used to deallocate this region. Must match the allocator that created it.
+    pub(crate) dealloc: unsafe fn(*mut u8, usize),
 }
 
 impl ExecutableMemory {
@@ -86,6 +88,12 @@ impl ExecutableMemory {
     /// Get function pointer at offset
     pub unsafe fn get_fn<F>(&self, offset: usize) -> F {
         std::mem::transmute_copy(&(self.ptr.add(offset) as usize))
+    }
+}
+
+impl Drop for ExecutableMemory {
+    fn drop(&mut self) {
+        unsafe { (self.dealloc)(self.ptr, self.size) };
     }
 }
 

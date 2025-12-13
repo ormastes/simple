@@ -346,8 +346,8 @@ pub struct UnitDef {
 /// e.g., `m = 1.0` or `km = 1000.0`
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnitVariant {
-    pub suffix: String,  // e.g., "m", "km"
-    pub factor: f64,     // conversion factor to base unit
+    pub suffix: String, // e.g., "m", "km"
+    pub factor: f64,    // conversion factor to base unit
 }
 
 /// Unit family definition: `unit length(base: f64): m = 1.0, km = 1000.0`
@@ -355,8 +355,8 @@ pub struct UnitVariant {
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnitFamilyDef {
     pub span: Span,
-    pub name: String,           // e.g., "length"
-    pub base_type: Type,        // e.g., f64
+    pub name: String,    // e.g., "length"
+    pub base_type: Type, // e.g., f64
     pub variants: Vec<UnitVariant>,
     pub visibility: Visibility,
 }

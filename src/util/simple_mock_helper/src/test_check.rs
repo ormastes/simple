@@ -8,7 +8,7 @@
 //! - Helpers for test binary initialization
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::OnceLock;
+use std::sync::RwLock;
 
 /// Test level classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,7 +58,7 @@ impl TestLevel {
 static TEST_LEVEL: AtomicU8 = AtomicU8::new(0);
 
 /// Optional custom test level name for diagnostics
-static TEST_LEVEL_NAME: OnceLock<String> = OnceLock::new();
+static TEST_LEVEL_NAME: RwLock<Option<String>> = RwLock::new(None);
 
 /// Initialize the test level for this test binary.
 ///
@@ -82,7 +82,10 @@ pub fn init_test_level(level: TestLevel) {
 /// Initialize test level with a custom name for diagnostics.
 pub fn init_test_level_named(level: TestLevel, name: &str) {
     init_test_level(level);
-    let _ = TEST_LEVEL_NAME.set(name.to_string());
+    let mut guard = TEST_LEVEL_NAME.write().expect("lock poisoned");
+    if guard.is_none() {
+        *guard = Some(name.to_string());
+    }
 }
 
 /// Get the current test level.
@@ -113,8 +116,12 @@ pub fn try_get_test_level() -> Option<TestLevel> {
 }
 
 /// Get the custom test level name if set.
-pub fn get_test_level_name() -> Option<&'static str> {
-    TEST_LEVEL_NAME.get().map(|s| s.as_str())
+pub fn get_test_level_name() -> Option<String> {
+    TEST_LEVEL_NAME
+        .read()
+        .expect("lock poisoned")
+        .as_ref()
+        .cloned()
 }
 
 /// Assert that the current test level is as expected.
@@ -232,6 +239,9 @@ pub fn validate_test_config() -> TestCheckResult {
             if are_mocks_enabled() {
                 errors.push("System tests should have mocks disabled".to_string());
             }
+            if !is_policy_initialized() {
+                errors.push("Mock policy not initialized for system tests".to_string());
+            }
         }
         TestLevel::Environment => {
             // Environment tests should have mocks enabled for HAL/external/lib
@@ -329,8 +339,20 @@ macro_rules! init_env_tests {
 }
 
 #[cfg(test)]
+pub(crate) fn reset_test_level_for_tests() {
+    TEST_LEVEL.store(0, Ordering::SeqCst);
+    *TEST_LEVEL_NAME.write().expect("lock poisoned") = None;
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock_policy::reset_policy_for_tests;
+
+    fn reset() {
+        reset_test_level_for_tests();
+        reset_policy_for_tests();
+    }
 
     #[test]
     fn test_level_allows_mocks() {
@@ -377,5 +399,41 @@ mod tests {
         let result = TestCheckResult::fail(vec!["error1".to_string(), "error2".to_string()]);
         assert!(!result.passed);
         assert_eq!(result.errors.len(), 2);
+    }
+
+    #[test]
+    fn validate_fails_without_init_macro() {
+        reset();
+        let result = validate_test_config();
+        assert!(!result.passed);
+        assert!(result.level.is_none());
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("Test level not initialized")));
+    }
+
+    #[test]
+    fn validate_unit_config_requires_policy() {
+        reset();
+        init_unit_tests!("unit_resettable");
+        let result = validate_test_config();
+        result.clone().expect_pass();
+        assert_eq!(result.level, Some(TestLevel::Unit));
+        assert!(crate::mock_policy::are_mocks_enabled());
+        assert_eq!(crate::mock_policy::get_allowed_patterns(), Some(vec!["*"]));
+        assert_eq!(get_test_level_name().as_deref(), Some("unit_resettable"));
+    }
+
+    #[test]
+    fn validate_system_config_marks_policy_initialized() {
+        reset();
+        init_system_tests!("system_resettable");
+        let result = validate_test_config();
+        result.clone().expect_pass();
+        assert_eq!(result.level, Some(TestLevel::System));
+        assert!(!crate::mock_policy::are_mocks_enabled());
+        assert!(crate::mock_policy::is_policy_initialized());
+        assert_eq!(get_test_level_name().as_deref(), Some("system_resettable"));
     }
 }

@@ -25,12 +25,12 @@
 //! let c = a + b;  // [6.0, 8.0, 10.0, 12.0]
 //! ```
 
-mod types;
-mod ops;
-mod intrinsics;
 mod detection;
+mod intrinsics;
+mod ops;
+mod types;
 
-pub use types::*;
-pub use ops::*;
-pub use intrinsics::*;
 pub use detection::*;
+pub use intrinsics::*;
+pub use ops::*;
+pub use types::*;

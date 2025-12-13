@@ -1,7 +1,9 @@
+#![allow(unused_imports, unused_variables)]
 //! Execution tests: Compiler pipeline, in-memory execution, CLI integration
 //! Tests for execution-related functionality
 
 use simple_compiler::CompilerPipeline;
+
 use simple_driver::{run_code, Interpreter, RunConfig, Runner, RunningType};
 use simple_loader::ModuleLoader;
 use simple_parser::{Lexer, Parser};
@@ -555,4 +557,3 @@ fn test_long_source_file() {
     let result = runner.run_source(&source).expect("run ok");
     assert_eq!(result, 99);
 }
-

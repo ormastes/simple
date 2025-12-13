@@ -706,7 +706,9 @@ impl<'a> Parser<'a> {
 
     /// Parse comprehension clause: `for pattern in iterable [if condition]`
     /// Returns (pattern, iterable, condition)
-    fn parse_comprehension_clause(&mut self) -> Result<(Pattern, Expr, Option<Box<Expr>>), ParseError> {
+    fn parse_comprehension_clause(
+        &mut self,
+    ) -> Result<(Pattern, Expr, Option<Box<Expr>>), ParseError> {
         let pattern = self.parse_pattern()?;
         self.expect(&TokenKind::In)?;
         let iterable = self.parse_expression()?;
@@ -732,6 +734,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Create a slice expression with the given components
+    #[allow(dead_code)]
     fn make_slice(
         receiver: Expr,
         start: Option<Expr>,
@@ -745,7 +748,6 @@ impl<'a> Parser<'a> {
             step,
         }
     }
-
 }
 
 // Primary expression parsing (extracted for maintainability)

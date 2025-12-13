@@ -47,6 +47,38 @@ fn release_handle(id: i64) -> bool {
     FILE_HANDLES.with(|handles| handles.borrow_mut().remove(&id).is_some())
 }
 
+/// Helper to create an Option::Some value
+fn make_option_some(value: Value) -> Value {
+    Value::Enum {
+        enum_name: "Option".to_string(),
+        variant: "Some".to_string(),
+        payload: Some(Box::new(value)),
+    }
+}
+
+/// Helper to create an Option::None value
+fn make_option_none() -> Value {
+    Value::Enum {
+        enum_name: "Option".to_string(),
+        variant: "None".to_string(),
+        payload: None,
+    }
+}
+
+/// Helper to create an optional timestamp field from SystemTime
+fn make_timestamp_option(time_result: io::Result<std::time::SystemTime>) -> Value {
+    match time_result {
+        Ok(time) => {
+            if let Ok(duration) = time.duration_since(std::time::UNIX_EPOCH) {
+                make_option_some(Value::Int(duration.as_nanos() as i64))
+            } else {
+                make_option_none()
+            }
+        }
+        Err(_) => make_option_none(),
+    }
+}
+
 //==============================================================================
 // IoError Helpers
 //==============================================================================
@@ -306,71 +338,9 @@ pub fn native_fs_metadata(args: &[Value]) -> Result<Value, CompileError> {
             );
 
             // Timestamps (as Option)
-            if let Ok(modified) = meta.modified() {
-                if let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    fields.insert(
-                        "modified".to_string(),
-                        Value::Enum {
-                            enum_name: "Option".to_string(),
-                            variant: "Some".to_string(),
-                            payload: Some(Box::new(Value::Int(duration.as_nanos() as i64))),
-                        },
-                    );
-                }
-            } else {
-                fields.insert(
-                    "modified".to_string(),
-                    Value::Enum {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        payload: None,
-                    },
-                );
-            }
-
-            if let Ok(created) = meta.created() {
-                if let Ok(duration) = created.duration_since(std::time::UNIX_EPOCH) {
-                    fields.insert(
-                        "created".to_string(),
-                        Value::Enum {
-                            enum_name: "Option".to_string(),
-                            variant: "Some".to_string(),
-                            payload: Some(Box::new(Value::Int(duration.as_nanos() as i64))),
-                        },
-                    );
-                }
-            } else {
-                fields.insert(
-                    "created".to_string(),
-                    Value::Enum {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        payload: None,
-                    },
-                );
-            }
-
-            if let Ok(accessed) = meta.accessed() {
-                if let Ok(duration) = accessed.duration_since(std::time::UNIX_EPOCH) {
-                    fields.insert(
-                        "accessed".to_string(),
-                        Value::Enum {
-                            enum_name: "Option".to_string(),
-                            variant: "Some".to_string(),
-                            payload: Some(Box::new(Value::Int(duration.as_nanos() as i64))),
-                        },
-                    );
-                }
-            } else {
-                fields.insert(
-                    "accessed".to_string(),
-                    Value::Enum {
-                        enum_name: "Option".to_string(),
-                        variant: "None".to_string(),
-                        payload: None,
-                    },
-                );
-            }
+            fields.insert("modified".to_string(), make_timestamp_option(meta.modified()));
+            fields.insert("created".to_string(), make_timestamp_option(meta.created()));
+            fields.insert("accessed".to_string(), make_timestamp_option(meta.accessed()));
 
             // Permissions (Unix mode)
             #[cfg(unix)]
@@ -769,6 +739,27 @@ pub fn native_term_read(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 #[cfg(unix)]
+fn poll_stdin(timeout_ms: i32) -> Result<i32, i32> {
+    use std::os::unix::io::AsRawFd;
+    let fd = std::io::stdin().as_raw_fd();
+    
+    unsafe {
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        
+        let ret = libc::poll(&mut pfd, 1, timeout_ms);
+        if ret < 0 {
+            Err(-1)
+        } else {
+            Ok(ret)
+        }
+    }
+}
+
+#[cfg(unix)]
 pub fn native_term_read_timeout(args: &[Value]) -> Result<Value, CompileError> {
     let handle = extract_int(args, 0).unwrap_or(0);
     let len = extract_int(args, 2).unwrap_or(1) as usize;
@@ -778,28 +769,15 @@ pub fn native_term_read_timeout(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(-2));
     }
 
-    use std::os::unix::io::AsRawFd;
-    let fd = std::io::stdin().as_raw_fd();
-
-    unsafe {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-
-        let ret = libc::poll(&mut pfd, 1, timeout_ms);
-        if ret < 0 {
-            return Ok(Value::Int(-1));
-        }
-        if ret == 0 {
-            return Ok(Value::Int(-3)); // Timeout
-        }
-
-        let mut buffer = vec![0u8; len];
-        match std::io::stdin().read(&mut buffer) {
-            Ok(n) => Ok(Value::Int(n as i64)),
-            Err(e) => Ok(Value::Int(-(e.raw_os_error().unwrap_or(1) as i64))),
+    match poll_stdin(timeout_ms) {
+        Err(code) => Ok(Value::Int(code as i64)),
+        Ok(0) => Ok(Value::Int(-3)), // Timeout
+        Ok(_) => {
+            let mut buffer = vec![0u8; len];
+            match std::io::stdin().read(&mut buffer) {
+                Ok(n) => Ok(Value::Int(n as i64)),
+                Err(e) => Ok(Value::Int(-(e.raw_os_error().unwrap_or(1) as i64))),
+            }
         }
     }
 }
@@ -834,21 +812,9 @@ pub fn native_term_poll(args: &[Value]) -> Result<Value, CompileError> {
         return Ok(Value::Int(-2));
     }
 
-    use std::os::unix::io::AsRawFd;
-    let fd = std::io::stdin().as_raw_fd();
-
-    unsafe {
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
-        };
-
-        let ret = libc::poll(&mut pfd, 1, timeout_ms);
-        if ret < 0 {
-            return Ok(Value::Int(-1));
-        }
-        Ok(Value::Int(if ret > 0 { 1 } else { 0 }))
+    match poll_stdin(timeout_ms) {
+        Err(code) => Ok(Value::Int(code as i64)),
+        Ok(ret) => Ok(Value::Int(if ret > 0 { 1 } else { 0 })),
     }
 }
 

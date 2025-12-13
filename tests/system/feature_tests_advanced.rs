@@ -1,6 +1,8 @@
 //! Feature tests: Advanced features and public function coverage
 //! Features #62-95 and public API coverage
 
+#![allow(unused_imports, unused_variables, deprecated)]
+
 use simple_compiler::CompilerPipeline;
 use simple_driver::{run_code, Interpreter, RunConfig, Runner, RunningType};
 use simple_loader::ModuleLoader;
@@ -764,7 +766,7 @@ unit length(base: f64):
 distance: length = 5_km
 main = int(distance.to_m())
 "#,
-        "parse",  // Expects parse error for typed variable syntax "distance: length = ..."
+        "parse", // Expects parse error for typed variable syntax "distance: length = ..."
     );
 }
 
@@ -783,7 +785,7 @@ unit length(base: f64):
 a = 2_km
 main = a.to_m()
 "#,
-        "to_m",  // Expects error for .to_m() method not found
+        "to_m", // Expects error for .to_m() method not found
     );
 }
 
@@ -799,7 +801,7 @@ unit length(base: f64): m = 1.0, km = 1000.0
 distance = 100_km
 main = distance.to_m()
 "#,
-        "to_m",  // Expects error for .to_m() method not found
+        "to_m", // Expects error for .to_m() method not found
     );
 }
 
@@ -818,7 +820,7 @@ unit velocity = length / time
 speed = 100_km / 1_hr
 main = 1
 "#,
-        "parse",  // Expects parse error for `unit velocity = ...` syntax
+        "parse", // Expects parse error for `unit velocity = ...` syntax
     );
 }
 
@@ -838,7 +840,7 @@ duration = 10_s
 speed = distance / duration
 main = 1
 "#,
-        "parse",  // Expects parse error for `unit velocity = ...` syntax
+        "parse", // Expects parse error for `unit velocity = ...` syntax
     );
 }
 
@@ -854,7 +856,7 @@ unit UserId: i64 as uid
 user_id: UserId = 12345_uid
 main = int(user_id)
 "#,
-        "parse",  // Expects parse error for typed variable syntax
+        "parse", // Expects parse error for typed variable syntax
     );
 }
 
@@ -874,7 +876,7 @@ fn get_user(id: UserId) -> int:
 user = 42_uid
 main = get_user(user)
 "#,
-        "int",  // Expects error for int() cast or type mismatch
+        "int", // Expects error for int() cast or type mismatch
     );
 }
 
@@ -974,4 +976,3 @@ main = read_write_exec - read_only
         .expect("octal permissions");
     assert_eq!(result, 219); // 511 - 292
 }
-

@@ -3,7 +3,6 @@
 //! This module provides functionality to convert Settlement SSMF files
 //! into raw binary images suitable for flashing to embedded devices.
 
-
 /// Output format for teardown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
@@ -52,12 +51,12 @@ pub struct TeardownConfig {
 impl Default for TeardownConfig {
     fn default() -> Self {
         Self {
-            flash_base: 0x0800_0000,  // Common STM32 flash base
-            ram_base: 0x2000_0000,    // Common Cortex-M RAM base
-            stack_top: 0x2000_5000,   // 20KB RAM
+            flash_base: 0x0800_0000, // Common STM32 flash base
+            ram_base: 0x2000_0000,   // Common Cortex-M RAM base
+            stack_top: 0x2000_5000,  // 20KB RAM
             include_startup: true,
             alignment: 4,
-            fill_byte: 0xFF,          // Flash erased state
+            fill_byte: 0xFF, // Flash erased state
         }
     }
 }
@@ -69,7 +68,7 @@ impl TeardownConfig {
         Self {
             flash_base: 0x0800_0000,
             ram_base: 0x2000_0000,
-            stack_top: 0x2000_5000,  // 20KB RAM
+            stack_top: 0x2000_5000, // 20KB RAM
             include_startup: true,
             alignment: 4,
             fill_byte: 0xFF,
@@ -81,7 +80,7 @@ impl TeardownConfig {
         Self {
             flash_base: 0x0800_0000,
             ram_base: 0x2000_0000,
-            stack_top: 0x2002_0000,  // 128KB RAM
+            stack_top: 0x2002_0000, // 128KB RAM
             include_startup: true,
             alignment: 4,
             fill_byte: 0xFF,
@@ -93,7 +92,7 @@ impl TeardownConfig {
         Self {
             flash_base: 0x0000_0000,
             ram_base: 0x2000_0000,
-            stack_top: 0x2001_0000,  // 64KB RAM
+            stack_top: 0x2001_0000, // 64KB RAM
             include_startup: true,
             alignment: 4,
             fill_byte: 0xFF,
@@ -105,7 +104,7 @@ impl TeardownConfig {
         Self {
             flash_base: 0x4200_0000,
             ram_base: 0x3FC8_0000,
-            stack_top: 0x3FCE_4000,  // 400KB RAM
+            stack_top: 0x3FCE_4000, // 400KB RAM
             include_startup: true,
             alignment: 4,
             fill_byte: 0xFF,
@@ -117,7 +116,7 @@ impl TeardownConfig {
         Self {
             flash_base: 0x8000_0000,
             ram_base: 0x8800_0000,
-            stack_top: 0x8810_0000,  // 1MB stack area
+            stack_top: 0x8810_0000, // 1MB stack area
             include_startup: true,
             alignment: 4,
             fill_byte: 0x00,
@@ -168,10 +167,10 @@ impl SettlementHeaderMin {
 
         // Skip to offset 16 for section info
         let offset = 16;
-        header.code_offset = u64::from_le_bytes(bytes[offset..offset+8].try_into().ok()?);
-        header.code_size = u64::from_le_bytes(bytes[offset+8..offset+16].try_into().ok()?);
-        header.data_offset = u64::from_le_bytes(bytes[offset+16..offset+24].try_into().ok()?);
-        header.data_size = u64::from_le_bytes(bytes[offset+24..offset+32].try_into().ok()?);
+        header.code_offset = u64::from_le_bytes(bytes[offset..offset + 8].try_into().ok()?);
+        header.code_size = u64::from_le_bytes(bytes[offset + 8..offset + 16].try_into().ok()?);
+        header.data_offset = u64::from_le_bytes(bytes[offset + 16..offset + 24].try_into().ok()?);
+        header.data_size = u64::from_le_bytes(bytes[offset + 24..offset + 32].try_into().ok()?);
 
         if header.is_valid() {
             Some(header)
@@ -254,13 +253,7 @@ pub fn generate_intel_hex(data: &[u8], base_addr: u32, output: &mut [u8]) -> usi
         }
 
         let offset = (addr & 0xFFFF) as u16;
-        out_idx += write_hex_record(
-            output,
-            out_idx,
-            HexRecordType::Data,
-            offset,
-            chunk,
-        );
+        out_idx += write_hex_record(output, out_idx, HexRecordType::Data, offset, chunk);
 
         addr += chunk.len() as u32;
     }
@@ -348,7 +341,13 @@ pub fn generate_srec(data: &[u8], base_addr: u32, entry_point: u32, output: &mut
 }
 
 /// Write a single S-Record.
-fn write_srec_record(output: &mut [u8], offset: usize, rec_type: u8, addr: u32, data: &[u8]) -> usize {
+fn write_srec_record(
+    output: &mut [u8],
+    offset: usize,
+    rec_type: u8,
+    addr: u32,
+    data: &[u8],
+) -> usize {
     let mut idx = offset;
 
     // Start code

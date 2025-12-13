@@ -261,6 +261,9 @@ Source Code (.spl)
    Execution (main → exit code)
 ```
 
+### Syntax Notes
+- `match` arms accept both `case pattern:` (spec style) and `pattern =>` (existing tests); colon form requires a newline + indented block.
+
 ## Current Status
 
 | Component | Status |

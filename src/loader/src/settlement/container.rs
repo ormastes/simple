@@ -9,8 +9,7 @@ use std::sync::Arc;
 use crate::memory::{ExecutableMemory, MemoryAllocator, Protection};
 use crate::module::LoadedModule;
 use crate::smf::settlement::{
-    SettlementHeader,
-    SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVES, SSMF_FLAG_RELOADABLE,
+    SettlementHeader, SSMF_FLAG_EXECUTABLE, SSMF_FLAG_HAS_NATIVES, SSMF_FLAG_RELOADABLE,
 };
 
 use super::linker::SettlementLinker;
@@ -254,7 +253,9 @@ impl Settlement {
         resolve_imports: bool,
     ) -> Result<ModuleHandle, SettlementError> {
         // Use path as module name
-        let name = module.path.file_stem()
+        let name = module
+            .path
+            .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
@@ -289,22 +290,14 @@ impl Settlement {
         // Copy code to settlement
         let (code_ptr, _) = self.code_slots.get_memory(code_slots);
         unsafe {
-            std::ptr::copy_nonoverlapping(
-                module.code_mem.as_ptr(),
-                code_ptr,
-                code_size,
-            );
+            std::ptr::copy_nonoverlapping(module.code_mem.as_ptr(), code_ptr, code_size);
         }
 
         // Copy data to settlement
         if let Some(ref data_mem) = module.data_mem {
             let (data_ptr, _) = self.data_slots.get_memory(data_slots);
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data_mem.as_ptr(),
-                    data_ptr,
-                    data_size,
-                );
+                std::ptr::copy_nonoverlapping(data_mem.as_ptr(), data_ptr, data_size);
             }
         }
 
@@ -320,7 +313,9 @@ impl Settlement {
             let entry_offset = module.header.entry_point as usize;
             let settlement_addr = code_ptr as usize + entry_offset;
 
-            let func_idx = self.func_table.allocate(settlement_addr, handle.0 as u16, 1);
+            let func_idx = self
+                .func_table
+                .allocate(settlement_addr, handle.0 as u16, 1);
             functions.push(func_idx);
             func_indices.push(("__entry".to_string(), func_idx));
 
@@ -336,7 +331,9 @@ impl Settlement {
             if sym.sym_type == crate::smf::SymbolType::Function {
                 let offset = sym.value as usize;
                 let settlement_addr = code_ptr as usize + offset;
-                let func_idx = self.func_table.allocate(settlement_addr, handle.0 as u16, 1);
+                let func_idx = self
+                    .func_table
+                    .allocate(settlement_addr, handle.0 as u16, 1);
                 functions.push(func_idx);
 
                 let sym_name = module.symbols.symbol_name(sym).to_string();
@@ -345,7 +342,8 @@ impl Settlement {
         }
 
         // Register exports in linker
-        self.linker.register_exports(module, handle, code_ptr as usize, &func_indices);
+        self.linker
+            .register_exports(module, handle, code_ptr as usize, &func_indices);
 
         // Link module and resolve dependencies
         let dependencies = if resolve_imports {
@@ -363,13 +361,14 @@ impl Settlement {
             // Re-apply relocations with resolved imports
             if !link_result.resolved_imports.is_empty() {
                 // Get mutable slice to code
-                let _code_slice = unsafe {
-                    std::slice::from_raw_parts_mut(code_ptr, code_size)
-                };
+                let _code_slice = unsafe { std::slice::from_raw_parts_mut(code_ptr, code_size) };
 
                 // Create resolver that combines linker exports with native symbols
                 let _resolver = |name: &str| -> Option<usize> {
-                    link_result.resolved_imports.get(name).copied()
+                    link_result
+                        .resolved_imports
+                        .get(name)
+                        .copied()
                         .or_else(|| self.native_libs.resolve_symbol(name))
                 };
 
@@ -399,7 +398,7 @@ impl Settlement {
             functions: functions.clone(),
             globals: Vec::new(), // TODO: populate from module
             types: Vec::new(),   // TODO: populate from module
-            dependencies, // Now properly populated from linker
+            dependencies,        // Now properly populated from linker
             version: module.version,
             code_size,
             data_size,
@@ -472,7 +471,8 @@ impl Settlement {
 
     /// Resolve a symbol by name across all modules.
     pub fn resolve_symbol(&mut self, name: &str) -> Option<usize> {
-        self.linker.resolve_symbol(name)
+        self.linker
+            .resolve_symbol(name)
             .or_else(|| self.native_libs.resolve_symbol(name))
     }
 
@@ -517,7 +517,7 @@ impl Settlement {
     ) -> Result<(), SettlementError> {
         if !self.config.reloadable {
             return Err(SettlementError::InvalidModule(
-                "Settlement is not configured for hot reload".to_string()
+                "Settlement is not configured for hot reload".to_string(),
             ));
         }
 
@@ -563,11 +563,7 @@ impl Settlement {
         if let Some(ref data_mem) = new_module.data_mem {
             let (new_data_ptr, _) = self.data_slots.get_memory(new_data_slots);
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    data_mem.as_ptr(),
-                    new_data_ptr,
-                    new_data_size,
-                );
+                std::ptr::copy_nonoverlapping(data_mem.as_ptr(), new_data_ptr, new_data_size);
             }
         }
 
@@ -598,7 +594,8 @@ impl Settlement {
         }
 
         // Update linker exports
-        self.linker.update_exports(new_module, handle, new_code_ptr as usize, &func_indices);
+        self.linker
+            .update_exports(new_module, handle, new_code_ptr as usize, &func_indices);
 
         // Free old slots (after updating pointers)
         self.code_slots.free(old_code_slots);
@@ -853,22 +850,12 @@ impl Settlement {
 
     /// Get code region as byte slice.
     pub fn code_region_slice(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self.code_region.as_ptr(),
-                self.code_region.size(),
-            )
-        }
+        unsafe { std::slice::from_raw_parts(self.code_region.as_ptr(), self.code_region.size()) }
     }
 
     /// Get data region as byte slice.
     pub fn data_region_slice(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(
-                self.data_region.as_ptr(),
-                self.data_region.size(),
-            )
-        }
+        unsafe { std::slice::from_raw_parts(self.data_region.as_ptr(), self.data_region.size()) }
     }
 
     /// Get function table entries as slice.
@@ -911,11 +898,19 @@ impl Drop for Settlement {
         // to get ownership of the ExecutableMemory regions
         let code_region = std::mem::replace(
             &mut self.code_region,
-            ExecutableMemory { ptr: std::ptr::null_mut(), size: 0 },
+            ExecutableMemory {
+                ptr: std::ptr::null_mut(),
+                size: 0,
+                dealloc: |_, _| {},
+            },
         );
         let data_region = std::mem::replace(
             &mut self.data_region,
-            ExecutableMemory { ptr: std::ptr::null_mut(), size: 0 },
+            ExecutableMemory {
+                ptr: std::ptr::null_mut(),
+                size: 0,
+                dealloc: |_, _| {},
+            },
         );
 
         // Free allocated memory regions
@@ -940,9 +935,19 @@ mod tests {
             let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
             let ptr = unsafe { std::alloc::alloc(layout) };
             if ptr.is_null() {
-                Err(std::io::Error::new(std::io::ErrorKind::OutOfMemory, "Allocation failed"))
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    "Allocation failed",
+                ))
             } else {
-                Ok(ExecutableMemory { ptr, size })
+                Ok(ExecutableMemory {
+                    ptr,
+                    size,
+                    dealloc: |ptr, size| unsafe {
+                        let layout = std::alloc::Layout::from_size_align(size, 4096).unwrap();
+                        std::alloc::dealloc(ptr, layout);
+                    },
+                })
             }
         }
 
@@ -951,8 +956,7 @@ mod tests {
         }
 
         fn free(&self, mem: ExecutableMemory) -> std::io::Result<()> {
-            let layout = std::alloc::Layout::from_size_align(mem.size, 4096).unwrap();
-            unsafe { std::alloc::dealloc(mem.ptr, layout) };
+            drop(mem);
             Ok(())
         }
     }

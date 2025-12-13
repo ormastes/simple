@@ -26,7 +26,11 @@ macro_rules! as_typed_ptr {
 /// Normalize a Python-style index (handles negative indices)
 #[inline]
 fn normalize_index(index: i64, len: i64) -> i64 {
-    if index < 0 { len + index } else { index }
+    if index < 0 {
+        len + index
+    } else {
+        index
+    }
 }
 
 /// FNV-1a hash for strings (64-bit)
@@ -192,7 +196,12 @@ pub extern "C" fn rt_array_len(array: RuntimeValue) -> i64 {
 /// Get an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_get(array: RuntimeValue, index: i64) -> RuntimeValue {
-    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr!(
+        array,
+        HeapObjectType::Array,
+        RuntimeArray,
+        RuntimeValue::NIL
+    );
     unsafe {
         let len = (*arr).len as i64;
         let idx = normalize_index(index, len);
@@ -236,7 +245,12 @@ pub extern "C" fn rt_array_push(array: RuntimeValue, value: RuntimeValue) -> boo
 /// Pop an element from an array
 #[no_mangle]
 pub extern "C" fn rt_array_pop(array: RuntimeValue) -> RuntimeValue {
-    let arr = as_typed_ptr!(mut array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let arr = as_typed_ptr!(
+        mut array,
+        HeapObjectType::Array,
+        RuntimeArray,
+        RuntimeValue::NIL
+    );
     unsafe {
         if (*arr).len == 0 {
             return RuntimeValue::NIL;
@@ -284,7 +298,12 @@ pub extern "C" fn rt_tuple_new(len: u64) -> RuntimeValue {
 /// Get an element from a tuple
 #[no_mangle]
 pub extern "C" fn rt_tuple_get(tuple: RuntimeValue, index: u64) -> RuntimeValue {
-    let tup = as_typed_ptr!(tuple, HeapObjectType::Tuple, RuntimeTuple, RuntimeValue::NIL);
+    let tup = as_typed_ptr!(
+        tuple,
+        HeapObjectType::Tuple,
+        RuntimeTuple,
+        RuntimeValue::NIL
+    );
     unsafe {
         if index >= (*tup).len {
             return RuntimeValue::NIL;
@@ -356,7 +375,12 @@ pub extern "C" fn rt_string_len(string: RuntimeValue) -> i64 {
 /// Get a pointer to the string data
 #[no_mangle]
 pub extern "C" fn rt_string_data(string: RuntimeValue) -> *const u8 {
-    let str_ptr = as_typed_ptr!(string, HeapObjectType::String, RuntimeString, std::ptr::null());
+    let str_ptr = as_typed_ptr!(
+        string,
+        HeapObjectType::String,
+        RuntimeString,
+        std::ptr::null()
+    );
     unsafe { str_ptr.add(1) as *const u8 }
 }
 

@@ -82,9 +82,7 @@ fn test_jit_recursive_factorial() {
 
 #[test]
 fn test_jit_println_capture() {
-    use simple_runtime::value::{
-        rt_capture_stdout_start, rt_capture_stdout_stop,
-    };
+    use simple_runtime::value::{rt_capture_stdout_start, rt_capture_stdout_stop};
 
     // Use static provider explicitly to avoid TLS issues with dynamic loading
     let mut jit = JitCompiler::new_static().unwrap();
@@ -110,5 +108,9 @@ fn test_jit_println_capture() {
     let captured = rt_capture_stdout_stop();
 
     assert_eq!(result, 0);
-    assert_eq!(captured, "hello jit\n", "JIT println should be captured, got: '{}'", captured);
+    assert_eq!(
+        captured, "hello jit\n",
+        "JIT println should be captured, got: '{}'",
+        captured
+    );
 }

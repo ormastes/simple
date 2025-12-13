@@ -227,18 +227,18 @@ impl TargetConfig {
             PointerSize::Bits64 => Self {
                 arch,
                 pointer_bytes: 8,
-                value_bytes: 8,   // 64-bit tagged values
-                tag_bits: 3,     // 3 bits = 8 tags
-                heap_align: 8,   // 8-byte alignment for pointers
+                value_bytes: 8, // 64-bit tagged values
+                tag_bits: 3,    // 3 bits = 8 tags
+                heap_align: 8,  // 8-byte alignment for pointers
                 is_little_endian: true,
                 default_stack_size: 8 * 1024 * 1024, // 8 MB
             },
             PointerSize::Bits32 => Self {
                 arch,
                 pointer_bytes: 4,
-                value_bytes: 8,   // Still use 64-bit values for consistent semantics
-                tag_bits: 3,     // Same tagging scheme
-                heap_align: 8,   // 8-byte alignment for 64-bit values
+                value_bytes: 8, // Still use 64-bit values for consistent semantics
+                tag_bits: 3,    // Same tagging scheme
+                heap_align: 8,  // 8-byte alignment for 64-bit values
                 is_little_endian: true,
                 default_stack_size: 2 * 1024 * 1024, // 2 MB
             },
@@ -374,17 +374,23 @@ impl Target {
     pub fn parse(s: &str) -> Result<Self, TargetParseError> {
         let parts: Vec<&str> = s.split('-').collect();
 
-        let arch = parts.first().map(|s| s.parse()).transpose()?
+        let arch = parts
+            .first()
+            .map(|s| s.parse())
+            .transpose()?
             .unwrap_or(TargetArch::host());
 
-        let os = parts.get(1).map(|s| match s.to_lowercase().as_str() {
-            "linux" | "gnu" => TargetOS::Linux,
-            "windows" | "win" | "msvc" => TargetOS::Windows,
-            "macos" | "darwin" | "apple" => TargetOS::MacOS,
-            "freebsd" => TargetOS::FreeBSD,
-            "none" | "bare" | "unknown" => TargetOS::None,
-            _ => TargetOS::Any,
-        }).unwrap_or(TargetOS::host());
+        let os = parts
+            .get(1)
+            .map(|s| match s.to_lowercase().as_str() {
+                "linux" | "gnu" => TargetOS::Linux,
+                "windows" | "win" | "msvc" => TargetOS::Windows,
+                "macos" | "darwin" | "apple" => TargetOS::MacOS,
+                "freebsd" => TargetOS::FreeBSD,
+                "none" | "bare" | "unknown" => TargetOS::None,
+                _ => TargetOS::Any,
+            })
+            .unwrap_or(TargetOS::host());
 
         Ok(Self { arch, os })
     }
@@ -430,12 +436,21 @@ mod tests {
     fn test_parse_arch() {
         assert_eq!("x86_64".parse::<TargetArch>().unwrap(), TargetArch::X86_64);
         assert_eq!("amd64".parse::<TargetArch>().unwrap(), TargetArch::X86_64);
-        assert_eq!("aarch64".parse::<TargetArch>().unwrap(), TargetArch::Aarch64);
+        assert_eq!(
+            "aarch64".parse::<TargetArch>().unwrap(),
+            TargetArch::Aarch64
+        );
         assert_eq!("arm64".parse::<TargetArch>().unwrap(), TargetArch::Aarch64);
         assert_eq!("i686".parse::<TargetArch>().unwrap(), TargetArch::X86);
         assert_eq!("armv7".parse::<TargetArch>().unwrap(), TargetArch::Arm);
-        assert_eq!("riscv64".parse::<TargetArch>().unwrap(), TargetArch::Riscv64);
-        assert_eq!("riscv32".parse::<TargetArch>().unwrap(), TargetArch::Riscv32);
+        assert_eq!(
+            "riscv64".parse::<TargetArch>().unwrap(),
+            TargetArch::Riscv64
+        );
+        assert_eq!(
+            "riscv32".parse::<TargetArch>().unwrap(),
+            TargetArch::Riscv32
+        );
     }
 
     #[test]

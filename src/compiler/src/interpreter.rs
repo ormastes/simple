@@ -360,7 +360,12 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             Node::Struct(s) => {
                 // Register struct as a constructor-like callable
                 // Store in env as Constructor value so it can be called like Point(x, y)
-                env.insert(s.name.clone(), Value::Constructor { class_name: s.name.clone() });
+                env.insert(
+                    s.name.clone(),
+                    Value::Constructor {
+                        class_name: s.name.clone(),
+                    },
+                );
                 // Also register as a class so instantiation works
                 classes.insert(
                     s.name.clone(),
@@ -383,7 +388,12 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             Node::Class(c) => {
                 classes.insert(c.name.clone(), c.clone());
                 // Store in env as Constructor value so it can be called like MyClass()
-                env.insert(c.name.clone(), Value::Constructor { class_name: c.name.clone() });
+                env.insert(
+                    c.name.clone(),
+                    Value::Constructor {
+                        class_name: c.name.clone(),
+                    },
+                );
             }
             Node::Impl(impl_block) => {
                 let type_name = get_type_name(&impl_block.target_type);
@@ -496,9 +506,21 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 return Ok(0);
             }
             Node::Expression(expr) => {
-                if let Expr::FunctionalUpdate { target, method, args } = expr {
+                if let Expr::FunctionalUpdate {
+                    target,
+                    method,
+                    args,
+                } = expr
+                {
                     if let Some((name, new_value)) = handle_functional_update(
-                        target, method, args, &env, &functions, &classes, &enums, &impl_methods
+                        target,
+                        method,
+                        args,
+                        &env,
+                        &functions,
+                        &classes,
+                        &enums,
+                        &impl_methods,
                     )? {
                         env.insert(name, new_value);
                         continue;
@@ -506,7 +528,12 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 }
                 // Handle method calls on objects - need to persist mutations to self
                 let (_, update) = handle_method_call_with_self_update(
-                    expr, &env, &functions, &classes, &enums, &impl_methods
+                    expr,
+                    &env,
+                    &functions,
+                    &classes,
+                    &enums,
+                    &impl_methods,
                 )?;
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
@@ -557,32 +584,18 @@ pub(crate) fn exec_node(
             if let Some(value_expr) = &let_stmt.value {
                 // Handle method calls on objects - need to persist mutations to self
                 let (value, update) = handle_method_call_with_self_update(
-                    value_expr, env, functions, classes, enums, impl_methods
+                    value_expr,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
                 )?;
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
                 }
                 let is_mutable = let_stmt.mutability.is_mutable();
-                match &let_stmt.pattern {
-                    Pattern::Identifier(_) | Pattern::MutIdentifier(_) => {
-                        bind_let_pattern_element(&let_stmt.pattern, value, is_mutable, env);
-                    }
-                    Pattern::Tuple(patterns) => {
-                        // Allow tuple pattern to match both Tuple and Array
-                        let values: Vec<Value> = match value {
-                            Value::Tuple(v) => v,
-                            Value::Array(v) => v,
-                            _ => Vec::new(),
-                        };
-                        bind_collection_pattern(patterns, values, is_mutable, env);
-                    }
-                    Pattern::Array(patterns) => {
-                        if let Value::Array(values) = value {
-                            bind_collection_pattern(patterns, values, is_mutable, env);
-                        }
-                    }
-                    _ => {}
-                }
+                bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
             }
             Ok(Control::Next)
         }
@@ -624,7 +637,12 @@ pub(crate) fn exec_node(
                 }
                 // Handle method calls on objects - need to persist mutations to self
                 let (value, update) = handle_method_call_with_self_update(
-                    &assign.value, env, functions, classes, enums, impl_methods
+                    &assign.value,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
                 )?;
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
@@ -659,7 +677,9 @@ pub(crate) fn exec_node(
                             .chain(classes.keys().map(|s| s.as_str()))
                             .collect();
                         let mut msg = format!("undefined variable '{obj_name}'");
-                        if let Some(suggestion) = crate::error::typo::format_suggestion(obj_name, known_names) {
+                        if let Some(suggestion) =
+                            crate::error::typo::format_suggestion(obj_name, known_names)
+                        {
                             msg.push_str(&format!("; {}", suggestion));
                         }
                         Err(CompileError::Semantic(msg))
@@ -671,23 +691,31 @@ pub(crate) fn exec_node(
                 }
             } else if let Expr::Tuple(targets) = &assign.target {
                 // Handle tuple unpacking: (a, b) = (x, y)
-                let value = evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
+                let value =
+                    evaluate_expr(&assign.value, env, functions, classes, enums, impl_methods)?;
                 let values: Vec<Value> = match value {
                     Value::Tuple(v) => v,
                     Value::Array(v) => v,
-                    _ => return Err(CompileError::Semantic("tuple unpacking requires tuple or array on right side".into())),
+                    _ => {
+                        return Err(CompileError::Semantic(
+                            "tuple unpacking requires tuple or array on right side".into(),
+                        ))
+                    }
                 };
                 if targets.len() != values.len() {
                     return Err(CompileError::Semantic(format!(
                         "tuple unpacking length mismatch: expected {}, got {}",
-                        targets.len(), values.len()
+                        targets.len(),
+                        values.len()
                     )));
                 }
                 for (target_expr, val) in targets.iter().zip(values.into_iter()) {
                     if let Expr::Identifier(name) = target_expr {
                         env.insert(name.clone(), val);
                     } else {
-                        return Err(CompileError::Semantic("tuple unpacking target must be identifier".into()));
+                        return Err(CompileError::Semantic(
+                            "tuple unpacking target must be identifier".into(),
+                        ));
                     }
                 }
                 Ok(Control::Next)
@@ -735,9 +763,21 @@ pub(crate) fn exec_node(
         }
         Node::With(with_stmt) => exec_with(with_stmt, env, functions, classes, enums, impl_methods),
         Node::Expression(expr) => {
-            if let Expr::FunctionalUpdate { target, method, args } = expr {
+            if let Expr::FunctionalUpdate {
+                target,
+                method,
+                args,
+            } = expr
+            {
                 if let Some((name, new_value)) = handle_functional_update(
-                    target, method, args, env, functions, classes, enums, impl_methods
+                    target,
+                    method,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
                 )? {
                     env.insert(name, new_value);
                     return Ok(Control::Next);
@@ -745,7 +785,12 @@ pub(crate) fn exec_node(
             }
             // Handle method calls on objects - need to persist mutations to self
             let (_, update) = handle_method_call_with_self_update(
-                expr, env, functions, classes, enums, impl_methods
+                expr,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
             )?;
             if let Some((name, new_self)) = update {
                 env.insert(name, new_self);
@@ -801,9 +846,20 @@ fn exec_method_function(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     if let Value::Object { class, fields } = self_val {
-        exec_function(method, args, env, functions, classes, enums, impl_methods, Some((class.as_str(), fields)))
+        exec_function(
+            method,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            Some((class.as_str(), fields)),
+        )
     } else {
-        Err(CompileError::Semantic("exec_method_function called with non-object self".into()))
+        Err(CompileError::Semantic(
+            "exec_method_function called with non-object self".into(),
+        ))
     }
 }
 

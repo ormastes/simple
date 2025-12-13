@@ -132,8 +132,7 @@ fn test_lower_tuple_expression() {
 
 #[test]
 fn test_lower_empty_array() {
-    let module =
-        parse_and_lower("fn test() -> i64:\n    let arr = []\n    return 0\n").unwrap();
+    let module = parse_and_lower("fn test() -> i64:\n    let arr = []\n    return 0\n").unwrap();
 
     let func = &module.functions[0];
     assert_eq!(func.locals.len(), 1);
@@ -161,10 +160,9 @@ fn test_lower_function_call() {
 
 #[test]
 fn test_lower_if_expression() {
-    let module = parse_and_lower(
-        "fn test(x: i64) -> i64:\n    let y = if x > 0: 1 else: 0\n    return y\n",
-    )
-    .unwrap();
+    let module =
+        parse_and_lower("fn test(x: i64) -> i64:\n    let y = if x > 0: 1 else: 0\n    return y\n")
+            .unwrap();
 
     let func = &module.functions[0];
     assert_eq!(func.locals.len(), 1);
@@ -262,10 +260,9 @@ fn test_lower_field_access() {
 
 #[test]
 fn test_lower_assignment() {
-    let module = parse_and_lower(
-        "fn test() -> i64:\n    let mut x: i64 = 0\n    x = 42\n    return x\n",
-    )
-    .unwrap();
+    let module =
+        parse_and_lower("fn test() -> i64:\n    let mut x: i64 = 0\n    x = 42\n    return x\n")
+            .unwrap();
 
     let func = &module.functions[0];
     assert!(matches!(func.body[1], HirStmt::Assign { .. }));
@@ -281,8 +278,7 @@ fn test_lower_expression_statement() {
 
 #[test]
 fn test_infer_type_from_binary_arithmetic() {
-    let module =
-        parse_and_lower("fn test() -> i64:\n    let x = 1 + 2\n    return x\n").unwrap();
+    let module = parse_and_lower("fn test() -> i64:\n    let x = 1 + 2\n    return x\n").unwrap();
 
     let func = &module.functions[0];
     // The type should be inferred from the left operand (i64)

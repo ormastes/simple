@@ -316,10 +316,12 @@ fn main() {
                 .position(|a| a == "--target")
                 .and_then(|i| args.get(i + 1))
                 .map(|s| {
-                    s.parse::<TargetArch>().map_err(|e| {
-                        eprintln!("error: {}", e);
-                        std::process::exit(1);
-                    }).unwrap()
+                    s.parse::<TargetArch>()
+                        .map_err(|e| {
+                            eprintln!("error: {}", e);
+                            std::process::exit(1);
+                        })
+                        .unwrap()
                 })
                 .map(|arch| Target::new(arch, simple_common::target::TargetOS::host()));
 

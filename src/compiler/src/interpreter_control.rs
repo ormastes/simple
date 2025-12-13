@@ -333,6 +333,37 @@ fn exec_match(
     Ok(Control::Next)
 }
 
+fn match_sequence_pattern(
+    value: &Value,
+    patterns: &[Pattern],
+    bindings: &mut HashMap<String, Value>,
+    enums: &Enums,
+    is_tuple: bool,
+) -> Result<bool, CompileError> {
+    let values = if is_tuple {
+        if let Value::Tuple(vals) = value {
+            vals
+        } else {
+            return Ok(false);
+        }
+    } else if let Value::Array(vals) = value {
+        vals
+    } else {
+        return Ok(false);
+    };
+    
+    if patterns.len() != values.len() {
+        return Ok(false);
+    }
+    
+    for (pat, val) in patterns.iter().zip(values.iter()) {
+        if !pattern_matches(pat, val, bindings, enums)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn pattern_matches(
     pattern: &Pattern,
     value: &Value,
@@ -415,35 +446,8 @@ fn pattern_matches(
             Ok(false)
         }
 
-        Pattern::Tuple(patterns) => {
-            if let Value::Tuple(values) = value {
-                if patterns.len() != values.len() {
-                    return Ok(false);
-                }
-                for (pat, val) in patterns.iter().zip(values.iter()) {
-                    if !pattern_matches(pat, val, bindings, enums)? {
-                        return Ok(false);
-                    }
-                }
-                return Ok(true);
-            }
-            Ok(false)
-        }
-
-        Pattern::Array(patterns) => {
-            if let Value::Array(values) = value {
-                if patterns.len() != values.len() {
-                    return Ok(false);
-                }
-                for (pat, val) in patterns.iter().zip(values.iter()) {
-                    if !pattern_matches(pat, val, bindings, enums)? {
-                        return Ok(false);
-                    }
-                }
-                return Ok(true);
-            }
-            Ok(false)
-        }
+        Pattern::Tuple(patterns) => match_sequence_pattern(value, patterns, bindings, enums, true),
+        Pattern::Array(patterns) => match_sequence_pattern(value, patterns, bindings, enums, false),
 
         Pattern::Struct { name, fields } => {
             if let Value::Object { class, fields: obj_fields } = value {

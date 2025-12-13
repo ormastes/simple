@@ -158,7 +158,10 @@ impl Backend for SoftwareBackend {
     fn load_kernel_binary(&self, _binary: &[u8], name: &str) -> GpuResult<KernelHandle> {
         // Software backend doesn't execute binaries - just store the name
         let handle = next_handle();
-        self.kernels.lock().unwrap().insert(handle, name.to_string());
+        self.kernels
+            .lock()
+            .unwrap()
+            .insert(handle, name.to_string());
         Ok(handle)
     }
 

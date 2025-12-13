@@ -16,7 +16,7 @@ pub const SPK_FLAG_HAS_RESOURCES: u16 = 0x0001;
 pub const SPK_FLAG_HAS_MANIFEST: u16 = 0x0002;
 pub const SPK_FLAG_COMPRESSED_RESOURCES: u16 = 0x0004;
 pub const SPK_FLAG_HAS_STDLIB: u16 = 0x0008;
-pub const SPK_FLAG_STANDALONE: u16 = 0x0010;  // All dependencies bundled
+pub const SPK_FLAG_STANDALONE: u16 = 0x0010; // All dependencies bundled
 
 /// Package trailer - located at EOF - TRAILER_SIZE
 ///
@@ -112,9 +112,8 @@ impl PackageTrailer {
         let trailer_bytes = &bytes[start..];
 
         // Safety: PackageTrailer is repr(C) with only primitive types
-        let trailer = unsafe {
-            std::ptr::read_unaligned(trailer_bytes.as_ptr() as *const PackageTrailer)
-        };
+        let trailer =
+            unsafe { std::ptr::read_unaligned(trailer_bytes.as_ptr() as *const PackageTrailer) };
 
         if trailer.is_valid() {
             Some(trailer)
@@ -141,10 +140,7 @@ impl PackageTrailer {
         let mut bytes = [0u8; Self::SIZE];
         // Safety: PackageTrailer is repr(C) with only primitive types
         unsafe {
-            std::ptr::write_unaligned(
-                bytes.as_mut_ptr() as *mut PackageTrailer,
-                *self,
-            );
+            std::ptr::write_unaligned(bytes.as_mut_ptr() as *mut PackageTrailer, *self);
         }
         bytes
     }
@@ -205,7 +201,8 @@ impl ManifestSection {
             return None;
         }
 
-        let manifest_toml = String::from_utf8(bytes[offset..offset + manifest_len].to_vec()).ok()?;
+        let manifest_toml =
+            String::from_utf8(bytes[offset..offset + manifest_len].to_vec()).ok()?;
         offset += manifest_len;
 
         // Read lock

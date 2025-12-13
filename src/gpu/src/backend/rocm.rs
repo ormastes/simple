@@ -100,7 +100,10 @@ fn hip_check(result: HipError) -> GpuResult<()> {
     if result == HIP_SUCCESS {
         Ok(())
     } else {
-        Err(GpuError::BackendError(format!("HIP/ROCm error: {}", result)))
+        Err(GpuError::BackendError(format!(
+            "HIP/ROCm error: {}",
+            result
+        )))
     }
 }
 
@@ -339,14 +342,11 @@ impl Backend for RocmBackend {
             max_work_group_invocations: self
                 .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)?
                 as u32,
-            max_work_groups_x: self
-                .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?
+            max_work_groups_x: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_X)?
                 as u32,
-            max_work_groups_y: self
-                .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?
+            max_work_groups_y: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Y)?
                 as u32,
-            max_work_groups_z: self
-                .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?
+            max_work_groups_z: self.get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_GRID_DIM_Z)?
                 as u32,
             shared_memory_size: self
                 .get_attribute(device, HIP_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK)?
@@ -383,13 +383,7 @@ impl Backend for RocmBackend {
         Ok(())
     }
 
-    fn memcpy(
-        &self,
-        dst: *mut u8,
-        src: *const u8,
-        size: usize,
-        kind: MemcpyKind,
-    ) -> GpuResult<()> {
+    fn memcpy(&self, dst: *mut u8, src: *const u8, size: usize, kind: MemcpyKind) -> GpuResult<()> {
         let hip_kind = match kind {
             MemcpyKind::HostToDevice => HIP_MEMCPY_HOST_TO_DEVICE,
             MemcpyKind::DeviceToHost => HIP_MEMCPY_DEVICE_TO_HOST,

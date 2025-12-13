@@ -102,7 +102,13 @@ fn compile_yield<M: Module>(
             let _ = builder.ins().call(set_state_ref, &[gen_param, next_state]);
 
             let val = ctx.vreg_values[&value];
-            builder.ins().return_(&[val]);
+            // Wrap the yielded value as a RuntimeValue so the dispatcher ABI
+            // matches the runtime's expectations.
+            let wrap_id = ctx.runtime_funcs["rt_value_int"];
+            let wrap_ref = ctx.module.declare_func_in_func(wrap_id, builder.func);
+            let wrap_call = builder.ins().call(wrap_ref, &[val]);
+            let wrapped = builder.inst_results(wrap_call)[0];
+            builder.ins().return_(&[wrapped]);
             return Ok(());
         }
     }

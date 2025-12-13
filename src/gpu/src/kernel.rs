@@ -1,11 +1,13 @@
 //! GPU Kernel Definitions
 
-
 /// A parameter type for GPU kernels.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelParamType {
     /// Storage buffer (read-write).
-    StorageBuffer { element_type: String, readonly: bool },
+    StorageBuffer {
+        element_type: String,
+        readonly: bool,
+    },
     /// Uniform buffer (read-only constants).
     UniformBuffer { element_type: String },
     /// Scalar value.

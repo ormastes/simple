@@ -298,6 +298,24 @@ pub(crate) fn evaluate_expr(
             impl_methods,
         ),
         Expr::FieldAccess { receiver, field } => {
+            // Support module-style access (lib.foo) by resolving directly to functions/classes
+            if let Expr::Identifier(module_name) = receiver.as_ref() {
+                if env.get(module_name).is_none() {
+                    if let Some(func) = functions.get(field) {
+                        return Ok(Value::Function {
+                            name: field.clone(),
+                            def: Box::new(func.clone()),
+                            captured_env: Env::new(),
+                        });
+                    }
+                    if classes.contains_key(field) {
+                        return Ok(Value::Constructor {
+                            class_name: field.clone(),
+                        });
+                    }
+                }
+            }
+
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
                 .deref_pointer();
             match recv_val {
@@ -382,8 +400,18 @@ pub(crate) fn evaluate_expr(
                             "unknown variant {variant} for enum {enum_name}"
                         )))
                     }
+                } else if let Some(func) = functions.get(variant) {
+                    Ok(Value::Function {
+                        name: variant.clone(),
+                        def: Box::new(func.clone()),
+                        captured_env: Env::new(),
+                    })
+                } else if classes.contains_key(variant) {
+                    Ok(Value::Constructor {
+                        class_name: variant.clone(),
+                    })
                 } else {
-                    Err(CompileError::Semantic(format!("unknown enum: {enum_name}")))
+                    Err(CompileError::Semantic(format!("unknown path: {:?}::{variant}", segments[0])))
                 }
             } else {
                 Err(CompileError::Semantic(format!(
