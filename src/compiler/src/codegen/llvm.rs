@@ -4,6 +4,8 @@
 /// - 32-bit architecture support (i686, armv7, riscv32)
 /// - Alternative 64-bit backend option
 /// - Shared MIR transforms and runtime FFI specs
+///
+/// Requires the `llvm` feature flag and LLVM 18 toolchain to be enabled.
 
 use crate::codegen::backend_trait::NativeBackend;
 use crate::error::CompileError;
@@ -11,17 +13,37 @@ use crate::hir::TypeId;
 use crate::mir::{MirFunction, MirModule};
 use simple_common::target::Target;
 
+#[cfg(feature = "llvm")]
+use inkwell::context::Context;
+
 /// LLVM-based code generator
+#[derive(Debug)]
 pub struct LlvmBackend {
     target: Target,
+    #[cfg(feature = "llvm")]
+    context: Context,
 }
 
 impl LlvmBackend {
     /// Create a new LLVM backend for the given target
     pub fn new(target: Target) -> Result<Self, CompileError> {
-        // TODO: Check LLVM availability
-        // TODO: Validate target triple support
-        Ok(Self { target })
+        #[cfg(not(feature = "llvm"))]
+        {
+            let _ = target; // Suppress unused warning when feature disabled
+            return Err(CompileError::Semantic(
+                "LLVM backend requires 'llvm' feature flag. \
+                 Build with: cargo build --features llvm".to_string()
+            ));
+        }
+        
+        #[cfg(feature = "llvm")]
+        {
+            // TODO: Validate target triple support
+            Ok(Self {
+                target,
+                context: Context::create(),
+            })
+        }
     }
 
     /// Get the target for this backend
