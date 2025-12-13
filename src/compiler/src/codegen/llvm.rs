@@ -15,13 +15,36 @@ use simple_common::target::Target;
 
 #[cfg(feature = "llvm")]
 use inkwell::context::Context;
+#[cfg(feature = "llvm")]
+use inkwell::module::Module;
+#[cfg(feature = "llvm")]
+use inkwell::builder::Builder;
+#[cfg(feature = "llvm")]
+use inkwell::types::{BasicTypeEnum, IntType, FloatType};
+#[cfg(feature = "llvm")]
+use inkwell::values::FunctionValue;
+#[cfg(feature = "llvm")]
+use std::cell::RefCell;
 
 /// LLVM-based code generator
-#[derive(Debug)]
 pub struct LlvmBackend {
     target: Target,
     #[cfg(feature = "llvm")]
     context: Context,
+    #[cfg(feature = "llvm")]
+    module: RefCell<Option<Module<'static>>>,
+    #[cfg(feature = "llvm")]
+    builder: RefCell<Option<Builder<'static>>>,
+}
+
+// Manual Debug implementation since Context/Module/Builder don't implement Debug
+impl std::fmt::Debug for LlvmBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlvmBackend")
+            .field("target", &self.target)
+            .field("has_module", &cfg!(feature = "llvm"))
+            .finish()
+    }
 }
 
 impl LlvmBackend {
@@ -38,10 +61,11 @@ impl LlvmBackend {
         
         #[cfg(feature = "llvm")]
         {
-            // TODO: Validate target triple support
             Ok(Self {
                 target,
                 context: Context::create(),
+                module: RefCell::new(None),
+                builder: RefCell::new(None),
             })
         }
     }
@@ -84,7 +108,7 @@ impl LlvmBackend {
         }
     }
 
-    /// Map a Simple type to an LLVM type
+    /// Map a Simple type to an LLVM type (returns LlvmType for non-feature builds)
     pub fn map_type(&self, ty: &TypeId) -> Result<LlvmType, CompileError> {
         use crate::hir::TypeId as T;
         match *ty {
@@ -99,12 +123,40 @@ impl LlvmBackend {
         }
     }
 
+    /// Get actual LLVM BasicTypeEnum for a TypeId (feature-gated)
+    #[cfg(feature = "llvm")]
+    fn llvm_type(&self, ty: &TypeId) -> Result<BasicTypeEnum<'static>, CompileError> {
+        use crate::hir::TypeId as T;
+        match *ty {
+            T::I32 | T::U32 => Ok(self.context.i32_type().into()),
+            T::I64 | T::U64 => Ok(self.context.i64_type().into()),
+            T::F32 => Ok(self.context.f32_type().into()),
+            T::F64 => Ok(self.context.f64_type().into()),
+            T::BOOL => Ok(self.context.bool_type().into()),
+            _ => Err(CompileError::Semantic(format!("Unsupported LLVM type: {:?}", ty))),
+        }
+    }
+
     /// Create an LLVM module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn create_module(&self, name: &str) -> Result<(), CompileError> {
         // Create module with the context
-        let _module = self.context.create_module(name);
-        // TODO: Store module for later use
+        let module = self.context.create_module(name);
+        
+        // Set target triple
+        let triple = self.get_target_triple();
+        module.set_triple(&inkwell::targets::TargetTriple::create(&triple));
+        
+        // Store module (using unsafe to extend lifetime - this is safe because
+        // the module is owned by the backend and won't outlive the context)
+        let module_static: Module<'static> = unsafe { std::mem::transmute(module) };
+        *self.module.borrow_mut() = Some(module_static);
+        
+        // Create builder
+        let builder = self.context.create_builder();
+        let builder_static: Builder<'static> = unsafe { std::mem::transmute(builder) };
+        *self.builder.borrow_mut() = Some(builder_static);
+        
         Ok(())
     }
 
@@ -117,19 +169,33 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     pub fn create_function_signature(
         &self,
-        _name: &str,
+        name: &str,
         params: &[TypeId],
         ret_type: &TypeId,
     ) -> Result<(), CompileError> {
+        let module = self.module.borrow();
+        let module = module.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        
         // Map parameter types
-        let _param_types: Result<Vec<_>, _> = params.iter()
-            .map(|ty| self.map_type(ty))
+        let param_types: Result<Vec<_>, _> = params.iter()
+            .map(|ty| self.llvm_type(ty).map(|t| t.into()))
             .collect();
+        let param_types = param_types?;
         
         // Map return type
-        let _ret = self.map_type(ret_type)?;
+        let ret_llvm = self.llvm_type(ret_type)?;
         
-        // TODO: Create actual LLVM function type and add to module
+        // Create function type
+        let fn_type = match ret_llvm {
+            BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
+            _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
+        };
+        
+        // Add function to module
+        let _function = module.add_function(name, fn_type, None);
+        
         Ok(())
     }
 
@@ -140,6 +206,39 @@ impl LlvmBackend {
         _params: &[TypeId],
         _ret_type: &TypeId,
     ) -> Result<(), CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+    }
+
+    /// Get LLVM IR as string (for debugging/testing)
+    #[cfg(feature = "llvm")]
+    pub fn get_ir(&self) -> Result<String, CompileError> {
+        let module = self.module.borrow();
+        let module = module.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        
+        Ok(module.print_to_string().to_string())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn get_ir(&self) -> Result<String, CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+    }
+
+    /// Verify the LLVM module
+    #[cfg(feature = "llvm")]
+    pub fn verify(&self) -> Result<(), CompileError> {
+        let module = self.module.borrow();
+        let module = module.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        
+        match module.verify() {
+            Ok(_) => Ok(()),
+            Err(e) => Err(CompileError::Semantic(format!("LLVM verification failed: {}", e))),
+        }
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn verify(&self) -> Result<(), CompileError> {
         Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
