@@ -176,4 +176,61 @@ mod tests {
         let target_64 = Target::new(TargetArch::X86_64, TargetOS::Linux);
         assert!(matches!(BackendKind::for_target(&target_64), BackendKind::Cranelift));
     }
+
+    /// Test LLVM module creation
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_llvm_module_creation() {
+        let target = Target::new(TargetArch::X86, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        // Verify module can be created
+        assert!(backend.create_module("test_module").is_ok());
+    }
+
+    /// Test LLVM function signature generation
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_llvm_function_signature() {
+        use crate::hir::TypeId as T;
+        
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        // Test simple function signature: fn(i32, i32) -> i32
+        let params = vec![T::I32, T::I32];
+        let ret_type = T::I32;
+        
+        let sig = backend.create_function_signature("add", &params, &ret_type);
+        assert!(sig.is_ok());
+    }
+
+    /// Test LLVM target triple mapping
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_target_triple_mapping() {
+        // Test 32-bit x86
+        let target_32 = Target::new(TargetArch::X86, TargetOS::Linux);
+        let backend_32 = LlvmBackend::new(target_32).unwrap();
+        let triple_32 = backend_32.get_target_triple();
+        assert!(triple_32.contains("i686") || triple_32.contains("i386"));
+        
+        // Test 64-bit x86
+        let target_64 = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend_64 = LlvmBackend::new(target_64).unwrap();
+        let triple_64 = backend_64.get_target_triple();
+        assert!(triple_64.contains("x86_64"));
+        
+        // Test 32-bit ARM
+        let target_arm = Target::new(TargetArch::Arm, TargetOS::Linux);
+        let backend_arm = LlvmBackend::new(target_arm).unwrap();
+        let triple_arm = backend_arm.get_target_triple();
+        assert!(triple_arm.contains("arm") || triple_arm.contains("armv7"));
+        
+        // Test 32-bit RISC-V
+        let target_rv32 = Target::new(TargetArch::Riscv32, TargetOS::Linux);
+        let backend_rv32 = LlvmBackend::new(target_rv32).unwrap();
+        let triple_rv32 = backend_rv32.get_target_triple();
+        assert!(triple_rv32.contains("riscv32"));
+    }
 }

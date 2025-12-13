@@ -31,9 +31,10 @@
 - [x] Share runtime FFI specs (future)
 - [ ] Implement for Cranelift (adapter - future)
 
-### Phase 4: Function Compilation ⏳ IN PROGRESS
-- [ ] LLVM module creation
-- [ ] LLVM function signatures
+### Phase 4: Function Compilation 🚧 IN PROGRESS
+- [x] LLVM module creation
+- [x] Target triple mapping (all 6 architectures)
+- [x] LLVM function signatures (stub)
 - [ ] Block lowering
 - [ ] Instruction lowering (BinOp, UnaryOp, etc.)
 - [ ] Control flow (Branch, Jump, Return)

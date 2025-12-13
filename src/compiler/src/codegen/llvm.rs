@@ -51,6 +51,31 @@ impl LlvmBackend {
         &self.target
     }
 
+    /// Get the LLVM target triple string for this target
+    pub fn get_target_triple(&self) -> String {
+        use simple_common::target::{TargetArch, TargetOS};
+        
+        let arch_str = match self.target.arch {
+            TargetArch::X86_64 => "x86_64",
+            TargetArch::Aarch64 => "aarch64",
+            TargetArch::X86 => "i686",
+            TargetArch::Arm => "armv7",
+            TargetArch::Riscv64 => "riscv64",
+            TargetArch::Riscv32 => "riscv32",
+        };
+        
+        let os_str = match self.target.os {
+            TargetOS::Linux => "unknown-linux-gnu",
+            TargetOS::Windows => "pc-windows-msvc",
+            TargetOS::MacOS => "apple-darwin",
+            TargetOS::FreeBSD => "unknown-freebsd",
+            TargetOS::None => "unknown-none-elf",
+            TargetOS::Any => "unknown-unknown",
+        };
+        
+        format!("{}-{}", arch_str, os_str)
+    }
+
     /// Get pointer width for this target
     pub fn pointer_width(&self) -> u32 {
         match self.target.arch.pointer_size() {
@@ -72,6 +97,50 @@ impl LlvmBackend {
             T::BOOL => Ok(LlvmType::I1),
             _ => Err(CompileError::Semantic(format!("Unsupported type in LLVM backend: {:?}", ty))),
         }
+    }
+
+    /// Create an LLVM module (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn create_module(&self, name: &str) -> Result<(), CompileError> {
+        // Create module with the context
+        let _module = self.context.create_module(name);
+        // TODO: Store module for later use
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn create_module(&self, _name: &str) -> Result<(), CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+    }
+
+    /// Create LLVM function signature (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn create_function_signature(
+        &self,
+        _name: &str,
+        params: &[TypeId],
+        ret_type: &TypeId,
+    ) -> Result<(), CompileError> {
+        // Map parameter types
+        let _param_types: Result<Vec<_>, _> = params.iter()
+            .map(|ty| self.map_type(ty))
+            .collect();
+        
+        // Map return type
+        let _ret = self.map_type(ret_type)?;
+        
+        // TODO: Create actual LLVM function type and add to module
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn create_function_signature(
+        &self,
+        _name: &str,
+        _params: &[TypeId],
+        _ret_type: &TypeId,
+    ) -> Result<(), CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Compile a MIR function to LLVM IR
