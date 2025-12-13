@@ -47,6 +47,15 @@ impl std::fmt::Debug for LlvmBackend {
     }
 }
 
+/// Binary operation types
+#[derive(Debug, Clone, Copy)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
 impl LlvmBackend {
     /// Create a new LLVM backend for the given target
     pub fn new(target: Target) -> Result<Self, CompileError> {
@@ -316,6 +325,117 @@ impl LlvmBackend {
         _params: &[TypeId],
         _ret_type: &TypeId,
         _constant_return: i32,
+    ) -> Result<(), CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+    }
+
+    /// Compile a function with binary operation (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn compile_binop_function(
+        &self,
+        name: &str,
+        param1_ty: &TypeId,
+        param2_ty: &TypeId,
+        ret_type: &TypeId,
+        op: BinOp,
+    ) -> Result<(), CompileError> {
+        let module = self.module.borrow();
+        let module = module.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        
+        let builder = self.builder.borrow();
+        let builder = builder.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+        
+        // Map parameter types
+        let p1_llvm = self.llvm_type(param1_ty)?;
+        let p2_llvm = self.llvm_type(param2_ty)?;
+        let ret_llvm = self.llvm_type(ret_type)?;
+        
+        // Create function type
+        let fn_type = match ret_llvm {
+            BasicTypeEnum::IntType(t) => {
+                t.fn_type(&[p1_llvm.into(), p2_llvm.into()], false)
+            },
+            BasicTypeEnum::FloatType(t) => {
+                t.fn_type(&[p1_llvm.into(), p2_llvm.into()], false)
+            },
+            _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
+        };
+        
+        // Add function to module
+        let function = module.add_function(name, fn_type, None);
+        
+        // Create entry basic block
+        let entry_block = self.context.append_basic_block(function, "entry");
+        builder.position_at_end(entry_block);
+        
+        // Get function parameters
+        let param1 = function.get_nth_param(0)
+            .ok_or_else(|| CompileError::Semantic("Missing param 0".to_string()))?;
+        let param2 = function.get_nth_param(1)
+            .ok_or_else(|| CompileError::Semantic("Missing param 1".to_string()))?;
+        
+        // Build binary operation
+        let result = match (&ret_llvm, op) {
+            (BasicTypeEnum::IntType(_), BinOp::Add) => {
+                builder.build_int_add(param1.into_int_value(), param2.into_int_value(), "add")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?
+                    .into()
+            },
+            (BasicTypeEnum::IntType(_), BinOp::Sub) => {
+                builder.build_int_sub(param1.into_int_value(), param2.into_int_value(), "sub")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build sub: {}", e)))?
+                    .into()
+            },
+            (BasicTypeEnum::IntType(_), BinOp::Mul) => {
+                builder.build_int_mul(param1.into_int_value(), param2.into_int_value(), "mul")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build mul: {}", e)))?
+                    .into()
+            },
+            (BasicTypeEnum::IntType(_), BinOp::Div) => {
+                builder.build_int_signed_div(param1.into_int_value(), param2.into_int_value(), "div")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build div: {}", e)))?
+                    .into()
+            },
+            (BasicTypeEnum::FloatType(_), BinOp::Add) => {
+                builder.build_float_add(param1.into_float_value(), param2.into_float_value(), "fadd")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build fadd: {}", e)))?
+                    .into()
+            },
+            (BasicTypeEnum::FloatType(_), BinOp::Sub) => {
+                builder.build_float_sub(param1.into_float_value(), param2.into_float_value(), "fsub")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build fsub: {}", e)))?
+                    .into()
+            },
+            (BasicTypeEnum::FloatType(_), BinOp::Mul) => {
+                builder.build_float_mul(param1.into_float_value(), param2.into_float_value(), "fmul")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build fmul: {}", e)))?
+                    .into()
+            },
+            (BasicTypeEnum::FloatType(_), BinOp::Div) => {
+                builder.build_float_div(param1.into_float_value(), param2.into_float_value(), "fdiv")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build fdiv: {}", e)))?
+                    .into()
+            },
+            _ => return Err(CompileError::Semantic(format!("Unsupported binop: {:?}", op))),
+        };
+        
+        // Build return instruction
+        builder.build_return(Some(&result))
+            .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
+        
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn compile_binop_function(
+        &self,
+        _name: &str,
+        _param1_ty: &TypeId,
+        _param2_ty: &TypeId,
+        _ret_type: &TypeId,
+        _op: BinOp,
     ) -> Result<(), CompileError> {
         Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
