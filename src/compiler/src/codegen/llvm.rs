@@ -5,7 +5,10 @@
 /// - Alternative 64-bit backend option
 /// - Shared MIR transforms and runtime FFI specs
 
+use crate::codegen::backend_trait::NativeBackend;
 use crate::error::CompileError;
+use crate::hir::TypeId;
+use crate::mir::{MirFunction, MirModule};
 use simple_common::target::Target;
 
 /// LLVM-based code generator
@@ -21,6 +24,11 @@ impl LlvmBackend {
         Ok(Self { target })
     }
 
+    /// Get the target for this backend
+    pub fn target(&self) -> &Target {
+        &self.target
+    }
+
     /// Get pointer width for this target
     pub fn pointer_width(&self) -> u32 {
         match self.target.arch.pointer_size() {
@@ -30,15 +38,17 @@ impl LlvmBackend {
     }
 
     /// Map a Simple type to an LLVM type
-    pub fn map_type(&self, ty: &Type) -> Result<LlvmType, CompileError> {
-        match ty {
-            Type::I32 => Ok(LlvmType::I32),
-            Type::I64 => Ok(LlvmType::I64),
-            Type::U32 => Ok(LlvmType::I32), // LLVM doesn't distinguish signed/unsigned at type level
-            Type::U64 => Ok(LlvmType::I64),
-            Type::F32 => Ok(LlvmType::F32),
-            Type::F64 => Ok(LlvmType::F64),
-            Type::Bool => Ok(LlvmType::I1),
+    pub fn map_type(&self, ty: &TypeId) -> Result<LlvmType, CompileError> {
+        use crate::hir::TypeId as T;
+        match *ty {
+            T::I32 => Ok(LlvmType::I32),
+            T::I64 => Ok(LlvmType::I64),
+            T::U32 => Ok(LlvmType::I32), // LLVM doesn't distinguish signed/unsigned at type level
+            T::U64 => Ok(LlvmType::I64),
+            T::F32 => Ok(LlvmType::F32),
+            T::F64 => Ok(LlvmType::F64),
+            T::BOOL => Ok(LlvmType::I1),
+            _ => Err(CompileError::Semantic(format!("Unsupported type in LLVM backend: {:?}", ty))),
         }
     }
 
@@ -52,6 +62,40 @@ impl LlvmBackend {
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
         // TODO: Implement object emission
         Ok(vec![])
+    }
+}
+
+/// Implement the NativeBackend trait for LLVM
+impl NativeBackend for LlvmBackend {
+    fn target(&self) -> &Target {
+        &self.target
+    }
+
+    fn compile(&mut self, module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        // Compile each function
+        for func in &module.functions {
+            self.compile_function(func)?;
+        }
+        
+        // Emit object code
+        self.emit_object(module)
+    }
+
+    fn name(&self) -> &'static str {
+        "llvm"
+    }
+
+    fn supports_target(target: &Target) -> bool {
+        // LLVM supports all architectures we care about
+        // In the future, we might check for LLVM toolchain availability here
+        match target.arch {
+            simple_common::target::TargetArch::X86_64
+            | simple_common::target::TargetArch::Aarch64
+            | simple_common::target::TargetArch::X86
+            | simple_common::target::TargetArch::Arm
+            | simple_common::target::TargetArch::Riscv64
+            | simple_common::target::TargetArch::Riscv32 => true,
+        }
     }
 }
 
@@ -69,60 +113,4 @@ pub enum LlvmType {
     Pointer(Box<LlvmType>),
     Struct(Vec<LlvmType>),
     Array(Box<LlvmType>, usize),
-}
-
-// Placeholder types for testing
-#[derive(Debug)]
-pub struct MirModule {
-    pub functions: Vec<MirFunction>,
-}
-
-#[derive(Debug)]
-pub struct MirFunction {
-    pub name: String,
-    pub params: Vec<(VReg, Type)>,
-    pub return_type: Type,
-    pub blocks: Vec<MirBlock>,
-}
-
-#[derive(Debug)]
-pub struct MirBlock {
-    pub id: BlockId,
-    pub instructions: Vec<MirInstr>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BlockId(pub u32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VReg(pub u32);
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Type {
-    I32,
-    I64,
-    U32,
-    U64,
-    F32,
-    F64,
-    Bool,
-}
-
-#[derive(Debug)]
-pub enum MirInstr {
-    BinOp {
-        dst: VReg,
-        op: BinOpKind,
-        lhs: VReg,
-        rhs: VReg,
-    },
-    Return(Option<VReg>),
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum BinOpKind {
-    Add,
-    Sub,
-    Mul,
-    Div,
 }
