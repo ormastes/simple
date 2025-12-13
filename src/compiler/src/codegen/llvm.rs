@@ -6,7 +6,6 @@
 /// - Shared MIR transforms and runtime FFI specs
 
 use crate::error::CompileError;
-use crate::mir::*;
 use simple_common::target::Target;
 
 /// LLVM-based code generator
@@ -24,13 +23,23 @@ impl LlvmBackend {
 
     /// Get pointer width for this target
     pub fn pointer_width(&self) -> u32 {
-        self.target.pointer_width
+        match self.target.arch.pointer_size() {
+            simple_common::target::PointerSize::Bits32 => 32,
+            simple_common::target::PointerSize::Bits64 => 64,
+        }
     }
 
     /// Map a Simple type to an LLVM type
-    pub fn map_type(&self, _ty: &Type) -> Result<LlvmType, CompileError> {
-        // TODO: Implement type mapping
-        Ok(LlvmType::Void)
+    pub fn map_type(&self, ty: &Type) -> Result<LlvmType, CompileError> {
+        match ty {
+            Type::I32 => Ok(LlvmType::I32),
+            Type::I64 => Ok(LlvmType::I64),
+            Type::U32 => Ok(LlvmType::I32), // LLVM doesn't distinguish signed/unsigned at type level
+            Type::U64 => Ok(LlvmType::I64),
+            Type::F32 => Ok(LlvmType::F32),
+            Type::F64 => Ok(LlvmType::F64),
+            Type::Bool => Ok(LlvmType::I1),
+        }
     }
 
     /// Compile a MIR function to LLVM IR
