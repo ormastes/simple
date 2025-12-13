@@ -253,6 +253,72 @@ impl LlvmBackend {
         // TODO: Implement object emission
         Ok(vec![])
     }
+
+    /// Compile a simple function with body (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn compile_simple_function(
+        &self,
+        name: &str,
+        params: &[TypeId],
+        ret_type: &TypeId,
+        constant_return: i32,
+    ) -> Result<(), CompileError> {
+        let module = self.module.borrow();
+        let module = module.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        
+        let builder = self.builder.borrow();
+        let builder = builder.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+        
+        // Map parameter types
+        let param_types: Result<Vec<_>, _> = params.iter()
+            .map(|ty| self.llvm_type(ty).map(|t| t.into()))
+            .collect();
+        let param_types = param_types?;
+        
+        // Map return type
+        let ret_llvm = self.llvm_type(ret_type)?;
+        
+        // Create function type
+        let fn_type = match ret_llvm {
+            BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
+            _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
+        };
+        
+        // Add function to module
+        let function = module.add_function(name, fn_type, None);
+        
+        // Create entry basic block
+        let entry_block = self.context.append_basic_block(function, "entry");
+        builder.position_at_end(entry_block);
+        
+        // Create constant return value
+        let ret_value = match ret_llvm {
+            BasicTypeEnum::IntType(t) => {
+                t.const_int(constant_return as u64, false)
+            },
+            _ => return Err(CompileError::Semantic("Only int return for now".to_string())),
+        };
+        
+        // Build return instruction
+        builder.build_return(Some(&ret_value))
+            .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
+        
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn compile_simple_function(
+        &self,
+        _name: &str,
+        _params: &[TypeId],
+        _ret_type: &TypeId,
+        _constant_return: i32,
+    ) -> Result<(), CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+    }
 }
 
 /// Implement the NativeBackend trait for LLVM
