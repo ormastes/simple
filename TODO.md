@@ -2,7 +2,9 @@
 
 ### ruby bdd style framework
 ### add jj version control connection. whenever watch build success whole build store to jj
-### pydoctest like tests
+### pydoctest like tests. 
+however, pydoctest is same as interpreter copy. so, simple interpreter prompt and response should be like python.
+so, by just copying simplem interpreter interaction to be a test script.
 ### llm friendly 
 #### show only limited interface to minimize context size
 #### infra about system test public class/struct touch coverage
