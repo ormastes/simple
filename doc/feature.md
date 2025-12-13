@@ -155,6 +155,35 @@
 | 217 | **async_nogc Default Profile** (async + no_gc as default) | 4 | 1 | Compiler, Profile System |
 | 218 | **File System Async API** (async fs read/write/list) | 5 | 4 | Runtime, Stdlib, async |
 | 219 | **Multi-Base Unit Types** (`unit IpAddr: str | u32 as ip` - multiple literal forms) | 4 | 3 | Parser, Type System |
+| 220 | **LLVM Backend** (32-bit + 64-bit target support) | 5 | 5 | Codegen, Compiler, Loader |
+
+### LLVM Backend Implementation (#220)
+
+| Sub-feature | Difficulty | Scope | Status |
+|-------------|------------|-------|--------|
+| inkwell dependency + feature flag | 1 | Cargo.toml | Pending |
+| Backend trait/interface (NativeBackend) | 2 | Codegen | Pending |
+| Shared runtime FFI specs (backend-agnostic) | 2 | Codegen | Pending |
+| LLVM type mapping (TypeId → LLVM types) | 3 | Codegen/LLVM | Pending |
+| LLVM function signatures + calling conv | 3 | Codegen/LLVM | Pending |
+| LLVM block/instruction lowering | 4 | Codegen/LLVM | Pending |
+| LLVM runtime FFI declarations | 2 | Codegen/LLVM | Pending |
+| 32-bit target support (i686, armv7, riscv32) | 3 | Codegen/LLVM | Pending |
+| Object code emission (ELF, Mach-O, COFF) | 3 | Codegen/LLVM | Pending |
+| Pipeline backend selection logic | 2 | Compiler | Pending |
+| SMF compatibility (LLVM objects) | 2 | Loader | Pending |
+| Cross-target smoke tests | 3 | Tests | Pending |
+| LLVM JIT support (ORC/MCJIT) | 4 | Codegen/LLVM | Future |
+
+**Target Coverage:**
+- **64-bit**: x86_64, aarch64, riscv64 (alternative to Cranelift)
+- **32-bit**: i686, armv7, riscv32 (currently unsupported)
+
+**Design Principles:**
+- Reuse MIR transforms (outlining, generator lowering)
+- Share runtime FFI specs between Cranelift and LLVM
+- Keep Cranelift as default for fast builds
+- Auto-select LLVM for 32-bit targets
 
 ### Difficulty-5 Breakdowns
 
