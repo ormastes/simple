@@ -1,6 +1,7 @@
 # Tedo 
 
 ### ruby bdd style framework
+### add jj version control connection. whenever watch build success whole build store to jj
 ### pydoctest like tests
 ### llm friendly 
 #### show only limited interface to minimize context size
