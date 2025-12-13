@@ -24,6 +24,8 @@ use inkwell::types::{BasicTypeEnum, IntType, FloatType};
 #[cfg(feature = "llvm")]
 use inkwell::values::FunctionValue;
 #[cfg(feature = "llvm")]
+use inkwell::IntPredicate;
+#[cfg(feature = "llvm")]
 use std::cell::RefCell;
 
 /// LLVM-based code generator
@@ -436,6 +438,98 @@ impl LlvmBackend {
         _param2_ty: &TypeId,
         _ret_type: &TypeId,
         _op: BinOp,
+    ) -> Result<(), CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+    }
+
+    /// Compile a function with conditional (if-else) (feature-gated)
+    #[cfg(feature = "llvm")]
+    pub fn compile_conditional_function(
+        &self,
+        name: &str,
+        param_ty: &TypeId,
+        ret_type: &TypeId,
+        true_value: i32,
+        false_value: i32,
+    ) -> Result<(), CompileError> {
+        let module = self.module.borrow();
+        let module = module.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        
+        let builder = self.builder.borrow();
+        let builder = builder.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+        
+        // Map types
+        let param_llvm = self.llvm_type(param_ty)?;
+        let ret_llvm = self.llvm_type(ret_type)?;
+        
+        // Create function type: fn(i32) -> i32
+        let fn_type = match ret_llvm {
+            BasicTypeEnum::IntType(t) => {
+                t.fn_type(&[param_llvm.into()], false)
+            },
+            _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
+        };
+        
+        // Add function to module
+        let function = module.add_function(name, fn_type, None);
+        
+        // Create basic blocks
+        let entry_block = self.context.append_basic_block(function, "entry");
+        let then_block = self.context.append_basic_block(function, "then");
+        let else_block = self.context.append_basic_block(function, "else");
+        let merge_block = self.context.append_basic_block(function, "merge");
+        
+        // Build entry block: if (param > 0)
+        builder.position_at_end(entry_block);
+        let param = function.get_nth_param(0)
+            .ok_or_else(|| CompileError::Semantic("Missing param".to_string()))?;
+        
+        let zero = self.context.i32_type().const_int(0, false);
+        let cond = builder.build_int_compare(
+            inkwell::IntPredicate::SGT,
+            param.into_int_value(),
+            zero,
+            "cmp"
+        ).map_err(|e| CompileError::Semantic(format!("Failed to build cmp: {}", e)))?;
+        
+        builder.build_conditional_branch(cond, then_block, else_block)
+            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+        
+        // Build then block
+        builder.position_at_end(then_block);
+        let then_val = self.context.i32_type().const_int(true_value as u64, false);
+        builder.build_unconditional_branch(merge_block)
+            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+        
+        // Build else block
+        builder.position_at_end(else_block);
+        let else_val = self.context.i32_type().const_int(false_value as u64, false);
+        builder.build_unconditional_branch(merge_block)
+            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+        
+        // Build merge block with phi
+        builder.position_at_end(merge_block);
+        let phi = builder.build_phi(self.context.i32_type(), "result")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build phi: {}", e)))?;
+        phi.add_incoming(&[(&then_val, then_block), (&else_val, else_block)]);
+        
+        let phi_val = phi.as_basic_value();
+        builder.build_return(Some(&phi_val))
+            .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
+        
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn compile_conditional_function(
+        &self,
+        _name: &str,
+        _param_ty: &TypeId,
+        _ret_type: &TypeId,
+        _true_value: i32,
+        _false_value: i32,
     ) -> Result<(), CompileError> {
         Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }

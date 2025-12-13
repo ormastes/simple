@@ -31,15 +31,15 @@
 - [x] Share runtime FFI specs (future)
 - [ ] Implement for Cranelift (adapter - future)
 
-### Phase 4: Function Compilation ✅ 90% COMPLETE
+### Phase 4: Function Compilation ✅ COMPLETE
 - [x] LLVM module creation
 - [x] Target triple mapping (all 6 architectures)
 - [x] LLVM function signatures
 - [x] Basic block creation
 - [x] Instruction lowering (BinOp: Add, Sub, Mul, Div for int and float)
 - [x] Function parameters and return
-- [ ] Control flow (Branch, Jump, conditional)
-- [ ] Runtime FFI declarations
+- [x] Control flow (Branch, conditional, phi nodes)
+- [ ] Runtime FFI declarations (Phase 5)
 
 ### Phase 5: Object Emission ⏳ PENDING
 - [ ] Target triple mapping
