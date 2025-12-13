@@ -8,6 +8,8 @@
 #### infra about system test public class/struct touch coverage
 #### system test mock usage limit or prevent.
 #### infra about integration test public function touch coverage
+#### config can point docs instruction
+#### has task which run script for project like coverage report, doc gen, lint .....
 ### update lanagauage spec << convension over config
 ### gui support
 #### ruby rails spring like framework

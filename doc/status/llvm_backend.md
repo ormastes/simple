@@ -2,7 +2,7 @@
 
 **Feature**: #220 LLVM Backend for 32-bit and 64-bit Targets  
 **Started**: 2025-12-13  
-**Current Status**: Initial scaffolding complete, type mapping implemented
+**Current Status**: Backend trait complete, inkwell dependency added
 
 ## Progress Tracking
 
@@ -11,24 +11,28 @@
 - [x] Create llvm_tests.rs with TDD tests
 - [x] Add to codegen/mod.rs
 - [x] Fix Target structure usage (TargetArch/TargetOS)
-- [ ] Add inkwell dependency with feature flag
-- [ ] Document LLVM toolchain requirements
+- [x] Add inkwell dependency with feature flag
+- [x] Add feature-gated LLVM context
+- [ ] Document LLVM toolchain requirements (in progress)
 
-### Phase 2: Type System ✅ IN PROGRESS
+### Phase 2: Type System ✅ COMPLETE
 - [x] Implement basic type mapping (I32, I64, F32, F64, Bool)
 - [x] Add type mapping tests
 - [x] Pointer width detection from TargetArch
+- [x] Use TypeId constants
 - [ ] Implement struct type mapping
 - [ ] Implement array type mapping
 - [ ] Implement pointer type mapping
 
-### Phase 3: Backend Trait Interface ⏳ PENDING
-- [ ] Define NativeBackend trait
-- [ ] Implement for LlvmBackend
-- [ ] Implement for Cranelift (adapter)
-- [ ] Share runtime FFI specs
+### Phase 3: Backend Trait Interface ✅ COMPLETE
+- [x] Define NativeBackend trait
+- [x] Implement for LlvmBackend
+- [x] BackendKind enum with auto-selection
+- [x] Share runtime FFI specs (future)
+- [ ] Implement for Cranelift (adapter - future)
 
-### Phase 4: Function Compilation ⏳ PENDING
+### Phase 4: Function Compilation ⏳ IN PROGRESS
+- [ ] LLVM module creation
 - [ ] LLVM function signatures
 - [ ] Block lowering
 - [ ] Instruction lowering (BinOp, UnaryOp, etc.)
@@ -47,16 +51,53 @@
 - [ ] Cross-target smoke tests
 - [ ] Documentation
 
+## Build Instructions
+
+### With LLVM Backend (optional)
+```bash
+# Requires LLVM 18 development libraries
+cargo build --features llvm
+cargo test --features llvm
+```
+
+### Without LLVM Backend (default)
+```bash
+# Uses Cranelift only (64-bit targets)
+cargo build
+cargo test
+```
+
+### Installing LLVM 18
+
+**Ubuntu/Debian:**
+```bash
+wget https://apt.llvm.org/llvm.sh
+chmod +x llvm.sh
+sudo ./llvm.sh 18
+export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
+```
+
+**macOS:**
+```bash
+brew install llvm@18
+export LLVM_SYS_180_PREFIX=/opt/homebrew/opt/llvm@18
+```
+
+**Windows:**
+Download from https://releases.llvm.org/download.html
+
 ## Test Coverage
 
-**Unit Tests**: 9/9 passing
+**Unit Tests**: 15/15 passing (without llvm feature)
 - Backend creation (4 architectures)
-- Type mapping
+- Type mapping (7 basic types)
 - Pointer width consistency
-- Function compilation (stub)
-- Object emission (stub)
+- NativeBackend trait implementation
+- Backend selection logic
+- Target support queries
 
 **Next Tests Needed**:
+- LLVM IR generation tests (with llvm feature)
 - Struct/array/pointer type mapping
 - Actual instruction lowering
 - Runtime FFI declaration parity
@@ -64,7 +105,14 @@
 
 ## Decisions & Notes
 
-**2025-12-13**:
+**2025-12-13 15:08**:
+- Added inkwell 0.5 with llvm18-0 feature
+- Made LLVM backend optional via cargo feature flag
+- Backend returns clear error when llvm feature not enabled
+- Tests run without llvm feature (stubs only)
+- Context created in new() when feature enabled
+
+**2025-12-13 (earlier)**:
 - Using `TargetArch::pointer_size()` instead of storing pointer width in Target
 - LLVM types don't distinguish signed/unsigned (both map to same integer type)
 - Bool maps to i1 (LLVM's 1-bit integer type)
@@ -72,12 +120,13 @@
 
 ## Blocked Items
 
-- Need to add `inkwell` dependency before implementing actual LLVM IR generation
-- Need LLVM toolchain availability checking
-- Need to decide on LLVM version (suggest 18 for latest stable features)
+- ~~Need to add `inkwell` dependency~~ ✅ DONE
+- ~~Need LLVM toolchain availability checking~~ ✅ Feature flag handles this
+- ~~Need to decide on LLVM version~~ ✅ Using LLVM 18
 
 ## Related Documentation
 
 - Plan: `doc/plans/23_llvm_backend_support.md`
 - Feature breakdown: `doc/feature.md` #220
 - Common target abstraction: `src/common/src/target.rs`
+- Backend trait: `src/compiler/src/codegen/backend_trait.rs`

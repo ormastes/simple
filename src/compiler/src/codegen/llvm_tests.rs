@@ -2,6 +2,8 @@
 ///
 /// Tests for LLVM-based code generation supporting 32-bit and 64-bit targets.
 /// This backend complements Cranelift by providing broader architecture support.
+///
+/// NOTE: Most tests require the `llvm` feature flag to be enabled.
 
 #[cfg(test)]
 mod tests {
@@ -9,8 +11,20 @@ mod tests {
     use crate::codegen::llvm::*;
     use simple_common::target::{Target, TargetArch, TargetOS};
 
+    /// Test that LLVM backend returns error without llvm feature
+    #[test]
+    #[cfg(not(feature = "llvm"))]
+    fn test_llvm_backend_requires_feature() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target);
+        assert!(backend.is_err());
+        let err = backend.unwrap_err();
+        assert!(err.to_string().contains("llvm") || err.to_string().contains("feature"));
+    }
+
     /// Test that LLVM backend can be created for 64-bit x86_64
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_llvm_backend_create_x86_64() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target);
@@ -19,6 +33,7 @@ mod tests {
 
     /// Test that LLVM backend can be created for 32-bit i686
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_llvm_backend_create_i686() {
         let target = Target::new(TargetArch::X86, TargetOS::Linux);
         let backend = LlvmBackend::new(target);
@@ -27,6 +42,7 @@ mod tests {
 
     /// Test that LLVM backend can be created for 32-bit ARMv7
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_llvm_backend_create_armv7() {
         let target = Target::new(TargetArch::Arm, TargetOS::Linux);
         let backend = LlvmBackend::new(target);
@@ -35,6 +51,7 @@ mod tests {
 
     /// Test that LLVM backend can be created for 32-bit RISC-V
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_llvm_backend_create_riscv32() {
         let target = Target::new(TargetArch::Riscv32, TargetOS::Linux);
         let backend = LlvmBackend::new(target);
@@ -43,6 +60,7 @@ mod tests {
 
     /// Test LLVM type mapping for basic types
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_llvm_type_mapping() {
         use crate::hir::TypeId as T;
         
@@ -65,6 +83,7 @@ mod tests {
 
     /// Test pointer width consistency
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_pointer_width_32bit() {
         let target = Target::new(TargetArch::X86, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
@@ -73,6 +92,7 @@ mod tests {
 
     /// Test pointer width consistency for 64-bit
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_pointer_width_64bit() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
@@ -81,6 +101,7 @@ mod tests {
 
     /// Test simple function compilation (stub test - will be replaced with real MIR)
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_compile_simple_function() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
@@ -94,7 +115,6 @@ mod tests {
     #[test]
     fn test_emit_object_code() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
         
         // TODO: Create proper MIR module when implementing object emission
         // For now, just verify backend supports the target
@@ -103,6 +123,7 @@ mod tests {
 
     /// Test backend reports correct target
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_backend_target() {
         let target = Target::new(TargetArch::X86, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
@@ -113,6 +134,7 @@ mod tests {
 
     /// Test that backend can handle multiple functions (stub test)
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_compile_multiple_functions() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
@@ -123,9 +145,8 @@ mod tests {
 
     /// Test NativeBackend trait implementation
     #[test]
+    #[cfg(feature = "llvm")]
     fn test_native_backend_trait() {
-        use crate::codegen::backend_trait::NativeBackend;
-        
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
         
@@ -140,5 +161,19 @@ mod tests {
         assert!(LlvmBackend::supports_target(&Target::new(TargetArch::Riscv32, TargetOS::Linux)));
         
         // TODO: Test compile through trait when we have proper MIR construction
+    }
+
+    /// Test backend selection logic (doesn't require llvm feature)
+    #[test]
+    fn test_backend_kind_selection() {
+        use crate::codegen::BackendKind;
+        
+        // 32-bit targets should select LLVM
+        let target_32 = Target::new(TargetArch::X86, TargetOS::Linux);
+        assert!(matches!(BackendKind::for_target(&target_32), BackendKind::Llvm));
+        
+        // 64-bit targets should select Cranelift (default for fast builds)
+        let target_64 = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        assert!(matches!(BackendKind::for_target(&target_64), BackendKind::Cranelift));
     }
 }
