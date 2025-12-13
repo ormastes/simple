@@ -48,20 +48,62 @@
 - [x] Relocatable object files
 - [x] Support for all 6 architectures
 
-### Phase 6: Integration ✅ COMPLETE
-- [x] Pipeline backend selection
-- [x] MIR instruction lowering (ConstInt, ConstBool, Copy, BinOp)
-- [x] MIR terminator lowering (Return, Jump, Branch)
-- [x] Virtual register mapping
-- [x] Basic block mapping
-- [x] Full compile_function() implementation
-- [ ] SMF compatibility (future optimization)
+## MIR Instruction Coverage
 
-## Implementation Complete! 🎉
+**Implemented (11/50+ instructions):**
+- ✅ ConstInt - Integer constants
+- ✅ ConstFloat - Float constants  
+- ✅ ConstBool - Boolean constants
+- ✅ ConstString - String constants (global data)
+- ✅ Copy - Register-to-register copy
+- ✅ BinOp - Binary operations (add, sub, mul, div)
+- ✅ UnaryOp - Unary operations (neg, not, fneg)
+- ✅ Load - Memory load
+- ✅ Store - Memory store
+- ✅ GcAlloc - Stack allocation (GC integration later)
+- ✅ Return - Function return
+- ✅ Jump - Unconditional branch
+- ✅ Branch - Conditional branch
 
-All phases 1-6 are now complete. The LLVM backend is fully functional
-and can compile MIR to native object code for all 6 architectures,
-including full 32-bit support.
+**Remaining High Priority:**
+- [ ] Call - Function calls (static)
+- [ ] IndirectCall - Function pointer calls
+- [ ] ArrayLit - Array creation
+- [ ] TupleLit - Tuple creation
+- [ ] IndexGet - Array/tuple indexing
+- [ ] StructInit - Struct creation
+- [ ] FieldGet - Struct field access
+- [ ] FieldSet - Struct field mutation
+
+**Remaining Medium Priority:**
+- [ ] DictLit - Dictionary creation
+- [ ] IndexSet - Array/tuple mutation
+- [ ] SliceOp - Slicing operations
+- [ ] EnumUnit/EnumWith - Enum construction
+- [ ] EnumDiscriminant - Enum tag check
+- [ ] EnumPayload - Enum value extraction
+- [ ] MethodCallStatic - Static method dispatch
+- [ ] MethodCallVirtual - Dynamic dispatch
+
+**Remaining Low Priority (Advanced):**
+- [ ] ClosureCreate - Closure construction
+- [ ] FutureCreate - Async future creation
+- [ ] Await - Async await
+- [ ] ActorSpawn/Send/Recv - Actor operations
+- [ ] GeneratorCreate/Yield/Next - Generator operations
+- [ ] PatternTest/Bind - Pattern matching
+- [ ] Wait - Blocking operations
+- [ ] GetElementPtr - GEP for indexing
+- [ ] LocalAddr - Address of local
+- [ ] FStringFormat - String interpolation
+
+**Fallback (Will be removed):**
+- [ ] InterpCall - Interpreter fallback for uncompilable functions
+- [ ] InterpEval - Interpreter fallback for expressions
+
+**Current Coverage:** 11/50+ instructions (22%)
+**Phase 6 Status:** Core operations complete, expanding coverage
+
 - [ ] Cross-target smoke tests
 - [ ] Documentation
 
