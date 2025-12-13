@@ -26,6 +26,10 @@ use inkwell::values::FunctionValue;
 #[cfg(feature = "llvm")]
 use inkwell::IntPredicate;
 #[cfg(feature = "llvm")]
+use inkwell::targets::{Target as LlvmTarget, TargetMachine, RelocMode, CodeModel, FileType, InitializationConfig};
+#[cfg(feature = "llvm")]
+use inkwell::OptimizationLevel;
+#[cfg(feature = "llvm")]
 use std::cell::RefCell;
 
 /// LLVM-based code generator
@@ -259,10 +263,51 @@ impl LlvmBackend {
         Ok(())
     }
 
-    /// Emit object code for a module
+    /// Emit object code for a module (feature-gated)
+    #[cfg(feature = "llvm")]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
-        // TODO: Implement object emission
-        Ok(vec![])
+        // Initialize LLVM targets
+        LlvmTarget::initialize_all(&InitializationConfig::default());
+        
+        let module = self.module.borrow();
+        let module = module.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        
+        // Get target triple
+        let triple = self.get_target_triple();
+        let target_triple = inkwell::targets::TargetTriple::create(&triple);
+        
+        // Get LLVM target
+        let target = LlvmTarget::from_triple(&target_triple)
+            .map_err(|e| CompileError::Semantic(format!("Failed to create target: {}", e)))?;
+        
+        // Create target machine
+        let cpu = "generic";
+        let features = "";
+        let opt_level = OptimizationLevel::Default;
+        let reloc_mode = RelocMode::PIC; // Position Independent Code
+        let code_model = CodeModel::Default;
+        
+        let target_machine = target.create_target_machine(
+            &target_triple,
+            cpu,
+            features,
+            opt_level,
+            reloc_mode,
+            code_model,
+        ).ok_or_else(|| CompileError::Semantic("Failed to create target machine".to_string()))?;
+        
+        // Emit object code to memory buffer
+        let buffer = target_machine.write_to_memory_buffer(module, FileType::Object)
+            .map_err(|e| CompileError::Semantic(format!("Failed to emit object: {}", e)))?;
+        
+        // Convert to Vec<u8>
+        Ok(buffer.as_slice().to_vec())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
     }
 
     /// Compile a simple function with body (feature-gated)
