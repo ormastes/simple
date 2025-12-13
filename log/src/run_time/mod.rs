@@ -33,7 +33,7 @@
 //! - `SIMPLE_LOG=simple_log::run_time::gc=trace` - GC only
 //! - `SIMPLE_LOG=simple_log::run_time::actor=debug` - actors only
 
-use tracing::{debug, error, info, trace, span, Level};
+use tracing::{debug, error, info, span, trace, Level};
 
 // =============================================================================
 // Function Execution

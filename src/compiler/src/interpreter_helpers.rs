@@ -454,6 +454,26 @@ fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
     }
 }
 
+/// Helper for binding sequence patterns (Tuple and Array) during comprehensions
+fn bind_sequence_pattern(value: &Value, patterns: &[Pattern], env: &mut Env, allow_tuple: bool) -> bool {
+    let values = match value {
+        Value::Tuple(vals) if allow_tuple => vals,
+        Value::Array(vals) => vals,
+        _ => return false,
+    };
+    
+    if patterns.len() != values.len() {
+        return false;
+    }
+    
+    for (pat, val) in patterns.iter().zip(values.iter()) {
+        if !bind_pattern(pat, val, env) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Bind a pattern to a value in an environment (returns false if pattern doesn't match)
 fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
     match pattern {
@@ -466,47 +486,8 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
             env.insert(name.clone(), value.clone());
             true
         }
-        Pattern::Tuple(patterns) => {
-            if let Value::Tuple(values) = value {
-                if patterns.len() != values.len() {
-                    return false;
-                }
-                for (pat, val) in patterns.iter().zip(values.iter()) {
-                    if !bind_pattern(pat, val, env) {
-                        return false;
-                    }
-                }
-                true
-            } else if let Value::Array(values) = value {
-                // Allow tuple pattern to match array
-                if patterns.len() != values.len() {
-                    return false;
-                }
-                for (pat, val) in patterns.iter().zip(values.iter()) {
-                    if !bind_pattern(pat, val, env) {
-                        return false;
-                    }
-                }
-                true
-            } else {
-                false
-            }
-        }
-        Pattern::Array(patterns) => {
-            if let Value::Array(values) = value {
-                if patterns.len() != values.len() {
-                    return false;
-                }
-                for (pat, val) in patterns.iter().zip(values.iter()) {
-                    if !bind_pattern(pat, val, env) {
-                        return false;
-                    }
-                }
-                true
-            } else {
-                false
-            }
-        }
+        Pattern::Tuple(patterns) => bind_sequence_pattern(value, patterns, env, true),
+        Pattern::Array(patterns) => bind_sequence_pattern(value, patterns, env, false),
         _ => {
             // For other patterns, just try identifier binding
             false
@@ -615,11 +596,35 @@ fn bind_let_pattern_element(
         Pattern::MutIdentifier(name) => {
             env.insert(name.clone(), val);
         }
+        Pattern::Typed { pattern, .. } => {
+            bind_let_pattern_element(pattern, val, is_mutable, env);
+        }
         _ => {}
     }
 }
 
-/// Bind a collection pattern (tuple or array) from a let statement
+/// Bind any pattern from a let statement.
+fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, env: &mut Env) {
+    match pat {
+        Pattern::Tuple(patterns) => {
+            // Allow tuple pattern to match both Tuple and Array
+            let values: Vec<Value> = match val {
+                Value::Tuple(v) => v,
+                Value::Array(v) => v,
+                _ => Vec::new(),
+            };
+            bind_collection_pattern(patterns, values, is_mutable, env);
+        }
+        Pattern::Array(patterns) => {
+            if let Value::Array(values) = val {
+                bind_collection_pattern(patterns, values, is_mutable, env);
+            }
+        }
+        _ => bind_let_pattern_element(pat, val, is_mutable, env),
+    }
+}
+
+/// Bind a collection pattern (tuple or array) from a let statement.
 fn bind_collection_pattern(
     patterns: &[Pattern],
     values: Vec<Value>,
@@ -627,7 +632,7 @@ fn bind_collection_pattern(
     env: &mut Env,
 ) {
     for (pat, val) in patterns.iter().zip(values.into_iter()) {
-        bind_let_pattern_element(pat, val, is_mutable, env);
+        bind_pattern_value(pat, val, is_mutable, env);
     }
 }
 

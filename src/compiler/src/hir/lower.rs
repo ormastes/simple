@@ -1017,7 +1017,6 @@ pub fn lower(module: &Module) -> LowerResult<HirModule> {
     Lowerer::new().lower_module(module)
 }
 
-
 // Tests extracted to separate file for maintainability
 #[cfg(test)]
 #[path = "lower_tests.rs"]

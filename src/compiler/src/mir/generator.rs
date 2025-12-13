@@ -93,8 +93,9 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
                     for inst_after in orig_block.instructions.iter().skip(idx + 1) {
                         resume_block.instructions.push(inst_after.clone());
                     }
-                    resume_block.terminator = remap_terminator(orig_block.terminator.clone(), &block_map)
-                        .unwrap_or_else(|| Terminator::Return(None));
+                    resume_block.terminator =
+                        remap_terminator(orig_block.terminator.clone(), &block_map)
+                            .unwrap_or_else(|| Terminator::Return(None));
                     write_block(&mut rewritten, resume_block);
                     resume
                 } else {
@@ -139,9 +140,8 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
 
         // If the block ended without a yield, copy the original terminator.
         if !current_block.terminator.is_sealed() {
-            current_block.terminator =
-                remap_terminator(orig_block.terminator.clone(), &block_map)
-                    .unwrap_or(Terminator::Return(None));
+            current_block.terminator = remap_terminator(orig_block.terminator.clone(), &block_map)
+                .unwrap_or(Terminator::Return(None));
             write_block(&mut rewritten, current_block);
         } else {
             write_block(&mut rewritten, current_block);
@@ -202,10 +202,7 @@ fn compute_live_outs(
     live_outs
 }
 
-fn live_after_each_inst(
-    block: &MirBlock,
-    live_out: Option<&HashSet<VReg>>,
-) -> Vec<HashSet<VReg>> {
+fn live_after_each_inst(block: &MirBlock, live_out: Option<&HashSet<VReg>>) -> Vec<HashSet<VReg>> {
     let mut live = live_out.cloned().unwrap_or_default();
     let mut states = Vec::with_capacity(block.instructions.len() + 1);
     states.push(live.clone()); // After the final instruction
@@ -224,10 +221,7 @@ fn live_after_each_inst(
     states
 }
 
-fn remap_terminator(
-    term: Terminator,
-    map: &HashMap<BlockId, BlockId>,
-) -> Option<Terminator> {
+fn remap_terminator(term: Terminator, map: &HashMap<BlockId, BlockId>) -> Option<Terminator> {
     match term {
         Terminator::Jump(target) => map.get(&target).copied().map(Terminator::Jump),
         Terminator::Branch {

@@ -8,10 +8,10 @@ pub mod token;
 
 // Parser submodules (split from parser.rs for maintainability)
 mod expressions;
+mod parser_patterns;
+mod parser_types;
 mod statements;
 mod types_def;
-mod parser_types;
-mod parser_patterns;
 
 pub use ast::*;
 pub use diagnostic::*;

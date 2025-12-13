@@ -1,3 +1,5 @@
+#![allow(unused_imports, unused_variables, deprecated)]
+
 //! SMF format tests: Header, Section, Direct Execution, Format Validation
 //! Tests for Simple Module Format (SMF) functionality
 
@@ -624,7 +626,9 @@ fn test_compile_and_run_from_memory_roundtrip() {
 /// Test CLI help output
 #[test]
 fn test_cli_help_output() {
-    use assert_cmd::Command;
+#![allow(unused_imports, unused_variables, deprecated)]
+
+use assert_cmd::Command;
 
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("--help");
@@ -957,4 +961,3 @@ fn test_multiple_in_memory_runs() {
         assert_eq!(result, i * 10);
     }
 }
-

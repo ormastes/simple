@@ -36,6 +36,9 @@ impl MemoryAllocator for WindowsAllocator {
         Ok(ExecutableMemory {
             ptr: ptr as *mut u8,
             size,
+            dealloc: |ptr, _| unsafe {
+                VirtualFree(ptr as *mut _, 0, MEM_RELEASE);
+            },
         })
     }
 
@@ -48,13 +51,5 @@ impl MemoryAllocator for WindowsAllocator {
 
     fn free(&self, mem: ExecutableMemory) -> std::io::Result<()> {
         default_free(mem)
-    }
-}
-
-impl Drop for ExecutableMemory {
-    fn drop(&mut self) {
-        unsafe {
-            VirtualFree(self.ptr as *mut _, 0, MEM_RELEASE);
-        }
     }
 }

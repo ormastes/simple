@@ -1,7 +1,9 @@
+#![allow(unused_imports)]
 //! Core tests: Edge cases, stress tests, module cache, concurrency, RunConfig
 //! Tests for edge cases and stress testing
 
 use simple_compiler::CompilerPipeline;
+
 use simple_driver::{run_code, Interpreter, RunConfig, Runner, RunningType};
 use simple_loader::ModuleLoader;
 use simple_parser::{Lexer, Parser};
@@ -424,4 +426,3 @@ fn test_invalid_operator() {
     let result = runner.run_source("main = 1 $$ 2");
     assert!(result.is_err(), "Invalid operator should error");
 }
-

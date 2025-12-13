@@ -3,9 +3,9 @@
 //! This module provides utilities for testing code generation and loading
 //! across different target architectures without requiring actual hardware.
 
-use simple_common::target::{Target, TargetArch, TargetOS, TargetConfig};
+use simple_common::target::{Target, TargetArch, TargetConfig, TargetOS};
 
-use crate::smf::header::{SmfHeader, Arch, Platform};
+use crate::smf::header::{Arch, SmfHeader};
 use crate::smf::settlement::SettlementHeader;
 
 /// Test fixture for a specific target architecture.
@@ -113,11 +113,7 @@ impl TestMatrix {
                 Target::new(TargetArch::X86_64, TargetOS::Windows),
                 Target::new(TargetArch::Aarch64, TargetOS::MacOS),
             ],
-            operating_systems: vec![
-                TargetOS::Linux,
-                TargetOS::Windows,
-                TargetOS::MacOS,
-            ],
+            operating_systems: vec![TargetOS::Linux, TargetOS::Windows, TargetOS::MacOS],
         }
     }
 
@@ -131,16 +127,8 @@ impl TestMatrix {
 
     /// Create a comprehensive test matrix (all combinations).
     pub fn comprehensive() -> Self {
-        let arches = [
-            TargetArch::X86_64,
-            TargetArch::Aarch64,
-            TargetArch::Riscv64,
-        ];
-        let oses = [
-            TargetOS::Linux,
-            TargetOS::Windows,
-            TargetOS::MacOS,
-        ];
+        let arches = [TargetArch::X86_64, TargetArch::Aarch64, TargetArch::Riscv64];
+        let oses = [TargetOS::Linux, TargetOS::Windows, TargetOS::MacOS];
 
         let mut targets = Vec::new();
         for arch in arches {
@@ -183,7 +171,10 @@ impl TestMatrix {
 
     /// Generate fixtures for all targets.
     pub fn fixtures(&self) -> Vec<TargetFixture> {
-        self.targets.iter().map(|&t| TargetFixture::new(t)).collect()
+        self.targets
+            .iter()
+            .map(|&t| TargetFixture::new(t))
+            .collect()
     }
 
     /// Iterate over target/OS combinations for testing.
@@ -246,32 +237,45 @@ impl CrossTestResults {
 
     /// Record a failed test.
     pub fn record_fail(&mut self, target: Target, message: impl Into<String>) {
-        self.results.push((target, TestOutcome::Failed(message.into())));
+        self.results
+            .push((target, TestOutcome::Failed(message.into())));
     }
 
     /// Record a skipped test.
     pub fn record_skip(&mut self, target: Target, reason: impl Into<String>) {
-        self.results.push((target, TestOutcome::Skipped(reason.into())));
+        self.results
+            .push((target, TestOutcome::Skipped(reason.into())));
     }
 
     /// Check if all tests passed.
     pub fn all_passed(&self) -> bool {
-        self.results.iter().all(|(_, outcome)| matches!(outcome, TestOutcome::Passed | TestOutcome::Skipped(_)))
+        self.results
+            .iter()
+            .all(|(_, outcome)| matches!(outcome, TestOutcome::Passed | TestOutcome::Skipped(_)))
     }
 
     /// Get the number of passed tests.
     pub fn passed_count(&self) -> usize {
-        self.results.iter().filter(|(_, o)| matches!(o, TestOutcome::Passed)).count()
+        self.results
+            .iter()
+            .filter(|(_, o)| matches!(o, TestOutcome::Passed))
+            .count()
     }
 
     /// Get the number of failed tests.
     pub fn failed_count(&self) -> usize {
-        self.results.iter().filter(|(_, o)| matches!(o, TestOutcome::Failed(_))).count()
+        self.results
+            .iter()
+            .filter(|(_, o)| matches!(o, TestOutcome::Failed(_)))
+            .count()
     }
 
     /// Get the number of skipped tests.
     pub fn skipped_count(&self) -> usize {
-        self.results.iter().filter(|(_, o)| matches!(o, TestOutcome::Skipped(_))).count()
+        self.results
+            .iter()
+            .filter(|(_, o)| matches!(o, TestOutcome::Skipped(_)))
+            .count()
     }
 
     /// Get a summary of the results.
@@ -287,7 +291,8 @@ impl CrossTestResults {
     /// Assert that all tests passed (for use in test functions).
     pub fn assert_all_passed(&self) {
         if !self.all_passed() {
-            let failures: Vec<_> = self.results
+            let failures: Vec<_> = self
+                .results
                 .iter()
                 .filter_map(|(t, o)| {
                     if let TestOutcome::Failed(msg) = o {
@@ -419,6 +424,7 @@ impl Default for CiConfig {
 
 #[cfg(test)]
 mod tests {
+    use crate::smf::Platform;
     use super::*;
 
     #[test]
@@ -482,8 +488,14 @@ mod tests {
         let mut results = CrossTestResults::new();
 
         results.record_pass(Target::new(TargetArch::X86_64, TargetOS::Linux));
-        results.record_fail(Target::new(TargetArch::Aarch64, TargetOS::Linux), "test error");
-        results.record_skip(Target::new(TargetArch::Riscv64, TargetOS::Linux), "unsupported");
+        results.record_fail(
+            Target::new(TargetArch::Aarch64, TargetOS::Linux),
+            "test error",
+        );
+        results.record_skip(
+            Target::new(TargetArch::Riscv64, TargetOS::Linux),
+            "unsupported",
+        );
 
         assert_eq!(results.passed_count(), 1);
         assert_eq!(results.failed_count(), 1);
@@ -496,7 +508,10 @@ mod tests {
         let mut results = CrossTestResults::new();
 
         results.record_pass(Target::new(TargetArch::X86_64, TargetOS::Linux));
-        results.record_skip(Target::new(TargetArch::Riscv64, TargetOS::Linux), "unsupported");
+        results.record_skip(
+            Target::new(TargetArch::Riscv64, TargetOS::Linux),
+            "unsupported",
+        );
 
         assert!(results.all_passed());
     }

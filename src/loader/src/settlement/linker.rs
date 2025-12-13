@@ -145,7 +145,9 @@ impl SettlementLinker {
                 let sym_name = module.symbols.symbol_name(sym).to_string();
 
                 // Skip if we export this symbol ourselves
-                if module.symbols.lookup(&sym_name)
+                if module
+                    .symbols
+                    .lookup(&sym_name)
                     .map(|s| s.binding == SymbolBinding::Global && s.value != 0)
                     .unwrap_or(false)
                 {

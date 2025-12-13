@@ -16,6 +16,7 @@
 //!    Use `compile_native()` or `compile_source_to_memory_native()` for this mode.
 
 use std::fs;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -34,9 +35,110 @@ use crate::interpreter::evaluate_module;
 use crate::lint::{LintChecker, LintConfig, LintDiagnostic};
 use crate::mir;
 use crate::monomorphize::monomorphize_module;
-use crate::value::FUNC_MAIN;
 use crate::project::ProjectContext;
+use crate::value::FUNC_MAIN;
 use crate::CompileError;
+
+/// Detect whether the module contains script-style statements (non-item code) at the top level.
+/// These should be interpreted directly rather than lowered through HIR/MIR.
+fn has_script_statements(items: &[simple_parser::ast::Node]) -> bool {
+    use simple_parser::ast::Node::*;
+    items.iter().any(|item| {
+        matches!(
+            item,
+            Let(_)
+                | Const(_)
+                | Static(_)
+                | Assignment(_)
+                | Return(_)
+                | If(_)
+                | Match(_)
+                | For(_)
+                | While(_)
+                | Loop(_)
+                | Break(_)
+                | Continue(_)
+                | Context(_)
+                | With(_)
+                | Expression(_)
+        )
+    })
+}
+
+/// Naive resolver for `use foo` when running single-file programs from the CLI.
+/// Recursively loads sibling modules and flattens their items into the root module.
+fn load_module_with_imports(
+    path: &Path,
+    visited: &mut HashSet<std::path::PathBuf>,
+) -> Result<simple_parser::ast::Module, CompileError> {
+    let path = path
+        .canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(path.clone()) {
+        return Ok(simple_parser::ast::Module {
+            name: None,
+            items: Vec::new(),
+        });
+    }
+
+    let source = fs::read_to_string(&path).map_err(|e| CompileError::Io(format!("{e}")))?;
+    let mut parser = simple_parser::Parser::new(&source);
+    let module = parser
+        .parse()
+        .map_err(|e| CompileError::Parse(format!("{e}")))?;
+
+    let mut items = Vec::new();
+    for item in module.items {
+        if let simple_parser::ast::Node::UseStmt(use_stmt) = &item {
+            if let Some(resolved) =
+                resolve_use_to_path(use_stmt, path.parent().unwrap_or(Path::new(".")))
+            {
+                let imported = load_module_with_imports(&resolved, visited)?;
+                items.extend(imported.items);
+                continue;
+            }
+        }
+        items.push(item);
+    }
+
+    Ok(simple_parser::ast::Module {
+        name: module.name,
+        items,
+    })
+}
+
+/// Resolve a simple `use` path to a sibling `.spl` file.
+fn resolve_use_to_path(
+    use_stmt: &simple_parser::ast::UseStmt,
+    base: &Path,
+) -> Option<std::path::PathBuf> {
+    use simple_parser::ast::ImportTarget;
+    let mut parts: Vec<String> = use_stmt
+        .path
+        .segments
+        .iter()
+        .filter(|s| s.as_str() != "crate")
+        .cloned()
+        .collect();
+
+    let target_name = match &use_stmt.target {
+        ImportTarget::Single(name) => Some(name.clone()),
+        ImportTarget::Aliased { name, .. } => Some(name.clone()),
+        _ => None,
+    }?;
+
+    parts.push(target_name);
+    let mut resolved = base.to_path_buf();
+    for part in parts {
+        resolved = resolved.join(part);
+    }
+    resolved.set_extension("spl");
+    if resolved.exists() {
+        Some(resolved)
+    } else {
+        None
+    }
+}
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
 pub struct CompilerPipeline {
@@ -80,7 +182,10 @@ impl CompilerPipeline {
     }
 
     /// Create a pipeline with both GC and project context
-    pub fn with_gc_and_project(gc: Arc<dyn GcAllocator>, project: ProjectContext) -> Result<Self, CompileError> {
+    pub fn with_gc_and_project(
+        gc: Arc<dyn GcAllocator>,
+        project: ProjectContext,
+    ) -> Result<Self, CompileError> {
         let lint_config = Some(project.lint_config.clone());
         Ok(Self {
             gc: Some(gc),
@@ -136,9 +241,8 @@ impl CompilerPipeline {
     /// Currently supports `main = <integer>` which returns the integer value.
     #[instrument(skip(self, source_path, out))]
     pub fn compile(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
-        let source =
-            fs::read_to_string(source_path).map_err(|e| CompileError::Io(format!("{e}")))?;
-        let smf_bytes = self.compile_source_to_memory(&source)?;
+        let module = load_module_with_imports(source_path, &mut HashSet::new())?;
+        let smf_bytes = self.compile_module_to_memory(module)?;
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
     }
 
@@ -167,14 +271,19 @@ impl CompilerPipeline {
     /// Lint diagnostics are stored and can be retrieved via `lint_diagnostics()`.
     #[instrument(skip(self, source))]
     pub fn compile_source_to_memory(&mut self, source: &str) -> Result<Vec<u8>, CompileError> {
-        // Clear previous lint diagnostics
-        self.lint_diagnostics.clear();
-
-        // Parse to ensure the source is syntactically valid.
         let mut parser = simple_parser::Parser::new(source);
         let module = parser
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
+        self.compile_module_to_memory(module)
+    }
+
+    fn compile_module_to_memory(
+        &mut self,
+        module: simple_parser::ast::Module,
+    ) -> Result<Vec<u8>, CompileError> {
+        // Clear previous lint diagnostics
+        self.lint_diagnostics.clear();
 
         // Monomorphization: specialize generic functions for concrete types
         let module = monomorphize_module(&module);
@@ -182,8 +291,11 @@ impl CompilerPipeline {
         // Run lint checks
         self.run_lint_checks(&module.items)?;
 
-        // Type inference/checking (features #13/#14 scaffolding)
-        type_check(&module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+        // If the module has script-style statements, skip type_check and interpret directly.
+        if !has_script_statements(&module.items) {
+            // Type inference/checking (features #13/#14 scaffolding)
+            type_check(&module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+        }
 
         // Extract the main function's return value
         let main_value = evaluate_module(&module.items)?;
@@ -207,7 +319,8 @@ impl CompilerPipeline {
 
         // If any lint has deny level, return an error
         if self.has_lint_errors() {
-            let errors: Vec<String> = self.lint_diagnostics
+            let errors: Vec<String> = self
+                .lint_diagnostics
                 .iter()
                 .filter(|d| d.is_error())
                 .map(|d| d.format())
@@ -224,9 +337,8 @@ impl CompilerPipeline {
     /// Faster execution but supports fewer language features than interpreter mode.
     #[instrument(skip(self, source_path, out))]
     pub fn compile_native(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
-        let source =
-            fs::read_to_string(source_path).map_err(|e| CompileError::Io(format!("{e}")))?;
-        let smf_bytes = self.compile_source_to_memory_native(&source)?;
+        let module = load_module_with_imports(source_path, &mut HashSet::new())?;
+        let smf_bytes = self.compile_module_to_memory_native(module)?;
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
     }
 
@@ -240,20 +352,31 @@ impl CompilerPipeline {
         &mut self,
         source: &str,
     ) -> Result<Vec<u8>, CompileError> {
-        // Clear previous lint diagnostics
-        self.lint_diagnostics.clear();
-
-        // 1. Parse source to AST
         let mut parser = simple_parser::Parser::new(source);
         let ast_module = parser
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
+        self.compile_module_to_memory_native(ast_module)
+    }
+
+    fn compile_module_to_memory_native(
+        &mut self,
+        ast_module: simple_parser::ast::Module,
+    ) -> Result<Vec<u8>, CompileError> {
+        // Clear previous lint diagnostics
+        self.lint_diagnostics.clear();
 
         // 2. Monomorphization: specialize generic functions for concrete types
         let ast_module = monomorphize_module(&ast_module);
 
         // 3. Run lint checks
         self.run_lint_checks(&ast_module.items)?;
+
+        // If script-style statements exist, interpret directly and wrap result.
+        if has_script_statements(&ast_module.items) {
+            let main_value = evaluate_module(&ast_module.items)?;
+            return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
+        }
 
         // 4. Type check
         type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
@@ -312,6 +435,16 @@ impl CompilerPipeline {
         // 3. Run lint checks
         self.run_lint_checks(&ast_module.items)?;
 
+        // If script-style statements exist, interpret directly and wrap result.
+        if has_script_statements(&ast_module.items) {
+            let main_value = evaluate_module(&ast_module.items)?;
+            return Ok(generate_smf_bytes_for_target(
+                main_value,
+                self.gc.as_ref(),
+                target,
+            ));
+        }
+
         // 4. Type check
         type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
 
@@ -330,18 +463,26 @@ impl CompilerPipeline {
             // Fallback: evaluate via interpreter and wrap result
             // Note: Interpreter result is architecture-neutral (just an i32)
             let main_value = evaluate_module(&ast_module.items)?;
-            return Ok(generate_smf_bytes_for_target(main_value, self.gc.as_ref(), target));
+            return Ok(generate_smf_bytes_for_target(
+                main_value,
+                self.gc.as_ref(),
+                target,
+            ));
         }
 
         // 7. Generate machine code via Cranelift for the target architecture
-        let codegen = Codegen::for_target(target)
-            .map_err(|e| CompileError::Codegen(format!("{e}")))?;
+        let codegen =
+            Codegen::for_target(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
         let object_code = codegen
             .compile_module(&mir_module)
             .map_err(|e| CompileError::Codegen(format!("{e}")))?;
 
         // 8. Wrap object code in SMF format for the target
-        Ok(generate_smf_from_object_for_target(&object_code, self.gc.as_ref(), target))
+        Ok(generate_smf_from_object_for_target(
+            &object_code,
+            self.gc.as_ref(),
+            target,
+        ))
     }
 }
 
@@ -444,9 +585,8 @@ fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
             let offset =
                 u64::from_le_bytes(elf_data[sh_offset + 24..sh_offset + 32].try_into().ok()?)
                     as usize;
-            let size =
-                u64::from_le_bytes(elf_data[sh_offset + 32..sh_offset + 40].try_into().ok()?)
-                    as usize;
+            let size = u64::from_le_bytes(elf_data[sh_offset + 32..sh_offset + 40].try_into().ok()?)
+                as usize;
 
             match name {
                 ".text" => text_section = Some((offset, size)),
@@ -513,9 +653,9 @@ fn apply_elf_relocations(
     rela_offset: usize,
     rela_size: usize,
     symtab_off: usize,
-    symtab_size: usize,
+    _symtab_size: usize,
     strtab_off: usize,
-    text_base: usize,
+    _text_base: usize,
 ) {
     // ELF64 relocation entry size is 24 bytes
     const RELA_ENTRY_SIZE: usize = 24;
@@ -536,10 +676,16 @@ fn apply_elf_relocations(
 
         let r_offset =
             u64::from_le_bytes(elf_data[rela_entry..rela_entry + 8].try_into().unwrap()) as usize;
-        let r_info =
-            u64::from_le_bytes(elf_data[rela_entry + 8..rela_entry + 16].try_into().unwrap());
-        let r_addend =
-            i64::from_le_bytes(elf_data[rela_entry + 16..rela_entry + 24].try_into().unwrap());
+        let r_info = u64::from_le_bytes(
+            elf_data[rela_entry + 8..rela_entry + 16]
+                .try_into()
+                .unwrap(),
+        );
+        let r_addend = i64::from_le_bytes(
+            elf_data[rela_entry + 16..rela_entry + 24]
+                .try_into()
+                .unwrap(),
+        );
 
         let r_type = (r_info & 0xffffffff) as u32;
         let r_sym = (r_info >> 32) as usize;
@@ -621,6 +767,7 @@ fn get_elf_string(elf_data: &[u8], strtab_off: usize, offset: usize) -> String {
 }
 
 /// Resolve a runtime symbol name to its address.
+#[allow(function_casts_as_integer)]
 fn resolve_runtime_symbol(name: &str) -> Option<usize> {
     use simple_runtime::value;
 
@@ -664,6 +811,7 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_value_float" => simple_runtime::rt_value_float as usize,
         "rt_value_bool" => simple_runtime::rt_value_bool as usize,
         "rt_value_nil" => simple_runtime::rt_value_nil as usize,
+        "rt_value_as_int" => simple_runtime::rt_value_as_int as usize,
 
         // Object operations
         "rt_object_new" => simple_runtime::rt_object_new as usize,
@@ -1055,8 +1203,8 @@ mod tests {
                 continue;
             }
 
-            let sh_name = u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().unwrap())
-                as usize;
+            let sh_name =
+                u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().unwrap()) as usize;
 
             if sh_name < shstrtab.len() {
                 let name_end = shstrtab[sh_name..]
@@ -1115,7 +1263,11 @@ mod tests {
                 func.return_type
             );
             for block in &func.blocks {
-                eprintln!("    Block {:?}: {} instructions", block.id, block.instructions.len());
+                eprintln!(
+                    "    Block {:?}: {} instructions",
+                    block.id,
+                    block.instructions.len()
+                );
                 for inst in &block.instructions {
                     eprintln!("      {:?}", inst);
                 }
@@ -1188,7 +1340,10 @@ pub fn get_value(x: i64) -> i64:
 main = 0
 "#;
         let mut config = LintConfig::new();
-        config.set_level(crate::lint::LintName::PrimitiveApi, crate::lint::LintLevel::Deny);
+        config.set_level(
+            crate::lint::LintName::PrimitiveApi,
+            crate::lint::LintLevel::Deny,
+        );
 
         let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
         pipeline.set_lint_config(config);
@@ -1214,7 +1369,10 @@ pub fn get_value(x: i64) -> i64:
 main = 0
 "#;
         let mut config = LintConfig::new();
-        config.set_level(crate::lint::LintName::PrimitiveApi, crate::lint::LintLevel::Allow);
+        config.set_level(
+            crate::lint::LintName::PrimitiveApi,
+            crate::lint::LintLevel::Allow,
+        );
 
         let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
         pipeline.set_lint_config(config);
@@ -1281,5 +1439,43 @@ main = 0
 
         // Should have lint warnings
         assert!(pipeline.has_lint_warnings());
+    }
+
+    #[test]
+    fn script_detection_handles_top_level_match() {
+        let mut parser = simple_parser::Parser::new(
+            "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0",
+        );
+        let module = parser.parse().expect("parse ok");
+        assert!(
+            has_script_statements(&module.items),
+            "script statements should be detected for match + let"
+        );
+    }
+
+    #[test]
+    fn interpreter_pipeline_executes_top_level_match() {
+        let source = "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0";
+        let mut parser = simple_parser::Parser::new(source);
+        let ast = parser.parse().expect("parse ok");
+        let module = monomorphize_module(&ast);
+        let item_kinds: Vec<&str> = module
+            .items
+            .iter()
+            .map(|n| match n {
+                simple_parser::ast::Node::Let(_) => "Let",
+                simple_parser::ast::Node::Match(_) => "Match",
+                simple_parser::ast::Node::Function(_) => "Function",
+                _ => "Other",
+            })
+            .collect();
+        assert_eq!(item_kinds, vec!["Let", "Match"]);
+
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(
+            result.is_ok(),
+            "script match should fall back to interpreter, got {result:?}"
+        );
     }
 }

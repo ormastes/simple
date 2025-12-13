@@ -1,3 +1,5 @@
+#![allow(unused_imports, deprecated, unused_variables, unused_mut)]
+
 use simple_driver::dependency_cache::{analyze_source_str, BuildCache, DepInfo};
 use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
 use simple_driver::runner::Runner;
@@ -7,7 +9,10 @@ use std::sync::{Arc, Mutex};
 
 // Import shared test helpers
 mod test_helpers;
-use test_helpers::{run_expect, run_expect_interp, run_expect_parity, run_expect_compile_error, run_expect_compile_error_at, run_expect_runtime_error, run_expect_error};
+use test_helpers::{
+    run_expect, run_expect_compile_error, run_expect_compile_error_at, run_expect_error,
+    run_expect_interp, run_expect_parity, run_expect_runtime_error,
+};
 
 #[test]
 fn runner_handles_mutability_control() {
@@ -538,4 +543,3 @@ main = if s == :hello: 1 else: 0
         1,
     );
 }
-

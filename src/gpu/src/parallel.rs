@@ -82,9 +82,8 @@ impl WorkGroupExecutor {
     where
         F: Fn(&WorkItemState) + Sync + Send,
     {
-        let total_items = global_size[0] as usize
-            * global_size[1] as usize
-            * global_size[2] as usize;
+        let total_items =
+            global_size[0] as usize * global_size[1] as usize * global_size[2] as usize;
 
         if total_items == 0 {
             return Ok(());
@@ -97,9 +96,7 @@ impl WorkGroupExecutor {
             (global_size[2] + local_size[2] - 1) / local_size[2],
         ];
 
-        let total_groups = num_groups[0] as usize
-            * num_groups[1] as usize
-            * num_groups[2] as usize;
+        let total_groups = num_groups[0] as usize * num_groups[1] as usize * num_groups[2] as usize;
 
         // Distribute work groups across threads
         let kernel = Arc::new(kernel);
@@ -294,7 +291,10 @@ where
 
             s.spawn(move || {
                 // Local reduction
-                let local_result = chunk.iter().skip(1).fold(chunk[0].clone(), |acc, x| op(&acc, x));
+                let local_result = chunk
+                    .iter()
+                    .skip(1)
+                    .fold(chunk[0].clone(), |acc, x| op(&acc, x));
                 results.lock().unwrap().push(local_result);
             });
         }
@@ -302,7 +302,10 @@ where
 
     // Final reduction
     let final_results = results.lock().unwrap();
-    final_results.iter().skip(1).fold(final_results[0].clone(), |acc, x| op(&acc, x))
+    final_results
+        .iter()
+        .skip(1)
+        .fold(final_results[0].clone(), |acc, x| op(&acc, x))
 }
 
 /// Execute a parallel scan (prefix sum) operation.

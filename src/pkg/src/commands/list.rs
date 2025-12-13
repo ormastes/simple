@@ -181,11 +181,8 @@ pub fn format_tree(node: &TreeNode, prefix: &str, is_last: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::init::init_project;
     use crate::commands::install::install_dependencies;
     use crate::commands::test_helpers::{cleanup_test_project, setup_test_project};
-    use crate::manifest::Dependency;
-    use std::fs;
 
     #[test]
     fn test_list_no_deps() {

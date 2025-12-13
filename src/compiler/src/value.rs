@@ -88,16 +88,37 @@ pub const CLASS_ARRAY: &str = "Array";
 
 /// Blocking operations - cannot be used in async contexts
 pub const BLOCKING_BUILTINS: &[&str] = &[
-    "await", "join", "recv", "sleep", "input", "read_file", "write_file",
+    "await",
+    "join",
+    "recv",
+    "sleep",
+    "input",
+    "read_file",
+    "write_file",
     // Native filesystem operations
-    "native_fs_read", "native_fs_write", "native_fs_append",
-    "native_fs_create_dir", "native_fs_remove_file", "native_fs_remove_dir",
-    "native_fs_rename", "native_fs_copy", "native_fs_metadata", "native_fs_read_dir",
-    "native_fs_open", "native_file_read", "native_file_write", "native_file_flush",
-    "native_file_seek", "native_file_sync", "native_file_close",
+    "native_fs_read",
+    "native_fs_write",
+    "native_fs_append",
+    "native_fs_create_dir",
+    "native_fs_remove_file",
+    "native_fs_remove_dir",
+    "native_fs_rename",
+    "native_fs_copy",
+    "native_fs_metadata",
+    "native_fs_read_dir",
+    "native_fs_open",
+    "native_file_read",
+    "native_file_write",
+    "native_file_flush",
+    "native_file_seek",
+    "native_file_sync",
+    "native_file_close",
     // Native terminal operations
-    "native_term_read", "native_term_write", "native_term_read_timeout",
-    "native_term_flush", "native_term_poll",
+    "native_term_read",
+    "native_term_write",
+    "native_term_read_timeout",
+    "native_term_flush",
+    "native_term_poll",
 ];
 
 /// Actor operations - require actor runtime
@@ -214,7 +235,10 @@ pub enum MethodLookupResult {
 impl MethodLookupResult {
     /// Check if a method was found (either direct or via method_missing).
     pub fn is_callable(&self) -> bool {
-        matches!(self, MethodLookupResult::Found | MethodLookupResult::MissingHook)
+        matches!(
+            self,
+            MethodLookupResult::Found | MethodLookupResult::MissingHook
+        )
     }
 
     /// Check if this is the method_missing fallback.
@@ -451,7 +475,10 @@ impl SpecialEnumKind {
 
     /// Check if this is an Option variant.
     pub fn is_option(&self) -> bool {
-        matches!(self, SpecialEnumKind::OptionSome | SpecialEnumKind::OptionNone)
+        matches!(
+            self,
+            SpecialEnumKind::OptionSome | SpecialEnumKind::OptionNone
+        )
     }
 
     /// Check if this is a Result variant.

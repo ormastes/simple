@@ -133,8 +133,14 @@ impl Toolchain {
     /// Set the sysroot.
     pub fn with_sysroot(mut self, sysroot: impl Into<PathBuf>) -> Self {
         self.sysroot = Some(sysroot.into());
-        self.cflags.push(format!("--sysroot={}", self.sysroot.as_ref().unwrap().display()));
-        self.ldflags.push(format!("--sysroot={}", self.sysroot.as_ref().unwrap().display()));
+        self.cflags.push(format!(
+            "--sysroot={}",
+            self.sysroot.as_ref().unwrap().display()
+        ));
+        self.ldflags.push(format!(
+            "--sysroot={}",
+            self.sysroot.as_ref().unwrap().display()
+        ));
         self
     }
 
@@ -273,7 +279,8 @@ impl NativeLibConfig {
             ""
         };
 
-        self.output_dir.join(format!("{}{}.{}", prefix, self.name, ext))
+        self.output_dir
+            .join(format!("{}{}.{}", prefix, self.name, ext))
     }
 }
 
@@ -303,7 +310,7 @@ impl NativeLibBuilder {
         // Check toolchain availability
         if !self.toolchain.is_available() {
             return Err(CrossCompileError::ToolchainNotFound(
-                self.toolchain.cc.display().to_string()
+                self.toolchain.cc.display().to_string(),
             ));
         }
 
@@ -330,14 +337,13 @@ impl NativeLibBuilder {
 
     /// Compile a single source file to object.
     fn compile_source(&self, source: &Path) -> Result<PathBuf, CrossCompileError> {
-        let stem = source.file_stem()
-            .ok_or_else(|| CrossCompileError::ConfigError("Invalid source file name".to_string()))?;
+        let stem = source.file_stem().ok_or_else(|| {
+            CrossCompileError::ConfigError("Invalid source file name".to_string())
+        })?;
         let obj = self.obj_dir.join(format!("{}.o", stem.to_string_lossy()));
 
         let mut cmd = Command::new(&self.toolchain.cc);
-        cmd.arg("-c")
-            .arg("-o").arg(&obj)
-            .arg(source);
+        cmd.arg("-c").arg("-o").arg(&obj).arg(source);
 
         // Add include directories
         for inc in &self.config.include_dirs {
@@ -377,8 +383,7 @@ impl NativeLibBuilder {
         let output = self.config.output_file(self.toolchain.target);
 
         let mut cmd = Command::new(&self.toolchain.cc);
-        cmd.arg("-shared")
-            .arg("-o").arg(&output);
+        cmd.arg("-shared").arg("-o").arg(&output);
 
         // Add objects
         for obj in objects {
@@ -409,7 +414,8 @@ impl NativeLibBuilder {
         if !output_result.status.success() {
             let stderr = String::from_utf8_lossy(&output_result.stderr);
             return Err(CrossCompileError::BuildFailed(format!(
-                "Linking failed: {}", stderr
+                "Linking failed: {}",
+                stderr
             )));
         }
 
@@ -421,8 +427,7 @@ impl NativeLibBuilder {
         let output = self.config.output_file(self.toolchain.target);
 
         let mut cmd = Command::new(&self.toolchain.ar);
-        cmd.arg("rcs")
-            .arg(&output);
+        cmd.arg("rcs").arg(&output);
 
         for obj in objects {
             cmd.arg(obj);
@@ -432,7 +437,8 @@ impl NativeLibBuilder {
         if !output_result.status.success() {
             let stderr = String::from_utf8_lossy(&output_result.stderr);
             return Err(CrossCompileError::BuildFailed(format!(
-                "Archive creation failed: {}", stderr
+                "Archive creation failed: {}",
+                stderr
             )));
         }
 
@@ -508,7 +514,8 @@ pub fn build_for_targets(
     let mut results = HashMap::new();
 
     for &target in targets {
-        let toolchain = registry.get(target)
+        let toolchain = registry
+            .get(target)
             .ok_or(CrossCompileError::UnsupportedTarget(target))?;
 
         // Create target-specific output directory
@@ -559,8 +566,7 @@ mod tests {
 
     #[test]
     fn test_output_file_names() {
-        let config = NativeLibConfig::new("test")
-            .shared_lib();
+        let config = NativeLibConfig::new("test").shared_lib();
 
         let linux = config.output_file(Target::new(TargetArch::X86_64, TargetOS::Linux));
         assert!(linux.to_string_lossy().ends_with(".so"));
@@ -574,8 +580,7 @@ mod tests {
 
     #[test]
     fn test_static_lib_output() {
-        let config = NativeLibConfig::new("test")
-            .static_lib();
+        let config = NativeLibConfig::new("test").static_lib();
 
         let linux = config.output_file(Target::new(TargetArch::X86_64, TargetOS::Linux));
         assert!(linux.to_string_lossy().ends_with(".a"));

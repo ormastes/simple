@@ -2,10 +2,10 @@
 //!
 //! This module provides startup code and runtime support for ARM Cortex-M processors.
 
-pub mod startup;
-pub mod vector;
 pub mod nvic;
+pub mod startup;
 pub mod systick;
+pub mod vector;
 
 pub use startup::*;
 pub use vector::*;
@@ -66,7 +66,9 @@ impl ArchInit for CortexM {
             core::arch::asm!("dsb", options(nomem, nostack));
         }
         loop {
-            unsafe { core::arch::asm!("wfi", options(nomem, nostack)); }
+            unsafe {
+                core::arch::asm!("wfi", options(nomem, nostack));
+            }
         }
     }
 

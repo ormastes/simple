@@ -1,7 +1,9 @@
+#![allow(unused_imports)]
 //! Runner system tests
 //! End-to-end tests using real implementations (no mocks)
 
 use simple_compiler::CompilerPipeline;
+
 use simple_driver::{run_code, Interpreter, RunConfig, Runner, RunningType};
 use simple_loader::ModuleLoader;
 use simple_parser::{Lexer, Parser};

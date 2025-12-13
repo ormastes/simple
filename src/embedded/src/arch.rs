@@ -99,8 +99,8 @@ impl EmbeddedArch {
     /// Get the interrupt vector table size (number of entries).
     pub const fn vector_table_size(&self) -> usize {
         match self {
-            Self::CortexM0 => 48,    // 16 + 32 external
-            Self::CortexM3 => 256,   // 16 + 240 external
+            Self::CortexM0 => 48,  // 16 + 32 external
+            Self::CortexM3 => 256, // 16 + 240 external
             Self::CortexM4 => 256,
             Self::CortexM7 => 256,
             Self::Riscv32 | Self::Riscv64 => 32, // PLIC interrupts

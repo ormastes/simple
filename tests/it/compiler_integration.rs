@@ -787,4 +787,3 @@ fn test_effect_set_append() {
     effects1.append(&effects2);
     assert_eq!(effects1.effects().len(), 2);
 }
-

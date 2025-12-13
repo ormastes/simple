@@ -9,15 +9,12 @@ use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
 
-use simple_loader::{
-    Settlement, SettlementConfig, SettlementBuilder, BuildOptions,
-    find_stub, create_executable,
-};
 use simple_loader::memory::PlatformAllocator;
+use simple_loader::{create_executable, Settlement, SettlementConfig};
 use simple_runtime::gc::GcRuntime;
 use simple_runtime::value::{
-    rt_capture_stdout_start, rt_capture_stderr_start,
-    rt_capture_stdout_stop, rt_capture_stderr_stop,
+    rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start,
+    rt_capture_stdout_stop,
 };
 
 use crate::Runner;
@@ -123,9 +120,7 @@ impl Interpreter {
                     self.runner.run_source_native(code)?
                 }
             }
-            RunningType::CompileAndRun => {
-                self.run_compile_and_run(code)?
-            }
+            RunningType::CompileAndRun => self.run_compile_and_run(code)?,
             RunningType::Both => {
                 let interp_result = if config.in_memory {
                     self.runner.run_source_in_memory(code)?
@@ -222,8 +217,8 @@ impl Interpreter {
             executable: true,
         };
 
-        let mut settlement = Settlement::new(config, allocator)
-            .map_err(|e| format!("create settlement: {e}"))?;
+        let mut settlement =
+            Settlement::new(config, allocator).map_err(|e| format!("create settlement: {e}"))?;
 
         // Add the module to the settlement
         settlement
@@ -231,10 +226,11 @@ impl Interpreter {
             .map_err(|e| format!("add module: {e}"))?;
 
         // Create executable
-        let exe_path = tmp.path().join(if cfg!(windows) { "app.exe" } else { "app" });
+        let exe_path = tmp
+            .path()
+            .join(if cfg!(windows) { "app.exe" } else { "app" });
 
-        create_executable(&settlement, &exe_path)
-            .map_err(|e| format!("create executable: {e}"))?;
+        create_executable(&settlement, &exe_path).map_err(|e| format!("create executable: {e}"))?;
 
         // Make executable on Unix
         #[cfg(unix)]
@@ -244,8 +240,7 @@ impl Interpreter {
                 .map_err(|e| format!("get perms: {e}"))?
                 .permissions();
             perms.set_mode(0o755);
-            std::fs::set_permissions(&exe_path, perms)
-                .map_err(|e| format!("set perms: {e}"))?;
+            std::fs::set_permissions(&exe_path, perms).map_err(|e| format!("set perms: {e}"))?;
         }
 
         // Run the executable
@@ -258,8 +253,14 @@ impl Interpreter {
 
         // Check for runtime errors (look for "error:" or "panic" in stderr)
         let stderr_str = String::from_utf8_lossy(&output.stderr);
-        if exit_code == -1 || stderr_str.contains("Load error:") || stderr_str.contains("Execution error:") {
-            return Err(format!("Executable failed (exit={}): {}", exit_code, stderr_str));
+        if exit_code == -1
+            || stderr_str.contains("Load error:")
+            || stderr_str.contains("Execution error:")
+        {
+            return Err(format!(
+                "Executable failed (exit={}): {}",
+                exit_code, stderr_str
+            ));
         }
 
         Ok(exit_code)

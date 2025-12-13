@@ -1,6 +1,8 @@
 //! Feature tests: Basic types, variables, operators, control flow, functions
 //! Features #1-42: Core language features
 
+#![allow(unused_imports, unused_variables, deprecated)]
+
 use simple_compiler::CompilerPipeline;
 use simple_driver::{run_code, Interpreter, RunConfig, Runner, RunningType};
 use simple_loader::ModuleLoader;
@@ -677,4 +679,3 @@ main = d3["a"] + d3["b"]
         .expect("dict spread");
     assert_eq!(result, 3);
 }
-

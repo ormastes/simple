@@ -1,7 +1,7 @@
 //! Package reader for loading SPK packages.
 
 use std::fs::File;
-use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::format::*;
@@ -42,7 +42,10 @@ impl PackageReader {
     }
 
     /// Load a package from any seekable reader.
-    pub fn load_from_reader<R: Read + Seek>(&self, reader: &mut R) -> Result<LoadedPackage, PackageError> {
+    pub fn load_from_reader<R: Read + Seek>(
+        &self,
+        reader: &mut R,
+    ) -> Result<LoadedPackage, PackageError> {
         // Read trailer from end
         let trailer = PackageTrailer::read_from(reader)?;
 
@@ -74,7 +77,9 @@ impl PackageReader {
 
             // Verify resources checksum
             if crc32(&resources_data) != trailer.resources_checksum {
-                return Err(PackageError::CompressionError("Resources checksum mismatch".to_string()));
+                return Err(PackageError::CompressionError(
+                    "Resources checksum mismatch".to_string(),
+                ));
             }
 
             if trailer.resources_compressed() {
@@ -101,7 +106,10 @@ impl PackageReader {
     }
 
     /// Load only the manifest (without loading full package).
-    pub fn load_manifest<P: AsRef<Path>>(&self, path: P) -> Result<Option<ManifestSection>, PackageError> {
+    pub fn load_manifest<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<Option<ManifestSection>, PackageError> {
         let mut file = File::open(path)?;
         let trailer = PackageTrailer::read_from(&mut file)?;
 
@@ -114,6 +122,22 @@ impl PackageReader {
         file.read_exact(&mut manifest_data)?;
 
         Ok(ManifestSection::from_bytes(&manifest_data))
+    }
+
+    /// Helper to read path from binary data
+    fn read_path(data: &[u8], offset: &mut usize) -> Option<String> {
+        if *offset + 2 > data.len() {
+            return None;
+        }
+        let path_len = u16::from_le_bytes(data[*offset..*offset + 2].try_into().unwrap()) as usize;
+        *offset += 2;
+
+        if *offset + path_len > data.len() {
+            return None;
+        }
+        let path = String::from_utf8_lossy(&data[*offset..*offset + path_len]).to_string();
+        *offset += path_len;
+        Some(path)
     }
 
     /// Unpack resources without decompression.
@@ -131,23 +155,17 @@ impl PackageReader {
 
         for _ in 0..count {
             // Read path
-            if offset + 2 > data.len() {
-                break;
-            }
-            let path_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
-            offset += 2;
-
-            if offset + path_len > data.len() {
-                break;
-            }
-            let path = String::from_utf8_lossy(&data[offset..offset + path_len]).to_string();
-            offset += path_len;
+            let path = match Self::read_path(data, &mut offset) {
+                Some(p) => p,
+                None => break,
+            };
 
             // Read data
             if offset + 4 > data.len() {
                 break;
             }
-            let data_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            let data_len =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
 
             if offset + data_len > data.len() {
@@ -189,25 +207,20 @@ impl PackageReader {
 
         for _ in 0..count {
             // Read path
-            if offset + 2 > data.len() {
-                break;
-            }
-            let path_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
-            offset += 2;
-
-            if offset + path_len > data.len() {
-                break;
-            }
-            let path = String::from_utf8_lossy(&data[offset..offset + path_len]).to_string();
-            offset += path_len;
+            let path = match Self::read_path(data, &mut offset) {
+                Some(p) => p,
+                None => break,
+            };
 
             // Read compressed and uncompressed sizes
             if offset + 8 > data.len() {
                 break;
             }
-            let compressed_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+            let compressed_len =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
-            let uncompressed_size = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+            let uncompressed_size =
+                u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
             offset += 4;
 
             // Read compressed data
@@ -218,7 +231,8 @@ impl PackageReader {
             offset += compressed_len;
 
             // Decompress
-            let decompressed = self.simple_decompress(compressed_data, uncompressed_size as usize)?;
+            let decompressed =
+                self.simple_decompress(compressed_data, uncompressed_size as usize)?;
 
             // Read checksum
             if offset + 4 > data.len() {
@@ -247,7 +261,11 @@ impl PackageReader {
     }
 
     /// Simple decompression (inverse of simple_compress).
-    fn simple_decompress(&self, data: &[u8], expected_size: usize) -> Result<Vec<u8>, PackageError> {
+    fn simple_decompress(
+        &self,
+        data: &[u8],
+        expected_size: usize,
+    ) -> Result<Vec<u8>, PackageError> {
         if data.is_empty() {
             return Ok(Vec::new());
         }
@@ -255,11 +273,15 @@ impl PackageReader {
         // Check for uncompressed marker
         if data[0] == 0xFE {
             if data.len() < 5 {
-                return Err(PackageError::CompressionError("Invalid uncompressed data".to_string()));
+                return Err(PackageError::CompressionError(
+                    "Invalid uncompressed data".to_string(),
+                ));
             }
             let size = u32::from_le_bytes(data[1..5].try_into().unwrap()) as usize;
             if data.len() < 5 + size {
-                return Err(PackageError::CompressionError("Truncated uncompressed data".to_string()));
+                return Err(PackageError::CompressionError(
+                    "Truncated uncompressed data".to_string(),
+                ));
             }
             return Ok(data[5..5 + size].to_vec());
         }

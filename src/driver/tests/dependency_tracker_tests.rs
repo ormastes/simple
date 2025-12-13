@@ -19,21 +19,21 @@
 //! 5. Symbol Resolution - cross-module symbol lookup
 
 use simple_dependency_tracker::{
-    resolution::{FileKind, FileSystem, ModPath, ResolutionResult, resolve, well_formed},
-    visibility::{
-        DirManifest, ModDecl, ModuleContents, Symbol, SymbolId, Visibility,
-        ancestor_visibility, effective_visibility, visibility_meet,
-    },
-    macro_import::{
-        AutoImport, MacroDirManifest, MacroExports, MacroSymbol, SymKind,
-        auto_imported_macros, explicit_import, glob_import, is_auto_imported,
-    },
     graph::ImportGraph,
+    macro_import::{
+        auto_imported_macros, explicit_import, glob_import, is_auto_imported, AutoImport,
+        MacroDirManifest, MacroExports, MacroSymbol, SymKind,
+    },
+    resolution::{resolve, well_formed, FileKind, FileSystem, ModPath, ResolutionResult},
     symbol::{ProjectSymbols, SymbolEntry, SymbolKind, SymbolTable},
+    visibility::{
+        ancestor_visibility, effective_visibility, visibility_meet, DirManifest, ModDecl,
+        ModuleContents, Symbol, SymbolId, Visibility,
+    },
 };
+use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
-use std::fs;
 
 // =============================================================================
 // Test Helpers
@@ -121,7 +121,10 @@ fn resolution_not_found() {
     let mp = ModPath::parse("nonexistent").unwrap();
     let root = Path::new("/fake/path");
 
-    assert!(matches!(resolve(&fs, root, &mp), ResolutionResult::NotFound));
+    assert!(matches!(
+        resolve(&fs, root, &mp),
+        ResolutionResult::NotFound
+    ));
 }
 
 #[test]
@@ -140,7 +143,10 @@ fn resolution_ambiguous_detected() {
 
     // Should detect ambiguity
     match resolve(&fs, &root, &mp) {
-        ResolutionResult::Ambiguous { file_path, dir_path } => {
+        ResolutionResult::Ambiguous {
+            file_path,
+            dir_path,
+        } => {
             assert!(file_path.to_string_lossy().contains("foo.spl"));
             assert!(dir_path.to_string_lossy().contains("__init__.spl"));
         }
@@ -309,7 +315,7 @@ fn macro_glob_doesnt_leak() {
     let mut exports = MacroExports::new();
     exports.add_non_macro(MacroSymbol::value("router", "Router"));
     exports.add_macro(MacroSymbol::macro_def("router", "route")); // In auto import
-    exports.add_macro(MacroSymbol::macro_def("router", "get"));   // NOT in auto import
+    exports.add_macro(MacroSymbol::macro_def("router", "get")); // NOT in auto import
 
     let result = glob_import(&manifest, &exports);
 
@@ -317,7 +323,9 @@ fn macro_glob_doesnt_leak() {
     assert!(result.iter().any(|s| s.name == "Router"));
 
     // route should be included (in auto import)
-    assert!(result.iter().any(|s| s.name == "route" && s.kind == SymKind::Macro));
+    assert!(result
+        .iter()
+        .any(|s| s.name == "route" && s.kind == SymKind::Macro));
 
     // get should NOT be included (not in auto import)
     assert!(!result.iter().any(|s| s.name == "get"));
@@ -352,7 +360,9 @@ fn macro_auto_imported_in_glob() {
 
     let result = glob_import(&manifest, &exports);
 
-    assert!(result.iter().any(|s| s.name == "my_macro" && s.kind == SymKind::Macro));
+    assert!(result
+        .iter()
+        .any(|s| s.name == "my_macro" && s.kind == SymKind::Macro));
 }
 
 #[test]
@@ -729,19 +739,39 @@ fn integration_module_with_visibility_and_exports() {
 
     // Check visibility
     assert_eq!(
-        effective_visibility(&manifest, "router", &router_contents, &SymbolId::new("Router")),
+        effective_visibility(
+            &manifest,
+            "router",
+            &router_contents,
+            &SymbolId::new("Router")
+        ),
         Visibility::Public
     );
     assert_eq!(
-        effective_visibility(&manifest, "router", &router_contents, &SymbolId::new("route")),
+        effective_visibility(
+            &manifest,
+            "router",
+            &router_contents,
+            &SymbolId::new("route")
+        ),
         Visibility::Public
     );
     assert_eq!(
-        effective_visibility(&manifest, "router", &router_contents, &SymbolId::new("helper")),
+        effective_visibility(
+            &manifest,
+            "router",
+            &router_contents,
+            &SymbolId::new("helper")
+        ),
         Visibility::Private
     );
     assert_eq!(
-        effective_visibility(&manifest, "internal", &internal_contents, &SymbolId::new("InternalHelper")),
+        effective_visibility(
+            &manifest,
+            "internal",
+            &internal_contents,
+            &SymbolId::new("InternalHelper")
+        ),
         Visibility::Private // Private module
     );
 }
@@ -768,7 +798,9 @@ fn integration_glob_import_with_auto_import() {
     assert!(result.iter().any(|s| s.name == "Request"));
 
     // Auto-imported macro: route
-    assert!(result.iter().any(|s| s.name == "route" && s.kind == SymKind::Macro));
+    assert!(result
+        .iter()
+        .any(|s| s.name == "route" && s.kind == SymKind::Macro));
 
     // NOT included: get, post (not in auto import)
     assert!(!result.iter().any(|s| s.name == "get"));

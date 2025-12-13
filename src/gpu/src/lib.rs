@@ -32,22 +32,22 @@
 //! let result = out_buf.download()?;
 //! ```
 
-mod device;
-mod context;
-mod buffer;
-mod kernel;
-mod intrinsics;
-mod error;
-mod parallel;
-mod optimize;
 pub mod backend;
+mod buffer;
+mod context;
+mod device;
+mod error;
+mod intrinsics;
+mod kernel;
+mod optimize;
+mod parallel;
 
-pub use device::*;
-pub use context::*;
+pub use backend::{get_backend, get_backend_by_type, Backend};
 pub use buffer::*;
-pub use kernel::*;
-pub use intrinsics::*;
+pub use context::*;
+pub use device::*;
 pub use error::*;
-pub use parallel::*;
+pub use intrinsics::*;
+pub use kernel::*;
 pub use optimize::*;
-pub use backend::{Backend, get_backend, get_backend_by_type};
+pub use parallel::*;

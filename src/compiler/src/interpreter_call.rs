@@ -211,6 +211,22 @@ fn evaluate_call(
             }
         }
     }
+    if let Expr::FieldAccess { receiver, field } = callee.as_ref() {
+        if let Expr::Identifier(module_name) = receiver.as_ref() {
+            if let Some(func) = functions.get(field) {
+                return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+            } else if classes.contains_key(field) {
+                return instantiate_class(field, args, env, functions, classes, enums, impl_methods);
+            } else if let Some(func) = env.get(field) {
+                if let Value::Function { def, captured_env, .. } = func {
+                    return exec_function_with_captured_env(def, args, env, captured_env, functions, classes, enums, impl_methods);
+                }
+            }
+            return Err(CompileError::Semantic(format!(
+                "unknown symbol {module_name}.{field}"
+            )));
+        }
+    }
     if let Expr::Path(segments) = callee.as_ref() {
         if segments.len() == 2 {
             let enum_name = &segments[0];
@@ -228,6 +244,10 @@ fn evaluate_call(
                         payload,
                     });
                 }
+            } else if let Some(func) = functions.get(variant) {
+                return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+            } else if classes.contains_key(variant) {
+                return instantiate_class(variant, args, env, functions, classes, enums, impl_methods);
             }
         }
         return Err(CompileError::Semantic(format!("unsupported path call: {:?}", segments)));

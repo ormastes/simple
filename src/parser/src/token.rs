@@ -49,7 +49,7 @@ pub enum TokenKind {
     Float(f64),
     TypedInteger(i64, NumericSuffix),
     TypedFloat(f64, NumericSuffix),
-    String(String),             // Legacy: plain string (for backward compat)
+    String(String),                 // Legacy: plain string (for backward compat)
     FString(Vec<FStringToken>), // "hello {expr}" interpolated strings (now default for double quotes)
     RawString(String),          // 'raw string' - no escapes, no interpolation
     TypedString(String, String), // "value"_suffix - string with unit suffix (e.g., "127.0.0.1"_ip)
@@ -75,6 +75,7 @@ pub enum TokenKind {
     Continue,
     Return,
     Match,
+    Case,
     Struct,
     Class,
     Enum,
@@ -86,12 +87,12 @@ pub enum TokenKind {
     Import,
     From,
     As,
-    Mod,       // mod (module declaration)
-    Use,       // use (import)
-    Export,    // export (re-export)
-    Common,    // common (directory prelude)
-    Auto,      // auto (auto import)
-    Crate,     // crate (module root)
+    Mod,    // mod (module declaration)
+    Use,    // use (import)
+    Export, // export (re-export)
+    Common, // common (directory prelude)
+    Auto,   // auto (auto import)
+    Crate,  // crate (module root)
     In,
     Is,
     Not,

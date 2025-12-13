@@ -42,10 +42,7 @@ pub enum ParseError {
     UnterminatedBlockComment { span: Option<Span> },
 
     #[error("Missing expected token: {expected}")]
-    MissingToken {
-        expected: String,
-        span: Span,
-    },
+    MissingToken { expected: String, span: Span },
 
     #[error("Invalid pattern")]
     InvalidPattern { span: Span, message: String },

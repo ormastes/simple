@@ -1,3 +1,4 @@
+#![allow(unused_imports)]
 //! Comprehensive type checker unit tests
 
 use simple_parser::Parser;
@@ -612,4 +613,3 @@ fn test_unify_type_param_same() {
     let t2 = Type::TypeParam("T".to_string());
     assert!(tc.unify(&t1, &t2).is_ok());
 }
-

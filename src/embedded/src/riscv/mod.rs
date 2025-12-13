@@ -2,10 +2,10 @@
 //!
 //! This module provides startup code and runtime support for RISC-V processors.
 
-pub mod startup;
+pub mod clint;
 pub mod csr;
 pub mod plic;
-pub mod clint;
+pub mod startup;
 
 pub use startup::*;
 
@@ -207,10 +207,7 @@ impl Drop for CriticalSection {
         // Restore MIE bit if it was set
         if self.mstatus & 0x8 != 0 {
             unsafe {
-                core::arch::asm!(
-                    "csrsi mstatus, 0x8",
-                    options(nomem, nostack)
-                );
+                core::arch::asm!("csrsi mstatus, 0x8", options(nomem, nostack));
             }
         }
     }

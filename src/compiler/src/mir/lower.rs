@@ -742,7 +742,9 @@ impl MirLowerer {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GeneratorCreate { dest, body_block });
+                    block
+                        .instructions
+                        .push(MirInst::GeneratorCreate { dest, body_block });
                     dest
                 })
             }
@@ -757,7 +759,9 @@ impl MirLowerer {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::FutureCreate { dest, body_block });
+                    block
+                        .instructions
+                        .push(MirInst::FutureCreate { dest, body_block });
                     dest
                 })
             }
@@ -768,9 +772,10 @@ impl MirLowerer {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block
-                        .instructions
-                        .push(MirInst::Await { dest, future: future_reg });
+                    block.instructions.push(MirInst::Await {
+                        dest,
+                        future: future_reg,
+                    });
                     dest
                 })
             }
@@ -785,7 +790,9 @@ impl MirLowerer {
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::ActorSpawn { dest, body_block });
+                    block
+                        .instructions
+                        .push(MirInst::ActorSpawn { dest, body_block });
                     dest
                 })
             }

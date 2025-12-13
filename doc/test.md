@@ -459,6 +459,8 @@ fn validate_config() {
 }
 ```
 
+> Note: Skipping the `init_*_tests!()` macro in any test binary (including system tests) will cause `validate_test_config()` to fail, ensuring the mock policy and test level are always initialized.
+
 ### Mock Patterns for Environment Tests
 
 Environment tests allow mocking of:

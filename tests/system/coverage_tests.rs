@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables, deprecated)]
 //! Coverage tests: Actor, Interpreter, Runner, ConfigEnv, Loader, Manual Memory
 //! Additional coverage tests for various system components
 
@@ -556,4 +557,3 @@ fn test_module_registry_reload() {
         "Should return new module"
     );
 }
-

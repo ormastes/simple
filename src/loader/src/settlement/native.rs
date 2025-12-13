@@ -3,10 +3,10 @@
 //! Handles loading and managing native libraries (static, shared, system).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::ffi::CString;
+use std::path::{Path, PathBuf};
 
-use crate::smf::settlement::{NativeLibEntry, NATIVE_LIB_SHARED, NATIVE_LIB_STATIC, NATIVE_LIB_SYSTEM};
+use crate::smf::settlement::{NATIVE_LIB_SHARED, NATIVE_LIB_STATIC, NATIVE_LIB_SYSTEM};
 
 /// Handle to a loaded native library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,14 +34,9 @@ pub enum NativeLibSpec {
         symbols: Vec<String>,
     },
     /// Shared library (loaded at runtime)
-    Shared {
-        name: String,
-        path: PathBuf,
-    },
+    Shared { name: String, path: PathBuf },
     /// System library (loaded from system paths)
-    System {
-        name: String,
-    },
+    System { name: String },
 }
 
 impl NativeLibSpec {
@@ -86,6 +81,7 @@ enum NativeLibHandle {
     #[cfg(windows)]
     Dynamic(*mut std::ffi::c_void),
     /// Not loaded yet
+    #[allow(dead_code)]
     Unloaded,
 }
 
@@ -138,9 +134,7 @@ impl LoadedNativeLib {
 
         let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
 
-        let handle = unsafe {
-            winapi::um::libloaderapi::LoadLibraryW(wide_path.as_ptr())
-        };
+        let handle = unsafe { winapi::um::libloaderapi::LoadLibraryW(wide_path.as_ptr()) };
 
         if handle.is_null() {
             return Err(format!("Failed to load {:?}", path));
@@ -175,7 +169,8 @@ impl LoadedNativeLib {
                 Err(_) => continue,
             };
 
-            let handle = unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
+            let handle =
+                unsafe { libc::dlopen(c_name.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
 
             if !handle.is_null() {
                 return Ok(Self {
@@ -200,9 +195,7 @@ impl LoadedNativeLib {
             .chain(Some(0))
             .collect();
 
-        let handle = unsafe {
-            winapi::um::libloaderapi::LoadLibraryW(wide_name.as_ptr())
-        };
+        let handle = unsafe { winapi::um::libloaderapi::LoadLibraryW(wide_name.as_ptr()) };
 
         if handle.is_null() {
             return Err(format!("System library '{}' not found", name));
@@ -224,57 +217,39 @@ impl LoadedNativeLib {
     /// Look up a symbol in the library.
     #[cfg(unix)]
     pub fn get_symbol(&mut self, name: &str) -> Option<usize> {
+        self.get_symbol_impl(name, |handle, c_name| unsafe {
+            let sym = libc::dlsym(handle, c_name.as_ptr());
+            if sym.is_null() { None } else { Some(sym as usize) }
+        })
+    }
+
+    #[cfg(windows)]
+    pub fn get_symbol(&mut self, name: &str) -> Option<usize> {
+        self.get_symbol_impl(name, |handle, c_name| unsafe {
+            let sym = winapi::um::libloaderapi::GetProcAddress(handle as _, c_name.as_ptr() as _);
+            if sym.is_null() { None } else { Some(sym as usize) }
+        })
+    }
+
+    /// Platform-agnostic symbol lookup implementation
+    fn get_symbol_impl<F>(&mut self, name: &str, lookup: F) -> Option<usize>
+    where
+        F: FnOnce(*mut std::ffi::c_void, &CString) -> Option<usize>,
+    {
         // Check cache first
         if let Some(&addr) = self.symbols.get(name) {
             return Some(addr);
         }
 
         let addr = match &self.handle {
-            NativeLibHandle::Static(data, size) => {
+            NativeLibHandle::Static(_data, _size) => {
                 // For static libs, we'd need to parse the object format
                 // This is a placeholder - real implementation would parse ELF/Mach-O/COFF
                 None
             }
             NativeLibHandle::Dynamic(handle) => {
                 let c_name = CString::new(name).ok()?;
-                let sym = unsafe { libc::dlsym(*handle, c_name.as_ptr()) };
-                if sym.is_null() {
-                    None
-                } else {
-                    Some(sym as usize)
-                }
-            }
-            NativeLibHandle::Unloaded => None,
-        };
-
-        if let Some(a) = addr {
-            self.symbols.insert(name.to_string(), a);
-        }
-
-        addr
-    }
-
-    #[cfg(windows)]
-    pub fn get_symbol(&mut self, name: &str) -> Option<usize> {
-        if let Some(&addr) = self.symbols.get(name) {
-            return Some(addr);
-        }
-
-        let addr = match &self.handle {
-            NativeLibHandle::Static(_, _) => None,
-            NativeLibHandle::Dynamic(handle) => {
-                let c_name = CString::new(name).ok()?;
-                let sym = unsafe {
-                    winapi::um::libloaderapi::GetProcAddress(
-                        *handle as _,
-                        c_name.as_ptr() as _,
-                    )
-                };
-                if sym.is_null() {
-                    None
-                } else {
-                    Some(sym as usize)
-                }
+                lookup(*handle, &c_name)
             }
             NativeLibHandle::Unloaded => None,
         };
@@ -316,13 +291,17 @@ impl Drop for LoadedNativeLib {
             #[cfg(unix)]
             NativeLibHandle::Dynamic(handle) => {
                 if !handle.is_null() {
-                    unsafe { libc::dlclose(*handle); }
+                    unsafe {
+                        libc::dlclose(*handle);
+                    }
                 }
             }
             #[cfg(windows)]
             NativeLibHandle::Dynamic(handle) => {
                 if !handle.is_null() {
-                    unsafe { winapi::um::libloaderapi::FreeLibrary(*handle as _); }
+                    unsafe {
+                        winapi::um::libloaderapi::FreeLibrary(*handle as _);
+                    }
                 }
             }
             NativeLibHandle::Unloaded => {}

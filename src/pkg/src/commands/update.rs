@@ -88,7 +88,9 @@ pub fn update_package(dir: &Path, name: &str) -> PkgResult<UpdateResult> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::test_helpers::{cleanup_test_project, setup_test_project, setup_with_path_dep, setup_two_path_deps};
+    use crate::commands::test_helpers::{
+        cleanup_test_project, setup_test_project, setup_two_path_deps, setup_with_path_dep,
+    };
 
     #[test]
     fn test_update_all() {

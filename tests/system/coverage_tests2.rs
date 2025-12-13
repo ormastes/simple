@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables, unused_comparisons, deprecated)]
 //! Coverage tests: Loaded Module, GcRuntime, ExecCore, Dependency Cache, SMF
 //! Additional coverage tests for loader and runtime components
 
@@ -643,4 +644,3 @@ fn test_section_type_values() {
     assert_eq!(SectionType::Reloc as u32, 5);
     assert_eq!(SectionType::SymTab as u32, 6);
 }
-

@@ -291,28 +291,24 @@ impl ValidBorrowState {
 
     /// Try to take an exclusive borrow. Returns new state if successful.
     /// Corresponds to Lean's `takeExclusive`.
-    pub fn take_exclusive(self) -> Result<ValidBorrowState, ValidBorrowState> {
+    pub fn take_exclusive(self) -> Option<ValidBorrowState> {
         match self {
-            ValidBorrowState::Unborrowed => Ok(ValidBorrowState::Exclusive),
-            other => Err(other), // Cannot take exclusive if already borrowed
+            ValidBorrowState::Unborrowed => Some(ValidBorrowState::Exclusive),
+            _ => None, // Cannot take exclusive if already borrowed
         }
     }
 
     /// Take a shared borrow. Always succeeds unless exclusive.
     /// Corresponds to Lean's `takeShared`.
-    pub fn take_shared(self) -> Result<ValidBorrowState, ValidBorrowState> {
+    pub fn take_shared(self) -> Option<ValidBorrowState> {
         match self {
-            ValidBorrowState::Unborrowed => Ok(ValidBorrowState::Shared(
-                std::num::NonZeroUsize::new(1).unwrap(),
-            )),
-            ValidBorrowState::Shared(n) => {
-                // Saturating add to prevent overflow
-                let new_count = n.get().saturating_add(1);
-                Ok(ValidBorrowState::Shared(
-                    std::num::NonZeroUsize::new(new_count).unwrap(),
-                ))
+            ValidBorrowState::Unborrowed => {
+                Some(ValidBorrowState::Shared(std::num::NonZeroUsize::new(1).unwrap()))
             }
-            ValidBorrowState::Exclusive => Err(ValidBorrowState::Exclusive),
+            ValidBorrowState::Shared(n) => Some(ValidBorrowState::Shared(
+                std::num::NonZeroUsize::new(n.get() + 1).unwrap(),
+            )),
+            ValidBorrowState::Exclusive => None,
         }
     }
 
@@ -359,120 +355,6 @@ impl ValidBorrowState {
             // Explicit: unborrowed and exclusive have no shared borrows
             ValidBorrowState::Unborrowed | ValidBorrowState::Exclusive => 0,
         }
-    }
-}
-
-/// Thread-safe borrow tracker for an allocation.
-/// Wraps `BorrowState` with a mutex for concurrent access.
-#[derive(Debug, Default)]
-pub struct BorrowTracker {
-    state: Mutex<BorrowState>,
-}
-
-impl BorrowTracker {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Check if the current state is valid.
-    pub fn is_valid(&self) -> bool {
-        self.state.lock().unwrap().is_valid()
-    }
-
-    /// Try to acquire an exclusive borrow.
-    pub fn try_exclusive(&self) -> bool {
-        self.state.lock().unwrap().take_exclusive()
-    }
-
-    /// Try to acquire a shared borrow.
-    pub fn try_shared(&self) -> bool {
-        self.state.lock().unwrap().take_shared()
-    }
-
-    /// Release an exclusive borrow.
-    pub fn release_exclusive(&self) {
-        self.state.lock().unwrap().release_exclusive();
-    }
-
-    /// Release a shared borrow.
-    pub fn release_shared(&self) {
-        self.state.lock().unwrap().release_shared();
-    }
-
-    /// Get current borrow counts for debugging/verification.
-    pub fn counts(&self) -> (bool, usize) {
-        let state = self.state.lock().unwrap();
-        (state.exclusive, state.shared.get())
-    }
-
-    /// Get type-safe state snapshot.
-    pub fn valid_state(&self) -> Option<ValidBorrowState> {
-        self.state.lock().unwrap().to_valid()
-    }
-}
-
-/// Type-safe borrow tracker that maintains invariant by construction.
-#[derive(Debug)]
-pub struct ValidBorrowTracker {
-    state: Mutex<ValidBorrowState>,
-}
-
-impl Default for ValidBorrowTracker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ValidBorrowTracker {
-    pub fn new() -> Self {
-        Self {
-            state: Mutex::new(ValidBorrowState::Unborrowed),
-        }
-    }
-
-    /// Try to acquire an exclusive borrow.
-    pub fn try_exclusive(&self) -> bool {
-        let mut guard = self.state.lock().unwrap();
-        let current = guard.clone();
-        match current.take_exclusive() {
-            Ok(new_state) => {
-                *guard = new_state;
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Try to acquire a shared borrow.
-    pub fn try_shared(&self) -> bool {
-        let mut guard = self.state.lock().unwrap();
-        let current = guard.clone();
-        match current.take_shared() {
-            Ok(new_state) => {
-                *guard = new_state;
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Release an exclusive borrow.
-    pub fn release_exclusive(&self) {
-        let mut guard = self.state.lock().unwrap();
-        let current = guard.clone();
-        *guard = current.release_exclusive();
-    }
-
-    /// Release a shared borrow.
-    pub fn release_shared(&self) {
-        let mut guard = self.state.lock().unwrap();
-        let current = guard.clone();
-        *guard = current.release_shared();
-    }
-
-    /// Get current state.
-    pub fn state(&self) -> ValidBorrowState {
-        self.state.lock().unwrap().clone()
     }
 }
 

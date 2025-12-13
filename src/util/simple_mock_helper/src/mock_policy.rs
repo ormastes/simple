@@ -10,7 +10,7 @@
 //! Each mock wrapper calls `check_mock_use_from(module_path!())`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 /// Result of a mock policy check (non-panicking version).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,8 +28,11 @@ pub enum MockCheckResult {
 /// Are mocks enabled in this test binary?
 static MOCKS_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Allowed module patterns (first init wins).
-static ALLOWED_PATTERNS: OnceLock<Vec<&'static str>> = OnceLock::new();
+/// Whether the mock policy has been initialized.
+static POLICY_INITIALIZED: AtomicBool = AtomicBool::new(false);
+
+/// Allowed module patterns.
+static ALLOWED_PATTERNS: OnceLock<RwLock<Vec<&'static str>>> = OnceLock::new();
 
 /// Default patterns: allow only modules under `::hal::` and `::sub_hal::`.
 pub const DEFAULT_HAL_PATTERNS: &[&str] = &["*::hal::*", "*::sub_hal::*"];
@@ -50,8 +53,12 @@ pub const DEFAULT_ENV_PATTERNS: &[&str] = &[
 /// - Use `::` as module separator.
 /// - `*` is a wildcard for any sequence of characters.
 pub fn init_mocks_for_only(patterns: &'static [&'static str]) {
-    let _ = ALLOWED_PATTERNS.set(patterns.to_vec());
+    let lock = ALLOWED_PATTERNS.get_or_init(|| RwLock::new(Vec::new()));
+    let mut guard = lock.write().expect("lock poisoned");
+    guard.clear();
+    guard.extend_from_slice(patterns);
     MOCKS_ENABLED.store(true, Ordering::SeqCst);
+    POLICY_INITIALIZED.store(true, Ordering::SeqCst);
 }
 
 /// Convenience: enable the default HAL-only policy.
@@ -61,7 +68,10 @@ pub fn init_mocks_for_only_default() {
 
 /// Disable all mocks for this test binary.
 pub fn init_mocks_for_system() {
+    let lock = ALLOWED_PATTERNS.get_or_init(|| RwLock::new(Vec::new()));
+    lock.write().expect("lock poisoned").clear(); // no allowed patterns when mocks are disabled
     MOCKS_ENABLED.store(false, Ordering::SeqCst);
+    POLICY_INITIALIZED.store(true, Ordering::SeqCst);
 }
 
 /// Check whether a mock from `source_path` (usually `module_path!()`)
@@ -96,16 +106,20 @@ pub fn check_mock_use_from(source_path: &str) {
 /// Returns a `MockCheckResult` indicating whether the mock is allowed
 /// and why if not.
 pub fn try_check_mock_use_from(source_path: &str) -> MockCheckResult {
+    if !POLICY_INITIALIZED.load(Ordering::SeqCst) {
+        return MockCheckResult::NotInitialized;
+    }
+
     if !MOCKS_ENABLED.load(Ordering::SeqCst) {
         return MockCheckResult::MocksDisabled;
     }
 
     let patterns = match ALLOWED_PATTERNS.get() {
-        Some(p) => p,
+        Some(lock) => lock.read().expect("lock poisoned"),
         None => return MockCheckResult::NotInitialized,
     };
 
-    for pat in patterns {
+    for pat in patterns.iter() {
         if pattern_matches(source_path, pat) {
             return MockCheckResult::Allowed;
         }
@@ -123,12 +137,23 @@ pub fn are_mocks_enabled() -> bool {
 
 /// Check if the mock policy has been initialized.
 pub fn is_policy_initialized() -> bool {
-    ALLOWED_PATTERNS.get().is_some()
+    POLICY_INITIALIZED.load(Ordering::SeqCst)
 }
 
 /// Get the current allowed patterns (if initialized).
-pub fn get_allowed_patterns() -> Option<&'static [&'static str]> {
-    ALLOWED_PATTERNS.get().map(|v| v.as_slice())
+pub fn get_allowed_patterns() -> Option<Vec<&'static str>> {
+    ALLOWED_PATTERNS
+        .get()
+        .map(|lock| lock.read().expect("lock poisoned").clone())
+}
+
+#[cfg(test)]
+pub(crate) fn reset_policy_for_tests() {
+    MOCKS_ENABLED.store(false, Ordering::SeqCst);
+    POLICY_INITIALIZED.store(false, Ordering::SeqCst);
+    if let Some(lock) = ALLOWED_PATTERNS.get() {
+        lock.write().expect("lock poisoned").clear();
+    }
 }
 
 /// Simple wildcard matcher:
@@ -272,5 +297,23 @@ mod tests {
         assert!(pattern_matches("my_crate::io::filesystem", "*::io::*"));
         // Negative cases
         assert!(!pattern_matches("my_crate::service::foo", "*::external::*"));
+    }
+
+    #[test]
+    fn try_check_requires_initialization() {
+        reset_policy_for_tests();
+        let result = try_check_mock_use_from("my_crate::hal::spi");
+        assert_eq!(result, MockCheckResult::NotInitialized);
+    }
+
+    #[test]
+    fn init_system_marks_policy_initialized() {
+        reset_policy_for_tests();
+        init_mocks_for_system();
+        assert!(is_policy_initialized());
+        assert_eq!(
+            try_check_mock_use_from("any::path"),
+            MockCheckResult::MocksDisabled
+        );
     }
 }

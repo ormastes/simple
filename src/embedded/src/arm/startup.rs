@@ -52,10 +52,7 @@ pub unsafe extern "C" fn Reset_Handler() -> ! {
             static mut __heap_start: u8;
             static __heap_size: u32;
         }
-        crate::runtime::init_heap(
-            &mut __heap_start as *mut u8,
-            __heap_size as usize,
-        );
+        crate::runtime::init_heap(&mut __heap_start as *mut u8, __heap_size as usize);
     }
 
     // Call main

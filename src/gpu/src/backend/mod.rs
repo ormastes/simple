@@ -88,13 +88,7 @@ pub trait Backend: Send + Sync {
     fn free(&self, handle: BufferHandle) -> GpuResult<()>;
 
     /// Copy memory.
-    fn memcpy(
-        &self,
-        dst: *mut u8,
-        src: *const u8,
-        size: usize,
-        kind: MemcpyKind,
-    ) -> GpuResult<()>;
+    fn memcpy(&self, dst: *mut u8, src: *const u8, size: usize, kind: MemcpyKind) -> GpuResult<()>;
 
     /// Asynchronous memory copy.
     fn memcpy_async(

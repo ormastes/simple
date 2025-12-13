@@ -1,11 +1,11 @@
 //! Package writer for creating SPK packages.
 
 use std::fs::File;
-use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{self, Cursor, Read, Seek, Write};
 use std::path::Path;
 
-use crate::settlement::{BuildOptions, Settlement, SettlementBuilder};
 use super::format::*;
+use crate::settlement::{BuildOptions, Settlement, SettlementBuilder};
 
 /// Error type for package operations.
 #[derive(Debug)]
@@ -167,7 +167,6 @@ impl PackageWriter {
             trailer.flags |= SPK_FLAG_HAS_MANIFEST;
             output.write_all(&manifest_data)?;
             trailer.manifest_size = manifest_data.len() as u64;
-            current_pos += trailer.manifest_size;
         } else {
             trailer.manifest_size = 0;
         }
@@ -251,7 +250,8 @@ impl PackageWriter {
             compression: 0,
         });
 
-        builder.build_to_vec(settlement)
+        builder
+            .build_to_vec(settlement)
             .map_err(|_| PackageError::InvalidSettlement)
     }
 
@@ -327,10 +327,7 @@ impl PackageWriter {
         while i < data.len() {
             // Check for run of same byte
             let mut run_len = 1;
-            while i + run_len < data.len()
-                && data[i + run_len] == data[i]
-                && run_len < 255
-            {
+            while i + run_len < data.len() && data[i + run_len] == data[i] && run_len < 255 {
                 run_len += 1;
             }
 
@@ -342,7 +339,7 @@ impl PackageWriter {
                 i += run_len;
             } else {
                 // Collect literals
-                let mut literal_start = i;
+                let literal_start = i;
                 let mut literal_count = 0;
 
                 while i < data.len() && literal_count < 254 {
@@ -427,14 +424,12 @@ mod tests {
     #[test]
     fn test_pack_resources() {
         let writer = PackageWriter::new();
-        let resources = vec![
-            ResourceEntry {
-                path: "lib/test.spl".to_string(),
-                data: b"test data".to_vec(),
-                uncompressed_size: 9,
-                checksum: crc32(b"test data"),
-            },
-        ];
+        let resources = vec![ResourceEntry {
+            path: "lib/test.spl".to_string(),
+            data: b"test data".to_vec(),
+            uncompressed_size: 9,
+            checksum: crc32(b"test data"),
+        }];
 
         let packed = writer.pack_resources(&resources).unwrap();
         assert!(!packed.is_empty());

@@ -1,6 +1,8 @@
 //! Compiler integration tests - Part 2
 //! HIR, MIR, Effect, DataSection, Value, Manual Memory tests
 
+#![allow(unused_imports, unused_variables, unused_comparisons)]
+
 use simple_compiler::CompilerPipeline;
 use simple_loader::{ModuleLoader, ModuleRegistry};
 use simple_parser::{Lexer, Parser, Span, Token, TokenKind};

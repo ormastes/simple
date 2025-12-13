@@ -264,9 +264,7 @@ impl<M: Module> CodegenBackend<M> {
         .map_err(BackendError::ModuleError)?;
 
         // Verify the function before defining
-        if let Err(errors) =
-            cranelift_codegen::verify_function(&self.ctx.func, self.module.isa())
-        {
+        if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
             return Err(BackendError::ModuleError(format!(
                 "Verifier errors:\n{}",
                 errors

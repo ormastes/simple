@@ -545,9 +545,7 @@ pub fn get_user_id() -> UserId:
 "#;
         let diagnostics = check_code(code);
         // UserId is not a primitive, so no warning
-        assert!(diagnostics
-            .iter()
-            .all(|d| d.lint != LintName::PrimitiveApi));
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::PrimitiveApi));
     }
 
     #[test]
@@ -580,9 +578,7 @@ pub fn raw_bytes(count: i32) -> i32:
 "#;
         let diagnostics = check_code(code);
         // The allow attribute should suppress primitive_api warnings
-        assert!(diagnostics
-            .iter()
-            .all(|d| d.lint != LintName::PrimitiveApi));
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::PrimitiveApi));
     }
 
     #[test]

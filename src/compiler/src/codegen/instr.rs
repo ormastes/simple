@@ -12,10 +12,13 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
 
 use crate::hir::{BinOp, TypeId, UnaryOp};
-use crate::mir::{BlockId, FStringPart, MirFunction, MirInst, MirLiteral, MirPattern, VReg, BindingStep, PatternBinding, Terminator};
+use crate::mir::{
+    BindingStep, BlockId, FStringPart, MirFunction, MirInst, MirLiteral, MirPattern,
+    PatternBinding, Terminator, VReg,
+};
 
 use super::shared::get_func_block_addr;
-use super::types_util::{type_id_to_cranelift, type_id_size, type_to_cranelift};
+use super::types_util::{type_id_size, type_id_to_cranelift, type_to_cranelift};
 
 // Include split modules for better organization
 include!("instr_methods.rs");
@@ -69,7 +72,12 @@ pub fn compile_instruction<M: Module>(
             ctx.vreg_values.insert(*dest, val);
         }
 
-        MirInst::BinOp { dest, op, left, right } => {
+        MirInst::BinOp {
+            dest,
+            op,
+            left,
+            right,
+        } => {
             let lhs = ctx.vreg_values[left];
             let rhs = ctx.vreg_values[right];
             let val = compile_binop(ctx, builder, *op, lhs, rhs)?;
@@ -107,11 +115,11 @@ pub fn compile_instruction<M: Module>(
             let val = ctx.vreg_values[operand];
             let result = match op {
                 UnaryOp::Neg => builder.ins().ineg(val),
-                UnaryOp::Not => builder.ins().icmp_imm(
-                    cranelift_codegen::ir::condcodes::IntCC::Equal,
-                    val,
-                    0,
-                ),
+                UnaryOp::Not => {
+                    builder
+                        .ins()
+                        .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0)
+                }
                 UnaryOp::BitNot => builder.ins().bnot(val),
             };
             ctx.vreg_values.insert(*dest, result);
@@ -169,13 +177,19 @@ pub fn compile_instruction<M: Module>(
             }
         }
 
-        MirInst::InterpCall { dest, func_name, args } => {
+        MirInst::InterpCall {
+            dest,
+            func_name,
+            args,
+        } => {
             compile_interp_call(ctx, builder, dest, func_name, args)?;
         }
 
         MirInst::InterpEval { dest, expr_index } => {
             let interp_eval_id = ctx.runtime_funcs["rt_interp_eval"];
-            let interp_eval_ref = ctx.module.declare_func_in_func(interp_eval_id, builder.func);
+            let interp_eval_ref = ctx
+                .module
+                .declare_func_in_func(interp_eval_id, builder.func);
             let idx = builder.ins().iconst(types::I64, *expr_index as i64);
             let call = builder.ins().call(interp_eval_ref, &[idx]);
             let result = builder.inst_results(call)[0];
@@ -194,15 +208,29 @@ pub fn compile_instruction<M: Module>(
             compile_dict_lit(ctx, builder, *dest, keys, values);
         }
 
-        MirInst::IndexGet { dest, collection, index } => {
+        MirInst::IndexGet {
+            dest,
+            collection,
+            index,
+        } => {
             compile_index_get(ctx, builder, *dest, *collection, *index);
         }
 
-        MirInst::IndexSet { collection, index, value } => {
+        MirInst::IndexSet {
+            collection,
+            index,
+            value,
+        } => {
             compile_index_set(ctx, builder, *collection, *index, *value);
         }
 
-        MirInst::SliceOp { dest, collection, start, end, step } => {
+        MirInst::SliceOp {
+            dest,
+            collection,
+            start,
+            end,
+            step,
+        } => {
             compile_slice_op(ctx, builder, *dest, *collection, *start, *end, *step);
         }
 
@@ -227,48 +255,135 @@ pub fn compile_instruction<M: Module>(
             compile_fstring_format(ctx, builder, *dest, parts);
         }
 
-        MirInst::ClosureCreate { dest, func_name, closure_size, capture_offsets, capture_types: _, captures } => {
-            compile_closure_create(ctx, builder, *dest, func_name, *closure_size as usize, capture_offsets, captures);
+        MirInst::ClosureCreate {
+            dest,
+            func_name,
+            closure_size,
+            capture_offsets,
+            capture_types: _,
+            captures,
+        } => {
+            compile_closure_create(
+                ctx,
+                builder,
+                *dest,
+                func_name,
+                *closure_size as usize,
+                capture_offsets,
+                captures,
+            );
         }
 
-        MirInst::IndirectCall { dest, callee, param_types, return_type, args, effect: _ } => {
+        MirInst::IndirectCall {
+            dest,
+            callee,
+            param_types,
+            return_type,
+            args,
+            effect: _,
+        } => {
             compile_indirect_call(ctx, builder, dest, *callee, param_types, *return_type, args);
         }
 
-        MirInst::StructInit { dest, type_id: _, struct_size, field_offsets, field_types, field_values } => {
-            compile_struct_init(ctx, builder, *dest, *struct_size as usize, field_offsets, field_types, field_values);
+        MirInst::StructInit {
+            dest,
+            type_id: _,
+            struct_size,
+            field_offsets,
+            field_types,
+            field_values,
+        } => {
+            compile_struct_init(
+                ctx,
+                builder,
+                *dest,
+                *struct_size as usize,
+                field_offsets,
+                field_types,
+                field_values,
+            );
         }
 
-        MirInst::FieldGet { dest, object, byte_offset, field_type } => {
+        MirInst::FieldGet {
+            dest,
+            object,
+            byte_offset,
+            field_type,
+        } => {
             let obj_ptr = ctx.vreg_values[object];
             let cranelift_ty = type_id_to_cranelift(*field_type);
-            let val = builder.ins().load(cranelift_ty, MemFlags::new(), obj_ptr, *byte_offset as i32);
+            let val =
+                builder
+                    .ins()
+                    .load(cranelift_ty, MemFlags::new(), obj_ptr, *byte_offset as i32);
             ctx.vreg_values.insert(*dest, val);
         }
 
-        MirInst::FieldSet { object, byte_offset, field_type: _, value } => {
+        MirInst::FieldSet {
+            object,
+            byte_offset,
+            field_type: _,
+            value,
+        } => {
             let obj_ptr = ctx.vreg_values[object];
             let val = ctx.vreg_values[value];
-            builder.ins().store(MemFlags::new(), val, obj_ptr, *byte_offset as i32);
+            builder
+                .ins()
+                .store(MemFlags::new(), val, obj_ptr, *byte_offset as i32);
         }
 
-        MirInst::MethodCallStatic { dest, receiver, func_name, args } => {
+        MirInst::MethodCallStatic {
+            dest,
+            receiver,
+            func_name,
+            args,
+        } => {
             compile_method_call_static(ctx, builder, dest, *receiver, func_name, args)?;
         }
 
-        MirInst::MethodCallVirtual { dest, receiver, vtable_slot, param_types, return_type, args } => {
-            compile_method_call_virtual(ctx, builder, dest, *receiver, *vtable_slot as usize, param_types, *return_type, args);
+        MirInst::MethodCallVirtual {
+            dest,
+            receiver,
+            vtable_slot,
+            param_types,
+            return_type,
+            args,
+        } => {
+            compile_method_call_virtual(
+                ctx,
+                builder,
+                dest,
+                *receiver,
+                *vtable_slot as usize,
+                param_types,
+                *return_type,
+                args,
+            );
         }
 
-        MirInst::BuiltinMethod { dest, receiver, receiver_type, method, args } => {
+        MirInst::BuiltinMethod {
+            dest,
+            receiver,
+            receiver_type,
+            method,
+            args,
+        } => {
             compile_builtin_method(ctx, builder, dest, *receiver, receiver_type, method, args)?;
         }
 
-        MirInst::PatternTest { dest, subject, pattern } => {
+        MirInst::PatternTest {
+            dest,
+            subject,
+            pattern,
+        } => {
             compile_pattern_test(ctx, builder, *dest, *subject, pattern);
         }
 
-        MirInst::PatternBind { dest, subject, binding } => {
+        MirInst::PatternBind {
+            dest,
+            subject,
+            binding,
+        } => {
             compile_pattern_bind(ctx, builder, *dest, *subject, binding);
         }
 
@@ -290,11 +405,20 @@ pub fn compile_instruction<M: Module>(
             ctx.vreg_values.insert(*dest, result);
         }
 
-        MirInst::EnumUnit { dest, enum_name: _, variant_name } => {
+        MirInst::EnumUnit {
+            dest,
+            enum_name: _,
+            variant_name,
+        } => {
             compile_enum_unit(ctx, builder, *dest, variant_name);
         }
 
-        MirInst::EnumWith { dest, enum_name: _, variant_name, payload } => {
+        MirInst::EnumWith {
+            dest,
+            enum_name: _,
+            variant_name,
+            payload,
+        } => {
             compile_enum_with(ctx, builder, *dest, variant_name, *payload);
         }
 
@@ -345,10 +469,22 @@ pub fn compile_instruction<M: Module>(
             let gen_val = ctx.vreg_values[generator];
             let call = builder.ins().call(next_ref, &[gen_val]);
             let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, result);
+
+            // The runtime returns a tagged RuntimeValue; unwrap to a raw i64 for
+            // downstream arithmetic in codegen paths.
+            let unwrap_id = ctx.runtime_funcs["rt_value_as_int"];
+            let unwrap_ref = ctx.module.declare_func_in_func(unwrap_id, builder.func);
+            let unwrap_call = builder.ins().call(unwrap_ref, &[result]);
+            let unwrapped = builder.inst_results(unwrap_call)[0];
+            ctx.vreg_values.insert(*dest, unwrapped);
         }
 
-        MirInst::TryUnwrap { dest, value, error_block, error_dest } => {
+        MirInst::TryUnwrap {
+            dest,
+            value,
+            error_block,
+            error_dest,
+        } => {
             compile_try_unwrap(ctx, builder, *dest, *value, *error_block, *error_dest);
         }
 
@@ -389,13 +525,37 @@ fn compile_binop<M: Module>(
         BinOp::BitXor => builder.ins().bxor(lhs, rhs),
         BinOp::ShiftLeft => builder.ins().ishl(lhs, rhs),
         BinOp::ShiftRight => builder.ins().sshr(lhs, rhs),
-        BinOp::Lt => builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThan, lhs, rhs),
-        BinOp::Gt => builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, lhs, rhs),
-        BinOp::LtEq => builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual, lhs, rhs),
-        BinOp::GtEq => builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual, lhs, rhs),
-        BinOp::Eq => builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
-        BinOp::NotEq => builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, rhs),
-        BinOp::Is => builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
+        BinOp::Lt => builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
+            lhs,
+            rhs,
+        ),
+        BinOp::Gt => builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
+            lhs,
+            rhs,
+        ),
+        BinOp::LtEq => builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
+            lhs,
+            rhs,
+        ),
+        BinOp::GtEq => builder.ins().icmp(
+            cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
+            lhs,
+            rhs,
+        ),
+        BinOp::Eq => builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
+        BinOp::NotEq => {
+            builder
+                .ins()
+                .icmp(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, rhs)
+        }
+        BinOp::Is => builder
+            .ins()
+            .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, lhs, rhs),
         BinOp::In => {
             let contains_id = ctx.runtime_funcs["rt_contains"];
             let contains_ref = ctx.module.declare_func_in_func(contains_id, builder.func);
@@ -403,13 +563,25 @@ fn compile_binop<M: Module>(
             builder.inst_results(call)[0]
         }
         BinOp::And => {
-            let lhs_bool = builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
-            let rhs_bool = builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
+            let lhs_bool =
+                builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
+            let rhs_bool =
+                builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
             builder.ins().band(lhs_bool, rhs_bool)
         }
         BinOp::Or => {
-            let lhs_bool = builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
-            let rhs_bool = builder.ins().icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
+            let lhs_bool =
+                builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, lhs, 0);
+            let rhs_bool =
+                builder
+                    .ins()
+                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, rhs, 0);
             builder.ins().bor(lhs_bool, rhs_bool)
         }
         BinOp::Pow => {
@@ -428,8 +600,14 @@ fn compile_binop<M: Module>(
             let result_param = builder.block_params(loop_header)[0];
             let exp_param = builder.block_params(loop_header)[1];
             let zero = builder.ins().iconst(types::I64, 0);
-            let cond = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan, exp_param, zero);
-            builder.ins().brif(cond, loop_body, &[], loop_exit, &[result_param]);
+            let cond = builder.ins().icmp(
+                cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
+                exp_param,
+                zero,
+            );
+            builder
+                .ins()
+                .brif(cond, loop_body, &[], loop_exit, &[result_param]);
 
             builder.switch_to_block(loop_body);
             let new_result = builder.ins().imul(result_param, lhs);
@@ -469,12 +647,15 @@ fn compile_builtin_io_call<M: Module>(
                 // Add space between arguments (except first)
                 if i > 0 {
                     // Print a space separator
-                    let space_data_id = ctx.module
+                    let space_data_id = ctx
+                        .module
                         .declare_anonymous_data(true, false)
                         .map_err(|e| e.to_string())?;
                     let mut space_desc = cranelift_module::DataDescription::new();
                     space_desc.define(b" ".to_vec().into_boxed_slice());
-                    ctx.module.define_data(space_data_id, &space_desc).map_err(|e| e.to_string())?;
+                    ctx.module
+                        .define_data(space_data_id, &space_desc)
+                        .map_err(|e| e.to_string())?;
 
                     let space_gv = ctx.module.declare_data_in_func(space_data_id, builder.func);
                     let space_ptr = builder.ins().global_value(types::I64, space_gv);
@@ -514,21 +695,32 @@ fn compile_builtin_io_call<M: Module>(
             // Handle empty print (just prints nothing or newline)
             if args.is_empty() && (func_name == "println" || func_name == "eprintln") {
                 // Print just a newline
-                let newline_data_id = ctx.module
+                let newline_data_id = ctx
+                    .module
                     .declare_anonymous_data(true, false)
                     .map_err(|e| e.to_string())?;
                 let mut newline_desc = cranelift_module::DataDescription::new();
                 newline_desc.define(b"\n".to_vec().into_boxed_slice());
-                ctx.module.define_data(newline_data_id, &newline_desc).map_err(|e| e.to_string())?;
+                ctx.module
+                    .define_data(newline_data_id, &newline_desc)
+                    .map_err(|e| e.to_string())?;
 
-                let newline_gv = ctx.module.declare_data_in_func(newline_data_id, builder.func);
+                let newline_gv = ctx
+                    .module
+                    .declare_data_in_func(newline_data_id, builder.func);
                 let newline_ptr = builder.ins().global_value(types::I64, newline_gv);
                 let newline_len = builder.ins().iconst(types::I64, 1);
 
-                let base_str_fn = if func_name == "println" { "rt_print_str" } else { "rt_eprint_str" };
+                let base_str_fn = if func_name == "println" {
+                    "rt_print_str"
+                } else {
+                    "rt_eprint_str"
+                };
                 let print_str_id = ctx.runtime_funcs[base_str_fn];
                 let print_str_ref = ctx.module.declare_func_in_func(print_str_id, builder.func);
-                builder.ins().call(print_str_ref, &[newline_ptr, newline_len]);
+                builder
+                    .ins()
+                    .call(print_str_ref, &[newline_ptr, newline_len]);
             }
 
             // Return nil (0) for void functions
@@ -562,20 +754,29 @@ fn compile_interp_call<M: Module>(
     }
 
     let func_name_bytes = func_name.as_bytes();
-    let data_id = ctx.module
+    let data_id = ctx
+        .module
         .declare_anonymous_data(true, false)
         .map_err(|e| e.to_string())?;
     let mut data_desc = cranelift_module::DataDescription::new();
     data_desc.define(func_name_bytes.to_vec().into_boxed_slice());
-    ctx.module.define_data(data_id, &data_desc).map_err(|e| e.to_string())?;
+    ctx.module
+        .define_data(data_id, &data_desc)
+        .map_err(|e| e.to_string())?;
 
     let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
     let name_ptr = builder.ins().global_value(types::I64, global_val);
-    let name_len = builder.ins().iconst(types::I64, func_name_bytes.len() as i64);
+    let name_len = builder
+        .ins()
+        .iconst(types::I64, func_name_bytes.len() as i64);
 
     let interp_call_id = ctx.runtime_funcs["rt_interp_call"];
-    let interp_call_ref = ctx.module.declare_func_in_func(interp_call_id, builder.func);
-    let call = builder.ins().call(interp_call_ref, &[name_ptr, name_len, args_array]);
+    let interp_call_ref = ctx
+        .module
+        .declare_func_in_func(interp_call_id, builder.func);
+    let call = builder
+        .ins()
+        .call(interp_call_ref, &[name_ptr, name_len, args_array]);
     let result = builder.inst_results(call)[0];
 
     if let Some(d) = dest {
@@ -603,7 +804,9 @@ fn compile_closure_create<M: Module>(
     if let Some(&func_id) = ctx.func_ids.get(func_name) {
         let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
         let fn_addr = builder.ins().func_addr(types::I64, func_ref);
-        builder.ins().store(MemFlags::new(), fn_addr, closure_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::new(), fn_addr, closure_ptr, 0);
     } else {
         let null = builder.ins().iconst(types::I64, 0);
         builder.ins().store(MemFlags::new(), null, closure_ptr, 0);
@@ -611,7 +814,9 @@ fn compile_closure_create<M: Module>(
 
     for (i, offset) in capture_offsets.iter().enumerate() {
         let cap_val = ctx.vreg_values[&captures[i]];
-        builder.ins().store(MemFlags::new(), cap_val, closure_ptr, *offset as i32);
+        builder
+            .ins()
+            .store(MemFlags::new(), cap_val, closure_ptr, *offset as i32);
     }
 
     ctx.vreg_values.insert(dest, closure_ptr);
@@ -627,16 +832,20 @@ fn compile_indirect_call<M: Module>(
     args: &[VReg],
 ) {
     let closure_ptr = ctx.vreg_values[&callee];
-    let fn_ptr = builder.ins().load(types::I64, MemFlags::new(), closure_ptr, 0);
+    let fn_ptr = builder
+        .ins()
+        .load(types::I64, MemFlags::new(), closure_ptr, 0);
 
     let call_conv = CallConv::SystemV;
     let mut sig = Signature::new(call_conv);
     sig.params.push(AbiParam::new(types::I64));
     for param_ty in param_types {
-        sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));
+        sig.params
+            .push(AbiParam::new(type_id_to_cranelift(*param_ty)));
     }
     if return_type != TypeId::VOID {
-        sig.returns.push(AbiParam::new(type_id_to_cranelift(return_type)));
+        sig.returns
+            .push(AbiParam::new(type_id_to_cranelift(return_type)));
     }
 
     let sig_ref = builder.import_signature(sig);
@@ -678,7 +887,9 @@ fn compile_struct_init<M: Module>(
     for (i, (offset, field_type)) in field_offsets.iter().zip(field_types.iter()).enumerate() {
         let field_val = ctx.vreg_values[&field_values[i]];
         let _cranelift_ty = type_id_to_cranelift(*field_type);
-        builder.ins().store(MemFlags::new(), field_val, ptr, *offset as i32);
+        builder
+            .ins()
+            .store(MemFlags::new(), field_val, ptr, *offset as i32);
     }
 
     ctx.vreg_values.insert(dest, ptr);
@@ -710,16 +921,21 @@ fn compile_method_call_static<M: Module>(
         }
     } else {
         let func_name_bytes = func_name.as_bytes();
-        let data_id = ctx.module
+        let data_id = ctx
+            .module
             .declare_anonymous_data(true, false)
             .map_err(|e| e.to_string())?;
         let mut data_desc = cranelift_module::DataDescription::new();
         data_desc.define(func_name_bytes.to_vec().into_boxed_slice());
-        ctx.module.define_data(data_id, &data_desc).map_err(|e| e.to_string())?;
+        ctx.module
+            .define_data(data_id, &data_desc)
+            .map_err(|e| e.to_string())?;
 
         let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
         let name_ptr = builder.ins().global_value(types::I64, global_val);
-        let name_len = builder.ins().iconst(types::I64, func_name_bytes.len() as i64);
+        let name_len = builder
+            .ins()
+            .iconst(types::I64, func_name_bytes.len() as i64);
 
         let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
         let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
@@ -746,16 +962,20 @@ fn compile_method_call_virtual<M: Module>(
     let recv_ptr = ctx.vreg_values[&receiver];
     let vtable_ptr = builder.ins().load(types::I64, MemFlags::new(), recv_ptr, 0);
     let slot_offset = (vtable_slot as i32) * 8;
-    let method_ptr = builder.ins().load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
+    let method_ptr = builder
+        .ins()
+        .load(types::I64, MemFlags::new(), vtable_ptr, slot_offset);
 
     let call_conv = CallConv::SystemV;
     let mut sig = Signature::new(call_conv);
     sig.params.push(AbiParam::new(types::I64));
     for param_ty in param_types {
-        sig.params.push(AbiParam::new(type_id_to_cranelift(*param_ty)));
+        sig.params
+            .push(AbiParam::new(type_id_to_cranelift(*param_ty)));
     }
     if return_type != TypeId::VOID {
-        sig.returns.push(AbiParam::new(type_id_to_cranelift(return_type)));
+        sig.returns
+            .push(AbiParam::new(type_id_to_cranelift(return_type)));
     }
 
     let sig_ref = builder.import_signature(sig);
@@ -857,6 +1077,7 @@ pub fn compile_function_body<M: Module>(
 
     let generator_states = func.generator_states.clone();
     let generator_state_len = generator_states.as_ref().map(|s| s.len()).unwrap_or(0);
+    let generator_done_state = generator_state_len + 1;
     let generator_state_map = generator_states.as_ref().map(|states| {
         let mut map = HashMap::new();
         for s in states {
@@ -879,6 +1100,7 @@ pub fn compile_function_body<M: Module>(
         let call = builder.ins().call(get_state_ref, &[generator_param]);
         let state_val = builder.inst_results(call)[0];
 
+        let mut dispatch_blocks = Vec::new();
         if let Some(entry_target) = func
             .block(func.entry_block)
             .and_then(|b| match b.terminator {
@@ -896,6 +1118,7 @@ pub fn compile_function_body<M: Module>(
                 .generator_complete
                 .and_then(|b| blocks.get(&b).copied())
                 .unwrap_or(target_block);
+            targets.push(default_block); // done state
 
             let mut current_block = entry_block;
             let mut is_first = true;
@@ -909,17 +1132,22 @@ pub fn compile_function_body<M: Module>(
                 let next_block = if is_last {
                     default_block
                 } else {
-                    builder.create_block()
+                    let nb = builder.create_block();
+                    dispatch_blocks.push(nb);
+                    nb
                 };
                 let cmp = builder.ins().icmp_imm(IntCC::Equal, state_val, idx as i64);
                 builder.ins().brif(cmp, *tgt, &[], next_block, &[]);
-                builder.seal_block(current_block);
                 if !is_last {
                     current_block = next_block;
                 }
             }
             builder.switch_to_block(default_block);
             skip_entry_terminator = true;
+
+            for b in dispatch_blocks {
+                builder.seal_block(b);
+            }
         }
     }
 
@@ -950,47 +1178,95 @@ pub fn compile_function_body<M: Module>(
             }
         }
 
-        // Compile instructions
+        // Compile instructions; if we hit a Yield, it already emits a return, so skip the terminator.
+        let mut returned_via_yield = false;
         for inst in &mir_block.instructions {
-            let mut instr_ctx = InstrContext {
-                module,
-                func_ids,
-                runtime_funcs,
-                vreg_values: &mut vreg_values,
-                local_addr_map: &mut local_addr_map,
-                variables: &variables,
-                func,
-                entry_block,
-                blocks: &blocks,
-                mir_block_id: mir_block.id,
-                generator_state_map: &generator_state_map,
-            };
-            compile_instruction(&mut instr_ctx, &mut builder, inst)?;
+            if let MirInst::Yield { value } = inst {
+                let mut instr_ctx = InstrContext {
+                    module,
+                    func_ids,
+                    runtime_funcs,
+                    vreg_values: &mut vreg_values,
+                    local_addr_map: &mut local_addr_map,
+                    variables: &variables,
+                    func,
+                    entry_block,
+                    blocks: &blocks,
+                    mir_block_id: mir_block.id,
+                    generator_state_map: &generator_state_map,
+                };
+                compile_yield(&mut instr_ctx, &mut builder, *value)?;
+                returned_via_yield = true;
+                break;
+            } else {
+                let mut instr_ctx = InstrContext {
+                    module,
+                    func_ids,
+                    runtime_funcs,
+                    vreg_values: &mut vreg_values,
+                    local_addr_map: &mut local_addr_map,
+                    variables: &variables,
+                    func,
+                    entry_block,
+                    blocks: &blocks,
+                    mir_block_id: mir_block.id,
+                    generator_state_map: &generator_state_map,
+                };
+                compile_instruction(&mut instr_ctx, &mut builder, inst)?;
+            }
         }
 
         // Compile terminator
+        if returned_via_yield {
+            continue;
+        }
         if skip_entry_terminator && mir_block.id == func.entry_block {
             continue;
         }
         match &mir_block.terminator {
             Terminator::Return(val) => {
+                let mut mark_done = false;
+                let mut next_state_val = generator_done_state as i64;
+                if let Some(map) = generator_state_map.as_ref() {
+                    if let Some(state) = map.get(&mir_block.id) {
+                        next_state_val = (state.state_id + 1) as i64;
+                    } else {
+                        mark_done = true;
+                    }
+                }
                 if generator_states.is_some() {
                     let gen_param = builder.block_params(entry_block)[0];
                     let set_state_id = runtime_funcs["rt_generator_set_state"];
                     let set_state_ref = module.declare_func_in_func(set_state_id, builder.func);
-                    let done_state = builder.ins().iconst(types::I64, generator_state_len as i64);
-                    let _ = builder.ins().call(set_state_ref, &[gen_param, done_state]);
-                    let mark_id = runtime_funcs["rt_generator_mark_done"];
-                    let mark_ref = module.declare_func_in_func(mark_id, builder.func);
-                    let _ = builder.ins().call(mark_ref, &[gen_param]);
+                    let next_state = builder.ins().iconst(types::I64, next_state_val);
+                    let _ = builder.ins().call(set_state_ref, &[gen_param, next_state]);
+                    if mark_done || next_state_val == generator_done_state as i64 {
+                        let mark_id = runtime_funcs["rt_generator_mark_done"];
+                        let mark_ref = module.declare_func_in_func(mark_id, builder.func);
+                        let _ = builder.ins().call(mark_ref, &[gen_param]);
+                    }
                 }
                 if let Some(v) = val {
-                    let ret_val = vreg_values[v];
+                    let mut ret_val = vreg_values[v];
+                    if generator_states.is_some() {
+                        let wrap_id = runtime_funcs["rt_value_int"];
+                        let wrap_ref = module.declare_func_in_func(wrap_id, builder.func);
+                        let wrap_call = builder.ins().call(wrap_ref, &[ret_val]);
+                        ret_val = builder.inst_results(wrap_call)[0];
+                    }
                     builder.ins().return_(&[ret_val]);
+                } else if generator_states.is_some() {
+                    let nil_id = runtime_funcs["rt_value_nil"];
+                    let nil_ref = module.declare_func_in_func(nil_id, builder.func);
+                    let call = builder.ins().call(nil_ref, &[]);
+                    let nil_val = builder.inst_results(call)[0];
+                    builder.ins().return_(&[nil_val]);
                 } else if func.return_type == TypeId::VOID {
                     builder.ins().return_(&[]);
                 } else {
-                    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
+                    builder
+                        .ins()
+                        .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
                 }
             }
 
@@ -999,7 +1275,11 @@ pub fn compile_function_body<M: Module>(
                 builder.ins().jump(target_block, &[]);
             }
 
-            Terminator::Branch { cond, then_block, else_block } => {
+            Terminator::Branch {
+                cond,
+                then_block,
+                else_block,
+            } => {
                 let cond_val = vreg_values[cond];
                 let then_bl = *blocks.get(then_block).unwrap();
                 let else_bl = *blocks.get(else_block).unwrap();
@@ -1007,7 +1287,9 @@ pub fn compile_function_body<M: Module>(
             }
 
             Terminator::Unreachable => {
-                builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
+                builder
+                    .ins()
+                    .trap(cranelift_codegen::ir::TrapCode::unwrap_user(1));
             }
         }
     }

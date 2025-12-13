@@ -2,12 +2,10 @@
 //!
 //! Manages memory in fixed-size slots for efficient allocation and compaction.
 
-use std::ops::Range;
-
 /// Default slot sizes for different regions.
-pub const CODE_SLOT_SIZE: usize = 64 * 1024;  // 64KB for code
-pub const DATA_SLOT_SIZE: usize = 16 * 1024;  // 16KB for data
-pub const TABLE_SLOT_SIZE: usize = 4 * 1024;  // 4KB for tables
+pub const CODE_SLOT_SIZE: usize = 64 * 1024; // 64KB for code
+pub const DATA_SLOT_SIZE: usize = 16 * 1024; // 16KB for data
+pub const TABLE_SLOT_SIZE: usize = 4 * 1024; // 4KB for tables
 
 /// A range of consecutive slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

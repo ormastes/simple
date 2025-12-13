@@ -175,7 +175,10 @@ fn create_outlined_function(
     name: &str,
     body_block: crate::mir::BlockId,
     kind: BodyKind,
-    live_ins_map: &std::collections::HashMap<crate::mir::BlockId, std::collections::HashSet<crate::mir::VReg>>,
+    live_ins_map: &std::collections::HashMap<
+        crate::mir::BlockId,
+        std::collections::HashSet<crate::mir::VReg>,
+    >,
     functions: &mut Vec<MirFunction>,
 ) -> MirFunction {
     let mut outlined = func.clone();

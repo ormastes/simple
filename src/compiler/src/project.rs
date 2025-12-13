@@ -241,15 +241,8 @@ impl ProjectContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_helpers::create_test_project;
     use std::fs;
-    use tempfile::TempDir;
-
-    fn create_test_project() -> TempDir {
-        let dir = TempDir::new().unwrap();
-        let src = dir.path().join("src");
-        fs::create_dir_all(&src).unwrap();
-        dir
-    }
 
     #[test]
     fn test_detect_no_project() {
@@ -372,8 +365,14 @@ bare_bool = "allow"
         fs::write(dir.path().join("simple.toml"), manifest).unwrap();
 
         let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
-        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Deny);
-        assert_eq!(ctx.lint_config.get_level(LintName::BareBool), LintLevel::Allow);
+        assert_eq!(
+            ctx.lint_config.get_level(LintName::PrimitiveApi),
+            LintLevel::Deny
+        );
+        assert_eq!(
+            ctx.lint_config.get_level(LintName::BareBool),
+            LintLevel::Allow
+        );
     }
 
     #[test]
@@ -389,9 +388,15 @@ primitive_api = "warn"
         fs::write(dir.path().join("simple.toml"), manifest).unwrap();
 
         let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
-        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
+        assert_eq!(
+            ctx.lint_config.get_level(LintName::PrimitiveApi),
+            LintLevel::Warn
+        );
         // bare_bool uses default (Warn)
-        assert_eq!(ctx.lint_config.get_level(LintName::BareBool), LintLevel::Warn);
+        assert_eq!(
+            ctx.lint_config.get_level(LintName::BareBool),
+            LintLevel::Warn
+        );
     }
 
     #[test]
@@ -405,6 +410,9 @@ name = "myapp"
 
         let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
         // Without [lint] section, defaults apply
-        assert_eq!(ctx.lint_config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
+        assert_eq!(
+            ctx.lint_config.get_level(LintName::PrimitiveApi),
+            LintLevel::Warn
+        );
     }
 }

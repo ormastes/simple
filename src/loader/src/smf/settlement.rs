@@ -12,16 +12,16 @@ pub const SSMF_MAGIC: [u8; 4] = *b"SSMF";
 pub const SSMF_VERSION: u16 = 1;
 
 // Settlement flags
-pub const SSMF_FLAG_EXECUTABLE: u16 = 0x0001;  // Has executable stub
-pub const SSMF_FLAG_RELOADABLE: u16 = 0x0002;  // Supports hot reload
+pub const SSMF_FLAG_EXECUTABLE: u16 = 0x0001; // Has executable stub
+pub const SSMF_FLAG_RELOADABLE: u16 = 0x0002; // Supports hot reload
 pub const SSMF_FLAG_HAS_NATIVES: u16 = 0x0004; // Contains native libraries
-pub const SSMF_FLAG_COMPRESSED: u16 = 0x0008;  // Resources are compressed
-pub const SSMF_FLAG_DEBUG: u16 = 0x0010;       // Contains debug info
+pub const SSMF_FLAG_COMPRESSED: u16 = 0x0008; // Resources are compressed
+pub const SSMF_FLAG_DEBUG: u16 = 0x0010; // Contains debug info
 
 // Native library types
-pub const NATIVE_LIB_STATIC: u8 = 0x01;   // Embedded in settlement
-pub const NATIVE_LIB_SHARED: u8 = 0x02;   // Load from path at runtime
-pub const NATIVE_LIB_SYSTEM: u8 = 0x03;   // System library (libc, etc.)
+pub const NATIVE_LIB_STATIC: u8 = 0x01; // Embedded in settlement
+pub const NATIVE_LIB_SHARED: u8 = 0x02; // Load from path at runtime
+pub const NATIVE_LIB_SYSTEM: u8 = 0x03; // System library (libc, etc.)
 
 /// Settlement SMF header.
 ///
@@ -175,9 +175,7 @@ impl SettlementHeader {
         }
 
         // Safety: SettlementHeader is repr(C) and contains only primitive types
-        let header = unsafe {
-            std::ptr::read_unaligned(bytes.as_ptr() as *const SettlementHeader)
-        };
+        let header = unsafe { std::ptr::read_unaligned(bytes.as_ptr() as *const SettlementHeader) };
 
         if header.is_valid() {
             Some(header)
@@ -191,10 +189,7 @@ impl SettlementHeader {
         let mut bytes = [0u8; Self::SIZE];
         // Safety: SettlementHeader is repr(C) and contains only primitive types
         unsafe {
-            std::ptr::write_unaligned(
-                bytes.as_mut_ptr() as *mut SettlementHeader,
-                *self,
-            );
+            std::ptr::write_unaligned(bytes.as_mut_ptr() as *mut SettlementHeader, *self);
         }
         bytes
     }

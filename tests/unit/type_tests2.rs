@@ -1,6 +1,8 @@
+#![allow(unused_imports)]
 //! Type checker unit tests - Part 2
 
 use simple_parser::Parser;
+
 use simple_type::{check, Substitution, Type, TypeChecker, TypeError};
 
 #[test]

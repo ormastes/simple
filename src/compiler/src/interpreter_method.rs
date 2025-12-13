@@ -10,6 +10,18 @@ fn evaluate_method_call(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Support module-style dot calls (lib.func()) by resolving directly to imported functions/classes.
+    if let Expr::Identifier(module_name) = receiver.as_ref() {
+        if env.get(module_name).is_none() {
+            if let Some(func) = functions.get(method) {
+                return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+            }
+            if classes.contains_key(method) {
+                return instantiate_class(method, args, env, functions, classes, enums, impl_methods);
+            }
+        }
+    }
+
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
     // Built-in methods for Array

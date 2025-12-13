@@ -195,9 +195,9 @@ impl GpuIntrinsic {
             | GpuIntrinsic::NumGroups
             | GpuIntrinsic::NumGroupsDim => "u32",
 
-            GpuIntrinsic::Barrier
-            | GpuIntrinsic::MemFence
-            | GpuIntrinsic::BarrierAndFence => "unit",
+            GpuIntrinsic::Barrier | GpuIntrinsic::MemFence | GpuIntrinsic::BarrierAndFence => {
+                "unit"
+            }
 
             GpuIntrinsic::AtomicAdd
             | GpuIntrinsic::AtomicSub
@@ -361,13 +361,7 @@ mod tests {
 
     #[test]
     fn test_work_item_linear_id() {
-        let state = WorkItemState::new(
-            [5, 3, 2],
-            [1, 1, 0],
-            [1, 1, 2],
-            [10, 10, 10],
-            [4, 4, 1],
-        );
+        let state = WorkItemState::new([5, 3, 2], [1, 1, 0], [1, 1, 2], [10, 10, 10], [4, 4, 1]);
 
         assert_eq!(state.global_id_linear(), 5 + 3 * 10 + 2 * 100);
     }

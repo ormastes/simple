@@ -152,15 +152,21 @@ pub extern "C" fn rt_generator_get_state(generator: RuntimeValue) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_generator_set_state(generator: RuntimeValue, state: i64) {
     let gen = validate_heap_type!(generator, HeapObjectType::Generator, RuntimeGenerator, ());
-    unsafe { (*gen).state = if state < 0 { 0 } else { state as u64 }; }
+    unsafe {
+        (*gen).state = if state < 0 { 0 } else { state as u64 };
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_generator_store_slot(generator: RuntimeValue, idx: i64, value: RuntimeValue) {
-    if idx < 0 { return; }
+    if idx < 0 {
+        return;
+    }
     let gen = validate_heap_type!(generator, HeapObjectType::Generator, RuntimeGenerator, ());
     unsafe {
-        if (*gen).slots.is_null() { return; }
+        if (*gen).slots.is_null() {
+            return;
+        }
         let slots = &mut *(*gen).slots;
         let idx = idx as usize;
         if idx >= slots.len() {
@@ -172,31 +178,55 @@ pub extern "C" fn rt_generator_store_slot(generator: RuntimeValue, idx: i64, val
 
 #[no_mangle]
 pub extern "C" fn rt_generator_load_slot(generator: RuntimeValue, idx: i64) -> RuntimeValue {
-    if idx < 0 { return RuntimeValue::NIL; }
-    let gen = validate_heap_type!(generator, HeapObjectType::Generator, RuntimeGenerator, RuntimeValue::NIL);
+    if idx < 0 {
+        return RuntimeValue::NIL;
+    }
+    let gen = validate_heap_type!(
+        generator,
+        HeapObjectType::Generator,
+        RuntimeGenerator,
+        RuntimeValue::NIL
+    );
     unsafe {
-        if (*gen).slots.is_null() { return RuntimeValue::NIL; }
+        if (*gen).slots.is_null() {
+            return RuntimeValue::NIL;
+        }
         let slots = &*(*gen).slots;
-        slots.get(idx as usize).copied().unwrap_or(RuntimeValue::NIL)
+        slots
+            .get(idx as usize)
+            .copied()
+            .unwrap_or(RuntimeValue::NIL)
     }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_generator_get_ctx(generator: RuntimeValue) -> RuntimeValue {
-    let gen = validate_heap_type!(generator, HeapObjectType::Generator, RuntimeGenerator, RuntimeValue::NIL);
+    let gen = validate_heap_type!(
+        generator,
+        HeapObjectType::Generator,
+        RuntimeGenerator,
+        RuntimeValue::NIL
+    );
     unsafe { (*gen).ctx }
 }
 
 #[no_mangle]
 pub extern "C" fn rt_generator_mark_done(generator: RuntimeValue) {
     let gen = validate_heap_type!(generator, HeapObjectType::Generator, RuntimeGenerator, ());
-    unsafe { (*gen).done = 1; }
+    unsafe {
+        (*gen).done = 1;
+    }
 }
 
 /// Resume a generator by calling its compiled dispatcher. Returns NIL when exhausted.
 #[no_mangle]
 pub extern "C" fn rt_generator_next(generator: RuntimeValue) -> RuntimeValue {
-    let gen = validate_heap_type!(generator, HeapObjectType::Generator, RuntimeGenerator, RuntimeValue::NIL);
+    let gen = validate_heap_type!(
+        generator,
+        HeapObjectType::Generator,
+        RuntimeGenerator,
+        RuntimeValue::NIL
+    );
     unsafe {
         if (*gen).done != 0 || (*gen).body_func == 0 {
             return RuntimeValue::NIL;
@@ -207,4 +237,3 @@ pub extern "C" fn rt_generator_next(generator: RuntimeValue) -> RuntimeValue {
         func(gen_val)
     }
 }
-

@@ -58,7 +58,12 @@ fn test_cranelift_target_support() {
         let result = Codegen::for_target(target);
 
         if expected_support {
-            assert!(result.is_ok(), "{} should be supported but got: {:?}", name, result.err());
+            assert!(
+                result.is_ok(),
+                "{} should be supported but got: {:?}",
+                name,
+                result.err()
+            );
             println!("{}: ✅ Supported", name);
         } else {
             // 32-bit targets are not supported by Cranelift

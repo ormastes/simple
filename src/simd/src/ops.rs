@@ -115,22 +115,12 @@ fn reduce_f32_helper(
 
 /// Find maximum value in f32 array using SIMD.
 pub fn max_f32(data: &[f32]) -> Option<f32> {
-    reduce_f32_helper(
-        data,
-        f32::max,
-        |a, b| a.max(b),
-        |v| v.max_element(),
-    )
+    reduce_f32_helper(data, f32::max, |a, b| a.max(b), |v| v.max_element())
 }
 
 /// Find minimum value in f32 array using SIMD.
 pub fn min_f32(data: &[f32]) -> Option<f32> {
-    reduce_f32_helper(
-        data,
-        f32::min,
-        |a, b| a.min(b),
-        |v| v.min_element(),
-    )
+    reduce_f32_helper(data, f32::min, |a, b| a.min(b), |v| v.min_element())
 }
 
 /// Scale all elements in an f32 array by a constant.

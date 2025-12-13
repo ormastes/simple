@@ -60,11 +60,31 @@ impl ModuleDocs {
         }
 
         // Group items by kind
-        let functions: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Function).collect();
-        let structs: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Struct).collect();
-        let classes: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Class).collect();
-        let enums: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Enum).collect();
-        let traits: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Trait).collect();
+        let functions: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Function)
+            .collect();
+        let structs: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Struct)
+            .collect();
+        let classes: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Class)
+            .collect();
+        let enums: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Enum)
+            .collect();
+        let traits: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Trait)
+            .collect();
 
         // Traits
         if !traits.is_empty() {
@@ -119,7 +139,9 @@ impl ModuleDocs {
         out.push_str("body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 2rem; }\n");
         out.push_str("pre { background: #f5f5f5; padding: 1rem; overflow-x: auto; }\n");
         out.push_str("code { font-family: monospace; }\n");
-        out.push_str(".item { margin-bottom: 2rem; border-bottom: 1px solid #eee; padding-bottom: 1rem; }\n");
+        out.push_str(
+            ".item { margin-bottom: 2rem; border-bottom: 1px solid #eee; padding-bottom: 1rem; }\n",
+        );
         out.push_str(".visibility { color: #666; font-size: 0.9em; }\n");
         out.push_str("</style>\n");
 
@@ -139,11 +161,31 @@ impl ModuleDocs {
         }
 
         // Group items by kind
-        let functions: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Function).collect();
-        let structs: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Struct).collect();
-        let classes: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Class).collect();
-        let enums: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Enum).collect();
-        let traits: Vec<_> = self.items.iter().filter(|i| i.kind == DocItemKind::Trait).collect();
+        let functions: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Function)
+            .collect();
+        let structs: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Struct)
+            .collect();
+        let classes: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Class)
+            .collect();
+        let enums: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Enum)
+            .collect();
+        let traits: Vec<_> = self
+            .items
+            .iter()
+            .filter(|i| i.kind == DocItemKind::Trait)
+            .collect();
 
         if !traits.is_empty() {
             out.push_str("<h2>Traits</h2>\n");
@@ -213,8 +255,15 @@ fn format_item_html(item: &DocItem) -> String {
     };
 
     out.push_str("<div class=\"item\">\n");
-    out.push_str(&format!("<h3>{}<code>{}</code></h3>\n", vis, html_escape(&item.name)));
-    out.push_str(&format!("<pre><code>{}</code></pre>\n", html_escape(&item.signature)));
+    out.push_str(&format!(
+        "<h3>{}<code>{}</code></h3>\n",
+        vis,
+        html_escape(&item.name)
+    ));
+    out.push_str(&format!(
+        "<pre><code>{}</code></pre>\n",
+        html_escape(&item.signature)
+    ));
 
     if !item.doc.is_empty() {
         out.push_str(&format!("<p>{}</p>\n", html_escape(&item.doc)));
@@ -250,7 +299,11 @@ pub fn generate(module: &Module) -> ModuleDocs {
 fn extract_doc_item(node: &Node) -> Option<DocItem> {
     match node {
         Node::Function(f) => {
-            let doc = f.doc_comment.as_ref().map(|d| d.content.clone()).unwrap_or_default();
+            let doc = f
+                .doc_comment
+                .as_ref()
+                .map(|d| d.content.clone())
+                .unwrap_or_default();
             Some(DocItem {
                 kind: DocItemKind::Function,
                 name: f.name.clone(),
@@ -260,7 +313,11 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
             })
         }
         Node::Struct(s) => {
-            let doc = s.doc_comment.as_ref().map(|d| d.content.clone()).unwrap_or_default();
+            let doc = s
+                .doc_comment
+                .as_ref()
+                .map(|d| d.content.clone())
+                .unwrap_or_default();
             Some(DocItem {
                 kind: DocItemKind::Struct,
                 name: s.name.clone(),
@@ -270,7 +327,11 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
             })
         }
         Node::Class(c) => {
-            let doc = c.doc_comment.as_ref().map(|d| d.content.clone()).unwrap_or_default();
+            let doc = c
+                .doc_comment
+                .as_ref()
+                .map(|d| d.content.clone())
+                .unwrap_or_default();
             Some(DocItem {
                 kind: DocItemKind::Class,
                 name: c.name.clone(),
@@ -280,7 +341,11 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
             })
         }
         Node::Enum(e) => {
-            let doc = e.doc_comment.as_ref().map(|d| d.content.clone()).unwrap_or_default();
+            let doc = e
+                .doc_comment
+                .as_ref()
+                .map(|d| d.content.clone())
+                .unwrap_or_default();
             Some(DocItem {
                 kind: DocItemKind::Enum,
                 name: e.name.clone(),
@@ -290,7 +355,11 @@ fn extract_doc_item(node: &Node) -> Option<DocItem> {
             })
         }
         Node::Trait(t) => {
-            let doc = t.doc_comment.as_ref().map(|d| d.content.clone()).unwrap_or_default();
+            let doc = t
+                .doc_comment
+                .as_ref()
+                .map(|d| d.content.clone())
+                .unwrap_or_default();
             Some(DocItem {
                 kind: DocItemKind::Trait,
                 name: t.name.clone(),
@@ -326,18 +395,22 @@ fn format_function_signature(f: &FunctionDef) -> String {
 
     // Parameters
     sig.push('(');
-    let params: Vec<String> = f.params.iter().map(|p| {
-        let mut param = String::new();
-        if p.mutability == Mutability::Mutable {
-            param.push_str("mut ");
-        }
-        param.push_str(&p.name);
-        if let Some(ty) = &p.ty {
-            param.push_str(": ");
-            param.push_str(&format_type(ty));
-        }
-        param
-    }).collect();
+    let params: Vec<String> = f
+        .params
+        .iter()
+        .map(|p| {
+            let mut param = String::new();
+            if p.mutability == Mutability::Mutable {
+                param.push_str("mut ");
+            }
+            param.push_str(&p.name);
+            if let Some(ty) = &p.ty {
+                param.push_str(": ");
+                param.push_str(&format_type(ty));
+            }
+            param
+        })
+        .collect();
     sig.push_str(&params.join(", "));
     sig.push(')');
 
@@ -430,41 +503,53 @@ fn format_type(ty: &Type) -> String {
     match ty {
         Type::Simple(name) => name.clone(),
         Type::Generic { name, args } => {
-            format!("{}<{}>", name, args.iter().map(format_type).collect::<Vec<_>>().join(", "))
+            format!(
+                "{}<{}>",
+                name,
+                args.iter().map(format_type).collect::<Vec<_>>().join(", ")
+            )
         }
-        Type::Array { element, size } => {
-            match size {
-                Some(_) => format!("[{}; _]", format_type(element)),
-                None => format!("[{}]", format_type(element)),
-            }
-        }
-        Type::Tuple(types) => format!("({})", types.iter().map(format_type).collect::<Vec<_>>().join(", ")),
+        Type::Array { element, size } => match size {
+            Some(_) => format!("[{}; _]", format_type(element)),
+            None => format!("[{}]", format_type(element)),
+        },
+        Type::Tuple(types) => format!(
+            "({})",
+            types.iter().map(format_type).collect::<Vec<_>>().join(", ")
+        ),
         Type::Optional(inner) => format!("{}?", format_type(inner)),
         Type::Function { params, ret } => {
-            let params_str = params.iter().map(format_type).collect::<Vec<_>>().join(", ");
+            let params_str = params
+                .iter()
+                .map(format_type)
+                .collect::<Vec<_>>()
+                .join(", ");
             match ret {
                 Some(ret) => format!("fn({}) -> {}", params_str, format_type(ret)),
                 None => format!("fn({})", params_str),
             }
         }
-        Type::Pointer { kind, inner } => {
-            match kind {
-                PointerKind::Unique => format!("&{}", format_type(inner)),
-                PointerKind::Shared => format!("*{}", format_type(inner)),
-                PointerKind::Weak => format!("-{}", format_type(inner)),
-                PointerKind::Handle => format!("+{}", format_type(inner)),
-                PointerKind::Borrow => format!("&{}", format_type(inner)),
-                PointerKind::BorrowMut => format!("&mut {}", format_type(inner)),
-            }
-        }
-        Type::Union(types) => types.iter().map(format_type).collect::<Vec<_>>().join(" | "),
-        Type::Constructor { target, args } => {
-            match args {
-                Some(args) => format!("Constructor[{}, ({})]", format_type(target),
-                    args.iter().map(format_type).collect::<Vec<_>>().join(", ")),
-                None => format!("Constructor[{}]", format_type(target)),
-            }
-        }
+        Type::Pointer { kind, inner } => match kind {
+            PointerKind::Unique => format!("&{}", format_type(inner)),
+            PointerKind::Shared => format!("*{}", format_type(inner)),
+            PointerKind::Weak => format!("-{}", format_type(inner)),
+            PointerKind::Handle => format!("+{}", format_type(inner)),
+            PointerKind::Borrow => format!("&{}", format_type(inner)),
+            PointerKind::BorrowMut => format!("&mut {}", format_type(inner)),
+        },
+        Type::Union(types) => types
+            .iter()
+            .map(format_type)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        Type::Constructor { target, args } => match args {
+            Some(args) => format!(
+                "Constructor[{}, ({})]",
+                format_type(target),
+                args.iter().map(format_type).collect::<Vec<_>>().join(", ")
+            ),
+            None => format!("Constructor[{}]", format_type(target)),
+        },
         Type::Simd { lanes, element } => format!("vec[{}, {}]", lanes, format_type(element)),
     }
 }
@@ -492,7 +577,8 @@ fn add(x: Int, y: Int) -> Int:
 
     #[test]
     fn test_generate_markdown() {
-        let source = "/** Adds two numbers */\npub fn add(x: Int, y: Int) -> Int:\n    return x + y";
+        let source =
+            "/** Adds two numbers */\npub fn add(x: Int, y: Int) -> Int:\n    return x + y";
 
         let mut parser = Parser::new(source);
         let module = parser.parse().unwrap();

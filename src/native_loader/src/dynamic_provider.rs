@@ -23,7 +23,10 @@ pub enum DynLoadError {
 
     /// ABI version mismatch between library and expected version.
     #[error("ABI version mismatch: expected {expected}, found {found}")]
-    AbiMismatch { expected: AbiVersion, found: AbiVersion },
+    AbiMismatch {
+        expected: AbiVersion,
+        found: AbiVersion,
+    },
 
     /// Generic loading error from libloading.
     #[error("load error: {0}")]
@@ -69,9 +72,8 @@ impl DynamicSymbolProvider {
 
         // Read ABI version from library
         let abi_version = unsafe {
-            let version_fn: Symbol<extern "C" fn() -> u32> = library
-                .get(b"simple_runtime_abi_version")
-                .map_err(|_| {
+            let version_fn: Symbol<extern "C" fn() -> u32> =
+                library.get(b"simple_runtime_abi_version").map_err(|_| {
                     DynLoadError::SymbolNotFound("simple_runtime_abi_version".to_string())
                 })?;
             AbiVersion::from_u32(version_fn())

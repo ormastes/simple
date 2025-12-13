@@ -1,3 +1,5 @@
+#![allow(unused_imports, deprecated)]
+
 use assert_cmd::Command;
 use predicates::prelude::PredicateBooleanExt;
 use predicates::str::contains;
@@ -6,11 +8,16 @@ use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
 use simple_driver::runner::Runner;
 use simple_runtime::gc::GcRuntime;
 use simple_term_io::io::term::TermNative;
+use std::fs;
 use std::sync::{Arc, Mutex};
+use tempfile::TempDir;
 
 // Import shared test helpers
 mod test_helpers;
-use test_helpers::{run_expect, run_expect_interp, run_expect_parity, run_expect_compile_error, run_expect_compile_error_at, run_expect_runtime_error, run_expect_error};
+use test_helpers::{
+    run_expect, run_expect_compile_error, run_expect_compile_error_at, run_expect_error,
+    run_expect_interp, run_expect_parity, run_expect_runtime_error,
+};
 
 #[test]
 fn runner_compiles_and_runs_stub() {
@@ -319,6 +326,21 @@ main = result
         42,
     );
 
+    // Spec syntax: match arms using `case pattern:` (doc/spec/functions.md)
+    run_expect(
+        r#"
+let x: i32 = 2
+match x:
+    case 1:
+        main = 10
+    case 2:
+        main = 20
+    case _:
+        main = 0
+"#,
+        20,
+    );
+
     // Match on enum variants
     run_expect(
         r#"
@@ -373,7 +395,147 @@ main = result
 "#,
         1,
     );
+}
 
+/// Regression: CLI should accept spec `case` match arms; currently fails.
+#[test]
+fn runner_cli_case_match_rejects_spec_syntax() {
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg("-c").arg(
+        "let x: i32 = 2\nmatch x:\n    case 2:\n        main = 20\n    case _:\n        main = 0",
+    );
+    cmd.assert().code(20).stdout(contains("20"));
+}
+
+/// Regression: CLI rejects `match` even with `=>` syntax (should succeed).
+#[test]
+fn runner_cli_match_arrow_rejects_basic_syntax() {
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg("-c")
+        .arg("let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0");
+    cmd.assert().code(20).stdout(contains("20"));
+}
+
+/// Regression: CLI rejects match when run against a source file.
+#[test]
+fn runner_cli_match_arrow_file_rejects_basic_syntax() {
+    let dir = TempDir::new().expect("tempdir");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        &main_path,
+        "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0",
+    )
+    .expect("write main.spl");
+
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg(&main_path);
+    cmd.assert().code(20);
+}
+
+/// Regression: CLI rejects match guards with spec `case` syntax.
+#[test]
+fn runner_cli_case_guard_rejects_spec_syntax() {
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg("-c").arg(
+        "let x: i32 = 3\nmatch x:\n    case n if n > 0:\n        main = 1\n    case _:\n        main = 0",
+    );
+    cmd.assert().code(1).stdout(contains("1"));
+}
+
+/// Regression: mixed match syntax (case + =>) rejected by CLI.
+#[test]
+fn runner_cli_match_mixed_syntax_rejects() {
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg("-c").arg(
+        "let x: i32 = 2\nmatch x:\n    case 1:\n        main = 10\n    2 =>\n        main = 20\n    _ =>\n        main = 0",
+    );
+    cmd.assert().code(20).stdout(contains("20"));
+}
+
+/// Regression: match inside function rejected in CLI executable path.
+#[test]
+fn runner_cli_match_inside_function_rejects() {
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg("-c").arg(
+        "fn f(x: i32) -> i32:\n    match x:\n        1 =>\n            return 10\n        _ =>\n            return 0\nmain = f(1)",
+    );
+    cmd.assert().code(10).stdout(contains("10"));
+}
+
+/// Regression: destructuring patterns rejected in CLI executable path.
+#[test]
+fn runner_cli_match_destructuring_rejects() {
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg("-c").arg(
+        "let tup: (i32, i32) = (1, 2)\nmatch tup:\n    (a, b) =>\n        main = a + b\n    _ =>\n        main = 0",
+    );
+    cmd.assert().code(3).stdout(contains("3"));
+}
+
+/// Regression: file + import + match rejected in CLI executable path.
+#[test]
+fn runner_cli_match_in_imported_module_rejects() {
+    let dir = TempDir::new().expect("tempdir");
+    let lib_path = dir.path().join("lib.spl");
+    fs::write(
+        &lib_path,
+        "pub fn classify(x: i32) -> i32:\n    match x:\n        0 =>\n            return 0\n        _ =>\n            return 1\n",
+    )
+    .expect("write lib.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        &main_path,
+        "use lib\nmain = lib::classify(0)",
+    )
+    .expect("write main.spl");
+
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.current_dir(dir.path());
+    cmd.arg(&main_path);
+    cmd.assert().code(0);
+}
+
+/// Regression: module import via `use` + dot call works in CLI executable path.
+#[test]
+fn runner_cli_match_in_imported_module_dot_call() {
+    let dir = TempDir::new().expect("tempdir");
+    let lib_path = dir.path().join("lib.spl");
+    fs::write(
+        &lib_path,
+        "pub fn classify(x: i32) -> i32:\n    match x:\n        0 =>\n            return 0\n        _ =>\n            return 1\n",
+    )
+    .expect("write lib.spl");
+    let main_path = dir.path().join("main.spl");
+    fs::write(
+        &main_path,
+        "use lib\nmain = lib.classify(0)",
+    )
+    .expect("write main.spl");
+
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.current_dir(dir.path());
+    cmd.arg(&main_path);
+    cmd.assert().code(0);
+}
+
+/// Regression: array destructuring rejected in CLI executable path.
+#[test]
+fn runner_cli_array_destructuring_rejects() {
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg("-c").arg(
+        "let arr: [i32] = [1, 2, 3]\nmatch arr:\n    [a, b, c] =>\n        main = a + b + c\n    _ =>\n        main = 0",
+    );
+    cmd.assert().code(6).stdout(contains("6"));
+}
+
+/// Regression: guard referencing outer binding rejected in CLI executable path.
+#[test]
+fn runner_cli_guard_outer_binding_rejects() {
+    let mut cmd = Command::cargo_bin("simple").expect("binary exists");
+    cmd.arg("-c").arg(
+        "let y: i32 = 2\nlet x: i32 = 2\nmatch x:\n    case y if x == y:\n        main = 1\n    _ =>\n        main = 0",
+    );
+    cmd.assert().code(1).stdout(contains("1"));
 }
 
 #[test]
@@ -536,4 +698,3 @@ main = d[key]"#,
     );
     run_expect("let d = {}\nmain = 42", 42);
 }
-

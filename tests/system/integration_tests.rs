@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables, deprecated)]
 //! Integration tests: HIR types, ExecCore, data structures
 //! Tests for compiler internals integration
 
@@ -582,4 +583,3 @@ fn test_block_builder_state_integration() {
     let reseal_result = builder.seal(Terminator::Unreachable);
     assert!(reseal_result.is_err());
 }
-

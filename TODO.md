@@ -1,4 +1,17 @@
-# Todo
+# Tedo 
+
+### ruby bdd style framework
+### pydoctest like tests
+### llm friendly 
+#### show only limited interface to minimize context size
+#### infra about system test public class/struct touch coverage
+#### system test mock usage limit or prevent.
+#### infra about integration test public function touch coverage
+### update lanagauage spec << convension over config
+### gui support
+#### ruby rails spring like framework
+#### tui
+
 
 ## Completed
 
@@ -35,8 +48,14 @@
 - **File:** `src/driver/tests/interpreter_types.rs:473`
 - **Reason:** Unit conversion methods (`.to_m()`) not yet implemented
 
----
+### Embedded panic customization
+- **Test:** `doc test src/embedded/src/lib.rs - (line 22)` (ignored)
+- **File:** `src/embedded/src/lib.rs`
+- **Reason:** Doc-test kept ignored for no_std placeholder entry macro
+- **Status:** Postponed; keep ignored until a host-friendly doctest harness exists
 
+---  
+## add convention over config to rule on language spec
 ## Postponed
 
 ### GPU backends

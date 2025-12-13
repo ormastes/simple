@@ -128,7 +128,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_pub_item_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    fn parse_pub_item_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         match &self.current.kind {
             TokenKind::Fn => {
                 let mut node = self.parse_function_with_doc(doc_comment)?;
@@ -297,42 +300,7 @@ impl<'a> Parser<'a> {
         &mut self,
         decorators: Vec<Decorator>,
     ) -> Result<Node, ParseError> {
-        let start_span = self.current.span;
-        self.expect(&TokenKind::Fn)?;
-
-        let name = self.expect_identifier()?;
-        // Parse optional generic parameters: fn foo<T, U>(...)
-        let generic_params = self.parse_generic_params()?;
-        let params = self.parse_parameters()?;
-
-        let return_type = if self.check(&TokenKind::Arrow) {
-            self.advance();
-            Some(self.parse_type()?)
-        } else {
-            None
-        };
-
-        self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
-
-        Ok(Node::Function(FunctionDef {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
-            name,
-            generic_params,
-            params,
-            return_type,
-            body,
-            visibility: Visibility::Private,
-            effect: None,
-            decorators,
-            attributes: vec![],
-            doc_comment: None,
-        }))
+        self.parse_function_with_attrs(decorators, vec![])
     }
 
     fn parse_function_with_attrs(
@@ -380,7 +348,10 @@ impl<'a> Parser<'a> {
 
     // === Doc Comment Variants ===
 
-    fn parse_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    fn parse_function_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_function()?;
         if let Node::Function(ref mut f) = node {
             f.doc_comment = doc_comment;
@@ -388,7 +359,10 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    fn parse_async_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    fn parse_async_function_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_async_function()?;
         if let Node::Function(ref mut f) = node {
             f.doc_comment = doc_comment;
@@ -396,7 +370,10 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    fn parse_decorated_function_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    fn parse_decorated_function_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_decorated_function()?;
         if let Node::Function(ref mut f) = node {
             f.doc_comment = doc_comment;
@@ -404,7 +381,10 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    fn parse_struct_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    fn parse_struct_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_struct()?;
         if let Node::Struct(ref mut s) = node {
             s.doc_comment = doc_comment;
@@ -412,7 +392,10 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    fn parse_class_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    fn parse_class_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_class()?;
         if let Node::Class(ref mut c) = node {
             c.doc_comment = doc_comment;
@@ -428,7 +411,10 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    fn parse_trait_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    fn parse_trait_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_trait()?;
         if let Node::Trait(ref mut t) = node {
             t.doc_comment = doc_comment;
@@ -436,7 +422,10 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    fn parse_attributed_item_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    fn parse_attributed_item_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_attributed_item()?;
         // Set doc_comment on the parsed item
         match &mut node {
@@ -870,7 +859,6 @@ impl<'a> Parser<'a> {
         Ok(params)
     }
 }
-
 
 #[cfg(test)]
 #[path = "parser_tests.rs"]

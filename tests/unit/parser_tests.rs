@@ -704,4 +704,3 @@ fn test_parse_let_with_type() {
         panic!("Expected let statement");
     }
 }
-

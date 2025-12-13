@@ -28,7 +28,7 @@
 //! - `SIMPLE_LOG=simple_log::parse::lexer=trace` - lexer only
 //! - `SIMPLE_LOG=simple_log::parse::parser=debug` - parser only
 
-use tracing::{debug, error, info, trace, warn, span, Level};
+use tracing::{debug, error, info, span, trace, warn, Level};
 
 /// Log a token being produced by the lexer.
 #[inline]

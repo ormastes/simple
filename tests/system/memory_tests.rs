@@ -1,7 +1,9 @@
+#![allow(unused_imports, unused_variables, unused_comparisons)]
 //! Parser, lexer, and runtime tests
 //! Additional parser/lexer system tests and runtime behavior tests
 
 use simple_compiler::CompilerPipeline;
+
 use simple_driver::{run_code, Interpreter, RunConfig, Runner, RunningType};
 use simple_loader::ModuleLoader;
 use simple_parser::{Lexer, Parser};
@@ -753,4 +755,3 @@ fn test_tab_indentation() {
     let result = runner.run_source(source).expect("run ok");
     assert_eq!(result, 42);
 }
-

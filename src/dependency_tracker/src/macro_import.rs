@@ -126,7 +126,9 @@ impl MacroExports {
     ///
     /// Corresponds to Lean: `def wellFormedExports`
     pub fn is_well_formed(&self) -> bool {
-        self.non_macros.iter().all(|s| s.kind == SymKind::ValueOrType)
+        self.non_macros
+            .iter()
+            .all(|s| s.kind == SymKind::ValueOrType)
             && self.macros.iter().all(|s| s.kind == SymKind::Macro)
     }
 }
@@ -159,15 +161,19 @@ impl MacroDirManifest {
 /// Corresponds to Lean: `def isAutoImported (m : DirManifest) (sym : Symbol) : Bool`
 pub fn is_auto_imported(manifest: &MacroDirManifest, sym: &MacroSymbol) -> bool {
     sym.kind == SymKind::Macro
-        && manifest.auto_imports.iter().any(|ai| {
-            ai.from_module == sym.module_path && ai.macro_name == sym.name
-        })
+        && manifest
+            .auto_imports
+            .iter()
+            .any(|ai| ai.from_module == sym.module_path && ai.macro_name == sym.name)
 }
 
 /// Filter macros that are in auto-import list.
 ///
 /// Corresponds to Lean: `def autoImportedMacros (m : DirManifest) (exports : ModuleExports) : List Symbol`
-pub fn auto_imported_macros(manifest: &MacroDirManifest, exports: &MacroExports) -> Vec<MacroSymbol> {
+pub fn auto_imported_macros(
+    manifest: &MacroDirManifest,
+    exports: &MacroExports,
+) -> Vec<MacroSymbol> {
     exports
         .macros
         .iter()
@@ -269,7 +275,9 @@ mod tests {
 
         let result = glob_import(&manifest, &exports);
 
-        assert!(result.iter().any(|s| s.name == "my_macro" && s.kind == SymKind::Macro));
+        assert!(result
+            .iter()
+            .any(|s| s.name == "my_macro" && s.kind == SymKind::Macro));
     }
 
     // Theorem: glob_subset

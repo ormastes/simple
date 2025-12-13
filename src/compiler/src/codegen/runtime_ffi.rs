@@ -96,6 +96,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_float", &[F64], &[I64]),
     RuntimeFuncSpec::new("rt_value_bool", &[I8], &[I64]),
     RuntimeFuncSpec::new("rt_value_nil", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_value_as_int", &[I64], &[I64]),
     // =========================================================================
     // Object operations
     // =========================================================================
@@ -155,14 +156,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // I/O operations (print, capture)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_print_str", &[I64, I64], &[]),      // ptr, len
-    RuntimeFuncSpec::new("rt_println_str", &[I64, I64], &[]),    // ptr, len
-    RuntimeFuncSpec::new("rt_eprint_str", &[I64, I64], &[]),     // ptr, len
-    RuntimeFuncSpec::new("rt_eprintln_str", &[I64, I64], &[]),   // ptr, len
-    RuntimeFuncSpec::new("rt_print_value", &[I64], &[]),         // RuntimeValue
-    RuntimeFuncSpec::new("rt_println_value", &[I64], &[]),       // RuntimeValue
-    RuntimeFuncSpec::new("rt_eprint_value", &[I64], &[]),        // RuntimeValue
-    RuntimeFuncSpec::new("rt_eprintln_value", &[I64], &[]),      // RuntimeValue
+    RuntimeFuncSpec::new("rt_print_str", &[I64, I64], &[]), // ptr, len
+    RuntimeFuncSpec::new("rt_println_str", &[I64, I64], &[]), // ptr, len
+    RuntimeFuncSpec::new("rt_eprint_str", &[I64, I64], &[]), // ptr, len
+    RuntimeFuncSpec::new("rt_eprintln_str", &[I64, I64], &[]), // ptr, len
+    RuntimeFuncSpec::new("rt_print_value", &[I64], &[]),    // RuntimeValue
+    RuntimeFuncSpec::new("rt_println_value", &[I64], &[]),  // RuntimeValue
+    RuntimeFuncSpec::new("rt_eprint_value", &[I64], &[]),   // RuntimeValue
+    RuntimeFuncSpec::new("rt_eprintln_value", &[I64], &[]), // RuntimeValue
     RuntimeFuncSpec::new("rt_capture_stdout_start", &[], &[]),
     RuntimeFuncSpec::new("rt_capture_stderr_start", &[], &[]),
 ];
