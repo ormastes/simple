@@ -148,6 +148,7 @@ impl LlvmBackend {
             T::F32 => Ok(self.context.f32_type().into()),
             T::F64 => Ok(self.context.f64_type().into()),
             T::BOOL => Ok(self.context.bool_type().into()),
+            T::Pointer => Ok(self.context.ptr_type(inkwell::AddressSpace::default()).into()),
             _ => Err(CompileError::Semantic(format!("Unsupported LLVM type: {:?}", ty))),
         }
     }
@@ -284,6 +285,7 @@ impl LlvmBackend {
         let fn_type = match ret_llvm {
             BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
             BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&param_types, false),
             _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
         };
         
@@ -337,6 +339,57 @@ impl LlvmBackend {
                         
                         let result = self.compile_binop(*op, *left_val, *right_val, builder)?;
                         vreg_map.insert(*dest, result);
+                    },
+                    MirInst::ConstFloat { dest, value } => {
+                        let const_val = self.context.f64_type().const_float(*value);
+                        vreg_map.insert(*dest, const_val.into());
+                    },
+                    MirInst::UnaryOp { dest, op, operand } => {
+                        let operand_val = vreg_map.get(operand)
+                            .ok_or_else(|| CompileError::Semantic(format!("Undefined vreg: {:?}", operand)))?;
+                        
+                        let result = self.compile_unaryop(*op, *operand_val, builder)?;
+                        vreg_map.insert(*dest, result);
+                    },
+                    MirInst::Load { dest, addr, ty } => {
+                        let addr_val = vreg_map.get(addr)
+                            .ok_or_else(|| CompileError::Semantic(format!("Undefined vreg: {:?}", addr)))?;
+                        
+                        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = addr_val {
+                            let loaded = builder.build_load(self.llvm_type(ty)?, *ptr, "load")
+                                .map_err(|e| CompileError::Semantic(format!("Failed to build load: {}", e)))?;
+                            vreg_map.insert(*dest, loaded);
+                        } else {
+                            return Err(CompileError::Semantic("Load requires pointer".to_string()));
+                        }
+                    },
+                    MirInst::Store { addr, value, ty: _ } => {
+                        let addr_val = vreg_map.get(addr)
+                            .ok_or_else(|| CompileError::Semantic(format!("Undefined vreg: {:?}", addr)))?;
+                        let value_val = vreg_map.get(value)
+                            .ok_or_else(|| CompileError::Semantic(format!("Undefined vreg: {:?}", value)))?;
+                        
+                        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = addr_val {
+                            builder.build_store(*ptr, *value_val)
+                                .map_err(|e| CompileError::Semantic(format!("Failed to build store: {}", e)))?;
+                        } else {
+                            return Err(CompileError::Semantic("Store requires pointer".to_string()));
+                        }
+                    },
+                    MirInst::GcAlloc { dest, ty } => {
+                        // Allocate on stack for now (proper GC integration later)
+                        let llvm_ty = self.llvm_type(ty)?;
+                        let alloc = builder.build_alloca(llvm_ty, "gc_alloc")
+                            .map_err(|e| CompileError::Semantic(format!("Failed to build alloca: {}", e)))?;
+                        vreg_map.insert(*dest, alloc.into());
+                    },
+                    MirInst::ConstString { dest, value } => {
+                        // Create global string constant
+                        let str_val = self.context.const_string(value.as_bytes(), false);
+                        let global = module.add_global(str_val.get_type(), None, "str");
+                        global.set_initializer(&str_val);
+                        global.set_constant(true);
+                        vreg_map.insert(*dest, global.as_pointer_value().into());
                     },
                     _ => {
                         // Other instructions not yet implemented
@@ -399,6 +452,39 @@ impl LlvmBackend {
                 Ok(result.into())
             },
             _ => Err(CompileError::Semantic("Type mismatch in binop".to_string())),
+        }
+    }
+
+    /// Compile a unary operation
+    #[cfg(feature = "llvm")]
+    fn compile_unaryop(
+        &self,
+        op: crate::hir::UnaryOp,
+        operand: inkwell::values::BasicValueEnum,
+        builder: &Builder,
+    ) -> Result<inkwell::values::BasicValueEnum, CompileError> {
+        use crate::hir::UnaryOp;
+        
+        match operand {
+            inkwell::values::BasicValueEnum::IntValue(val) => {
+                let result = match op {
+                    UnaryOp::Neg => builder.build_int_neg(val, "neg")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build neg: {}", e)))?,
+                    UnaryOp::Not => builder.build_not(val, "not")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build not: {}", e)))?,
+                    _ => return Err(CompileError::Semantic(format!("Unsupported int unaryop: {:?}", op))),
+                };
+                Ok(result.into())
+            },
+            inkwell::values::BasicValueEnum::FloatValue(val) => {
+                let result = match op {
+                    UnaryOp::Neg => builder.build_float_neg(val, "fneg")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build fneg: {}", e)))?,
+                    _ => return Err(CompileError::Semantic(format!("Unsupported float unaryop: {:?}", op))),
+                };
+                Ok(result.into())
+            },
+            _ => Err(CompileError::Semantic("Unsupported operand type for unaryop".to_string())),
         }
     }
 

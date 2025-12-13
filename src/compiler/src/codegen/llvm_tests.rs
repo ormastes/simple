@@ -866,3 +866,146 @@ mod tests {
         
         backend.verify().unwrap();
     }
+
+    /// Test MIR float constant compilation
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_mir_float_const() {
+        use crate::hir::TypeId as T;
+        use crate::mir::MirFunction;
+        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+        use simple_parser::ast::Visibility;
+        
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        backend.create_module("float_test").unwrap();
+        
+        // fn test() -> f64 { return 3.14; }
+        let mut func = MirFunction::new("test".to_string(), T::F64, Visibility::Public);
+        
+        let v0 = VReg(0);
+        func.blocks[0].instructions.push(MirInst::ConstFloat { dest: v0, value: 3.14 });
+        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+        
+        backend.compile_function(&func).unwrap();
+        
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("3.14"));
+        assert!(ir.contains("ret double"));
+        
+        backend.verify().unwrap();
+    }
+
+    /// Test MIR unary operation compilation
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_mir_unaryop() {
+        use crate::hir::{TypeId as T, UnaryOp};
+        use crate::mir::MirFunction;
+        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+        use simple_parser::ast::Visibility;
+        
+        let target = Target::new(TargetArch::Aarch64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        backend.create_module("unary_test").unwrap();
+        
+        // fn neg(x: i32) -> i32 { return -x; }
+        let mut func = MirFunction::new("neg".to_string(), T::I32, Visibility::Public);
+        
+        use crate::mir::MirLocal;
+        use crate::mir::effects::LocalKind;
+        func.params.push(MirLocal {
+            name: "x".to_string(),
+            ty: T::I32,
+            kind: LocalKind::Parameter,
+        });
+        
+        let v0 = VReg(0);  // parameter
+        let v1 = VReg(1);  // result
+        
+        func.blocks[0].instructions.push(MirInst::UnaryOp {
+            dest: v1,
+            op: UnaryOp::Neg,
+            operand: v0,
+        });
+        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v1) });
+        
+        backend.compile_function(&func).unwrap();
+        
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("sub"));  // Negation is sub 0, x
+        
+        backend.verify().unwrap();
+    }
+
+    /// Test MIR memory operations (Load/Store)
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_mir_memory_ops() {
+        use crate::hir::TypeId as T;
+        use crate::mir::MirFunction;
+        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+        use simple_parser::ast::Visibility;
+        
+        let target = Target::new(TargetArch::RiscV64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        backend.create_module("mem_test").unwrap();
+        
+        // fn test() -> i32 { let x = 42; return x; }
+        let mut func = MirFunction::new("test".to_string(), T::I32, Visibility::Public);
+        
+        let v0 = VReg(0);  // const 42
+        let v1 = VReg(1);  // alloca
+        let v2 = VReg(2);  // loaded value
+        
+        func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 42 });
+        func.blocks[0].instructions.push(MirInst::GcAlloc { dest: v1, ty: T::I32 });
+        func.blocks[0].instructions.push(MirInst::Store { addr: v1, value: v0, ty: T::I32 });
+        func.blocks[0].instructions.push(MirInst::Load { dest: v2, addr: v1, ty: T::I32 });
+        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v2) });
+        
+        backend.compile_function(&func).unwrap();
+        
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("alloca"));
+        assert!(ir.contains("store"));
+        assert!(ir.contains("load"));
+        
+        backend.verify().unwrap();
+    }
+
+    /// Test MIR string constant compilation
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_mir_string_const() {
+        use crate::hir::TypeId as T;
+        use crate::mir::MirFunction;
+        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+        use simple_parser::ast::Visibility;
+        
+        let target = Target::new(TargetArch::X86, TargetOS::Linux);  // i686
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        backend.create_module("str_test").unwrap();
+        
+        // fn test() -> *i8 { return "hello"; }
+        let mut func = MirFunction::new("test".to_string(), T::Pointer, Visibility::Public);
+        
+        let v0 = VReg(0);
+        func.blocks[0].instructions.push(MirInst::ConstString {
+            dest: v0,
+            value: "hello".to_string(),
+        });
+        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+        
+        backend.compile_function(&func).unwrap();
+        
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("hello"));
+        assert!(ir.contains("@str"));
+        
+        backend.verify().unwrap();
+    }
