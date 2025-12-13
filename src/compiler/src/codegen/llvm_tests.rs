@@ -709,3 +709,160 @@ mod tests {
         // ELF type should be ET_REL (relocatable, value 1)
         assert_eq!(object_code[16], 1); // e_type LSB
     }
+
+    /// Test MIR function compilation
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_mir_function_compilation() {
+        use crate::hir::TypeId as T;
+        use crate::mir::{MirFunction, MirBlock};
+        use crate::mir::instructions::{MirInst, MirTerminator, VReg, BlockId};
+        use simple_parser::ast::Visibility;
+        use crate::mir::MirModule;
+        
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        backend.create_module("mir_test").unwrap();
+        
+        // Create a simple MIR function: fn test() -> i32 { return 42; }
+        let mut func = MirFunction::new("test".to_string(), T::I32, Visibility::Public);
+        
+        // Add instruction: const i64 42 -> v0
+        let v0 = VReg(0);
+        func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 42 });
+        
+        // Add terminator: return v0
+        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+        
+        // Compile function
+        backend.compile_function(&func).unwrap();
+        
+        // Verify IR
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("define"));
+        assert!(ir.contains("test"));
+        assert!(ir.contains("ret i64 42"));
+        
+        backend.verify().unwrap();
+    }
+
+    /// Test MIR binary operation compilation
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_mir_binop_compilation() {
+        use crate::hir::{TypeId as T, BinOp};
+        use crate::mir::{MirFunction, MirLocal};
+        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+        use crate::mir::effects::LocalKind;
+        use simple_parser::ast::Visibility;
+        use crate::mir::MirModule;
+        
+        let target = Target::new(TargetArch::X86, TargetOS::Linux);  // i686
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        backend.create_module("mir_binop").unwrap();
+        
+        // Create MIR function: fn add(a: i32, b: i32) -> i32 { return a + b; }
+        let mut func = MirFunction::new("add".to_string(), T::I32, Visibility::Public);
+        
+        // Add parameters
+        func.params.push(MirLocal {
+            name: "a".to_string(),
+            ty: T::I32,
+            kind: LocalKind::Parameter,
+        });
+        func.params.push(MirLocal {
+            name: "b".to_string(),
+            ty: T::I32,
+            kind: LocalKind::Parameter,
+        });
+        
+        // Parameters map to v0 and v1
+        let v0 = VReg(0);
+        let v1 = VReg(1);
+        let v2 = VReg(2);
+        
+        // Add instruction: v2 = add v0, v1
+        func.blocks[0].instructions.push(MirInst::BinOp {
+            dest: v2,
+            op: BinOp::Add,
+            left: v0,
+            right: v1,
+        });
+        
+        // Add terminator: return v2
+        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v2) });
+        
+        // Compile function
+        backend.compile_function(&func).unwrap();
+        
+        // Verify IR
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("i686"));
+        assert!(ir.contains("add"));
+        assert!(ir.contains("ret"));
+        
+        backend.verify().unwrap();
+    }
+
+    /// Test MIR control flow compilation
+    #[test]
+    #[cfg(feature = "llvm")]
+    fn test_mir_control_flow_compilation() {
+        use crate::hir::{TypeId as T, BinOp};
+        use crate::mir::{MirFunction, MirLocal, MirBlock};
+        use crate::mir::instructions::{MirInst, MirTerminator, VReg, BlockId};
+        use crate::mir::effects::LocalKind;
+        use simple_parser::ast::Visibility;
+        
+        let target = Target::new(TargetArch::Arm, TargetOS::Linux);  // ARMv7
+        let backend = LlvmBackend::new(target).unwrap();
+        
+        backend.create_module("mir_cf").unwrap();
+        
+        // Create MIR function with branching
+        let mut func = MirFunction::new("check".to_string(), T::I32, Visibility::Public);
+        
+        // Add parameter
+        func.params.push(MirLocal {
+            name: "x".to_string(),
+            ty: T::I32,
+            kind: LocalKind::Parameter,
+        });
+        
+        let v0 = VReg(0);  // parameter
+        let v_true = VReg(1);
+        let v_false = VReg(2);
+        
+        // Block 0: check condition
+        func.blocks[0].instructions.push(MirInst::ConstBool { dest: v0, value: true });
+        func.blocks[0].terminator = Some(MirTerminator::Branch {
+            cond: v0,
+            then_block: BlockId(1),
+            else_block: BlockId(2),
+        });
+        
+        // Block 1: then branch
+        let mut then_block = MirBlock::new(BlockId(1));
+        then_block.instructions.push(MirInst::ConstInt { dest: v_true, value: 1 });
+        then_block.terminator = Some(MirTerminator::Return { value: Some(v_true) });
+        func.blocks.push(then_block);
+        
+        // Block 2: else branch
+        let mut else_block = MirBlock::new(BlockId(2));
+        else_block.instructions.push(MirInst::ConstInt { dest: v_false, value: 0 });
+        else_block.terminator = Some(MirTerminator::Return { value: Some(v_false) });
+        func.blocks.push(else_block);
+        
+        // Compile function
+        backend.compile_function(&func).unwrap();
+        
+        // Verify IR
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("br i1"));
+        assert!(ir.contains("bb1"));
+        assert!(ir.contains("bb2"));
+        
+        backend.verify().unwrap();
+    }

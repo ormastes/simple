@@ -258,8 +258,202 @@ impl LlvmBackend {
     }
 
     /// Compile a MIR function to LLVM IR
+    #[cfg(feature = "llvm")]
+    pub fn compile_function(&self, func: &MirFunction) -> Result<(), CompileError> {
+        use crate::mir::instructions::MirInst;
+        use std::collections::HashMap;
+        
+        let module = self.module.borrow();
+        let module = module.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+        
+        let builder = self.builder.borrow();
+        let builder = builder.as_ref()
+            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+        
+        // Map parameter types
+        let param_types: Result<Vec<_>, _> = func.params.iter()
+            .map(|p| self.llvm_type(&p.ty).map(|t| t.into()))
+            .collect();
+        let param_types = param_types?;
+        
+        // Map return type
+        let ret_llvm = self.llvm_type(&func.return_type)?;
+        
+        // Create function type
+        let fn_type = match ret_llvm {
+            BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
+            _ => return Err(CompileError::Semantic("Unsupported return type".to_string())),
+        };
+        
+        // Add function to module
+        let function = module.add_function(&func.name, fn_type, None);
+        
+        // Create basic blocks for each MIR block
+        let mut llvm_blocks = HashMap::new();
+        for block in &func.blocks {
+            let bb = self.context.append_basic_block(function, &format!("bb{}", block.id.0));
+            llvm_blocks.insert(block.id, bb);
+        }
+        
+        // Map virtual registers to LLVM values
+        let mut vreg_map: HashMap<crate::mir::instructions::VReg, inkwell::values::BasicValueEnum> = HashMap::new();
+        
+        // Map function parameters to virtual registers
+        for (i, param) in func.params.iter().enumerate() {
+            if let Some(llvm_param) = function.get_nth_param(i as u32) {
+                // Params are mapped to vregs starting from VReg(0)
+                vreg_map.insert(crate::mir::instructions::VReg(i as u32), llvm_param.into());
+            }
+        }
+        
+        // Compile each block
+        for block in &func.blocks {
+            let bb = llvm_blocks[&block.id];
+            builder.position_at_end(bb);
+            
+            // Compile each instruction
+            for inst in &block.instructions {
+                match inst {
+                    MirInst::ConstInt { dest, value } => {
+                        let const_val = self.context.i64_type().const_int(*value as u64, true);
+                        vreg_map.insert(*dest, const_val.into());
+                    },
+                    MirInst::ConstBool { dest, value } => {
+                        let const_val = self.context.bool_type().const_int(*value as u64, false);
+                        vreg_map.insert(*dest, const_val.into());
+                    },
+                    MirInst::Copy { dest, src } => {
+                        if let Some(val) = vreg_map.get(src) {
+                            vreg_map.insert(*dest, *val);
+                        }
+                    },
+                    MirInst::BinOp { dest, op, left, right } => {
+                        let left_val = vreg_map.get(left)
+                            .ok_or_else(|| CompileError::Semantic(format!("Undefined vreg: {:?}", left)))?;
+                        let right_val = vreg_map.get(right)
+                            .ok_or_else(|| CompileError::Semantic(format!("Undefined vreg: {:?}", right)))?;
+                        
+                        let result = self.compile_binop(*op, *left_val, *right_val, builder)?;
+                        vreg_map.insert(*dest, result);
+                    },
+                    _ => {
+                        // Other instructions not yet implemented
+                    }
+                }
+            }
+            
+            // Compile terminator
+            if let Some(term) = &block.terminator {
+                self.compile_terminator(term, &llvm_blocks, &vreg_map, builder)?;
+            }
+        }
+        
+        Ok(())
+    }
+
+    #[cfg(not(feature = "llvm"))]
     pub fn compile_function(&self, _func: &MirFunction) -> Result<(), CompileError> {
-        // TODO: Implement function compilation
+        Err(CompileError::Semantic("LLVM feature not enabled".to_string()))
+    }
+
+    /// Compile a binary operation
+    #[cfg(feature = "llvm")]
+    fn compile_binop(
+        &self,
+        op: crate::hir::BinOp,
+        left: inkwell::values::BasicValueEnum,
+        right: inkwell::values::BasicValueEnum,
+        builder: &Builder,
+    ) -> Result<inkwell::values::BasicValueEnum, CompileError> {
+        use crate::hir::BinOp;
+        
+        match (left, right) {
+            (inkwell::values::BasicValueEnum::IntValue(l), inkwell::values::BasicValueEnum::IntValue(r)) => {
+                let result = match op {
+                    BinOp::Add => builder.build_int_add(l, r, "add")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?,
+                    BinOp::Sub => builder.build_int_sub(l, r, "sub")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build sub: {}", e)))?,
+                    BinOp::Mul => builder.build_int_mul(l, r, "mul")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build mul: {}", e)))?,
+                    BinOp::Div => builder.build_int_signed_div(l, r, "div")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build div: {}", e)))?,
+                    _ => return Err(CompileError::Semantic(format!("Unsupported int binop: {:?}", op))),
+                };
+                Ok(result.into())
+            },
+            (inkwell::values::BasicValueEnum::FloatValue(l), inkwell::values::BasicValueEnum::FloatValue(r)) => {
+                let result = match op {
+                    BinOp::Add => builder.build_float_add(l, r, "fadd")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build fadd: {}", e)))?,
+                    BinOp::Sub => builder.build_float_sub(l, r, "fsub")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build fsub: {}", e)))?,
+                    BinOp::Mul => builder.build_float_mul(l, r, "fmul")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build fmul: {}", e)))?,
+                    BinOp::Div => builder.build_float_div(l, r, "fdiv")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build fdiv: {}", e)))?,
+                    _ => return Err(CompileError::Semantic(format!("Unsupported float binop: {:?}", op))),
+                };
+                Ok(result.into())
+            },
+            _ => Err(CompileError::Semantic("Type mismatch in binop".to_string())),
+        }
+    }
+
+    /// Compile a terminator instruction
+    #[cfg(feature = "llvm")]
+    fn compile_terminator(
+        &self,
+        term: &crate::mir::instructions::MirTerminator,
+        blocks: &std::collections::HashMap<crate::mir::instructions::BlockId, inkwell::basic_block::BasicBlock>,
+        vreg_map: &std::collections::HashMap<crate::mir::instructions::VReg, inkwell::values::BasicValueEnum>,
+        builder: &Builder,
+    ) -> Result<(), CompileError> {
+        use crate::mir::instructions::MirTerminator;
+        
+        match term {
+            MirTerminator::Return { value } => {
+                if let Some(vreg) = value {
+                    if let Some(val) = vreg_map.get(vreg) {
+                        builder.build_return(Some(val))
+                            .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
+                    } else {
+                        return Err(CompileError::Semantic("Return value not found".to_string()));
+                    }
+                } else {
+                    builder.build_return(None)
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
+                }
+            },
+            MirTerminator::Jump { target } => {
+                let target_bb = blocks.get(target)
+                    .ok_or_else(|| CompileError::Semantic(format!("Target block not found: {:?}", target)))?;
+                builder.build_unconditional_branch(*target_bb)
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build jump: {}", e)))?;
+            },
+            MirTerminator::Branch { cond, then_block, else_block } => {
+                let cond_val = vreg_map.get(cond)
+                    .ok_or_else(|| CompileError::Semantic("Branch condition not found".to_string()))?;
+                
+                let then_bb = blocks.get(then_block)
+                    .ok_or_else(|| CompileError::Semantic(format!("Then block not found: {:?}", then_block)))?;
+                let else_bb = blocks.get(else_block)
+                    .ok_or_else(|| CompileError::Semantic(format!("Else block not found: {:?}", else_block)))?;
+                
+                if let inkwell::values::BasicValueEnum::IntValue(cond_int) = cond_val {
+                    builder.build_conditional_branch(*cond_int, *then_bb, *else_bb)
+                        .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+                } else {
+                    return Err(CompileError::Semantic("Branch condition must be bool/int".to_string()));
+                }
+            },
+            _ => {
+                // Other terminators not yet implemented
+            }
+        }
+        
         Ok(())
     }
 
