@@ -218,8 +218,8 @@ fn test_feature_72_result_ok() {
     let result = runner
         .run_source(
             r#"
-result = Ok(42)
-main = result.unwrap()
+res = Ok(42)
+main = res.unwrap()
 "#,
         )
         .expect("result ok");
@@ -233,8 +233,8 @@ fn test_feature_72_result_err_unwrap_or() {
     let result = runner
         .run_source(
             r#"
-result = Err("error message")
-main = result.unwrap_or(99)
+res = Err("error message")
+main = res.unwrap_or(99)
 "#,
         )
         .expect("result err");
@@ -248,9 +248,9 @@ fn test_feature_72_result_is_ok() {
     let result = runner
         .run_source(
             r#"
-result = Ok(10)
+res = Ok(10)
 x = 0
-if result.is_ok():
+if res.is_ok():
     x = 1
 main = x
 "#,
@@ -266,9 +266,9 @@ fn test_feature_72_result_is_err() {
     let result = runner
         .run_source(
             r#"
-result = Err("oops")
+res = Err("oops")
 x = 0
-if result.is_err():
+if res.is_err():
     x = 1
 main = x
 "#,
@@ -304,7 +304,7 @@ fn test_feature_73_question_operator() {
     let result = runner
         .run_source(
             r#"
-fn may_fail(x) -> Result[int, str]:
+fn may_fail(x) -> Res[int, str]:
     if x < 0:
         return Err("negative")
     return Ok(x * 2)
@@ -313,8 +313,8 @@ fn caller(x):
     val = may_fail(x)?
     return Ok(val + 1)
 
-result = caller(5)
-main = result.unwrap()
+res = caller(5)
+main = res.unwrap()
 "#,
         )
         .expect("? operator");
@@ -377,10 +377,10 @@ fn test_feature_75_if_let_some() {
         .run_source(
             r#"
 opt = Some(42)
-result = 0
+res = 0
 if let Some(x) = opt:
-    result = x
-main = result
+    res = x
+main = res
 "#,
         )
         .expect("if let some");
@@ -395,12 +395,12 @@ fn test_feature_75_if_let_none_else() {
         .run_source(
             r#"
 opt = None
-result = 0
+res = 0
 if let Some(x) = opt:
-    result = x
+    res = x
 else:
-    result = -1
-main = result
+    res = -1
+main = res
 "#,
         )
         .expect("if let none");
@@ -629,8 +629,8 @@ fn worker(x: int) -> int:
     return x * MULTIPLIER
 
 handle = spawn_isolated(worker, 5)
-result = handle.join()
-main = result
+res = handle.join()
+main = res
 "#,
         )
         .expect("spawn_isolated");
@@ -702,8 +702,8 @@ fn test_feature_84_channel_try_recv() {
             r#"
 ch = Channel[int]()
 # No sender, try_recv should return None
-result = ch.try_recv()
-main = if result.is_none(): 1 else: 0
+res = ch.try_recv()
+main = if res.is_none(): 1 else: 0
 "#,
         )
         .expect("channel try_recv");

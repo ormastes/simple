@@ -23,10 +23,10 @@ fn test_native_fs_write_and_read() {
 extern fn native_fs_write(path, data)
 extern fn native_fs_read(path)
 
-let write_result = native_fs_write("{}", "hello")
-let read_result = native_fs_read("{}")
+let write_res = native_fs_write("{}", "hello")
+let read_res = native_fs_read("{}")
 
-main = match read_result:
+main = match read_res:
     Ok(bytes) => bytes.len()
     Err(_) => -1
 "#,
@@ -48,9 +48,9 @@ fn test_native_fs_write_bytes() {
 extern fn native_fs_write(path, data)
 
 # Write bytes [104, 101, 108, 108, 111] = "hello"
-let result = native_fs_write("{}", [104, 101, 108, 108, 111])
+let res = native_fs_write("{}", [104, 101, 108, 108, 111])
 
-main = match result:
+main = match res:
     Ok(n) => n
     Err(_) => -1
 "#,
@@ -98,10 +98,10 @@ fn test_native_fs_not_found_error() {
     let code = r#"
 extern fn native_fs_read(path)
 
-let result = native_fs_read("/nonexistent/path/file.txt")
+let res = native_fs_read("/nonexistent/path/file.txt")
 
-# Check if result is Err variant
-main = match result:
+# Check if res is Err variant
+main = match res:
     Ok(_) => 0
     Err(_) => 1
 "#;
@@ -156,9 +156,9 @@ fn test_native_fs_create_dir_recursive() {
         r#"
 extern fn native_fs_create_dir(path, recursive)
 
-let result = native_fs_create_dir("{}", true)
+let res = native_fs_create_dir("{}", true)
 
-main = match result:
+main = match res:
     Ok(_) => 1
     Err(_) => -1
 "#,
@@ -183,9 +183,9 @@ fn test_native_fs_remove_file() {
         r#"
 extern fn native_fs_remove_file(path)
 
-let result = native_fs_remove_file("{}")
+let res = native_fs_remove_file("{}")
 
-main = match result:
+main = match res:
     Ok(_) => 1
     Err(_) => -1
 "#,
@@ -213,9 +213,9 @@ fn test_native_fs_rename() {
         r#"
 extern fn native_fs_rename(src, dst)
 
-let result = native_fs_rename("{}", "{}")
+let res = native_fs_rename("{}", "{}")
 
-main = match result:
+main = match res:
     Ok(_) => 1
     Err(_) => -1
 "#,
@@ -243,9 +243,9 @@ fn test_native_fs_copy() {
         r#"
 extern fn native_fs_copy(src, dst)
 
-let result = native_fs_copy("{}", "{}")
+let res = native_fs_copy("{}", "{}")
 
-main = match result:
+main = match res:
     Ok(bytes) => bytes
     Err(_) => -1
 "#,
@@ -275,9 +275,9 @@ fn test_native_fs_metadata() {
         r#"
 extern fn native_fs_metadata(path)
 
-let result = native_fs_metadata("{}")
+let res = native_fs_metadata("{}")
 
-main = match result:
+main = match res:
     Ok(meta) => meta.size
     Err(_) => -1
 "#,
@@ -303,9 +303,9 @@ fn test_native_fs_metadata_file_type() {
         r#"
 extern fn native_fs_metadata(path)
 
-let result = native_fs_metadata("{}")
+let res = native_fs_metadata("{}")
 
-let is_ok = match result:
+let is_ok = match res:
     Ok(_) => true
     Err(_) => false
 
@@ -322,9 +322,9 @@ main = if is_ok: 1 else: -1
         r#"
 extern fn native_fs_metadata(path)
 
-let result = native_fs_metadata("{}")
+let res = native_fs_metadata("{}")
 
-let is_ok = match result:
+let is_ok = match res:
     Ok(_) => true
     Err(_) => false
 
@@ -352,9 +352,9 @@ fn test_native_fs_read_dir() {
         r#"
 extern fn native_fs_read_dir(path)
 
-let result = native_fs_read_dir("{}")
+let res = native_fs_read_dir("{}")
 
-main = match result:
+main = match res:
     Ok(entries) => entries.entries.len()
     Err(_) => -1
 "#,
@@ -381,9 +381,9 @@ fn test_native_fs_open_and_close() {
         r#"
 extern fn native_fs_open(path, mode)
 
-let open_result = native_fs_open("{}", "Read")
+let open_res = native_fs_open("{}", "Read")
 
-let is_ok = match open_result:
+let is_ok = match open_res:
     Ok(_) => true
     Err(_) => false
 
@@ -441,9 +441,9 @@ fn test_native_term_write() {
 extern fn native_term_write(handle, data, len)
 
 # Write to stdout (handle 1)
-let result = native_term_write(1, "test", 4)
+let res = native_term_write(1, "test", 4)
 
-main = if result > 0: 1 else: 0
+main = if res > 0: 1 else: 0
 "#;
 
     let result = run_code(code, &[], "").unwrap();
@@ -455,9 +455,9 @@ fn test_native_term_flush() {
     let code = r#"
 extern fn native_term_flush(handle)
 
-let result = native_term_flush(1)
+let res = native_term_flush(1)
 
-main = if result == 0: 1 else: 0
+main = if res == 0: 1 else: 0
 "#;
 
     let result = run_code(code, &[], "").unwrap();

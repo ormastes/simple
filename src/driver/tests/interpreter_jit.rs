@@ -359,11 +359,11 @@ fn jit_while_loop_countdown() {
     let code = r#"
 fn main() -> i64:
     let mut n: i64 = 10
-    let mut result: i64 = 0
+    let mut res: i64 = 0
     while n > 0:
-        result = result + n
+        res = res + n
         n = n - 1
-    return result
+    return res
 "#;
     let result = run_jit(code).unwrap();
     // Sum of 10..1 = 55
@@ -374,15 +374,15 @@ fn main() -> i64:
 fn jit_nested_while_loops() {
     let code = r#"
 fn main() -> i64:
-    let mut result: i64 = 0
+    let mut res: i64 = 0
     let mut i: i64 = 0
     while i < 6:
         let mut j: i64 = 0
         while j < 7:
-            result = result + 1
+            res = res + 1
             j = j + 1
         i = i + 1
-    return result
+    return res
 "#;
     let result = run_jit(code).unwrap();
     // 6 * 7 = 42
@@ -685,12 +685,12 @@ fn main() -> i64:
 fn jit_iterative_power() {
     let code = r#"
 fn power(base: i64, exp: i64) -> i64:
-    let mut result: i64 = 1
+    let mut res: i64 = 1
     let mut i: i64 = 0
     while i < exp:
-        result = result * base
+        res = res * base
         i = i + 1
-    return result
+    return res
 
 fn main() -> i64:
     return power(2, 5) + 10

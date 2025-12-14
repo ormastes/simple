@@ -262,8 +262,8 @@ main = if opt.is_none(): 1 else: 0
 fn interpreter_option_map() {
     let code = r#"
 opt = Some(10)
-result = opt.map(\x: x * 2)
-main = result.unwrap()
+res = opt.map(\x: x * 2)
+main = res.unwrap()
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 20);

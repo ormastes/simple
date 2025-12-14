@@ -140,7 +140,6 @@ fn run_sample_interpret(sample_path: &Path) -> Result<i32, String> {
 fn samples_dir() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     PathBuf::from(manifest_dir)
-        .join("tests")
         .join("system")
         .join("simple_basic")
         .join("samples")
