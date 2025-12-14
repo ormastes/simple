@@ -146,7 +146,7 @@ fn call_extern_function(
         }
 
         // =====================================================================
-        // Native Filesystem Operations (std_lib/src/host/async_nogc/io/fs.spl)
+        // Native Filesystem Operations (simple/std_lib/src/host/async_nogc/io/fs.spl)
         // =====================================================================
         "native_fs_read" => {
             check_async_violation("native_fs_read")?;
@@ -218,7 +218,7 @@ fn call_extern_function(
         }
 
         // =====================================================================
-        // Native Terminal Operations (std_lib/src/host/async_nogc/io/term.spl)
+        // Native Terminal Operations (simple/std_lib/src/host/async_nogc/io/term.spl)
         // =====================================================================
         "native_stdin" => native_stdin(&evaluated),
         "native_stdout" => native_stdout(&evaluated),

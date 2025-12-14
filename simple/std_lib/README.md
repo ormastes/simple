@@ -5,7 +5,7 @@ This directory contains the Simple language standard library implementation.
 ## Structure
 
 ```
-std_lib/
+simple/std_lib/
 ├── src/           # Standard library implementation (.spl files)
 │   ├── core/      # Variant-agnostic pure core (mutable)
 │   ├── core_immut/     # Variant-agnostic, #[immutable]
@@ -31,18 +31,19 @@ The standard library is written in Simple language itself. All `.spl` files in `
 Tests are located in `test/` and can be run with:
 
 ```bash
-simple test std_lib/test/
+simple test simple/std_lib/test/
 ```
 
 ### Documentation
 
 For language specification and design docs, see:
-- Main documentation: `../doc/` or symlink `../simple_doc/`
-- Stdlib spec: `../doc/spec/stdlib.md`
+- Main documentation: `simple/doc/` (symlink to `../doc/`)
+- Stdlib spec: `simple/doc/spec/stdlib.md`
 
 ## Migration Note
 
 **Previous location:** `lib/std/`  
-**New location:** `std_lib/src/`
+**New location:** `simple/std_lib/src/`
 
-This restructuring separates Simple language files from Rust compiler implementation for clearer organization.
+This restructuring creates a `simple/` workspace for Simple language development, separate from the Rust compiler source.
+
