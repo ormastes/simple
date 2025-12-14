@@ -62,10 +62,10 @@ Options:
 # Start interactive REPL
 simple
 >>> 1 + 2
-=> 3
+3
 >>> let x = 10
 >>> x * 5
-=> 50
+50
 >>> exit
 
 # Run a program

@@ -9,10 +9,10 @@ use simple_driver::jj_state::{BuildMetadata, BuildMode, JjStateManager, TestLeve
 fn jj_state_manager_detects_repo() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // Create a mock .jj directory
     std::fs::create_dir_all(repo_path.join(".jj/repo")).unwrap();
-    
+
     let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
     assert!(manager.is_enabled());
 }
@@ -21,7 +21,7 @@ fn jj_state_manager_detects_repo() {
 fn jj_state_manager_disabled_when_no_repo() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // No .jj directory created
     let manager = JjStateManager::new_with_path(repo_path).unwrap();
     assert!(!manager.is_enabled());
@@ -31,16 +31,16 @@ fn jj_state_manager_disabled_when_no_repo() {
 fn snapshot_build_creates_commit() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // Initialize a real jj repo for this test
     std::process::Command::new("jj")
         .args(&["git", "init", "--colocate"])
         .current_dir(&repo_path)
         .output()
         .expect("jj not installed");
-    
+
     let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
-    
+
     let metadata = BuildMetadata {
         timestamp: Utc::now(),
         duration_ms: 3200,
@@ -48,35 +48,43 @@ fn snapshot_build_creates_commit() {
         target: "x86_64-unknown-linux-gnu".to_string(),
         mode: BuildMode::Release,
     };
-    
+
     let result = manager.snapshot_build_success(&metadata);
-    assert!(result.is_ok(), "Snapshot should succeed: {:?}", result.err());
-    
+    assert!(
+        result.is_ok(),
+        "Snapshot should succeed: {:?}",
+        result.err()
+    );
+
     // Verify commit was created (check parent since we created a new working copy)
     let output = std::process::Command::new("jj")
         .args(&["show", "@-"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     let log = String::from_utf8_lossy(&output.stdout);
-    assert!(log.contains("Build Success"), "Commit message should contain 'Build Success', got:\n{}", log);
+    assert!(
+        log.contains("Build Success"),
+        "Commit message should contain 'Build Success', got:\n{}",
+        log
+    );
 }
 
 #[test]
 fn snapshot_test_creates_commit() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // Initialize a real jj repo
     std::process::Command::new("jj")
         .args(&["git", "init", "--colocate"])
         .current_dir(&repo_path)
         .output()
         .expect("jj not installed");
-    
+
     let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
-    
+
     let metadata = TestMetadata {
         timestamp: Utc::now(),
         duration_ms: 12400,
@@ -86,19 +94,27 @@ fn snapshot_test_creates_commit() {
         ignored: 3,
         test_level: TestLevel::All,
     };
-    
+
     let result = manager.snapshot_test_success(&metadata);
-    assert!(result.is_ok(), "Snapshot should succeed: {:?}", result.err());
-    
+    assert!(
+        result.is_ok(),
+        "Snapshot should succeed: {:?}",
+        result.err()
+    );
+
     // Verify commit was created (check parent since we created a new working copy)
     let output = std::process::Command::new("jj")
         .args(&["show", "@-"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     let log = String::from_utf8_lossy(&output.stdout);
-    assert!(log.contains("Tests Passed"), "Commit message should contain 'Tests Passed', got:\n{}", log);
+    assert!(
+        log.contains("Tests Passed"),
+        "Commit message should contain 'Tests Passed', got:\n{}",
+        log
+    );
 }
 
 #[test]
@@ -113,7 +129,7 @@ fn build_metadata_serializes_correctly() {
         target: "x86_64-unknown-linux-gnu".to_string(),
         mode: BuildMode::Release,
     };
-    
+
     let message = metadata.to_commit_message();
     assert!(message.contains("🏗️  Build Success"));
     assert!(message.contains("Duration: 3.2s"));
@@ -133,7 +149,7 @@ fn test_metadata_serializes_correctly() {
         ignored: 3,
         test_level: TestLevel::Unit,
     };
-    
+
     let message = metadata.to_commit_message();
     assert!(message.contains("✅ Tests Passed"));
     assert!(message.contains("Level: Unit"));
@@ -148,16 +164,16 @@ fn test_metadata_serializes_correctly() {
 fn get_last_working_state_returns_latest() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // Initialize jj repo
     std::process::Command::new("jj")
         .args(&["git", "init", "--colocate"])
         .current_dir(&repo_path)
         .output()
         .expect("jj not installed");
-    
+
     let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
-    
+
     // Create a build snapshot
     let metadata = BuildMetadata {
         timestamp: Utc::now(),
@@ -167,11 +183,11 @@ fn get_last_working_state_returns_latest() {
         mode: BuildMode::Debug,
     };
     manager.snapshot_build_success(&metadata).unwrap();
-    
+
     // Get last working state
     let last_state = manager.get_last_working_state().unwrap();
     assert!(last_state.is_some(), "Should have a last working state");
-    
+
     let state = last_state.unwrap();
     assert!(state.contains("Build Success") || state.len() > 0);
 }
@@ -185,7 +201,7 @@ fn snapshot_includes_timestamp() {
         target: "test".to_string(),
         mode: BuildMode::Debug,
     };
-    
+
     let message = metadata.to_commit_message();
     assert!(message.contains("Timestamp:"));
 }
@@ -199,7 +215,7 @@ fn snapshot_includes_duration() {
         target: "test".to_string(),
         mode: BuildMode::Debug,
     };
-    
+
     let message = metadata.to_commit_message();
     assert!(message.contains("Duration: 5.4s"));
 }
@@ -216,7 +232,7 @@ fn snapshot_includes_artifacts() {
         target: "test".to_string(),
         mode: BuildMode::Debug,
     };
-    
+
     let message = metadata.to_commit_message();
     assert!(message.contains("Artifacts:"));
     assert!(message.contains("artifact1.smf"));
@@ -232,12 +248,12 @@ fn snapshot_message_format_correct() {
         target: "x86_64-unknown-linux-gnu".to_string(),
         mode: BuildMode::Release,
     };
-    
+
     let message = build_meta.to_commit_message();
-    
+
     // Should have emoji and title
     assert!(message.starts_with("🏗️  Build Success"));
-    
+
     // Should have all fields
     assert!(message.contains("Duration:"));
     assert!(message.contains("Mode:"));
@@ -250,16 +266,16 @@ fn snapshot_message_format_correct() {
 fn multiple_snapshots_track_history() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // Initialize jj repo
     std::process::Command::new("jj")
         .args(&["git", "init", "--colocate"])
         .current_dir(&repo_path)
         .output()
         .expect("jj not installed");
-    
+
     let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
-    
+
     // Create multiple snapshots
     for i in 1..=3 {
         let metadata = BuildMetadata {
@@ -272,28 +288,33 @@ fn multiple_snapshots_track_history() {
         manager.snapshot_build_success(&metadata).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    
+
     // Verify we have multiple commits
     let output = std::process::Command::new("jj")
         .args(&["log", "--limit", "20"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     let log = String::from_utf8_lossy(&output.stdout);
     let count = log.matches("Build Success").count();
-    assert!(count >= 3, "Should have at least 3 build snapshots, found {}, log:\n{}", count, log);
+    assert!(
+        count >= 3,
+        "Should have at least 3 build snapshots, found {}, log:\n{}",
+        count,
+        log
+    );
 }
 
 #[test]
 fn snapshot_fails_gracefully_no_repo() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // No jj repo created
     let manager = JjStateManager::new_with_path(repo_path).unwrap();
     assert!(!manager.is_enabled());
-    
+
     let metadata = BuildMetadata {
         timestamp: Utc::now(),
         duration_ms: 1000,
@@ -301,7 +322,7 @@ fn snapshot_fails_gracefully_no_repo() {
         target: "test".to_string(),
         mode: BuildMode::Debug,
     };
-    
+
     // Should succeed but do nothing
     let result = manager.snapshot_build_success(&metadata);
     assert!(result.is_ok(), "Should gracefully handle no repo");
@@ -311,27 +332,27 @@ fn snapshot_fails_gracefully_no_repo() {
 fn snapshot_preserves_git_state() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // Initialize git first
     std::process::Command::new("git")
         .args(&["init"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     // Configure git
     std::process::Command::new("git")
         .args(&["config", "user.email", "test@example.com"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     std::process::Command::new("git")
         .args(&["config", "user.name", "Test User"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     // Make a git commit
     std::fs::write(repo_path.join("test.txt"), "test").unwrap();
     std::process::Command::new("git")
@@ -339,22 +360,22 @@ fn snapshot_preserves_git_state() {
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     std::process::Command::new("git")
         .args(&["commit", "-m", "Initial commit"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     // Now init jj co-located
     std::process::Command::new("jj")
         .args(&["git", "init", "--colocate"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
-    
+
     // Create jj snapshot
     let metadata = BuildMetadata {
         timestamp: Utc::now(),
@@ -364,32 +385,35 @@ fn snapshot_preserves_git_state() {
         mode: BuildMode::Debug,
     };
     manager.snapshot_build_success(&metadata).unwrap();
-    
+
     // Verify git still has the original commit
     let output = std::process::Command::new("git")
         .args(&["log", "--oneline"])
         .current_dir(&repo_path)
         .output()
         .unwrap();
-    
+
     let log = String::from_utf8_lossy(&output.stdout);
-    assert!(log.contains("Initial commit"), "Git commit should be preserved");
+    assert!(
+        log.contains("Initial commit"),
+        "Git commit should be preserved"
+    );
 }
 
 #[test]
 fn snapshot_is_idempotent() {
     let temp = TempDir::new().unwrap();
     let repo_path = temp.path().to_path_buf();
-    
+
     // Initialize jj repo
     std::process::Command::new("jj")
         .args(&["git", "init", "--colocate"])
         .current_dir(&repo_path)
         .output()
         .expect("jj not installed");
-    
+
     let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
-    
+
     let metadata = BuildMetadata {
         timestamp: Utc::now(),
         duration_ms: 1000,
@@ -397,11 +421,11 @@ fn snapshot_is_idempotent() {
         target: "test".to_string(),
         mode: BuildMode::Debug,
     };
-    
+
     // Create snapshot twice
     manager.snapshot_build_success(&metadata).unwrap();
     manager.snapshot_build_success(&metadata).unwrap();
-    
+
     // Both should succeed (idempotent)
     let result = manager.get_last_working_state();
     assert!(result.is_ok());

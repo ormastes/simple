@@ -56,12 +56,7 @@ fn jit_generator_dispatcher_yields_and_restores() {
     // Create runtime generator with compiled dispatcher pointer and run it.
     let gen = rt_generator_new(func_ptr as u64, slot_count, RuntimeValue::NIL);
     let first = rt_generator_next(gen);
-    assert_eq!(
-        rt_value_as_int(first),
-        1,
-        "first raw {}",
-        first.to_raw()
-    );
+    assert_eq!(rt_value_as_int(first), 1, "first raw {}", first.to_raw());
 
     let second = rt_generator_next(gen);
     assert_eq!(

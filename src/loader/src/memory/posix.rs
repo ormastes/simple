@@ -45,10 +45,8 @@ impl MemoryAllocator for PosixAllocator {
         Ok(ExecutableMemory {
             ptr: ptr as *mut u8,
             size: aligned_size,
-            dealloc: |ptr, size| {
-                unsafe {
-                    munmap(ptr as *mut _, size);
-                }
+            dealloc: |ptr, size| unsafe {
+                munmap(ptr as *mut _, size);
             },
         })
     }

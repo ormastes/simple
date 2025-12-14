@@ -483,11 +483,7 @@ fn runner_cli_match_in_imported_module_rejects() {
     )
     .expect("write lib.spl");
     let main_path = dir.path().join("main.spl");
-    fs::write(
-        &main_path,
-        "use lib\nmain = lib::classify(0)",
-    )
-    .expect("write main.spl");
+    fs::write(&main_path, "use lib\nmain = lib::classify(0)").expect("write main.spl");
 
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.current_dir(dir.path());
@@ -506,11 +502,7 @@ fn runner_cli_match_in_imported_module_dot_call() {
     )
     .expect("write lib.spl");
     let main_path = dir.path().join("main.spl");
-    fs::write(
-        &main_path,
-        "use lib\nmain = lib.classify(0)",
-    )
-    .expect("write main.spl");
+    fs::write(&main_path, "use lib\nmain = lib.classify(0)").expect("write main.spl");
 
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.current_dir(dir.path());

@@ -15,8 +15,8 @@
 //!    actual machine code. This mode is faster but supports fewer features.
 //!    Use `compile_native()` or `compile_source_to_memory_native()` for this mode.
 
-use std::fs;
 use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -71,9 +71,7 @@ fn load_module_with_imports(
     path: &Path,
     visited: &mut HashSet<std::path::PathBuf>,
 ) -> Result<simple_parser::ast::Module, CompileError> {
-    let path = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     if !visited.insert(path.clone()) {
         return Ok(simple_parser::ast::Module {
             name: None,
@@ -1464,7 +1462,8 @@ main = 0
 
     #[test]
     fn interpreter_pipeline_executes_top_level_match() {
-        let source = "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0";
+        let source =
+            "let x: i32 = 2\nmatch x:\n    2 =>\n        main = 20\n    _ =>\n        main = 0";
         let mut parser = simple_parser::Parser::new(source);
         let ast = parser.parse().expect("parse ok");
         let module = monomorphize_module(&ast);

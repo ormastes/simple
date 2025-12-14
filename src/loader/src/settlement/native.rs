@@ -219,7 +219,11 @@ impl LoadedNativeLib {
     pub fn get_symbol(&mut self, name: &str) -> Option<usize> {
         self.get_symbol_impl(name, |handle, c_name| unsafe {
             let sym = libc::dlsym(handle, c_name.as_ptr());
-            if sym.is_null() { None } else { Some(sym as usize) }
+            if sym.is_null() {
+                None
+            } else {
+                Some(sym as usize)
+            }
         })
     }
 
@@ -227,7 +231,11 @@ impl LoadedNativeLib {
     pub fn get_symbol(&mut self, name: &str) -> Option<usize> {
         self.get_symbol_impl(name, |handle, c_name| unsafe {
             let sym = winapi::um::libloaderapi::GetProcAddress(handle as _, c_name.as_ptr() as _);
-            if sym.is_null() { None } else { Some(sym as usize) }
+            if sym.is_null() {
+                None
+            } else {
+                Some(sym as usize)
+            }
         })
     }
 

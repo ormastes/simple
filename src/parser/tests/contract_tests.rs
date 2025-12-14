@@ -33,11 +33,11 @@ requires:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Function(func) = &items[0] {
         assert_eq!(func.name, "divide");
         assert!(func.contract.is_some());
-        
+
         let contract = func.contract.as_ref().unwrap();
         assert_eq!(contract.requires.len(), 1);
         assert_eq!(contract.ensures.len(), 0);
@@ -57,11 +57,11 @@ ensures:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Function(func) = &items[0] {
         assert_eq!(func.name, "abs");
         assert!(func.contract.is_some());
-        
+
         let contract = func.contract.as_ref().unwrap();
         assert_eq!(contract.requires.len(), 0);
         assert_eq!(contract.ensures.len(), 1);
@@ -83,11 +83,11 @@ ensures:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Function(func) = &items[0] {
         assert_eq!(func.name, "divide");
         assert!(func.contract.is_some());
-        
+
         let contract = func.contract.as_ref().unwrap();
         assert_eq!(contract.requires.len(), 1);
         assert_eq!(contract.ensures.len(), 1);
@@ -111,11 +111,11 @@ requires:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Function(func) = &items[0] {
         assert_eq!(func.name, "transfer");
         assert!(func.contract.is_some());
-        
+
         let contract = func.contract.as_ref().unwrap();
         assert_eq!(contract.requires.len(), 3);
     } else {
@@ -134,14 +134,14 @@ ensures:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Function(func) = &items[0] {
         assert_eq!(func.name, "increment");
         assert!(func.contract.is_some());
-        
+
         let contract = func.contract.as_ref().unwrap();
         assert_eq!(contract.ensures.len(), 1);
-        
+
         // Check that the condition contains an old() expression
         // The AST should contain ContractOld expression
         // (We'll verify this works when we implement the runtime)
@@ -158,7 +158,7 @@ fn add(a: i32, b: i32) -> i32:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Function(func) = &items[0] {
         assert_eq!(func.name, "add");
         assert!(func.contract.is_none());
@@ -186,11 +186,11 @@ class BankAccount:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Class(class) = &items[0] {
         assert_eq!(class.name, "BankAccount");
         assert!(class.invariant.is_some());
-        
+
         let invariant = class.invariant.as_ref().unwrap();
         assert_eq!(invariant.conditions.len(), 1);
     } else {
@@ -215,11 +215,11 @@ class Counter:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Class(class) = &items[0] {
         assert_eq!(class.name, "Counter");
         assert!(class.invariant.is_some());
-        
+
         let invariant = class.invariant.as_ref().unwrap();
         assert_eq!(invariant.conditions.len(), 3);
     } else {
@@ -239,7 +239,7 @@ class Point:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Class(class) = &items[0] {
         assert_eq!(class.name, "Point");
         assert!(class.invariant.is_none());
@@ -262,15 +262,15 @@ class Stack:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Class(class) = &items[0] {
         assert_eq!(class.name, "Stack");
         assert_eq!(class.methods.len(), 1);
-        
+
         let method = &class.methods[0];
         assert_eq!(method.name, "push");
         assert!(method.contract.is_some());
-        
+
         let contract = method.contract.as_ref().unwrap();
         assert_eq!(contract.ensures.len(), 1);
     } else {
@@ -315,11 +315,11 @@ ensures:
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Function(func) = &items[0] {
         assert_eq!(func.name, "withdraw");
         assert!(func.contract.is_some());
-        
+
         let contract = func.contract.as_ref().unwrap();
         assert_eq!(contract.requires.len(), 3);
         assert_eq!(contract.ensures.len(), 1);

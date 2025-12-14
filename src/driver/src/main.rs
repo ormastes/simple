@@ -15,6 +15,7 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 use simple_common::target::{Target, TargetArch};
+use simple_driver::doctest::is_definition_like;
 use simple_driver::runner::Runner;
 use simple_driver::watcher::watch;
 use simple_log;
@@ -104,6 +105,7 @@ fn run_repl(gc_log: bool, gc_off: bool) -> i32 {
     println!();
 
     let runner = create_runner(gc_log, gc_off);
+    let mut prelude: Vec<String> = Vec::new();
     let mut rl = match DefaultEditor::new() {
         Ok(editor) => editor,
         Err(e) => {
@@ -131,16 +133,33 @@ fn run_repl(gc_log: bool, gc_off: bool) -> i32 {
 
                 let _ = rl.add_history_entry(line);
 
-                // Wrap expression in main if not already a full program
-                let code = if line.contains("main") || line.contains("fn ") || line.contains("let ")
-                {
-                    line.to_string()
-                } else {
-                    format!("main = {}", line)
-                };
+                if is_definition_like(line) {
+                    let mut code = String::new();
+                    for stmt in &prelude {
+                        code.push_str(stmt);
+                        code.push('\n');
+                    }
+                    code.push_str(line);
+                    code.push('\n');
+                    code.push_str("main = 0");
+
+                    match runner.run_source_in_memory(&code) {
+                        Ok(_) => prelude.push(line.to_string()),
+                        Err(e) => eprintln!("Error: {}", e),
+                    }
+                    continue;
+                }
+
+                let mut code = String::new();
+                for stmt in &prelude {
+                    code.push_str(stmt);
+                    code.push('\n');
+                }
+                code.push_str("main = ");
+                code.push_str(line);
 
                 match runner.run_source_in_memory(&code) {
-                    Ok(result) => println!("=> {}", result),
+                    Ok(result) => println!("{result}"),
                     Err(e) => eprintln!("Error: {}", e),
                 }
             }
@@ -196,10 +215,15 @@ fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
     }
 }
 
-fn compile_file(source: &PathBuf, output: Option<PathBuf>, target: Option<Target>, snapshot: bool) -> i32 {
-    use std::time::Instant;
+fn compile_file(
+    source: &PathBuf,
+    output: Option<PathBuf>,
+    target: Option<Target>,
+    snapshot: bool,
+) -> i32 {
     use simple_driver::jj::{BuildEvent, BuildState, JJConnector};
-    
+    use std::time::Instant;
+
     let runner = Runner::new();
     let out_path = output.unwrap_or_else(|| source.with_extension("smf"));
 
@@ -232,29 +256,29 @@ fn compile_file(source: &PathBuf, output: Option<PathBuf>, target: Option<Target
     match result {
         Ok(()) => {
             println!("Compiled {} -> {}", source.display(), out_path.display());
-            
+
             // Record successful compilation event
             build_state.events.push(BuildEvent::CompilationSucceeded {
                 timestamp: std::time::SystemTime::now(),
                 duration_ms,
             });
             build_state = build_state.mark_compilation_success();
-            
+
             // Create JJ snapshot if requested
             if snapshot {
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let jj = JJConnector::new(&cwd);
-                
+
                 // Try to get current commit ID to verify we're in a JJ repo
                 match jj.current_commit_id() {
                     Ok(commit_id) => {
                         build_state = build_state.with_commit(commit_id.clone());
-                        
+
                         // Store the build state
                         if let Err(e) = jj.store_state(build_state.clone()) {
                             eprintln!("warning: failed to store build state: {}", e);
                         }
-                        
+
                         // Describe the change with build state
                         if let Err(e) = jj.describe_with_state(&build_state) {
                             eprintln!("warning: failed to describe change: {}", e);
@@ -270,26 +294,26 @@ fn compile_file(source: &PathBuf, output: Option<PathBuf>, target: Option<Target
                     }
                 }
             }
-            
+
             0
         }
         Err(e) => {
             eprintln!("error: {}", e);
-            
+
             // Record failed compilation event
             build_state.events.push(BuildEvent::CompilationFailed {
                 timestamp: std::time::SystemTime::now(),
                 duration_ms,
                 error: e.to_string(),
             });
-            
+
             if snapshot {
                 // Save failure state for diagnostics
                 let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
                 let jj = JJConnector::new(&cwd);
                 let _ = jj.store_state(build_state);
             }
-            
+
             1
         }
     }

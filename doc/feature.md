@@ -157,7 +157,7 @@
 | 219 | **Multi-Base Unit Types** (`unit IpAddr: str | u32 as ip` - multiple literal forms) | 4 | 3 | Parser, Type System |
 | 220 | **LLVM Backend** (32-bit + 64-bit target support) | 5 | 5 | Codegen, Compiler, Loader | ✅ **COMPLETE** |
 | 300 | **BDD Spec Framework** (RSpec-style describe/context/it DSL) | 5 | 4 | Testing, Stdlib | 🔄 **Sprint 1 COMPLETE** |
-| 301 | **Simple Doctest (sdoctest)** (Python doctest-style `>>>` examples) | 5 | 4 | Testing, Stdlib | 🔄 **Sprint 2 60% COMPLETE** |
+| 301 | **Simple Doctest (sdoctest)** (Python doctest-style `>>>` examples) | 5 | 4 | Testing, Stdlib | 🔄 **Sprint 2 COMPLETE (runtime runner; CLI/BDD wiring pending)** |
 | 302 | **Test CLI Integration** (unified `simple test` command) | 5 | 3 | Driver, CLI | 📋 **PLANNED** |
 | 400 | **Contract Blocks** (requires/ensures/invariant for functions/classes) | 5 | 4 | Parser, Type System, Runtime | 📋 **PLANNED** |
 | 401 | **Capability-Based Imports** (module requires[pure/io/net/fs]) | 5 | 4 | Parser, Module System, Effect Checker | 📋 **PLANNED** |
@@ -257,9 +257,38 @@
 | 126 | Kernel caching and JIT | 3 | Runtime |
 | 127 | Work group size computation | 2 | Runtime |
 | 127 | Argument marshalling (buffer refs) | 3 | Runtime |
-| 510 | UI Dynamic Structure (render-time if/for, keyed lists) | 4 | 5 | UI Parser, RenderIR, Runtime (📋 **PLANNED**, see plan 24) |
-| 511 | UI Structural PatchSet/Diff (insert/remove/replace/move) | 4 | 5 | UI Runtime, GUI Renderer, TUI Renderer (📋 **PLANNED**, see plan 24) |
-| 512 | UI SSR + Hydration (HTML emit + client rebind) | 4 | 5 | UI Runtime, Renderer, Build Pipeline (📋 **PLANNED**, see plan 24) |
+| 500 | UI Parser (.sui files, `{@ $}` `{- +}` `{{ }}` `{% %}` syntax) | 5 | 3 | Parser, Build Pipeline | 📋 **PLANNED** |
+| 501 | UI/Logic Pairing (strict file convention) | 4 | 2 | Compiler, Tooling | 📋 **PLANNED** |
+| 502 | UI Server/Client Blocks (`{- -}` server, `{+ +}` client) | 5 | 4 | Compiler, WASM Codegen | 📋 **PLANNED** |
+| 503 | UI Shared State (`{$ $}` declarations across server/client) | 4 | 3 | Compiler, Runtime | 📋 **PLANNED** |
+| 504 | UI RenderWasm Generation (render-time WASM) | 5 | 4 | Compiler, WASM Codegen | 📋 **PLANNED** |
+| 505 | UI PatchSet ABI (text/attr updates) | 4 | 3 | Runtime, Renderer | 📋 **PLANNED** |
+| 506 | UI Binding Graph (state → hole dependency tracking) | 5 | 4 | Runtime, Reactivity | 📋 **PLANNED** |
+| 507 | UI Event System (click, input, key handlers) | 5 | 3 | Runtime, Renderer | 📋 **PLANNED** |
+| 508 | UI GUI Renderer (DOM backend) | 5 | 3 | Runtime, Browser | 📋 **PLANNED** |
+| 509 | UI TUI Renderer (terminal buffer backend) | 4 | 4 | Runtime, Terminal | 📋 **PLANNED** |
+| 510 | UI Dynamic Structure (render-time if/for, keyed lists) | 4 | 5 | UI Parser, RenderIR, Runtime | 📋 **PLANNED** |
+| 511 | UI Structural PatchSet/Diff (insert/remove/replace/move) | 4 | 5 | UI Runtime, GUI Renderer, TUI Renderer | 📋 **PLANNED** |
+| 512 | UI SSR + Hydration (HTML emit + client rebind) | 4 | 5 | UI Runtime, Renderer, Build Pipeline | 📋 **PLANNED** |
+| 513 | UI Context/Session API (DI, persistent storage) | 4 | 3 | Runtime | 📋 **PLANNED** |
+| 514 | UI Component Lifecycle (mount, unmount, update) | 4 | 3 | Runtime | 📋 **PLANNED** |
+| 520 | Web Router (path → controller mapping) | 5 | 3 | Runtime, Web | 📋 **PLANNED** |
+| 521 | Web Controller Classes (request handling) | 5 | 3 | Compiler, Web | 📋 **PLANNED** |
+| 522 | Web Page Response (controller → .sui SSR) | 5 | 3 | Compiler, Runtime | 📋 **PLANNED** |
+| 523 | Web Implicit Render (controller → view by convention) | 4 | 2 | Compiler, Web | 📋 **PLANNED** |
+| 524 | Web Layouts (template composition) | 4 | 3 | Parser, Compiler | 📋 **PLANNED** |
+| 525 | Web Partials (reusable view fragments) | 4 | 2 | Parser, Compiler | 📋 **PLANNED** |
+| 526 | Web View Helpers (link_to, path_*, etc.) | 4 | 2 | Stdlib, Web | 📋 **PLANNED** |
+| 527 | Web Component Embedding (`{@ embed @}` directive) | 5 | 4 | Compiler, Runtime | 📋 **PLANNED** |
+| 528 | Web Hydration Strategies (load, visible, idle, interaction) | 4 | 5 | Runtime, WASM | 📋 **PLANNED** |
+| 529 | Web Externalized Config (file → env → CLI) | 4 | 2 | Compiler, Config | 📋 **PLANNED** |
+| 530 | Web Starters (bundled auto-config) | 3 | 3 | Build, Config | 📋 **PLANNED** |
+| 531 | Web Production Endpoints (/health, /metrics) | 4 | 2 | Runtime, Web | 📋 **PLANNED** |
+| 532 | Web Auto-Config Backoff (explicit overrides) | 3 | 2 | Config, DI | 📋 **PLANNED** |
+| 533 | Web Enforced Layering (controller → service → infra) | 3 | 3 | Linter, Compiler | 📋 **PLANNED** |
+| 534 | Web Explainability (simpleweb explain route/view) | 3 | 3 | CLI, Tooling | 📋 **PLANNED** |
+| 535 | Web Template Caching (mtime-based recompilation) | 3 | 2 | Compiler, Watch | 📋 **PLANNED** |
+| 536 | Web WASM Client Build (client/ → wasm bundle) | 5 | 4 | Compiler, WASM | 📋 **PLANNED** |
 
 ### BDD Spec Framework Implementation (#300)
 
@@ -872,3 +901,120 @@ LLMs are powerful but prone to specific failure modes:
 - **Silent regressions** (golden tests catch this)
 
 Simple's LLM-friendly features address each failure mode systematically, making it the safest language for AI-assisted development.
+
+### 13. UI Framework (Unified .sui Templates)
+
+Features #500-514 provide a unified UI framework with shared state, server/client execution, and dual-renderer support (GUI + TUI):
+
+- **Unified `.sui` Syntax** (#500-502): All syntax uses `{` prefix with distinct second character:
+
+  | Syntax | Purpose | Runs on |
+  |--------|---------|---------|
+  | `{@ ... @}` | Directive (component, embed) | Compile-time |
+  | `{$ ... $}` | State declarations (shared) | Compile-time |
+  | `{- ... -}` | Server block (DB, session) | Server only |
+  | `{+ ... +}` | Client block (events, fetch) | Client only |
+  | `{{ expr }}` | Output (escaped) | Both |
+  | `{! expr !}` | Raw output (unsafe) | Both |
+  | `{% ... %}` | Render code (if/for) | Both |
+  | `{# ... #}` | Comment | Neither |
+
+- **Shared State Model**: State is declared once, initialized/updated at different times:
+  - `{$ let count: i32 $}` - Declare (shared)
+  - `{- count = db.get_count() -}` - Server sets initial value
+  - `{+ on_click("#btn", fn(): count += 1) +}` - Client updates
+  - `{{ count }}` - Render reads (same value, different timing)
+
+- **UI/Logic Pairing** (#501): Strict convention maps `.sui` files to `.spl` logic files:
+  - `app/ui/components/Counter.ui.sui` ↔ `app/logic/components/Counter.spl`
+
+- **Dual Renderer** (#508-509): Same `.sui` compiles to both:
+  - **GUI**: HTML/CSS in browser or webview
+  - **TUI**: Terminal buffer with keyboard navigation
+
+- **Component Embedding** (#512): `{@ embed ComponentName prop=value @}` with hydration strategies:
+  - `hydrate="load"` (default), `"visible"`, `"idle"`, `"interaction"`, `"none"`
+
+**Implementation Milestones**:
+1. **M0**: Parser + IR design (Medium)
+2. **M1**: Static templates, `{{ }}` holes (Medium)
+3. **M2**: `{- -}` / `{+ +}` blocks, events (High)
+4. **M3**: Binding graph, reactivity (High)
+5. **M4**: TUI renderer (High)
+6. **M5**: `{% if %}` / `{% for %}` (Very High)
+7. **M6**: SSR + hydration (Very High)
+
+**See**: `doc/ui.md` for full specification.
+
+### 14. Web Framework (Server Infrastructure)
+
+Features #520-536 provide Rails-like routing, controllers, and services with Spring-grade maintainability:
+
+- **Routing & Controllers** (#520-521): Convention-based routing with REST resources:
+  ```spl
+  # config/routes.spl
+  routes:
+      get "/" => HomeController.index
+      resources "users"   # RESTful CRUD
+      namespace "/api/v1":
+          resources "posts"
+
+  # app/controllers/users_controller.spl
+  class UsersController:
+      @inject
+      let user_service: UserService
+
+      fn index(req) -> Response:
+          let users = user_service.list_all()
+          page({ users: users })  # renders .sui page
+  ```
+
+- **Services & DI** (#530): Dependency injection with `@inject`:
+  ```spl
+  @service
+  class UserService:
+      @inject
+      let db: Database
+  ```
+
+- **Middleware** (#533): Request/response pipeline:
+  ```spl
+  @middleware
+  class AuthMiddleware:
+      fn call(req, next) -> Response:
+          match get_session(req):
+              Some(s) => next(req)
+              None => redirect("/login")
+  ```
+
+- **Configuration** (#529-532): Spring Boot-inspired:
+  - `web_app.toml` - Project manifest
+  - Externalized config: file → env → CLI layering
+  - Starters: `web = true`, `json = true`, `metrics = true`
+  - Auto-config with explicit override backoff
+
+- **Production Features** (#531):
+  - `/health`, `/metrics` endpoints via starters
+  - `simple web routes` - List all routes
+  - `simple web explain route GET /users/:id`
+
+**Directory Structure**:
+```
+app/
+  controllers/     # Request handlers
+  services/        # Business logic
+  middleware/      # Request pipeline
+  ui/              # .sui pages (see ui.md)
+  logic/           # .sui logic files
+config/
+  routes.spl       # Route definitions
+  services.spl     # DI bindings
+```
+
+**Integration with UI Framework**:
+- Controllers return `page(props)` which renders `.sui` templates
+- `.sui` files handle SSR (`{- -}`) and client hydration (`{+ +}`)
+- API controllers return `json(data)` for pure API endpoints
+- Unified build via `web_app.toml`
+
+**See**: `doc/web_framework.md` for full specification.

@@ -424,8 +424,8 @@ impl Default for CiConfig {
 
 #[cfg(test)]
 mod tests {
-    use crate::smf::Platform;
     use super::*;
+    use crate::smf::Platform;
 
     #[test]
     fn test_target_fixture_host() {

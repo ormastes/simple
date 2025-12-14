@@ -24,6 +24,7 @@ mod integration_tests;
 mod integration_tests2;
 mod memory_tests;
 mod runner_tests;
+mod simple_basic;
 mod smf_tests;
 mod struct_coverage_tests;
 

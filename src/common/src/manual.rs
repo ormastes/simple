@@ -302,9 +302,9 @@ impl ValidBorrowState {
     /// Corresponds to Lean's `takeShared`.
     pub fn take_shared(self) -> Option<ValidBorrowState> {
         match self {
-            ValidBorrowState::Unborrowed => {
-                Some(ValidBorrowState::Shared(std::num::NonZeroUsize::new(1).unwrap()))
-            }
+            ValidBorrowState::Unborrowed => Some(ValidBorrowState::Shared(
+                std::num::NonZeroUsize::new(1).unwrap(),
+            )),
             ValidBorrowState::Shared(n) => Some(ValidBorrowState::Shared(
                 std::num::NonZeroUsize::new(n.get() + 1).unwrap(),
             )),
