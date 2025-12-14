@@ -1308,6 +1308,10 @@ impl<'a> Lexer<'a> {
             "vec" => TokenKind::Vec,
             "shared" => TokenKind::Shared,
             "gpu" => TokenKind::Gpu,
+            "requires" => TokenKind::Requires,
+            "ensures" => TokenKind::Ensures,
+            "invariant" => TokenKind::Invariant,
+            "old" => TokenKind::Old,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
         }
