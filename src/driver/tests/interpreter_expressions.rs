@@ -204,8 +204,8 @@ fn interpreter_trailing_block_with_args() {
 fn apply_twice(f, x):
     return f(f(x))
 
-result = apply_twice(\n: n + 1, 40)
-main = result
+res = apply_twice(\n: n + 1, 40)
+main = res
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
@@ -228,8 +228,8 @@ fn interpreter_trailing_block_multi_param() {
 fn combine(a, b, f):
     return f(a, b)
 
-result = combine(20, 22) \x, y: x + y
-main = result
+res = combine(20, 22) \x, y: x + y
+main = res
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);

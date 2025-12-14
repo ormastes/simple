@@ -136,7 +136,7 @@ main = 42
 fn interpreter_result_ok_unwrap() {
     // Basic Result with Ok variant - test unwrap
     let code = r#"
-result = Ok(42)
+res = Ok(42)
 main = result.unwrap()
 "#;
     let result = run_code(code, &[], "").unwrap();
@@ -147,7 +147,7 @@ main = result.unwrap()
 fn interpreter_result_is_ok() {
     // Check if result is Ok
     let code = r#"
-result = Ok(10)
+res = Ok(10)
 x = 0
 if result.is_ok():
     x = 1
@@ -161,7 +161,7 @@ main = x
 fn interpreter_result_is_err() {
     // Check if result is Err
     let code = r#"
-result = Err("error")
+res = Err("error")
 x = 0
 if result.is_err():
     x = 1
@@ -230,7 +230,7 @@ fn caller(x):
     val = may_fail(x)?  # If Err, early return with the error
     return Ok(val + 1)
 
-result = caller(5)
+res = caller(5)
 main = result.unwrap()
 "#;
     let result = run_code(code, &[], "").unwrap();
@@ -251,7 +251,7 @@ fn caller(x):
     val = may_fail(x)?
     return Ok(val + 1)
 
-result = caller(-5)  # Will return Err("negative")
+res = caller(-5)  # Will return Err("negative")
 main = result.unwrap_or(-99)
 "#;
     let result = run_code(code, &[], "").unwrap();
@@ -277,7 +277,7 @@ fn pipeline(x):
     b = step2(a)?
     return Ok(b)
 
-result = pipeline(5)
+res = pipeline(5)
 main = result.unwrap()
 "#;
     let result = run_code(code, &[], "").unwrap();
@@ -375,10 +375,10 @@ fn interpreter_if_let_some() {
     // If let with Option/Some pattern
     let code = r#"
 opt = Some(42)
-result = 0
+res = 0
 if let Some(x) = opt:
-    result = x
-main = result
+    res = x
+main = res
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
@@ -389,12 +389,12 @@ fn interpreter_if_let_none_else() {
     // If let with else branch for non-matching
     let code = r#"
 opt = None
-result = 0
+res = 0
 if let Some(x) = opt:
-    result = x
+    res = x
 else:
-    result = -1
-main = result
+    res = -1
+main = res
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, -1);
@@ -405,10 +405,10 @@ fn interpreter_if_let_ok() {
     // If let with Result/Ok pattern
     let code = r#"
 res = Ok(100)
-result = 0
+res = 0
 if let Ok(val) = res:
-    result = val
-main = result
+    res = val
+main = res
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 100);

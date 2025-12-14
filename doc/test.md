@@ -206,14 +206,20 @@ target/coverage/
 
 ### Generating Coverage Data
 
+**Backend Strategy**: Coverage builds automatically use the **LLVM backend** for:
+- Native coverage instrumentation (more accurate than post-build analysis)
+- Integration with `cargo llvm-cov` tooling
+- Support for all target architectures including 32-bit
+
 ```bash
 # 1. Overall coverage: ALL tests merged (UT+IT+ST+ENV) for branch/condition
+# (Automatically switches to LLVM backend for native instrumentation)
 cargo llvm-cov --workspace --branch \
     --json --output-path=target/coverage/overall/coverage.json
 cargo llvm-cov --workspace --branch \
     --html --output-dir=target/coverage/overall/html
 
-# 2. Integration tests: Own raw data for public function coverage
+# 2. Integration tests: Own raw data for public function coverage  
 cargo llvm-cov -p simple-tests --test it \
     --json --output-path=target/coverage/it/coverage.json
 
@@ -221,12 +227,14 @@ cargo llvm-cov -p simple-tests --test it \
 cargo llvm-cov -p simple-tests --test system \
     --json --output-path=target/coverage/system/coverage.json
 
-# Or use Makefile targets
+# Or use Makefile targets (backend selection is automatic)
 make coverage-unit      # Overall merged (UT+IT+ST+ENV) - branch/condition
 make coverage-it        # IT only - own raw data for public func
 make coverage-system    # ST only - own raw data for class/struct
 make coverage-all       # All reports
 ```
+
+**Note**: The build system automatically selects the LLVM backend when running coverage commands to ensure accurate instrumentation and analysis.
 
 ### Public API Specification
 
