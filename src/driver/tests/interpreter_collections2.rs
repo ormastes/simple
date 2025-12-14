@@ -137,7 +137,7 @@ fn interpreter_result_ok_unwrap() {
     // Basic Result with Ok variant - test unwrap
     let code = r#"
 res = Ok(42)
-main = result.unwrap()
+main = res.unwrap()
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
@@ -149,7 +149,7 @@ fn interpreter_result_is_ok() {
     let code = r#"
 res = Ok(10)
 x = 0
-if result.is_ok():
+if res.is_ok():
     x = 1
 main = x
 "#;
@@ -163,7 +163,7 @@ fn interpreter_result_is_err() {
     let code = r#"
 res = Err("error")
 x = 0
-if result.is_err():
+if res.is_err():
     x = 1
 main = x
 "#;
@@ -231,7 +231,7 @@ fn caller(x):
     return Ok(val + 1)
 
 res = caller(5)
-main = result.unwrap()
+main = res.unwrap()
 "#;
     let result = run_code(code, &[], "").unwrap();
     // 5 * 2 = 10, then + 1 = 11
@@ -252,7 +252,7 @@ fn caller(x):
     return Ok(val + 1)
 
 res = caller(-5)  # Will return Err("negative")
-main = result.unwrap_or(-99)
+main = res.unwrap_or(-99)
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, -99);
@@ -278,7 +278,7 @@ fn pipeline(x):
     return Ok(b)
 
 res = pipeline(5)
-main = result.unwrap()
+main = res.unwrap()
 "#;
     let result = run_code(code, &[], "").unwrap();
     // 5 + 10 = 15, 15 * 2 = 30
@@ -405,10 +405,10 @@ fn interpreter_if_let_ok() {
     // If let with Result/Ok pattern
     let code = r#"
 res = Ok(100)
-res = 0
+out = 0
 if let Ok(val) = res:
-    res = val
-main = res
+    out = val
+main = out
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 100);
