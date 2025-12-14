@@ -60,6 +60,16 @@ simple/                          # Project root (Rust compiler)
 **Build Files:**
 - Removed `/bin/` from `.gitignore` (now a symlink, should be tracked)
 
+## Note on native_lib/
+
+The `simple/native_lib/` directory mentioned in some documentation does not exist yet. Native Rust implementations are currently scattered throughout the `src/` tree:
+- Runtime FFI: `src/runtime/src/value/ffi.rs`
+- Native I/O: `src/compiler/src/interpreter_native_io.rs`
+- Codegen FFI: `src/compiler/src/codegen/runtime_ffi.rs`
+- Native loader: `src/native_loader/`
+
+Future refactoring may consolidate these into `simple/native_lib/`.
+
 ## For Developers
 
 ### Using the New Structure
