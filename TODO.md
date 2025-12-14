@@ -3,9 +3,11 @@
 ## In Progress
 
 ### JJ Version Control Integration
-**Status:** Core Implementation Complete
+**Status:** Core Implementation Complete + Event System Added
 **Goal:** Auto-snapshot successful builds and test runs to JJ
-**Implementation:** `src/driver/src/jj_state.rs`
+**Implementation:** 
+- `src/driver/src/jj_state.rs` - State management with JJ CLI
+- `src/driver/src/jj/` - Event system and state storage
 
 **Completed:**
 1. ✅ JjStateManager - Core state management with JJ CLI integration
@@ -18,12 +20,18 @@
    - Build snapshots (8 tests)
    - Test snapshots (4 tests)
    - Edge cases and idempotency (3 tests)
+8. ✅ **NEW: JJ Connection Infrastructure (12 tests passing)**
+   - `jj/event.rs` - BuildEvent and BuildState types
+   - `jj/store.rs` - StateStore for persistent build history
+   - `jj/jj.rs` - JJConnector for JJ CLI integration
+   - `jj/message.rs` - MessageFormatter for user-facing messages
 
 **Remaining:**
 1. ⏳ CLI integration (`--snapshot` flag for build/test commands)
-2. ⏳ System tests for end-to-end snapshot workflow
-3. ⏳ Documentation (usage guide, examples)
-4. 🔒 Test State Storage (DEFERRED - pending test framework setup)
+2. ⏳ Wire compilation/test success into BuildEvent capture
+3. ⏳ System tests for end-to-end snapshot workflow
+4. ⏳ Documentation (usage guide, examples)
+5. 🔒 Test State Storage (DEFERRED - pending test framework setup)
 
 ---
 
