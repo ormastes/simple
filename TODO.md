@@ -75,12 +75,69 @@
 
 ---
 
-## Pending
+## In Progress
 
-### Pydoctest-like Interactive Tests
-- Interactive REPL session recording
-- Copy-paste Simple interpreter interactions as tests
-- Python-style prompt/response format
+### Simple Doctest (sdoctest) Framework
+**Status:** Phase 1 - Core Parser and Runner
+**Goal:** Python doctest-style interactive tests embedded in docstrings and docs
+**Spec:** `doc/spec/sdoctest.md`
+
+**Features:**
+- `>>>` prompt syntax for executable examples
+- Extract from docstrings (`///`), Markdown (` ```simple-doctest `), and `.sdt` files
+- Integrated with BDD spec framework runner
+- Coverage contribution to public function touch
+- REPL recording mode (`--record`)
+- Wildcard matching for non-deterministic output
+- Setup/teardown blocks per docstring
+- Tag-based filtering
+
+**Sprint 1: Core Parser and Runner**
+1. ✅ Create `lib/std/doctest/` module structure
+2. ✅ Implement parser (`parser.spl`):
+   - Extract `>>>` examples from strings
+   - Parse expected output
+   - Parse exception expectations (`Error: Type`)
+   - Extract docstrings from `.spl` files
+   - Parse setup/teardown blocks
+3. ✅ Implement matcher (`matcher.spl`):
+   - Exact string matching with normalization
+   - Wildcard matching (`.` and `*`)
+   - Exception matching
+4. ✅ Implement runner (`runner.spl`):
+   - Execute code in isolated interpreter (placeholder)
+   - Capture stdout/stderr
+   - Match output vs expected
+   - Setup/teardown execution
+5. ✅ Create stub modules:
+   - `discovery.spl` - File discovery framework
+   - `reporter.spl` - Result formatting
+   - `integration.spl` - Spec runner integration
+6. ✅ Write 40+ unit tests for parser, matcher, and runner
+7. ⏳ Wire interpreter integration (pending Simple REPL/interpreter API)
+8. ⏳ Run tests and verify basic functionality
+
+**Sprint 2: Discovery and Integration (Planned)**
+- Discovery from `.spl`, `.md`, `.sdt` files
+- Hook into `spec.runner` for unified test execution
+- CLI: `simple test --doctest`
+- Integration tests
+
+**Sprint 3: Advanced Features (Planned)**
+- Wildcard matching (`.` and `*`)
+- Setup/teardown isolation
+- Tag filtering (`@doctest(tag: ...)`)
+- REPL recording mode
+
+**Sprint 4: Coverage and Polish (Planned)**
+- Coverage integration (public function touch)
+- Configuration (`simple.toml`)
+- Migration guide
+- Example library
+
+---
+
+## Pending
 
 ### LLM-Friendly Test Infrastructure
 - Minimal context interface
