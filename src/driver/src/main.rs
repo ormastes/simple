@@ -30,7 +30,7 @@ fn print_help() {
     eprintln!("  simple <file.spl>           Run source file");
     eprintln!("  simple <file.smf>           Run compiled binary");
     eprintln!("  simple -c \"code\"            Run code string");
-    eprintln!("  simple compile <src> [-o <out>] [--target <arch>]  Compile to SMF");
+    eprintln!("  simple compile <src> [-o <out>] [--target <arch>] [--snapshot]  Compile to SMF");
     eprintln!("  simple watch <file.spl>     Watch and auto-recompile");
     eprintln!("  simple targets              List available target architectures");
     eprintln!();
@@ -55,6 +55,7 @@ fn print_help() {
     eprintln!("  --gc-log       Enable verbose GC logging");
     eprintln!("  --gc=off       Disable garbage collection");
     eprintln!("  --target <arch>  Target architecture for cross-compilation");
+    eprintln!("  --snapshot     Create JJ snapshot on successful build/test");
     eprintln!();
     eprintln!("Target Architectures:");
     eprintln!("  x86_64   64-bit x86 (default on most systems)");
@@ -76,6 +77,7 @@ fn print_help() {
     eprintln!("  simple -c \"main = 42\"       # Run expression");
     eprintln!("  simple compile app.spl      # Compile to app.smf");
     eprintln!("  simple compile app.spl --target aarch64  # Cross-compile");
+    eprintln!("  simple compile app.spl --snapshot  # Compile and snapshot");
     eprintln!("  simple watch app.spl        # Watch for changes");
     eprintln!("  simple init myapp           # Create new project");
     eprintln!("  simple add http \"1.0\"       # Add dependency");
@@ -194,7 +196,10 @@ fn run_code(code: &str, gc_log: bool, gc_off: bool) -> i32 {
     }
 }
 
-fn compile_file(source: &PathBuf, output: Option<PathBuf>, target: Option<Target>) -> i32 {
+fn compile_file(source: &PathBuf, output: Option<PathBuf>, target: Option<Target>, snapshot: bool) -> i32 {
+    use std::time::Instant;
+    use simple_driver::jj::{BuildEvent, BuildState, JJConnector};
+    
     let runner = Runner::new();
     let out_path = output.unwrap_or_else(|| source.with_extension("smf"));
 
@@ -206,6 +211,14 @@ fn compile_file(source: &PathBuf, output: Option<PathBuf>, target: Option<Target
         }
     };
 
+    // Start timing and create build event
+    let start_time = Instant::now();
+    let mut build_state = BuildState::new();
+    build_state.events.push(BuildEvent::CompilationStarted {
+        timestamp: std::time::SystemTime::now(),
+        files: vec![source.display().to_string()],
+    });
+
     // Use target-specific compilation if target is specified
     let result = if let Some(target) = target {
         println!("Cross-compiling for target: {}", target);
@@ -214,13 +227,69 @@ fn compile_file(source: &PathBuf, output: Option<PathBuf>, target: Option<Target
         runner.compile_to_smf(&source_content, &out_path)
     };
 
+    let duration_ms = start_time.elapsed().as_millis() as u64;
+
     match result {
         Ok(()) => {
             println!("Compiled {} -> {}", source.display(), out_path.display());
+            
+            // Record successful compilation event
+            build_state.events.push(BuildEvent::CompilationSucceeded {
+                timestamp: std::time::SystemTime::now(),
+                duration_ms,
+            });
+            build_state = build_state.mark_compilation_success();
+            
+            // Create JJ snapshot if requested
+            if snapshot {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let jj = JJConnector::new(&cwd);
+                
+                // Try to get current commit ID to verify we're in a JJ repo
+                match jj.current_commit_id() {
+                    Ok(commit_id) => {
+                        build_state = build_state.with_commit(commit_id.clone());
+                        
+                        // Store the build state
+                        if let Err(e) = jj.store_state(build_state.clone()) {
+                            eprintln!("warning: failed to store build state: {}", e);
+                        }
+                        
+                        // Describe the change with build state
+                        if let Err(e) = jj.describe_with_state(&build_state) {
+                            eprintln!("warning: failed to describe change: {}", e);
+                        } else {
+                            println!(
+                                "📸 Updated JJ change description with build state (commit: {})",
+                                &commit_id[..std::cmp::min(12, commit_id.len())]
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        eprintln!("warning: --snapshot requires a JJ repository (run 'jj git init' or 'jj init')");
+                    }
+                }
+            }
+            
             0
         }
         Err(e) => {
             eprintln!("error: {}", e);
+            
+            // Record failed compilation event
+            build_state.events.push(BuildEvent::CompilationFailed {
+                timestamp: std::time::SystemTime::now(),
+                duration_ms,
+                error: e.to_string(),
+            });
+            
+            if snapshot {
+                // Save failure state for diagnostics
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let jj = JJConnector::new(&cwd);
+                let _ = jj.store_state(build_state);
+            }
+            
             1
         }
     }
@@ -300,7 +369,7 @@ fn main() {
         "compile" => {
             if args.len() < 2 {
                 eprintln!("error: compile requires a source file");
-                eprintln!("Usage: simple compile <source.spl> [-o <output.smf>] [--target <arch>]");
+                eprintln!("Usage: simple compile <source.spl> [-o <output.smf>] [--target <arch>] [--snapshot]");
                 std::process::exit(1);
             }
             let source = PathBuf::from(&args[1]);
@@ -325,7 +394,10 @@ fn main() {
                 })
                 .map(|arch| Target::new(arch, simple_common::target::TargetOS::host()));
 
-            std::process::exit(compile_file(&source, output, target));
+            // Parse --snapshot flag
+            let snapshot = args.iter().any(|a| a == "--snapshot");
+
+            std::process::exit(compile_file(&source, output, target, snapshot));
         }
         "targets" => {
             std::process::exit(list_targets());

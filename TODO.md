@@ -27,7 +27,7 @@
    - `jj/message.rs` - MessageFormatter for user-facing messages
 
 **Remaining:**
-1. ⏳ CLI integration (`--snapshot` flag for build/test commands)
+1. ✅ CLI integration (`--snapshot` flag for build/test commands)
 2. ⏳ Wire compilation/test success into BuildEvent capture
 3. ⏳ System tests for end-to-end snapshot workflow
 4. ⏳ Documentation (usage guide, examples)
