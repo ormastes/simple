@@ -159,6 +159,17 @@
 | 300 | **BDD Spec Framework** (RSpec-style describe/context/it DSL) | 5 | 4 | Testing, Stdlib | 🔄 **Sprint 1 COMPLETE** |
 | 301 | **Simple Doctest (sdoctest)** (Python doctest-style `>>>` examples) | 5 | 4 | Testing, Stdlib | 🔄 **Sprint 2 60% COMPLETE** |
 | 302 | **Test CLI Integration** (unified `simple test` command) | 5 | 3 | Driver, CLI | 📋 **PLANNED** |
+| 400 | **Contract Blocks** (requires/ensures/invariant for functions/classes) | 5 | 4 | Parser, Type System, Runtime | 📋 **PLANNED** |
+| 401 | **Capability-Based Imports** (module requires[pure/io/net/fs]) | 5 | 4 | Parser, Module System, Effect Checker | 📋 **PLANNED** |
+| 402 | **Extended Effect System** (@pure, @io, @net, @fs, @unsafe markers) | 4 | 3 | Parser, Type System, Stdlib | 📋 **PLANNED** |
+| 403 | **AST/IR Export** (--emit-ast/hir/mir for verification tools) | 4 | 3 | Compiler, Serialization | 📋 **PLANNED** |
+| 404 | **Structured Diagnostics** (JSON error format with codes/suggestions) | 4 | 2 | Compiler, Error Handling | 📋 **PLANNED** |
+| 405 | **Context Pack Generator** (extract minimal dependencies for LLM) | 4 | 3 | Compiler, CLI | 📋 **PLANNED** |
+| 406 | **Property-Based Testing** (generate random inputs, shrink failures) | 4 | 4 | Testing Framework | 📋 **PLANNED** |
+| 407 | **Snapshot/Golden Tests** (compare outputs to saved snapshots) | 4 | 3 | Testing Framework | 📋 **PLANNED** |
+| 408 | **Provenance Annotations** (@generated_by, prompt hash tracking) | 3 | 2 | Parser, Build System | 📋 **PLANNED** |
+| 409 | **Forbidden Pattern Linter** (configurable banned constructs) | 3 | 3 | Linter, Configuration | 📋 **PLANNED** |
+| 410 | **Semantic Diff Tool** (AST-level diff, not text diff) | 3 | 3 | Compiler, Tools | 📋 **PLANNED** |
 
 ### LLVM Backend Implementation (#220) ✅ COMPLETE
 
@@ -601,3 +612,227 @@ Features #300-310 provide a comprehensive testing infrastructure with Ruby/RSpec
 - `doc/doctest_integration.md` - BDD integration plan
 - `doc/status/sdoctest_implementation.md` - Implementation status
 - `doc/test.md` - Test policy and coverage rules
+
+### 12. LLM-Friendly Development Features
+
+Features #400-410 make Simple optimized for LLM-assisted development, code generation, and verification. These features reduce LLM errors, enable automated verification, and make the language more predictable for AI agents.
+
+**Design Philosophy:**
+- **Explicit over Implicit**: No hidden conversions, effects, or dependencies
+- **Verifiable Intent**: Contracts and effects make behavior checkable
+- **Minimal Context**: Tools extract only needed information
+- **Deterministic Output**: Same code always compiles the same way
+- **Machine-Checkable**: AST/IR export enables external verification
+
+#### Contract System (#400)
+
+Contract blocks (`requires`/`ensures`/`invariant`) make function intent explicit and catch LLM errors early:
+
+```simple
+fn divide(a: i64, b: i64) -> i64:
+    requires:
+        b != 0              # Precondition: no division by zero
+    ensures:
+        result * b == a     # Postcondition: verify correctness
+    
+    return a / b
+
+class BankAccount:
+    balance: i64
+    
+    invariant:
+        balance >= 0  # Always true after any method
+    
+    fn withdraw(amount: i64):
+        requires:
+            amount > 0
+            amount <= balance
+        ensures:
+            balance == old(balance) - amount  # Verify state change
+        
+        balance -= amount
+```
+
+**Benefits:**
+- LLM can read contracts to understand intent
+- Runtime checks catch violations immediately  
+- Contracts serve as executable specifications
+- Reduces need for manual validation
+- Enables property-based test generation
+
+**Special Syntax:**
+- `old(expr)` - Value before function execution
+- `result` - Return value in ensures block
+
+**Implementation:** Parser + type checker + runtime assertions (future: Z3 static verification)
+
+#### Capability-Based Imports (#401-402)
+
+Modules declare required capabilities, preventing LLMs from adding forbidden effects:
+
+```simple
+module app.domain requires[pure]:
+    # Only pure functions - no I/O, network, or filesystem
+    use crate.core.math.*  # OK - math is pure
+    use crate.io.fs.*      # ERROR: fs capability not allowed
+
+module app.api requires[io, net]:
+    use domain.*           # OK - pure is always allowed
+    use crate.net.http.*   # OK - net capability granted
+    
+@io @net
+fn fetch_and_save(url: str, path: str) -> Result[(), Error]:
+    let data = http.get(url)?  # Requires @net effect
+    fs.write(path, data)?      # Requires @io effect
+    return Ok(())
+```
+
+**Capabilities:**
+- `pure` - No side effects (mathematics, data transformations)
+- `io` - File system, stdin/stdout/stderr
+- `net` - Network operations (HTTP, TCP, UDP)
+- `fs` - File system only (subset of io)
+- `unsafe` - Pointer operations, FFI, memory manipulation
+- `async` - Async/await operations
+
+**Benefits:**
+- Prevents LLM from adding I/O to pure business logic
+- Enforces layered architecture (domain can't call network)
+- Compile-time safety for effect usage
+- Clear error messages when LLM violates capability rules
+
+**Effect Inference:**
+Functions automatically infer effects from calls, no need to annotate every function.
+
+#### Tooling for Verification (#403-405)
+
+**AST/IR Export (#403):**
+```bash
+simple compile app.spl --emit-ast       # AST as JSON
+simple compile app.spl --emit-mir       # MIR as JSON
+simple compile app.spl --error-format=json  # Errors as JSON
+```
+
+Enables external verification tools, semantic diff, and machine checking.
+
+**Structured Diagnostics (#404):**
+```json
+{
+  "errors": [{
+    "code": "E2001",
+    "message": "Type mismatch: expected i64, found str",
+    "location": {"file": "app.spl", "line": 42, "column": 10},
+    "suggestions": ["Use .parse() to convert string to integer"]
+  }]
+}
+```
+
+Makes "fix loops" reliable for LLM agents.
+
+**Context Pack Generator (#405):**
+```bash
+simple context app.service --format=markdown > context.md
+```
+
+Extracts only symbols/types/docs needed for a module, reducing context from megabytes to kilobytes (90% reduction typical).
+
+#### Testing Infrastructure (#406-407)
+
+**Property-Based Testing (#406):**
+```simple
+use std.testing.property.*
+
+@property_test(iterations: 1000)
+fn test_sort_idempotent(input: List[i64]):
+    # Property: sorting twice == sorting once
+    expect(sort(sort(input))).to eq(sort(input))
+```
+
+Generates random inputs and shrinks failures to minimal cases. Catches edge cases LLMs typically miss.
+
+**Snapshot/Golden Tests (#407):**
+```simple
+use std.testing.snapshot.*
+
+@snapshot_test
+fn test_render_user_json():
+    user = User(id: 42, name: "Alice")
+    json = render_json(user)
+    expect_snapshot(json, format: "json")
+```
+
+Makes LLM regressions obvious by comparing outputs to saved snapshots.
+
+#### Additional Features (#408-410)
+
+**Provenance Annotations (#408):**
+```simple
+@generated_by(tool: "llm-assistant", version: "1.0")
+@prompt_hash("sha256:abc123...")
+fn auto_generated_helper() -> i64:
+    # LLM-generated code
+```
+
+Enables audit trails and blame assignment for generated code.
+
+**Forbidden Pattern Linter (#409):**
+```toml
+# simple.toml
+[lint.forbidden]
+unchecked_indexing = "deny"
+global_mutable_state = "deny"
+ad_hoc_parsing = "warn"
+```
+
+Prevents LLMs from generating risky code patterns.
+
+**Semantic Diff Tool (#410):**
+```bash
+simple diff old.spl new.spl --semantic
+```
+
+Shows AST-level changes, not formatting differences. Highlights real behavior changes.
+
+#### Already Implemented
+
+Several LLM-friendly features are already in Simple:
+
+✅ **Exhaustiveness by default** - Match expressions must cover all cases  
+✅ **Non-null by default** - `Option[T]` for nullable values  
+✅ **No implicit conversions** - Explicit `.to_i64()` required  
+✅ **Strict module boundaries** - Visibility control prevents violations  
+✅ **Doctest support** - Executable examples in documentation (Sprint 2 90% complete)  
+✅ **Stable error codes** - E2001, E2002, etc. with consistent messages
+
+#### Implementation Plan
+
+See `doc/plans/llm_friendly.md` for detailed implementation plan.
+
+**Priorities:**
+1. **Phase 1**: Contract blocks (11 hours) - ⭐⭐⭐ Highest impact
+2. **Phase 2**: Capability-based imports (18 hours) - ⭐⭐⭐ Critical safety
+3. **Phase 3**: AST/IR export (13 hours) - ⭐⭐ Enables verification
+4. **Phase 4**: Context pack generator (14 hours) - ⭐⭐ Reduces token usage
+5. **Phase 5**: Property testing (16 hours) - ⭐ Better test coverage
+6. **Phase 6**: Linting rules (16 hours) - ⭐ Code quality
+7. **Phase 7**: Documentation (10 hours) - ⭐ User guide
+
+**Total Effort:** ~98 hours (~12 working days)
+
+**Success Metrics:**
+- LLM error rate: <5% contract violations
+- Effect violations: 0% in production
+- Context size: 90% reduction
+- Property tests: 80%+ edge case coverage
+- Developer satisfaction: 90%+ positive
+
+#### Why This Matters
+
+LLMs are powerful but prone to specific failure modes:
+- **Hallucinating conversions** (contracts + no implicit conversions prevent this)
+- **Forgetting nil checks** (non-null by default prevents this)  
+- **Adding forbidden I/O** (capability system prevents this)
+- **Missing edge cases** (property-based testing catches this)
+- **Silent regressions** (golden tests catch this)
+
+Simple's LLM-friendly features address each failure mode systematically, making it the safest language for AI-assisted development.
