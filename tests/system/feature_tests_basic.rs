@@ -635,11 +635,11 @@ class Resource:
         pass
 
 r = Resource(5)
-result = 0
+res = 0
 with r as v:
-    result = v
+    res = v
 
-main = result
+main = res
 "#,
         )
         .expect("context manager");

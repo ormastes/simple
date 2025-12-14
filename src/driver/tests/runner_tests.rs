@@ -283,15 +283,15 @@ fn runner_handles_pattern_matching() {
     run_expect(
         r#"
 let x = 2
-let mut result = 0
+let mut res = 0
 match x:
     1 =>
-        result = 10
+        res = 10
     2 =>
-        result = 20
+        res = 20
     _ =>
-        result = 0
-main = result
+        res = 0
+main = res
 "#,
         20,
     );
@@ -300,15 +300,15 @@ main = result
     run_expect(
         r#"
 let x = 99
-let mut result = 0
+let mut res = 0
 match x:
     1 =>
-        result = 10
+        res = 10
     2 =>
-        result = 20
+        res = 20
     _ =>
-        result = 0
-main = result
+        res = 0
+main = res
 "#,
         0,
     );
@@ -317,11 +317,11 @@ main = result
     run_expect(
         r#"
 let x = 42
-let mut result = 0
+let mut res = 0
 match x:
     n =>
-        result = n
-main = result
+        res = n
+main = res
 "#,
         42,
     );
@@ -349,13 +349,13 @@ enum Status:
     Error
 
 let s = Status::Ok
-let mut result = 0
+let mut res = 0
 match s:
     Status::Ok =>
-        result = 1
+        res = 1
     Status::Error =>
-        result = 0
-main = result
+        res = 0
+main = res
 "#,
         1,
     );
@@ -368,13 +368,13 @@ enum Status:
     Error
 
 let s = Status::Error
-let mut result = 0
+let mut res = 0
 match s:
     Status::Ok =>
-        result = 1
+        res = 1
     Status::Error =>
-        result = 0
-main = result
+        res = 0
+main = res
 "#,
         0,
     );
@@ -383,15 +383,15 @@ main = result
     run_expect(
         r#"
 let x = 10
-let mut result = 0
+let mut res = 0
 match x:
     n if n > 5 =>
-        result = 1
+        res = 1
     n if n <= 5 =>
-        result = 0
+        res = 0
     _ =>
-        result = 99
-main = result
+        res = 99
+main = res
 "#,
         1,
     );
@@ -610,13 +610,13 @@ enum Option:
     None
 
 let x = Option::Some(42)
-let mut result = 0
+let mut res = 0
 match x:
     Option::Some(v) =>
-        result = v
+        res = v
     Option::None =>
-        result = 0
-main = result
+        res = 0
+main = res
 "#,
         42,
     );
@@ -629,13 +629,13 @@ enum Option:
     None
 
 let x = Option::None
-let mut result = 0
+let mut res = 0
 match x:
     Option::Some(v) =>
-        result = v
+        res = v
     Option::None =>
-        result = 99
-main = result
+        res = 99
+main = res
 "#,
         99,
     );

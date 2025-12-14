@@ -133,10 +133,10 @@ class Calculator:
         return x * 2
 
 let calc = Calculator {}
-let mut result = 0
+let mut res = 0
 context calc:
-    result = double(21)
-main = result
+    res = double(21)
+main = res
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
@@ -153,10 +153,10 @@ class Adder:
         return self.base + x
 
 let a = Adder { base: 30 }
-let mut result = 0
+let mut res = 0
 context a:
-    result = add(12)
-main = result
+    res = add(12)
+main = res
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
@@ -211,10 +211,10 @@ class Counter:
         return 42
 
 let c = Counter { count: 0 }
-let mut result = 0
+let mut res = 0
 context c:
-    result = something_undefined()
-main = result
+    res = something_undefined()
+main = res
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);

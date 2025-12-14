@@ -152,8 +152,8 @@ fn runner_future_basic() {
     run_expect(
         r#"
 let f = future(42)
-let result = await f
-main = result
+let res = await f
+main = res
 "#,
         42,
     );
@@ -168,8 +168,8 @@ fn compute():
     return 10 + 20 + 30
 
 let f = future(compute())
-let result = await f
-main = result
+let res = await f
+main = res
 "#,
         60,
     );
@@ -198,8 +198,8 @@ fn runner_await_non_future() {
     run_expect(
         r#"
 let x = 42
-let result = await x
-main = result
+let res = await x
+main = res
 "#,
         42,
     );
@@ -214,8 +214,8 @@ fn slow_add(a: i64, b: i64) -> i64:
     return a + b
 
 let f = future(slow_add(15, 27))
-let result = await f
-main = result
+let res = await f
+main = res
 "#,
         42,
     );
@@ -262,8 +262,8 @@ fn parity_future_basic() {
     run_expect(
         r#"
 let f = future(42)
-let result = await f
-main = result
+let res = await f
+main = res
 "#,
         42,
     );
@@ -278,8 +278,8 @@ fn slow_add(a: i64, b: i64) -> i64:
     return a + b
 
 let f = future(slow_add(15, 27))
-let result = await f
-main = result
+let res = await f
+main = res
 "#,
         42,
     );
@@ -334,8 +334,8 @@ fn parity_future_with_capture() {
         r#"
 let base = 40
 let f = future(base + 2)
-let result = await f
-main = result
+let res = await f
+main = res
 "#,
         42,
     );
@@ -350,8 +350,8 @@ let a = 10
 let b = 20
 let c = 12
 let f = future(a + b + c)
-let result = await f
-main = result
+let res = await f
+main = res
 "#,
         42,
     );

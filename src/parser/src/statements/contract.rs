@@ -15,13 +15,13 @@ impl Parser<'_> {
     /// Parse a contract block (requires/ensures) for a function.
     ///
     /// Syntax:
-    /// ```
+    /// ```text
     /// requires:
     ///     condition1
     ///     condition2
     /// ensures:
-    ///     result > 0
-    ///     result * b == a
+    ///     res > 0
+    ///     res * b == a
     /// ```
     pub(crate) fn parse_contract_block(&mut self) -> Result<Option<ContractBlock>, ParseError> {
         let mut requires = Vec::new();
@@ -72,9 +72,9 @@ impl Parser<'_> {
     /// Parse a single contract clause (one condition).
     ///
     /// Syntax:
-    /// ```
+    /// ```text
     /// b != 0
-    /// result > 0
+    /// res > 0
     /// balance >= 0
     /// ```
     fn parse_contract_clause(&mut self) -> Result<ContractClause, ParseError> {
@@ -99,7 +99,7 @@ impl Parser<'_> {
     /// Parse an invariant block for a class.
     ///
     /// Syntax:
-    /// ```
+    /// ```text
     /// invariant:
     ///     balance >= 0
     ///     count >= 0
