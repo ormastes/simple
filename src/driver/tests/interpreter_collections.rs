@@ -571,8 +571,8 @@ fn interpreter_with_as_binding() {
     // With statement binds resource to name
     let code = r#"
 with 42 as x:
-    result = x + 1
-main = result
+    value = x + 1
+main = value
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 43);
@@ -594,9 +594,9 @@ class Resource:
 
 r = Resource { value: 5 }
 with r as v:
-    result = v
+    ret_value = v
 
-main = result
+main = ret_value
 "#;
     let result = run_code(code, &[], "").unwrap();
     // __enter__ returns self.value + 10 = 5 + 10 = 15

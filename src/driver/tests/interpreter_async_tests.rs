@@ -76,8 +76,8 @@ fn interpreter_future_basic() {
     // Create a future and await it
     let code = r#"
 let f = future(42)
-let result = await f
-main = result
+let value = await f
+main = value
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
@@ -91,8 +91,8 @@ fn compute():
     return 10 + 20 + 30
 
 let f = future(compute())
-let result = await f
-main = result
+let value = await f
+main = value
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 60);
@@ -119,8 +119,8 @@ fn interpreter_await_non_future() {
     // Await on a non-future value should just return it
     let code = r#"
 let x = 42
-let result = await x
-main = result
+let value = await x
+main = value
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
@@ -134,8 +134,8 @@ fn slow_add(a, b):
     return a + b
 
 let f = future(slow_add(15, 27))
-let result = await f
-main = result
+let value = await f
+main = value
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);

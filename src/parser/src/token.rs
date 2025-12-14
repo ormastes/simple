@@ -126,6 +126,7 @@ pub enum TokenKind {
     Ensures,   // ensures: (postcondition)
     Invariant, // invariant: (class invariant)
     Old,       // old() (previous value in ensures)
+    Result,    // result (return value in ensures)
 
     // Operators
     Plus,        // +

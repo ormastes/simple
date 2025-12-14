@@ -792,6 +792,13 @@ pub(crate) fn evaluate_expr(
                 )),
             }
         }
+        // Contract expressions - not supported in interpreter yet
+        Expr::ContractResult => Err(CompileError::Semantic(
+            "contract 'result' keyword can only be used in contract blocks".into(),
+        )),
+        Expr::ContractOld(_) => Err(CompileError::Semantic(
+            "contract old() expression can only be used in ensures blocks".into(),
+        )),
         #[allow(unreachable_patterns)]
         _ => Err(CompileError::Semantic(format!(
             "unsupported expression type: {:?}",
