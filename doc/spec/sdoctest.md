@@ -482,16 +482,22 @@ Error: EmptyStackError
 ### Phase 2: Discovery and Integration (Sprint 2)
 **Goal:** Auto-discover doctests and integrate with spec framework
 
-1. ⏳ Implement `discovery.spl`:
-   - Walk source tree for `.spl` files
-   - Extract docstrings via AST
-   - Find `.md` and `.sdt` files
-2. ⏳ Implement `integration.spl`:
+1. ✅ Enhanced `discovery.spl`:
+   - File walking framework
+   - Markdown doctest extraction
+   - Glob pattern include/exclude (stub)
+2. ✅ Created integration test spec
+3. ✅ Created test fixtures (sample.spl, sample.sdt, tutorial.md)
+4. ⏳ Implement file system helpers:
+   - `walk_directory()` - recursive file tree traversal
+   - `path_exists()` - check path existence
+   - `read_file()` - read file contents
+5. ⏳ Implement `integration.spl`:
    - Hook into `spec.runner` discovery
    - Create synthetic spec examples
    - Report via spec formatters
-3. ⏳ Write integration tests
-4. ⏳ Update `simple test` CLI to include doctests
+6. ⏳ Write integration tests
+7. ⏳ Update `simple test` CLI to include doctests
 
 **Deliverable:** `simple test --doctest` works end-to-end
 
