@@ -66,7 +66,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let (fields, methods) = self.parse_indented_fields_and_methods()?;
+        let (fields, methods, invariant) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Class(ClassDef {
             span: self.make_span(start_span),
@@ -78,7 +78,7 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Private,
             attributes,
             doc_comment: None,
-            invariant: None, // TODO: Parse invariant block
+            invariant,
         }))
     }
 
@@ -197,7 +197,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Actor)?;
         let name = self.expect_identifier()?;
 
-        let (fields, methods) = self.parse_indented_fields_and_methods()?;
+        let (fields, methods, _invariant) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Actor(ActorDef {
             span: self.make_span(start_span),
@@ -265,7 +265,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Skip newlines until we hit a non-newline token
-    fn skip_newlines(&mut self) {
+    pub(crate) fn skip_newlines(&mut self) {
         while self.check(&TokenKind::Newline) {
             self.advance();
         }
@@ -330,10 +330,11 @@ impl<'a> Parser<'a> {
     /// Parse fields and methods in an indented block (class, actor)
     fn parse_indented_fields_and_methods(
         &mut self,
-    ) -> Result<(Vec<Field>, Vec<FunctionDef>), ParseError> {
+    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>), ParseError> {
         self.expect_block_start()?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
+        let mut invariant = None;
 
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
             self.skip_newlines();
@@ -341,7 +342,16 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            if self.check(&TokenKind::Fn) || self.check(&TokenKind::Pub) {
+            if self.check(&TokenKind::Invariant) {
+                // Parse invariant block (only one allowed)
+                if invariant.is_some() {
+                    return Err(ParseError::syntax_error_with_span(
+                        "Multiple invariant blocks not allowed",
+                        self.current.span,
+                    ));
+                }
+                invariant = self.parse_invariant_block()?;
+            } else if self.check(&TokenKind::Fn) || self.check(&TokenKind::Pub) {
                 let item = self.parse_item()?;
                 if let Node::Function(f) = item {
                     methods.push(f);
@@ -351,6 +361,6 @@ impl<'a> Parser<'a> {
             }
         }
         self.consume_dedent();
-        Ok((fields, methods))
+        Ok((fields, methods, invariant))
     }
 }

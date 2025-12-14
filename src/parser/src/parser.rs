@@ -323,6 +323,16 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Skip newlines before checking for contract blocks
+        self.skip_newlines();
+
+        // Parse optional contract block (requires/ensures)
+        let contract = if self.check(&TokenKind::Requires) || self.check(&TokenKind::Ensures) {
+            self.parse_contract_block()?
+        } else {
+            None
+        };
+
         self.expect(&TokenKind::Colon)?;
         let body = self.parse_block()?;
 
@@ -343,7 +353,7 @@ impl<'a> Parser<'a> {
             decorators,
             attributes,
             doc_comment: None,
-            contract: None, // TODO: Parse contract blocks
+            contract,
         }))
     }
 

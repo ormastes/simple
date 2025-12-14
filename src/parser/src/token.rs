@@ -120,7 +120,7 @@ pub enum TokenKind {
     Vec,    // vec (for SIMD vector types)
     Shared, // shared (for GPU shared memory)
     Gpu,    // gpu (for GPU intrinsics namespace)
-    
+
     // Contract keywords (LLM-friendly features)
     Requires,  // requires: (precondition)
     Ensures,   // ensures: (postcondition)
