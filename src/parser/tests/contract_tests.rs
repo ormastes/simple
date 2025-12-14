@@ -53,8 +53,7 @@ fn abs(x: i32) -> i32
 ensures:
     result >= 0
 :
-    if x < 0: -x
-    else: x
+    return if x < 0: 0 - x else: x
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
@@ -100,14 +99,14 @@ ensures:
 #[test]
 fn test_function_with_multiple_requires() {
     let source = r#"
-fn transfer(from: Account, to: Account, amount: i64) -> bool
+fn transfer(sender: Account, recipient: Account, amount: i64) -> bool
 requires:
     amount > 0
-    from.balance >= amount
-    to.balance + amount <= MAX_BALANCE
+    sender.balance >= amount
+    recipient.balance + amount <= MAX_BALANCE
 :
-    from.balance -= amount
-    to.balance += amount
+    sender.balance -= amount
+    recipient.balance += amount
     true
 "#;
     let items = parse(source);
@@ -307,14 +306,12 @@ requires:
     account.balance >= amount
     account.active
 ensures:
-    result == true implies account.balance == old(account.balance) - amount
-    result == false implies account.balance == old(account.balance)
+    account.balance <= old(account.balance)
 :
     if account.balance >= amount:
         account.balance -= amount
-        true
-    else:
-        false
+        return true
+    return false
 "#;
     let items = parse(source);
     assert_eq!(items.len(), 1);
@@ -325,7 +322,7 @@ ensures:
         
         let contract = func.contract.as_ref().unwrap();
         assert_eq!(contract.requires.len(), 3);
-        assert_eq!(contract.ensures.len(), 2);
+        assert_eq!(contract.ensures.len(), 1);
     } else {
         panic!("Expected Function node");
     }

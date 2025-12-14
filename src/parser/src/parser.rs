@@ -333,6 +333,9 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Skip newlines after contract block before expecting colon
+        self.skip_newlines();
+
         self.expect(&TokenKind::Colon)?;
         let body = self.parse_block()?;
 

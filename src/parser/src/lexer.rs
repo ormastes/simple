@@ -1312,6 +1312,7 @@ impl<'a> Lexer<'a> {
             "ensures" => TokenKind::Ensures,
             "invariant" => TokenKind::Invariant,
             "old" => TokenKind::Old,
+            "result" => TokenKind::Result,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
         }

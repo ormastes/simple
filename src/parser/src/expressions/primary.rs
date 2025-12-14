@@ -85,6 +85,18 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Symbol(s))
             }
+            // Contract special expressions
+            TokenKind::Old => {
+                self.advance();
+                self.expect(&TokenKind::LParen)?;
+                let expr = self.parse_expression()?;
+                self.expect(&TokenKind::RParen)?;
+                Ok(Expr::ContractOld(Box::new(expr)))
+            }
+            TokenKind::Result => {
+                self.advance();
+                Ok(Expr::ContractResult)
+            }
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
