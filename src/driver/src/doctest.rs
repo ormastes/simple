@@ -140,7 +140,7 @@ pub fn parse_doctest_text(content: &str, source: impl AsRef<Path>) -> Vec<Doctes
         if let Some(rest) = line.strip_prefix("...") {
             if let Some(last) = commands.last_mut() {
                 last.push('\n');
-                last.push_str(rest.trim_start());
+                last.push_str(rest);
             }
             continue;
         }
