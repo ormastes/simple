@@ -252,8 +252,8 @@ mod tests {
 
     #[test]
     fn test_path_contains() {
-        let path = string_to_runtime_value("lib/std/collections.spl");
-        let pattern = string_to_runtime_value("/std/");
+        let path = string_to_runtime_value("std_lib/src/collections.spl");
+        let pattern = string_to_runtime_value("/src/");
         let result = doctest_path_contains(path, pattern);
         assert!(result.as_bool());
     }

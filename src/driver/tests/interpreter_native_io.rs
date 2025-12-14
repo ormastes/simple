@@ -1,8 +1,8 @@
 //! Interpreter tests - native I/O operations
 //!
 //! Tests for the native filesystem and terminal operations implemented in
-//! interpreter_native_io.rs, corresponding to lib/std/host/async_nogc/io/fs.spl
-//! and lib/std/host/async_nogc/io/term.spl
+//! interpreter_native_io.rs, corresponding to std_lib/src/host/async_nogc/io/fs.spl
+//! and std_lib/src/host/async_nogc/io/term.spl
 
 use simple_driver::interpreter::run_code;
 use std::fs;
