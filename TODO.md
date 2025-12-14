@@ -1,7 +1,29 @@
-# Tedo 
+# TODO
+
+## In Progress
+
+### JJ Version Control Integration
+**Status:** Phase 2 Complete (see `doc/jj_integration_plan.md`)
+**Goal:** Auto-snapshot successful builds and test runs to JJ
+**Timeline:** ~7.5 hours (6 phases)
+
+**Phases:**
+1. ✅ Setup (15 min) - JJ repo initialized, .jjignore created
+2. ✅ Core (2 hours) - JjStateManager with 15 unit tests (all passing)
+3. ⏳ Build Integration (1.5 hours) - 8+ integration tests
+4. ⏳ Test Integration (1.5 hours) - 10+ integration tests
+5. ⏳ CLI Commands (1 hour) - 6+ system tests
+6. ⏳ Documentation (1 hour)
+7. 🔒 Test State Storage (DEFERRED - pending test framework)
+
+**Current:** Phase 3 (Build Integration)
+**Completed:** JJ repo initialized, core state manager with 15/15 tests passing
+
+---
+
+## Pending
 
 ### ruby bdd style framework
-### add jj version control connection. whenever watch build success whole build store to jj
 ### pydoctest like tests. 
 however, pydoctest is same as interpreter copy. so, simple interpreter prompt and response should be like python.
 so, by just copying simplem interpreter interaction to be a test script.
