@@ -3,21 +3,27 @@
 ## In Progress
 
 ### JJ Version Control Integration
-**Status:** Phase 2 Complete (see `doc/jj_integration_plan.md`)
+**Status:** Core Implementation Complete
 **Goal:** Auto-snapshot successful builds and test runs to JJ
-**Timeline:** ~7.5 hours (6 phases)
+**Implementation:** `src/driver/src/jj_state.rs`
 
-**Phases:**
-1. ✅ Setup (15 min) - JJ repo initialized, .jjignore created
-2. ✅ Core (2 hours) - JjStateManager with 15 unit tests (all passing)
-3. ⏳ Build Integration (1.5 hours) - 8+ integration tests
-4. ⏳ Test Integration (1.5 hours) - 10+ integration tests
-5. ⏳ CLI Commands (1 hour) - 6+ system tests
-6. ⏳ Documentation (1 hour)
-7. 🔒 Test State Storage (DEFERRED - pending test framework)
+**Completed:**
+1. ✅ JjStateManager - Core state management with JJ CLI integration
+2. ✅ BuildMetadata - Track build success, duration, artifacts, mode
+3. ✅ TestMetadata - Track test results, duration, pass/fail/ignored counts
+4. ✅ Automatic snapshot creation on build/test success
+5. ✅ Last working state retrieval
+6. ✅ Unit tests for display methods (2 tests passing)
+7. ✅ Integration tests - 15/15 tests passing (`tests/jj_state_tests.rs`)
+   - Build snapshots (8 tests)
+   - Test snapshots (4 tests)
+   - Edge cases and idempotency (3 tests)
 
-**Current:** Phase 3 (Build Integration)
-**Completed:** JJ repo initialized, core state manager with 15/15 tests passing
+**Remaining:**
+1. ⏳ CLI integration (`--snapshot` flag for build/test commands)
+2. ⏳ System tests for end-to-end snapshot workflow
+3. ⏳ Documentation (usage guide, examples)
+4. 🔒 Test State Storage (DEFERRED - pending test framework setup)
 
 ---
 
