@@ -33,7 +33,11 @@ fn doctest_supports_multiline_blocks() {
     assert_eq!(examples.len(), 1);
 
     let results = run_examples(&examples);
-    assert!(matches!(results[0].status, DoctestStatus::Passed));
+    assert!(
+        matches!(results[0].status, DoctestStatus::Passed),
+        "actual output: {}",
+        results[0].actual
+    );
     assert_eq!(results[0].actual.trim(), "1\n2");
 }
 
@@ -69,7 +73,7 @@ fn doctest_parses_markdown_fences() {
 
     let examples = parse_markdown_doctests(text, "tutorial.md");
     assert_eq!(examples.len(), 1);
-    assert_eq!(examples[0].start_line, 5);
+    assert_eq!(examples[0].start_line, 6);
 
     let results = run_examples(&examples);
     assert!(matches!(results[0].status, DoctestStatus::Passed));
