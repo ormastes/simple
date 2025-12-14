@@ -35,19 +35,60 @@
 
 ---
 
+## In Progress
+
+### BDD Spec Framework (RSpec-style for Simple)
+**Status:** Sprint 1 - Core DSL & Registry (Phase 1-2)
+**Goal:** Ruby/RSpec-style BDD test framework written in Simple
+**Spec:** `doc/bdd_spec.md`
+
+**Completed:**
+1. ✅ Directory structure (`lib/std/spec/`)
+2. ✅ Core DSL (`dsl.spl`) - describe, context, it, let, hooks
+3. ✅ Registry (`registry.spl`) - ExampleGroup, Example, Hook storage
+4. ✅ Runtime (`runtime.spl`) - Configuration and state management
+5. ✅ Expectations (`expect.spl`) - expect/to/not_to, expect_raises
+6. ✅ Matcher Protocol (`matchers.spl`) - Base Matcher trait
+7. ✅ Core Matchers (`matchers/core.spl`) - eq, be, be_nil
+8. ✅ Comparison Matchers (`matchers/comparison.spl`) - gt, lt, gte, lte
+9. ✅ Collection Matchers (`matchers/collection.spl`) - include, be_empty
+10. ✅ Error Matchers (`matchers/error.spl`) - raise_error
+
+**Next Steps (Sprint 1 Remaining):**
+1. ⏳ Write unit tests for DSL and matchers
+2. ⏳ Test registry functionality
+
+**Sprint 2 (Planned):**
+- Runner implementation (`runner/cli.spl`, `runner/executor.spl`)
+- Formatters (progress, doc, json)
+- Integration tests
+
+**Sprint 3 (Planned):**
+- Coverage infrastructure in compiler
+- symbols.json emission
+- Public API coverage calculation
+
+**Sprint 4 (Planned):**
+- Test environment setup (`test/` folder structure)
+- Migration guide
+- Documentation
+
+---
+
 ## Pending
 
-### ruby bdd style framework
-### pydoctest like tests. 
-however, pydoctest is same as interpreter copy. so, simple interpreter prompt and response should be like python.
-so, by just copying simplem interpreter interaction to be a test script.
-### llm friendly 
-#### show only limited interface to minimize context size
-#### infra about system test public class/struct touch coverage
-#### system test mock usage limit or prevent.
-#### infra about integration test public function touch coverage
-#### config can point docs instruction
-#### has task which run script for project like coverage report, doc gen, lint .....
+### Pydoctest-like Interactive Tests
+- Interactive REPL session recording
+- Copy-paste Simple interpreter interactions as tests
+- Python-style prompt/response format
+
+### LLM-Friendly Test Infrastructure
+- Minimal context interface
+- System test public class/struct touch coverage
+- System test mock usage limits
+- Integration test public function touch coverage
+- Config-driven docs instructions
+- Task runner for coverage, docs, lint
 ### update lanagauage spec << convension over config
 ### gui support
 #### ruby rails spring like framework
