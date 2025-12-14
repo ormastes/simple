@@ -846,7 +846,7 @@ pub enum Expr {
     },
     /// Try operator: expr? - unwrap Ok or early return Err
     Try(Box<Expr>),
-    
+
     // Contract-specific expressions (LLM-friendly feature #400)
     /// Result identifier in ensures block - refers to return value
     ContractResult,

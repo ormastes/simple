@@ -6,7 +6,6 @@
 /// - invariant: blocks (class invariants)
 /// - old(expr) expressions
 /// - result identifiers
-
 use crate::ast::{ContractBlock, ContractClause, Expr, InvariantBlock};
 use crate::error::ParseError;
 use crate::parser::Parser;
@@ -32,12 +31,14 @@ impl Parser<'_> {
         if self.check(&TokenKind::Requires) {
             self.advance();
             self.expect(&TokenKind::Colon)?;
+            self.expect(&TokenKind::Newline)?;
             self.expect(&TokenKind::Indent)?;
 
             // Parse all requires clauses
             while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                 let clause = self.parse_contract_clause()?;
                 requires.push(clause);
+                self.skip_newlines();
             }
 
             self.expect(&TokenKind::Dedent)?;
@@ -47,12 +48,14 @@ impl Parser<'_> {
         if self.check(&TokenKind::Ensures) {
             self.advance();
             self.expect(&TokenKind::Colon)?;
+            self.expect(&TokenKind::Newline)?;
             self.expect(&TokenKind::Indent)?;
 
             // Parse all ensures clauses
             while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                 let clause = self.parse_contract_clause()?;
                 ensures.push(clause);
+                self.skip_newlines();
             }
 
             self.expect(&TokenKind::Dedent)?;
@@ -109,6 +112,7 @@ impl Parser<'_> {
         let start_span = self.current.span;
         self.advance();
         self.expect(&TokenKind::Colon)?;
+        self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
 
         let mut conditions = Vec::new();
@@ -117,6 +121,7 @@ impl Parser<'_> {
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
             let clause = self.parse_contract_clause()?;
             conditions.push(clause);
+            self.skip_newlines();
         }
 
         self.expect(&TokenKind::Dedent)?;
