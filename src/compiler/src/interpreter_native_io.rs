@@ -1,8 +1,8 @@
 // Native I/O implementations for the interpreter
 //
 // This module provides implementations for extern functions declared in:
-// - std_lib/src/host/async_nogc/io/fs.spl (filesystem operations)
-// - std_lib/src/host/async_nogc/io/term.spl (terminal I/O)
+// - simple/std_lib/src/host/async_nogc/io/fs.spl (filesystem operations)
+// - simple/std_lib/src/host/async_nogc/io/term.spl (terminal I/O)
 //
 // Note: This file is include!'d into interpreter.rs, so it inherits imports from there.
 

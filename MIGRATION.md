@@ -2,33 +2,50 @@
 
 ## Overview
 
-This document describes the repository restructuring completed to separate Simple language files from the Rust compiler implementation.
+This document describes the repository restructuring to create a dedicated `simple/` workspace for Simple language development.
 
 ## Changes
 
 ### New Directory Structure
 
-| Old Path | New Path | Purpose |
-|----------|----------|---------|
-| `lib/std/` | `std_lib/src/` | Simple language standard library |
-| `test/` | `std_lib/test/` | Simple language tests |
-| N/A | `bin/` | Binary tools (gitignored) |
-| `doc/` | `simple_doc/` (symlink) | Documentation (symlink for convenience) |
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Rust compiler | Root directory | Compiler implementation in Rust |
+| Simple workspace | `simple/` | Simple language development |
+| Binaries | `simple/bin/` → `target/debug/` | Symlink to compiled executables |
+| Documentation | `simple/doc/` → `doc/` | Symlink for convenience |
+| Standard library | `simple/std_lib/src/` | Simple stdlib (.spl files) |
+| Tests | `simple/std_lib/test/` | Simple language tests |
+
+### Structure Overview
+
+```
+simple/                          # Project root (Rust compiler)
+├── src/                         # Rust compiler source
+├── doc/                         # Documentation
+├── lib/                         # Legacy stdlib (to be removed)
+└── simple/                      # Simple language workspace
+    ├── bin/ -> ../target/debug/ # Compiled binaries (symlink)
+    ├── doc/ -> ../doc/          # Documentation (symlink)
+    └── std_lib/                 # Simple stdlib
+        ├── src/                 # .spl library files
+        └── test/                # .spl test files
+```
 
 ### Files Migrated
 
 **Standard Library:**
-- All `.spl` files from `lib/std/` → `std_lib/src/`
+- All `.spl` files from `lib/std/` → `simple/std_lib/src/`
 - Preserves all subdirectories: `core/`, `host/`, `gpu/`, etc.
 
 **Tests:**
-- All test files from `test/` → `std_lib/test/`
+- All test files from `test/` → `simple/std_lib/test/`
 - Includes: `unit/`, `integration/`, `fixtures/`
 
 ### Code Updates
 
 **Rust Code:**
-- Updated references in 5 files:
+- Updated references in 5 files to use `simple/std_lib/src/` paths:
   - `src/loader/src/package/format.rs` - Documentation example
   - `src/runtime/src/value/doctest_io.rs` - Test path
   - `src/compiler/src/interpreter_extern.rs` - Documentation comments (2 locations)
@@ -37,11 +54,11 @@ This document describes the repository restructuring completed to separate Simpl
 
 **Documentation:**
 - Updated `CLAUDE.md` with new structure
-- Created `std_lib/README.md`
-- Created `bin/README.md`
+- Created `simple/std_lib/README.md`
+- Updated `MIGRATION.md` (this file)
 
 **Build Files:**
-- Updated `.gitignore` to exclude `bin/`
+- Removed `/bin/` from `.gitignore` (now a symlink, should be tracked)
 
 ## For Developers
 
@@ -50,23 +67,25 @@ This document describes the repository restructuring completed to separate Simpl
 **Standard Library Development:**
 ```bash
 # Edit stdlib files
-vim std_lib/src/core/array.spl
+vim simple/std_lib/src/core/array.spl
 
-# Run stdlib tests
-simple test std_lib/test/
+# Run stdlib tests  
+simple test simple/std_lib/test/
+
+# Access compiled binary
+simple/bin/simple --version
 ```
 
 **Binary Tools:**
 ```bash
-# Place compiled tools here (not tracked by git)
-simple build my_tool.spl -o bin/my_tool
-./bin/my_tool
+# Binaries are in target/debug, accessible via symlink
+simple/bin/simple run myfile.spl
 ```
 
 **Documentation:**
 ```bash
 # Access via symlink
-ls simple_doc/
+ls simple/doc/
 
 # Or use original path
 ls doc/
@@ -90,7 +109,7 @@ If you have local branches or work in progress:
    grep -r "lib/std" .
    
    # Replace with new paths
-   sed -i 's|lib/std|std_lib/src|g' your_file.rs
+   sed -i 's|lib/std|simple/std_lib/src|g' your_file.rs
    ```
 
 3. **Test your changes:**
@@ -102,19 +121,20 @@ If you have local branches or work in progress:
 
 This restructuring achieves several goals:
 
-1. **Clarity:** Separates Simple language code from Rust implementation
-2. **Discoverability:** Standard library is now at top-level `std_lib/`
-3. **Tooling:** Binary tools have dedicated ignored directory
-4. **Testing:** Test files co-located with library in `std_lib/test/`
-5. **Documentation:** Symlink provides convenience without duplication
+1. **Separation:** Clear boundary between Rust compiler (root) and Simple language (simple/)
+2. **Workspace:** Dedicated `simple/` directory for Simple language development
+3. **Convenience:** Symlinks provide easy access to binaries and docs
+4. **Organization:** Standard library and tests co-located in `simple/std_lib/`
+5. **Clarity:** Root directory focuses on compiler implementation
 
 ## Backward Compatibility
 
-The old `lib/` and `test/` directories remain in the repository for now to avoid breaking existing workflows. They will be removed in a future cleanup commit once all references are verified updated.
+The old `lib/` and `test/` directories remain for now to avoid breaking existing workflows. They will be removed in a future cleanup commit once all references are verified updated.
 
 ## Questions?
 
 See:
-- `std_lib/README.md` - Standard library documentation
+- `simple/std_lib/README.md` - Standard library documentation
 - `CLAUDE.md` - Updated development guide
 - `doc/architecture.md` - Design principles
+
