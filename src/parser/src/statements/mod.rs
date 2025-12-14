@@ -5,6 +5,9 @@
 //! - Control flow (if, for, while, loop, match)
 //! - Jump statements (return, break, continue)
 //! - Context and with statements
+//! - Contract blocks (requires/ensures/invariant) - LLM-friendly feature #400
+
+mod contract;
 
 use crate::ast::*;
 use crate::error::ParseError;
