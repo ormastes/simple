@@ -60,7 +60,6 @@ pub fn is_definition_like(line: &str) -> bool {
                 | "while"
                 | "if"
                 | "match"
-                | "print"
         ) {
             return true;
         }
@@ -264,8 +263,7 @@ fn run_example(example: &DoctestExample, state: &mut EvalState) -> DoctestResult
         match state.interpreter.run(&source, config.clone()) {
             Ok(result) => {
                 if is_def {
-                    state.prelude.push_str(command);
-                    state.prelude.push('\n');
+                    append_to_prelude(&mut state.prelude, command, true);
                 }
 
                 let stdout = result.stdout.trim_end();
@@ -299,7 +297,7 @@ fn run_example(example: &DoctestExample, state: &mut EvalState) -> DoctestResult
     }
 }
 
-fn build_source(prelude: &str, snippet: &str, is_def: bool) -> String {
+pub fn build_source(prelude: &str, snippet: &str, is_def: bool) -> String {
     let mut src = String::new();
     if !prelude.is_empty() {
         src.push_str(prelude);
@@ -311,13 +309,38 @@ fn build_source(prelude: &str, snippet: &str, is_def: bool) -> String {
     if is_def {
         src.push_str(snippet);
         src.push('\n');
+        if snippet.trim_end().ends_with(':') {
+            src.push_str("    0\n");
+        }
         src.push_str("main = 0\n");
     } else {
-        src.push_str("main = ");
-        src.push_str(snippet);
-        src.push('\n');
+        let trimmed = snippet.trim_start();
+        if trimmed.starts_with("print ") {
+            src.push_str(snippet);
+            src.push('\n');
+            src.push_str("print \"\\n\"\n");
+            src.push_str("main = 0\n");
+        } else {
+            src.push_str("let __repl_val = ");
+            src.push_str(snippet);
+            src.push('\n');
+            src.push_str("print __repl_val\n");
+            src.push_str("print \"\\n\"\n");
+            src.push_str("main = 0\n");
+        }
     }
     src
+}
+
+pub fn append_to_prelude(prelude: &mut String, snippet: &str, is_def: bool) {
+    if !is_def {
+        return;
+    }
+    prelude.push_str(snippet);
+    prelude.push('\n');
+    if snippet.trim_end().ends_with(':') {
+        prelude.push_str("    0\n");
+    }
 }
 
 fn match_matches(actual: &str, expected: &Expected) -> Result<(), String> {

@@ -134,6 +134,12 @@ fn interpreter_basic_sample_check_transcript() {
     run_repl_script(script).expect("repl transcript should pass");
 }
 
+#[test]
+fn interpreter_repl_regressions() {
+    let script = include_str!("repl_regressions.sdt");
+    run_repl_script(script).expect("repl regression transcript should pass");
+}
+
 // ============================================================================
 // Sample file tests - Syntax/Basics
 // ============================================================================
