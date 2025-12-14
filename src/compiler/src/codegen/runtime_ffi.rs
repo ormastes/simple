@@ -166,6 +166,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_eprintln_value", &[I64], &[]), // RuntimeValue
     RuntimeFuncSpec::new("rt_capture_stdout_start", &[], &[]),
     RuntimeFuncSpec::new("rt_capture_stderr_start", &[], &[]),
+    // =========================================================================
+    // Doctest I/O operations (file discovery)
+    // =========================================================================
+    RuntimeFuncSpec::new("doctest_read_file", &[I64], &[I64]), // path -> content (RuntimeValue)
+    RuntimeFuncSpec::new("doctest_path_exists", &[I64], &[I64]), // path -> bool (RuntimeValue)
+    RuntimeFuncSpec::new("doctest_is_file", &[I64], &[I64]),   // path -> bool (RuntimeValue)
+    RuntimeFuncSpec::new("doctest_is_dir", &[I64], &[I64]),    // path -> bool (RuntimeValue)
+    RuntimeFuncSpec::new("doctest_walk_directory", &[I64, I64, I64], &[I64]), // root, include, exclude -> array (RuntimeValue)
+    RuntimeFuncSpec::new("doctest_path_has_extension", &[I64, I64], &[I64]), // path, ext -> bool (RuntimeValue)
+    RuntimeFuncSpec::new("doctest_path_contains", &[I64, I64], &[I64]), // path, pattern -> bool (RuntimeValue)
 ];
 
 #[cfg(test)]
