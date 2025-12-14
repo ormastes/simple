@@ -418,9 +418,14 @@ fn exec_function_with_captured_env(
             local_env.insert(name, value);
         }
 
-        // Execute the function body
-        let result = exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods);
-        control_to_value(result)
+        // Execute the function body with implicit return support
+        let result = exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods);
+        match result {
+            Ok((Control::Return(v), _)) => Ok(v),
+            Ok((_, Some(v))) => Ok(v), // Implicit return from last expression
+            Ok((_, None)) => Ok(Value::Nil),
+            Err(e) => Err(e),
+        }
     })
 }
 
@@ -462,9 +467,10 @@ fn exec_function_inner(
     for (name, val) in bound {
         local_env.insert(name, val);
     }
-    match exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
-        Ok(Control::Return(v)) => Ok(v),
-        Ok(_) => Ok(Value::Nil),
+    match exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
+        Ok((Control::Return(v), _)) => Ok(v),
+        Ok((_, Some(v))) => Ok(v), // Implicit return from last expression
+        Ok((_, None)) => Ok(Value::Nil),
         // TryError from ? operator - propagate as return value
         Err(CompileError::TryError(val)) => Ok(val),
         Err(e) => Err(e),

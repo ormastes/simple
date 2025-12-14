@@ -137,9 +137,11 @@ pub fn parse_doctest_text(content: &str, source: impl AsRef<Path>) -> Vec<Doctes
         }
 
         if let Some(rest) = line.strip_prefix("...") {
+            // Format is "... " (prompt with space) + indented content, or just "..." + content
+            let content = rest.strip_prefix(' ').unwrap_or(rest);
             if let Some(last) = commands.last_mut() {
                 last.push('\n');
-                last.push_str(rest);
+                last.push_str(content);
             }
             continue;
         }
@@ -312,6 +314,12 @@ pub fn build_source(prelude: &str, snippet: &str, is_def: bool) -> String {
         if snippet.trim_end().ends_with(':') {
             src.push_str("    0\n");
         }
+        // Add trailing newline for control flow statements that may have print side effects
+        // (if, while, for, match blocks)
+        let first_word = snippet.trim_start().split_whitespace().next().unwrap_or("");
+        if matches!(first_word, "if" | "while" | "for" | "match") {
+            src.push_str("print \"\\n\"\n");
+        }
         src.push_str("main = 0\n");
     } else {
         let trimmed = snippet.trim_start();
@@ -321,10 +329,13 @@ pub fn build_source(prelude: &str, snippet: &str, is_def: bool) -> String {
             src.push_str("print \"\\n\"\n");
             src.push_str("main = 0\n");
         } else {
+            // Store result and only print value if not nil (like Python REPL)
+            // But always print newline to separate outputs
             src.push_str("let __repl_val = ");
             src.push_str(snippet);
             src.push('\n');
-            src.push_str("print __repl_val\n");
+            src.push_str("if __repl_val != nil:\n");
+            src.push_str("    print __repl_val\n");
             src.push_str("print \"\\n\"\n");
             src.push_str("main = 0\n");
         }
@@ -332,8 +343,49 @@ pub fn build_source(prelude: &str, snippet: &str, is_def: bool) -> String {
     src
 }
 
+/// Check if a snippet is a true definition that should be saved in prelude.
+/// Control flow statements (if, while, for, match) should NOT be added to prelude
+/// because they execute with side effects and shouldn't be re-run on each subsequent input.
+fn is_prelude_definition(snippet: &str) -> bool {
+    let trimmed = snippet.trim_start();
+
+    // Check keyword-based definitions
+    if let Some(first) = trimmed.split_whitespace().next() {
+        // Only add actual definitions, not control flow
+        if matches!(
+            first,
+            "let" | "mut" | "fn" | "struct" | "class" | "enum" | "trait" | "impl" | "use"
+                | "type" | "actor" | "import"
+        ) {
+            return true;
+        }
+    }
+
+    // Check for assignment (e.g., "a = 1") - need to save variable bindings
+    let mut chars = trimmed.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch != '=' {
+            continue;
+        }
+        let prev = trimmed[..idx].chars().rev().find(|c| !c.is_whitespace());
+        let next = chars.clone().map(|(_, c)| c).find(|c| !c.is_whitespace());
+
+        let is_comparison = matches!(prev, Some('=') | Some('!') | Some('<') | Some('>'))
+            || matches!(next, Some('='));
+        if !is_comparison {
+            return true;
+        }
+    }
+
+    false
+}
+
 pub fn append_to_prelude(prelude: &mut String, snippet: &str, is_def: bool) {
     if !is_def {
+        return;
+    }
+    // Only add true definitions to prelude, not control flow statements
+    if !is_prelude_definition(snippet) {
         return;
     }
     prelude.push_str(snippet);

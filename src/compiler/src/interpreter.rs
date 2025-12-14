@@ -833,6 +833,41 @@ pub(crate) fn exec_block(
     Ok(Control::Next)
 }
 
+/// Execute a block in a function context, supporting implicit return.
+/// If the last statement is an expression, its value is captured and returned.
+pub(crate) fn exec_block_fn(
+    block: &Block,
+    env: &mut Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Control, Option<Value>), CompileError> {
+    let len = block.statements.len();
+    let mut last_expr_value: Option<Value> = None;
+
+    for (i, stmt) in block.statements.iter().enumerate() {
+        // For the last statement, if it's an expression, capture its value
+        let is_last = i == len - 1;
+        if is_last {
+            if let Node::Expression(expr) = stmt {
+                // Evaluate and capture the value for implicit return
+                let val = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
+                last_expr_value = Some(val);
+                continue;
+            }
+        }
+
+        match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
+            Control::Next => {}
+            flow @ (Control::Return(_) | Control::Break(_) | Control::Continue) => {
+                return Ok((flow, None));
+            }
+        }
+    }
+    Ok((Control::Next, last_expr_value))
+}
+
 // Include control flow functions (if, while, loop, for, match, pattern_matches)
 include!("interpreter_control.rs");
 

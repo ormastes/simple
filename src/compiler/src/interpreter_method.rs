@@ -602,10 +602,11 @@ fn exec_function_with_self_return(
         local_env.insert(name, val);
     }
 
-    // Execute the function body
-    let result = match exec_block(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
-        Ok(Control::Return(v)) => v,
-        Ok(_) => Value::Nil,
+    // Execute the function body with implicit return support
+    let result = match exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
+        Ok((Control::Return(v), _)) => v,
+        Ok((_, Some(v))) => v, // Implicit return from last expression
+        Ok((_, None)) => Value::Nil,
         Err(CompileError::TryError(val)) => val,
         Err(e) => return Err(e),
     };

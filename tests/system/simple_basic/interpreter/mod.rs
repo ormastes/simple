@@ -9,19 +9,38 @@ fn simple_bin() -> PathBuf {
     }
 }
 
-/// Parse a Simple doctest-style transcript (>>> for input, following lines for expected output).
+/// Parse a Simple doctest-style transcript (>>> for input, ... for continuation, following lines for expected output).
 fn parse_sdoctest(script: &str) -> (Vec<String>, Vec<String>) {
     let mut commands = Vec::new();
     let mut expected = Vec::new();
+    let mut in_command = false;
 
     for line in script.lines() {
         let trimmed = line.trim_end();
         if trimmed.starts_with(">>>") {
+            // New command
             commands.push(trimmed.trim_start_matches(">>>").trim_start().to_string());
-        } else if trimmed.is_empty() || trimmed.starts_with('#') {
+            in_command = true;
+        } else if trimmed.starts_with("...") {
+            // Continuation line - strip "..." and indentation
+            // The sdoctest shows indentation for readability, but REPL auto-adds it
+            // So we strip both "..." and the following whitespace
+            if let Some(last) = commands.last_mut() {
+                last.push('\n');
+                let content = trimmed.strip_prefix("...").unwrap_or(trimmed).trim_start();
+                last.push_str(content);
+            }
+        } else if trimmed.is_empty() {
+            // Empty line ends multiline command in REPL
+            if in_command {
+                commands.push(String::new()); // Signal end of multiline block
+                in_command = false;
+            }
+        } else if trimmed.starts_with('#') {
             continue;
         } else {
             expected.push(trimmed.to_string());
+            in_command = false;
         }
     }
 
