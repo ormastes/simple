@@ -1703,6 +1703,7 @@ mod tests {
             decorators: vec![],
             attributes: vec![],
             doc_comment: None,
+            contract: None,
         };
 
         let mangled = table.request_function("identity", vec![ConcreteType::Int], &func);

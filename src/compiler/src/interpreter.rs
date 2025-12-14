@@ -379,6 +379,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                         visibility: s.visibility,
                         attributes: Vec::new(),
                         doc_comment: None,
+                        invariant: None,
                     },
                 );
             }
@@ -430,6 +431,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                         visibility: a.visibility,
                         attributes: vec![],
                         doc_comment: None,
+                        invariant: None,
                     },
                 );
                 env.insert(

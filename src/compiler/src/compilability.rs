@@ -495,6 +495,15 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             }
             add_reason(reasons, FallbackReason::MethodCall);
         }
+
+        // Contract expressions - not yet implemented
+        Expr::ContractResult => {
+            add_reason(reasons, FallbackReason::NotYetImplemented("contract result".into()));
+        }
+        Expr::ContractOld(inner) => {
+            analyze_expr(inner, reasons);
+            add_reason(reasons, FallbackReason::NotYetImplemented("contract old()".into()));
+        }
     }
 }
 
