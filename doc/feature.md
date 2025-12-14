@@ -16,8 +16,8 @@
 | 10 | **Classes** (reference types, methods) | 4 | 4 | Parser, Type System, Memory, GC, Codegen |
 | 11 | **Enums** (algebraic data types, variants) | 5 | 3 | Parser, Type System, Pattern Matching, Codegen |
 | 12 | **Pattern Matching** (match/case, destructuring) | 5 | 4 | Parser, Type System, Exhaustiveness Check, Codegen |
-| 13 | **Type Inference** | 4 | 5 | Type System (Hindley-Milner or similar) |
-| 14 | **Generics/Type Parameters** | 4 | 5 | Parser, Type System, Monomorphization/Codegen |
+| 13 | **Type Inference** | 4 | 4 | Type System (Hindley-Milner or similar) | **PARTIAL (HM scaffold; expr inference working)** |
+| 14 | **Generics/Type Parameters** | 4 | 4 | Parser, Type System, Monomorphization/Codegen | **COMPLETE (basic)** |
 | 15 | **Traits** (interfaces, polymorphism) | 4 | 4 | Parser, Type System, Vtables/Codegen |
 | 16 | **Impl Blocks** | 4 | 3 | Parser, Type System, Method Resolution |
 | 17 | **Lambdas/Closures** (\x: expr syntax) | 4 | 4 | Parser, Type System, Closure Capture, Codegen |
@@ -27,17 +27,17 @@
 | 21 | **String Interpolation** ({expr} in strings) | 3 | 3 | Lexer, Parser, Codegen |
 | 22 | **Comments** (# line comments) | 5 | 1 | Lexer |
 | 23 | **Line Continuation** (\ at end of line) | 2 | 2 | Lexer |
-| 24 | **GC-Managed Memory** (default T) | 5 | 5 | Runtime, GC Implementation, Codegen |
+| 24 | **GC-Managed Memory** (default T) | 5 | 5 | Runtime, GC Implementation, Codegen | **COMPLETE** |
 | 25 | **Unique Pointers** (&T, RAII) | 4 | 4 | Type System, Borrow Checking, Codegen |
 | 26 | **Shared Pointers** (*T, refcounting) | 4 | 4 | Runtime, Type System, Codegen |
 | 27 | **Weak Pointers** (-T) | 3 | 3 | Runtime, Type System |
 | 28 | **Handle Pointers** (+T, handle pools) | 3 | 4 | Runtime, Type System, Pool Management |
-| 29 | **Borrowing** (&T_borrow, &mut T_borrow) | 4 | 5 | Type System, Borrow Checker |
-| 30 | **Actors** (actor keyword, state, message handlers) | 4 | 5 | Parser, Type System, Runtime Scheduler |
-| 31 | **Concurrency Primitives** (spawn, send, receive) | 4 | 5 | Runtime, Scheduler, Message Queues |
-| 32 | **Async Effects** | 3 | 5 | Type System, Effect Analysis, Runtime Guards |
-| 33 | **Stackless Coroutine Actors** | 3 | 5 | Runtime, State Machine Transform |
-| 34 | **Macros** (compile-time code generation) | 3 | 5 | Macro System, AST Manipulation, Hygiene |
+| 29 | **Borrowing** (&T_borrow, &mut T_borrow) | 4 | 4 | Type System, Borrow Checker | **IMPLEMENTED (runtime borrow checking)** |
+| 30 | **Actors** (actor keyword, state, message handlers) | 4 | 3 | Parser, Type System, Runtime Scheduler | **COMPLETE** |
+| 31 | **Concurrency Primitives** (spawn, send, receive) | 4 | 3 | Runtime, Scheduler, Message Queues | **COMPLETE** |
+| 32 | **Async Effects** | 3 | 4 | Type System, Effect Analysis, Runtime Guards | **COMPLETE** |
+| 33 | **Stackless Coroutine Actors** | 3 | 4 | Runtime, State Machine Transform | **COMPLETE** |
+| 34 | **Macros** (compile-time code generation) | 3 | 4 | Macro System, AST Manipulation, Hygiene | **COMPLETE** |
 | 35 | **Context Blocks** (DSL support) | 2 | 3 | Parser, Scope Resolution |
 | 36 | **Method Missing** (dynamic dispatch) | 2 | 4 | Runtime, Dynamic Dispatch |
 | 37 | **Union Types** (A | B inline unions) | 3 | 4 | Type System, Codegen |
@@ -103,8 +103,8 @@
 | 97 | **Constructor Polymorphism** (`Constructor[T]` type for factory patterns) | 4 | 3 | Parser, Type System, Codegen |
 | 98 | **Strong Enums** (`#[strong]` disallows wildcard `_` in pattern matching) | 4 | 2 | Parser, Pattern Matching, Semantic Analysis |
 | 99 | **Body Block Outlining** (Actor/Generator/Future `body_block` to `fn(ctx)`) | 4 | 4 | MIR Transform, Codegen, Runtime FFI |
-| 100 | **Capture Buffer & VReg Remapping** (ctx layout for outlined bodies) | 4 | 5 | MIR Liveness, Closure Encoding, Codegen |
-| 101 | **Generator State Machine Codegen** (stackless yield/next) | 4 | 5 | MIR Transform, Runtime State, Codegen |
+| 100 | **Capture Buffer & VReg Remapping** (ctx layout for outlined bodies) | 4 | 5 | MIR Liveness, Closure Encoding, Codegen | **COMPLETE** |
+| 101 | **Generator State Machine Codegen** (stackless yield/next) | 4 | 5 | MIR Transform, Runtime State, Codegen | **COMPLETE** |
 | 102 | **Future Body Execution** (compiled future resolves/awaits) | 4 | 4 | Runtime, Codegen, MIR Outlining |
 | 103 | **Codegen Parity Completion** (remove stubs, pass full tests) | 5 | 5 | MIR, Codegen, Runtime | **COMPLETE** |
 | 104 | **Module Path Syntax** (dot-separated paths: `crate.sys.http`) | 5 | 2 | Parser, Semantic Analysis | **PARSING COMPLETE** |
@@ -129,7 +129,7 @@
 | 123 | **SIMD Math Functions** (sqrt, abs, fma, floor, ceil) | 4 | 3 | Codegen, Runtime |
 | 124 | **GPU Context** (device discovery, context creation) | 5 | 4 | Runtime, GPU Backend |
 | 125 | **GPU Buffers** (alloc, upload, download, map) | 5 | 4 | Runtime, GPU Backend |
-| 126 | **GPU Kernels** (`#[gpu]` attribute for compute kernels) | 5 | 5 | Parser, Compiler, SPIR-V Codegen |
+| 126 | **GPU Kernels** (`#[gpu]` attribute for compute kernels) | 5 | 5 | Parser, Compiler, SPIR-V Codegen (📋 **PLANNED**, see plan 26) |
 | 127 | **GPU Launch** (kernel dispatch, work groups, sync) | 5 | 4 | Runtime, GPU Backend |
 | 128 | **GPU Intrinsics** (global_id, local_id, barrier, atomics) | 4 | 4 | Codegen, SPIR-V |
 | 129 | **GPU Shared Memory** (`shared let` for work group local storage) | 4 | 4 | Codegen, SPIR-V |
@@ -257,6 +257,9 @@
 | 126 | Kernel caching and JIT | 3 | Runtime |
 | 127 | Work group size computation | 2 | Runtime |
 | 127 | Argument marshalling (buffer refs) | 3 | Runtime |
+| 510 | UI Dynamic Structure (render-time if/for, keyed lists) | 4 | 5 | UI Parser, RenderIR, Runtime (📋 **PLANNED**, see plan 24) |
+| 511 | UI Structural PatchSet/Diff (insert/remove/replace/move) | 4 | 5 | UI Runtime, GUI Renderer, TUI Renderer (📋 **PLANNED**, see plan 24) |
+| 512 | UI SSR + Hydration (HTML emit + client rebind) | 4 | 5 | UI Runtime, Renderer, Build Pipeline (📋 **PLANNED**, see plan 24) |
 
 ### BDD Spec Framework Implementation (#300)
 
@@ -277,7 +280,10 @@
 | Coverage tracker | 4 | lib/std/spec/coverage/ | 📋 Sprint 3 |
 | Coverage reporter | 3 | lib/std/spec/coverage/ | 📋 Sprint 3 |
 
-**Sprint 1 Status (COMPLETE):** Core DSL, registry, matchers fully implemented. 40+ unit tests for DSL and matchers pending.
+**Sprint 1 Status (✅ COMPLETE):** Core DSL, registry, matchers fully implemented.  
+**Sprint 2 Status (📋 PLANNED):** Runner CLI, executor, formatters.  
+**Sprint 3 Status (📋 PLANNED):** Coverage integration.  
+**Overall Progress:** 70% of Sprint 1 (10/12 tasks), 28% overall. See `doc/plans/28_bdd_spec.md`.
 
 ### Simple Doctest Implementation (#301)
 
@@ -305,10 +311,11 @@
 | REPL recording mode | 3 | Driver | 📋 Sprint 3 |
 | Coverage integration | 3 | lib/std/spec/coverage/ | 📋 Sprint 4 |
 
-**Sprint 1 Status (COMPLETE):** Parser, Matcher, Runner with 40+ unit tests passing.  
-**Sprint 2 Status (60% COMPLETE):** Discovery framework, FFI bridge (7 functions, 7 tests), integration tests (12 cases). Remaining: FFI wiring, glob matching, CLI integration.
+**Sprint 1 Status (✅ COMPLETE):** Parser, Matcher, Runner with 40+ unit tests passing.  
+**Sprint 2 Status (✅ COMPLETE - Effective):** Discovery framework with FFI bridge (7 functions, 7 tests passing), Markdown extraction, glob pattern matching, integration tests (19 test cases). Blocked: CLI integration (needs infrastructure), interpreter execution (needs Simple runtime).  
+**Overall Progress:** 90% effective completion (15/16 non-blocked tasks). See `doc/plans/29_doctest.md`.
 
-**File I/O FFI Functions (Rust Bridge):**
+**File I/O FFI Functions (Rust Bridge - Temporary until stdlib I/O complete):**
 - `doctest_read_file(path: RuntimeValue) -> RuntimeValue` - Read file contents
 - `doctest_path_exists(path: RuntimeValue) -> RuntimeValue` - Check path existence
 - `doctest_is_file(path: RuntimeValue) -> RuntimeValue` - Check if file
@@ -328,6 +335,35 @@
 | Unified reporting | 2 | Driver | 📋 Planned |
 | Coverage report generation | 3 | Driver | 📋 Planned |
 | Exit code handling | 1 | Driver | 📋 Planned |
+
+### JJ Version Control Integration (#303)
+
+**Goal:** Auto-snapshot successful builds and test runs to Jujutsu (JJ) VCS.  
+**Status:** 67% Complete (8/12 tasks)
+
+| Sub-feature | Difficulty | Scope | Status |
+|-------------|------------|-------|--------|
+| JJ state manager (build/test metadata) | 3 | Driver | ✅ Complete |
+| Event system (BuildEvent types) | 3 | Driver/JJ | ✅ Complete |
+| State store (persistent build history) | 3 | Driver/JJ | ✅ Complete |
+| JJ connector (CLI integration) | 3 | Driver/JJ | ✅ Complete |
+| Message formatter (user-facing) | 2 | Driver/JJ | ✅ Complete |
+| Unit tests (2 passing) | 2 | Tests | ✅ Complete |
+| Integration tests (15 passing) | 3 | Tests | ✅ Complete |
+| CLI --snapshot flag (compile command) | 2 | Driver | ✅ Complete |
+| Test success tracking | 2 | Driver | ⏳ Blocked (needs test framework) |
+| System tests (end-to-end workflow) | 3 | Tests | 📋 Planned |
+| Documentation (usage guide) | 2 | Docs | 📋 Planned |
+| Test state storage | 2 | Driver | 🔒 Deferred |
+
+**Current Usage:**
+```bash
+simple compile app.spl --snapshot
+# Compiled app.spl -> app.smf
+# 📸 Updated JJ change description with build state (commit: abc123...)
+```
+
+**See:** `doc/plans/27_jj_integration.md` for complete plan.
 
 ### Primitive API Lint Implementation (#92)
 

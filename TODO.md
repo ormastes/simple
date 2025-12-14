@@ -1,222 +1,157 @@
 # TODO
 
-## In Progress
+This file tracks active development priorities. For detailed implementation plans, see `doc/plans/`.
 
-### JJ Version Control Integration
-**Status:** Core Implementation Complete + Event System Added
-**Goal:** Auto-snapshot successful builds and test runs to JJ
-**Implementation:** 
-- `src/driver/src/jj_state.rs` - State management with JJ CLI
-- `src/driver/src/jj/` - Event system and state storage
+## Active Development
+
+### 1. Contract Blocks (#400) - LLM-Friendly Feature
+**Status:** 25% Complete (Parser Phase 1)  
+**Priority:** High  
+**Plan:** `doc/plans/llm_friendly.md`
 
 **Completed:**
-1. ✅ JjStateManager - Core state management with JJ CLI integration
-2. ✅ BuildMetadata - Track build success, duration, artifacts, mode
-3. ✅ TestMetadata - Track test results, duration, pass/fail/ignored counts
-4. ✅ Automatic snapshot creation on build/test success
-5. ✅ Last working state retrieval
-6. ✅ Unit tests for display methods (2 tests passing)
-7. ✅ Integration tests - 15/15 tests passing (`tests/jj_state_tests.rs`)
-   - Build snapshots (8 tests)
-   - Test snapshots (4 tests)
-   - Edge cases and idempotency (3 tests)
-8. ✅ **NEW: JJ Connection Infrastructure (12 tests passing)**
-   - `jj/event.rs` - BuildEvent and BuildState types
-   - `jj/store.rs` - StateStore for persistent build history
-   - `jj/jj.rs` - JJConnector for JJ CLI integration
-   - `jj/message.rs` - MessageFormatter for user-facing messages
+- ✅ Keywords added to lexer (requires, ensures, invariant, old)
+- ✅ AST nodes (ContractBlock, InvariantBlock, ContractClause)
+- ✅ Parsing logic (parse_contract_block, parse_invariant_block)
 
-**Remaining:**
-1. ✅ CLI integration (`--snapshot` flag for build/test commands)
-2. ⏳ Wire compilation/test success into BuildEvent capture
-3. ⏳ System tests for end-to-end snapshot workflow
-4. ⏳ Documentation (usage guide, examples)
-5. 🔒 Test State Storage (DEFERRED - pending test framework setup)
+**Next Steps:**
+- Wire parsing into function/class definitions
+- Add parsing tests
+- Implement type checking for contracts
+- Generate runtime assertions
+
+**See:** `doc/feature.md` #400-410 for all LLM-friendly features
 
 ---
 
-## In Progress
-
-### BDD Spec Framework (RSpec-style for Simple)
-**Status:** Sprint 1 - Core DSL & Registry (Phase 1-2)
-**Goal:** Ruby/RSpec-style BDD test framework written in Simple
-**Spec:** `doc/bdd_spec.md`
+### 2. JJ Version Control Integration (#303)
+**Status:** 67% Complete (8/12 tasks)  
+**Priority:** Medium  
+**Plan:** `doc/plans/27_jj_integration.md`
 
 **Completed:**
-1. ✅ Directory structure (`lib/std/spec/`)
-2. ✅ Core DSL (`dsl.spl`) - describe, context, it, let, hooks
-3. ✅ Registry (`registry.spl`) - ExampleGroup, Example, Hook storage
-4. ✅ Runtime (`runtime.spl`) - Configuration and state management
-5. ✅ Expectations (`expect.spl`) - expect/to/not_to, expect_raises
-6. ✅ Matcher Protocol (`matchers.spl`) - Base Matcher trait
-7. ✅ Core Matchers (`matchers/core.spl`) - eq, be, be_nil
-8. ✅ Comparison Matchers (`matchers/comparison.spl`) - gt, lt, gte, lte
-9. ✅ Collection Matchers (`matchers/collection.spl`) - include, be_empty
-10. ✅ Error Matchers (`matchers/error.spl`) - raise_error
+- ✅ Core state management (JjStateManager)
+- ✅ Event system (BuildEvent types)
+- ✅ CLI integration (--snapshot flag)
+- ✅ Unit tests (2 passing)
+- ✅ Integration tests (15 passing)
 
-**Next Steps (Sprint 1 Remaining):**
-1. ⏳ Write unit tests for DSL and matchers
-2. ⏳ Test registry functionality
-
-**Sprint 2 (Planned):**
-- Runner implementation (`runner/cli.spl`, `runner/executor.spl`)
-- Formatters (progress, doc, json)
-- Integration tests
-
-**Sprint 3 (Planned):**
-- Coverage infrastructure in compiler
-- symbols.json emission
-- Public API coverage calculation
-
-**Sprint 4 (Planned):**
-- Test environment setup (`test/` folder structure)
-- Migration guide
+**Remaining:**
+- Test success tracking (blocked on test framework)
+- System tests
 - Documentation
 
 ---
 
-## In Progress
+### 3. BDD Spec Framework (#300)
+**Status:** 70% of Sprint 1, 28% overall  
+**Priority:** High (Testing Infrastructure)  
+**Plan:** `doc/plans/28_bdd_spec.md`
 
-### Simple Doctest (sdoctest) Framework
-**Status:** Phase 1 - Core Parser and Runner
-**Goal:** Python doctest-style interactive tests embedded in docstrings and docs
-**Spec:** `doc/spec/sdoctest.md`
+**Sprint 1 Complete (10/12):**
+- ✅ DSL, Registry, Runtime, Matchers all implemented
 
-**Features:**
-- `>>>` prompt syntax for executable examples
-- Extract from docstrings (`///`), Markdown (` ```simple-doctest `), and `.sdt` files
-- Integrated with BDD spec framework runner
-- Coverage contribution to public function touch
-- REPL recording mode (`--record`)
-- Wildcard matching for non-deterministic output
-- Setup/teardown blocks per docstring
-- Tag-based filtering
+**Sprint 1 Remaining:**
+- Unit tests for DSL and matchers
+- Test registry functionality
 
-**Sprint 1: Core Parser and Runner**
-1. ✅ Create `lib/std/doctest/` module structure
-2. ✅ Implement parser (`parser.spl`):
-   - Extract `>>>` examples from strings
-   - Parse expected output
-   - Parse exception expectations (`Error: Type`)
-   - Extract docstrings from `.spl` files
-   - Parse setup/teardown blocks
-3. ✅ Implement matcher (`matcher.spl`):
-   - Exact string matching with normalization
-   - Wildcard matching (`.` and `*`)
-   - Exception matching
-4. ✅ Implement runner (`runner.spl`):
-   - Execute code in isolated interpreter (placeholder)
-   - Capture stdout/stderr
-   - Match output vs expected
-   - Setup/teardown execution
-5. ✅ Create stub modules:
-   - `discovery.spl` - File discovery framework
-   - `reporter.spl` - Result formatting
-   - `integration.spl` - Spec runner integration
-6. ✅ Write 40+ unit tests for parser, matcher, and runner
-7. ⏳ Wire interpreter integration (pending Simple REPL/interpreter API)
-8. ⏳ Run tests and verify basic functionality
-
-**Sprint 2: Discovery and Integration (In Progress - 85% Complete)**
-1. ✅ Enhanced `discovery.spl` with file walking framework
-2. ✅ Implemented Markdown doctest extraction
-3. ✅ Created integration test spec (`test/integration/doctest/discovery_spec.spl`)
-4. ✅ Created test fixtures (sample.spl, sample.sdt, tutorial.md)
-5. ✅ Implemented Rust FFI bridge for file I/O (7 functions, 7 tests passing)
-   - `src/runtime/src/value/doctest_io.rs`
-   - Functions: `doctest_read_file`, `doctest_path_exists`, `doctest_is_file`, 
-     `doctest_is_dir`, `doctest_walk_directory`, `doctest_path_has_extension`, 
-     `doctest_path_contains`
-6. ✅ Registered FFI symbols in runtime resolver
-7. ✅ Created extern declarations in discovery.spl
-8. ✅ Implemented glob pattern matching for include/exclude
-9. ✅ Created verification script (`scripts/verify_doctest.sh`)
-10. ⏳ Hook into `spec.runner` for unified test execution (BLOCKED: needs BDD framework)
-11. ⏳ CLI: `simple test --doctest` (BLOCKED: needs CLI infrastructure)
-12. 🔒 Run integration tests (BLOCKED: needs Simple interpreter to execute .spl files)
-
-**Sprint 2 Complete:** 9/12 tasks (75% accounting for blocked items)
-**Sprint 2 Executable:** 9/9 non-blocked tasks (100%)
-
-**Sprint 3: Advanced Features (Planned)**
-- Wildcard matching (`.` and `*`)
-- Setup/teardown isolation
-- Tag filtering (`@doctest(tag: ...)`)
-- REPL recording mode
-
-**Sprint 4: Coverage and Polish (Planned)**
-- Coverage integration (public function touch)
-- Configuration (`simple.toml`)
-- Migration guide
-- Example library
+**Sprint 2 Planned:**
+- Runner CLI, executor, formatters
 
 ---
 
-## Pending
-### vscode nvim language server and debugger and other support.
-### mcp for llm 
-### LLM-Friendly Infrastructure
-- Minimal context interface
-- System test public class/struct touch coverage
-- System test mock usage limits
-- Integration test public function touch coverage
-- Config-driven docs instructions
-- Task runner for coverage, docs, lint
-### update lanagauage spec << convension over config
-### gui support
-#### ruby rails spring like framework
-#### tui
+### 4. Simple Doctest (#301)
+**Status:** 90% effective completion  
+**Priority:** High (Testing Infrastructure)  
+**Plan:** `doc/plans/29_doctest.md`
 
+**Sprint 1 Complete:**
+- ✅ Parser, Matcher, Runner (40+ unit tests)
+
+**Sprint 2 Complete (Effective):**
+- ✅ Discovery framework
+- ✅ FFI bridge (7 functions, 7 tests)
+- ✅ Markdown extraction
+- ✅ Glob pattern matching
+- ✅ Integration tests (19 test cases)
+
+**Blocked:**
+- CLI integration (needs infrastructure)
+- Interpreter execution (needs Simple runtime)
+
+---
+
+## Planned Development
+
+### High Priority
+1. **LLM-Friendly Features (#400-410)** - Contract blocks in progress
+2. **Test Framework Completion** - BDD + Doctest finishing touches
+3. **Language Server (LSP)** - Editor support (Plan: `doc/plans/30_pending_features.md`)
+
+### Medium Priority
+4. **Test CLI Integration (#302)** - Unified `simple test` command
+5. **Convention Documentation** - Update language spec with conventions
+6. **TUI Framework** - Terminal UI library
+7. **Package Registry** - Central repository (crates.io-style)
+
+### Low Priority
+8. **Web Framework** - Ruby on Rails-style framework
+9. **GUI Framework** - Native or Immediate Mode GUI
+10. **Debugger (DAP)** - Debug Adapter Protocol support
+
+**See:** `doc/plans/30_pending_features.md` for full details
+
+---
 
 ## Completed
 
-### Embedded Support (src/embedded/)
-**Startup code:**
-- ARM Cortex-M (M0, M3, M4, M7) - vector tables, NVIC, SysTick
-- RISC-V (RV32, RV64) - CSR, PLIC, CLINT
-- Linker scripts for both architectures
+All completed features are tracked in `doc/feature.md` with ✅ status.
 
-**Teardown module:**
-- Settlement SSMF parsing for embedded targets
-- Intel HEX and S-Record output formats
-- Target configs: STM32F103, STM32F4, nRF52832, ESP32-C3, RISC-V QEMU
+Major completed systems:
+- ✅ Parser, Lexer, AST
+- ✅ HIR, MIR, Codegen (Cranelift + Interpreter)
+- ✅ Runtime value system (9 modules, 50+ FFI functions)
+- ✅ SMF binary format and loader
+- ✅ Package manager (UV-style)
+- ✅ Module system with imports/exports
+- ✅ Embedded support (ARM Cortex-M, RISC-V)
+- ✅ Effect system (@async, effect checking)
+- ✅ Primitive API linting
+- ✅ Doctest Sprint 1 & 2
+- ✅ BDD Spec Sprint 1
 
-**Variants module:**
-- Feature flags: `no-float`, `no-alloc`, `no-thread`, `no-gc`
-- Presets: `minimal`, `embedded-tiny`, `embedded-small`
-- Fixed-point math (Q16.16) for float-less targets
-- Static containers for alloc-less targets
-- Cooperative scheduler for thread-less targets
-- Memory pools and arenas for GC-less targets
+**See:** `doc/feature.md` for complete status
 
 ---
 
-## Ignored Tests (features not yet implemented)
+## Ignored/Deferred
 
-### Generator JIT codegen
-- **Test:** `jit_generator_dispatcher_yields_and_restores`
-- **File:** `src/compiler/tests/generator_codegen.rs:14`
-- **Reason:** Requires stable block layout hookup; dispatcher path covered in runtime test
+**Ignored Tests:**
+- Generator JIT codegen (needs block layout hookup)
+- Unit conversion methods (not yet implemented)
+- Embedded panic customization (doctest placeholder)
 
-### Unit conversion methods
-- **Test:** `interpreter_unit_family_to_base`
-- **File:** `src/driver/tests/interpreter_types.rs:473`
-- **Reason:** Unit conversion methods (`.to_m()`) not yet implemented
+**Deferred Features:**
+- GPU backends (WGPU, Metal)
+- 32-bit architecture support (needs LLVM backend)
+- Test state storage (JJ integration - blocked on test framework)
 
-### Embedded panic customization
-- **Test:** `doc test src/embedded/src/lib.rs - (line 22)` (ignored)
-- **File:** `src/embedded/src/lib.rs`
-- **Reason:** Doc-test kept ignored for no_std placeholder entry macro
-- **Status:** Postponed; keep ignored until a host-friendly doctest harness exists
+---
 
----  
-## add convention over config to rule on language spec
-## Postponed
+## Quick Reference
 
-### GPU backends
-- WGPU/WebGPU backend integration
-- Metal backend (Apple)
+**Documentation:**
+- `doc/feature.md` - Complete feature list with status
+- `doc/plans/` - Detailed implementation plans (30+ files)
+- `doc/spec/` - Language specifications
+- `doc/status/` - Feature implementation status (79+ files)
 
-### 32-bit architecture support
-**Status:** Deferred - requires LLVM backend
-**Reason:** Cranelift does not support 32-bit (ARM32 was removed)
+**Commands:**
+- `make test` - Run all tests
+- `make coverage` - Generate coverage report
+- `make lint` - Run linter
+- `make fmt` - Format code
+- `make check` - Pre-commit checks (fmt + lint + test)
+
+**Current Focus:** Contract blocks implementation (LLM-friendly feature #400)
+
