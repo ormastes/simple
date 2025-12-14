@@ -156,6 +156,9 @@
 | 218 | **File System Async API** (async fs read/write/list) | 5 | 4 | Runtime, Stdlib, async |
 | 219 | **Multi-Base Unit Types** (`unit IpAddr: str | u32 as ip` - multiple literal forms) | 4 | 3 | Parser, Type System |
 | 220 | **LLVM Backend** (32-bit + 64-bit target support) | 5 | 5 | Codegen, Compiler, Loader | ✅ **COMPLETE** |
+| 300 | **BDD Spec Framework** (RSpec-style describe/context/it DSL) | 5 | 4 | Testing, Stdlib | 🔄 **Sprint 1 COMPLETE** |
+| 301 | **Simple Doctest (sdoctest)** (Python doctest-style `>>>` examples) | 5 | 4 | Testing, Stdlib | 🔄 **Sprint 2 60% COMPLETE** |
+| 302 | **Test CLI Integration** (unified `simple test` command) | 5 | 3 | Driver, CLI | 📋 **PLANNED** |
 
 ### LLVM Backend Implementation (#220) ✅ COMPLETE
 
@@ -243,6 +246,77 @@
 | 126 | Kernel caching and JIT | 3 | Runtime |
 | 127 | Work group size computation | 2 | Runtime |
 | 127 | Argument marshalling (buffer refs) | 3 | Runtime |
+
+### BDD Spec Framework Implementation (#300)
+
+| Sub-feature | Difficulty | Scope | Status |
+|-------------|------------|-------|--------|
+| DSL module (describe, context, it, let, hooks) | 3 | lib/std/spec/dsl.spl | ✅ Complete |
+| Registry module (ExampleGroup, Example, Hook storage) | 3 | lib/std/spec/registry.spl | ✅ Complete |
+| Runtime module (Configuration, state management) | 2 | lib/std/spec/runtime.spl | ✅ Complete |
+| Expectation DSL (expect/to/not_to, expect_raises) | 3 | lib/std/spec/expect.spl | ✅ Complete |
+| Matcher protocol (Matcher trait) | 2 | lib/std/spec/matchers.spl | ✅ Complete |
+| Core matchers (eq, be, be_nil) | 2 | lib/std/spec/matchers/core.spl | ✅ Complete |
+| Comparison matchers (gt, lt, gte, lte) | 2 | lib/std/spec/matchers/comparison.spl | ✅ Complete |
+| Collection matchers (include, be_empty) | 2 | lib/std/spec/matchers/collection.spl | ✅ Complete |
+| Error matchers (raise_error) | 2 | lib/std/spec/matchers/error.spl | ✅ Complete |
+| Runner CLI (cli.spl) | 3 | lib/std/spec/runner/ | 📋 Sprint 2 |
+| Executor (example execution) | 3 | lib/std/spec/runner/ | 📋 Sprint 2 |
+| Formatters (progress, doc, json) | 3 | lib/std/spec/formatter/ | 📋 Sprint 2 |
+| Coverage tracker | 4 | lib/std/spec/coverage/ | 📋 Sprint 3 |
+| Coverage reporter | 3 | lib/std/spec/coverage/ | 📋 Sprint 3 |
+
+**Sprint 1 Status (COMPLETE):** Core DSL, registry, matchers fully implemented. 40+ unit tests for DSL and matchers pending.
+
+### Simple Doctest Implementation (#301)
+
+| Sub-feature | Difficulty | Scope | Status |
+|-------------|------------|-------|--------|
+| Parser (`>>>` extraction from strings) | 3 | lib/std/doctest/parser.spl | ✅ Complete |
+| Expected output parsing | 2 | lib/std/doctest/parser.spl | ✅ Complete |
+| Exception expectation parsing (`Error: Type`) | 2 | lib/std/doctest/parser.spl | ✅ Complete |
+| Docstring extraction from `.spl` files | 2 | lib/std/doctest/parser.spl | ✅ Complete |
+| Setup/Teardown block parsing | 2 | lib/std/doctest/parser.spl | ✅ Complete |
+| Matcher (exact string matching) | 2 | lib/std/doctest/matcher.spl | ✅ Complete |
+| Wildcard matching (`.` and `*`) | 3 | lib/std/doctest/matcher.spl | ✅ Complete |
+| Exception matching | 2 | lib/std/doctest/matcher.spl | ✅ Complete |
+| Runner (execution in isolated interpreter) | 3 | lib/std/doctest/runner.spl | ✅ Complete |
+| Output capture | 2 | lib/std/doctest/runner.spl | ✅ Complete |
+| Timeout support | 2 | lib/std/doctest/runner.spl | ✅ Complete |
+| Discovery framework | 3 | lib/std/doctest/discovery.spl | ✅ Sprint 2 |
+| Markdown extraction (` ```simple-doctest `) | 3 | lib/std/doctest/discovery.spl | ✅ Sprint 2 |
+| File I/O FFI bridge | 3 | src/runtime/src/value/doctest_io.rs | ✅ Sprint 2 |
+| FFI wiring into Simple | 2 | lib/std/doctest/discovery.spl | ⏳ Sprint 2 |
+| Glob pattern matching | 2 | lib/std/doctest/discovery.spl | ⏳ Sprint 2 |
+| BDD spec integration | 3 | lib/std/doctest/integration.spl | ⏳ Sprint 2 |
+| Reporter (result formatting) | 2 | lib/std/doctest/reporter.spl | 📋 Sprint 2 |
+| Tag filtering | 2 | lib/std/doctest/ | 📋 Sprint 3 |
+| REPL recording mode | 3 | Driver | 📋 Sprint 3 |
+| Coverage integration | 3 | lib/std/spec/coverage/ | 📋 Sprint 4 |
+
+**Sprint 1 Status (COMPLETE):** Parser, Matcher, Runner with 40+ unit tests passing.  
+**Sprint 2 Status (60% COMPLETE):** Discovery framework, FFI bridge (7 functions, 7 tests), integration tests (12 cases). Remaining: FFI wiring, glob matching, CLI integration.
+
+**File I/O FFI Functions (Rust Bridge):**
+- `doctest_read_file(path: RuntimeValue) -> RuntimeValue` - Read file contents
+- `doctest_path_exists(path: RuntimeValue) -> RuntimeValue` - Check path existence
+- `doctest_is_file(path: RuntimeValue) -> RuntimeValue` - Check if file
+- `doctest_is_dir(path: RuntimeValue) -> RuntimeValue` - Check if directory
+- `doctest_walk_directory(root, include, exclude) -> RuntimeValue` - Recursive directory walk
+- `doctest_path_has_extension(path, ext) -> RuntimeValue` - Extension check
+- `doctest_path_contains(path, pattern) -> RuntimeValue` - Pattern matching helper
+
+### Test CLI Integration (#302)
+
+| Sub-feature | Difficulty | Scope | Status |
+|-------------|------------|-------|--------|
+| CLI command structure (`simple test`) | 2 | Driver | 📋 Planned |
+| Test type filtering (--spec, --doctest) | 2 | Driver | 📋 Planned |
+| Layer filtering (--unit, --integration, etc.) | 2 | Driver | 📋 Planned |
+| Test discovery orchestration | 3 | Driver | 📋 Planned |
+| Unified reporting | 2 | Driver | 📋 Planned |
+| Coverage report generation | 3 | Driver | 📋 Planned |
+| Exit code handling | 1 | Driver | 📋 Planned |
 
 ### Primitive API Lint Implementation (#92)
 
@@ -469,3 +543,61 @@ Features #104-111 provide a comprehensive module system with explicit visibility
 - **Feature Flags** (#111): Compile-time toggles for conditional compilation.
 
 This module system provides predictable static resolution, explicit macro importing, and directory-wide attribute/import control. See `doc/import_export_and__init__.md` for the complete specification.
+
+### 11. BDD Spec Framework and Doctest
+
+Features #300-310 provide a comprehensive testing infrastructure with Ruby/RSpec-style BDD testing and Python doctest-style documentation tests:
+
+- **BDD Spec Framework** (#300): RSpec-style test framework written in Simple:
+  - `describe`/`context`/`it` DSL for nested test organization
+  - `let`/`let!` for lazy/eager test fixtures
+  - `before`/`after` hooks (each, all, suite)
+  - `expect(value).to matcher` assertion syntax
+  - 20+ built-in matchers (eq, be, include, raise_error, etc.)
+  - Multiple formatters (progress, documentation, JSON)
+  - Test filtering by tag, name pattern, or layer
+  - Coverage tracking (branch/condition, public function touch, method touch)
+
+- **Simple Doctest (sdoctest)** (#301): Python doctest-inspired framework:
+  - `>>>` prompt syntax for executable examples in docstrings
+  - Extract from `.spl` docstrings, Markdown (` ```simple-doctest `), and `.sdt` files
+  - Wildcard matching (`.` and `*`) for non-deterministic output
+  - Exception matching (`Error: Type` or `Error: Type: message`)
+  - Setup/Teardown blocks per docstring
+  - Tag-based filtering (`@doctest(tag: slow)`)
+  - REPL recording mode (`simple repl --record output.sdt`)
+  - Integration with BDD spec framework for unified test execution
+  - Coverage contribution to public function touch metrics
+
+- **Test CLI Integration** (#302): Unified test runner:
+  - `simple test` - Run all tests (specs + doctests)
+  - `simple test --spec` - Run only BDD specs
+  - `simple test --doctest` - Run only doctests
+  - `simple test --unit` - Run only unit layer tests
+  - `simple test --coverage` - Generate coverage reports
+  - `simple test --format doc` - Use documentation formatter
+  - `simple test --list` - List discovered tests
+
+**Test Layers:**
+1. **Unit Tests**: Branch/condition coverage (100% target), all mocks allowed
+2. **Integration Tests**: Public function coverage on class/struct, HAL mocks only
+3. **System Tests**: Class/struct method coverage, no mocks
+4. **Environment Tests**: Branch/condition coverage (merged with unit), HAL/External/Lib mocks
+
+**Implementation Status (2025-12-14):**
+- BDD Framework: ✅ Sprint 1 Complete (DSL, Registry, Runtime, Matchers)
+- Doctest: ✅ Sprint 1 Complete (Parser, Matcher, Runner - 40+ unit tests)
+- Doctest: 🔄 Sprint 2 In Progress (Discovery, Integration - 60% complete)
+  - ✅ Rust FFI bridge for file I/O (7 functions, 7 tests passing)
+  - ✅ Enhanced discovery module with directory walking
+  - ✅ Markdown extraction (` ```simple-doctest ` blocks)
+  - ✅ Integration test suite (12 test cases)
+  - ⏳ FFI wiring into Simple code
+  - ⏳ Glob pattern matching
+  - ⏳ CLI integration
+
+**See Also:**
+- `doc/spec/sdoctest.md` - Doctest specification
+- `doc/doctest_integration.md` - BDD integration plan
+- `doc/status/sdoctest_implementation.md` - Implementation status
+- `doc/test.md` - Test policy and coverage rules

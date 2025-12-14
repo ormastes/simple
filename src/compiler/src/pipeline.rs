@@ -873,6 +873,15 @@ fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_capture_stdout_start" => value::rt_capture_stdout_start as usize,
         "rt_capture_stderr_start" => value::rt_capture_stderr_start as usize,
 
+        // Doctest I/O operations (file discovery)
+        "doctest_read_file" => simple_runtime::doctest_read_file as usize,
+        "doctest_path_exists" => simple_runtime::doctest_path_exists as usize,
+        "doctest_is_file" => simple_runtime::doctest_is_file as usize,
+        "doctest_is_dir" => simple_runtime::doctest_is_dir as usize,
+        "doctest_walk_directory" => simple_runtime::doctest_walk_directory as usize,
+        "doctest_path_has_extension" => simple_runtime::doctest_path_has_extension as usize,
+        "doctest_path_contains" => simple_runtime::doctest_path_contains as usize,
+
         _ => return None,
     };
 

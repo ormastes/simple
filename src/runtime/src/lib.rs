@@ -105,6 +105,14 @@ pub use value::{
     rt_value_truthy,
     // Future/generator operations
     rt_wait,
+    // Doctest I/O operations
+    doctest_is_dir,
+    doctest_is_file,
+    doctest_path_contains,
+    doctest_path_exists,
+    doctest_path_has_extension,
+    doctest_read_file,
+    doctest_walk_directory,
 };
 
 // Re-export RuntimeDict struct
