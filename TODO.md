@@ -2,6 +2,16 @@
 
 This file tracks active development priorities. For detailed implementation plans, see `doc/plans/`.
 
+## new struct refactoring
+lets make and migrate existing spl code to here. simple langauge package and lib development dir
+so, make spl lib development itself easier.
+
+simple/bin/ < place binary tools and make it .gitignore
+simple/std_lib/ < spl library files.
+simple/std_lib/src/
+simple/std_lib/test/
+simple/doc/ < link to doc/
+
 ## Active Development
 
 ### 1. Contract Blocks (#400) - LLM-Friendly Feature
