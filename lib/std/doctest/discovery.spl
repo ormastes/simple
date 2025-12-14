@@ -2,7 +2,7 @@
 /// 
 /// Discovers doctests from .spl, .md, and .sdt files
 
-use parser::{DoctestExample, parse_spl_file, parse_sdt_file}
+use parser::{DoctestExample, parse_spl_file, parse_sdt_file, parse_docstring}
 
 /// Discovery configuration
 struct DiscoveryConfig:
@@ -20,6 +20,23 @@ struct DiscoveryConfig:
             exclude_patterns: ["**/target/**", "**/build/**"]
         )
 
+// ============================================================================
+// FFI Declarations for File I/O
+// ============================================================================
+// These are provided by the runtime (src/runtime/src/value/doctest_io.rs)
+
+extern fn doctest_read_file(path: String) -> String
+extern fn doctest_path_exists(path: String) -> Bool
+extern fn doctest_is_file(path: String) -> Bool
+extern fn doctest_is_dir(path: String) -> Bool
+extern fn doctest_walk_directory(root: String, include_patterns: List[String], exclude_patterns: List[String]) -> List[String]
+extern fn doctest_path_has_extension(path: String, ext: String) -> Bool
+extern fn doctest_path_contains(path: String, pattern: String) -> Bool
+
+// ============================================================================
+// Discovery Functions
+// ============================================================================
+
 /// Discover all doctests in configured paths
 fn discover_all(config: DiscoveryConfig = DiscoveryConfig.default()) -> List[DoctestExample]:
     examples = []
@@ -32,6 +49,14 @@ fn discover_all(config: DiscoveryConfig = DiscoveryConfig.default()) -> List[Doc
         files = walk_directory(search_path, config.include_patterns, config.exclude_patterns)
         
         for file_path in files:
+            # Apply exclude patterns
+            if should_exclude(file_path, config.exclude_patterns):
+                continue
+            
+            # Apply include patterns
+            if not matches_any_pattern(file_path, config.include_patterns):
+                continue
+            
             file_examples = discover_file(file_path)
             examples.extend(file_examples)
     
@@ -81,19 +106,49 @@ fn parse_markdown_file(path: String) -> List[DoctestExample]:
     
     return examples
 
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
 /// Walk directory tree and return matching files
 fn walk_directory(root: String, include_patterns: List[String], exclude_patterns: List[String]) -> List[String]:
-    # TODO: Implement recursive directory walking with glob pattern matching
-    # This will use std.io.walk_dir and std.path.matches_glob when available
-    # For now, return empty list (stub)
-    return []
+    return doctest_walk_directory(root, include_patterns, exclude_patterns)
 
 /// Check if path exists
 fn path_exists(path: String) -> Bool:
-    # TODO: Use std.io.path_exists
-    return False
+    return doctest_path_exists(path)
 
 /// Read file contents
 fn read_file(path: String) -> String:
-    # TODO: Use std.io.read_text_file
-    return ""
+    return doctest_read_file(path)
+
+/// Check if path should be excluded
+fn should_exclude(path: String, exclude_patterns: List[String]) -> Bool:
+    for pattern in exclude_patterns:
+        # Simple pattern matching - check if path contains the pattern
+        # Remove leading/trailing ** and *
+        clean_pattern = pattern.replace("**/", "").replace("/**", "").replace("**", "")
+        if doctest_path_contains(path, clean_pattern):
+            return True
+    return False
+
+/// Check if path matches any include pattern
+fn matches_any_pattern(path: String, include_patterns: List[String]) -> Bool:
+    for pattern in include_patterns:
+        # Simple pattern matching for extensions
+        if pattern.starts_with("**/*"):
+            # Extract extension like "**/*.spl" -> ".spl"
+            ext = pattern[4:]  # Skip "**/*"
+            if doctest_path_has_extension(path, ext):
+                return True
+        elif pattern.contains("*"):
+            # Other wildcard patterns - for now, just check if path contains non-wildcard parts
+            clean_pattern = pattern.replace("**/", "").replace("/**", "").replace("**", "").replace("*", "")
+            if clean_pattern.len > 0 and doctest_path_contains(path, clean_pattern):
+                return True
+        else:
+            # Exact match
+            if path == pattern or doctest_path_contains(path, pattern):
+                return True
+    return False
+
