@@ -1,4 +1,5 @@
 pub mod dependency_cache;
+pub mod doctest;
 pub mod exec_core;
 pub mod interpreter;
 pub mod jj;

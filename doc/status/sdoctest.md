@@ -4,6 +4,8 @@
 **Overall Progress:** 90% effective completion (15/16 non-blocked tasks)  
 **See:** `doc/plans/29_doctest.md` for complete implementation plan
 
+**Recent Update (runtime bridge):** Added a Rust-side doctest runner (`src/driver/src/doctest.rs`) that discovers `.sdt` and Markdown `simple-doctest` fences, executes examples with the interpreter (output capture + wildcard matching), and unit-tests the flow (`src/driver/tests/doctest_tests.rs`). CLI/BDD wiring is still pending, but interpreter integration is now unblocked for basic end-to-end runs.
+
 ## Current Status
 
 ### Sprint 1: Core Parser and Runner ✅ COMPLETE

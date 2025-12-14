@@ -46,16 +46,14 @@ impl JJConnector {
             ));
         }
 
-        let commit_id = String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .to_string();
+        let commit_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
         Ok(commit_id)
     }
 
     /// Create a change description with build state
     pub fn describe_with_state(&self, state: &BuildState) -> io::Result<()> {
         let description = self.format_description(state);
-        
+
         Command::new("jj")
             .arg("describe")
             .arg("-m")
@@ -87,9 +85,7 @@ impl JJConnector {
     pub fn has_all_tests_passing(&self) -> io::Result<bool> {
         let states = self.load_current_states()?;
         Ok(states.iter().any(|s| {
-            s.compilation_success
-                && s.tests_passed.is_some()
-                && s.tests_failed == Some(0)
+            s.compilation_success && s.tests_passed.is_some() && s.tests_failed == Some(0)
         }))
     }
 

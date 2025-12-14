@@ -626,9 +626,9 @@ fn test_compile_and_run_from_memory_roundtrip() {
 /// Test CLI help output
 #[test]
 fn test_cli_help_output() {
-#![allow(unused_imports, unused_variables, deprecated)]
+    #![allow(unused_imports, unused_variables, deprecated)]
 
-use assert_cmd::Command;
+    use assert_cmd::Command;
 
     let mut cmd = Command::cargo_bin("simple").expect("binary exists");
     cmd.arg("--help");

@@ -55,26 +55,24 @@ impl BuildMetadata {
     /// Convert metadata to a commit message
     pub fn to_commit_message(&self) -> String {
         let duration_secs = self.duration_ms as f64 / 1000.0;
-        
+
         let mut message = format!(
             "🏗️  Build Success\n\n\
              Duration: {:.1}s\n\
              Mode: {}\n\
              Target: {}\n",
-            duration_secs,
-            self.mode,
-            self.target
+            duration_secs, self.mode, self.target
         );
-        
+
         if !self.artifacts.is_empty() {
             message.push_str("Artifacts:\n");
             for artifact in &self.artifacts {
                 message.push_str(&format!("  - {}\n", artifact.display()));
             }
         }
-        
+
         message.push_str(&format!("\nTimestamp: {}\n", self.timestamp.to_rfc3339()));
-        
+
         message
     }
 }
@@ -95,7 +93,7 @@ impl TestMetadata {
     /// Convert metadata to a commit message
     pub fn to_commit_message(&self) -> String {
         let duration_secs = self.duration_ms as f64 / 1000.0;
-        
+
         format!(
             "✅ Tests Passed: All\n\n\
              Level: {}\n\
@@ -128,50 +126,56 @@ impl JjStateManager {
         let repo_path = std::env::current_dir()?;
         Self::new_with_path(repo_path)
     }
-    
+
     /// Create a new state manager with specified path
     pub fn new_with_path(repo_path: PathBuf) -> Result<Self, Box<dyn std::error::Error>> {
         let enabled = repo_path.join(".jj").exists();
         Ok(Self { enabled, repo_path })
     }
-    
+
     /// Check if JJ is enabled for this repository
     pub fn is_enabled(&self) -> bool {
         self.enabled
     }
-    
+
     /// Snapshot a successful build
-    pub fn snapshot_build_success(&self, metadata: &BuildMetadata) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn snapshot_build_success(
+        &self,
+        metadata: &BuildMetadata,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.enabled {
             // Gracefully do nothing if JJ is not enabled
             return Ok(());
         }
-        
+
         let message = metadata.to_commit_message();
         self.create_snapshot(&message)?;
-        
+
         Ok(())
     }
-    
+
     /// Snapshot a successful test run
-    pub fn snapshot_test_success(&self, metadata: &TestMetadata) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn snapshot_test_success(
+        &self,
+        metadata: &TestMetadata,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.enabled {
             // Gracefully do nothing if JJ is not enabled
             return Ok(());
         }
-        
+
         let message = metadata.to_commit_message();
         self.create_snapshot(&message)?;
-        
+
         Ok(())
     }
-    
+
     /// Get the last working state (commit ID)
     pub fn get_last_working_state(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
         if !self.enabled {
             return Ok(None);
         }
-        
+
         // Get the most recent success snapshot
         let output = Command::new("jj")
             .args(&[
@@ -183,16 +187,16 @@ impl JjStateManager {
             ])
             .current_dir(&self.repo_path)
             .output()?;
-        
+
         if !output.status.success() {
             return Ok(None);
         }
-        
+
         let log = String::from_utf8_lossy(&output.stdout);
         if log.trim().is_empty() {
             return Ok(None);
         }
-        
+
         // Parse commit ID from log output
         // Format: "@  commit_id email timestamp description..."
         // or:     "○  commit_id email timestamp description..."
@@ -204,33 +208,33 @@ impl JjStateManager {
                 }
             }
         }
-        
+
         Ok(None)
     }
-    
+
     /// Create a JJ snapshot with the given message
     fn create_snapshot(&self, message: &str) -> Result<(), Box<dyn std::error::Error>> {
         let output = Command::new("jj")
             .args(&["describe", "-m", message])
             .current_dir(&self.repo_path)
             .output()?;
-        
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("Failed to create snapshot: {}", stderr).into());
         }
-        
+
         // Create a new working copy for the next change
         let output = Command::new("jj")
             .args(&["new"])
             .current_dir(&self.repo_path)
             .output()?;
-        
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(format!("Failed to create new working copy: {}", stderr).into());
         }
-        
+
         Ok(())
     }
 }
@@ -247,13 +251,13 @@ impl Default for JjStateManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn build_mode_display() {
         assert_eq!(BuildMode::Debug.to_string(), "Debug");
         assert_eq!(BuildMode::Release.to_string(), "Release");
     }
-    
+
     #[test]
     fn test_level_display() {
         assert_eq!(TestLevel::Unit.to_string(), "Unit");

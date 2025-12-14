@@ -2,7 +2,6 @@
 ///
 /// This trait provides a unified interface for different code generation backends
 /// (Cranelift, LLVM) to allow the compiler pipeline to be backend-agnostic.
-
 use crate::error::CompileError;
 use crate::mir::MirModule;
 use simple_common::target::Target;

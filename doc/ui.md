@@ -1,491 +1,562 @@
-Simple UI Library Specification
+# Simple UI Framework Specification
 
-JSP-like UI files, paired UI/Logic directories, dual-stage execution (instantiate vs render/update), dual renderer (HTML GUI + TUI simulation)
-
-
----
-
-1. Goals and non-goals
-
-Goals
-
-One UI definition runs in:
-
-GUI: real HTML/CSS (browser / webview / future web target)
-
-TUI: simulated layout + styling (tuicss-like) with keyboard/focus navigation
-
-
-JSP-like authoring: UI files are “HTML-first” with embedded Simple code.
-
-Two execution stages in one UI file:
-
-Instantiation-time (run once per instance; build bindings, init state, register events)
-
-Render/update-time (compiled to WASM; run per update; produces patch-set)
-
-
-File/class matching: each UI file has a matching Simple class in a paired logic directory.
-
-
-Non-goals (initially)
-
-Full CSS implementation in TUI (map a subset only).
-
-Full browser DOM API access from WASM (render uses patch-set, not direct DOM ops).
-
-Complex diff engine on day one (start with “hole patching”, then evolve).
-
-
+Unified `.sui` files with server/client execution model, dual renderer (GUI + TUI), and shared state architecture.
 
 ---
 
-2. Repository layout: UI + Logic pairing
+## 1. Architecture Overview
 
-A strict convention removes ambiguity and enables tooling (compiler, watcher, IDE) to find logic from UI and vice versa.
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Unified .sui Model                           │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│                      Shared State                               │
+│                    {$ let x: T $}                               │
+│                          │                                      │
+│           ┌──────────────┼──────────────┐                       │
+│           ▼              │              ▼                       │
+│    ┌────────────┐        │       ┌────────────┐                 │
+│    │   SERVER   │        │       │   CLIENT   │                 │
+│    │   {- -}    │        │       │   {+ +}    │                 │
+│    │            │        │       │            │                 │
+│    │ • DB query │        │       │ • Events   │                 │
+│    │ • Session  │        │       │ • Fetch    │                 │
+│    │ • Auth     │        │       │ • DOM ops  │                 │
+│    └─────┬──────┘        │       └─────┬──────┘                 │
+│          │               │             │                        │
+│          └───────────────┼─────────────┘                        │
+│                          ▼                                      │
+│              ┌───────────────────────┐                          │
+│              │    Render Template    │                          │
+│              │  {{ expr }}  {% %}    │                          │
+│              └───────────┬───────────┘                          │
+│                          │                                      │
+│              ┌───────────┴───────────┐                          │
+│              ▼                       ▼                          │
+│         HTML String              PatchSet                       │
+│         (SSR output)          (client updates)                  │
+│              │                       │                          │
+│              ▼                       ▼                          │
+│    ┌─────────────────┐     ┌─────────────────┐                  │
+│    │   GUI Renderer  │     │   TUI Renderer  │                  │
+│    │   (DOM/WebView) │     │   (Terminal)    │                  │
+│    └─────────────────┘     └─────────────────┘                  │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-Recommended layout
+**Key Insight**: State is declared once, but initialized/updated at different times:
+- **Server** (`{- -}`): Sets initial values (DB, session, auth)
+- **Client** (`{+ +}`): Updates on user interaction (events, fetch)
+- **Render** (`{{ }}`, `{% %}`): Reads state, outputs HTML or patches
 
+---
+
+## 2. Template Syntax
+
+All syntax uses `{` prefix with distinct second character:
+
+| Syntax | Name | Purpose | Runs on |
+|--------|------|---------|---------|
+| `{@ ... @}` | Directive | Component/page declaration, embed | Compile-time |
+| `{$ ... $}` | Declaration | State fields (shared) | Compile-time |
+| `{- ... -}` | Server block | Initial data, DB, session | Server only |
+| `{+ ... +}` | Client block | Events, fetch, DOM | Client only |
+| `{{ expr }}` | Output | HTML-escaped expression | Both |
+| `{! expr !}` | Raw output | Unescaped (unsafe) | Both |
+| `{% ... %}` | Render code | if/for/let statements | Both |
+| `{# ... #}` | Comment | Ignored | Neither |
+
+### Example: Counter Component
+
+**UI File**: `app/ui/components/Counter.ui.sui`
+```html
+{@ component Counter @}
+
+{$ let count: i32 $}
+
+{- count = props.start or 0 -}
+
+{+
+  on_click("#inc", fn(): count += 1)
+  on_click("#dec", fn(): count -= 1)
++}
+
+<div class="counter">
+  <button id="dec">-</button>
+  <span>{{ count }}</span>
+  <button id="inc">+</button>
+</div>
+```
+
+**Logic File**: `app/logic/components/Counter.spl`
+```spl
+class Counter:
+    fn reset():
+        this.count = 0
+        invalidate()
+```
+
+---
+
+## 3. Execution Timeline
+
+```
+REQUEST LIFECYCLE
+─────────────────
+
+1. Request arrives at server
+        │
+        ▼
+2. Parse .sui, execute {- server -} block
+   ┌─────────────────────────────────────┐
+   │ {- users = db.query("SELECT...") -} │
+   │ {- session = get_session(req)     -} │
+   └─────────────────────────────────────┘
+        │
+        ▼
+3. Render template → HTML string
+   ┌─────────────────────────────────────┐
+   │ {{ users.len() }} users found       │
+   │ {% for u in users: %}               │
+   │   <li>{{ u.name }}</li>             │
+   │ {% end %}                           │
+   └─────────────────────────────────────┘
+        │
+        ▼
+4. Send HTML to browser
+        │
+        ════════════════════════════════════
+        │
+        ▼
+5. Browser displays static HTML
+        │
+        ▼
+6. Load WASM module
+        │
+        ▼
+7. Hydrate: execute {+ client +} block
+   ┌─────────────────────────────────────┐
+   │ {+ on_click("#btn", handler)      +} │
+   │ {+ on_input("#search", filter)    +} │
+   └─────────────────────────────────────┘
+        │
+        ▼
+8. User interacts (click, type, etc.)
+        │
+        ▼
+9. Event handler updates state
+        │
+        ▼
+10. Re-render → PatchSet (not full HTML)
+        │
+        ▼
+11. Apply patches to DOM/TUI
+```
+
+---
+
+## 4. File Types and Structure
+
+### 4.1 Page vs Component
+
+| Type | Extension | Purpose |
+|------|-----------|---------|
+| Page | `.page.sui` | Root mount point, routing, SSR entry |
+| Component | `.ui.sui` | Reusable embedded component |
+
+### 4.2 Directory Layout
+
+```
 app/
   ui/
     pages/
-      Home.page.sui
-      Settings.page.sui
+      Home.page.sui        # SSR entry point
+      Users.page.sui
     components/
-      Counter.ui.sui
-      Dialog.ui.sui
+      Counter.ui.sui       # Reusable component
+      UserList.ui.sui
     layouts/
-      AppShell.ui.sui
+      AppShell.ui.sui      # Layout wrapper
   logic/
     pages/
-      Home.spl
-      Settings.spl
+      Home.spl             # Page logic
+      Users.spl
     components/
-      Counter.spl
-      Dialog.spl
+      Counter.spl          # Component logic
+      UserList.spl
     layouts/
       AppShell.spl
-
   assets/
     styles/
-      base.css          # GUI only
-      theme.tui.json    # TUI mapping
+      base.css             # GUI styles
+      theme.tui.toml       # TUI theme mapping
+```
 
-Matching rules (hard requirement)
+### 4.3 UI/Logic Pairing Rules
 
-For a UI file:
+For every `.sui` file, a matching `.spl` file must exist:
 
+```
 app/ui/components/Counter.ui.sui
-
-
-The logic file must exist:
-
-app/logic/components/Counter.spl
-
-
-And contain a matching public class:
-
-class Counter { ... }
-
-
-Same for pages:
-
-Home.page.sui ↔ Home.spl containing class Home.
-
-
-Why this matters
-
-Deterministic linking in the compiler.
-
-Predictable hot-reload and dependency tracking.
-
-Enables “open counterpart” editor commands (like you do with header/cpp).
-
-
+      ↕ (paired)
+app/logic/components/Counter.spl  →  class Counter { ... }
+```
 
 ---
 
-3. UI file types: root vs embedded
+## 5. Embedding Components
 
-Root page UI
+Use `{@ embed @}` to include components:
 
-Extension: *.page.sui
+```html
+{@ page Home @}
 
-Must define a single root (document/window/mount root).
+{$ let users: List[User] $}
 
-Owns routing/mount policy, page-level context and session usage.
+{- users = UserService.list() -}
 
+<main>
+  <h1>Welcome</h1>
 
-Embedded component UI
+  {# Embed component with props #}
+  {@ embed UserList users=users @}
 
-Extension: *.ui.sui
+  {# Embed with hydration strategy #}
+  {@ embed SearchBox query="" hydrate="visible" @}
+</main>
+```
 
-Defines a reusable component template used inside pages/other components.
+### Hydration Strategies
 
-May declare props, events, slots.
-
-
-Both compile into the same internal artifacts; the only difference is: root page has a mount root and a page lifecycle.
-
-
----
-
-4. JSP-like syntax with two-stage blocks
-
-You requested:
-
-“2 stage variable and statement”
-
-“instanciate time and rendering update time”
-
-“rendering time statement code compiled wasm”
-
-
-Block taxonomy
-
-Stage A: Instantiation-time (host runtime, once)
-
-Use blocks that are explicitly “setup-time”:
-
-<%@ ... %> directives (compile-time + instantiate config)
-
-<%! ... %> declarations (instance fields, helper methods, static defs)
-
-<%~ ... %> instantiate statements (executed once per component instance)
-
-
-Stage B: Render/update-time (compiled to WASM, many times)
-
-<%= expr %> render expression “hole”
-
-<% code %> render statements (if/for/let), compiled to WASM
-
-
-Example: component UI file
-
-app/ui/components/Counter.ui.sui
-
-<%@ component name="Counter" %>
-
-<%! 
-  # instance fields (exist across renders)
-  let count: i32
-%>
-
-<%~ 
-  # instantiate-time init (run once)
-  this.count = props.start
-  bind(this.count, "#countText")     # build dependency graph
-  on_click("#incBtn", this.increment)
-%>
-
-<Box>
-  <Text id="countText">Count: <%= this.count %></Text>
-  <Button id="incBtn">Inc</Button>
-</Box>
-
-Matching logic file: app/logic/components/Counter.spl
-
-class Counter {
-  fn increment() {
-    this.count += 1
-    invalidate()  # request re-render (or auto from binding)
-  }
-}
-
-Notes:
-
-bind() and on_click() are instantiate-time runtime APIs.
-
-<%= this.count %> is a render-time expression compiled into WASM.
-
-
+| Strategy | When hydrates |
+|----------|---------------|
+| `hydrate="load"` | Immediately on page load (default) |
+| `hydrate="visible"` | When scrolled into viewport |
+| `hydrate="idle"` | During browser idle time |
+| `hydrate="interaction"` | On first user interaction |
+| `hydrate="none"` | Never (static only) |
 
 ---
 
-5. Runtime model: component instance, context, session
+## 6. Control Flow in Templates
 
-Each instantiated UI has:
+### Conditionals
 
-props: immutable inputs (for a given instance; can update via parent)
+```html
+{% if user.is_admin: %}
+  <button>Delete All</button>
+{% elif user.is_mod: %}
+  <button>Moderate</button>
+{% else: %}
+  <span>Read only</span>
+{% end %}
+```
 
-state: fields declared via <%! ... %> / logic class fields
+### Loops
 
-context: hierarchical dependency injection (theme, locale, shared services)
+```html
+<ul>
+  {% for item in items: %}
+    <li key="{{ item.id }}">{{ item.name }}</li>
+  {% end %}
+</ul>
+```
 
-session: user/session-scoped storage (client app: persistent store; web: HTTP session analog)
+### Local Variables
 
-ui_counter: per-element instance counters (stable IDs for lists, keyed rendering)
-
-
-Core objects
-
-UiInstance
-
-ComponentInstance
-
-RenderContext { props, this, context, session }
-
-BindingGraph (state → affected holes/nodes)
-
-PatchSet (output of render-time WASM)
-
-
-
----
-
-6. Rendering architecture (GUI HTML vs TUI)
-
-Compiler output (per UI file)
-
-InitIR (instantiate-time program)
-
-TemplateIR (static node tree with dynamic holes)
-
-RenderWasm (WASM module/function that returns PatchSet)
-
-
-Runtime phases
-
-1. Instantiate
-
-Execute InitIR on host runtime
-
-Create BindingGraph + event wiring
-
-
-
-2. Initial render
-
-Call RenderWasm(render_ctx) → PatchSet
-
-Backend applies PatchSet to:
-
-HTML DOM (GUI)
-
-Terminal buffer (TUI)
-
-
-
-
-3. Update loop
-
-Events mutate state (logic methods)
-
-BindingGraph determines what is dirty
-
-Call RenderWasm() again
-
-Apply PatchSet diff
-
-
-
-
-Backend abstraction
-
-RendererBackend.apply(patch: PatchSet)
-
-GUI backend translates to DOM operations and CSS classes.
-
-TUI backend translates to screen buffer operations, focus/keyboard navigation.
-
-
+```html
+{% let total = items.map(i => i.price).sum() %}
+<span>Total: {{ total }}</span>
+```
 
 ---
 
-7. UI library public API (minimal v1)
+## 7. Server vs Client Code
 
-Instantiate-time APIs (host runtime)
+### 7.1 Server Block (`{- -}`)
 
-bind(field_ref, selector_or_hole_id)
+Runs **once** during SSR. Has access to:
+- Database connections
+- Session/auth data
+- File system
+- Environment variables
 
-invalidate() / schedule_render()
+```html
+{-
+  let session = get_session(request)
+  let user = db.find_user(session.user_id)
+  let posts = db.query("SELECT * FROM posts WHERE author = ?", user.id)
+-}
+```
 
+### 7.2 Client Block (`{+ +}`)
+
+Runs **after hydration** in browser. Has access to:
+- DOM events
+- Fetch API
+- Local storage
+- Browser APIs
+
+```html
+{+
+  on_click("#load-more", async fn():
+    let more = await fetch_json("/api/posts?page=" + page)
+    posts = posts.concat(more)
+    invalidate()
+  )
+
+  on_input("#search", fn(e):
+    filter = e.target.value
+    invalidate()
+  )
++}
+```
+
+### 7.3 What Goes Where?
+
+| Code Type | Server `{- -}` | Client `{+ +}` |
+|-----------|----------------|----------------|
+| DB queries | ✓ | ✗ (use fetch) |
+| Session access | ✓ | ✗ |
+| File I/O | ✓ | ✗ |
+| Event handlers | ✗ | ✓ |
+| DOM manipulation | ✗ | ✓ |
+| Fetch API | ✗ | ✓ |
+| Initial state | ✓ | restore from SSR |
+
+---
+
+## 8. Layouts and Slots
+
+### 8.1 Defining a Layout
+
+```html
+{@ layout AppShell @}
+
+{$ let title: str $}
+
+<html>
+  <head>
+    <title>{{ title }} - MyApp</title>
+  </head>
+  <body>
+    <nav>{@ slot nav @}</nav>
+    <main>{@ slot main @}</main>
+    <footer>&copy; 2025</footer>
+  </body>
+</html>
+```
+
+### 8.2 Using a Layout
+
+```html
+{@ page Home layout=AppShell title="Home" @}
+
+{@ fill nav @}
+  <a href="/">Home</a>
+  <a href="/about">About</a>
+{@ end @}
+
+{@ fill main @}
+  <h1>Welcome!</h1>
+  <p>Content here...</p>
+{@ end @}
+```
+
+---
+
+## 9. Dual Renderer: GUI + TUI
+
+Same `.sui` compiles to both:
+
+### 9.1 GUI (Browser/WebView)
+
+- Outputs real HTML/CSS
+- Uses DOM for updates
+- Full CSS support
+
+### 9.2 TUI (Terminal)
+
+- Outputs to terminal buffer
+- Uses box-drawing, colors
+- Subset of CSS (flex, padding, margin)
+- Keyboard navigation
+
+### 9.3 Element Mapping
+
+| Sui Element | GUI | TUI |
+|-------------|-----|-----|
+| `<div>` | `<div>` | Box |
+| `<span>` | `<span>` | Inline text |
+| `<button>` | `<button>` | `[ Label ]` |
+| `<input>` | `<input>` | `[________]` |
+| `<ul>/<li>` | List | Bulleted lines |
+| `<table>` | Table | ASCII table |
+
+### 9.4 TUI Theme
+
+```toml
+# theme.tui.toml
+[colors]
+primary = "blue"
+danger = "red"
+text = "white"
+bg = "black"
+
+[borders]
+default = "single"  # single, double, rounded, none
+
+[focus]
+style = "reverse"
+```
+
+---
+
+## 10. PatchSet Architecture
+
+Render produces patches, not full re-renders:
+
+```
+┌─────────────────────────────────────────┐
+│              PatchSet                   │
+├─────────────────────────────────────────┤
+│ SetText(nodeId, text)                   │
+│ SetAttr(nodeId, name, value)            │
+│ AddClass(nodeId, class)                 │
+│ RemoveClass(nodeId, class)              │
+│ InsertChild(parentId, index, subtree)   │
+│ RemoveChild(parentId, childId)          │
+│ ReplaceSubtree(nodeId, subtree)         │
+│ MoveChild(parentId, fromIdx, toIdx)     │
+└─────────────────────────────────────────┘
+```
+
+---
+
+## 11. Runtime APIs
+
+### 11.1 Client APIs (in `{+ +}` blocks)
+
+```spl
+# Events
 on_click(selector, handler)
-
+on_input(selector, handler)
 on_key(selector, key, handler)
+on_submit(selector, handler)
 
-provide(key, value) / use(key) for context
+# State
+invalidate()                    # Request re-render
+schedule_render(delay_ms)       # Delayed render
 
-session_get(key) / session_set(key, value)
+# Navigation
+navigate(path)                  # Client-side nav
+navigate(path, replace=true)    # Replace history
 
-mount(root_selector) (pages only)
+# Context
+provide(key, value)             # Set context for children
+use(key) -> T                   # Get context value
 
-navigate(route) (pages only)
+# Storage
+local_get(key) -> str?
+local_set(key, value)
+session_get(key) -> str?
+session_set(key, value)
+```
 
+### 11.2 Server APIs (in `{- -}` blocks)
 
-Render-time APIs (WASM-safe)
+```spl
+# Request
+get_session(req) -> Session
+get_cookie(req, name) -> str?
+get_header(req, name) -> str?
 
-Pure helpers: formatting, escaping, i18n lookup, class merging
-
-Conditional and loops in <% %> blocks
-
-No direct DOM/terminal access; only “emit patch ops”
-
-
-
----
-
-8. Feature list (by milestone) with development plan
-
-Milestone 0 — Tooling skeleton (low–medium)
-
-Parser for .sui (HTML-like + code blocks)
-
-Split into InitIR/RenderIR/TemplateIR
-
-Pairing rule enforcement (UI ↔ Logic file/class)
-
-Basic build pipeline: sui -> wasm + metadata
-
-
-Difficulty: Medium (parser + IR design, but constrained scope)
-
+# Response helpers
+redirect(url)
+set_cookie(name, value, opts)
+set_header(name, value)
+```
 
 ---
 
-Milestone 1 — Static template + text holes (medium)
+## 12. Milestones
 
-Support <%= expr %> in text and attributes
-
-No structural diffs yet (no dynamic child list)
-
-PatchSet supports:
-
-SetText(nodeId, text)
-
-SetAttr(nodeId, name, value)
-
-AddClass/RemoveClass
-
-
-
-Difficulty: Medium (stable node IDs + hole mapping)
-
+| Phase | Features | Difficulty |
+|-------|----------|------------|
+| M0 | Parser, IR design, pairing rules | Medium |
+| M1 | Static templates, `{{ }}` holes | Medium |
+| M2 | `{- -}` / `{+ +}` blocks, events | High |
+| M3 | Binding graph, reactivity | High |
+| M4 | TUI renderer | High |
+| M5 | `{% if %}` / `{% for %}` | Very High |
+| M6 | SSR + hydration | Very High |
 
 ---
 
-Milestone 2 — Events + reactivity core (high)
+## 13. Full Example: User List Page
 
-Instantiate-time binding graph:
+**Page**: `app/ui/pages/Users.page.sui`
+```html
+{@ page Users layout=AppShell title="Users" @}
 
-track which fields affect which holes
+{$ let users: List[User] $}
+{$ let filter: str $}
+{$ let loading: bool $}
 
+{-
+  users = db.query("SELECT * FROM users ORDER BY name")
+  filter = ""
+  loading = false
+-}
 
-Event system:
+{+
+  on_input("#search", fn(e):
+    filter = e.target.value
+    invalidate()
+  )
 
-GUI: DOM events → dispatch → logic method
+  on_click("#refresh", async fn():
+    loading = true
+    invalidate()
+    users = await fetch_json("/api/users")
+    loading = false
+    invalidate()
+  )
++}
 
-TUI: keyboard navigation + “activate” semantics
+{@ fill main @}
+  <div class="toolbar">
+    <input id="search" placeholder="Filter..." value="{{ filter }}" />
+    <button id="refresh">
+      {% if loading: %}Loading...{% else: %}Refresh{% end %}
+    </button>
+  </div>
 
+  <ul class="user-list">
+    {% for u in users.filter(u => u.name.contains(filter)): %}
+      <li key="{{ u.id }}">
+        <strong>{{ u.name }}</strong>
+        <span>{{ u.email }}</span>
+      </li>
+    {% end %}
+  </ul>
+{@ end @}
+```
 
-Update scheduling / batching (microtask-like for GUI, tick loop for TUI)
-
-
-Difficulty: High (correctness, edge cases, avoiding infinite loops)
-
-
----
-
-Milestone 3 — TUI renderer (high)
-
-Layout engine subset:
-
-vertical/horizontal stack
-
-width/height constraints
-
-padding/margin subset
-
-
-Theme mapping (CSS-ish → terminal style)
-
-Focus, tab order, scrolling containers
-
-
-Difficulty: High (layout + input model are non-trivial)
-
-
----
-
-Milestone 4 — Dynamic structure (very high)
-
-<% if %>, <% for %> generating child lists
-
-Keyed lists (key= attribute) for stable identity
-
-PatchSet extends:
-
-InsertChild(parentId, index, subtree)
-
-RemoveChild(parentId, childId)
-
-ReplaceSubtree(nodeId, subtree)
-
-
-
-Difficulty: Very High (diffing, stable identity, performance)
-
+**Logic**: `app/logic/pages/Users.spl`
+```spl
+class Users:
+    fn delete_user(id: i64):
+        this.users = this.users.filter(u => u.id != id)
+        invalidate()
+```
 
 ---
 
-Milestone 5 — Server-side rendering + hydration (very high)
+## 14. See Also
 
-Server render to HTML string (or DOM-less tree)
-
-Hydration: bind WASM runtime to existing DOM
-
-Session semantics align with web
-
-
-Difficulty: Very High (hydration correctness, mismatch handling)
-
-
----
-
-9. Difficulty/risk matrix (summary)
-
-Area    Difficulty  Key risks
-
-UI/logic pairing + build tooling    Medium  naming edge cases, refactors
-Template parsing + IR   Medium–High HTML+code grammar, error recovery
-WASM render function    High    ABI design for PatchSet, perf
-Reactivity/binding graph    High    dependency tracking, invalidation correctness
-TUI renderer + layout   High    layout rules, input/focus, terminal quirks
-Structural diffs (lists/conditionals)   Very High   stable keys, patch complexity
-SSR + hydration Very High   DOM mismatch, partial hydration, security
-
-
-
----
-
-10. Recommended “v1” scope (to ship something usable)
-
-If you want an early working system for your client GUI/TUI app:
-
-Milestone 0–3 only
-
-Constrain templates to:
-
-static structure
-
-dynamic text/attrs
-
-events
-
-no dynamic child lists (initially) This yields a usable app framework quickly, and you can add lists/diff later.
-
-
-
-
----
-
-If you want, I can convert the above into a repository-ready markdown spec (e.g., doc/spec/ui_framework.md) and add:
-
-precise grammar for .sui
-
-exact PatchSet ABI (binary layout / serialization)
-
-a concrete minimal component set (Box, Text, Button, Input, List, Window)
-
-the rules for node IDs and selectors so TUI and GUI stay consistent.
+- `doc/web_framework.md` - Routing, controllers, API endpoints
+- `doc/feature.md` - Feature list (#500-536)
+- `doc/spec/language.md` - Simple language specification

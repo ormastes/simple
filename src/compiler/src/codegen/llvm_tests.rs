@@ -63,20 +63,20 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn test_llvm_type_mapping() {
         use crate::hir::TypeId as T;
-        
+
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         // Test integer types map correctly
         assert_eq!(backend.map_type(&T::I32).unwrap(), LlvmType::I32);
         assert_eq!(backend.map_type(&T::I64).unwrap(), LlvmType::I64);
         assert_eq!(backend.map_type(&T::U32).unwrap(), LlvmType::I32);
         assert_eq!(backend.map_type(&T::U64).unwrap(), LlvmType::I64);
-        
+
         // Test floating point types
         assert_eq!(backend.map_type(&T::F32).unwrap(), LlvmType::F32);
         assert_eq!(backend.map_type(&T::F64).unwrap(), LlvmType::F64);
-        
+
         // Test bool
         assert_eq!(backend.map_type(&T::BOOL).unwrap(), LlvmType::I1);
     }
@@ -105,7 +105,7 @@ mod tests {
     fn test_compile_simple_function() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         // TODO: Create proper MIR function when implementing actual compilation
         // For now, just verify the backend can be created
         assert_eq!(backend.name(), "llvm");
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn test_emit_object_code() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        
+
         // TODO: Create proper MIR module when implementing object emission
         // For now, just verify backend supports the target
         assert!(LlvmBackend::supports_target(&target));
@@ -127,7 +127,7 @@ mod tests {
     fn test_backend_target() {
         let target = Target::new(TargetArch::X86, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         assert_eq!(backend.target().arch, TargetArch::X86);
         assert_eq!(backend.target().os, TargetOS::Linux);
     }
@@ -138,7 +138,7 @@ mod tests {
     fn test_compile_multiple_functions() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         // TODO: Will implement when we have proper MIR function creation
         assert_eq!(backend.pointer_width(), 64);
     }
@@ -149,17 +149,29 @@ mod tests {
     fn test_native_backend_trait() {
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         // Test trait methods
         assert_eq!(backend.name(), "llvm");
         assert_eq!(backend.target().arch, TargetArch::X86_64);
-        
+
         // Test supports_target
-        assert!(LlvmBackend::supports_target(&Target::new(TargetArch::X86, TargetOS::Linux)));
-        assert!(LlvmBackend::supports_target(&Target::new(TargetArch::X86_64, TargetOS::Linux)));
-        assert!(LlvmBackend::supports_target(&Target::new(TargetArch::Arm, TargetOS::Linux)));
-        assert!(LlvmBackend::supports_target(&Target::new(TargetArch::Riscv32, TargetOS::Linux)));
-        
+        assert!(LlvmBackend::supports_target(&Target::new(
+            TargetArch::X86,
+            TargetOS::Linux
+        )));
+        assert!(LlvmBackend::supports_target(&Target::new(
+            TargetArch::X86_64,
+            TargetOS::Linux
+        )));
+        assert!(LlvmBackend::supports_target(&Target::new(
+            TargetArch::Arm,
+            TargetOS::Linux
+        )));
+        assert!(LlvmBackend::supports_target(&Target::new(
+            TargetArch::Riscv32,
+            TargetOS::Linux
+        )));
+
         // TODO: Test compile through trait when we have proper MIR construction
     }
 
@@ -167,14 +179,20 @@ mod tests {
     #[test]
     fn test_backend_kind_selection() {
         use crate::codegen::BackendKind;
-        
+
         // 32-bit targets should select LLVM
         let target_32 = Target::new(TargetArch::X86, TargetOS::Linux);
-        assert!(matches!(BackendKind::for_target(&target_32), BackendKind::Llvm));
-        
+        assert!(matches!(
+            BackendKind::for_target(&target_32),
+            BackendKind::Llvm
+        ));
+
         // 64-bit targets should select Cranelift (default for fast builds)
         let target_64 = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        assert!(matches!(BackendKind::for_target(&target_64), BackendKind::Cranelift));
+        assert!(matches!(
+            BackendKind::for_target(&target_64),
+            BackendKind::Cranelift
+        ));
     }
 
     /// Test LLVM module creation
@@ -183,7 +201,7 @@ mod tests {
     fn test_llvm_module_creation() {
         let target = Target::new(TargetArch::X86, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         // Verify module can be created
         assert!(backend.create_module("test_module").is_ok());
     }
@@ -193,14 +211,14 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn test_llvm_function_signature() {
         use crate::hir::TypeId as T;
-        
+
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         // Test simple function signature: fn(i32, i32) -> i32
         let params = vec![T::I32, T::I32];
         let ret_type = T::I32;
-        
+
         let sig = backend.create_function_signature("add", &params, &ret_type);
         assert!(sig.is_ok());
     }
@@ -214,19 +232,19 @@ mod tests {
         let backend_32 = LlvmBackend::new(target_32).unwrap();
         let triple_32 = backend_32.get_target_triple();
         assert!(triple_32.contains("i686") || triple_32.contains("i386"));
-        
+
         // Test 64-bit x86
         let target_64 = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend_64 = LlvmBackend::new(target_64).unwrap();
         let triple_64 = backend_64.get_target_triple();
         assert!(triple_64.contains("x86_64"));
-        
+
         // Test 32-bit ARM
         let target_arm = Target::new(TargetArch::Arm, TargetOS::Linux);
         let backend_arm = LlvmBackend::new(target_arm).unwrap();
         let triple_arm = backend_arm.get_target_triple();
         assert!(triple_arm.contains("arm") || triple_arm.contains("armv7"));
-        
+
         // Test 32-bit RISC-V
         let target_rv32 = Target::new(TargetArch::Riscv32, TargetOS::Linux);
         let backend_rv32 = LlvmBackend::new(target_rv32).unwrap();
@@ -238,24 +256,26 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn test_llvm_ir_generation() {
         use crate::hir::TypeId as T;
-        
+
         let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         // Create module
         backend.create_module("test_ir").unwrap();
-        
+
         // Create function: fn add(i32, i32) -> i32
-        backend.create_function_signature("add", &[T::I32, T::I32], &T::I32).unwrap();
-        
+        backend
+            .create_function_signature("add", &[T::I32, T::I32], &T::I32)
+            .unwrap();
+
         // Get IR
         let ir = backend.get_ir().unwrap();
-        
+
         // Verify IR contains our function
         assert!(ir.contains("define"));
         assert!(ir.contains("add"));
         assert!(ir.contains("i32"));
-        
+
         // Verify module
         backend.verify().unwrap();
     }
@@ -265,23 +285,29 @@ mod tests {
     #[cfg(feature = "llvm")]
     fn test_llvm_ir_different_types() {
         use crate::hir::TypeId as T;
-        
-        let target = Target::new(TargetArch::X86, TargetOS::Linux);  // 32-bit!
+
+        let target = Target::new(TargetArch::X86, TargetOS::Linux); // 32-bit!
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         backend.create_module("types_test").unwrap();
-        
+
         // Test i64 function
-        backend.create_function_signature("fn_i64", &[T::I64], &T::I64).unwrap();
-        
+        backend
+            .create_function_signature("fn_i64", &[T::I64], &T::I64)
+            .unwrap();
+
         // Test f32 function
-        backend.create_function_signature("fn_f32", &[T::F32, T::F32], &T::F32).unwrap();
-        
+        backend
+            .create_function_signature("fn_f32", &[T::F32, T::F32], &T::F32)
+            .unwrap();
+
         // Test f64 function
-        backend.create_function_signature("fn_f64", &[T::F64], &T::F64).unwrap();
-        
+        backend
+            .create_function_signature("fn_f64", &[T::F64], &T::F64)
+            .unwrap();
+
         let ir = backend.get_ir().unwrap();
-        
+
         // Check that functions were created
         assert!(ir.contains("fn_i64"));
         assert!(ir.contains("fn_f32"));
@@ -289,7 +315,7 @@ mod tests {
         assert!(ir.contains("i64"));
         assert!(ir.contains("float"));
         assert!(ir.contains("double"));
-        
+
         backend.verify().unwrap();
     }
 
@@ -297,715 +323,797 @@ mod tests {
     #[test]
     #[cfg(feature = "llvm")]
     fn test_32bit_target_triple_in_ir() {
-        let target = Target::new(TargetArch::Arm, TargetOS::Linux);  // ARMv7 32-bit
+        let target = Target::new(TargetArch::Arm, TargetOS::Linux); // ARMv7 32-bit
         let backend = LlvmBackend::new(target).unwrap();
-        
+
         backend.create_module("armv7_test").unwrap();
-        
+
         let ir = backend.get_ir().unwrap();
-        
+
         // Verify target triple is in IR
         assert!(ir.contains("target triple"));
         assert!(ir.contains("armv7") || ir.contains("arm"));
     }
 }
 
-    /// Test complete function compilation with basic blocks
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_complete_function_compilation() {
-        use crate::hir::TypeId as T;
-        
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("complete_fn").unwrap();
-        
-        // Compile function: fn answer() -> i32 { return 42; }
-        backend.compile_simple_function("answer", &[], &T::I32, 42).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify function exists
-        assert!(ir.contains("define"));
-        assert!(ir.contains("answer"));
-        
-        // Verify basic block
-        assert!(ir.contains("entry:"));
-        
-        // Verify return instruction with constant
-        assert!(ir.contains("ret i32 42"));
-        
-        backend.verify().unwrap();
-    }
+/// Test complete function compilation with basic blocks
+#[test]
+#[cfg(feature = "llvm")]
+fn test_complete_function_compilation() {
+    use crate::hir::TypeId as T;
 
-    /// Test 32-bit function compilation
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_32bit_function_compilation() {
-        use crate::hir::TypeId as T;
-        
-        // Use actual 32-bit target (i686)
-        let target = Target::new(TargetArch::X86, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("i686_test").unwrap();
-        
-        // Compile function for 32-bit target
-        backend.compile_simple_function("get_value", &[], &T::I32, 100).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify it's targeting i686
-        assert!(ir.contains("i686"));
-        assert!(ir.contains("get_value"));
-        assert!(ir.contains("ret i32 100"));
-        
-        backend.verify().unwrap();
-    }
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
 
-    /// Test function with parameters
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_function_with_parameters() {
-        use crate::hir::TypeId as T;
-        
-        let target = Target::new(TargetArch::Arm, TargetOS::Linux);  // ARMv7
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("params_test").unwrap();
-        
-        // Function with 2 i32 parameters (though we ignore them for now)
-        backend.compile_simple_function("dummy", &[T::I32, T::I32], &T::I32, 0).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify parameters in signature
-        assert!(ir.contains("i32"));
-        assert!(ir.contains("dummy"));
-        assert!(ir.contains("armv7") || ir.contains("arm"));
-        
-        backend.verify().unwrap();
-    }
+    backend.create_module("complete_fn").unwrap();
 
-    /// Test binary operation compilation - integer add
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_binop_integer_add() {
-        use crate::hir::TypeId as T;
-        use crate::codegen::llvm::BinOp;
-        
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("binop_test").unwrap();
-        
-        // fn add(a: i32, b: i32) -> i32 { return a + b; }
-        backend.compile_binop_function("add", &T::I32, &T::I32, &T::I32, BinOp::Add).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify IR contains add instruction
-        assert!(ir.contains("add"));
-        assert!(ir.contains("i32"));
-        assert!(ir.contains("ret"));
-        
-        backend.verify().unwrap();
-    }
+    // Compile function: fn answer() -> i32 { return 42; }
+    backend
+        .compile_simple_function("answer", &[], &T::I32, 42)
+        .unwrap();
 
-    /// Test binary operations on 32-bit target
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_binop_32bit_target() {
-        use crate::hir::TypeId as T;
-        use crate::codegen::llvm::BinOp;
-        
-        // Use i686 (32-bit x86)
-        let target = Target::new(TargetArch::X86, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("i686_binop").unwrap();
-        
-        // Test all 4 operations
-        backend.compile_binop_function("add", &T::I32, &T::I32, &T::I32, BinOp::Add).unwrap();
-        backend.compile_binop_function("sub", &T::I32, &T::I32, &T::I32, BinOp::Sub).unwrap();
-        backend.compile_binop_function("mul", &T::I32, &T::I32, &T::I32, BinOp::Mul).unwrap();
-        backend.compile_binop_function("div", &T::I32, &T::I32, &T::I32, BinOp::Div).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify all operations present
-        assert!(ir.contains("add"));
-        assert!(ir.contains("sub"));
-        assert!(ir.contains("mul"));
-        assert!(ir.contains("sdiv")); // signed division
-        
-        // Verify 32-bit target
-        assert!(ir.contains("i686"));
-        
-        backend.verify().unwrap();
-    }
+    let ir = backend.get_ir().unwrap();
 
-    /// Test floating point binary operations
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_binop_float() {
-        use crate::hir::TypeId as T;
-        use crate::codegen::llvm::BinOp;
-        
-        let target = Target::new(TargetArch::Arm, TargetOS::Linux);  // ARMv7
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("float_binop").unwrap();
-        
-        // fn fadd(a: f32, b: f32) -> f32 { return a + b; }
-        backend.compile_binop_function("fadd", &T::F32, &T::F32, &T::F32, BinOp::Add).unwrap();
-        backend.compile_binop_function("fsub", &T::F32, &T::F32, &T::F32, BinOp::Sub).unwrap();
-        backend.compile_binop_function("fmul", &T::F32, &T::F32, &T::F32, BinOp::Mul).unwrap();
-        backend.compile_binop_function("fdiv", &T::F32, &T::F32, &T::F32, BinOp::Div).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify float operations
-        assert!(ir.contains("fadd"));
-        assert!(ir.contains("fsub"));
-        assert!(ir.contains("fmul"));
-        assert!(ir.contains("fdiv"));
-        assert!(ir.contains("float"));
-        
-        backend.verify().unwrap();
-    }
+    // Verify function exists
+    assert!(ir.contains("define"));
+    assert!(ir.contains("answer"));
 
-    /// Test 64-bit integer operations
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_binop_i64() {
-        use crate::hir::TypeId as T;
-        use crate::codegen::llvm::BinOp;
-        
-        let target = Target::new(TargetArch::Riscv32, TargetOS::Linux);  // RISC-V 32-bit
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("i64_binop").unwrap();
-        
-        // 64-bit operations on 32-bit target (important test!)
-        backend.compile_binop_function("add64", &T::I64, &T::I64, &T::I64, BinOp::Add).unwrap();
-        backend.compile_binop_function("mul64", &T::I64, &T::I64, &T::I64, BinOp::Mul).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify i64 operations on 32-bit target
-        assert!(ir.contains("i64"));
-        assert!(ir.contains("add"));
-        assert!(ir.contains("mul"));
-        assert!(ir.contains("riscv32"));
-        
-        backend.verify().unwrap();
-    }
+    // Verify basic block
+    assert!(ir.contains("entry:"));
 
-    /// Test control flow - if/else with phi
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_control_flow_conditional() {
-        use crate::hir::TypeId as T;
-        
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("control_flow").unwrap();
-        
-        // fn check(x: i32) -> i32 { if (x > 0) { return 1; } else { return 0; } }
-        backend.compile_conditional_function("check", &T::I32, &T::I32, 1, 0).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify control flow elements
-        assert!(ir.contains("entry:"));
-        assert!(ir.contains("then:"));
-        assert!(ir.contains("else:"));
-        assert!(ir.contains("merge:"));
-        assert!(ir.contains("phi"));
-        assert!(ir.contains("br i1")); // conditional branch
-        assert!(ir.contains("icmp")); // integer compare
-        
-        backend.verify().unwrap();
-    }
+    // Verify return instruction with constant
+    assert!(ir.contains("ret i32 42"));
 
-    /// Test control flow on 32-bit target (i686)
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_control_flow_32bit() {
-        use crate::hir::TypeId as T;
-        
-        let target = Target::new(TargetArch::X86, TargetOS::Linux);  // i686
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("i686_control").unwrap();
-        
-        // Conditional on 32-bit target
-        backend.compile_conditional_function("test32", &T::I32, &T::I32, 42, 0).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify 32-bit target
-        assert!(ir.contains("i686"));
-        
-        // Verify control flow works
-        assert!(ir.contains("phi"));
-        assert!(ir.contains("br"));
-        
-        backend.verify().unwrap();
-    }
+    backend.verify().unwrap();
+}
 
-    /// Test control flow on ARMv7 (32-bit ARM)
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_control_flow_armv7() {
-        use crate::hir::TypeId as T;
-        
-        let target = Target::new(TargetArch::Arm, TargetOS::Linux);  // ARMv7
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("armv7_control").unwrap();
-        
-        backend.compile_conditional_function("arm_test", &T::I32, &T::I32, 100, -100).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        
-        // Verify ARMv7 target
-        assert!(ir.contains("armv7") || ir.contains("arm"));
-        
-        // Verify control flow
-        assert!(ir.contains("phi"));
-        assert!(ir.contains("icmp sgt")); // signed greater than
-        
-        backend.verify().unwrap();
-    }
+/// Test 32-bit function compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_32bit_function_compilation() {
+    use crate::hir::TypeId as T;
 
-    /// Test object code emission for x86_64
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_object_emission_x86_64() {
-        use crate::hir::TypeId as T;
-        use crate::mir::MirModule;
-        
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("obj_test").unwrap();
-        
-        // Create a simple function
-        backend.compile_simple_function("main", &[], &T::I32, 0).unwrap();
-        
-        // Emit object code
-        let mir_module = MirModule::default();
-        let object_code = backend.emit_object(&mir_module).unwrap();
-        
-        // Verify we got some object code
-        assert!(!object_code.is_empty());
-        
-        // ELF magic number for x86_64 Linux
-        assert_eq!(&object_code[0..4], b"\x7fELF");
-    }
+    // Use actual 32-bit target (i686)
+    let target = Target::new(TargetArch::X86, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
 
-    /// Test object code emission for 32-bit i686
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_object_emission_i686() {
-        use crate::hir::TypeId as T;
-        use crate::mir::MirModule;
-        
-        let target = Target::new(TargetArch::X86, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("i686_obj").unwrap();
-        
-        // Create function with binary operation
-        backend.compile_binop_function("add", &T::I32, &T::I32, &T::I32, 
-            crate::codegen::llvm::BinOp::Add).unwrap();
-        
-        // Emit object code
-        let mir_module = MirModule::default();
-        let object_code = backend.emit_object(&mir_module).unwrap();
-        
-        // Verify object code generated
-        assert!(!object_code.is_empty());
-        assert_eq!(&object_code[0..4], b"\x7fELF");
-        
-        // Verify it's 32-bit ELF (class = 1)
-        assert_eq!(object_code[4], 1); // ELFCLASS32
-    }
+    backend.create_module("i686_test").unwrap();
 
-    /// Test object code emission for ARMv7
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_object_emission_armv7() {
-        use crate::hir::TypeId as T;
-        use crate::mir::MirModule;
-        
-        let target = Target::new(TargetArch::Arm, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("arm_obj").unwrap();
-        
-        // Create control flow function
-        backend.compile_conditional_function("check", &T::I32, &T::I32, 1, 0).unwrap();
-        
-        // Emit object code
-        let mir_module = MirModule::default();
-        let object_code = backend.emit_object(&mir_module).unwrap();
-        
-        // Verify object code
-        assert!(!object_code.is_empty());
-        assert_eq!(&object_code[0..4], b"\x7fELF");
-        
-        // Verify it's 32-bit
-        assert_eq!(object_code[4], 1); // ELFCLASS32
-    }
+    // Compile function for 32-bit target
+    backend
+        .compile_simple_function("get_value", &[], &T::I32, 100)
+        .unwrap();
 
-    /// Test object code emission for RISC-V 32
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_object_emission_riscv32() {
-        use crate::hir::TypeId as T;
-        use crate::mir::MirModule;
-        
-        let target = Target::new(TargetArch::Riscv32, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("rv32_obj").unwrap();
-        
-        // Create function
-        backend.compile_simple_function("test", &[], &T::I32, 42).unwrap();
-        
-        // Emit object code
-        let mir_module = MirModule::default();
-        let object_code = backend.emit_object(&mir_module).unwrap();
-        
-        // Verify object code
-        assert!(!object_code.is_empty());
-        assert_eq!(&object_code[0..4], b"\x7fELF");
-        assert_eq!(object_code[4], 1); // ELFCLASS32
-    }
+    let ir = backend.get_ir().unwrap();
 
-    /// Test that object code is valid relocatable object
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_object_is_relocatable() {
-        use crate::hir::TypeId as T;
-        use crate::mir::MirModule;
-        
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("reloc_test").unwrap();
-        backend.compile_simple_function("func", &[], &T::I32, 123).unwrap();
-        
-        let mir_module = MirModule::default();
-        let object_code = backend.emit_object(&mir_module).unwrap();
-        
-        assert!(!object_code.is_empty());
-        
-        // ELF type should be ET_REL (relocatable, value 1)
-        assert_eq!(object_code[16], 1); // e_type LSB
-    }
+    // Verify it's targeting i686
+    assert!(ir.contains("i686"));
+    assert!(ir.contains("get_value"));
+    assert!(ir.contains("ret i32 100"));
 
-    /// Test MIR function compilation
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_mir_function_compilation() {
-        use crate::hir::TypeId as T;
-        use crate::mir::{MirFunction, MirBlock};
-        use crate::mir::instructions::{MirInst, MirTerminator, VReg, BlockId};
-        use simple_parser::ast::Visibility;
-        use crate::mir::MirModule;
-        
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("mir_test").unwrap();
-        
-        // Create a simple MIR function: fn test() -> i32 { return 42; }
-        let mut func = MirFunction::new("test".to_string(), T::I32, Visibility::Public);
-        
-        // Add instruction: const i64 42 -> v0
-        let v0 = VReg(0);
-        func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 42 });
-        
-        // Add terminator: return v0
-        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
-        
-        // Compile function
-        backend.compile_function(&func).unwrap();
-        
-        // Verify IR
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("define"));
-        assert!(ir.contains("test"));
-        assert!(ir.contains("ret i64 42"));
-        
-        backend.verify().unwrap();
-    }
+    backend.verify().unwrap();
+}
 
-    /// Test MIR binary operation compilation
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_mir_binop_compilation() {
-        use crate::hir::{TypeId as T, BinOp};
-        use crate::mir::{MirFunction, MirLocal};
-        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
-        use crate::mir::effects::LocalKind;
-        use simple_parser::ast::Visibility;
-        use crate::mir::MirModule;
-        
-        let target = Target::new(TargetArch::X86, TargetOS::Linux);  // i686
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("mir_binop").unwrap();
-        
-        // Create MIR function: fn add(a: i32, b: i32) -> i32 { return a + b; }
-        let mut func = MirFunction::new("add".to_string(), T::I32, Visibility::Public);
-        
-        // Add parameters
-        func.params.push(MirLocal {
-            name: "a".to_string(),
-            ty: T::I32,
-            kind: LocalKind::Parameter,
-        });
-        func.params.push(MirLocal {
-            name: "b".to_string(),
-            ty: T::I32,
-            kind: LocalKind::Parameter,
-        });
-        
-        // Parameters map to v0 and v1
-        let v0 = VReg(0);
-        let v1 = VReg(1);
-        let v2 = VReg(2);
-        
-        // Add instruction: v2 = add v0, v1
-        func.blocks[0].instructions.push(MirInst::BinOp {
-            dest: v2,
-            op: BinOp::Add,
-            left: v0,
-            right: v1,
-        });
-        
-        // Add terminator: return v2
-        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v2) });
-        
-        // Compile function
-        backend.compile_function(&func).unwrap();
-        
-        // Verify IR
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("i686"));
-        assert!(ir.contains("add"));
-        assert!(ir.contains("ret"));
-        
-        backend.verify().unwrap();
-    }
+/// Test function with parameters
+#[test]
+#[cfg(feature = "llvm")]
+fn test_function_with_parameters() {
+    use crate::hir::TypeId as T;
 
-    /// Test MIR control flow compilation
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_mir_control_flow_compilation() {
-        use crate::hir::{TypeId as T, BinOp};
-        use crate::mir::{MirFunction, MirLocal, MirBlock};
-        use crate::mir::instructions::{MirInst, MirTerminator, VReg, BlockId};
-        use crate::mir::effects::LocalKind;
-        use simple_parser::ast::Visibility;
-        
-        let target = Target::new(TargetArch::Arm, TargetOS::Linux);  // ARMv7
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("mir_cf").unwrap();
-        
-        // Create MIR function with branching
-        let mut func = MirFunction::new("check".to_string(), T::I32, Visibility::Public);
-        
-        // Add parameter
-        func.params.push(MirLocal {
-            name: "x".to_string(),
-            ty: T::I32,
-            kind: LocalKind::Parameter,
-        });
-        
-        let v0 = VReg(0);  // parameter
-        let v_true = VReg(1);
-        let v_false = VReg(2);
-        
-        // Block 0: check condition
-        func.blocks[0].instructions.push(MirInst::ConstBool { dest: v0, value: true });
-        func.blocks[0].terminator = Some(MirTerminator::Branch {
-            cond: v0,
-            then_block: BlockId(1),
-            else_block: BlockId(2),
-        });
-        
-        // Block 1: then branch
-        let mut then_block = MirBlock::new(BlockId(1));
-        then_block.instructions.push(MirInst::ConstInt { dest: v_true, value: 1 });
-        then_block.terminator = Some(MirTerminator::Return { value: Some(v_true) });
-        func.blocks.push(then_block);
-        
-        // Block 2: else branch
-        let mut else_block = MirBlock::new(BlockId(2));
-        else_block.instructions.push(MirInst::ConstInt { dest: v_false, value: 0 });
-        else_block.terminator = Some(MirTerminator::Return { value: Some(v_false) });
-        func.blocks.push(else_block);
-        
-        // Compile function
-        backend.compile_function(&func).unwrap();
-        
-        // Verify IR
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("br i1"));
-        assert!(ir.contains("bb1"));
-        assert!(ir.contains("bb2"));
-        
-        backend.verify().unwrap();
-    }
+    let target = Target::new(TargetArch::Arm, TargetOS::Linux); // ARMv7
+    let backend = LlvmBackend::new(target).unwrap();
 
-    /// Test MIR float constant compilation
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_mir_float_const() {
-        use crate::hir::TypeId as T;
-        use crate::mir::MirFunction;
-        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
-        use simple_parser::ast::Visibility;
-        
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("float_test").unwrap();
-        
-        // fn test() -> f64 { return 3.14; }
-        let mut func = MirFunction::new("test".to_string(), T::F64, Visibility::Public);
-        
-        let v0 = VReg(0);
-        func.blocks[0].instructions.push(MirInst::ConstFloat { dest: v0, value: 3.14 });
-        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
-        
-        backend.compile_function(&func).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("3.14"));
-        assert!(ir.contains("ret double"));
-        
-        backend.verify().unwrap();
-    }
+    backend.create_module("params_test").unwrap();
 
-    /// Test MIR unary operation compilation
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_mir_unaryop() {
-        use crate::hir::{TypeId as T, UnaryOp};
-        use crate::mir::MirFunction;
-        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
-        use simple_parser::ast::Visibility;
-        
-        let target = Target::new(TargetArch::Aarch64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("unary_test").unwrap();
-        
-        // fn neg(x: i32) -> i32 { return -x; }
-        let mut func = MirFunction::new("neg".to_string(), T::I32, Visibility::Public);
-        
-        use crate::mir::MirLocal;
-        use crate::mir::effects::LocalKind;
-        func.params.push(MirLocal {
-            name: "x".to_string(),
-            ty: T::I32,
-            kind: LocalKind::Parameter,
-        });
-        
-        let v0 = VReg(0);  // parameter
-        let v1 = VReg(1);  // result
-        
-        func.blocks[0].instructions.push(MirInst::UnaryOp {
-            dest: v1,
-            op: UnaryOp::Neg,
-            operand: v0,
-        });
-        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v1) });
-        
-        backend.compile_function(&func).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("sub"));  // Negation is sub 0, x
-        
-        backend.verify().unwrap();
-    }
+    // Function with 2 i32 parameters (though we ignore them for now)
+    backend
+        .compile_simple_function("dummy", &[T::I32, T::I32], &T::I32, 0)
+        .unwrap();
 
-    /// Test MIR memory operations (Load/Store)
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_mir_memory_ops() {
-        use crate::hir::TypeId as T;
-        use crate::mir::MirFunction;
-        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
-        use simple_parser::ast::Visibility;
-        
-        let target = Target::new(TargetArch::RiscV64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("mem_test").unwrap();
-        
-        // fn test() -> i32 { let x = 42; return x; }
-        let mut func = MirFunction::new("test".to_string(), T::I32, Visibility::Public);
-        
-        let v0 = VReg(0);  // const 42
-        let v1 = VReg(1);  // alloca
-        let v2 = VReg(2);  // loaded value
-        
-        func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 42 });
-        func.blocks[0].instructions.push(MirInst::GcAlloc { dest: v1, ty: T::I32 });
-        func.blocks[0].instructions.push(MirInst::Store { addr: v1, value: v0, ty: T::I32 });
-        func.blocks[0].instructions.push(MirInst::Load { dest: v2, addr: v1, ty: T::I32 });
-        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v2) });
-        
-        backend.compile_function(&func).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("alloca"));
-        assert!(ir.contains("store"));
-        assert!(ir.contains("load"));
-        
-        backend.verify().unwrap();
-    }
+    let ir = backend.get_ir().unwrap();
 
-    /// Test MIR string constant compilation
-    #[test]
-    #[cfg(feature = "llvm")]
-    fn test_mir_string_const() {
-        use crate::hir::TypeId as T;
-        use crate::mir::MirFunction;
-        use crate::mir::instructions::{MirInst, MirTerminator, VReg};
-        use simple_parser::ast::Visibility;
-        
-        let target = Target::new(TargetArch::X86, TargetOS::Linux);  // i686
-        let backend = LlvmBackend::new(target).unwrap();
-        
-        backend.create_module("str_test").unwrap();
-        
-        // fn test() -> *i8 { return "hello"; }
-        let mut func = MirFunction::new("test".to_string(), T::Pointer, Visibility::Public);
-        
-        let v0 = VReg(0);
-        func.blocks[0].instructions.push(MirInst::ConstString {
-            dest: v0,
-            value: "hello".to_string(),
-        });
-        func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
-        
-        backend.compile_function(&func).unwrap();
-        
-        let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("hello"));
-        assert!(ir.contains("@str"));
-        
-        backend.verify().unwrap();
-    }
+    // Verify parameters in signature
+    assert!(ir.contains("i32"));
+    assert!(ir.contains("dummy"));
+    assert!(ir.contains("armv7") || ir.contains("arm"));
+
+    backend.verify().unwrap();
+}
+
+/// Test binary operation compilation - integer add
+#[test]
+#[cfg(feature = "llvm")]
+fn test_binop_integer_add() {
+    use crate::codegen::llvm::BinOp;
+    use crate::hir::TypeId as T;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("binop_test").unwrap();
+
+    // fn add(a: i32, b: i32) -> i32 { return a + b; }
+    backend
+        .compile_binop_function("add", &T::I32, &T::I32, &T::I32, BinOp::Add)
+        .unwrap();
+
+    let ir = backend.get_ir().unwrap();
+
+    // Verify IR contains add instruction
+    assert!(ir.contains("add"));
+    assert!(ir.contains("i32"));
+    assert!(ir.contains("ret"));
+
+    backend.verify().unwrap();
+}
+
+/// Test binary operations on 32-bit target
+#[test]
+#[cfg(feature = "llvm")]
+fn test_binop_32bit_target() {
+    use crate::codegen::llvm::BinOp;
+    use crate::hir::TypeId as T;
+
+    // Use i686 (32-bit x86)
+    let target = Target::new(TargetArch::X86, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("i686_binop").unwrap();
+
+    // Test all 4 operations
+    backend
+        .compile_binop_function("add", &T::I32, &T::I32, &T::I32, BinOp::Add)
+        .unwrap();
+    backend
+        .compile_binop_function("sub", &T::I32, &T::I32, &T::I32, BinOp::Sub)
+        .unwrap();
+    backend
+        .compile_binop_function("mul", &T::I32, &T::I32, &T::I32, BinOp::Mul)
+        .unwrap();
+    backend
+        .compile_binop_function("div", &T::I32, &T::I32, &T::I32, BinOp::Div)
+        .unwrap();
+
+    let ir = backend.get_ir().unwrap();
+
+    // Verify all operations present
+    assert!(ir.contains("add"));
+    assert!(ir.contains("sub"));
+    assert!(ir.contains("mul"));
+    assert!(ir.contains("sdiv")); // signed division
+
+    // Verify 32-bit target
+    assert!(ir.contains("i686"));
+
+    backend.verify().unwrap();
+}
+
+/// Test floating point binary operations
+#[test]
+#[cfg(feature = "llvm")]
+fn test_binop_float() {
+    use crate::codegen::llvm::BinOp;
+    use crate::hir::TypeId as T;
+
+    let target = Target::new(TargetArch::Arm, TargetOS::Linux); // ARMv7
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("float_binop").unwrap();
+
+    // fn fadd(a: f32, b: f32) -> f32 { return a + b; }
+    backend
+        .compile_binop_function("fadd", &T::F32, &T::F32, &T::F32, BinOp::Add)
+        .unwrap();
+    backend
+        .compile_binop_function("fsub", &T::F32, &T::F32, &T::F32, BinOp::Sub)
+        .unwrap();
+    backend
+        .compile_binop_function("fmul", &T::F32, &T::F32, &T::F32, BinOp::Mul)
+        .unwrap();
+    backend
+        .compile_binop_function("fdiv", &T::F32, &T::F32, &T::F32, BinOp::Div)
+        .unwrap();
+
+    let ir = backend.get_ir().unwrap();
+
+    // Verify float operations
+    assert!(ir.contains("fadd"));
+    assert!(ir.contains("fsub"));
+    assert!(ir.contains("fmul"));
+    assert!(ir.contains("fdiv"));
+    assert!(ir.contains("float"));
+
+    backend.verify().unwrap();
+}
+
+/// Test 64-bit integer operations
+#[test]
+#[cfg(feature = "llvm")]
+fn test_binop_i64() {
+    use crate::codegen::llvm::BinOp;
+    use crate::hir::TypeId as T;
+
+    let target = Target::new(TargetArch::Riscv32, TargetOS::Linux); // RISC-V 32-bit
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("i64_binop").unwrap();
+
+    // 64-bit operations on 32-bit target (important test!)
+    backend
+        .compile_binop_function("add64", &T::I64, &T::I64, &T::I64, BinOp::Add)
+        .unwrap();
+    backend
+        .compile_binop_function("mul64", &T::I64, &T::I64, &T::I64, BinOp::Mul)
+        .unwrap();
+
+    let ir = backend.get_ir().unwrap();
+
+    // Verify i64 operations on 32-bit target
+    assert!(ir.contains("i64"));
+    assert!(ir.contains("add"));
+    assert!(ir.contains("mul"));
+    assert!(ir.contains("riscv32"));
+
+    backend.verify().unwrap();
+}
+
+/// Test control flow - if/else with phi
+#[test]
+#[cfg(feature = "llvm")]
+fn test_control_flow_conditional() {
+    use crate::hir::TypeId as T;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("control_flow").unwrap();
+
+    // fn check(x: i32) -> i32 { if (x > 0) { return 1; } else { return 0; } }
+    backend
+        .compile_conditional_function("check", &T::I32, &T::I32, 1, 0)
+        .unwrap();
+
+    let ir = backend.get_ir().unwrap();
+
+    // Verify control flow elements
+    assert!(ir.contains("entry:"));
+    assert!(ir.contains("then:"));
+    assert!(ir.contains("else:"));
+    assert!(ir.contains("merge:"));
+    assert!(ir.contains("phi"));
+    assert!(ir.contains("br i1")); // conditional branch
+    assert!(ir.contains("icmp")); // integer compare
+
+    backend.verify().unwrap();
+}
+
+/// Test control flow on 32-bit target (i686)
+#[test]
+#[cfg(feature = "llvm")]
+fn test_control_flow_32bit() {
+    use crate::hir::TypeId as T;
+
+    let target = Target::new(TargetArch::X86, TargetOS::Linux); // i686
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("i686_control").unwrap();
+
+    // Conditional on 32-bit target
+    backend
+        .compile_conditional_function("test32", &T::I32, &T::I32, 42, 0)
+        .unwrap();
+
+    let ir = backend.get_ir().unwrap();
+
+    // Verify 32-bit target
+    assert!(ir.contains("i686"));
+
+    // Verify control flow works
+    assert!(ir.contains("phi"));
+    assert!(ir.contains("br"));
+
+    backend.verify().unwrap();
+}
+
+/// Test control flow on ARMv7 (32-bit ARM)
+#[test]
+#[cfg(feature = "llvm")]
+fn test_control_flow_armv7() {
+    use crate::hir::TypeId as T;
+
+    let target = Target::new(TargetArch::Arm, TargetOS::Linux); // ARMv7
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("armv7_control").unwrap();
+
+    backend
+        .compile_conditional_function("arm_test", &T::I32, &T::I32, 100, -100)
+        .unwrap();
+
+    let ir = backend.get_ir().unwrap();
+
+    // Verify ARMv7 target
+    assert!(ir.contains("armv7") || ir.contains("arm"));
+
+    // Verify control flow
+    assert!(ir.contains("phi"));
+    assert!(ir.contains("icmp sgt")); // signed greater than
+
+    backend.verify().unwrap();
+}
+
+/// Test object code emission for x86_64
+#[test]
+#[cfg(feature = "llvm")]
+fn test_object_emission_x86_64() {
+    use crate::hir::TypeId as T;
+    use crate::mir::MirModule;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("obj_test").unwrap();
+
+    // Create a simple function
+    backend
+        .compile_simple_function("main", &[], &T::I32, 0)
+        .unwrap();
+
+    // Emit object code
+    let mir_module = MirModule::default();
+    let object_code = backend.emit_object(&mir_module).unwrap();
+
+    // Verify we got some object code
+    assert!(!object_code.is_empty());
+
+    // ELF magic number for x86_64 Linux
+    assert_eq!(&object_code[0..4], b"\x7fELF");
+}
+
+/// Test object code emission for 32-bit i686
+#[test]
+#[cfg(feature = "llvm")]
+fn test_object_emission_i686() {
+    use crate::hir::TypeId as T;
+    use crate::mir::MirModule;
+
+    let target = Target::new(TargetArch::X86, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("i686_obj").unwrap();
+
+    // Create function with binary operation
+    backend
+        .compile_binop_function(
+            "add",
+            &T::I32,
+            &T::I32,
+            &T::I32,
+            crate::codegen::llvm::BinOp::Add,
+        )
+        .unwrap();
+
+    // Emit object code
+    let mir_module = MirModule::default();
+    let object_code = backend.emit_object(&mir_module).unwrap();
+
+    // Verify object code generated
+    assert!(!object_code.is_empty());
+    assert_eq!(&object_code[0..4], b"\x7fELF");
+
+    // Verify it's 32-bit ELF (class = 1)
+    assert_eq!(object_code[4], 1); // ELFCLASS32
+}
+
+/// Test object code emission for ARMv7
+#[test]
+#[cfg(feature = "llvm")]
+fn test_object_emission_armv7() {
+    use crate::hir::TypeId as T;
+    use crate::mir::MirModule;
+
+    let target = Target::new(TargetArch::Arm, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("arm_obj").unwrap();
+
+    // Create control flow function
+    backend
+        .compile_conditional_function("check", &T::I32, &T::I32, 1, 0)
+        .unwrap();
+
+    // Emit object code
+    let mir_module = MirModule::default();
+    let object_code = backend.emit_object(&mir_module).unwrap();
+
+    // Verify object code
+    assert!(!object_code.is_empty());
+    assert_eq!(&object_code[0..4], b"\x7fELF");
+
+    // Verify it's 32-bit
+    assert_eq!(object_code[4], 1); // ELFCLASS32
+}
+
+/// Test object code emission for RISC-V 32
+#[test]
+#[cfg(feature = "llvm")]
+fn test_object_emission_riscv32() {
+    use crate::hir::TypeId as T;
+    use crate::mir::MirModule;
+
+    let target = Target::new(TargetArch::Riscv32, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("rv32_obj").unwrap();
+
+    // Create function
+    backend
+        .compile_simple_function("test", &[], &T::I32, 42)
+        .unwrap();
+
+    // Emit object code
+    let mir_module = MirModule::default();
+    let object_code = backend.emit_object(&mir_module).unwrap();
+
+    // Verify object code
+    assert!(!object_code.is_empty());
+    assert_eq!(&object_code[0..4], b"\x7fELF");
+    assert_eq!(object_code[4], 1); // ELFCLASS32
+}
+
+/// Test that object code is valid relocatable object
+#[test]
+#[cfg(feature = "llvm")]
+fn test_object_is_relocatable() {
+    use crate::hir::TypeId as T;
+    use crate::mir::MirModule;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("reloc_test").unwrap();
+    backend
+        .compile_simple_function("func", &[], &T::I32, 123)
+        .unwrap();
+
+    let mir_module = MirModule::default();
+    let object_code = backend.emit_object(&mir_module).unwrap();
+
+    assert!(!object_code.is_empty());
+
+    // ELF type should be ET_REL (relocatable, value 1)
+    assert_eq!(object_code[16], 1); // e_type LSB
+}
+
+/// Test MIR function compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_function_compilation() {
+    use crate::hir::TypeId as T;
+    use crate::mir::instructions::{BlockId, MirInst, MirTerminator, VReg};
+    use crate::mir::MirModule;
+    use crate::mir::{MirBlock, MirFunction};
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("mir_test").unwrap();
+
+    // Create a simple MIR function: fn test() -> i32 { return 42; }
+    let mut func = MirFunction::new("test".to_string(), T::I32, Visibility::Public);
+
+    // Add instruction: const i64 42 -> v0
+    let v0 = VReg(0);
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v0,
+        value: 42,
+    });
+
+    // Add terminator: return v0
+    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+
+    // Compile function
+    backend.compile_function(&func).unwrap();
+
+    // Verify IR
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("define"));
+    assert!(ir.contains("test"));
+    assert!(ir.contains("ret i64 42"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR binary operation compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_binop_compilation() {
+    use crate::hir::{BinOp, TypeId as T};
+    use crate::mir::effects::LocalKind;
+    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::MirModule;
+    use crate::mir::{MirFunction, MirLocal};
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86, TargetOS::Linux); // i686
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("mir_binop").unwrap();
+
+    // Create MIR function: fn add(a: i32, b: i32) -> i32 { return a + b; }
+    let mut func = MirFunction::new("add".to_string(), T::I32, Visibility::Public);
+
+    // Add parameters
+    func.params.push(MirLocal {
+        name: "a".to_string(),
+        ty: T::I32,
+        kind: LocalKind::Parameter,
+    });
+    func.params.push(MirLocal {
+        name: "b".to_string(),
+        ty: T::I32,
+        kind: LocalKind::Parameter,
+    });
+
+    // Parameters map to v0 and v1
+    let v0 = VReg(0);
+    let v1 = VReg(1);
+    let v2 = VReg(2);
+
+    // Add instruction: v2 = add v0, v1
+    func.blocks[0].instructions.push(MirInst::BinOp {
+        dest: v2,
+        op: BinOp::Add,
+        left: v0,
+        right: v1,
+    });
+
+    // Add terminator: return v2
+    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v2) });
+
+    // Compile function
+    backend.compile_function(&func).unwrap();
+
+    // Verify IR
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("i686"));
+    assert!(ir.contains("add"));
+    assert!(ir.contains("ret"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR control flow compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_control_flow_compilation() {
+    use crate::hir::{BinOp, TypeId as T};
+    use crate::mir::effects::LocalKind;
+    use crate::mir::instructions::{BlockId, MirInst, MirTerminator, VReg};
+    use crate::mir::{MirBlock, MirFunction, MirLocal};
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::Arm, TargetOS::Linux); // ARMv7
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("mir_cf").unwrap();
+
+    // Create MIR function with branching
+    let mut func = MirFunction::new("check".to_string(), T::I32, Visibility::Public);
+
+    // Add parameter
+    func.params.push(MirLocal {
+        name: "x".to_string(),
+        ty: T::I32,
+        kind: LocalKind::Parameter,
+    });
+
+    let v0 = VReg(0); // parameter
+    let v_true = VReg(1);
+    let v_false = VReg(2);
+
+    // Block 0: check condition
+    func.blocks[0].instructions.push(MirInst::ConstBool {
+        dest: v0,
+        value: true,
+    });
+    func.blocks[0].terminator = Some(MirTerminator::Branch {
+        cond: v0,
+        then_block: BlockId(1),
+        else_block: BlockId(2),
+    });
+
+    // Block 1: then branch
+    let mut then_block = MirBlock::new(BlockId(1));
+    then_block.instructions.push(MirInst::ConstInt {
+        dest: v_true,
+        value: 1,
+    });
+    then_block.terminator = Some(MirTerminator::Return {
+        value: Some(v_true),
+    });
+    func.blocks.push(then_block);
+
+    // Block 2: else branch
+    let mut else_block = MirBlock::new(BlockId(2));
+    else_block.instructions.push(MirInst::ConstInt {
+        dest: v_false,
+        value: 0,
+    });
+    else_block.terminator = Some(MirTerminator::Return {
+        value: Some(v_false),
+    });
+    func.blocks.push(else_block);
+
+    // Compile function
+    backend.compile_function(&func).unwrap();
+
+    // Verify IR
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("br i1"));
+    assert!(ir.contains("bb1"));
+    assert!(ir.contains("bb2"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR float constant compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_float_const() {
+    use crate::hir::TypeId as T;
+    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("float_test").unwrap();
+
+    // fn test() -> f64 { return 3.14; }
+    let mut func = MirFunction::new("test".to_string(), T::F64, Visibility::Public);
+
+    let v0 = VReg(0);
+    func.blocks[0].instructions.push(MirInst::ConstFloat {
+        dest: v0,
+        value: 3.14,
+    });
+    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("3.14"));
+    assert!(ir.contains("ret double"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR unary operation compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_unaryop() {
+    use crate::hir::{TypeId as T, UnaryOp};
+    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::Aarch64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("unary_test").unwrap();
+
+    // fn neg(x: i32) -> i32 { return -x; }
+    let mut func = MirFunction::new("neg".to_string(), T::I32, Visibility::Public);
+
+    use crate::mir::effects::LocalKind;
+    use crate::mir::MirLocal;
+    func.params.push(MirLocal {
+        name: "x".to_string(),
+        ty: T::I32,
+        kind: LocalKind::Parameter,
+    });
+
+    let v0 = VReg(0); // parameter
+    let v1 = VReg(1); // result
+
+    func.blocks[0].instructions.push(MirInst::UnaryOp {
+        dest: v1,
+        op: UnaryOp::Neg,
+        operand: v0,
+    });
+    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v1) });
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("sub")); // Negation is sub 0, x
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR memory operations (Load/Store)
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_memory_ops() {
+    use crate::hir::TypeId as T;
+    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::RiscV64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("mem_test").unwrap();
+
+    // fn test() -> i32 { let x = 42; return x; }
+    let mut func = MirFunction::new("test".to_string(), T::I32, Visibility::Public);
+
+    let v0 = VReg(0); // const 42
+    let v1 = VReg(1); // alloca
+    let v2 = VReg(2); // loaded value
+
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v0,
+        value: 42,
+    });
+    func.blocks[0].instructions.push(MirInst::GcAlloc {
+        dest: v1,
+        ty: T::I32,
+    });
+    func.blocks[0].instructions.push(MirInst::Store {
+        addr: v1,
+        value: v0,
+        ty: T::I32,
+    });
+    func.blocks[0].instructions.push(MirInst::Load {
+        dest: v2,
+        addr: v1,
+        ty: T::I32,
+    });
+    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v2) });
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("alloca"));
+    assert!(ir.contains("store"));
+    assert!(ir.contains("load"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR string constant compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_string_const() {
+    use crate::hir::TypeId as T;
+    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86, TargetOS::Linux); // i686
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("str_test").unwrap();
+
+    // fn test() -> *i8 { return "hello"; }
+    let mut func = MirFunction::new("test".to_string(), T::Pointer, Visibility::Public);
+
+    let v0 = VReg(0);
+    func.blocks[0].instructions.push(MirInst::ConstString {
+        dest: v0,
+        value: "hello".to_string(),
+    });
+    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("hello"));
+    assert!(ir.contains("@str"));
+
+    backend.verify().unwrap();
+}
