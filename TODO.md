@@ -127,11 +127,12 @@
    - Functions: `doctest_read_file`, `doctest_path_exists`, `doctest_is_file`, 
      `doctest_is_dir`, `doctest_walk_directory`, `doctest_path_has_extension`, 
      `doctest_path_contains`
-6. ⏳ Wire FFI functions into Simple discovery.spl
-7. ⏳ Implement glob pattern matching for include/exclude
-8. ⏳ Hook into `spec.runner` for unified test execution
-9. ⏳ CLI: `simple test --doctest`
-10. ⏳ Run integration tests
+6. ✅ Registered FFI symbols in runtime resolver
+7. ✅ Created extern declarations in discovery.spl
+8. ✅ Implemented glob pattern matching for include/exclude
+9. ⏳ Hook into `spec.runner` for unified test execution
+10. ⏳ CLI: `simple test --doctest`
+11. ⏳ Run integration tests (pending interpreter/Simple runtime)
 
 **Sprint 3: Advanced Features (Planned)**
 - Wildcard matching (`.` and `*`)
