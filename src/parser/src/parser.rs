@@ -343,6 +343,7 @@ impl<'a> Parser<'a> {
             decorators,
             attributes,
             doc_comment: None,
+            contract: None, // TODO: Parse contract blocks
         }))
     }
 

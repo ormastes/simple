@@ -78,6 +78,7 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Private,
             attributes,
             doc_comment: None,
+            invariant: None, // TODO: Parse invariant block
         }))
     }
 

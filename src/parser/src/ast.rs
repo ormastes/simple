@@ -242,6 +242,8 @@ pub struct FunctionDef {
     pub attributes: Vec<Attribute>,
     /// Documentation comment for API doc generation
     pub doc_comment: Option<DocComment>,
+    /// Contract specification (requires/ensures)
+    pub contract: Option<ContractBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -266,6 +268,60 @@ impl Default for Block {
             statements: Vec::new(),
         }
     }
+}
+
+//==============================================================================
+// Contract Blocks (LLM-friendly feature #400)
+//==============================================================================
+
+/// Contract specification for a function.
+///
+/// Contracts make function behavior explicit and verifiable, which helps
+/// catch LLM-generated code errors at runtime (and optionally at compile time).
+///
+/// Example:
+/// ```simple
+/// fn divide(a: i64, b: i64) -> i64:
+///     requires:
+///         b != 0
+///     ensures:
+///         result * b == a
+///     
+///     return a / b
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ContractBlock {
+    /// Preconditions that must be true when function is called
+    pub requires: Vec<ContractClause>,
+    /// Postconditions that must be true when function returns
+    pub ensures: Vec<ContractClause>,
+}
+
+/// A single contract clause (one condition in requires/ensures block).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContractClause {
+    pub span: Span,
+    /// The boolean expression that must be true
+    pub condition: Expr,
+    /// Optional message to display on failure
+    pub message: Option<String>,
+}
+
+/// Class invariant - must be true after constructor and every public method.
+///
+/// Example:
+/// ```simple
+/// class BankAccount:
+///     balance: i64
+///     
+///     invariant:
+///         balance >= 0
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvariantBlock {
+    pub span: Span,
+    /// Conditions that must always be true
+    pub conditions: Vec<ContractClause>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -296,6 +352,8 @@ pub struct ClassDef {
     pub attributes: Vec<Attribute>,
     /// Documentation comment for API doc generation
     pub doc_comment: Option<DocComment>,
+    /// Class invariant (checked after constructor and public methods)
+    pub invariant: Option<InvariantBlock>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -788,6 +846,12 @@ pub enum Expr {
     },
     /// Try operator: expr? - unwrap Ok or early return Err
     Try(Box<Expr>),
+    
+    // Contract-specific expressions (LLM-friendly feature #400)
+    /// Result identifier in ensures block - refers to return value
+    ContractResult,
+    /// old(expr) in ensures block - refers to value before function execution
+    ContractOld(Box<Expr>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
