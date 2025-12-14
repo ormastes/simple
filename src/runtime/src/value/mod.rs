@@ -21,6 +21,7 @@ mod actors;
 mod async_gen;
 mod collections;
 mod core;
+mod doctest_io;
 mod ffi;
 mod heap;
 mod objects;
@@ -82,6 +83,12 @@ pub use ffi::{
 pub use ffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str,
     rt_print_value, rt_println_str, rt_println_value,
+};
+
+// Re-export doctest I/O FFI functions
+pub use doctest_io::{
+    doctest_is_dir, doctest_is_file, doctest_path_contains, doctest_path_exists,
+    doctest_path_has_extension, doctest_read_file, doctest_walk_directory,
 };
 
 // ============================================================================

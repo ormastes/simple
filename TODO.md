@@ -117,11 +117,21 @@
 7. ⏳ Wire interpreter integration (pending Simple REPL/interpreter API)
 8. ⏳ Run tests and verify basic functionality
 
-**Sprint 2: Discovery and Integration (Planned)**
-- Discovery from `.spl`, `.md`, `.sdt` files
-- Hook into `spec.runner` for unified test execution
-- CLI: `simple test --doctest`
-- Integration tests
+**Sprint 2: Discovery and Integration (In Progress)**
+1. ✅ Enhanced `discovery.spl` with file walking framework
+2. ✅ Implemented Markdown doctest extraction
+3. ✅ Created integration test spec (`test/integration/doctest/discovery_spec.spl`)
+4. ✅ Created test fixtures (sample.spl, sample.sdt, tutorial.md)
+5. ✅ Implemented Rust FFI bridge for file I/O (7 functions, 7 tests passing)
+   - `src/runtime/src/value/doctest_io.rs`
+   - Functions: `doctest_read_file`, `doctest_path_exists`, `doctest_is_file`, 
+     `doctest_is_dir`, `doctest_walk_directory`, `doctest_path_has_extension`, 
+     `doctest_path_contains`
+6. ⏳ Wire FFI functions into Simple discovery.spl
+7. ⏳ Implement glob pattern matching for include/exclude
+8. ⏳ Hook into `spec.runner` for unified test execution
+9. ⏳ CLI: `simple test --doctest`
+10. ⏳ Run integration tests
 
 **Sprint 3: Advanced Features (Planned)**
 - Wildcard matching (`.` and `*`)
