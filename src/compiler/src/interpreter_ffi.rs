@@ -127,6 +127,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         visibility: Visibility::Public,
                         attributes: vec![],
                         doc_comment: None,
+                        invariant: None,
                     },
                 );
             }
