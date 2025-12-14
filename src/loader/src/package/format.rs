@@ -232,7 +232,7 @@ impl ManifestSection {
 /// Resource entry in the resources section.
 #[derive(Debug, Clone)]
 pub struct ResourceEntry {
-    /// Path within package (e.g., "lib/std/core.spl")
+    /// Path within package (e.g., "std_lib/src/core.spl")
     pub path: String,
     /// Compressed data
     pub data: Vec<u8>,

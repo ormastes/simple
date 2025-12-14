@@ -10,21 +10,29 @@ simple/
 ├── CLAUDE.md                      # This file - development guide
 ├── public_api.yml                 # Public API definitions for coverage
 │
-├── lib/                           # Simple standard library (written in Simple)
-│   └── std/                       # stdlib root
-│       ├── __init__.spl           # Root manifest with #[deny(primitive_api)]
-│       ├── core/                  # Variant-agnostic pure core (mutable)
-│       ├── core_immut/            # Variant-agnostic, #[immutable]
-│       ├── core_nogc/             # Variant-agnostic, #[no_gc] (mutable)
-│       ├── core_nogc_immut/       # Variant-agnostic, #[no_gc] + #[immutable]
-│       ├── simd/                  # Cross-platform SIMD & vector math
-│       ├── host/                  # OS-based stdlib overlays
-│       │   └── async_nogc_mut/    # DEFAULT: async + no_gc + mutable
-│       ├── bare/                  # Baremetal (single variant: async+nogc+immut)
-│       ├── gpu/                   # GPU device & host APIs
-│       │   ├── kernel/            # Device-side (single: async+nogc+immut)
-│       │   └── host/async_nogc_mut/  # Host-side GPU control
-│       └── tools/                 # Diagnostics, testing, reflection
+├── bin/                           # Binary tools (.gitignore)
+├── simple_doc -> doc/             # Symlink to documentation
+│
+├── std_lib/                       # Simple standard library (written in Simple)
+│   ├── README.md                  # Standard library documentation
+│   ├── src/                       # .spl library files
+│   │   ├── __init__.spl           # Root manifest with #[deny(primitive_api)]
+│   │   ├── core/                  # Variant-agnostic pure core (mutable)
+│   │   ├── core_immut/            # Variant-agnostic, #[immutable]
+│   │   ├── core_nogc/             # Variant-agnostic, #[no_gc] (mutable)
+│   │   ├── core_nogc_immut/       # Variant-agnostic, #[no_gc] + #[immutable]
+│   │   ├── simd/                  # Cross-platform SIMD & vector math
+│   │   ├── host/                  # OS-based stdlib overlays
+│   │   │   └── async_nogc_mut/    # DEFAULT: async + no_gc + mutable
+│   │   ├── bare/                  # Baremetal (single variant: async+nogc+immut)
+│   │   ├── gpu/                   # GPU device & host APIs
+│   │   │   ├── kernel/            # Device-side (single: async+nogc+immut)
+│   │   │   └── host/async_nogc_mut/  # Host-side GPU control
+│   │   └── tools/                 # Diagnostics, testing, reflection
+│   └── test/                      # .spl test files
+│       ├── unit/                  # Unit tests
+│       ├── integration/           # Integration tests
+│       └── fixtures/              # Test fixtures
 │
 ├── native_lib/                    # Native implementations (written in Rust)
 │   ├── core/                      # Memory allocation, GC interface, math intrinsics
