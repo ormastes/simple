@@ -15,7 +15,7 @@ use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
 use simple_common::target::{Target, TargetArch};
-use simple_driver::doctest::is_definition_like;
+use simple_driver::doctest::{append_to_prelude, build_source, is_definition_like};
 use simple_driver::runner::Runner;
 use simple_driver::watcher::watch;
 use simple_log;
@@ -105,7 +105,7 @@ fn run_repl(gc_log: bool, gc_off: bool) -> i32 {
     println!();
 
     let runner = create_runner(gc_log, gc_off);
-    let mut prelude: Vec<String> = Vec::new();
+    let mut prelude = String::new();
     let mut rl = match DefaultEditor::new() {
         Ok(editor) => editor,
         Err(e) => {
@@ -133,33 +133,15 @@ fn run_repl(gc_log: bool, gc_off: bool) -> i32 {
 
                 let _ = rl.add_history_entry(line);
 
-                if is_definition_like(line) {
-                    let mut code = String::new();
-                    for stmt in &prelude {
-                        code.push_str(stmt);
-                        code.push('\n');
-                    }
-                    code.push_str(line);
-                    code.push('\n');
-                    code.push_str("main = 0");
-
-                    match runner.run_source_in_memory(&code) {
-                        Ok(_) => prelude.push(line.to_string()),
-                        Err(e) => eprintln!("Error: {}", e),
-                    }
-                    continue;
-                }
-
-                let mut code = String::new();
-                for stmt in &prelude {
-                    code.push_str(stmt);
-                    code.push('\n');
-                }
-                code.push_str("main = ");
-                code.push_str(line);
+                let is_def = is_definition_like(line);
+                let code = build_source(&prelude, line, is_def);
 
                 match runner.run_source_in_memory(&code) {
-                    Ok(result) => println!("{result}"),
+                    Ok(_) => {
+                        if is_def {
+                            append_to_prelude(&mut prelude, line, true);
+                        }
+                    }
                     Err(e) => eprintln!("Error: {}", e),
                 }
             }
