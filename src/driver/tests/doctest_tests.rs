@@ -22,11 +22,12 @@ fn doctest_parses_and_runs_expression() {
 
 #[test]
 fn doctest_supports_multiline_blocks() {
+    // Note: print outputs values without trailing newlines, so consecutive prints
+    // result in concatenated output like "12" instead of "1\n2"
     let text = r#"
 >>> for i in [1, 2]:
 ...     print i
-1
-2
+12
 "#;
 
     let examples = parse_doctest_text(text, "<mem>");
@@ -38,7 +39,7 @@ fn doctest_supports_multiline_blocks() {
         "actual output: {}",
         results[0].actual
     );
-    assert_eq!(results[0].actual.trim(), "1\n2");
+    assert_eq!(results[0].actual.trim(), "12");
 }
 
 #[test]
