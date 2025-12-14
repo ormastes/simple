@@ -34,12 +34,10 @@ simple/                            # Project root - Rust compiler implementation
 │           ├── integration/       # Integration tests
 │           └── fixtures/          # Test fixtures
 │
-├── native_lib/                    # Native implementations (written in Rust)
-│   ├── core/                      # Memory allocation, GC interface, math intrinsics
-│   ├── io/                        # Filesystem, networking, terminal I/O
-│   ├── sys/                       # Args, env, process, time
-│   ├── sync/                      # Mutexes, channels, atomics
-│   └── ffi/                       # FFI bridge and type conversions
+├── lib/                           # Legacy stdlib (to be removed)
+│   └── std/                       # Old stdlib location
+│
+├── test/                          # Legacy tests (to be removed)
 │
 ├── log/                           # Logging crate (tracing wrapper)
 │   └── src/lib.rs                 # simple_log::init() entry point
