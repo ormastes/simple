@@ -57,18 +57,7 @@ fn snapshot_build_creates_commit() {
     );
 
     // Verify commit was created (check parent since we created a new working copy)
-    let output = std::process::Command::new("jj")
-        .args(&["show", "@-"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-
-    let log = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        log.contains("Build Success"),
-        "Commit message should contain 'Build Success', got:\n{}",
-        log
-    );
+    assert_jj_commit_contains(&repo_path, "Build Success");
 }
 
 #[test]
@@ -103,16 +92,7 @@ fn snapshot_test_creates_commit() {
     );
 
     // Verify commit was created (check parent since we created a new working copy)
-    let output = std::process::Command::new("jj")
-        .args(&["show", "@-"])
-        .current_dir(&repo_path)
-        .output()
-        .unwrap();
-
-    let log = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        log.contains("Tests Passed"),
-        "Commit message should contain 'Tests Passed', got:\n{}",
+    assert_jj_commit_contains(&repo_path, "Tests Passed");
         log
     );
 }
@@ -162,17 +142,7 @@ fn test_metadata_serializes_correctly() {
 
 #[test]
 fn get_last_working_state_returns_latest() {
-    let temp = TempDir::new().unwrap();
-    let repo_path = temp.path().to_path_buf();
-
-    // Initialize jj repo
-    std::process::Command::new("jj")
-        .args(&["git", "init", "--colocate"])
-        .current_dir(&repo_path)
-        .output()
-        .expect("jj not installed");
-
-    let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
+    let (_temp, repo_path, manager) = setup_jj_repo();
 
     // Create a build snapshot
     let metadata = BuildMetadata {
@@ -264,17 +234,7 @@ fn snapshot_message_format_correct() {
 
 #[test]
 fn multiple_snapshots_track_history() {
-    let temp = TempDir::new().unwrap();
-    let repo_path = temp.path().to_path_buf();
-
-    // Initialize jj repo
-    std::process::Command::new("jj")
-        .args(&["git", "init", "--colocate"])
-        .current_dir(&repo_path)
-        .output()
-        .expect("jj not installed");
-
-    let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
+    let (_temp, repo_path, manager) = setup_jj_repo();
 
     // Create multiple snapshots
     for i in 1..=3 {
@@ -402,17 +362,7 @@ fn snapshot_preserves_git_state() {
 
 #[test]
 fn snapshot_is_idempotent() {
-    let temp = TempDir::new().unwrap();
-    let repo_path = temp.path().to_path_buf();
-
-    // Initialize jj repo
-    std::process::Command::new("jj")
-        .args(&["git", "init", "--colocate"])
-        .current_dir(&repo_path)
-        .output()
-        .expect("jj not installed");
-
-    let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
+    let (_temp, _repo_path, manager) = setup_jj_repo();
 
     let metadata = BuildMetadata {
         timestamp: Utc::now(),

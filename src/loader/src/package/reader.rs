@@ -140,24 +140,44 @@ impl PackageReader {
         Some(path)
     }
 
-    /// Unpack resources without decompression.
-    fn unpack_resources(&self, data: &[u8]) -> Result<Vec<ResourceEntry>, PackageError> {
+    /// Read resource header (path and count)
+    fn read_resource_header(data: &[u8], offset: &mut usize) -> Result<(usize, String), ()> {
+        // Read path
+        let path = match Self::read_path(data, offset) {
+            Some(p) => p,
+            None => return Err(()),
+        };
+        Ok((0, path))
+    }
+
+    /// Helper to read resource count and initialize parser
+    fn init_resource_parser(data: &[u8]) -> Option<(Vec<ResourceEntry>, usize, usize)> {
         if data.len() < 4 {
-            return Ok(Vec::new());
+            return None;
         }
 
-        let mut resources = Vec::new();
-        let mut offset = 0;
+        let resources = Vec::new();
+        let offset = 0;
 
         // Read resource count
         let count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-        offset += 4;
+        let offset = offset + 4;
+
+        Some((resources, offset, count))
+    }
+
+    /// Unpack resources without decompression.
+    fn unpack_resources(&self, data: &[u8]) -> Result<Vec<ResourceEntry>, PackageError> {
+        let (mut resources, mut offset, count) = match Self::init_resource_parser(data) {
+            Some(result) => result,
+            None => return Ok(Vec::new()),
+        };
 
         for _ in 0..count {
             // Read path
-            let path = match Self::read_path(data, &mut offset) {
-                Some(p) => p,
-                None => break,
+            let (_, path) = match Self::read_resource_header(data, &mut offset) {
+                Ok(header) => header,
+                Err(_) => break,
             };
 
             // Read data
@@ -194,22 +214,16 @@ impl PackageReader {
 
     /// Decompress resources.
     fn decompress_resources(&self, data: &[u8]) -> Result<Vec<ResourceEntry>, PackageError> {
-        if data.len() < 4 {
-            return Ok(Vec::new());
-        }
-
-        let mut resources = Vec::new();
-        let mut offset = 0;
-
-        // Read resource count
-        let count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
-        offset += 4;
+        let (mut resources, mut offset, count) = match Self::init_resource_parser(data) {
+            Some(result) => result,
+            None => return Ok(Vec::new()),
+        };
 
         for _ in 0..count {
             // Read path
-            let path = match Self::read_path(data, &mut offset) {
-                Some(p) => p,
-                None => break,
+            let (_, path) = match Self::read_resource_header(data, &mut offset) {
+                Ok(header) => header,
+                Err(_) => break,
             };
 
             // Read compressed and uncompressed sizes

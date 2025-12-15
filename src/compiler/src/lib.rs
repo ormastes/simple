@@ -6,8 +6,10 @@
 pub mod codegen;
 pub mod compilability;
 pub mod effects;
+pub mod elf_utils;
 pub mod error;
 pub mod hir;
+pub mod import_loader;
 pub mod interpreter;
 pub mod interpreter_ffi;
 pub mod linker;
@@ -17,6 +19,7 @@ pub mod module_resolver;
 pub mod monomorphize;
 pub mod pipeline;
 pub mod project;
+pub mod smf_builder;
 pub mod value;
 pub mod value_bridge;
 

@@ -188,12 +188,14 @@ impl HasEffects for MirInst {
 ```rust
 pub enum SimpleTy {
     Nat, Bool, Str,
+    Generic(String, Vec<SimpleTy>),
     Arrow(Box<SimpleTy>, Box<SimpleTy>),
 }
 
 pub enum SimpleExpr {
     LitNat(i64), LitBool(bool), LitStr(String),
     Add(Box<SimpleExpr>, Box<SimpleExpr>),
+    Generic(String, Vec<SimpleExpr>),
     IfElse(Box<SimpleExpr>, Box<SimpleExpr>, Box<SimpleExpr>),
     Lam(Box<SimpleExpr>),
     App(Box<SimpleExpr>, Box<SimpleExpr>),
@@ -201,6 +203,9 @@ pub enum SimpleExpr {
 
 /// Pure, total inference function
 pub fn infer_simple(expr: &SimpleExpr) -> Option<SimpleTy>;
+
+/// The Lean model proves `tyEq`/`listTyEq` reflect `Ty` equality, so the
+/// boolean equality checks in `ifElse`/`app` stay sound even for generics.
 ```
 
 ## Simplification Guidelines

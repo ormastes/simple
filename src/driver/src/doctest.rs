@@ -343,6 +343,29 @@ pub fn build_source(prelude: &str, snippet: &str, is_def: bool) -> String {
     src
 }
 
+/// Check if a snippet contains an assignment expression
+fn contains_assignment(snippet: &str) -> bool {
+    // Simple heuristic: look for '=' that's not part of '==', '!=', '<=', '>='
+    let chars: Vec<char> = snippet.chars().collect();
+    for i in 0..chars.len() {
+        if chars[i] == '=' {
+            // Check if it's part of a comparison operator
+            let before = if i > 0 { chars[i - 1] } else { ' ' };
+            let after = if i + 1 < chars.len() {
+                chars[i + 1]
+            } else {
+                ' '
+            };
+            if before != '=' && before != '!' && before != '<' && before != '>'
+                && after != '='
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Check if a snippet is a true definition that should be saved in prelude.
 /// Control flow statements (if, while, for, match) should NOT be added to prelude
 /// because they execute with side effects and shouldn't be re-run on each subsequent input.
@@ -354,30 +377,25 @@ fn is_prelude_definition(snippet: &str) -> bool {
         // Only add actual definitions, not control flow
         if matches!(
             first,
-            "let" | "mut" | "fn" | "struct" | "class" | "enum" | "trait" | "impl" | "use"
-                | "type" | "actor" | "import"
+            "let"
+                | "mut"
+                | "fn"
+                | "struct"
+                | "class"
+                | "enum"
+                | "trait"
+                | "impl"
+                | "use"
+                | "type"
+                | "actor"
+                | "import"
         ) {
             return true;
         }
     }
 
     // Check for assignment (e.g., "a = 1") - need to save variable bindings
-    let mut chars = trimmed.char_indices().peekable();
-    while let Some((idx, ch)) = chars.next() {
-        if ch != '=' {
-            continue;
-        }
-        let prev = trimmed[..idx].chars().rev().find(|c| !c.is_whitespace());
-        let next = chars.clone().map(|(_, c)| c).find(|c| !c.is_whitespace());
-
-        let is_comparison = matches!(prev, Some('=') | Some('!') | Some('<') | Some('>'))
-            || matches!(next, Some('='));
-        if !is_comparison {
-            return true;
-        }
-    }
-
-    false
+    contains_assignment(snippet)
 }
 
 pub fn append_to_prelude(prelude: &mut String, snippet: &str, is_def: bool) {

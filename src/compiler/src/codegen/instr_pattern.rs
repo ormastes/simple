@@ -64,6 +64,15 @@ fn compile_pattern_bind<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
+/// Calculate discriminant for enum variant (stub - returns hash of name)
+fn calculate_variant_discriminant(variant_name: &str) -> u32 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    variant_name.hash(&mut hasher);
+    (hasher.finish() & 0xFFFFFFFF) as u32
+}
+
 fn compile_enum_unit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
@@ -73,7 +82,7 @@ fn compile_enum_unit<M: Module>(
     let enum_new_id = ctx.runtime_funcs["rt_enum_new"];
     let enum_new_ref = ctx.module.declare_func_in_func(enum_new_id, builder.func);
 
-    let disc = variant_name.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(types::I32, 0);
     let nil_val = builder.ins().iconst(types::I64, 0);
@@ -93,7 +102,7 @@ fn compile_enum_with<M: Module>(
     let enum_new_id = ctx.runtime_funcs["rt_enum_new"];
     let enum_new_ref = ctx.module.declare_func_in_func(enum_new_id, builder.func);
 
-    let disc = variant_name.bytes().fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+    let disc = calculate_variant_discriminant(variant_name);
     let disc_val = builder.ins().iconst(types::I32, disc as i64);
     let enum_id = builder.ins().iconst(types::I32, 0);
     let payload_val = ctx.vreg_values[&payload];

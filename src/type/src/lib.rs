@@ -58,6 +58,8 @@ pub enum LeanTy {
     Bool,
     /// String type
     Str,
+    /// Generic type constructor (name + type arguments)
+    Generic(String, Vec<LeanTy>),
     /// Function type (arrow)
     Arrow(Box<LeanTy>, Box<LeanTy>),
 }
@@ -75,6 +77,8 @@ pub enum LeanExpr {
     Add(Box<LeanExpr>, Box<LeanExpr>),
     /// String concatenation (Str ++ Str → Str)
     Concat(Box<LeanExpr>, Box<LeanExpr>),
+    /// Generic constructor with type arguments
+    Generic(String, Vec<LeanExpr>),
     /// If-then-else
     IfElse(Box<LeanExpr>, Box<LeanExpr>, Box<LeanExpr>),
     /// Lambda (toy rule: abstracts Nat argument)
@@ -100,9 +104,11 @@ pub fn lean_infer(expr: &LeanExpr) -> Option<LeanTy> {
                 // Explicit: addition only works on Nat
                 (LeanTy::Bool, _)
                 | (LeanTy::Str, _)
+                | (LeanTy::Generic(_, _), _)
                 | (LeanTy::Arrow(_, _), _)
                 | (_, LeanTy::Bool)
                 | (_, LeanTy::Str)
+                | (_, LeanTy::Generic(_, _))
                 | (_, LeanTy::Arrow(_, _)) => None,
             }
         }
@@ -115,10 +121,19 @@ pub fn lean_infer(expr: &LeanExpr) -> Option<LeanTy> {
                 (LeanTy::Nat, _)
                 | (LeanTy::Bool, _)
                 | (LeanTy::Arrow(_, _), _)
+                | (LeanTy::Generic(_, _), _)
                 | (_, LeanTy::Nat)
                 | (_, LeanTy::Bool)
-                | (_, LeanTy::Arrow(_, _)) => None,
+                | (_, LeanTy::Arrow(_, _))
+                | (_, LeanTy::Generic(_, _)) => None,
             }
+        }
+        LeanExpr::Generic(name, args) => {
+            let mut arg_tys = Vec::with_capacity(args.len());
+            for expr in args {
+                arg_tys.push(lean_infer(expr)?);
+            }
+            Some(LeanTy::Generic(name.clone(), arg_tys))
         }
 
         LeanExpr::IfElse(c, t, e) => {
@@ -155,7 +170,7 @@ pub fn lean_infer(expr: &LeanExpr) -> Option<LeanTy> {
                     }
                 }
                 // Explicit: only Arrow types can be applied
-                LeanTy::Nat | LeanTy::Bool | LeanTy::Str => None,
+                LeanTy::Nat | LeanTy::Bool | LeanTy::Str | LeanTy::Generic(_, _) => None,
             }
         }
     }

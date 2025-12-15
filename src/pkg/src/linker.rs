@@ -304,6 +304,22 @@ mod tests {
         dir
     }
 
+    /// Helper to setup test linker with a linked dependency
+    fn setup_linked_linker(test_name: &str, lib_name: &str) -> (PathBuf, Linker) {
+        let temp = temp_dir(test_name);
+        let project_dir = temp.join("project");
+        let dep_dir = temp.join(lib_name);
+
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::create_dir_all(&dep_dir).unwrap();
+
+        let linker = Linker::new(&project_dir);
+        linker.init().unwrap();
+        linker.link_path(lib_name, &dep_dir).unwrap();
+
+        (temp, linker)
+    }
+
     #[test]
     fn test_linker_init() {
         let temp = temp_dir("init");
@@ -346,16 +362,7 @@ mod tests {
 
     #[test]
     fn test_unlink() {
-        let temp = temp_dir("unlink");
-        let project_dir = temp.join("project");
-        let dep_dir = temp.join("mylib");
-
-        fs::create_dir_all(&project_dir).unwrap();
-        fs::create_dir_all(&dep_dir).unwrap();
-
-        let linker = Linker::new(&project_dir);
-        linker.init().unwrap();
-        linker.link_path("mylib", &dep_dir).unwrap();
+        let (temp, linker) = setup_linked_linker("unlink", "mylib");
 
         assert!(linker.is_linked("mylib"));
 
@@ -394,24 +401,13 @@ mod tests {
 
     #[test]
     fn test_clean() {
-        let temp = temp_dir("clean");
-        let project_dir = temp.join("project");
-        let dep_dir = temp.join("mylib");
-
-        fs::create_dir_all(&project_dir).unwrap();
-        fs::create_dir_all(&dep_dir).unwrap();
-
-        let linker = Linker::new(&project_dir);
-        linker.init().unwrap();
-        linker.link_path("mylib", &dep_dir).unwrap();
+        let (_temp, linker) = setup_linked_linker("clean", "mylib");
 
         assert!(linker.deps_dir().exists());
 
         linker.clean().unwrap();
 
         assert!(!linker.deps_dir().exists());
-
-        let _ = fs::remove_dir_all(&temp);
     }
 
     #[test]

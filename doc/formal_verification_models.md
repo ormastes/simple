@@ -46,7 +46,10 @@ def infer : Expr → Option Ty
 | `Expr.ifElse c t e` | `LeanExpr::IfElse(Box, Box, Box)` | ✅ Exact |
 | `Expr.lam body` | `LeanExpr::Lam(Box)` | ✅ Exact |
 | `Expr.app f x` | `LeanExpr::App(Box, Box)` | ✅ Exact |
+| `Expr.generic name args` | `LeanExpr::Generic(String, Vec<LeanExpr>)` | ✅ Exact |
 | `infer` | `lean_infer()` | ✅ Exact |
+
+The inference model now matches generic constructors, and its `tyEq`/`listTyEq` helpers come with proven `tyEq_spec`/`listTyEq_spec` so the `ifElse` and `app` branches behave exactly like structural equality.
 
 **Code Comparison:**
 ```lean

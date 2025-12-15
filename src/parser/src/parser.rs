@@ -505,6 +505,38 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Parse optional parenthesized argument list: `(arg1, arg2, ...)`
+    fn parse_optional_paren_args(&mut self) -> Result<Option<Vec<Expr>>, ParseError> {
+        if self.check(&TokenKind::LParen) {
+            self.advance();
+            let mut args = Vec::new();
+            while !self.check(&TokenKind::RParen) {
+                args.push(self.parse_expression()?);
+                if !self.check(&TokenKind::RParen) {
+                    self.expect(&TokenKind::Comma)?;
+                }
+            }
+            self.expect(&TokenKind::RParen)?;
+            Ok(Some(args))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Parse parenthesized type list: `(Type1, Type2, ...)`
+    pub(crate) fn parse_paren_type_list(&mut self) -> Result<Vec<Type>, ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        let mut types = Vec::new();
+        while !self.check(&TokenKind::RParen) {
+            types.push(self.parse_type()?);
+            if !self.check(&TokenKind::RParen) {
+                self.expect(&TokenKind::Comma)?;
+            }
+        }
+        self.expect(&TokenKind::RParen)?;
+        Ok(types)
+    }
+
     /// Parse a single attribute: #[name] or #[name = value] or #[name(args)]
     fn parse_attribute(&mut self) -> Result<Attribute, ParseError> {
         let start_span = self.current.span;
@@ -523,20 +555,7 @@ impl<'a> Parser<'a> {
         };
 
         // Check for arguments: #[name(arg1, arg2)]
-        let args = if self.check(&TokenKind::LParen) {
-            self.advance();
-            let mut args = Vec::new();
-            while !self.check(&TokenKind::RParen) {
-                args.push(self.parse_expression()?);
-                if !self.check(&TokenKind::RParen) {
-                    self.expect(&TokenKind::Comma)?;
-                }
-            }
-            self.expect(&TokenKind::RParen)?;
-            Some(args)
-        } else {
-            None
-        };
+        let args = self.parse_optional_paren_args()?;
 
         self.expect(&TokenKind::RBracket)?;
 
@@ -614,20 +633,7 @@ impl<'a> Parser<'a> {
         let name = self.parse_primary()?;
 
         // Check for arguments: @decorator(arg1, arg2)
-        let args = if self.check(&TokenKind::LParen) {
-            self.advance();
-            let mut args = Vec::new();
-            while !self.check(&TokenKind::RParen) {
-                args.push(self.parse_expression()?);
-                if !self.check(&TokenKind::RParen) {
-                    self.expect(&TokenKind::Comma)?;
-                }
-            }
-            self.expect(&TokenKind::RParen)?;
-            Some(args)
-        } else {
-            None
-        };
+        let args = self.parse_optional_paren_args()?;
 
         Ok(Decorator {
             span: Span::new(

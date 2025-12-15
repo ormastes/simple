@@ -208,9 +208,9 @@ mod tests {
         cleanup_test_project(&temp_dir);
     }
 
-    #[test]
-    fn test_install_path_dependency() {
-        let temp_dir = setup_test_project("install", "path-dep");
+    /// Helper to setup a test with a path dependency
+    fn setup_path_dependency(test_name: &str, subtest: &str) -> (PathBuf, PathBuf) {
+        let temp_dir = setup_test_project(test_name, subtest);
 
         // Create a path dependency
         let dep_dir = temp_dir.join("mylib");
@@ -221,6 +221,13 @@ mod tests {
         let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
         manifest.add_dependency("mylib", Dependency::path("./mylib"));
         manifest.save(&temp_dir.join("simple.toml")).unwrap();
+
+        (temp_dir, dep_dir)
+    }
+
+    #[test]
+    fn test_install_path_dependency() {
+        let (temp_dir, _) = setup_path_dependency("install", "path-dep");
 
         // Install
         let result = install_dependencies(&temp_dir).unwrap();
@@ -241,17 +248,7 @@ mod tests {
 
     #[test]
     fn test_install_idempotent() {
-        let temp_dir = setup_test_project("install", "idempotent");
-
-        // Create a path dependency
-        let dep_dir = temp_dir.join("mylib");
-        fs::create_dir_all(&dep_dir).unwrap();
-        init_project(&dep_dir, Some("mylib")).unwrap();
-
-        // Add the dependency
-        let mut manifest = Manifest::load(&temp_dir.join("simple.toml")).unwrap();
-        manifest.add_dependency("mylib", Dependency::path("./mylib"));
-        manifest.save(&temp_dir.join("simple.toml")).unwrap();
+        let (temp_dir, _) = setup_path_dependency("install", "idempotent");
 
         // First install
         let result1 = install_dependencies(&temp_dir).unwrap();
