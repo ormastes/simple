@@ -1,6 +1,12 @@
-/// Doctest Example Parser
-/// 
-/// Extracts >>> examples from docstrings, Markdown, and .sdt files
+///
+Doctest Example Parser
+
+Extracts >>> examples from:
+- Triple-quote blocks (\"\"\"...\"\"\")
+- Block comments (/* ... */)
+- Markdown code blocks
+- Standalone .sdt files
+///
 
 /// Source location for error reporting
 struct SourceLocation:
@@ -164,16 +170,137 @@ fn parse_sdt_file(path: String) -> List[DoctestExample]:
     # .sdt files are just unwrapped docstring content
     return parse_docstring(content, source: path)
 
-/// Extract docstrings from Simple source file (.spl)
-/// 
-/// This is a simplified parser that looks for /// comment blocks
-/// In production, this would use the AST
-fn extract_docstrings(source_code: String, file_path: String) -> List[(String, Int)]:  # (content, line)
+///
+Extract triple-quote blocks (///...///) from source code
+
+Finds blocks of form:
+///
+content here
+///
+///
+fn extract_triple_quote_blocks(source_code: String, file_path: String) -> List[(String, Int)]:
+    blocks = []
+    lines = source_code.split("\n")
+    i = 0
+
+    while i < lines.len:
+        trimmed = lines[i].trim()
+
+        # Check for opening ///
+        if trimmed.starts_with(///""):
+            # Extract language hint if present (e.g., ///simple or ///sdoctest)
+            start_line = i + 1
+            start_idx = i
+
+            # Collect content until closing ///
+            content_lines = []
+            i += 1
+
+            while i < lines.len:
+                line = lines[i]
+                if line.trim() == ///"":
+                    # Found closing ///
+                    blocks.push((content_lines.join("\n"), start_line))
+                    i += 1
+                    break
+                content_lines.push(line)
+                i += 1
+        else:
+            i += 1
+
+    return blocks
+
+///
+Extract /* ... */ block comments from source code
+
+These can contain doctests. If a block comment is immediately
+before or after a function/class definition, it belongs to it.
+///
+fn extract_block_comment_blocks(source_code: String, file_path: String) -> List[(String, Int)]:
+    blocks = []
+    lines = source_code.split("\n")
+    i = 0
+
+    while i < lines.len:
+        line = lines[i]
+        trimmed = line.trim()
+
+        # Check for opening /*
+        if trimmed.starts_with("/*"):
+            start_line = i + 1
+            content_lines = []
+            i += 1
+
+            # Handle /* ... */ on same line
+            if trimmed.contains("*/"):
+                # Single-line comment - skip for now, handle multi-line
+                pass
+
+            # Multi-line comment
+            while i < lines.len:
+                line = lines[i]
+                if line.contains("*/"):
+                    # Found closing */ - add content before it
+                    close_idx = line.find("*/")
+                    if close_idx.is_some:
+                        content_lines.push(line[..close_idx.unwrap()])
+
+                    # Combine and store block
+                    content = content_lines.join("\n").trim()
+                    if not content.is_empty:
+                        blocks.push((content, start_line))
+                    i += 1
+                    break
+                else:
+                    content_lines.push(line)
+                i += 1
+        else:
+            i += 1
+
+    return blocks
+
+///
+Extract docstrings from Simple source file (.spl)
+
+Looks for:
+1. Triple-quote blocks (///...///)
+2. Block comments (/* ... */)
+3. Legacy /// comment blocks
+
+Returns list of (content, line_number) tuples
+///
+fn extract_docstrings(source_code: String, file_path: String) -> List[(String, Int)]:
+    docstrings = []
+
+    # Extract triple-quote blocks
+    triple_blocks = extract_triple_quote_blocks(source_code, file_path)
+    for (content, line) in triple_blocks:
+        docstrings.push((content, line))
+
+    # Extract block comment blocks
+    comment_blocks = extract_block_comment_blocks(source_code, file_path)
+    for (content, line) in comment_blocks:
+        docstrings.push((content, line))
+
+    # Extract legacy /// line comments for backward compatibility
+    legacy = extract_legacy_docstrings(source_code, file_path)
+    for (content, line) in legacy:
+        docstrings.push((content, line))
+
+    return docstrings
+
+///
+Extract legacy /// docstring blocks (for backward compatibility)
+
+Finds sequences of /// comments and combines them into docstring blocks.
+This maintains support for code written with the old syntax.
+///
+fn extract_legacy_docstrings(source_code: String, file_path: String) -> List[(String, Int)]:
     docstrings = []
     lines = source_code.split("\n")
     current_docstring = []
     start_line = 0
-    
+
     for i, line in lines.enumerate():
         trimmed = line.trim_start()
         if trimmed.starts_with("///"):
@@ -187,12 +314,12 @@ fn extract_docstrings(source_code: String, file_path: String) -> List[(String, I
             content = current_docstring.join("\n")
             docstrings.push((content, start_line))
             current_docstring = []
-    
+
     # Handle docstring at end of file
     if not current_docstring.is_empty:
         content = current_docstring.join("\n")
         docstrings.push((content, start_line))
-    
+
     return docstrings
 
 /// Parse all doctests from a Simple source file
