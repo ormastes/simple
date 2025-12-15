@@ -39,14 +39,27 @@ simple/                            # Project root - Rust compiler implementation
 │       │   ├── gpu/               # GPU device & host APIs
 │       │   │   ├── kernel/        # Device-side (single: async+nogc+immut)
 │       │   │   └── host/async_nogc_mut/  # Host-side GPU control
+│       │   ├── doctest/           # Doctest framework
+│       │   ├── spec/              # BDD spec framework
+│       │   │   ├── matchers/      # Matcher implementations
+│       │   │   └── runner/        # Test runner
+│       │   ├── units/             # Semantic unit types (ByteCount, Duration, etc)
 │       │   └── tools/             # Diagnostics, testing, reflection
-│       └── test/                  # .spl test files
-│           ├── unit/              # Unit tests (stdlib functionality: collections, strings, units)
+│       └── test/                  # .spl test files (mirroring src/ structure)
+│           ├── unit/              # Unit tests (stdlib functionality by module)
+│           │   ├── core/          # Tests for core/ module
+│           │   └── units/         # Tests for units/ module
 │           ├── system/            # System tests (frameworks: spec, doctest)
-│           │   ├── spec/          # BDD spec framework tests
-│           │   └── doctest/       # Doctest framework tests
+│           │   ├── spec/          # Tests for spec/ framework
+│           │   │   └── matchers/  # Tests for matchers/ submodule
+│           │   └── doctest/       # Tests for doctest/ framework
+│           │       ├── parser/    # Tests for doctest parsing
+│           │       ├── matcher/   # Tests for output matching
+│           │       └── runner/    # Tests for example execution
 │           ├── integration/       # Integration tests (cross-module behavior)
-│           └── fixtures/          # Test fixtures
+│           │   └── doctest/       # Doctest discovery and cross-module tests
+│           └── fixtures/          # Test data and fixtures
+│               └── doctest/       # Doctest framework test samples
 │
 ├── lib/                           # Legacy stdlib (to be removed)
 │   └── std/                       # Old stdlib location
@@ -403,58 +416,73 @@ cargo test -p simple-driver runner_compiles
 ```
 
 ### Simple Standard Library Tests
-The Simple stdlib includes BDD-style specification tests written in the Simple language itself. These tests are automatically discovered and wrapped as Rust tests via `build.rs`:
+The Simple stdlib includes BDD-style specification tests written in the Simple language itself. These tests are automatically discovered and wrapped as Rust tests via `build.rs`. The test structure mirrors `src/` organization with tests grouped by module.
 
 ```bash
 # Run all stdlib tests (unit + system + integration)
 cargo test -p simple-driver simple_stdlib
 
-# Run unit tests only (stdlib functionality)
+# Run unit tests only (core functionality)
 cargo test -p simple-driver simple_stdlib_unit
 
 # Run system tests only (frameworks)
 cargo test -p simple-driver simple_stdlib_system
 
-# Run specific stdlib test suite
-cargo test -p simple-driver simple_stdlib_unit_collections_spec
+# Run specific test modules
+cargo test -p simple-driver simple_stdlib_unit_core          # All core tests
+cargo test -p simple-driver simple_stdlib_unit_units         # Units tests
+cargo test -p simple-driver simple_stdlib_system_spec        # Spec framework tests
+cargo test -p simple-driver simple_stdlib_system_doctest     # Doctest framework tests
+
+# Run specific stdlib test suites
+cargo test -p simple-driver simple_stdlib_unit_core_collections_spec
+cargo test -p simple-driver simple_stdlib_unit_core_string_spec
 cargo test -p simple-driver simple_stdlib_system_spec_spec_framework_spec
-cargo test -p simple-driver simple_stdlib_system_doctest_runner_spec
-cargo test -p simple-driver simple_stdlib_unit_string_spec
+cargo test -p simple-driver simple_stdlib_system_spec_matchers_spec_matchers_spec
+cargo test -p simple-driver simple_stdlib_system_doctest_parser_parser_spec
+cargo test -p simple-driver simple_stdlib_system_doctest_matcher_matcher_spec
 
 # Run directly with Simple interpreter
-./target/debug/simple simple/std_lib/test/unit/arithmetic_spec.spl
+./target/debug/simple simple/std_lib/test/unit/core/arithmetic_spec.spl
 ./target/debug/simple simple/std_lib/test/system/spec/spec_framework_spec.spl
-./target/debug/simple simple/std_lib/test/system/doctest/matcher_spec.spl
+./target/debug/simple simple/std_lib/test/system/doctest/parser/parser_spec.spl
 ```
 
-**Test Organization:**
-- `simple/std_lib/test/unit/` - Unit tests for stdlib functionality
+**Test Organization (mirroring src/ structure):**
+
+- `simple/std_lib/test/unit/core/` - Unit tests for core stdlib functionality
   - `arithmetic_spec.spl`, `comparison_spec.spl`, `primitives_spec.spl` - Basic operations
   - `collections_spec.spl` - Option, Result, Array, List, Dict
-  - `string_spec.spl` - String operations
-  - `units_spec.spl` - Semantic units (Size, Time)
-  - `fixture_spec.spl`, `hello_spec.spl` - Test examples
+  - `string_spec.spl` - String operations and manipulation
+  - `hello_spec.spl` - Basic example test
+
+- `simple/std_lib/test/unit/units/` - Unit tests for semantic units module
+  - `units_spec.spl` - Size units (bytes, KiB, MiB, etc.) and time units (ns, us, ms, s, min, hr, day)
 
 - `simple/std_lib/test/system/spec/` - BDD spec framework system tests
-  - `spec_framework_spec.spl` - describe/context/it/expect DSL
-  - `spec_matchers_spec.spl` - All matcher types (core, comparison, collection, string)
+  - `spec_framework_spec.spl` - describe/context/it/expect DSL functionality
+  - `matchers/spec_matchers_spec.spl` - All matcher types (core, comparison, collection, string)
 
 - `simple/std_lib/test/system/doctest/` - Doctest framework system tests
-  - `parser_spec.spl` - Docstring parsing
-  - `matcher_spec.spl` - Output matching and wildcards
-  - `runner_spec.spl` - Example execution
-  - `doctest_advanced_spec.spl` - Edge cases and error handling
+  - `doctest_advanced_spec.spl` - Edge cases, error handling, Unicode support
+  - `parser/parser_spec.spl` - Docstring parsing and code extraction
+  - `matcher/matcher_spec.spl` - Output matching, pattern normalization, wildcards
+  - `runner/runner_spec.spl` - Example execution and error handling
 
-- `simple/std_lib/test/integration/` - Integration tests
-  - `doctest/discovery_spec.spl` - Cross-module doctest behavior
+- `simple/std_lib/test/integration/doctest/` - Integration tests
+  - `discovery_spec.spl` - Cross-module doctest discovery and execution
 
-**Test Discovery:** Files matching `*_spec.spl` or `*_test.spl` are auto-discovered (fixtures excluded)
+- `simple/std_lib/test/fixtures/` - Test data and fixtures
+  - `fixture_spec.spl` - Fixture testing examples
+  - `doctest/sample.spl`, `sample_data.txt` - Doctest framework test samples
 
-**Current Coverage (16 files, 250+ test cases):**
-- ✅ Unit Tests: Collections, Strings, Units, Primitives, Arithmetic, Comparison (6 files, 60+ tests)
-- ✅ System Tests: BDD Framework, BDD Matchers, Doctest Framework (6 files, 160+ tests)
-- ✅ Integration Tests: Doctest Discovery (1 file, 8+ tests)
-- ✅ Plus Test Fixtures: Arithmetic, Comparison, Primitives, Hello, Fixtures (3 files)
+**Test Discovery:** Files matching `*_spec.spl` or `*_test.spl` are auto-discovered by build.rs
+
+**Current Coverage (14 test files, 250+ test cases):**
+- ✅ Unit Tests: 7 files (core: arithmetic, comparison, primitives, collections, strings, hello; units: units)
+- ✅ System Tests: 6 files (spec: framework, matchers; doctest: parser, matcher, runner, advanced)
+- ✅ Integration Tests: 1 file (doctest discovery)
+- ✅ Plus Fixtures: 2 files (fixture_spec, doctest samples)
 
 ## Code Quality Tools
 
