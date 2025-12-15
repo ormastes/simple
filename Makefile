@@ -8,10 +8,10 @@
 #   make check       - Run all checks (lint, test, duplication)
 #   make clean       - Clean build artifacts
 
-.PHONY: all test test-verbose test-unit test-it test-system test-env \
+.PHONY: all test test-verbose test-unit test-integration test-system test-environment \
         coverage coverage-html coverage-lcov coverage-json coverage-summary \
-        coverage-unit coverage-it coverage-system coverage-env coverage-merged coverage-all \
-        coverage-check coverage-check-unit coverage-check-it coverage-check-system \
+        coverage-unit coverage-integration coverage-system coverage-environment coverage-merged coverage-all \
+        coverage-check coverage-check-unit coverage-check-integration coverage-check-system \
         duplication duplication-simple lint lint-fix fmt fmt-check \
         check check-full unused-deps outdated audit build build-release \
         clean clean-coverage clean-duplication install-tools help
@@ -34,25 +34,25 @@ test-verbose:
 test-unit:
 	cargo test --workspace
 
-# Integration tests: tests/ crate IT level
-test-it:
-	cargo test -p simple-tests --test it
+# Integration tests: tests/ crate integration level
+test-integration:
+	cargo test -p simple-tests --test integration
 
 # System tests: tests/ crate system level
 test-system:
 	cargo test -p simple-tests --test system
 
-# Environment tests: tests/ crate env_test level
-test-env:
-	cargo test -p simple-tests --test env_test
+# Environment tests: tests/ crate environment level
+test-environment:
+	cargo test -p simple-tests --test environment
 
 # ============================================================================
 # Coverage (requires cargo-llvm-cov)
 # Install: cargo install cargo-llvm-cov
 # Per test.md policy:
-#   - Merged: UT + env_test (line/branch/condition) - 100% threshold
-#   - IT: public function coverage (separate) - 100% threshold
-#   - System: class/struct coverage (separate) - 100% threshold
+#   - Merged: UT + environment (line/branch/condition) - 100% threshold
+#   - Integration: public function touch (separate) - 100% threshold
+#   - System: public class/struct touch (separate) - 100% threshold
 # ============================================================================
 
 COVERAGE_DIR := target/coverage
@@ -86,45 +86,45 @@ coverage-unit:
 		--html --output-dir=$(COVERAGE_DIR)/unit/html
 	@echo "Unit coverage report: $(COVERAGE_DIR)/unit/html/index.html"
 
-# Integration: Public function coverage on class/struct
-coverage-it:
-	@mkdir -p $(COVERAGE_DIR)/it
-	@echo "=== INTEGRATION TEST COVERAGE (Public Functions) ==="
-	cargo llvm-cov -p simple-tests --test it \
-		--json --output-path=$(COVERAGE_DIR)/it/coverage.json
-	@echo "Analyzing public function coverage..."
+# Integration: Public function touch
+coverage-integration:
+	@mkdir -p $(COVERAGE_DIR)/integration
+	@echo "=== INTEGRATION TEST COVERAGE (Public Function Touch) ==="
+	cargo llvm-cov -p simple-tests --test integration \
+		--json --output-path=$(COVERAGE_DIR)/integration/coverage.json
+	@echo "Analyzing public function touch..."
 	@if [ -f public_api.yml ]; then \
 		cargo run -p simple_mock_helper --bin smh_coverage -- \
-			--coverage $(COVERAGE_DIR)/it/coverage.json \
-			--api public_api.yml --type public-func 2>/dev/null || \
-			cargo llvm-cov -p simple-tests --test it; \
+			--coverage $(COVERAGE_DIR)/integration/coverage.json \
+			--api public_api.yml --type public-func-touch 2>/dev/null || \
+			cargo llvm-cov -p simple-tests --test integration; \
 	else \
-		cargo llvm-cov -p simple-tests --test it; \
+		cargo llvm-cov -p simple-tests --test integration; \
 	fi
 
-# System: Class/struct method coverage
+# System: Public class/struct touch
 coverage-system:
 	@mkdir -p $(COVERAGE_DIR)/system
-	@echo "=== SYSTEM TEST COVERAGE (Class/Struct Methods) ==="
+	@echo "=== SYSTEM TEST COVERAGE (Public Class/Struct Touch) ==="
 	cargo llvm-cov -p simple-tests --test system \
 		--json --output-path=$(COVERAGE_DIR)/system/coverage.json
-	@echo "Analyzing class/struct coverage..."
+	@echo "Analyzing public class/struct touch..."
 	@if [ -f public_api.yml ]; then \
 		cargo run -p simple_mock_helper --bin smh_coverage -- \
 			--coverage $(COVERAGE_DIR)/system/coverage.json \
-			--api public_api.yml --type class-struct 2>/dev/null || \
+			--api public_api.yml --type class-struct-touch 2>/dev/null || \
 			cargo llvm-cov -p simple-tests --test system; \
 	else \
 		cargo llvm-cov -p simple-tests --test system; \
 	fi
 
 # Environment: Branch/Condition coverage (merged with unit)
-coverage-env:
-	@mkdir -p $(COVERAGE_DIR)/env
+coverage-environment:
+	@mkdir -p $(COVERAGE_DIR)/environment
 	@echo "=== ENVIRONMENT TEST COVERAGE (Branch/Condition) ==="
-	cargo llvm-cov -p simple-tests --test env_test --branch \
-		--json --output-path=$(COVERAGE_DIR)/env/coverage.json
-	cargo llvm-cov -p simple-tests --test env_test --branch
+	cargo llvm-cov -p simple-tests --test environment --branch \
+		--json --output-path=$(COVERAGE_DIR)/environment/coverage.json
+	cargo llvm-cov -p simple-tests --test environment --branch
 
 # Merged coverage: Unit + Environment (Branch/Condition)
 coverage-merged:
@@ -136,16 +136,16 @@ coverage-merged:
 		--html --output-dir=$(COVERAGE_DIR)/merged/html
 	@echo "Merged coverage report: $(COVERAGE_DIR)/merged/html/index.html"
 
-coverage-all: coverage-unit coverage-it coverage-system coverage-env
+coverage-all: coverage-unit coverage-integration coverage-system coverage-environment
 	@echo ""
 	@echo "All coverage reports generated:"
-	@echo "  Unit (branch/condition):    $(COVERAGE_DIR)/unit/"
-	@echo "  Integration (public func):  $(COVERAGE_DIR)/it/"
-	@echo "  System (class/struct):      $(COVERAGE_DIR)/system/"
-	@echo "  Environment (branch/cond):  $(COVERAGE_DIR)/env/"
+	@echo "  Unit (branch/condition):         $(COVERAGE_DIR)/unit/"
+	@echo "  Integration (public func touch): $(COVERAGE_DIR)/integration/"
+	@echo "  System (class/struct touch):     $(COVERAGE_DIR)/system/"
+	@echo "  Environment (branch/cond):       $(COVERAGE_DIR)/environment/"
 
 # Coverage threshold checks (per test.md: 100% for all)
-coverage-check: coverage-check-unit coverage-check-it coverage-check-system
+coverage-check: coverage-check-unit coverage-check-integration coverage-check-system
 	@echo "All coverage thresholds passed!"
 
 coverage-check-unit:
@@ -153,22 +153,22 @@ coverage-check-unit:
 	cargo llvm-cov --workspace --branch --fail-under-lines 100
 	cargo llvm-cov --workspace --branch --fail-under-branches 100
 
-coverage-check-it:
-	@echo "Checking IT public function coverage..."
+coverage-check-integration:
+	@echo "Checking integration public function touch..."
 	@if [ -f public_api.yml ]; then \
 		cargo run -p simple_mock_helper --bin smh_coverage -- \
-			--coverage $(COVERAGE_DIR)/it/coverage.json \
-			--api public_api.yml --type public-func --threshold 100; \
+			--coverage $(COVERAGE_DIR)/integration/coverage.json \
+			--api public_api.yml --type public-func-touch --threshold 100; \
 	else \
-		echo "Warning: public_api.yml not found, skipping IT coverage check"; \
+		echo "Warning: public_api.yml not found, skipping integration coverage check"; \
 	fi
 
 coverage-check-system:
-	@echo "Checking system class/struct coverage..."
+	@echo "Checking system public class/struct touch..."
 	@if [ -f public_api.yml ]; then \
 		cargo run -p simple_mock_helper --bin smh_coverage -- \
 			--coverage $(COVERAGE_DIR)/system/coverage.json \
-			--api public_api.yml --type class-struct --threshold 100; \
+			--api public_api.yml --type class-struct-touch --threshold 100; \
 	else \
 		echo "Warning: public_api.yml not found, skipping system coverage check"; \
 	fi
@@ -300,23 +300,23 @@ help:
 	@echo "Simple Language Project - Available Commands"
 	@echo ""
 	@echo "Testing (631+ tests total):"
-	@echo "  make test          - Run all tests"
-	@echo "  make test-verbose  - Run tests with output"
-	@echo "  make test-unit     - Run all workspace unit tests"
-	@echo "  make test-it       - Run integration tests only"
-	@echo "  make test-system   - Run system tests only"
-	@echo "  make test-env      - Run environment tests only"
+	@echo "  make test               - Run all tests"
+	@echo "  make test-verbose       - Run tests with output"
+	@echo "  make test-unit          - Run all workspace unit tests"
+	@echo "  make test-integration   - Run integration tests only"
+	@echo "  make test-system        - Run system tests only"
+	@echo "  make test-environment   - Run environment tests only"
 	@echo ""
 	@echo "Coverage (per test.md policy):"
-	@echo "  make coverage         - Generate HTML coverage report"
-	@echo "  make coverage-unit    - Unit tests (branch/condition)"
-	@echo "  make coverage-it      - Integration (public function on class/struct)"
-	@echo "  make coverage-system  - System (class/struct method coverage)"
-	@echo "  make coverage-env     - Environment (branch/condition)"
-	@echo "  make coverage-merged  - Merged unit + env (branch/condition)"
-	@echo "  make coverage-all     - Generate all coverage reports"
-	@echo "  make coverage-check   - Verify all coverage thresholds (100%)"
-	@echo "  make coverage-summary - Print coverage summary"
+	@echo "  make coverage              - Generate HTML coverage report"
+	@echo "  make coverage-unit         - Unit tests (branch/condition)"
+	@echo "  make coverage-integration  - Integration (public function touch)"
+	@echo "  make coverage-system       - System (public class/struct touch)"
+	@echo "  make coverage-environment  - Environment (branch/condition)"
+	@echo "  make coverage-merged       - Merged unit + environment (branch/condition)"
+	@echo "  make coverage-all          - Generate all coverage reports"
+	@echo "  make coverage-check        - Verify all coverage thresholds (100%)"
+	@echo "  make coverage-summary      - Print coverage summary"
 	@echo ""
 	@echo "Duplication:"
 	@echo "  make duplication   - Check for code duplication"

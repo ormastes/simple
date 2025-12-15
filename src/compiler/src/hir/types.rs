@@ -695,6 +695,45 @@ impl LocalVar {
     }
 }
 
+/// HIR contract clause - a single condition in a contract block
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirContractClause {
+    /// The boolean condition expression
+    pub condition: HirExpr,
+    /// Optional error message for contract violation
+    pub message: Option<String>,
+}
+
+/// HIR contract block for function contracts
+#[derive(Debug, Clone, Default)]
+pub struct HirContract {
+    /// Preconditions (in:/requires:) - checked at function entry
+    pub preconditions: Vec<HirContractClause>,
+    /// Invariants (invariant:) - checked at entry and exit
+    pub invariants: Vec<HirContractClause>,
+    /// Postconditions (out(ret):/ensures:) - checked on success exit
+    pub postconditions: Vec<HirContractClause>,
+    /// Binding name for return value in postconditions (default: "ret")
+    pub postcondition_binding: Option<String>,
+    /// Error postconditions (out_err(err):) - checked on error exit
+    pub error_postconditions: Vec<HirContractClause>,
+    /// Binding name for error value in error postconditions (default: "err")
+    pub error_binding: Option<String>,
+    /// Captured "old" values - (local_index, snapshot_index)
+    /// These are expressions evaluated at function entry for use in postconditions
+    pub old_values: Vec<(usize, HirExpr)>,
+}
+
+impl HirContract {
+    /// Check if this contract block has any clauses
+    pub fn is_empty(&self) -> bool {
+        self.preconditions.is_empty()
+            && self.invariants.is_empty()
+            && self.postconditions.is_empty()
+            && self.error_postconditions.is_empty()
+    }
+}
+
 /// HIR function definition
 #[derive(Debug, Clone)]
 pub struct HirFunction {
@@ -704,6 +743,8 @@ pub struct HirFunction {
     pub return_type: TypeId,
     pub body: Vec<HirStmt>,
     pub visibility: Visibility,
+    /// Function contract (preconditions, postconditions, invariants)
+    pub contract: Option<HirContract>,
 }
 
 impl HirFunction {
@@ -880,6 +921,7 @@ mod tests {
                 ty: TypeId::I64,
             }))],
             visibility: Visibility::Public,
+            contract: None,
         };
 
         assert_eq!(func.name, "add");

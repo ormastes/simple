@@ -41,8 +41,11 @@ simple/                            # Project root - Rust compiler implementation
 │       │   │   └── host/async_nogc_mut/  # Host-side GPU control
 │       │   └── tools/             # Diagnostics, testing, reflection
 │       └── test/                  # .spl test files
-│           ├── unit/              # Unit tests
-│           ├── integration/       # Integration tests
+│           ├── unit/              # Unit tests (stdlib functionality: collections, strings, units)
+│           ├── system/            # System tests (frameworks: spec, doctest)
+│           │   ├── spec/          # BDD spec framework tests
+│           │   └── doctest/       # Doctest framework tests
+│           ├── integration/       # Integration tests (cross-module behavior)
 │           └── fixtures/          # Test fixtures
 │
 ├── lib/                           # Legacy stdlib (to be removed)
@@ -387,6 +390,7 @@ Refactor → Clean up, maintain passing tests
 
 ## Running Tests
 
+### Rust Integration Tests
 ```bash
 # All tests
 cargo test --workspace
@@ -397,6 +401,60 @@ cargo test -p simple-driver
 # Specific test
 cargo test -p simple-driver runner_compiles
 ```
+
+### Simple Standard Library Tests
+The Simple stdlib includes BDD-style specification tests written in the Simple language itself. These tests are automatically discovered and wrapped as Rust tests via `build.rs`:
+
+```bash
+# Run all stdlib tests (unit + system + integration)
+cargo test -p simple-driver simple_stdlib
+
+# Run unit tests only (stdlib functionality)
+cargo test -p simple-driver simple_stdlib_unit
+
+# Run system tests only (frameworks)
+cargo test -p simple-driver simple_stdlib_system
+
+# Run specific stdlib test suite
+cargo test -p simple-driver simple_stdlib_unit_collections_spec
+cargo test -p simple-driver simple_stdlib_system_spec_spec_framework_spec
+cargo test -p simple-driver simple_stdlib_system_doctest_runner_spec
+cargo test -p simple-driver simple_stdlib_unit_string_spec
+
+# Run directly with Simple interpreter
+./target/debug/simple simple/std_lib/test/unit/arithmetic_spec.spl
+./target/debug/simple simple/std_lib/test/system/spec/spec_framework_spec.spl
+./target/debug/simple simple/std_lib/test/system/doctest/matcher_spec.spl
+```
+
+**Test Organization:**
+- `simple/std_lib/test/unit/` - Unit tests for stdlib functionality
+  - `arithmetic_spec.spl`, `comparison_spec.spl`, `primitives_spec.spl` - Basic operations
+  - `collections_spec.spl` - Option, Result, Array, List, Dict
+  - `string_spec.spl` - String operations
+  - `units_spec.spl` - Semantic units (Size, Time)
+  - `fixture_spec.spl`, `hello_spec.spl` - Test examples
+
+- `simple/std_lib/test/system/spec/` - BDD spec framework system tests
+  - `spec_framework_spec.spl` - describe/context/it/expect DSL
+  - `spec_matchers_spec.spl` - All matcher types (core, comparison, collection, string)
+
+- `simple/std_lib/test/system/doctest/` - Doctest framework system tests
+  - `parser_spec.spl` - Docstring parsing
+  - `matcher_spec.spl` - Output matching and wildcards
+  - `runner_spec.spl` - Example execution
+  - `doctest_advanced_spec.spl` - Edge cases and error handling
+
+- `simple/std_lib/test/integration/` - Integration tests
+  - `doctest/discovery_spec.spl` - Cross-module doctest behavior
+
+**Test Discovery:** Files matching `*_spec.spl` or `*_test.spl` are auto-discovered (fixtures excluded)
+
+**Current Coverage (16 files, 250+ test cases):**
+- ✅ Unit Tests: Collections, Strings, Units, Primitives, Arithmetic, Comparison (6 files, 60+ tests)
+- ✅ System Tests: BDD Framework, BDD Matchers, Doctest Framework (6 files, 160+ tests)
+- ✅ Integration Tests: Doctest Discovery (1 file, 8+ tests)
+- ✅ Plus Test Fixtures: Arithmetic, Comparison, Primitives, Hello, Fixtures (3 files)
 
 ## Code Quality Tools
 
@@ -571,6 +629,32 @@ Optional (requires npm): `npm install -g jscpd`
 
 **Note:** Large documentation files (feature.md, improve_api.md) have been reorganized into index files linking to focused sub-documents for better maintainability. Original files backed up with `.backup` extension.
 ## Recent Work (2025-12-15)
+
+### Code Deduplication ✅ COMPLETED
+
+Successfully reduced code duplication from **2.53% to 1.58%** (0.95 percentage points below threshold):
+
+**Final Results:**
+- **Lines reduced:** 869 lines (-0.95%)
+- **Tokens reduced:** 8424 tokens (-1.08%)
+- **Clones eliminated:** 78 clones (-36%)
+- **Achievement:** 37.5% reduction in duplication
+
+**Refactoring Phases (5 total):**
+1. **Error Handling Macros** (-696 lines) - `semantic_err!`, `bail_semantic!`, `bail_unknown_method!`
+2. **Module Loading** (-72 lines) - Consolidated into `pipeline/` submodules
+3. **Method Error Macro** (-26 lines) - Standardized unknown method errors
+4. **Monomorphize Utilities** (-66 lines) - Shared type analysis helpers
+5. **TOML Helper** (-9 lines) - String array extraction
+
+**Impact:**
+- ✅ All 807+ tests passing
+- ✅ Code quality significantly improved
+- ✅ Centralized error handling patterns
+- ✅ Shared utilities for type analysis
+- ✅ Build time unchanged (~1.7s)
+
+See `DEDUPLICATION_FINAL_REPORT.md` for complete details.
 
 ### Build Fixes
 - Added Debug, Clone, Copy, PartialEq, Eq derives to BackendKind enum

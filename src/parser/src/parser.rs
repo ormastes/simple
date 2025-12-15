@@ -83,12 +83,36 @@ impl<'a> Parser<'a> {
             TokenKind::Let => self.parse_let(),
             TokenKind::Const => self.parse_const(),
             TokenKind::Static => self.parse_static(),
-            TokenKind::Type => self.parse_type_alias(),
+            TokenKind::Type => {
+                // Check if this is a type alias (type Name = ...) or expression (expect type to eq)
+                // Simple heuristic: type alias names are PascalCase (start with uppercase)
+                // Expression context uses lowercase like "expect type to eq"
+                let next = self
+                    .pending_token
+                    .clone()
+                    .unwrap_or_else(|| self.lexer.next_token());
+                self.pending_token = Some(next.clone());
+
+                // Check if next token is an uppercase identifier (type alias pattern)
+                if let TokenKind::Identifier(name) = &next.kind {
+                    if name.chars().next().map_or(false, |c| c.is_uppercase()) {
+                        // PascalCase identifier after 'type' - treat as type alias
+                        self.parse_type_alias()
+                    } else {
+                        // lowercase identifier after 'type' - treat as expression
+                        self.parse_expression_or_assignment()
+                    }
+                } else {
+                    // Not followed by identifier - treat 'type' as expression
+                    self.parse_expression_or_assignment()
+                }
+            }
             TokenKind::Unit => self.parse_unit(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
             // Module system (Features #104-111)
             TokenKind::Use => self.parse_use(),
+            TokenKind::Import => self.parse_import(), // alias for use
             TokenKind::Mod => self.parse_mod(Visibility::Private, vec![]),
             TokenKind::Common => self.parse_common_use(),
             TokenKind::Export => self.parse_export_use(),
@@ -109,22 +133,31 @@ impl<'a> Parser<'a> {
 
     /// Try to parse a doc comment if one is present.
     /// Returns None if no doc comment, Some(DocComment) if found.
+    /// Merges consecutive doc comments into a single DocComment.
     fn try_parse_doc_comment(&mut self) -> Option<DocComment> {
         // Skip newlines before doc comment
         while self.check(&TokenKind::Newline) {
             self.advance();
         }
 
-        if let TokenKind::DocComment(content) = &self.current.kind {
+        let mut contents = Vec::new();
+
+        // Collect all consecutive doc comments
+        while let TokenKind::DocComment(content) = &self.current.kind {
             let content = content.clone();
+            contents.push(content);
             self.advance();
-            // Skip newlines after doc comment
+            // Skip newlines between doc comments
             while self.check(&TokenKind::Newline) {
                 self.advance();
             }
-            Some(DocComment::new(content))
-        } else {
+        }
+
+        if contents.is_empty() {
             None
+        } else {
+            // Merge all doc comments with newlines
+            Some(DocComment::new(contents.join("\n")))
         }
     }
 
@@ -326,8 +359,14 @@ impl<'a> Parser<'a> {
         // Skip newlines before checking for contract blocks
         self.skip_newlines();
 
-        // Parse optional contract block (requires/ensures)
-        let contract = if self.check(&TokenKind::Requires) || self.check(&TokenKind::Ensures) {
+        // Parse optional contract block (new: in/out/out_err/invariant, legacy: requires/ensures)
+        let contract = if self.check(&TokenKind::In)
+            || self.check(&TokenKind::Invariant)
+            || self.check(&TokenKind::Out)
+            || self.check(&TokenKind::OutErr)
+            || self.check(&TokenKind::Requires)
+            || self.check(&TokenKind::Ensures)
+        {
             self.parse_contract_block()?
         } else {
             None
@@ -847,6 +886,98 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Expect an identifier or a keyword that can be used as a path segment.
+    /// This allows using reserved words like 'unit', 'test', etc. in module paths.
+    pub(crate) fn expect_path_segment(&mut self) -> Result<String, ParseError> {
+        // First try regular identifier
+        if let TokenKind::Identifier(name) = &self.current.kind {
+            let name = name.clone();
+            self.advance();
+            return Ok(name);
+        }
+
+        // Allow certain keywords as path segments
+        let name = match &self.current.kind {
+            TokenKind::Unit => "unit",
+            TokenKind::Type => "type",
+            TokenKind::As => "as",
+            TokenKind::In => "in",
+            TokenKind::Is => "is",
+            TokenKind::Or => "or",
+            TokenKind::And => "and",
+            TokenKind::Not => "not",
+            TokenKind::Mod => "mod",
+            TokenKind::Use => "use",
+            TokenKind::Match => "match",
+            TokenKind::If => "if",
+            TokenKind::Else => "else",
+            TokenKind::For => "for",
+            TokenKind::While => "while",
+            TokenKind::Loop => "loop",
+            TokenKind::Break => "break",
+            TokenKind::Continue => "continue",
+            TokenKind::Return => "return",
+            TokenKind::True => "true",
+            TokenKind::False => "false",
+            _ => {
+                return Err(ParseError::unexpected_token(
+                    "identifier",
+                    format!("{:?}", self.current.kind),
+                    self.current.span,
+                ));
+            }
+        };
+        self.advance();
+        Ok(name.to_string())
+    }
+
+    /// Expect an identifier or a keyword that can be used as a method/field name.
+    /// This allows using reserved words like 'new', 'type', etc. as method names.
+    pub(crate) fn expect_method_name(&mut self) -> Result<String, ParseError> {
+        // First try regular identifier
+        if let TokenKind::Identifier(name) = &self.current.kind {
+            let name = name.clone();
+            self.advance();
+            return Ok(name);
+        }
+
+        // Allow certain keywords as method names
+        let name = match &self.current.kind {
+            TokenKind::New => "new",
+            TokenKind::Type => "type",
+            TokenKind::Unit => "unit",
+            TokenKind::Match => "match",
+            TokenKind::Is => "is",
+            TokenKind::As => "as",
+            TokenKind::In => "in",
+            TokenKind::Or => "or",
+            TokenKind::And => "and",
+            TokenKind::Not => "not",
+            TokenKind::If => "if",
+            TokenKind::Else => "else",
+            TokenKind::For => "for",
+            TokenKind::While => "while",
+            TokenKind::Loop => "loop",
+            TokenKind::Return => "return",
+            TokenKind::Break => "break",
+            TokenKind::Continue => "continue",
+            TokenKind::True => "true",
+            TokenKind::False => "false",
+            TokenKind::Result => "result",
+            TokenKind::Out => "out",
+            TokenKind::OutErr => "out_err",
+            _ => {
+                return Err(ParseError::unexpected_token(
+                    "identifier",
+                    format!("{:?}", self.current.kind),
+                    self.current.span,
+                ));
+            }
+        };
+        self.advance();
+        Ok(name.to_string())
+    }
+
     /// Check if a type should be treated as a borrow type
     /// Types ending with _borrow are borrow references
     pub(crate) fn is_borrow_type(&self, ty: &Type) -> bool {
@@ -857,24 +988,42 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse generic type parameters: <T, U, V>
+    /// Parse generic type parameters: <T, U, V> or [T, U, V]
+    /// Both angle brackets and square brackets are supported for compatibility
     /// Returns empty Vec if no generic parameters are present
     pub(crate) fn parse_generic_params(&mut self) -> Result<Vec<String>, ParseError> {
-        if !self.check(&TokenKind::Lt) {
+        // Check for angle brackets <T> or square brackets [T]
+        let use_brackets = if self.check(&TokenKind::Lt) {
+            self.advance(); // consume '<'
+            false
+        } else if self.check(&TokenKind::LBracket) {
+            self.advance(); // consume '['
+            true
+        } else {
             return Ok(Vec::new());
-        }
-        self.advance(); // consume '<'
+        };
 
         let mut params = Vec::new();
-        while !self.check(&TokenKind::Gt) {
+        let end_token = if use_brackets {
+            TokenKind::RBracket
+        } else {
+            TokenKind::Gt
+        };
+
+        while !self.check(&end_token) {
             let name = self.expect_identifier()?;
             params.push(name);
 
-            if !self.check(&TokenKind::Gt) {
+            if !self.check(&end_token) {
                 self.expect(&TokenKind::Comma)?;
             }
         }
-        self.expect(&TokenKind::Gt)?; // consume '>'
+
+        if use_brackets {
+            self.expect(&TokenKind::RBracket)?; // consume ']'
+        } else {
+            self.expect(&TokenKind::Gt)?; // consume '>'
+        }
 
         Ok(params)
     }

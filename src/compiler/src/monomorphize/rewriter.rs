@@ -3,7 +3,7 @@
 use super::analyzer::CallSiteAnalyzer;
 use super::engine::Monomorphizer;
 use super::types::{ConcreteType, PointerKind};
-use super::util::concrete_to_ast_type;
+use super::util::{concrete_to_ast_type, infer_concrete_type, type_uses_param};
 use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node, Type as AstType};
 use std::collections::HashMap;
 
@@ -264,9 +264,10 @@ impl<'a> CallSiteRewriter<'a> {
         for type_param in &func.generic_params {
             for (i, param) in func.params.iter().enumerate() {
                 if let Some(ty) = &param.ty {
-                    if self.type_uses_param(ty, type_param) {
+                    if type_uses_param(ty, type_param) {
                         if let Some(arg) = args.get(i) {
-                            if let Some(concrete) = self.infer_concrete_type(&arg.value) {
+                            // Rewriter doesn't have type context, use empty map
+                            if let Some(concrete) = infer_concrete_type(&arg.value, &HashMap::new()) {
                                 type_args.push(concrete);
                                 break;
                             }
@@ -280,53 +281,6 @@ impl<'a> CallSiteRewriter<'a> {
             Some(type_args)
         } else {
             None
-        }
-    }
-
-    fn type_uses_param(&self, ty: &AstType, param: &str) -> bool {
-        match ty {
-            AstType::Simple(name) => name == param,
-            AstType::Generic { name, args } => {
-                name == param || args.iter().any(|a| self.type_uses_param(a, param))
-            }
-            AstType::Array { element, .. } => self.type_uses_param(element, param),
-            AstType::Tuple(elems) => elems.iter().any(|e| self.type_uses_param(e, param)),
-            AstType::Function { params, ret } => {
-                params.iter().any(|p| self.type_uses_param(p, param))
-                    || ret
-                        .as_ref()
-                        .map_or(false, |r| self.type_uses_param(r, param))
-            }
-            AstType::Optional(inner) => self.type_uses_param(inner, param),
-            AstType::Pointer { inner, .. } => self.type_uses_param(inner, param),
-            _ => false,
-        }
-    }
-
-    fn infer_concrete_type(&self, expr: &Expr) -> Option<ConcreteType> {
-        match expr {
-            Expr::Integer(_) | Expr::TypedInteger(_, _) => Some(ConcreteType::Int),
-            Expr::Float(_) | Expr::TypedFloat(_, _) => Some(ConcreteType::Float),
-            Expr::Bool(_) => Some(ConcreteType::Bool),
-            Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => {
-                Some(ConcreteType::String)
-            }
-            Expr::Nil => Some(ConcreteType::Nil),
-            Expr::Array(elems) => {
-                if let Some(first) = elems.first() {
-                    Some(ConcreteType::Array(Box::new(
-                        self.infer_concrete_type(first)?,
-                    )))
-                } else {
-                    None
-                }
-            }
-            Expr::Tuple(elems) => {
-                let elem_types: Option<Vec<_>> =
-                    elems.iter().map(|e| self.infer_concrete_type(e)).collect();
-                elem_types.map(ConcreteType::Tuple)
-            }
-            _ => None,
         }
     }
 }

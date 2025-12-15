@@ -163,15 +163,7 @@ impl TypeChecker {
             Expr::Match { subject, arms } => {
                 let _ = self.infer_expr(subject)?;
                 let result_ty = self.fresh_var();
-                for arm in arms {
-                    self.bind_pattern(&arm.pattern);
-                    if let Some(guard) = &arm.guard {
-                        let _ = self.infer_expr(guard)?;
-                    }
-                    for stmt in &arm.body.statements {
-                        self.check_node(stmt)?;
-                    }
-                }
+                self.check_match_arms(arms)?;
                 Ok(result_ty)
             }
             Expr::FieldAccess { receiver, .. } => {

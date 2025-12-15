@@ -136,6 +136,13 @@ impl Lowerer {
 
         let body = self.lower_block(&f.body, &mut ctx)?;
 
+        // Lower contract if present
+        let contract = if let Some(ref ast_contract) = f.contract {
+            Some(self.lower_contract(ast_contract, &mut ctx)?)
+        } else {
+            None
+        };
+
         Ok(HirFunction {
             name: f.name.clone(),
             params,
@@ -143,6 +150,60 @@ impl Lowerer {
             return_type,
             body,
             visibility: f.visibility,
+            contract,
         })
+    }
+
+    fn lower_contract(
+        &mut self,
+        contract: &ast::ContractBlock,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirContract> {
+        let mut hir_contract = HirContract::default();
+
+        // Lower preconditions
+        for clause in &contract.preconditions {
+            let condition = self.lower_expr(&clause.condition, ctx)?;
+            hir_contract.preconditions.push(HirContractClause {
+                condition,
+                message: clause.message.clone(),
+            });
+        }
+
+        // Lower invariants
+        for clause in &contract.invariants {
+            let condition = self.lower_expr(&clause.condition, ctx)?;
+            hir_contract.invariants.push(HirContractClause {
+                condition,
+                message: clause.message.clone(),
+            });
+        }
+
+        // Lower postconditions
+        // First, add the return value binding if specified
+        if let Some(ref binding) = contract.postcondition_binding {
+            hir_contract.postcondition_binding = Some(binding.clone());
+        }
+        for clause in &contract.postconditions {
+            let condition = self.lower_expr(&clause.condition, ctx)?;
+            hir_contract.postconditions.push(HirContractClause {
+                condition,
+                message: clause.message.clone(),
+            });
+        }
+
+        // Lower error postconditions
+        if let Some(ref binding) = contract.error_binding {
+            hir_contract.error_binding = Some(binding.clone());
+        }
+        for clause in &contract.error_postconditions {
+            let condition = self.lower_expr(&clause.condition, ctx)?;
+            hir_contract.error_postconditions.push(HirContractClause {
+                condition,
+                message: clause.message.clone(),
+            });
+        }
+
+        Ok(hir_contract)
     }
 }

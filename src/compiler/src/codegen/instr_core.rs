@@ -247,22 +247,7 @@ fn compile_interp_call<M: Module>(
         builder.ins().call(array_push_ref, &[args_array, arg_val]);
     }
 
-    let func_name_bytes = func_name.as_bytes();
-    let data_id = ctx
-        .module
-        .declare_anonymous_data(true, false)
-        .map_err(|e| e.to_string())?;
-    let mut data_desc = cranelift_module::DataDescription::new();
-    data_desc.define(func_name_bytes.to_vec().into_boxed_slice());
-    ctx.module
-        .define_data(data_id, &data_desc)
-        .map_err(|e| e.to_string())?;
-
-    let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
-    let name_ptr = builder.ins().global_value(types::I64, global_val);
-    let name_len = builder
-        .ins()
-        .iconst(types::I64, func_name_bytes.len() as i64);
+    let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
 
     let interp_call_id = ctx.runtime_funcs["rt_interp_call"];
     let interp_call_ref = ctx

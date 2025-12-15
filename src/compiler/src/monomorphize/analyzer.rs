@@ -1,7 +1,7 @@
 //! Call site analyzer for finding generic function calls.
 
 use super::types::ConcreteType;
-use super::util::ast_type_to_concrete;
+use super::util::{ast_type_to_concrete, infer_concrete_type, type_uses_param};
 use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node, Type as AstType};
 use std::collections::HashMap;
 
@@ -224,10 +224,10 @@ impl<'a> CallSiteAnalyzer<'a> {
             // Find which parameter uses this type param
             for (i, param) in func.params.iter().enumerate() {
                 if let Some(ty) = &param.ty {
-                    if self.type_uses_param(ty, type_param) {
+                    if type_uses_param(ty, type_param) {
                         // Get the actual argument value
                         if let Some(arg) = args.get(i) {
-                            if let Some(concrete) = self.infer_concrete_type(&arg.value) {
+                            if let Some(concrete) = infer_concrete_type(&arg.value, &self.type_context) {
                                 type_args.push(concrete);
                                 break;
                             }
@@ -244,47 +244,15 @@ impl<'a> CallSiteAnalyzer<'a> {
         }
     }
 
-    /// Check if a type directly uses a type parameter.
-    fn type_uses_param(&self, ty: &AstType, param: &str) -> bool {
-        match ty {
-            AstType::Simple(name) => name == param,
-            AstType::Generic { name, args } => {
-                name == param || args.iter().any(|a| self.type_uses_param(a, param))
-            }
-            AstType::Array { element, .. } => self.type_uses_param(element, param),
-            AstType::Tuple(elems) => elems.iter().any(|e| self.type_uses_param(e, param)),
-            AstType::Function { params, ret } => {
-                params.iter().any(|p| self.type_uses_param(p, param))
-                    || ret
-                        .as_ref()
-                        .map_or(false, |r| self.type_uses_param(r, param))
-            }
-            AstType::Optional(inner) => self.type_uses_param(inner, param),
-            AstType::Pointer { inner, .. } => self.type_uses_param(inner, param),
-            _ => false,
-        }
-    }
-
-    /// Infer the concrete type of an expression.
+    /// Infer the concrete type of an expression (extended version with Tuple support).
     fn infer_concrete_type(&self, expr: &Expr) -> Option<ConcreteType> {
+        // Try the shared utility first
+        if let Some(ty) = infer_concrete_type(expr, &self.type_context) {
+            return Some(ty);
+        }
+        
+        // Handle additional cases not in shared util
         match expr {
-            Expr::Integer(_) | Expr::TypedInteger(_, _) => Some(ConcreteType::Int),
-            Expr::Float(_) | Expr::TypedFloat(_, _) => Some(ConcreteType::Float),
-            Expr::Bool(_) => Some(ConcreteType::Bool),
-            Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => {
-                Some(ConcreteType::String)
-            }
-            Expr::Nil => Some(ConcreteType::Nil),
-            Expr::Identifier(name) => self.type_context.get(name).cloned(),
-            Expr::Array(elems) => {
-                if let Some(first) = elems.first() {
-                    Some(ConcreteType::Array(Box::new(
-                        self.infer_concrete_type(first)?,
-                    )))
-                } else {
-                    None
-                }
-            }
             Expr::Tuple(elems) => {
                 let elem_types: Option<Vec<_>> =
                     elems.iter().map(|e| self.infer_concrete_type(e)).collect();

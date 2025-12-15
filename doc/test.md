@@ -8,10 +8,10 @@ This document defines the test strategy for the Simple language compiler, using 
 
 ## Test Categories and Directory Structure
 
-Tests are organized into four categories. Unit tests are distributed across workspace crates, while IT/System/Env tests are in the `tests/` crate:
+Tests are organized into four categories with separate coverage tracking:
 
 ```
-# Unit tests in each crate (631+ tests total):
+# Rust unit tests in each crate (631+ tests total):
 src/parser/       # 115 tests (50 inline + 65 in tests/)
 src/compiler/     # 79 tests (57 inline + 22 in tests/)
 src/common/       # 29 tests (18 inline + 11 in tests/)
@@ -23,15 +23,33 @@ src/native_loader/# 11 tests
 src/lib/          # 2 tests
 simple_mock_helper/ # 37 tests
 
-# Specialized test levels in tests/ crate:
+# Simple language tests (BDD framework):
+test/                           # Root test folder (Simple .spl tests)
+├── __init__.spl                # Root test environment (std.spec.* imports)
+├── environment/                # Test runtime orchestration
+│   ├── __init__.spl            # Environment configuration
+│   ├── bootstrap.spl           # Process-level bootstrap
+│   ├── fixtures/               # Test fixtures and data
+│   └── helpers/                # Shared test helpers
+├── unit/                       # Unit tests (Simple .spl)
+│   ├── __init__.spl            # Unit test configuration
+│   └── **/*_spec.spl           # Fast isolated tests
+├── integration/                # Integration tests (Simple .spl)
+│   ├── __init__.spl            # Integration test configuration
+│   └── **/*_spec.spl           # Public function tests
+└── system/                     # System tests (Simple .spl)
+    ├── __init__.spl            # System test configuration
+    └── **/*_spec.spl           # Public class/struct tests
+
+# Specialized test levels in tests/ crate (Rust):
 tests/
 ├── unit/           # Additional unit tests with mock policy
 │   └── main.rs     # Entry point with #[ctor] init
-├── it/             # Integration tests - mocks only in HAL layers
+├── integration/    # Integration tests - mocks only in HAL layers
 │   └── main.rs
 ├── system/         # System tests - no mocks allowed
 │   └── main.rs
-└── env_test/       # Environment tests - HAL/library verification
+└── environment/    # Environment tests - HAL/library verification
     └── main.rs
 ```
 
@@ -40,8 +58,8 @@ tests/
 | Level | Mock Policy | Coverage Metric | Coverage Data | Threshold |
 |-------|-------------|-----------------|---------------|-----------|
 | **Unit** | All mocks allowed | Branch, Condition | Merged (UT+IT+ST+ENV) | 100% |
-| **Integration** | HAL-only mocks | Public function on class/struct | Own raw data | 100% |
-| **System** | No mocks | Class/struct method | Own raw data | 100% |
+| **Integration** | HAL-only mocks | Public function touch | Own raw data | 100% |
+| **System** | No mocks | Public class/struct touch | Own raw data | 100% |
 | **Environment** | HAL/External/Lib mocks | Branch, Condition | Merged into UT | 100% |
 
 ### Coverage Data Strategy
@@ -81,22 +99,24 @@ Separate Raw Data (for specific coverage metrics):
 - **Coverage**: `make coverage-unit` (overall merged coverage)
 
 #### Integration Tests (IT) - 9 tests
-- **Coverage Metrics**: Public function coverage on class/struct (100% required)
-- **Data Handling**: **Own raw data** (separate from overall, for public func analysis)
-- **Purpose**: Verify all public API functions on classes/structs are exercised
-- **Threshold**: 100% public functions on class/struct covered
+- **Coverage Metrics**: Public function touch (100% required)
+- **Data Handling**: **Own raw data** (separate from overall, for public function touch analysis)
+- **Purpose**: Verify all public API functions are touched (called at least once)
+- **Threshold**: 100% public functions touched
 - **Mock Policy**: HAL-only mocks allowed
-- **Command**: `make test-it`
-- **Coverage**: `make coverage-it` (own raw data for public func coverage)
+- **Command**: `make test-integration`
+- **Coverage**: `make coverage-integration` (own raw data for public function touch)
+- **Location**: `test/integration/` (Simple .spl tests) and `tests/integration/` (Rust tests)
 
 #### System Tests (ST) - 8 tests
-- **Coverage Metrics**: Class/struct method coverage (100% required)
-- **Data Handling**: **Own raw data** (separate from overall, for class/struct analysis)
-- **Purpose**: Verify all public class/struct methods are exercised end-to-end
-- **Threshold**: 100% class/struct methods covered
+- **Coverage Metrics**: Public class/struct touch (100% required)
+- **Data Handling**: **Own raw data** (separate from overall, for public class/struct touch analysis)
+- **Purpose**: Verify all public classes/structs are touched (instantiated/used at least once)
+- **Threshold**: 100% public classes/structs touched
 - **Mock Policy**: No mocks allowed (real implementations only)
 - **Command**: `make test-system`
-- **Coverage**: `make coverage-system` (own raw data for class/struct coverage)
+- **Coverage**: `make coverage-system` (own raw data for public class/struct touch)
+- **Location**: `test/system/` (Simple .spl tests) and `tests/system/` (Rust tests)
 
 #### Environment Tests (env_test) - 7 tests
 - **Coverage Metrics**: Branch and Condition coverage (100% required)
@@ -137,7 +157,7 @@ fn validate_config() {
 ```
 
 ```rust
-// tests/it/main.rs
+// tests/integration/main.rs
 use ctor::ctor;
 use simple_mock_helper::{init_integration_tests, validate_test_config};
 
@@ -196,12 +216,12 @@ target/coverage/
 │   ├── coverage.json
 │   ├── coverage.lcov
 │   └── html/
-├── it/                        # IT only - own raw data (public func on class/struct)
+├── integration/               # IT only - own raw data (public function touch)
 │   ├── coverage.json
-│   └── public_func_report.txt
-└── system/                    # ST only - own raw data (class/struct methods)
+│   └── public_func_touch_report.txt
+└── system/                    # ST only - own raw data (public class/struct touch)
     ├── coverage.json
-    └── class_coverage_report.txt
+    └── class_touch_report.txt
 ```
 
 ### Generating Coverage Data
@@ -219,19 +239,19 @@ cargo llvm-cov --workspace --branch \
 cargo llvm-cov --workspace --branch \
     --html --output-dir=target/coverage/overall/html
 
-# 2. Integration tests: Own raw data for public function coverage  
-cargo llvm-cov -p simple-tests --test it \
-    --json --output-path=target/coverage/it/coverage.json
+# 2. Integration tests: Own raw data for public function touch
+cargo llvm-cov -p simple-tests --test integration \
+    --json --output-path=target/coverage/integration/coverage.json
 
-# 3. System tests: Own raw data for class/struct coverage
+# 3. System tests: Own raw data for public class/struct touch
 cargo llvm-cov -p simple-tests --test system \
     --json --output-path=target/coverage/system/coverage.json
 
 # Or use Makefile targets (backend selection is automatic)
-make coverage-unit      # Overall merged (UT+IT+ST+ENV) - branch/condition
-make coverage-it        # IT only - own raw data for public func
-make coverage-system    # ST only - own raw data for class/struct
-make coverage-all       # All reports
+make coverage-unit          # Overall merged (UT+IT+ST+ENV) - branch/condition
+make coverage-integration   # IT only - own raw data for public func touch
+make coverage-system        # ST only - own raw data for public class/struct touch
+make coverage-all           # All reports
 ```
 
 **Note**: The build system automatically selects the LLVM backend when running coverage commands to ensure accurate instrumentation and analysis.
@@ -271,40 +291,40 @@ types:
 
 ```bash
 # Generate merged coverage report
-cargo llvm-cov --test unit --test env_test --html
+cargo llvm-cov --test unit --test environment --html
 
 # Check thresholds
-cargo llvm-cov --test unit --test env_test --fail-under-lines 80
-cargo llvm-cov --test unit --test env_test --fail-under-branches 70
+cargo llvm-cov --test unit --test environment --fail-under-lines 80
+cargo llvm-cov --test unit --test environment --fail-under-branches 70
 ```
 
-#### Integration Coverage (Public Function)
+#### Integration Coverage (Public Function Touch)
 
 ```rust
 use simple_mock_helper::{
     load_llvm_cov_export, load_public_api_spec,
-    compute_public_func_coverage, CoverageSummary,
+    compute_public_func_touch, CoverageSummary,
 };
 
-fn check_it_coverage() -> anyhow::Result<()> {
-    let cov = load_llvm_cov_export("target/coverage/it/coverage.json")?;
+fn check_integration_coverage() -> anyhow::Result<()> {
+    let cov = load_llvm_cov_export("target/coverage/integration/coverage.json")?;
     let api = load_public_api_spec("public_api.yml")?;
 
-    let results = compute_public_func_coverage(&cov, &api);
+    let results = compute_public_func_touch(&cov, &api);
     let summary = CoverageSummary::from_results(&results);
 
-    assert!(summary.meets_threshold(90.0),
-        "Public function coverage {:.1}% < 90%", summary.coverage_percent());
+    assert!(summary.meets_threshold(100.0),
+        "Public function touch {:.1}% < 100%", summary.coverage_percent());
     Ok(())
 }
 ```
 
-#### System Coverage (Class/Struct)
+#### System Coverage (Public Class/Struct Touch)
 
 ```rust
 use simple_mock_helper::{
     load_llvm_cov_export, load_public_api_spec,
-    compute_class_coverage, print_class_coverage_table,
+    compute_class_touch, print_class_touch_table,
     CoverageSummary,
 };
 
@@ -312,12 +332,12 @@ fn check_system_coverage() -> anyhow::Result<()> {
     let cov = load_llvm_cov_export("target/coverage/system/coverage.json")?;
     let api = load_public_api_spec("public_api.yml")?;
 
-    let results = compute_class_coverage(&cov, &api);
-    print_class_coverage_table(&results, None);
+    let results = compute_class_touch(&cov, &api);
+    print_class_touch_table(&results, None);
 
     let summary = CoverageSummary::from_results(&results);
-    assert!(summary.meets_threshold(85.0),
-        "Class coverage {:.1}% < 85%", summary.coverage_percent());
+    assert!(summary.meets_threshold(100.0),
+        "Public class/struct touch {:.1}% < 100%", summary.coverage_percent());
     Ok(())
 }
 ```
@@ -325,7 +345,7 @@ fn check_system_coverage() -> anyhow::Result<()> {
 ### Coverage CLI Tool
 
 ```bash
-# Check merged coverage (UT + env_test)
+# Check merged coverage (UT + environment)
 cargo run -p simple_mock_helper --bin smh_coverage -- \
     --coverage target/coverage/merged/coverage.json \
     --type line-branch-condition \
@@ -333,19 +353,19 @@ cargo run -p simple_mock_helper --bin smh_coverage -- \
     --branch-threshold 70 \
     --condition-threshold 60
 
-# Check IT coverage (public functions)
+# Check integration coverage (public function touch)
 cargo run -p simple_mock_helper --bin smh_coverage -- \
-    --coverage target/coverage/it/coverage.json \
+    --coverage target/coverage/integration/coverage.json \
     --api public_api.yml \
-    --type public-func \
-    --threshold 90
+    --type public-func-touch \
+    --threshold 100
 
-# Check system coverage (class/struct)
+# Check system coverage (public class/struct touch)
 cargo run -p simple_mock_helper --bin smh_coverage -- \
     --coverage target/coverage/system/coverage.json \
     --api public_api.yml \
-    --type class-struct \
-    --threshold 85
+    --type class-struct-touch \
+    --threshold 100
 ```
 
 ## Cargo.toml Configuration
@@ -365,16 +385,16 @@ name = "unit"
 path = "tests/unit/main.rs"
 
 [[test]]
-name = "it"
-path = "tests/it/main.rs"
+name = "integration"
+path = "tests/integration/main.rs"
 
 [[test]]
 name = "system"
 path = "tests/system/main.rs"
 
 [[test]]
-name = "env_test"
-path = "tests/env_test/main.rs"
+name = "environment"
+path = "tests/environment/main.rs"
 ```
 
 ## Running Tests
@@ -385,12 +405,12 @@ cargo test --workspace
 
 # Run specific test level
 cargo test --test unit
-cargo test --test it
+cargo test --test integration
 cargo test --test system
-cargo test --test env_test
+cargo test --test environment
 
 # Run with coverage
-cargo llvm-cov --workspace --test unit --test it
+cargo llvm-cov --workspace --test unit --test integration
 ```
 
 ## System Tests
@@ -446,14 +466,14 @@ fn gc_logging_enabled() {
 Environment tests verify HAL, external libraries, and other dependencies work correctly. They can mock these dependencies to simulate various scenarios.
 
 ```rust
-// tests/env_test/main.rs
+// tests/environment/main.rs
 use ctor::ctor;
 use simple_mock_helper::{init_env_tests, validate_test_config};
 
 #[ctor]
 fn init() {
-    // env_test can mock HAL, external libs, and other library dependencies
-    init_env_tests!("env_test");
+    // environment can mock HAL, external libs, and other library dependencies
+    init_env_tests!("environment");
 }
 
 mod hal_tests;          // Test HAL implementations
@@ -538,37 +558,37 @@ fn verify_real_filesystem() {
 
 | Test Level | Metric | Threshold |
 |------------|--------|-----------|
-| Unit + env_test | Line | 80% |
-| Unit + env_test | Branch | 70% |
-| Unit + env_test | Condition | 60% |
-| Integration | Public functions | 90% |
-| System | Class/struct methods | 85% |
+| Unit + environment | Line | 80% |
+| Unit + environment | Branch | 70% |
+| Unit + environment | Condition | 60% |
+| Integration | Public function touch | 100% |
+| System | Public class/struct touch | 100% |
 
 ## Makefile Targets
 
 ```makefile
 # Test execution
-test:              # Run all tests
-test-unit:         # Run unit tests only
-test-it:           # Run integration tests only
-test-system:       # Run system tests only
-test-env:          # Run environment tests only
+test:                   # Run all tests
+test-unit:              # Run unit tests only
+test-integration:       # Run integration tests only
+test-system:            # Run system tests only
+test-environment:       # Run environment tests only
 
 # Coverage generation (separated by policy)
-coverage-merged:   # UT + env_test → line/branch/condition
-coverage-it:       # IT only → public function coverage
-coverage-system:   # System only → class/struct coverage
-coverage-all:      # Generate all three coverage reports
+coverage-merged:        # UT + environment → line/branch/condition
+coverage-integration:   # Integration only → public function touch
+coverage-system:        # System only → public class/struct touch
+coverage-all:           # Generate all three coverage reports
 
 # Coverage verification
-coverage-check:           # Verify all coverage thresholds
-coverage-check-merged:    # Check UT + env_test thresholds
-coverage-check-it:        # Check IT public func threshold
-coverage-check-system:    # Check system class threshold
+coverage-check:              # Verify all coverage thresholds
+coverage-check-merged:       # Check UT + environment thresholds
+coverage-check-integration:  # Check integration public func touch threshold
+coverage-check-system:       # Check system class touch threshold
 
 # Reports
-coverage-html:     # Generate HTML report (merged only)
-coverage-report:   # Print summary of all coverage types
+coverage-html:          # Generate HTML report (merged only)
+coverage-report:        # Print summary of all coverage types
 ```
 
 ## CI/CD Integration
@@ -580,15 +600,15 @@ coverage-report:   # Print summary of all coverage types
 coverage:
   steps:
     # 1. Run tests and generate coverage
-    - name: Generate merged coverage (UT + env_test)
+    - name: Generate merged coverage (UT + environment)
       run: |
-        cargo llvm-cov --test unit --test env_test \
+        cargo llvm-cov --test unit --test environment \
           --json --output-path=target/coverage/merged/coverage.json
 
-    - name: Generate IT coverage
+    - name: Generate integration coverage
       run: |
-        cargo llvm-cov --test it \
-          --json --output-path=target/coverage/it/coverage.json
+        cargo llvm-cov --test integration \
+          --json --output-path=target/coverage/integration/coverage.json
 
     - name: Generate system coverage
       run: |
@@ -603,17 +623,17 @@ coverage:
           --type line-branch-condition \
           --line-threshold 80 --branch-threshold 70 --condition-threshold 60
 
-    - name: Check IT public function coverage
+    - name: Check integration public function touch
       run: |
         cargo run -p simple_mock_helper --bin smh_coverage -- \
-          --coverage target/coverage/it/coverage.json \
-          --api public_api.yml --type public-func --threshold 90
+          --coverage target/coverage/integration/coverage.json \
+          --api public_api.yml --type public-func-touch --threshold 100
 
-    - name: Check system class coverage
+    - name: Check system class/struct touch
       run: |
         cargo run -p simple_mock_helper --bin smh_coverage -- \
           --coverage target/coverage/system/coverage.json \
-          --api public_api.yml --type class-struct --threshold 85
+          --api public_api.yml --type class-struct-touch --threshold 100
 ```
 
 ### Coverage Report Summary
@@ -623,16 +643,16 @@ The CI should output a summary like:
 ```
 === Coverage Report ===
 
-Merged (UT + env_test):
+Merged (UT + environment):
   Line:      82.5% (target: 80%) ✓
   Branch:    71.2% (target: 70%) ✓
   Condition: 63.8% (target: 60%) ✓
 
-Integration (public functions):
-  Coverage:  92.3% (target: 90%) ✓
+Integration (public function touch):
+  Touch:     100.0% (target: 100%) ✓
 
-System (class/struct methods):
-  Coverage:  87.1% (target: 85%) ✓
+System (public class/struct touch):
+  Touch:     100.0% (target: 100%) ✓
 
 All coverage thresholds met!
 ```

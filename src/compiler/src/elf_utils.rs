@@ -2,6 +2,19 @@
 
 use simple_runtime::value;
 
+/// Helper to extract a null-terminated section name from the string table.
+#[inline]
+pub(crate) fn get_section_name(shstrtab: &[u8], sh_name: usize) -> Option<&str> {
+    if sh_name >= shstrtab.len() {
+        return None;
+    }
+    let name_end = shstrtab[sh_name..]
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(shstrtab.len() - sh_name);
+    std::str::from_utf8(&shstrtab[sh_name..sh_name + name_end]).ok()
+}
+
 /// Extract code from an object file.
 /// Tries to parse as ELF and extract .text section, with relocation support.
 pub(crate) fn extract_code_from_object(object_code: &[u8]) -> Vec<u8> {
@@ -79,13 +92,7 @@ pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
         let sh_link = u32::from_le_bytes(elf_data[sh_offset + 40..sh_offset + 44].try_into().ok()?);
 
         // Get section name from string table
-        if sh_name < shstrtab.len() {
-            let name_end = shstrtab[sh_name..]
-                .iter()
-                .position(|&c| c == 0)
-                .unwrap_or(shstrtab.len() - sh_name);
-            let name = std::str::from_utf8(&shstrtab[sh_name..sh_name + name_end]).ok()?;
-
+        if let Some(name) = get_section_name(shstrtab, sh_name) {
             let offset =
                 u64::from_le_bytes(elf_data[sh_offset + 24..sh_offset + 32].try_into().ok()?)
                     as usize;

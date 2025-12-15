@@ -86,6 +86,7 @@ fn test_generic_struct_def() {
             mutability: Mutability::Immutable,
             visibility: Visibility::Private,
         }],
+        methods: vec![],
         visibility: Visibility::Private,
         attributes: vec![],
         doc_comment: None,

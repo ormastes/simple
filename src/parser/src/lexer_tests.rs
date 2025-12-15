@@ -465,6 +465,34 @@ fn test_doc_line_comment() {
     );
 }
 
+#[test]
+fn test_triple_slash_doc_comment() {
+    // /// is a doc comment (like in Rust)
+    assert_eq!(
+        tokenize("/// This is a doc comment\nx"),
+        vec![
+            TokenKind::DocComment("This is a doc comment".to_string()),
+            TokenKind::Newline,
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn test_double_slash_still_floor_div() {
+    // // is still floor division, not a comment
+    assert_eq!(
+        tokenize("10 // 3"),
+        vec![
+            TokenKind::Integer(10),
+            TokenKind::DoubleSlash,
+            TokenKind::Integer(3),
+            TokenKind::Eof,
+        ]
+    );
+}
+
 // === Module System Keywords Tests ===
 
 #[test]

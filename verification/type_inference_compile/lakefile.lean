@@ -10,3 +10,7 @@ lean_lib TypeInferenceCompile
 lean_lib Generics
 
 lean_lib GenericsTest
+
+lean_lib Contracts
+
+lean_lib ContractsTest

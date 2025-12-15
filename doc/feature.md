@@ -2,7 +2,7 @@
 
 ## Summary Statistics
 
-**Overall Progress:** 22% (47/212 features complete)
+**Overall Progress:** 24% (51/212 features complete)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
@@ -10,7 +10,8 @@
 | Codegen | 5 | 2 | 1 | 2 |
 | Extended | 21 | 1 | 0 | 20 |
 | Testing | 4 | 2 | 1 | 1 |
-| Advanced | 127 | 0 | 0 | 127 |
+| Contracts | 32 | 4 | 1 | 27 |
+| Advanced | 95 | 0 | 0 | 95 |
 | Infrastructure | 5 | 4 | 1 | 0 |
 
 **Completed features:** See [feature_done_1.md](feature_done_1.md)
@@ -132,11 +133,19 @@ test "Should notify when user created":
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| CTR-001 | `in:` preconditions | 📋 | Boolean expressions that must be true at function entry |
-| CTR-002 | `out(ret):` postconditions | 📋 | Conditions on success return value |
-| CTR-003 | `out_err(err):` error postconditions | 📋 | Conditions on error return value |
-| CTR-004 | `invariant:` routine invariants | 📋 | Must hold at entry and all exits |
-| CTR-005 | `old(expr)` snapshots | 📋 | Capture values at function entry for postconditions |
+| CTR-001 | `in:` preconditions | ✅ | Boolean expressions that must be true at function entry |
+| CTR-002 | `out(ret):` postconditions | ✅ | Conditions on success return value |
+| CTR-003 | `out_err(err):` error postconditions | ✅ | Conditions on error return value |
+| CTR-004 | `invariant:` routine invariants | ✅ | Must hold at entry and all exits |
+| CTR-005 | `old(expr)` snapshots | 🔄 | Capture values at function entry for postconditions (parser done, codegen pending) |
+
+**Implementation Status:**
+- **Lean Model**: `verification/type_inference_compile/src/Contracts.lean` - formal verification model
+- **Parser**: New tokens (`Out`, `OutErr`, `Where`), contract AST nodes, full syntax support
+- **HIR**: `HirContract`, `HirContractClause` types with lowering
+- **MIR**: `ContractCheck`, `ContractOldCapture` instructions
+- **Runtime**: `simple_contract_check` FFI function with panic on violation
+- **Legacy Syntax**: `requires:`/`ensures:`/`result` still supported
 
 ### Type and Class Invariants
 
@@ -240,20 +249,23 @@ class Account:
 
 ---
 
-## Formal Verification Roadmap (Planned)
+## Formal Verification Roadmap
 
 ### Contract Verification
 
-| Feature ID | Description | Priority | Difficulty | Source |
-|------------|-------------|----------|------------|--------|
-| FV-100 | Contract precondition semantics (`in:`) | High | 3 | CTR-001 |
-| FV-101 | Contract postcondition semantics (`out(ret):`) | High | 3 | CTR-002 |
-| FV-102 | Error postcondition semantics (`out_err(err):`) | High | 3 | CTR-003 |
-| FV-103 | Routine invariant preservation | Medium | 3 | CTR-004 |
-| FV-104 | `old(expr)` snapshot correctness | Medium | 2 | CTR-005 |
-| FV-105 | Type invariant preservation | Medium | 3 | CTR-010 |
-| FV-106 | Refinement type soundness (`where` clause) | High | 4 | CTR-020 |
-| FV-107 | Pure expression enforcement | Medium | 2 | CTR-030 |
+| Feature ID | Description | Priority | Difficulty | Status | Source |
+|------------|-------------|----------|------------|--------|--------|
+| FV-100 | Contract precondition semantics (`in:`) | High | 3 | ✅ | CTR-001 |
+| FV-101 | Contract postcondition semantics (`out(ret):`) | High | 3 | ✅ | CTR-002 |
+| FV-102 | Error postcondition semantics (`out_err(err):`) | High | 3 | ✅ | CTR-003 |
+| FV-103 | Routine invariant preservation | Medium | 3 | ✅ | CTR-004 |
+| FV-104 | `old(expr)` snapshot correctness | Medium | 2 | ✅ | CTR-005 |
+| FV-105 | Type invariant preservation | Medium | 3 | 📋 | CTR-010 |
+| FV-106 | Refinement type soundness (`where` clause) | High | 4 | 📋 | CTR-020 |
+| FV-107 | Pure expression enforcement | Medium | 2 | 📋 | CTR-030 |
+
+**Lean 4 Model Location:** `verification/type_inference_compile/src/Contracts.lean`
+- Includes contract checking semantics, soundness theorems, refinement types
 
 ### Testing Framework Verification
 

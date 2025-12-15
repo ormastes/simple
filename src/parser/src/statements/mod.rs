@@ -130,8 +130,15 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse use path and target (shared by use, common use, export use)
+    /// Supports both Python-style (module.{A, B}) and Rust-style (module::{A, B})
     fn parse_use_path_and_target(&mut self) -> Result<(ModulePath, ImportTarget), ParseError> {
         let path = self.parse_module_path()?;
+
+        // Check for Rust-style :: before { or *
+        if self.check(&TokenKind::DoubleColon) {
+            self.advance(); // consume ::
+        }
+
         if self.check(&TokenKind::Star) || self.check(&TokenKind::LBrace) {
             let target = self.parse_import_target(None)?;
             Ok((path, target))
@@ -765,7 +772,8 @@ impl<'a> Parser<'a> {
             self.advance();
             segments.push("crate".to_string());
         } else {
-            segments.push(self.expect_identifier()?);
+            // Use expect_path_segment to allow keywords like 'unit', 'test', etc.
+            segments.push(self.expect_path_segment()?);
         }
 
         // Parse dot-separated segments
@@ -782,7 +790,8 @@ impl<'a> Parser<'a> {
                 break; // Stop, let caller handle {}
             }
 
-            segments.push(self.expect_identifier()?);
+            // Use expect_path_segment to allow keywords as path segments
+            segments.push(self.expect_path_segment()?);
         }
 
         Ok(ModulePath::new(segments))
@@ -849,6 +858,19 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_use(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Use)?;
+        self.parse_use_or_import_body(start_span)
+    }
+
+    /// Parse import statement (alias for use): import module.Item
+    /// This is syntactic sugar for `use` - both work identically.
+    pub(crate) fn parse_import(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Import)?;
+        self.parse_use_or_import_body(start_span)
+    }
+
+    /// Common body for use/import statements
+    fn parse_use_or_import_body(&mut self, start_span: Span) -> Result<Node, ParseError> {
         let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::UseStmt(UseStmt {
             span: Span::new(

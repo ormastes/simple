@@ -1,8 +1,11 @@
 use simple_compiler::CompilerPipeline;
 use simple_loader::ModuleLoader;
 
-/// Helper to compile and run a simple program
-fn compile_and_run(src: &str) -> i32 {
+/// Common compilation and execution helper
+fn compile_with_method<F>(src: &str, compile_fn: F) -> i32
+where
+    F: FnOnce(&mut CompilerPipeline, &std::path::Path, &std::path::Path) -> Result<(), simple_compiler::CompileError>,
+{
     let dir = tempfile::tempdir().unwrap();
     let src_path = dir.path().join("main.simple");
     let out_path = dir.path().join("main.smf");
@@ -10,7 +13,7 @@ fn compile_and_run(src: &str) -> i32 {
     std::fs::write(&src_path, src).unwrap();
 
     let mut compiler = CompilerPipeline::new().unwrap();
-    compiler.compile(&src_path, &out_path).unwrap();
+    compile_fn(&mut compiler, &src_path, &out_path).unwrap();
 
     let loader = ModuleLoader::new();
     let module = loader.load(&out_path).unwrap();
@@ -18,6 +21,13 @@ fn compile_and_run(src: &str) -> i32 {
     type MainFn = extern "C" fn() -> i32;
     let main: MainFn = module.entry_point().expect("main symbol");
     main()
+}
+
+/// Helper to compile and run a simple program
+fn compile_and_run(src: &str) -> i32 {
+    compile_with_method(src, |compiler, src_path, out_path| {
+        compiler.compile(src_path, out_path)
+    })
 }
 
 #[test]
@@ -153,21 +163,9 @@ fn compile_boolean_false() {
 
 /// Helper to compile using native codegen and run
 fn compile_native_and_run(src: &str) -> i32 {
-    let dir = tempfile::tempdir().unwrap();
-    let src_path = dir.path().join("main.simple");
-    let out_path = dir.path().join("main.smf");
-
-    std::fs::write(&src_path, src).unwrap();
-
-    let mut compiler = CompilerPipeline::new().unwrap();
-    compiler.compile_native(&src_path, &out_path).unwrap();
-
-    let loader = ModuleLoader::new();
-    let module = loader.load(&out_path).unwrap();
-
-    type MainFn = extern "C" fn() -> i32;
-    let main: MainFn = module.entry_point().expect("main symbol");
-    main()
+    compile_with_method(src, |compiler, src_path, out_path| {
+        compiler.compile_native(src_path, out_path)
+    })
 }
 
 #[test]

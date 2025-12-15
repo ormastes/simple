@@ -301,6 +301,58 @@ pub unsafe extern "C" fn rt_method_not_found(
 }
 
 // ============================================================================
+// Contract Checking (Design by Contract support)
+// ============================================================================
+
+/// Check a contract condition and panic if it fails.
+/// This is called from compiled code when contract checking is enabled.
+///
+/// # Arguments
+/// * `condition` - The boolean condition (1 = true, 0 = false)
+/// * `kind` - Type of contract (0=Pre, 1=Post, 2=ErrPost, 3=InvEntry, 4=InvExit)
+/// * `func_name_ptr` - Pointer to function name string (UTF-8), may be null
+/// * `func_name_len` - Length of function name
+///
+/// # Safety
+/// func_name_ptr must be a valid pointer to func_name_len bytes of UTF-8 data, or null.
+#[no_mangle]
+pub unsafe extern "C" fn simple_contract_check(
+    condition: i64,
+    kind: i64,
+    func_name_ptr: *const u8,
+    func_name_len: i64,
+) {
+    if condition != 0 {
+        // Condition is true, contract satisfied
+        return;
+    }
+
+    // Contract violated - panic with error message
+    let kind_name = match kind {
+        0 => "Precondition",
+        1 => "Postcondition",
+        2 => "Error postcondition",
+        3 => "Entry invariant",
+        4 => "Exit invariant",
+        _ => "Contract",
+    };
+
+    let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
+        "<unknown>".to_string()
+    } else {
+        let slice = std::slice::from_raw_parts(func_name_ptr, func_name_len as usize);
+        std::str::from_utf8(slice)
+            .unwrap_or("<invalid UTF-8>")
+            .to_string()
+    };
+
+    panic!(
+        "{} violation in function '{}': contract condition failed",
+        kind_name, func_name
+    );
+}
+
+// ============================================================================
 // I/O Capture System (for testing and embedding)
 // ============================================================================
 

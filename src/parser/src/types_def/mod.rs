@@ -29,13 +29,15 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params()?;
-        let fields = self.parse_indented_fields()?;
+        // Parse fields and optional inline methods (ignoring invariant for structs)
+        let (fields, methods, _invariant) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Struct(StructDef {
             span: self.make_span(start_span),
             name,
             generic_params,
             fields,
+            methods,
             visibility: Visibility::Private,
             attributes,
             doc_comment: None,
@@ -318,7 +320,7 @@ impl<'a> Parser<'a> {
         Ok(methods)
     }
 
-    /// Parse fields and methods in an indented block (class, actor)
+    /// Parse fields and methods in an indented block (class, actor, struct)
     fn parse_indented_fields_and_methods(
         &mut self,
     ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>), ParseError> {
@@ -342,12 +344,20 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 invariant = self.parse_invariant_block()?;
-            } else if self.check(&TokenKind::Fn) || self.check(&TokenKind::Pub) {
+            } else if self.check(&TokenKind::Fn) {
+                // Method: fn method_name(...)
+                let item = self.parse_item()?;
+                if let Node::Function(f) = item {
+                    methods.push(f);
+                }
+            } else if self.check(&TokenKind::Pub) && self.peek_is(&TokenKind::Fn) {
+                // Public method: pub fn method_name(...)
                 let item = self.parse_item()?;
                 if let Node::Function(f) = item {
                     methods.push(f);
                 }
             } else {
+                // Field (may be public: pub field_name: Type)
                 fields.push(self.parse_field()?);
             }
         }

@@ -71,17 +71,7 @@ fn compile_indirect_call<M: Module>(
         call_args.push(ctx.vreg_values[arg]);
     }
 
-    let call = builder.ins().call_indirect(sig_ref, fn_ptr, &call_args);
-
-    if let Some(d) = dest {
-        let results = builder.inst_results(call);
-        if !results.is_empty() {
-            ctx.vreg_values.insert(*d, results[0]);
-        } else {
-            let null = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*d, null);
-        }
-    }
+    indirect_call_with_result(ctx, builder, sig_ref, fn_ptr, &call_args, dest);
 }
 
 fn compile_struct_init<M: Module>(
@@ -136,22 +126,7 @@ fn compile_method_call_static<M: Module>(
             }
         }
     } else {
-        let func_name_bytes = func_name.as_bytes();
-        let data_id = ctx
-            .module
-            .declare_anonymous_data(true, false)
-            .map_err(|e| e.to_string())?;
-        let mut data_desc = cranelift_module::DataDescription::new();
-        data_desc.define(func_name_bytes.to_vec().into_boxed_slice());
-        ctx.module
-            .define_data(data_id, &data_desc)
-            .map_err(|e| e.to_string())?;
-
-        let global_val = ctx.module.declare_data_in_func(data_id, builder.func);
-        let name_ptr = builder.ins().global_value(types::I64, global_val);
-        let name_len = builder
-            .ins()
-            .iconst(types::I64, func_name_bytes.len() as i64);
+        let (name_ptr, name_len) = create_string_constant(ctx, builder, func_name)?;
 
         let not_found_id = ctx.runtime_funcs["rt_function_not_found"];
         let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
@@ -201,15 +176,5 @@ fn compile_method_call_virtual<M: Module>(
         call_args.push(ctx.vreg_values[arg]);
     }
 
-    let call = builder.ins().call_indirect(sig_ref, method_ptr, &call_args);
-
-    if let Some(d) = dest {
-        let results = builder.inst_results(call);
-        if !results.is_empty() {
-            ctx.vreg_values.insert(*d, results[0]);
-        } else {
-            let null = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*d, null);
-        }
-    }
+    indirect_call_with_result(ctx, builder, sig_ref, method_ptr, &call_args, dest);
 }

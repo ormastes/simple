@@ -120,26 +120,8 @@ impl ProjectContext {
         let mut profiles: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
         if let Some(profiles_table) = toml.get("profiles").and_then(|v| v.as_table()) {
             for (profile_name, profile_value) in profiles_table {
-                let attrs: Vec<String> = profile_value
-                    .get("attributes")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                let imports: Vec<String> = profile_value
-                    .get("imports")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
+                let attrs = extract_string_array(profile_value, "attributes");
+                let imports = extract_string_array(profile_value, "imports");
                 profiles.insert(profile_name.clone(), (attrs, imports));
             }
         }
@@ -243,6 +225,7 @@ mod tests {
     use super::*;
     use crate::test_helpers::create_test_project;
     use std::fs;
+    use tempfile::TempDir;
 
     #[test]
     fn test_detect_no_project() {
@@ -277,9 +260,16 @@ strict_null = true
         assert!(ctx.is_feature_enabled("strict_null"));
     }
 
+    /// Helper to create test project context from TOML manifest
+    fn create_test_project_with_manifest(manifest: &str) -> (TempDir, ProjectContext) {
+        let dir = create_test_project();
+        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
+        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        (dir, ctx)
+    }
+
     #[test]
     fn test_parse_manifest_with_profiles() {
-        let dir = create_test_project();
         let manifest = r#"
 [project]
 name = "server_app"
@@ -297,9 +287,7 @@ imports = ["crate.core.base.*"]
 strict_null = true
 new_async = false
 "#;
-        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
-
-        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        let (_dir, ctx) = create_test_project_with_manifest(manifest);
 
         assert_eq!(ctx.name, "server_app");
         assert!(ctx.is_feature_enabled("strict_null"));
@@ -325,14 +313,11 @@ new_async = false
 
     #[test]
     fn test_default_source_root() {
-        let dir = create_test_project();
         let manifest = r#"
 [project]
 name = "myapp"
 "#;
-        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
-
-        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        let (dir, ctx) = create_test_project_with_manifest(manifest);
         assert_eq!(ctx.source_root, dir.path().join("src"));
     }
 
@@ -353,7 +338,6 @@ version = "1.0.0"
 
     #[test]
     fn test_lint_configuration() {
-        let dir = create_test_project();
         let manifest = r#"
 [project]
 name = "myapp"
@@ -362,9 +346,7 @@ name = "myapp"
 primitive_api = "deny"
 bare_bool = "allow"
 "#;
-        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
-
-        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        let (_dir, ctx) = create_test_project_with_manifest(manifest);
         assert_eq!(
             ctx.lint_config.get_level(LintName::PrimitiveApi),
             LintLevel::Deny
@@ -377,7 +359,6 @@ bare_bool = "allow"
 
     #[test]
     fn test_lint_configuration_warn() {
-        let dir = create_test_project();
         let manifest = r#"
 [project]
 name = "myapp"
@@ -385,9 +366,7 @@ name = "myapp"
 [lint]
 primitive_api = "warn"
 "#;
-        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
-
-        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        let (_dir, ctx) = create_test_project_with_manifest(manifest);
         assert_eq!(
             ctx.lint_config.get_level(LintName::PrimitiveApi),
             LintLevel::Warn
@@ -401,18 +380,28 @@ primitive_api = "warn"
 
     #[test]
     fn test_lint_default_without_section() {
-        let dir = create_test_project();
         let manifest = r#"
 [project]
 name = "myapp"
 "#;
-        fs::write(dir.path().join("simple.toml"), manifest).unwrap();
-
-        let ctx = ProjectContext::new(dir.path().to_path_buf()).unwrap();
+        let (_dir, ctx) = create_test_project_with_manifest(manifest);
         // Without [lint] section, defaults apply
         assert_eq!(
             ctx.lint_config.get_level(LintName::PrimitiveApi),
             LintLevel::Warn
         );
     }
+}
+
+/// Helper to extract a string array from a TOML value
+fn extract_string_array(value: &toml::Value, key: &str) -> Vec<String> {
+    value
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }

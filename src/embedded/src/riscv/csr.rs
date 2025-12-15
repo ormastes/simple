@@ -159,39 +159,53 @@ pub unsafe fn write_mtvec(value: usize) {
     core::arch::asm!("csrw mtvec, {}", in(reg) value, options(nomem, nostack));
 }
 
+/// Helper to read 64-bit CSR on RV32 with high/low word atomicity check
+#[cfg(feature = "riscv32")]
+#[inline]
+fn read_csr_64_rv32(csr_low: &str, csr_high: &str) -> u64 {
+    loop {
+        let hi1: u32;
+        let lo: u32;
+        let hi2: u32;
+        unsafe {
+            core::arch::asm!(
+                concat!("csrr {{0}}, ", csr_high),
+                concat!("csrr {{1}}, ", csr_low),
+                concat!("csrr {{2}}, ", csr_high),
+                out(reg) hi1,
+                out(reg) lo,
+                out(reg) hi2,
+                options(nomem, nostack)
+            );
+        }
+        if hi1 == hi2 {
+            return ((hi1 as u64) << 32) | (lo as u64);
+        }
+    }
+}
+
+/// Helper to read 64-bit CSR on RV64
+#[cfg(feature = "riscv64")]
+#[inline]
+fn read_csr_64_rv64(csr_name: &str) -> u64 {
+    let value: u64;
+    unsafe {
+        core::arch::asm!(concat!("csrr {{}}, ", csr_name), out(reg) value, options(nomem, nostack));
+    }
+    value
+}
+
 /// Read cycle counter.
 #[inline]
 pub fn read_cycle() -> u64 {
     #[cfg(feature = "riscv32")]
     {
-        loop {
-            let hi1: u32;
-            let lo: u32;
-            let hi2: u32;
-            unsafe {
-                core::arch::asm!(
-                    "csrr {0}, cycleh",
-                    "csrr {1}, cycle",
-                    "csrr {2}, cycleh",
-                    out(reg) hi1,
-                    out(reg) lo,
-                    out(reg) hi2,
-                    options(nomem, nostack)
-                );
-            }
-            if hi1 == hi2 {
-                return ((hi1 as u64) << 32) | (lo as u64);
-            }
-        }
+        read_csr_64_rv32("cycle", "cycleh")
     }
 
     #[cfg(feature = "riscv64")]
     {
-        let value: u64;
-        unsafe {
-            core::arch::asm!("csrr {}, cycle", out(reg) value, options(nomem, nostack));
-        }
-        value
+        read_csr_64_rv64("cycle")
     }
 
     #[cfg(not(any(feature = "riscv32", feature = "riscv64")))]
@@ -203,34 +217,12 @@ pub fn read_cycle() -> u64 {
 pub fn read_time() -> u64 {
     #[cfg(feature = "riscv32")]
     {
-        loop {
-            let hi1: u32;
-            let lo: u32;
-            let hi2: u32;
-            unsafe {
-                core::arch::asm!(
-                    "csrr {0}, timeh",
-                    "csrr {1}, time",
-                    "csrr {2}, timeh",
-                    out(reg) hi1,
-                    out(reg) lo,
-                    out(reg) hi2,
-                    options(nomem, nostack)
-                );
-            }
-            if hi1 == hi2 {
-                return ((hi1 as u64) << 32) | (lo as u64);
-            }
-        }
+        read_csr_64_rv32("time", "timeh")
     }
 
     #[cfg(feature = "riscv64")]
     {
-        let value: u64;
-        unsafe {
-            core::arch::asm!("csrr {}, time", out(reg) value, options(nomem, nostack));
-        }
-        value
+        read_csr_64_rv64("time")
     }
 
     #[cfg(not(any(feature = "riscv32", feature = "riscv64")))]
@@ -242,34 +234,12 @@ pub fn read_time() -> u64 {
 pub fn read_instret() -> u64 {
     #[cfg(feature = "riscv32")]
     {
-        loop {
-            let hi1: u32;
-            let lo: u32;
-            let hi2: u32;
-            unsafe {
-                core::arch::asm!(
-                    "csrr {0}, instreth",
-                    "csrr {1}, instret",
-                    "csrr {2}, instreth",
-                    out(reg) hi1,
-                    out(reg) lo,
-                    out(reg) hi2,
-                    options(nomem, nostack)
-                );
-            }
-            if hi1 == hi2 {
-                return ((hi1 as u64) << 32) | (lo as u64);
-            }
-        }
+        read_csr_64_rv32("instret", "instreth")
     }
 
     #[cfg(feature = "riscv64")]
     {
-        let value: u64;
-        unsafe {
-            core::arch::asm!("csrr {}, instret", out(reg) value, options(nomem, nostack));
-        }
-        value
+        read_csr_64_rv64("instret")
     }
 
     #[cfg(not(any(feature = "riscv32", feature = "riscv64")))]

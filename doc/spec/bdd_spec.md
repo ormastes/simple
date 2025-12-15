@@ -69,7 +69,7 @@ Targets: private/internal functions, pure logic units, small modules
 
 Fakes/mocks encouraged
 
-Coverage target: high line/branch within the unit under test
+Coverage target: Branch/condition coverage (merged with environment tests)
 
 
 1.4 test/integration/
@@ -80,7 +80,7 @@ Targets: exported functions and “module-level” APIs
 
 Uses real dependencies where feasible, but still avoids end-to-end orchestration
 
-Coverage target: Public Function Coverage (see §5)
+Coverage target: Public Function Touch (100%) - ensures all public functions are called at least once
 
 
 1.5 test/system/
@@ -91,7 +91,7 @@ Targets: public classes/structs that contain business logic (“logic-containing
 
 Runs with realistic environment (filesystem, network, processes) via test/environment
 
-Coverage target: Public Type Coverage (see §5)
+Coverage target: Public Class/Struct Touch (100%) - ensures all public classes/structs are used at least once
 
 
 This layered structure matches practical guidance from the “test pyramid” concept: more unit tests, fewer system tests, to balance confidence and cost. 

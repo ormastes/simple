@@ -122,11 +122,17 @@ pub enum TokenKind {
     Gpu,    // gpu (for GPU intrinsics namespace)
 
     // Contract keywords (LLM-friendly features)
-    Requires,  // requires: (precondition)
-    Ensures,   // ensures: (postcondition)
-    Invariant, // invariant: (class invariant)
-    Old,       // old() (previous value in ensures)
-    Result,    // result (return value in ensures)
+    // New spec syntax (doc/spec/invariant.md)
+    Out,       // out (postcondition block)
+    OutErr,    // out_err (error postcondition block)
+    Where,     // where (refinement type predicate)
+    // Legacy syntax (still supported)
+    Requires,  // requires: (precondition) - legacy, use in:
+    Ensures,   // ensures: (postcondition) - legacy, use out(ret):
+    // Shared
+    Invariant, // invariant: (routine/class invariant)
+    Old,       // old() (previous value in postconditions)
+    Result,    // result (return value in ensures) - legacy
 
     // Operators
     Plus,        // +

@@ -15,6 +15,9 @@
 //!    actual machine code. This mode is faster but supports fewer features.
 //!    Use `compile_native()` or `compile_source_to_memory_native()` for this mode.
 
+pub mod module_loader;
+pub mod script_detection;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
@@ -227,6 +230,23 @@ impl CompilerPipeline {
         Ok(())
     }
 
+    /// Type check and lower AST to MIR.
+    /// 
+    /// This is a common pipeline step extracted from compile_source_to_memory_native
+    /// and compile_source_to_memory_native_for_target.
+    fn type_check_and_lower(&self, ast_module: &simple_parser::ast::Module) -> Result<mir::MirModule, CompileError> {
+        // Type check
+        type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+
+        // Lower AST to HIR
+        let hir_module = hir::lower(ast_module)
+            .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
+
+        // Lower HIR to MIR
+        mir::lower_to_mir(&hir_module)
+            .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))
+    }
+
     /// Compile a Simple source file to an SMF at `out` using native codegen.
     ///
     /// This uses the native compilation pipeline: HIR → MIR → Cranelift.
@@ -274,16 +294,8 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
-        // 4. Type check
-        type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
-
-        // 5. Lower AST to HIR
-        let hir_module = hir::lower(&ast_module)
-            .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
-
-        // 6. Lower HIR to MIR
-        let mir_module = mir::lower_to_mir(&hir_module)
-            .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+        // 4-6. Type check and lower to MIR
+        let mir_module = self.type_check_and_lower(&ast_module)?;
 
         // Check if we have a main function. If not, fall back to interpreter mode.
         // This handles cases like `main = 42` which are module-level constants,
@@ -341,16 +353,8 @@ impl CompilerPipeline {
             ));
         }
 
-        // 4. Type check
-        type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
-
-        // 5. Lower AST to HIR
-        let hir_module = hir::lower(&ast_module)
-            .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
-
-        // 6. Lower HIR to MIR
-        let mir_module = mir::lower_to_mir(&hir_module)
-            .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+        // 4-6. Type check and lower to MIR
+        let mir_module = self.type_check_and_lower(&ast_module)?;
 
         // Check if we have a main function. If not, fall back to interpreter mode.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
@@ -393,7 +397,7 @@ pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAlloca
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::elf_utils::extract_elf_text_section;
+    use crate::elf_utils::{extract_elf_text_section, get_section_name};
 
     /// Debug helper to list ELF sections
     fn list_elf_sections(elf_data: &[u8]) -> Vec<String> {
@@ -448,14 +452,7 @@ mod tests {
             let sh_name =
                 u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().unwrap()) as usize;
 
-            if sh_name < shstrtab.len() {
-                let name_end = shstrtab[sh_name..]
-                    .iter()
-                    .position(|&c| c == 0)
-                    .unwrap_or(shstrtab.len() - sh_name);
-                let name =
-                    std::str::from_utf8(&shstrtab[sh_name..sh_name + name_end]).unwrap_or("?");
-
+            if let Some(name) = get_section_name(shstrtab, sh_name) {
                 let sec_offset = u64::from_le_bytes(
                     elf_data[sh_offset + 24..sh_offset + 32].try_into().unwrap(),
                 ) as usize;
@@ -550,6 +547,13 @@ mod tests {
 
     // ============== Lint Integration Tests ==============
 
+    /// Test helper for running source with a specific lint configuration
+    fn run_with_lint_config(source: &str, config: LintConfig) -> Result<Vec<u8>, CompileError> {
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        pipeline.set_lint_config(config);
+        pipeline.compile_source_to_memory(source)
+    }
+
     #[test]
     fn test_pipeline_lint_warnings_collected() {
         // Public function with primitive param should generate warning
@@ -587,10 +591,7 @@ main = 0
             crate::lint::LintLevel::Deny,
         );
 
-        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
-        pipeline.set_lint_config(config);
-
-        let result = pipeline.compile_source_to_memory(source);
+        let result = run_with_lint_config(source, config);
         assert!(result.is_err());
 
         match result {
@@ -618,7 +619,6 @@ main = 0
 
         let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
         pipeline.set_lint_config(config);
-
         let result = pipeline.compile_source_to_memory(source);
         assert!(result.is_ok());
 

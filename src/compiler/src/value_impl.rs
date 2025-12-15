@@ -75,6 +75,7 @@ impl Value {
             Value::Object { .. }
             | Value::Enum { .. }
             | Value::Lambda { .. }
+            | Value::BlockClosure { .. }
             | Value::Function { .. }
             | Value::Constructor { .. }
             | Value::Actor(_)
@@ -155,6 +156,7 @@ impl Value {
             Value::Tuple(_) => "tuple",
             Value::Dict(_) => "dict",
             Value::Lambda { .. } => "function",
+            Value::BlockClosure { .. } => "function",
             Value::Function { .. } => "function",
             Value::Object { .. } => "object",
             Value::Enum { .. } => "enum",

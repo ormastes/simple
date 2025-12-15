@@ -331,6 +331,13 @@ impl LintChecker {
             }
         }
 
+        // Check public methods
+        for method in &s.methods {
+            if method.visibility.is_public() {
+                self.check_function(method);
+            }
+        }
+
         self.config = original_config;
     }
 

@@ -140,6 +140,7 @@ impl Default for Block {
 
 //==============================================================================
 // Contract Blocks (LLM-friendly feature #400)
+// Spec: doc/spec/invariant.md
 //==============================================================================
 
 /// Contract specification for a function.
@@ -147,25 +148,73 @@ impl Default for Block {
 /// Contracts make function behavior explicit and verifiable, which helps
 /// catch LLM-generated code errors at runtime (and optionally at compile time).
 ///
-/// Example:
+/// New spec syntax (doc/spec/invariant.md):
+/// ```simple
+/// fn div(a: i64, b: i64) -> (i64 | DivByZero):
+///     in:
+///         b != 0
+///     invariant:
+///         true
+///
+///     if b == 0:
+///         return DivByZero(msg: "division by zero")
+///     return a / b
+///
+///     out(ret):
+///         ret * b == a
+///     out_err(err):
+///         old(b) == 0
+/// ```
+///
+/// Legacy syntax (still supported):
 /// ```simple
 /// fn divide(a: i64, b: i64) -> i64:
 ///     requires:
 ///         b != 0
 ///     ensures:
 ///         result * b == a
-///     
 ///     return a / b
 /// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ContractBlock {
-    /// Preconditions that must be true when function is called
-    pub requires: Vec<ContractClause>,
-    /// Postconditions that must be true when function returns
-    pub ensures: Vec<ContractClause>,
+    /// Preconditions (in: block) - must be true at function entry
+    /// Legacy: requires: block
+    pub preconditions: Vec<ContractClause>,
+    /// Routine invariants (invariant: block inside function)
+    /// Must be true at entry and all exits
+    pub invariants: Vec<ContractClause>,
+    /// Postconditions for success (out(ret): block)
+    /// Legacy: ensures: block
+    /// The binding name for return value (default: "ret")
+    pub postconditions: Vec<ContractClause>,
+    pub postcondition_binding: Option<String>,
+    /// Postconditions for error exit (out_err(err): block)
+    /// The binding name for error value (default: "err")
+    pub error_postconditions: Vec<ContractClause>,
+    pub error_binding: Option<String>,
 }
 
-/// A single contract clause (one condition in requires/ensures block).
+impl ContractBlock {
+    /// Check if the contract block is empty (no clauses)
+    pub fn is_empty(&self) -> bool {
+        self.preconditions.is_empty()
+            && self.invariants.is_empty()
+            && self.postconditions.is_empty()
+            && self.error_postconditions.is_empty()
+    }
+
+    /// Legacy compatibility: get requires clauses
+    pub fn requires(&self) -> &[ContractClause] {
+        &self.preconditions
+    }
+
+    /// Legacy compatibility: get ensures clauses
+    pub fn ensures(&self) -> &[ContractClause] {
+        &self.postconditions
+    }
+}
+
+/// A single contract clause (one condition in contract blocks).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ContractClause {
     pub span: Span,
@@ -175,13 +224,13 @@ pub struct ContractClause {
     pub message: Option<String>,
 }
 
-/// Class invariant - must be true after constructor and every public method.
+/// Class/struct invariant - must be true after constructor and every public method.
 ///
 /// Example:
 /// ```simple
 /// class BankAccount:
 ///     balance: i64
-///     
+///
 ///     invariant:
 ///         balance >= 0
 /// ```
@@ -192,6 +241,23 @@ pub struct InvariantBlock {
     pub conditions: Vec<ContractClause>,
 }
 
+/// Refinement type definition (type T = Base where predicate)
+///
+/// Example:
+/// ```simple
+/// type PosI64 = i64 where self > 0
+/// type NonZero = i64 where self != 0
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct RefinementType {
+    pub span: Span,
+    pub name: String,
+    pub base_type: Type,
+    /// The predicate expression (uses 'self' to refer to the value)
+    pub predicate: Expr,
+    pub visibility: Visibility,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct StructDef {
     pub span: Span,
@@ -199,6 +265,8 @@ pub struct StructDef {
     /// Generic type parameters: struct Foo<T, U>
     pub generic_params: Vec<String>,
     pub fields: Vec<Field>,
+    /// Inline method definitions
+    pub methods: Vec<FunctionDef>,
     pub visibility: Visibility,
     /// Attributes applied to the struct: #[derive(Debug)]
     pub attributes: Vec<Attribute>,
@@ -642,6 +710,11 @@ pub enum Expr {
         receiver: Box<Expr>,
         index: Box<Expr>,
     },
+    /// Tuple element access with numeric index: tuple.0, tuple.1
+    TupleIndex {
+        receiver: Box<Expr>,
+        index: usize,
+    },
     Lambda {
         params: Vec<LambdaParam>,
         body: Box<Expr>,
@@ -720,6 +793,10 @@ pub enum Expr {
     ContractResult,
     /// old(expr) in ensures block - refers to value before function execution
     ContractOld(Box<Expr>),
+
+    /// Do block - a sequence of statements that evaluate to () (unit)
+    /// Used for colon-block syntax in BDD DSL: `describe "name": body`
+    DoBlock(Vec<Node>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

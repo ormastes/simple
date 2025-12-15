@@ -567,6 +567,21 @@ pub(crate) fn evaluate_expr(
                 )),
             }
         }
+        // Tuple element access with literal index: tuple.0, tuple.1
+        Expr::TupleIndex { receiver, index } => {
+            let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
+                .deref_pointer();
+            match recv_val {
+                Value::Tuple(tup) => {
+                    tup.get(*index).cloned().ok_or_else(|| {
+                        CompileError::Semantic(format!("tuple index out of bounds: {index}"))
+                    })
+                }
+                _ => Err(CompileError::Semantic(
+                    "tuple index access on non-tuple type".into(),
+                )),
+            }
+        }
         Expr::ListComprehension {
             expr,
             pattern,
@@ -799,6 +814,13 @@ pub(crate) fn evaluate_expr(
         Expr::ContractOld(_) => Err(CompileError::Semantic(
             "contract old() expression can only be used in ensures blocks".into(),
         )),
+        // DoBlock - a block of statements used as a closure (BDD DSL colon-blocks)
+        Expr::DoBlock(nodes) => {
+            Ok(Value::BlockClosure {
+                nodes: nodes.clone(),
+                env: env.clone(),
+            })
+        }
         #[allow(unreachable_patterns)]
         _ => Err(CompileError::Semantic(format!(
             "unsupported expression type: {:?}",

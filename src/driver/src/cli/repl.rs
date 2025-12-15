@@ -131,7 +131,7 @@ fn needs_continuation(lines: &[String]) -> bool {
     calculate_indent_level(lines) > 0
 }
 
-pub fn run_repl(version: &str, runner: Runner) -> i32 {
+pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
     println!("Simple Language v{} - Interactive Mode", version);
     println!("Type expressions to evaluate. Use 'exit' or Ctrl-D to quit.");
     println!();
@@ -163,6 +163,25 @@ pub fn run_repl(version: &str, runner: Runner) -> i32 {
             (format!("... {}", indent), indent)
         } else {
             (">>> ".to_string(), String::new())
+        };
+
+        // Helper to execute accumulated input
+        let execute_input = |input: &str, prelude: &mut String, runner: &mut Runner| {
+            if input.trim().is_empty() {
+                return;
+            }
+            
+            let is_def = is_definition_like(input);
+            let code = build_source(prelude, input, is_def);
+
+            match runner.run_source_in_memory(&code) {
+                Ok(_) => {
+                    if is_def {
+                        append_to_prelude(prelude, input, true);
+                    }
+                }
+                Err(e) => eprintln!("Error: {}", e),
+            }
         };
 
         match rl.readline(&prompt) {
@@ -207,23 +226,8 @@ pub fn run_repl(version: &str, runner: Runner) -> i32 {
                         let full_input = accumulated_lines.join("\n");
                         accumulated_lines.clear();
 
-                        if full_input.trim().is_empty() {
-                            continue;
-                        }
-
                         let _ = rl.add_history_entry(&full_input);
-
-                        let is_def = is_definition_like(&full_input);
-                        let code = build_source(&prelude, &full_input, is_def);
-
-                        match runner.run_source_in_memory(&code) {
-                            Ok(_) => {
-                                if is_def {
-                                    append_to_prelude(&mut prelude, &full_input, true);
-                                }
-                            }
-                            Err(e) => eprintln!("Error: {}", e),
-                        }
+                        execute_input(&full_input, &mut prelude, &mut runner);
                     }
                     // Empty line when not in multiline - just continue
                     continue;
@@ -244,18 +248,7 @@ pub fn run_repl(version: &str, runner: Runner) -> i32 {
                 accumulated_lines.clear();
 
                 let _ = rl.add_history_entry(&full_input);
-
-                let is_def = is_definition_like(&full_input);
-                let code = build_source(&prelude, &full_input, is_def);
-
-                match runner.run_source_in_memory(&code) {
-                    Ok(_) => {
-                        if is_def {
-                            append_to_prelude(&mut prelude, &full_input, true);
-                        }
-                    }
-                    Err(e) => eprintln!("Error: {}", e),
-                }
+                execute_input(&full_input, &mut prelude, &mut runner);
             }
             Err(ReadlineError::Interrupted) => {
                 println!("^C");

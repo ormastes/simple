@@ -4,9 +4,33 @@ use super::table::MonomorphizationTable;
 use super::types::{ConcreteType, SpecializationKey, TypeBindings};
 use super::util::{ast_type_to_concrete, concrete_to_ast_type};
 use simple_parser::ast::{
-    Block, ClassDef, Expr, FunctionDef, Module, Node, StructDef, Type as AstType,
+    Block, ClassDef, Expr, FunctionDef, Module, Node, StructDef, Type as AstType, Field,
 };
 use std::collections::HashMap;
+
+/// Trait for types that have fields and methods (StructDef and ClassDef)
+trait HasFieldsAndMethods {
+    fn fields_mut(&mut self) -> &mut Vec<Field>;
+    fn methods_mut(&mut self) -> &mut Vec<FunctionDef>;
+}
+
+impl HasFieldsAndMethods for StructDef {
+    fn fields_mut(&mut self) -> &mut Vec<Field> {
+        &mut self.fields
+    }
+    fn methods_mut(&mut self) -> &mut Vec<FunctionDef> {
+        &mut self.methods
+    }
+}
+
+impl HasFieldsAndMethods for ClassDef {
+    fn fields_mut(&mut self) -> &mut Vec<Field> {
+        &mut self.fields
+    }
+    fn methods_mut(&mut self) -> &mut Vec<FunctionDef> {
+        &mut self.methods
+    }
+}
 
 pub struct Monomorphizer<'a> {
     /// The module being processed
@@ -180,6 +204,32 @@ impl<'a> Monomorphizer<'a> {
         }
     }
 
+    /// Helper to substitute types in fields and methods
+    fn substitute_in_fields_and_methods<T>(
+        &mut self,
+        item: &mut T,
+        bindings: &HashMap<String, ConcreteType>,
+    ) where
+        T: HasFieldsAndMethods,
+    {
+        // Substitute types in fields
+        for field in item.fields_mut() {
+            field.ty = self.substitute_ast_type(&field.ty, bindings);
+        }
+
+        // Substitute types in methods
+        for method in item.methods_mut() {
+            for param in &mut method.params {
+                if let Some(ty) = &param.ty {
+                    param.ty = Some(self.substitute_ast_type(ty, bindings));
+                }
+            }
+            if let Some(ret) = &method.return_type {
+                method.return_type = Some(self.substitute_ast_type(ret, bindings));
+            }
+        }
+    }
+
     /// Specialize a generic struct.
     fn specialize_struct(&mut self, s: &StructDef, key: &SpecializationKey) -> StructDef {
         let bindings = self.build_bindings(&s.generic_params, &key.type_args);
@@ -188,10 +238,7 @@ impl<'a> Monomorphizer<'a> {
         specialized.name = key.mangled_name();
         specialized.generic_params.clear();
 
-        // Substitute types in fields
-        for field in &mut specialized.fields {
-            field.ty = self.substitute_ast_type(&field.ty, &bindings);
-        }
+        self.substitute_in_fields_and_methods(&mut specialized, &bindings);
 
         specialized
     }
@@ -204,21 +251,10 @@ impl<'a> Monomorphizer<'a> {
         specialized.name = key.mangled_name();
         specialized.generic_params.clear();
 
-        // Substitute types in fields
-        for field in &mut specialized.fields {
-            field.ty = self.substitute_ast_type(&field.ty, &bindings);
-        }
+        self.substitute_in_fields_and_methods(&mut specialized, &bindings);
 
-        // Substitute types in methods
+        // Class methods need body substitution too
         for method in &mut specialized.methods {
-            for param in &mut method.params {
-                if let Some(ty) = &param.ty {
-                    param.ty = Some(self.substitute_ast_type(ty, &bindings));
-                }
-            }
-            if let Some(ret) = &method.return_type {
-                method.return_type = Some(self.substitute_ast_type(ret, &bindings));
-            }
             method.body = self.substitute_in_block(&method.body, &bindings);
         }
 

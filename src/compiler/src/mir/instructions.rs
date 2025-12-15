@@ -350,6 +350,46 @@ pub enum MirInst {
 
     /// Create Result::Err
     ResultErr { dest: VReg, value: VReg },
+
+    // =========================================================================
+    // Contract instructions (Design by Contract support)
+    // =========================================================================
+    /// Check a contract condition (precondition, postcondition, or invariant).
+    /// Panics with contract violation error if condition is false.
+    ContractCheck {
+        /// The condition to check (should be boolean)
+        condition: VReg,
+        /// Type of contract being checked
+        kind: ContractKind,
+        /// Function name for error message
+        func_name: String,
+        /// Optional custom error message
+        message: Option<String>,
+    },
+
+    /// Capture a value at function entry for use in postconditions with old().
+    /// The captured value is stored in a temporary slot.
+    ContractOldCapture {
+        /// Destination for the captured value
+        dest: VReg,
+        /// The expression value to capture
+        value: VReg,
+    },
+}
+
+/// Kind of contract being checked
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContractKind {
+    /// Precondition (in:/requires:) - checked at function entry
+    Precondition,
+    /// Postcondition (out(ret):/ensures:) - checked on success return
+    Postcondition,
+    /// Error postcondition (out_err(err):) - checked on error return
+    ErrorPostcondition,
+    /// Invariant at function entry
+    InvariantEntry,
+    /// Invariant at function exit
+    InvariantExit,
 }
 
 /// Captured variable in a closure
@@ -468,7 +508,11 @@ impl HasEffects for MirInst {
             | MirInst::EnumDiscriminant { .. }
             | MirInst::EnumPayload { .. }
             | MirInst::PatternTest { .. }
-            | MirInst::PatternBind { .. } => Effect::Compute,
+            | MirInst::PatternBind { .. }
+            | MirInst::ContractOldCapture { .. } => Effect::Compute,
+
+            // Contract checks may panic (Io effect due to potential panic)
+            MirInst::ContractCheck { .. } => Effect::Io,
 
             // Collection allocation (GcAlloc effect)
             MirInst::ArrayLit { .. }
@@ -572,7 +616,8 @@ impl MirInst {
             | MirInst::OptionNone { dest, .. }
             | MirInst::ResultOk { dest, .. }
             | MirInst::ResultErr { dest, .. }
-            | MirInst::InterpEval { dest, .. } => Some(*dest),
+            | MirInst::InterpEval { dest, .. }
+            | MirInst::ContractOldCapture { dest, .. } => Some(*dest),
             MirInst::Call { dest, .. }
             | MirInst::IndirectCall { dest, .. }
             | MirInst::Wait { dest, .. }
@@ -695,6 +740,8 @@ impl MirInst {
             MirInst::ClosureCreate { captures, .. } => captures.clone(),
             MirInst::InterpCall { args, .. } => args.clone(),
             MirInst::InterpEval { .. } => vec![],
+            MirInst::ContractCheck { condition, .. } => vec![*condition],
+            MirInst::ContractOldCapture { value, .. } => vec![*value],
         }
     }
 }

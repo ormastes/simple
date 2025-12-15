@@ -53,6 +53,32 @@ macro_rules! parse_binary_multi {
 }
 
 impl<'a> Parser<'a> {
+    /// Helper to convert an expression + args into a Call or MethodCall.
+    /// If expr is FieldAccess, create MethodCall; otherwise create Call.
+    fn make_call_expr(&self, expr: Expr, args: Vec<Argument>) -> Expr {
+        match expr {
+            Expr::FieldAccess { receiver, field } => Expr::MethodCall {
+                receiver,
+                method: field,
+                args,
+            },
+            _ => Expr::Call {
+                callee: Box::new(expr),
+                args,
+            },
+        }
+    }
+
+    /// Helper to create a Slice expression
+    fn make_slice_expr(&self, receiver: Expr, start: Option<Expr>, end: Option<Expr>, step: Option<Box<Expr>>) -> Expr {
+        Expr::Slice {
+            receiver: Box::new(receiver),
+            start: start.map(Box::new),
+            end: end.map(Box::new),
+            step,
+        }
+    }
+
     // === Expression Parsing (Pratt Parser) ===
 
     pub(crate) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
@@ -109,23 +135,34 @@ impl<'a> Parser<'a> {
             // Check for no-parentheses call at statement level
             // Only for identifiers or field access followed by argument-starting tokens
             if self.is_callable_expr(&expr) && self.can_start_argument() {
-                let args = self.parse_no_paren_arguments()?;
+                let mut args = self.parse_no_paren_arguments()?;
+
+                // Check for trailing colon-block: func arg:
+                //     body
+                // This becomes: func(arg, fn(): body)
+                if self.check(&TokenKind::Colon) {
+                    if let Some(block_lambda) = self.try_parse_colon_block()? {
+                        args.push(Argument {
+                            name: None,
+                            value: block_lambda,
+                        });
+                    }
+                }
+
                 if !args.is_empty() {
-                    let call_expr = match expr {
-                        Expr::Identifier(_) => Expr::Call {
-                            callee: Box::new(expr),
-                            args,
-                        },
-                        Expr::FieldAccess { receiver, field } => Expr::MethodCall {
-                            receiver,
-                            method: field,
-                            args,
-                        },
-                        _ => Expr::Call {
-                            callee: Box::new(expr),
-                            args,
-                        },
-                    };
+                    let call_expr = self.make_call_expr(expr, args);
+                    return Ok(Node::Expression(call_expr));
+                }
+            }
+            // Also check for colon-block on plain identifier (no other args)
+            // e.g., `describe:` without string argument
+            else if self.is_callable_expr(&expr) && self.check(&TokenKind::Colon) {
+                if let Some(block_lambda) = self.try_parse_colon_block()? {
+                    let args = vec![Argument {
+                        name: None,
+                        value: block_lambda,
+                    }];
+                    let call_expr = self.make_call_expr(expr, args);
                     return Ok(Node::Expression(call_expr));
                 }
             }
@@ -429,12 +466,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                         let step = self.parse_optional_expr_before_bracket()?;
                         self.expect(&TokenKind::RBracket)?;
-                        expr = Expr::Slice {
-                            receiver: Box::new(expr),
-                            start: None,
-                            end: None,
-                            step,
-                        };
+                        expr = self.make_slice_expr(expr, None, None, step);
                     } else if self.check(&TokenKind::Colon) {
                         // Slice starting with : (no start)
                         self.advance();
@@ -443,12 +475,7 @@ impl<'a> Parser<'a> {
                             self.advance();
                             let step = self.parse_optional_expr_before_bracket()?;
                             self.expect(&TokenKind::RBracket)?;
-                            expr = Expr::Slice {
-                                receiver: Box::new(expr),
-                                start: None,
-                                end: None,
-                                step,
-                            };
+                            expr = self.make_slice_expr(expr, None, None, step);
                         } else {
                             let end = self.parse_optional_expr_before_bracket()?;
                             let step = self.parse_optional_step()?;
@@ -505,45 +532,55 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Dot => {
                     self.advance();
-                    let field = self.expect_identifier()?;
-                    if self.check(&TokenKind::LParen) {
-                        let mut args = self.parse_arguments()?;
-                        // Check for trailing block: obj.method(args) \x: body
-                        if self.check(&TokenKind::Backslash) {
-                            let trailing_lambda = self.parse_trailing_lambda()?;
-                            args.push(Argument {
-                                name: None,
-                                value: trailing_lambda,
-                            });
-                        }
-                        expr = Expr::MethodCall {
+                    // Support tuple element access: tuple.0, tuple.1
+                    if let TokenKind::Integer(n) = &self.current.kind {
+                        let index = *n;
+                        self.advance();
+                        expr = Expr::TupleIndex {
                             receiver: Box::new(expr),
-                            method: field,
-                            args,
-                        };
-                    } else if self.check(&TokenKind::Backslash) {
-                        // Method call with only trailing block: obj.method \x: body
-                        let trailing_lambda = self.parse_trailing_lambda()?;
-                        expr = Expr::MethodCall {
-                            receiver: Box::new(expr),
-                            method: field,
-                            args: vec![Argument {
-                                name: None,
-                                value: trailing_lambda,
-                            }],
+                            index: index as usize,
                         };
                     } else {
-                        expr = Expr::FieldAccess {
-                            receiver: Box::new(expr),
-                            field,
-                        };
+                        let field = self.expect_method_name()?;
+                        if self.check(&TokenKind::LParen) {
+                            let mut args = self.parse_arguments()?;
+                            // Check for trailing block: obj.method(args) \x: body
+                            if self.check(&TokenKind::Backslash) {
+                                let trailing_lambda = self.parse_trailing_lambda()?;
+                                args.push(Argument {
+                                    name: None,
+                                    value: trailing_lambda,
+                                });
+                            }
+                            expr = Expr::MethodCall {
+                                receiver: Box::new(expr),
+                                method: field,
+                                args,
+                            };
+                        } else if self.check(&TokenKind::Backslash) {
+                            // Method call with only trailing block: obj.method \x: body
+                            let trailing_lambda = self.parse_trailing_lambda()?;
+                            expr = Expr::MethodCall {
+                                receiver: Box::new(expr),
+                                method: field,
+                                args: vec![Argument {
+                                    name: None,
+                                    value: trailing_lambda,
+                                }],
+                            };
+                        } else {
+                            expr = Expr::FieldAccess {
+                                receiver: Box::new(expr),
+                                field,
+                            };
+                        }
                     }
                 }
                 TokenKind::Arrow => {
                     // Functional update operator: obj->method(args)
                     // Desugars to: obj = obj.method(args)
                     self.advance();
-                    let method = self.expect_identifier()?;
+                    let method = self.expect_method_name()?;
                     let args = self.parse_arguments()?;
                     expr = Expr::FunctionalUpdate {
                         target: Box::new(expr),
@@ -573,6 +610,9 @@ impl<'a> Parser<'a> {
                 value: trailing_lambda,
             });
         }
+        // Note: Colon-block syntax like func(args): body is only supported in the
+        // no-paren call context (parse_expression_or_assignment), not here.
+        // This avoids conflicts with for/while/if statements that use colon after expressions.
         Ok(Expr::Call {
             callee: Box::new(callee),
             args,
@@ -600,13 +640,110 @@ impl<'a> Parser<'a> {
         if !self.check(&TokenKind::Colon) {
             let name = self.expect_identifier()?;
             params.push(LambdaParam { name, ty: None });
-            while self.check(&TokenKind::Comma) {
-                self.advance();
-                let name = self.expect_identifier()?;
-                params.push(LambdaParam { name, ty: None });
-            }
+            self.parse_remaining_lambda_params(&mut params)?;
         }
         Ok(params)
+    }
+
+    /// Parse lambda parameters between pipes: |x| or |x, y|
+    /// Called after the opening pipe has been consumed.
+    pub(crate) fn parse_pipe_lambda_params(&mut self) -> Result<Vec<LambdaParam>, ParseError> {
+        let mut params = Vec::new();
+        // Check for no-param lambda: || expr
+        if !self.check(&TokenKind::Pipe) {
+            let name = self.expect_identifier()?;
+            params.push(LambdaParam { name, ty: None });
+            self.parse_remaining_lambda_params(&mut params)?;
+        }
+        Ok(params)
+    }
+
+    /// Helper to parse remaining comma-separated lambda parameters
+    fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>) -> Result<(), ParseError> {
+        while self.check(&TokenKind::Comma) {
+            self.advance();
+            let name = self.expect_identifier()?;
+            params.push(LambdaParam { name, ty: None });
+        }
+        Ok(())
+    }
+
+    /// Try to parse a colon-block as a trailing lambda.
+    ///
+    /// Syntax:
+    /// ```text
+    /// func arg:
+    ///     statement1
+    ///     statement2
+    /// ```
+    ///
+    /// This is parsed as `func(arg, fn(): statement1; statement2)`.
+    ///
+    /// Returns `Some(lambda)` if we see `:` followed by newline and indent,
+    /// `None` if this doesn't look like a colon-block.
+    fn try_parse_colon_block(&mut self) -> Result<Option<Expr>, ParseError> {
+        // Must be at a colon
+        if !self.check(&TokenKind::Colon) {
+            return Ok(None);
+        }
+
+        // Peek ahead to see if this is a colon-block
+        // We need: colon, newline, indent
+        // Since we can't easily peek multiple tokens, we'll consume and check
+        self.advance(); // consume ':'
+
+        // Skip any newlines after the colon
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        // Must have indent for a block
+        if !self.check(&TokenKind::Indent) {
+            // Not a colon-block, but we already consumed the colon
+            // This is an error state - colon without proper block
+            return Err(ParseError::unexpected_token(
+                "indented block after ':'",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        }
+
+        self.advance(); // consume Indent
+
+        // Parse statements until dedent
+        let mut statements = Vec::new();
+        while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
+            // Skip newlines between statements
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+
+            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+                break;
+            }
+
+            let stmt = self.parse_item()?;
+            statements.push(stmt);
+
+            // Skip trailing newlines
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+        }
+
+        // Consume dedent if present
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+
+        // Wrap statements in a DoBlock expression, then in a Lambda
+        let block_expr = Expr::DoBlock(statements);
+
+        Ok(Some(Expr::Lambda {
+            params: vec![],
+            body: Box::new(block_expr),
+            move_mode: MoveMode::Copy,
+        }))
     }
 
     /// Parse an if/elif expression (shared logic)
@@ -635,12 +772,28 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::LParen)?;
         let mut args = Vec::new();
 
-        while !self.check(&TokenKind::RParen) {
-            // Check for named argument
+        // Skip newlines and indent after opening paren (for multi-line argument lists)
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
+            self.advance();
+        }
+
+        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+            // Skip any stray whitespace tokens at the start of each argument
+            while self.check(&TokenKind::Newline)
+                || self.check(&TokenKind::Indent)
+                || self.check(&TokenKind::Dedent)
+            {
+                self.advance();
+            }
+            if self.check(&TokenKind::RParen) {
+                break;
+            }
+
+            // Check for named argument with '=' or ':' syntax
             let mut name = None;
             if let TokenKind::Identifier(id) = &self.current.kind {
                 let id_clone = id.clone();
-                // Peek ahead for '=' without consuming the stream
+                // Peek ahead for '=' or ':' without consuming the stream
                 let next = self
                     .pending_token
                     .clone()
@@ -650,6 +803,11 @@ impl<'a> Parser<'a> {
                     name = Some(id_clone);
                     self.advance(); // consume identifier
                     self.expect(&TokenKind::Assign)?; // consume '='
+                } else if next.kind == TokenKind::Colon {
+                    // Support colon syntax: name: value
+                    name = Some(id_clone);
+                    self.advance(); // consume identifier
+                    self.expect(&TokenKind::Colon)?; // consume ':'
                 } else {
                     // leave current untouched; pending_token already holds the peeked token
                 }
@@ -658,8 +816,23 @@ impl<'a> Parser<'a> {
             let value = self.parse_expression()?;
             args.push(Argument { name, value });
 
+            // Skip newlines, indent, dedent after argument (for multi-line argument lists)
+            while self.check(&TokenKind::Newline)
+                || self.check(&TokenKind::Indent)
+                || self.check(&TokenKind::Dedent)
+            {
+                self.advance();
+            }
+
             if !self.check(&TokenKind::RParen) {
                 self.expect(&TokenKind::Comma)?;
+                // Skip newlines, indent, dedent after comma
+                while self.check(&TokenKind::Newline)
+                    || self.check(&TokenKind::Indent)
+                    || self.check(&TokenKind::Dedent)
+                {
+                    self.advance();
+                }
             }
         }
 
