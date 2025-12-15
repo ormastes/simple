@@ -393,6 +393,7 @@ pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAlloca
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::elf_utils::extract_elf_text_section;
 
     /// Debug helper to list ELF sections
     fn list_elf_sections(elf_data: &[u8]) -> Vec<String> {

@@ -6,6 +6,10 @@
 /// - Shared MIR transforms and runtime FFI specs
 ///
 /// Requires the `llvm` feature flag and LLVM 18 toolchain to be enabled.
+
+mod types;
+pub use types::{BinOp, LlvmType};
+
 use crate::codegen::backend_trait::NativeBackend;
 use crate::error::CompileError;
 use crate::hir::TypeId;
@@ -54,14 +58,8 @@ impl std::fmt::Debug for LlvmBackend {
     }
 }
 
-/// Binary operation types
-#[derive(Debug, Clone, Copy)]
-pub enum BinOp {
-    Add,
-    Sub,
-    Mul,
-    Div,
-}
+// Continue with rest of original llvm.rs implementation
+// (All other methods remain in this file for now to minimize changes)
 
 impl LlvmBackend {
     /// Create a new LLVM backend for the given target
@@ -107,60 +105,21 @@ impl LlvmBackend {
 
         let os_str = match self.target.os {
             TargetOS::Linux => "unknown-linux-gnu",
-            TargetOS::Windows => "pc-windows-msvc",
             TargetOS::MacOS => "apple-darwin",
+            TargetOS::Windows => "pc-windows-msvc",
             TargetOS::FreeBSD => "unknown-freebsd",
-            TargetOS::None => "unknown-none-elf",
-            TargetOS::Any => "unknown-unknown",
+            TargetOS::Any | TargetOS::None => "unknown-unknown",
         };
 
         format!("{}-{}", arch_str, os_str)
     }
 
-    /// Get pointer width for this target
+    /// Get pointer width (32 or 64 bits)
     pub fn pointer_width(&self) -> u32 {
-        match self.target.arch.pointer_size() {
-            simple_common::target::PointerSize::Bits32 => 32,
-            simple_common::target::PointerSize::Bits64 => 64,
-        }
-    }
-
-    /// Map a Simple type to an LLVM type (returns LlvmType for non-feature builds)
-    pub fn map_type(&self, ty: &TypeId) -> Result<LlvmType, CompileError> {
-        use crate::hir::TypeId as T;
-        match *ty {
-            T::I32 => Ok(LlvmType::I32),
-            T::I64 => Ok(LlvmType::I64),
-            T::U32 => Ok(LlvmType::I32), // LLVM doesn't distinguish signed/unsigned at type level
-            T::U64 => Ok(LlvmType::I64),
-            T::F32 => Ok(LlvmType::F32),
-            T::F64 => Ok(LlvmType::F64),
-            T::BOOL => Ok(LlvmType::I1),
-            _ => Err(CompileError::Semantic(format!(
-                "Unsupported type in LLVM backend: {:?}",
-                ty
-            ))),
-        }
-    }
-
-    /// Get actual LLVM BasicTypeEnum for a TypeId (feature-gated)
-    #[cfg(feature = "llvm")]
-    fn llvm_type(&self, ty: &TypeId) -> Result<BasicTypeEnum<'static>, CompileError> {
-        use crate::hir::TypeId as T;
-        match *ty {
-            T::I32 | T::U32 => Ok(self.context.i32_type().into()),
-            T::I64 | T::U64 => Ok(self.context.i64_type().into()),
-            T::F32 => Ok(self.context.f32_type().into()),
-            T::F64 => Ok(self.context.f64_type().into()),
-            T::BOOL => Ok(self.context.bool_type().into()),
-            T::Pointer => Ok(self
-                .context
-                .ptr_type(inkwell::AddressSpace::default())
-                .into()),
-            _ => Err(CompileError::Semantic(format!(
-                "Unsupported LLVM type: {:?}",
-                ty
-            ))),
+        use simple_common::target::TargetArch;
+        match self.target.arch {
+            TargetArch::X86 | TargetArch::Arm | TargetArch::Riscv32 => 32,
+            TargetArch::X86_64 | TargetArch::Aarch64 | TargetArch::Riscv64 => 64,
         }
     }
 
@@ -199,28 +158,29 @@ impl LlvmBackend {
     pub fn create_function_signature(
         &self,
         name: &str,
-        params: &[TypeId],
-        ret_type: &TypeId,
-    ) -> Result<(), CompileError> {
+        param_types: &[TypeId],
+        return_type: &TypeId,
+    ) -> Result<FunctionValue<'static>, CompileError> {
         let module = self.module.borrow();
         let module = module
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
 
         // Map parameter types
-        let param_types: Result<Vec<_>, _> = params
+        let param_llvm: Result<Vec<_>, _> = param_types
             .iter()
             .map(|ty| self.llvm_type(ty).map(|t| t.into()))
             .collect();
-        let param_types = param_types?;
+        let param_llvm = param_llvm?;
 
         // Map return type
-        let ret_llvm = self.llvm_type(ret_type)?;
+        let ret_llvm = self.llvm_type(return_type)?;
 
         // Create function type
         let fn_type = match ret_llvm {
-            BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
-            BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
+            BasicTypeEnum::IntType(t) => t.fn_type(&param_llvm, false),
+            BasicTypeEnum::FloatType(t) => t.fn_type(&param_llvm, false),
+            BasicTypeEnum::PointerType(t) => t.fn_type(&param_llvm, false),
             _ => {
                 return Err(CompileError::Semantic(
                     "Unsupported return type".to_string(),
@@ -228,32 +188,28 @@ impl LlvmBackend {
             }
         };
 
-        // Add function to module
-        let _function = module.add_function(name, fn_type, None);
-
-        Ok(())
+        Ok(module.add_function(name, fn_type, None))
     }
 
     #[cfg(not(feature = "llvm"))]
     pub fn create_function_signature(
         &self,
         _name: &str,
-        _params: &[TypeId],
-        _ret_type: &TypeId,
+        _param_types: &[TypeId],
+        _return_type: &TypeId,
     ) -> Result<(), CompileError> {
         Err(CompileError::Semantic(
             "LLVM feature not enabled".to_string(),
         ))
     }
 
-    /// Get LLVM IR as string (for debugging/testing)
+    /// Get LLVM IR as string (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn get_ir(&self) -> Result<String, CompileError> {
         let module = self.module.borrow();
         let module = module
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
-
         Ok(module.print_to_string().to_string())
     }
 
@@ -264,7 +220,7 @@ impl LlvmBackend {
         ))
     }
 
-    /// Verify the LLVM module
+    /// Verify the module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn verify(&self) -> Result<(), CompileError> {
         let module = self.module.borrow();
@@ -272,13 +228,10 @@ impl LlvmBackend {
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
 
-        match module.verify() {
-            Ok(_) => Ok(()),
-            Err(e) => Err(CompileError::Semantic(format!(
-                "LLVM verification failed: {}",
-                e
-            ))),
-        }
+        module
+            .verify()
+            .map_err(|e| CompileError::Semantic(format!("LLVM verification failed: {}", e)))?;
+        Ok(())
     }
 
     #[cfg(not(feature = "llvm"))]
@@ -288,7 +241,7 @@ impl LlvmBackend {
         ))
     }
 
-    /// Compile a MIR function to LLVM IR
+    /// Compile a MIR function to LLVM IR (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn compile_function(&self, func: &MirFunction) -> Result<(), CompileError> {
         use crate::mir::instructions::MirInst;
@@ -478,34 +431,55 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_binop(
         &self,
-        op: crate::hir::BinOp,
+        op: crate::mir::instructions::BinOpKind,
         left: inkwell::values::BasicValueEnum,
         right: inkwell::values::BasicValueEnum,
         builder: &Builder,
     ) -> Result<inkwell::values::BasicValueEnum, CompileError> {
-        use crate::hir::BinOp;
+        use crate::mir::instructions::BinOpKind;
 
+        // Both operands must be the same type
         match (left, right) {
             (
                 inkwell::values::BasicValueEnum::IntValue(l),
                 inkwell::values::BasicValueEnum::IntValue(r),
             ) => {
                 let result = match op {
-                    BinOp::Add => builder.build_int_add(l, r, "add").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build add: {}", e))
-                    })?,
-                    BinOp::Sub => builder.build_int_sub(l, r, "sub").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build sub: {}", e))
-                    })?,
-                    BinOp::Mul => builder.build_int_mul(l, r, "mul").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build mul: {}", e))
-                    })?,
-                    BinOp::Div => builder.build_int_signed_div(l, r, "div").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build div: {}", e))
-                    })?,
+                    BinOpKind::Add => builder
+                        .build_int_add(l, r, "add")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_add: {}", e)))?,
+                    BinOpKind::Sub => builder
+                        .build_int_sub(l, r, "sub")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_sub: {}", e)))?,
+                    BinOpKind::Mul => builder
+                        .build_int_mul(l, r, "mul")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_mul: {}", e)))?,
+                    BinOpKind::Div => builder
+                        .build_int_signed_div(l, r, "div")
+                        .map_err(|e| {
+                            CompileError::Semantic(format!("build_int_signed_div: {}", e))
+                        })?,
+                    BinOpKind::Eq => builder
+                        .build_int_compare(IntPredicate::EQ, l, r, "eq")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                    BinOpKind::Ne => builder
+                        .build_int_compare(IntPredicate::NE, l, r, "ne")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                    BinOpKind::Lt => builder
+                        .build_int_compare(IntPredicate::SLT, l, r, "lt")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                    BinOpKind::Le => builder
+                        .build_int_compare(IntPredicate::SLE, l, r, "le")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                    BinOpKind::Gt => builder
+                        .build_int_compare(IntPredicate::SGT, l, r, "gt")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                    BinOpKind::Ge => builder
+                        .build_int_compare(IntPredicate::SGE, l, r, "ge")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
                     _ => {
                         return Err(CompileError::Semantic(format!(
-                            "Unsupported int binop: {:?}",
+                            "Unsupported integer binop: {:?}",
                             op
                         )))
                     }
@@ -517,18 +491,18 @@ impl LlvmBackend {
                 inkwell::values::BasicValueEnum::FloatValue(r),
             ) => {
                 let result = match op {
-                    BinOp::Add => builder.build_float_add(l, r, "fadd").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build fadd: {}", e))
-                    })?,
-                    BinOp::Sub => builder.build_float_sub(l, r, "fsub").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build fsub: {}", e))
-                    })?,
-                    BinOp::Mul => builder.build_float_mul(l, r, "fmul").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build fmul: {}", e))
-                    })?,
-                    BinOp::Div => builder.build_float_div(l, r, "fdiv").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build fdiv: {}", e))
-                    })?,
+                    BinOpKind::Add => builder
+                        .build_float_add(l, r, "fadd")
+                        .map_err(|e| CompileError::Semantic(format!("build_float_add: {}", e)))?,
+                    BinOpKind::Sub => builder
+                        .build_float_sub(l, r, "fsub")
+                        .map_err(|e| CompileError::Semantic(format!("build_float_sub: {}", e)))?,
+                    BinOpKind::Mul => builder
+                        .build_float_mul(l, r, "fmul")
+                        .map_err(|e| CompileError::Semantic(format!("build_float_mul: {}", e)))?,
+                    BinOpKind::Div => builder
+                        .build_float_div(l, r, "fdiv")
+                        .map_err(|e| CompileError::Semantic(format!("build_float_div: {}", e)))?,
                     _ => {
                         return Err(CompileError::Semantic(format!(
                             "Unsupported float binop: {:?}",
@@ -538,7 +512,9 @@ impl LlvmBackend {
                 };
                 Ok(result.into())
             }
-            _ => Err(CompileError::Semantic("Type mismatch in binop".to_string())),
+            _ => Err(CompileError::Semantic(
+                "Type mismatch in binary operation".to_string(),
+            )),
         }
     }
 
@@ -546,24 +522,24 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_unaryop(
         &self,
-        op: crate::hir::UnaryOp,
+        op: crate::mir::instructions::UnaryOpKind,
         operand: inkwell::values::BasicValueEnum,
         builder: &Builder,
     ) -> Result<inkwell::values::BasicValueEnum, CompileError> {
-        use crate::hir::UnaryOp;
+        use crate::mir::instructions::UnaryOpKind;
 
         match operand {
             inkwell::values::BasicValueEnum::IntValue(val) => {
                 let result = match op {
-                    UnaryOp::Neg => builder.build_int_neg(val, "neg").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build neg: {}", e))
-                    })?,
-                    UnaryOp::Not => builder.build_not(val, "not").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build not: {}", e))
-                    })?,
+                    UnaryOpKind::Neg => builder
+                        .build_int_neg(val, "neg")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_neg: {}", e)))?,
+                    UnaryOpKind::Not => builder
+                        .build_not(val, "not")
+                        .map_err(|e| CompileError::Semantic(format!("build_not: {}", e)))?,
                     _ => {
                         return Err(CompileError::Semantic(format!(
-                            "Unsupported int unaryop: {:?}",
+                            "Unsupported integer unary op: {:?}",
                             op
                         )))
                     }
@@ -572,12 +548,12 @@ impl LlvmBackend {
             }
             inkwell::values::BasicValueEnum::FloatValue(val) => {
                 let result = match op {
-                    UnaryOp::Neg => builder.build_float_neg(val, "fneg").map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build fneg: {}", e))
-                    })?,
+                    UnaryOpKind::Neg => builder
+                        .build_float_neg(val, "fneg")
+                        .map_err(|e| CompileError::Semantic(format!("build_float_neg: {}", e)))?,
                     _ => {
                         return Err(CompileError::Semantic(format!(
-                            "Unsupported float unaryop: {:?}",
+                            "Unsupported float unary op: {:?}",
                             op
                         )))
                     }
@@ -585,7 +561,7 @@ impl LlvmBackend {
                 Ok(result.into())
             }
             _ => Err(CompileError::Semantic(
-                "Unsupported operand type for unaryop".to_string(),
+                "Invalid operand type for unary operation".to_string(),
             )),
         }
     }
@@ -594,8 +570,8 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_terminator(
         &self,
-        term: &crate::mir::instructions::MirTerminator,
-        blocks: &std::collections::HashMap<
+        term: &crate::mir::instructions::Terminator,
+        llvm_blocks: &std::collections::HashMap<
             crate::mir::instructions::BlockId,
             inkwell::basic_block::BasicBlock,
         >,
@@ -605,69 +581,76 @@ impl LlvmBackend {
         >,
         builder: &Builder,
     ) -> Result<(), CompileError> {
-        use crate::mir::instructions::MirTerminator;
+        use crate::mir::instructions::Terminator;
 
         match term {
-            MirTerminator::Return { value } => {
-                if let Some(vreg) = value {
-                    if let Some(val) = vreg_map.get(vreg) {
-                        builder.build_return(Some(val)).map_err(|e| {
-                            CompileError::Semantic(format!("Failed to build return: {}", e))
-                        })?;
-                    } else {
-                        return Err(CompileError::Semantic("Return value not found".to_string()));
-                    }
+            Terminator::Return(vreg) => {
+                if let Some(val) = vreg_map.get(vreg) {
+                    builder
+                        .build_return(Some(val))
+                        .map_err(|e| CompileError::Semantic(format!("build_return: {}", e)))?;
                 } else {
-                    builder.build_return(None).map_err(|e| {
-                        CompileError::Semantic(format!("Failed to build return: {}", e))
-                    })?;
+                    return Err(CompileError::Semantic(format!(
+                        "Undefined return value: {:?}",
+                        vreg
+                    )));
                 }
             }
-            MirTerminator::Jump { target } => {
-                let target_bb = blocks.get(target).ok_or_else(|| {
-                    CompileError::Semantic(format!("Target block not found: {:?}", target))
+            Terminator::ReturnVoid => {
+                builder
+                    .build_return(None)
+                    .map_err(|e| CompileError::Semantic(format!("build_return: {}", e)))?;
+            }
+            Terminator::Jump(block_id) => {
+                let target_bb = llvm_blocks.get(block_id).ok_or_else(|| {
+                    CompileError::Semantic(format!("Undefined block: {:?}", block_id))
                 })?;
                 builder
                     .build_unconditional_branch(*target_bb)
-                    .map_err(|e| CompileError::Semantic(format!("Failed to build jump: {}", e)))?;
+                    .map_err(|e| {
+                        CompileError::Semantic(format!("build_unconditional_branch: {}", e))
+                    })?;
             }
-            MirTerminator::Branch {
+            Terminator::Branch {
                 cond,
                 then_block,
                 else_block,
             } => {
                 let cond_val = vreg_map.get(cond).ok_or_else(|| {
-                    CompileError::Semantic("Branch condition not found".to_string())
-                })?;
-
-                let then_bb = blocks.get(then_block).ok_or_else(|| {
-                    CompileError::Semantic(format!("Then block not found: {:?}", then_block))
-                })?;
-                let else_bb = blocks.get(else_block).ok_or_else(|| {
-                    CompileError::Semantic(format!("Else block not found: {:?}", else_block))
+                    CompileError::Semantic(format!("Undefined condition: {:?}", cond))
                 })?;
 
                 if let inkwell::values::BasicValueEnum::IntValue(cond_int) = cond_val {
+                    let then_bb = llvm_blocks.get(then_block).ok_or_else(|| {
+                        CompileError::Semantic(format!("Undefined block: {:?}", then_block))
+                    })?;
+                    let else_bb = llvm_blocks.get(else_block).ok_or_else(|| {
+                        CompileError::Semantic(format!("Undefined block: {:?}", else_block))
+                    })?;
+
                     builder
                         .build_conditional_branch(*cond_int, *then_bb, *else_bb)
                         .map_err(|e| {
-                            CompileError::Semantic(format!("Failed to build branch: {}", e))
+                            CompileError::Semantic(format!("build_conditional_branch: {}", e))
                         })?;
                 } else {
                     return Err(CompileError::Semantic(
-                        "Branch condition must be bool/int".to_string(),
+                        "Branch condition must be boolean".to_string(),
                     ));
                 }
             }
             _ => {
-                // Other terminators not yet implemented
+                return Err(CompileError::Semantic(format!(
+                    "Unsupported terminator: {:?}",
+                    term
+                )))
             }
         }
 
         Ok(())
     }
 
-    /// Emit object code for a module (feature-gated)
+    /// Emit object code from the module (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn emit_object(&self, _module: &MirModule) -> Result<Vec<u8>, CompileError> {
         // Initialize LLVM targets
@@ -682,34 +665,28 @@ impl LlvmBackend {
         let triple = self.get_target_triple();
         let target_triple = inkwell::targets::TargetTriple::create(&triple);
 
-        // Get LLVM target
-        let target = LlvmTarget::from_triple(&target_triple)
-            .map_err(|e| CompileError::Semantic(format!("Failed to create target: {}", e)))?;
+        // Get target from triple
+        let target = LlvmTarget::from_triple(&target_triple).map_err(|e| {
+            CompileError::Semantic(format!("Failed to create target from triple: {}", e))
+        })?;
 
         // Create target machine
-        let cpu = "generic";
-        let features = "";
-        let opt_level = OptimizationLevel::Default;
-        let reloc_mode = RelocMode::PIC; // Position Independent Code
-        let code_model = CodeModel::Default;
-
         let target_machine = target
             .create_target_machine(
                 &target_triple,
-                cpu,
-                features,
-                opt_level,
-                reloc_mode,
-                code_model,
+                "generic",
+                "",
+                OptimizationLevel::Default,
+                RelocMode::PIC,
+                CodeModel::Default,
             )
             .ok_or_else(|| CompileError::Semantic("Failed to create target machine".to_string()))?;
 
-        // Emit object code to memory buffer
+        // Emit object file to memory buffer
         let buffer = target_machine
             .write_to_memory_buffer(module, FileType::Object)
-            .map_err(|e| CompileError::Semantic(format!("Failed to emit object: {}", e)))?;
+            .map_err(|e| CompileError::Semantic(format!("Failed to emit object file: {}", e)))?;
 
-        // Convert to Vec<u8>
         Ok(buffer.as_slice().to_vec())
     }
 
@@ -720,15 +697,16 @@ impl LlvmBackend {
         ))
     }
 
-    /// Compile a simple function with body (feature-gated)
+    /// Compile a simple arithmetic function for testing
     #[cfg(feature = "llvm")]
     pub fn compile_simple_function(
         &self,
         name: &str,
-        params: &[TypeId],
-        ret_type: &TypeId,
-        constant_return: i32,
+        a_val: i64,
+        b_val: i64,
     ) -> Result<(), CompileError> {
+        self.create_module("test_module")?;
+
         let module = self.module.borrow();
         let module = module
             .as_ref()
@@ -739,47 +717,27 @@ impl LlvmBackend {
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
 
-        // Map parameter types
-        let param_types: Result<Vec<_>, _> = params
-            .iter()
-            .map(|ty| self.llvm_type(ty).map(|t| t.into()))
-            .collect();
-        let param_types = param_types?;
-
-        // Map return type
-        let ret_llvm = self.llvm_type(ret_type)?;
-
-        // Create function type
-        let fn_type = match ret_llvm {
-            BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
-            BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
-            _ => {
-                return Err(CompileError::Semantic(
-                    "Unsupported return type".to_string(),
-                ))
-            }
-        };
-
-        // Add function to module
+        // Create function signature: i64 fn()
+        let i64_type = self.context.i64_type();
+        let fn_type = i64_type.fn_type(&[], false);
         let function = module.add_function(name, fn_type, None);
 
-        // Create entry basic block
-        let entry_block = self.context.append_basic_block(function, "entry");
-        builder.position_at_end(entry_block);
+        // Create entry block
+        let entry = self.context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
 
-        // Create constant return value
-        let ret_value = match ret_llvm {
-            BasicTypeEnum::IntType(t) => t.const_int(constant_return as u64, false),
-            _ => {
-                return Err(CompileError::Semantic(
-                    "Only int return for now".to_string(),
-                ))
-            }
-        };
+        // Create constants
+        let a = i64_type.const_int(a_val as u64, true);
+        let b = i64_type.const_int(b_val as u64, true);
 
-        // Build return instruction
+        // Add them
+        let result = builder
+            .build_int_add(a, b, "add")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?;
+
+        // Return result
         builder
-            .build_return(Some(&ret_value))
+            .build_return(Some(&result))
             .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
 
         Ok(())
@@ -789,25 +747,25 @@ impl LlvmBackend {
     pub fn compile_simple_function(
         &self,
         _name: &str,
-        _params: &[TypeId],
-        _ret_type: &TypeId,
-        _constant_return: i32,
+        _a_val: i64,
+        _b_val: i64,
     ) -> Result<(), CompileError> {
         Err(CompileError::Semantic(
             "LLVM feature not enabled".to_string(),
         ))
     }
 
-    /// Compile a function with binary operation (feature-gated)
+    /// Compile a function with binary operations (for testing)
     #[cfg(feature = "llvm")]
     pub fn compile_binop_function(
         &self,
         name: &str,
-        param1_ty: &TypeId,
-        param2_ty: &TypeId,
-        ret_type: &TypeId,
         op: BinOp,
+        a_val: i64,
+        b_val: i64,
     ) -> Result<(), CompileError> {
+        self.create_module("test_module")?;
+
         let module = self.module.borrow();
         let module = module
             .as_ref()
@@ -818,80 +776,36 @@ impl LlvmBackend {
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
 
-        // Map parameter types
-        let p1_llvm = self.llvm_type(param1_ty)?;
-        let p2_llvm = self.llvm_type(param2_ty)?;
-        let ret_llvm = self.llvm_type(ret_type)?;
-
-        // Create function type
-        let fn_type = match ret_llvm {
-            BasicTypeEnum::IntType(t) => t.fn_type(&[p1_llvm.into(), p2_llvm.into()], false),
-            BasicTypeEnum::FloatType(t) => t.fn_type(&[p1_llvm.into(), p2_llvm.into()], false),
-            _ => {
-                return Err(CompileError::Semantic(
-                    "Unsupported return type".to_string(),
-                ))
-            }
-        };
-
-        // Add function to module
+        // Create function signature: i64 fn()
+        let i64_type = self.context.i64_type();
+        let fn_type = i64_type.fn_type(&[], false);
         let function = module.add_function(name, fn_type, None);
 
-        // Create entry basic block
-        let entry_block = self.context.append_basic_block(function, "entry");
-        builder.position_at_end(entry_block);
+        // Create entry block
+        let entry = self.context.append_basic_block(function, "entry");
+        builder.position_at_end(entry);
 
-        // Get function parameters
-        let param1 = function
-            .get_nth_param(0)
-            .ok_or_else(|| CompileError::Semantic("Missing param 0".to_string()))?;
-        let param2 = function
-            .get_nth_param(1)
-            .ok_or_else(|| CompileError::Semantic("Missing param 1".to_string()))?;
+        // Create constants
+        let a = i64_type.const_int(a_val as u64, true);
+        let b = i64_type.const_int(b_val as u64, true);
 
-        // Build binary operation
-        let result = match (&ret_llvm, op) {
-            (BasicTypeEnum::IntType(_), BinOp::Add) => builder
-                .build_int_add(param1.into_int_value(), param2.into_int_value(), "add")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?
-                .into(),
-            (BasicTypeEnum::IntType(_), BinOp::Sub) => builder
-                .build_int_sub(param1.into_int_value(), param2.into_int_value(), "sub")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build sub: {}", e)))?
-                .into(),
-            (BasicTypeEnum::IntType(_), BinOp::Mul) => builder
-                .build_int_mul(param1.into_int_value(), param2.into_int_value(), "mul")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build mul: {}", e)))?
-                .into(),
-            (BasicTypeEnum::IntType(_), BinOp::Div) => builder
-                .build_int_signed_div(param1.into_int_value(), param2.into_int_value(), "div")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build div: {}", e)))?
-                .into(),
-            (BasicTypeEnum::FloatType(_), BinOp::Add) => builder
-                .build_float_add(param1.into_float_value(), param2.into_float_value(), "fadd")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build fadd: {}", e)))?
-                .into(),
-            (BasicTypeEnum::FloatType(_), BinOp::Sub) => builder
-                .build_float_sub(param1.into_float_value(), param2.into_float_value(), "fsub")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build fsub: {}", e)))?
-                .into(),
-            (BasicTypeEnum::FloatType(_), BinOp::Mul) => builder
-                .build_float_mul(param1.into_float_value(), param2.into_float_value(), "fmul")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build fmul: {}", e)))?
-                .into(),
-            (BasicTypeEnum::FloatType(_), BinOp::Div) => builder
-                .build_float_div(param1.into_float_value(), param2.into_float_value(), "fdiv")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build fdiv: {}", e)))?
-                .into(),
-            _ => {
-                return Err(CompileError::Semantic(format!(
-                    "Unsupported binop: {:?}",
-                    op
-                )))
-            }
+        // Perform operation
+        let result = match op {
+            BinOp::Add => builder
+                .build_int_add(a, b, "add")
+                .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?,
+            BinOp::Sub => builder
+                .build_int_sub(a, b, "sub")
+                .map_err(|e| CompileError::Semantic(format!("Failed to build sub: {}", e)))?,
+            BinOp::Mul => builder
+                .build_int_mul(a, b, "mul")
+                .map_err(|e| CompileError::Semantic(format!("Failed to build mul: {}", e)))?,
+            BinOp::Div => builder
+                .build_int_signed_div(a, b, "div")
+                .map_err(|e| CompileError::Semantic(format!("Failed to build div: {}", e)))?,
         };
 
-        // Build return instruction
+        // Return result
         builder
             .build_return(Some(&result))
             .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
@@ -903,26 +817,26 @@ impl LlvmBackend {
     pub fn compile_binop_function(
         &self,
         _name: &str,
-        _param1_ty: &TypeId,
-        _param2_ty: &TypeId,
-        _ret_type: &TypeId,
         _op: BinOp,
+        _a_val: i64,
+        _b_val: i64,
     ) -> Result<(), CompileError> {
         Err(CompileError::Semantic(
             "LLVM feature not enabled".to_string(),
         ))
     }
 
-    /// Compile a function with conditional (if-else) (feature-gated)
+    /// Compile a function with conditional logic (for testing)
     #[cfg(feature = "llvm")]
     pub fn compile_conditional_function(
         &self,
         name: &str,
-        param_ty: &TypeId,
-        ret_type: &TypeId,
-        true_value: i32,
-        false_value: i32,
+        cond_val: bool,
+        then_val: i64,
+        else_val: i64,
     ) -> Result<(), CompileError> {
+        self.create_module("test_module")?;
+
         let module = self.module.borrow();
         let module = module
             .as_ref()
@@ -933,73 +847,55 @@ impl LlvmBackend {
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
 
-        // Map types
-        let param_llvm = self.llvm_type(param_ty)?;
-        let ret_llvm = self.llvm_type(ret_type)?;
-
-        // Create function type: fn(i32) -> i32
-        let fn_type = match ret_llvm {
-            BasicTypeEnum::IntType(t) => t.fn_type(&[param_llvm.into()], false),
-            _ => {
-                return Err(CompileError::Semantic(
-                    "Unsupported return type".to_string(),
-                ))
-            }
-        };
-
-        // Add function to module
+        // Create function signature: i64 fn()
+        let i64_type = self.context.i64_type();
+        let bool_type = self.context.bool_type();
+        let fn_type = i64_type.fn_type(&[], false);
         let function = module.add_function(name, fn_type, None);
 
-        // Create basic blocks
-        let entry_block = self.context.append_basic_block(function, "entry");
-        let then_block = self.context.append_basic_block(function, "then");
-        let else_block = self.context.append_basic_block(function, "else");
-        let merge_block = self.context.append_basic_block(function, "merge");
+        // Create blocks
+        let entry = self.context.append_basic_block(function, "entry");
+        let then_bb = self.context.append_basic_block(function, "then");
+        let else_bb = self.context.append_basic_block(function, "else");
+        let merge_bb = self.context.append_basic_block(function, "merge");
 
-        // Build entry block: if (param > 0)
-        builder.position_at_end(entry_block);
-        let param = function
-            .get_nth_param(0)
-            .ok_or_else(|| CompileError::Semantic("Missing param".to_string()))?;
-
-        let zero = self.context.i32_type().const_int(0, false);
-        let cond = builder
-            .build_int_compare(
-                inkwell::IntPredicate::SGT,
-                param.into_int_value(),
-                zero,
-                "cmp",
-            )
-            .map_err(|e| CompileError::Semantic(format!("Failed to build cmp: {}", e)))?;
-
+        // Entry block
+        builder.position_at_end(entry);
+        let cond = bool_type.const_int(cond_val as u64, false);
         builder
-            .build_conditional_branch(cond, then_block, else_block)
-            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+            .build_conditional_branch(cond, then_bb, else_bb)
+            .map_err(|e| {
+                CompileError::Semantic(format!("Failed to build conditional branch: {}", e))
+            })?;
 
-        // Build then block
-        builder.position_at_end(then_block);
-        let then_val = self.context.i32_type().const_int(true_value as u64, false);
+        // Then block
+        builder.position_at_end(then_bb);
+        let then_value = i64_type.const_int(then_val as u64, true);
         builder
-            .build_unconditional_branch(merge_block)
-            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| {
+                CompileError::Semantic(format!("Failed to build unconditional branch: {}", e))
+            })?;
 
-        // Build else block
-        builder.position_at_end(else_block);
-        let else_val = self.context.i32_type().const_int(false_value as u64, false);
+        // Else block
+        builder.position_at_end(else_bb);
+        let else_value = i64_type.const_int(else_val as u64, true);
         builder
-            .build_unconditional_branch(merge_block)
-            .map_err(|e| CompileError::Semantic(format!("Failed to build branch: {}", e)))?;
+            .build_unconditional_branch(merge_bb)
+            .map_err(|e| {
+                CompileError::Semantic(format!("Failed to build unconditional branch: {}", e))
+            })?;
 
-        // Build merge block with phi
-        builder.position_at_end(merge_block);
+        // Merge block with phi
+        builder.position_at_end(merge_bb);
         let phi = builder
-            .build_phi(self.context.i32_type(), "result")
+            .build_phi(i64_type, "result")
             .map_err(|e| CompileError::Semantic(format!("Failed to build phi: {}", e)))?;
-        phi.add_incoming(&[(&then_val, then_block), (&else_val, else_block)]);
+        phi.add_incoming(&[(&then_value, then_bb), (&else_value, else_bb)]);
 
-        let phi_val = phi.as_basic_value();
+        let result = phi.as_basic_value();
         builder
-            .build_return(Some(&phi_val))
+            .build_return(Some(&result))
             .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
 
         Ok(())
@@ -1009,10 +905,9 @@ impl LlvmBackend {
     pub fn compile_conditional_function(
         &self,
         _name: &str,
-        _param_ty: &TypeId,
-        _ret_type: &TypeId,
-        _true_value: i32,
-        _false_value: i32,
+        _cond_val: bool,
+        _then_val: i64,
+        _else_val: i64,
     ) -> Result<(), CompileError> {
         Err(CompileError::Semantic(
             "LLVM feature not enabled".to_string(),
@@ -1020,19 +915,18 @@ impl LlvmBackend {
     }
 }
 
-/// Implement the NativeBackend trait for LLVM
 impl NativeBackend for LlvmBackend {
     fn target(&self) -> &Target {
         &self.target
     }
 
     fn compile(&mut self, module: &MirModule) -> Result<Vec<u8>, CompileError> {
-        // Compile each function
+        let module_name = module.name.as_deref().unwrap_or("module");
+        self.create_module(module_name)?;
         for func in &module.functions {
             self.compile_function(func)?;
         }
-
-        // Emit object code
+        self.verify()?;
         self.emit_object(module)
     }
 
@@ -1041,31 +935,16 @@ impl NativeBackend for LlvmBackend {
     }
 
     fn supports_target(target: &Target) -> bool {
-        // LLVM supports all architectures we care about
-        // In the future, we might check for LLVM toolchain availability here
-        match target.arch {
-            simple_common::target::TargetArch::X86_64
-            | simple_common::target::TargetArch::Aarch64
-            | simple_common::target::TargetArch::X86
-            | simple_common::target::TargetArch::Arm
-            | simple_common::target::TargetArch::Riscv64
-            | simple_common::target::TargetArch::Riscv32 => true,
-        }
+        // LLVM supports all targets
+        use simple_common::target::TargetArch;
+        matches!(
+            target.arch,
+            TargetArch::X86_64
+                | TargetArch::Aarch64
+                | TargetArch::X86
+                | TargetArch::Arm
+                | TargetArch::Riscv64
+                | TargetArch::Riscv32
+        )
     }
-}
-
-/// LLVM type representation
-#[derive(Debug, Clone, PartialEq)]
-pub enum LlvmType {
-    Void,
-    I1,
-    I8,
-    I16,
-    I32,
-    I64,
-    F32,
-    F64,
-    Pointer(Box<LlvmType>),
-    Struct(Vec<LlvmType>),
-    Array(Box<LlvmType>, usize),
 }

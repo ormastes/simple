@@ -1,154 +1,112 @@
-# File Splitting Status Report
+# File Splitting Status
 
-**Date:** 2025-12-15  
-**Session:** Multi-hour code quality improvement
+## Completed
+- ✅ Fixed syntax error in `src/compiler/src/codegen/llvm_tests/mir_compilation.rs`
+- ✅ Fixed backend selection logic in `src/compiler/src/codegen/backend_trait.rs`
+- ✅ All tests passing (631+ tests)
 
----
+## Files Requiring Splitting (>1000 lines)
 
-## Summary
+### 1. src/compiler/src/codegen/llvm.rs (1071 lines)
+**Priority:** High  
+**Risk:** Medium (feature-gated, modular)  
+**Duplication:** Multiple 51-line blocks in compile_function, compile_binop, test helpers
 
-Successfully removed code duplication (WORLD-CLASS 1.34%) and initiated systematic file splitting of 9 files over 1000 lines.
-
----
-
-## Completed: Duplication Removal ✅
-
-**Status:** WORLD-CLASS (Top 5% globally)
-- From: 2.33% → To: 1.34% (44% reduction)
-- 5 phases, 16 refactorings, 13 files modified
-- 212 lines saved, 66 clones eliminated
-
----
-
-## In Progress: File Splitting
-
-### Files Over 1000 Lines (9 total)
-
-| # | File | Lines | Status | Progress |
-|---|------|-------|--------|----------|
-| 1 | monomorphize.rs | 1798 | ⏳ Phase 1 | 45% (5 modules) |
-| 2 | pipeline.rs | 1489 | ⏳ Started | 8% (2 modules) |
-| 3 | lexer.rs | 1343 | 📋 Planned | - |
-| 4 | instr.rs | 1305 | 📋 Planned | - |
-| 5 | llvm_tests.rs | 1119 | 📋 Planned | - |
-| 6 | llvm.rs | 1071 | 📋 Planned | - |
-| 7 | ast.rs | 1045 | 📋 Planned | - |
-| 8 | hir/lower.rs | 1023 | 📋 Planned | - |
-| 9 | container.rs | 1005 | 📋 Planned | - |
-
-**Total:** 11,198 lines across 9 files
-
----
-
-## Modules Created (7 total)
-
-### monomorphize/ (5 modules)
+**Proposed Structure:**
 ```
-src/compiler/src/monomorphize/
-├── mod.rs           (23 lines)   ✅ Public API
-├── types.rs         (171 lines)  ✅ Type definitions
-├── table.rs         (159 lines)  ✅ Specialization tracking
-├── analyzer.rs      (319 lines)  ✅ Call site detection
-└── instantiate.rs   (132 lines)  ✅ Type conversion
-```
-**Status:** 804/1798 lines extracted (45%)
-
-### pipeline/ (2 modules)
-```
-src/compiler/src/pipeline/
-├── script_detection.rs (32 lines)  ✅ Script detection
-└── module_loader.rs    (81 lines)  ✅ Module loading
-```
-**Status:** 113/1489 lines extracted (8%)
-
----
-
-## Next Steps (Priority Order)
-
-### Option 1: Quick Win - llvm_tests.rs ⭐ RECOMMENDED
-**Effort:** 30-45 minutes  
-**Impact:** Low risk (test file only)  
-**Structure:**
-```
-llvm_tests/
-├── mod.rs
-├── backend_tests.rs      - Backend creation
-├── type_tests.rs         - Type mapping
-├── function_tests.rs     - Function compilation
-├── ir_tests.rs           - IR generation
-└── target_tests.rs       - Target-specific
+src/compiler/src/codegen/llvm/
+├── mod.rs           - Re-exports and module organization
+├── backend.rs       - LlvmBackend struct, new(), basic operations
+├── types.rs         - Type mapping, LlvmType enum
+├── module.rs        - Module and function creation
+├── codegen.rs       - compile_function, compile_binop/unary/terminator
+├── emit.rs          - Object file emission
+└── test_helpers.rs  - Test helper functions
 ```
 
-### Option 2: Complete monomorphize.rs Phase 2
-**Effort:** 2-3 hours  
-**Impact:** 67% reduction in largest file  
-**Remaining:**
-- specialization.rs (~600 lines)
-- entry.rs (~350 lines)
-- tests.rs (~140 lines)
+### 2. src/parser/src/ast.rs (1045 lines)
+**Priority:** High  
+**Risk:** Low (pure data definitions, no logic)  
+**Duplication:** Minimal (mostly struct/enum definitions)
 
-### Option 3: lexer.rs Splitting
-**Effort:** 2-3 hours  
-**Impact:** Clear module boundaries  
-**Structure:**
+**Proposed Structure:**
 ```
-lexer/
-├── mod.rs
-├── scanner.rs
-├── tokens.rs
-├── indentation.rs
-├── comments.rs
-└── escape.rs
+src/parser/src/ast/
+├── mod.rs         - Node enum, re-exports
+├── common.rs      - Visibility, Mutability, RangeBound, SelfMode, MoveMode
+├── docs.rs        - DocComment, Decorator, Attribute  
+├── definitions.rs - FunctionDef, StructDef, ClassDef, TraitDef, ImplBlock
+├── enums.rs       - EnumDef, EnumVariant, UnitDef, UnitVariant, UnitFamilyDef
+├── macros.rs      - MacroDef, MacroPattern, MacroInvocation, MacroArg
+├── statements.rs  - LetStmt, IfStmt, MatchStmt, ForStmt, WhileStmt, etc
+├── contracts.rs   - ContractBlock, ContractClause, InvariantBlock
+├── modules.rs     - Import, Export, Use statements, ModulePath
+└── expressions.rs - Expr enum and related types
 ```
 
----
+### 3. src/compiler/src/hir/lower.rs (1023 lines)
+**Priority:** Medium  
+**Risk:** High (complex logic, many dependencies)  
+**Duplication:** Multiple duplicates in lower_expr, lower_node, lower_module
 
-## Estimated Completion
+**Proposed Structure:**
+```
+src/compiler/src/hir/lower/
+├── mod.rs         - Lowerer struct, re-exports
+├── module.rs      - Module lowering
+├── node.rs        - Node lowering  
+├── expr.rs        - Expression lowering
+├── types.rs       - Type resolution
+└── inference.rs   - Type inference helpers
+```
 
-### By File Priority:
-1. **llvm_tests.rs** (30 min) - Quick win
-2. **Complete monomorphize.rs** (2-3 hours) - Biggest impact
-3. **lexer.rs** (2-3 hours) - Clear boundaries
-4. **pipeline.rs** (3-4 hours) - Already started
-5. **Remaining 5 files** (10-12 hours total)
+### 4. src/loader/src/settlement/container.rs (1005 lines)
+**Priority:** Low  
+**Risk:** High (integration code, complex state management)  
+**Duplication:** Duplicates in add_module_with_linking, remove_module, replace_module
 
-**Total Estimated Effort:** 20-25 hours across multiple sessions
+**Proposed Structure:**
+```
+src/loader/src/settlement/container/
+├── mod.rs           - SettlementContainer struct
+├── module_ops.rs    - add_module, remove_module, replace_module
+├── linking.rs       - Symbol resolution and linking logic
+├── compaction.rs    - Memory compaction and cleanup
+└── validation.rs    - Container validation logic
+```
 
----
+## Implementation Plan
 
-## Benefits Achieved
+### Phase 1: Low-Risk Splits (ast.rs)
+1. Create ast/ directory structure
+2. Move pure data definitions (no behavior changes)
+3. Run tests after each file
+4. Update imports across codebase
 
-✅ **WORLD-CLASS duplication** (1.34%)  
-✅ **7 focused modules created**  
-✅ **2 files in progress** (monomorphize, pipeline)  
-✅ **Clear patterns established** for remaining files  
-✅ **Zero breaking changes**  
-✅ **Comprehensive documentation**
+### Phase 2: Medium-Risk Splits (llvm.rs)
+1. Create llvm/ directory structure  
+2. Split feature-gated sections (easier to test in isolation)
+3. Verify test helpers work correctly
+4. Run full test suite
 
----
+### Phase 3: High-Risk Splits (lower.rs, container.rs)
+1. Analyze dependencies carefully
+2. Extract helper functions first to reduce duplication
+3. Split into modules only after helpers are stable
+4. Run integration tests between each step
 
-## Current State
+## Testing Strategy
 
-| Aspect | Status |
-|--------|--------|
-| Duplication | ✅ COMPLETE |
-| File splitting | ⏳ 11% overall (7/9 files remaining) |
-| Code quality | ✅ EXCELLENT |
-| Documentation | ✅ COMPLETE |
+After each split:
+1. Run unit tests: `cargo test -p <crate> --lib`
+2. Run integration tests: `cargo test`
+3. Check duplication: `make duplication-simple`
+4. Verify line counts: No file should exceed 1000 lines
 
----
+## Success Criteria
 
-## Recommendation
-
-**Quick win approach:**
-1. Complete llvm_tests.rs splitting (30 min)
-2. Test compilation
-3. Commit progress
-4. Continue with monomorphize.rs Phase 2 in next session
-
-This provides visible progress while maintaining momentum.
-
----
-
-**Status:** Duplication ✅ | File Splitting ⏳ 11%  
-**Quality Level:** WORLD-CLASS
+- ✅ All tests pass
+- ✅ No file exceeds 1000 lines
+- ✅ Duplication reduced (especially 51-line blocks)
+- ✅ Code organization improved (better separation of concerns)
+- ✅ No breaking changes to public API

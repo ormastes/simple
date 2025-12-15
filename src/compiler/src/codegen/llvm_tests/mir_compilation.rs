@@ -5,9 +5,7 @@ use simple_common::target::{Target, TargetArch, TargetOS};
 
 fn test_mir_function_compilation() {
     use crate::hir::TypeId as T;
-    use crate::mir::instructions::{BlockId, MirInst, MirTerminator, VReg};
-    use crate::mir::MirModule;
-    use crate::mir::{MirBlock, MirFunction};
+    use crate::mir::{BlockId, MirBlock, MirFunction, MirInst, MirModule, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -26,7 +24,7 @@ fn test_mir_function_compilation() {
     });
 
     // Add terminator: return v0
-    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+    func.blocks[0].terminator = Terminator::Return(Some(v0));
 
     // Compile function
     backend.compile_function(&func).unwrap();
@@ -46,7 +44,7 @@ fn test_mir_function_compilation() {
 fn test_mir_binop_compilation() {
     use crate::hir::{BinOp, TypeId as T};
     use crate::mir::effects::LocalKind;
-    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirModule;
     use crate::mir::{MirFunction, MirLocal};
     use simple_parser::ast::Visibility;
@@ -85,7 +83,7 @@ fn test_mir_binop_compilation() {
     });
 
     // Add terminator: return v2
-    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v2) });
+    func.blocks[0].terminator = Terminator::Return(Some(v2));
 
     // Compile function
     backend.compile_function(&func).unwrap();
@@ -105,7 +103,7 @@ fn test_mir_binop_compilation() {
 fn test_mir_control_flow_compilation() {
     use crate::hir::{BinOp, TypeId as T};
     use crate::mir::effects::LocalKind;
-    use crate::mir::instructions::{BlockId, MirInst, MirTerminator, VReg};
+    use crate::mir::{BlockId, MirInst, Terminator, VReg};
     use crate::mir::{MirBlock, MirFunction, MirLocal};
     use simple_parser::ast::Visibility;
 
@@ -133,11 +131,11 @@ fn test_mir_control_flow_compilation() {
         dest: v0,
         value: true,
     });
-    func.blocks[0].terminator = Some(MirTerminator::Branch {
+    func.blocks[0].terminator = Terminator::Branch {
         cond: v0,
         then_block: BlockId(1),
         else_block: BlockId(2),
-    });
+    };
 
     // Block 1: then branch
     let mut then_block = MirBlock::new(BlockId(1));
@@ -145,9 +143,7 @@ fn test_mir_control_flow_compilation() {
         dest: v_true,
         value: 1,
     });
-    then_block.terminator = Some(MirTerminator::Return {
-        value: Some(v_true),
-    });
+    then_block.terminator = Terminator::Return(Some(v_true));
     func.blocks.push(then_block);
 
     // Block 2: else branch
@@ -156,9 +152,7 @@ fn test_mir_control_flow_compilation() {
         dest: v_false,
         value: 0,
     });
-    else_block.terminator = Some(MirTerminator::Return {
-        value: Some(v_false),
-    });
+    else_block.terminator = Terminator::Return(Some(v_false));
     func.blocks.push(else_block);
 
     // Compile function
@@ -178,7 +172,7 @@ fn test_mir_control_flow_compilation() {
 #[cfg(feature = "llvm")]
 fn test_mir_float_const() {
     use crate::hir::TypeId as T;
-    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
     use simple_parser::ast::Visibility;
 
@@ -195,7 +189,7 @@ fn test_mir_float_const() {
         dest: v0,
         value: 3.14,
     });
-    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+    func.blocks[0].terminator = Terminator::Return(Some(v0));
 
     backend.compile_function(&func).unwrap();
 
@@ -211,7 +205,7 @@ fn test_mir_float_const() {
 #[cfg(feature = "llvm")]
 fn test_mir_unaryop() {
     use crate::hir::{TypeId as T, UnaryOp};
-    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
     use simple_parser::ast::Visibility;
 
@@ -239,7 +233,7 @@ fn test_mir_unaryop() {
         op: UnaryOp::Neg,
         operand: v0,
     });
-    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v1) });
+    func.blocks[0].terminator = Terminator::Return(Some(v1));
 
     backend.compile_function(&func).unwrap();
 
@@ -254,7 +248,7 @@ fn test_mir_unaryop() {
 #[cfg(feature = "llvm")]
 fn test_mir_memory_ops() {
     use crate::hir::TypeId as T;
-    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
     use simple_parser::ast::Visibility;
 
@@ -288,7 +282,7 @@ fn test_mir_memory_ops() {
         addr: v1,
         ty: T::I32,
     });
-    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v2) });
+    func.blocks[0].terminator = Terminator::Return(Some(v2));
 
     backend.compile_function(&func).unwrap();
 
@@ -305,7 +299,7 @@ fn test_mir_memory_ops() {
 #[cfg(feature = "llvm")]
 fn test_mir_string_const() {
     use crate::hir::TypeId as T;
-    use crate::mir::instructions::{MirInst, MirTerminator, VReg};
+    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
     use simple_parser::ast::Visibility;
 
@@ -322,7 +316,7 @@ fn test_mir_string_const() {
         dest: v0,
         value: "hello".to_string(),
     });
-    func.blocks[0].terminator = Some(MirTerminator::Return { value: Some(v0) });
+    func.blocks[0].terminator = Terminator::Return(Some(v0));
 
     backend.compile_function(&func).unwrap();
 

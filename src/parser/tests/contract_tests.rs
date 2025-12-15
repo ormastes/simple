@@ -88,7 +88,6 @@ ensures:
 "#;
     let items = parse(source);
     assert_function_contract(&items, "divide", 1, 1);
-    }
 }
 
 #[test]

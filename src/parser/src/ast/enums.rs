@@ -1,7 +1,8 @@
-//! Type-related enums and utilities.
-//!
-//! These enums replace boolean flags to make semantics explicit
-//! and simplify formal verification.
+//==============================================================================
+// Visibility and Mutability (for formal verification)
+//==============================================================================
+// These enums replace boolean flags to make the semantics explicit.
+// This simplifies formal verification by making invalid states unrepresentable.
 
 /// Visibility of a declaration.
 ///
@@ -81,6 +82,7 @@ impl RangeBound {
 }
 
 /// Self-binding mode for method calls.
+/// Distinguishes whether `self` should be explicitly bound in parameter evaluation.
 ///
 /// Lean equivalent:
 /// ```lean
@@ -105,6 +107,7 @@ impl SelfMode {
 }
 
 /// Capture mode for lambdas/closures.
+/// Distinguishes between move semantics (captures by value) and borrow semantics.
 ///
 /// Lean equivalent:
 /// ```lean
@@ -127,3 +130,4 @@ impl MoveMode {
         matches!(self, MoveMode::Move)
     }
 }
+

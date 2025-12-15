@@ -11,7 +11,9 @@ use super::table::MonomorphizationTable;
 #[cfg(test)]
 use super::types::SpecializationKey;
 #[cfg(test)]
-use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node, Span};
+use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node};
+#[cfg(test)]
+use simple_parser::Span;
 
 pub fn ast_type_to_concrete(
     ty: &AstType,
