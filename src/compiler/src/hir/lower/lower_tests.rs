@@ -1,4 +1,5 @@
 use super::*;
+use super::super::types::*;
 use simple_parser::Parser;
 
 fn parse_and_lower(source: &str) -> LowerResult<HirModule> {

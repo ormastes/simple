@@ -358,6 +358,42 @@ impl Type {
     }
 }
 
+//==============================================================================
+// Type Scheme (for let-polymorphism) - Matches Generics.lean
+//==============================================================================
+// A type scheme is a type with bound type variables: ∀α₁...αₙ. τ
+// This enables let-polymorphism where a let-bound variable can have
+// different types at different use sites.
+//
+// Lean equivalent (from Generics.lean):
+// ```lean
+// structure Scheme where
+//   vars : List TyVar  -- Bound type variables
+//   ty : Ty            -- The type body
+// ```
+
+/// Type scheme: ∀vars. ty (polymorphic type)
+/// Matches the Lean `Scheme` structure in Generics.lean
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeScheme {
+    /// Bound type variables (quantified)
+    pub vars: Vec<usize>,
+    /// The type body
+    pub ty: Type,
+}
+
+impl TypeScheme {
+    /// Create a monomorphic scheme (no quantified variables)
+    pub fn mono(ty: Type) -> Self {
+        Self { vars: vec![], ty }
+    }
+
+    /// Create a polymorphic scheme with the given bound variables
+    pub fn poly(vars: Vec<usize>, ty: Type) -> Self {
+        Self { vars, ty }
+    }
+}
+
 /// Substitution map for type variables
 #[derive(Debug, Clone, Default)]
 pub struct Substitution {

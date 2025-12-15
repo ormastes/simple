@@ -35,13 +35,14 @@ pub enum BackendKind {
 impl BackendKind {
     /// Select the appropriate backend for a target
     pub fn for_target(target: &Target) -> Self {
-        // Use LLVM for 32-bit targets, Cranelift for 64-bit
+        // Use LLVM for 32-bit targets if available, Cranelift for 64-bit
+        #[cfg(feature = "llvm")]
         if target.arch.is_32bit() {
-            BackendKind::Llvm
-        } else {
-            // Default to Cranelift for 64-bit (faster compilation)
-            BackendKind::Cranelift
+            return BackendKind::Llvm;
         }
+        
+        // Default to Cranelift (available for all targets)
+        BackendKind::Cranelift
     }
 
     /// Force a specific backend (for testing or user preference)
@@ -64,7 +65,10 @@ mod tests {
     fn test_backend_selection_32bit() {
         let target = Target::new(TargetArch::X86, TargetOS::Linux);
         let backend = BackendKind::for_target(&target);
+        #[cfg(feature = "llvm")]
         assert!(matches!(backend, BackendKind::Llvm));
+        #[cfg(not(feature = "llvm"))]
+        assert!(matches!(backend, BackendKind::Cranelift));
     }
 
     #[test]

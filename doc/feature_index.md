@@ -4,11 +4,10 @@ This document provides an overview of Simple language features organized by cate
 
 ## Feature Documentation Structure
 
-- **[Core Features](features/core.md)** - Features #1-131: Basic language features, types, memory management, concurrency, module system, SIMD/GPU
-- **[Extended Features](features/extended.md)** - Features #200-220: String unit types, networking APIs, LLVM backend
-- **[Testing Features](features/testing.md)** - Features #300-303: BDD spec framework, doctest, test CLI, JJ integration
-- **[Advanced Features](features/advanced.md)** - Features #400-536: Contracts, capability-based imports, UI framework, web framework
-- **[Codegen Status](codegen_status.md)** - MIR instruction coverage, runtime FFI functions, implementation status
+- **[Feature Overview](feature.md)** - In-progress and planned features
+- **[Completed Features](feature_done_1.md)** - Archived completed features
+- **[Codegen Status](codegen_status.md)** - MIR instruction coverage, runtime FFI functions
+- **[FEATURE_STATUS.md](FEATURE_STATUS.md)** - Comprehensive implementation status (212 features)
 
 ## Quick Reference by Category
 

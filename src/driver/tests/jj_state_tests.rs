@@ -5,6 +5,37 @@ use tempfile::TempDir;
 // Import the module we're testing (to be created)
 use simple_driver::jj_state::{BuildMetadata, BuildMode, JjStateManager, TestLevel, TestMetadata};
 
+/// Helper function to verify a jj commit message contains expected text
+fn assert_jj_commit_contains(repo_path: &PathBuf, expected: &str) {
+    let output = std::process::Command::new("jj")
+        .args(["log", "-r", "@-", "--no-graph", "-T", "description"])
+        .current_dir(repo_path)
+        .output()
+        .expect("Failed to run jj log");
+    let log = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        log.contains(expected),
+        "Expected commit message to contain '{}', got: {}",
+        expected,
+        log
+    );
+}
+
+/// Helper to set up a jj repo and return (TempDir, path, manager)
+fn setup_jj_repo() -> (TempDir, PathBuf, JjStateManager) {
+    let temp = TempDir::new().unwrap();
+    let repo_path = temp.path().to_path_buf();
+
+    std::process::Command::new("jj")
+        .args(["git", "init", "--colocate"])
+        .current_dir(&repo_path)
+        .output()
+        .expect("jj not installed");
+
+    let manager = JjStateManager::new_with_path(repo_path.clone()).unwrap();
+    (temp, repo_path, manager)
+}
+
 #[test]
 fn jj_state_manager_detects_repo() {
     let temp = TempDir::new().unwrap();
@@ -93,8 +124,6 @@ fn snapshot_test_creates_commit() {
 
     // Verify commit was created (check parent since we created a new working copy)
     assert_jj_commit_contains(&repo_path, "Tests Passed");
-        log
-    );
 }
 
 #[test]

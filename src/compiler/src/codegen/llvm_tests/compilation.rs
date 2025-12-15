@@ -85,7 +85,7 @@ fn test_native_backend_trait() {
 fn test_backend_kind_selection() {
     use crate::codegen::BackendKind;
 
-    // 32-bit targets should select LLVM
+    // 32-bit targets should select LLVM when llvm feature is available
     let target_32 = Target::new(TargetArch::X86, TargetOS::Linux);
     let kind_32 = BackendKind::for_target(&target_32);
     #[cfg(feature = "llvm")]
@@ -99,7 +99,7 @@ fn test_backend_kind_selection() {
     // Always prefer Cranelift for 64-bit when available
     assert_eq!(kind_64, BackendKind::Cranelift);
 
-    // ARM targets should prefer LLVM for better support
+    // ARM 32-bit targets should prefer LLVM when available
     let target_arm = Target::new(TargetArch::Arm, TargetOS::Linux);
     let kind_arm = BackendKind::for_target(&target_arm);
     #[cfg(feature = "llvm")]

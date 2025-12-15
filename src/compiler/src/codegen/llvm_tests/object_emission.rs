@@ -145,7 +145,3 @@ fn test_object_is_relocatable() {
     // ELF type should be ET_REL (relocatable, value 1)
     assert_eq!(object_code[16], 1); // e_type LSB
 }
-
-/// Test MIR function compilation
-#[test]
-#[cfg(feature = "llvm")]

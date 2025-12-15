@@ -19,7 +19,7 @@ pub(crate) fn extract_code_from_object(object_code: &[u8]) -> Vec<u8> {
 }
 
 /// Parse ELF object file, extract .text section, and apply relocations.
-fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn extract_elf_text_section(elf_data: &[u8]) -> Option<Vec<u8>> {
     // Minimal ELF64 parsing to extract .text section
     if elf_data.len() < 64 {
         return None;
