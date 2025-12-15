@@ -45,7 +45,9 @@ simple/                            # Project root - Rust compiler implementation
 ├── doc/                           # Documentation
 │   ├── architecture.md            # Design principles and dependency rules
 │   ├── codegen_technical.md       # Codegen implementation details
-│   ├── feature.md                 # Feature list with importance/difficulty ratings
+│   ├── feature.md                 # Feature overview (→ feature_index.md for details)
+│   ├── feature_index.md           # Complete feature catalog with ratings/status
+│   ├── codegen_status.md          # MIR instruction coverage, runtime FFI
 │   ├── formal_verification.md     # Lean 4 formal verification docs
 │   ├── import_export_and__init__.md  # Module system specification (v4)
 │   ├── test.md                    # Test policy (mock control, coverage, test levels)
@@ -70,6 +72,8 @@ simple/                            # Project root - Rust compiler implementation
 │   ├── status/                    # Feature implementation status (79+ files)
 │   ├── plans/                     # Implementation plans
 │   └── research/                  # Research notes
+│       ├── improve_api.md         # API design overview (→ api_design_index.md)
+│       └── api_design_index.md    # Detailed API guidelines by topic
 │
 ├── verification/                  # Lean 4 formal verification projects
 │   ├── manual_pointer_borrow/     # Borrow checker model
@@ -277,15 +281,19 @@ Source Code (.spl)
 | Lexer | Complete |
 | Parser | Complete (modular: expressions, statements, types_def) |
 | AST | Complete |
+| Type Inference | Partial (HM scaffold with unification working) |
 | HIR | Complete (type-checked IR) |
 | MIR | Complete (50+ instructions, generator state machine lowering) |
-| Codegen | Hybrid (Cranelift + Interpreter fallback, 50+ runtime FFI functions) |
+| Codegen | Hybrid (Cranelift + LLVM backends, Interpreter fallback) |
 | RuntimeValue | Complete (9 modules, tagged pointers, 50+ FFI functions) |
 | SMF Loader | Complete |
 | Driver | Complete (exec_core, runner, interpreter layers) |
 | Runtime/GC | Abfall-backed wrapper with optional logging |
 | Package Manager | Complete (UV-style: manifest, lock, cache, resolution) |
 | Module System | Parsing complete, resolution infrastructure ready |
+| BDD Framework | Sprint 1 Complete (DSL, matchers, runtime) |
+| Doctest | Sprint 2 Complete (parser, runner, discovery with FFI) |
+| JJ Integration | 67% Complete (8/12 tasks, build snapshots working) |
 
 ### MIR Instruction Categories
 
@@ -541,6 +549,13 @@ Optional (requires npm): `npm install -g jscpd`
 - `src/pkg/src/` - UV-style package manager
 
 ### Documentation
+- `doc/feature_index.md` - Complete feature catalog (131+ features with status/difficulty)
+- `doc/feature.md` - Feature overview (links to feature_index.md)
+- `doc/codegen_status.md` - MIR instruction coverage, runtime FFI functions
 - `doc/codegen_technical.md` - Codegen implementation details
 - `doc/import_export_and__init__.md` - Module system specification
+- `doc/research/api_design_index.md` - API design guidelines
+- `doc/research/improve_api.md` - API design overview
 - `doc/status/` - Feature implementation status (79+ files)
+
+**Note:** Large documentation files (feature.md, improve_api.md) have been reorganized into index files linking to focused sub-documents for better maintainability. Original files backed up with `.backup` extension.

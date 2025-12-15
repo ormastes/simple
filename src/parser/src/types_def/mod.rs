@@ -119,16 +119,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
 
         let fields = if self.check(&TokenKind::LParen) {
-            self.advance();
-            let mut types = Vec::new();
-            while !self.check(&TokenKind::RParen) {
-                types.push(self.parse_type()?);
-                if !self.check(&TokenKind::RParen) {
-                    self.expect(&TokenKind::Comma)?;
-                }
-            }
-            self.expect(&TokenKind::RParen)?;
-            Some(types)
+            Some(self.parse_paren_type_list()?)
         } else {
             None
         };

@@ -24,6 +24,7 @@ pub trait NativeBackend {
 }
 
 /// Backend selection based on target architecture
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
     /// Cranelift backend (fast compilation, 64-bit only)
     Cranelift,

@@ -96,13 +96,18 @@ mod tests {
     use std::time::SystemTime;
     use tempfile::TempDir;
 
-    #[test]
-    fn test_store_and_load() {
+    /// Helper to create initialized temp store
+    fn setup_test_store() -> (TempDir, StateStore) {
         let temp = TempDir::new().unwrap();
         let store_path = temp.path().join("states.json");
         let store = StateStore::new(&store_path);
-
         store.init().unwrap();
+        (temp, store)
+    }
+
+    #[test]
+    fn test_store_and_load() {
+        let (_temp, store) = setup_test_store();
 
         let state = BuildState {
             timestamp: SystemTime::now(),
@@ -124,11 +129,7 @@ mod tests {
 
     #[test]
     fn test_load_for_commit() {
-        let temp = TempDir::new().unwrap();
-        let store_path = temp.path().join("states.json");
-        let store = StateStore::new(&store_path);
-
-        store.init().unwrap();
+        let (_temp, store) = setup_test_store();
 
         let state1 = BuildState::new()
             .with_commit("commit1".to_string())
@@ -145,11 +146,7 @@ mod tests {
 
     #[test]
     fn test_latest() {
-        let temp = TempDir::new().unwrap();
-        let store_path = temp.path().join("states.json");
-        let store = StateStore::new(&store_path);
-
-        store.init().unwrap();
+        let (_temp, store) = setup_test_store();
 
         assert!(store.latest().unwrap().is_none());
 
@@ -166,11 +163,8 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let temp = TempDir::new().unwrap();
-        let store_path = temp.path().join("states.json");
-        let store = StateStore::new(&store_path);
+        let (_temp, store) = setup_test_store();
 
-        store.init().unwrap();
         store.store(BuildState::new()).unwrap();
         assert_eq!(store.load_all().unwrap().len(), 1);
 

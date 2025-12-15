@@ -53,7 +53,7 @@ theorem toValid_toState (vs : ValidBorrowState) :
   | shared count h =>
     simp [ValidBorrowState.toState, BorrowState.toValid]
     cases count with
-    | zero => exact absurd rfl (Nat.not_lt_zero 0 h).elim
+    | zero => exact absurd rfl (Nat.ne_of_gt h)
     | succ n => rfl
 
 def takeExclusive (s : BorrowState) : BorrowState :=
@@ -68,34 +68,34 @@ def releaseShared (s : BorrowState) : BorrowState :=
 def releaseExclusive (s : BorrowState) : BorrowState :=
   { s with exclusive := false }
 
-/-- Type-safe operations on ValidBorrowState.
-    These operations preserve validity by construction - no runtime checks needed. -/
+-- Type-safe operations on ValidBorrowState.
+-- These operations preserve validity by construction - no runtime checks needed.
 
-/-- Try to take exclusive borrow. Returns some only if currently unborrowed. -/
+-- Try to take exclusive borrow. Returns some only if currently unborrowed.
 def ValidBorrowState.takeExclusive : ValidBorrowState → Option ValidBorrowState
   | .unborrowed => some .exclusive
   -- Explicit: cannot take exclusive if already borrowed
   | .exclusive => none
   | .shared _ _ => none
 
-/-- Try to take shared borrow. Returns some unless already exclusive. -/
+-- Try to take shared borrow. Returns some unless already exclusive.
 def ValidBorrowState.takeShared : ValidBorrowState → Option ValidBorrowState
   | .unborrowed => some (.shared 1 (Nat.one_pos))
-  | .shared n h => some (.shared (n + 1) (Nat.succ_pos n))
+  | .shared n _ => some (.shared (n + 1) (Nat.succ_pos n))
   | .exclusive => none  -- Cannot take shared if exclusive
 
-/-- Release exclusive borrow. No-op if not exclusive. -/
+-- Release exclusive borrow. No-op if not exclusive.
 def ValidBorrowState.releaseExclusive : ValidBorrowState → ValidBorrowState
   | .exclusive => .unborrowed
   | other => other
 
-/-- Release shared borrow. Decrements count or returns unborrowed. -/
+-- Release shared borrow. Decrements count or returns unborrowed.
 def ValidBorrowState.releaseShared : ValidBorrowState → ValidBorrowState
   | .shared 1 _ => .unborrowed
   | .shared (n + 2) _ => .shared (n + 1) (Nat.succ_pos n)
   | other => other
 
-/-- Type-safe operations always preserve validity (trivially true by construction). -/
+-- Type-safe operations always preserve validity (trivially true by construction).
 theorem validState_takeExclusive_valid (vs : ValidBorrowState) :
     ∀ vs', vs.takeExclusive = some vs' → valid vs'.toState := by
   intro vs' h

@@ -85,15 +85,7 @@ impl<'a> Parser<'a> {
 
         // Handle tuple type
         if self.check(&TokenKind::LParen) {
-            self.advance();
-            let mut types = Vec::new();
-            while !self.check(&TokenKind::RParen) {
-                types.push(self.parse_type()?);
-                if !self.check(&TokenKind::RParen) {
-                    self.expect(&TokenKind::Comma)?;
-                }
-            }
-            self.expect(&TokenKind::RParen)?;
+            let types = self.parse_paren_type_list()?;
 
             // Check if it's a function type
             if self.check(&TokenKind::Arrow) {

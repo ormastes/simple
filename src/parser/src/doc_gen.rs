@@ -48,18 +48,16 @@ pub struct ModuleDocs {
 }
 
 impl ModuleDocs {
-    /// Generate Markdown documentation
-    pub fn to_markdown(&self) -> String {
-        let mut out = String::new();
-
-        // Module header
-        if let Some(name) = &self.name {
-            out.push_str(&format!("# Module `{}`\n\n", name));
-        } else {
-            out.push_str("# API Documentation\n\n");
-        }
-
-        // Group items by kind
+    /// Group items by kind for documentation generation
+    fn group_items(
+        &self,
+    ) -> (
+        Vec<&DocItem>,
+        Vec<&DocItem>,
+        Vec<&DocItem>,
+        Vec<&DocItem>,
+        Vec<&DocItem>,
+    ) {
         let functions: Vec<_> = self
             .items
             .iter()
@@ -85,6 +83,23 @@ impl ModuleDocs {
             .iter()
             .filter(|i| i.kind == DocItemKind::Trait)
             .collect();
+
+        (functions, structs, classes, enums, traits)
+    }
+
+    /// Generate Markdown documentation
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+
+        // Module header
+        if let Some(name) = &self.name {
+            out.push_str(&format!("# Module `{}`\n\n", name));
+        } else {
+            out.push_str("# API Documentation\n\n");
+        }
+
+        // Group items by kind
+        let (functions, structs, classes, enums, traits) = self.group_items();
 
         // Traits
         if !traits.is_empty() {
@@ -161,31 +176,7 @@ impl ModuleDocs {
         }
 
         // Group items by kind
-        let functions: Vec<_> = self
-            .items
-            .iter()
-            .filter(|i| i.kind == DocItemKind::Function)
-            .collect();
-        let structs: Vec<_> = self
-            .items
-            .iter()
-            .filter(|i| i.kind == DocItemKind::Struct)
-            .collect();
-        let classes: Vec<_> = self
-            .items
-            .iter()
-            .filter(|i| i.kind == DocItemKind::Class)
-            .collect();
-        let enums: Vec<_> = self
-            .items
-            .iter()
-            .filter(|i| i.kind == DocItemKind::Enum)
-            .collect();
-        let traits: Vec<_> = self
-            .items
-            .iter()
-            .filter(|i| i.kind == DocItemKind::Trait)
-            .collect();
+        let (functions, structs, classes, enums, traits) = self.group_items();
 
         if !traits.is_empty() {
             out.push_str("<h2>Traits</h2>\n");

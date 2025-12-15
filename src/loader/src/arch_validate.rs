@@ -232,20 +232,26 @@ impl ArchValidator {
         self
     }
 
+    /// Helper to parse and validate architecture from header
+    fn parse_arch_from_header(arch_byte: u8, result: &mut ValidationResult) -> Option<TargetArch> {
+        match Arch::from_u8(arch_byte) {
+            Some(arch) => Some(arch.to_target_arch()),
+            None => {
+                result.passed = false;
+                result.errors.push(ValidationError::InvalidArch(arch_byte));
+                None
+            }
+        }
+    }
+
     /// Validate an SMF header.
     pub fn validate_smf(&self, header: &SmfHeader) -> ValidationResult {
         let mut result = ValidationResult::ok();
 
         // Parse architecture from header
-        let module_arch = match Arch::from_u8(header.arch) {
-            Some(arch) => arch.to_target_arch(),
-            None => {
-                result.passed = false;
-                result
-                    .errors
-                    .push(ValidationError::InvalidArch(header.arch));
-                return result;
-            }
+        let module_arch = match Self::parse_arch_from_header(header.arch, &mut result) {
+            Some(arch) => arch,
+            None => return result,
         };
 
         // Parse platform from header
@@ -280,15 +286,9 @@ impl ArchValidator {
         let mut result = ValidationResult::ok();
 
         // Parse architecture from header
-        let module_arch = match Arch::from_u8(header.arch) {
-            Some(arch) => arch.to_target_arch(),
-            None => {
-                result.passed = false;
-                result
-                    .errors
-                    .push(ValidationError::InvalidArch(header.arch));
-                return result;
-            }
+        let module_arch = match Self::parse_arch_from_header(header.arch, &mut result) {
+            Some(arch) => arch,
+            None => return result,
         };
 
         // Settlement headers don't have platform info - assume 'Any'

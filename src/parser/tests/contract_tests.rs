@@ -20,6 +20,22 @@ fn parse_err(src: &str) {
     assert!(parser.parse().is_err(), "should fail to parse");
 }
 
+/// Helper to validate function contract
+fn assert_function_contract(items: &[Node], name: &str, requires_count: usize, ensures_count: usize) {
+    assert_eq!(items.len(), 1);
+    
+    if let Node::Function(func) = &items[0] {
+        assert_eq!(func.name, name);
+        assert!(func.contract.is_some());
+        
+        let contract = func.contract.as_ref().unwrap();
+        assert_eq!(contract.requires.len(), requires_count);
+        assert_eq!(contract.ensures.len(), ensures_count);
+    } else {
+        panic!("Expected Function node");
+    }
+}
+
 // === Function Contracts ===
 
 #[test]
@@ -32,18 +48,7 @@ requires:
     a / b
 "#;
     let items = parse(source);
-    assert_eq!(items.len(), 1);
-
-    if let Node::Function(func) = &items[0] {
-        assert_eq!(func.name, "divide");
-        assert!(func.contract.is_some());
-
-        let contract = func.contract.as_ref().unwrap();
-        assert_eq!(contract.requires.len(), 1);
-        assert_eq!(contract.ensures.len(), 0);
-    } else {
-        panic!("Expected Function node");
-    }
+    assert_function_contract(&items, "divide", 1, 0);
 }
 
 #[test]
@@ -82,17 +87,7 @@ ensures:
     a / b
 "#;
     let items = parse(source);
-    assert_eq!(items.len(), 1);
-
-    if let Node::Function(func) = &items[0] {
-        assert_eq!(func.name, "divide");
-        assert!(func.contract.is_some());
-
-        let contract = func.contract.as_ref().unwrap();
-        assert_eq!(contract.requires.len(), 1);
-        assert_eq!(contract.ensures.len(), 1);
-    } else {
-        panic!("Expected Function node");
+    assert_function_contract(&items, "divide", 1, 1);
     }
 }
 

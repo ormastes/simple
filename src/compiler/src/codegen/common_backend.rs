@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use cranelift_codegen::ir::UserFuncName;
-use cranelift_codegen::isa::CallConv;
+use cranelift_codegen::isa::{CallConv, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable, Flags};
 use cranelift_codegen::Context;
 use cranelift_module::{Linkage, Module};
@@ -141,6 +141,14 @@ pub fn create_isa_and_flags(
     // Use the target from settings, or default to host
     let triple = target_arch_to_triple(settings.target.arch)?;
 
+    create_isa_from_triple(triple, flags)
+}
+
+/// Helper to create ISA from a triple
+fn create_isa_from_triple(
+    triple: Triple,
+    flags: settings::Flags,
+) -> Result<(settings::Flags, OwnedTargetIsa), BackendError> {
     let isa = cranelift_codegen::isa::lookup(triple)
         .map_err(|e| BackendError::Compilation(e.to_string()))?
         .finish(flags.clone())
@@ -168,12 +176,7 @@ pub fn create_host_isa_and_flags(
     let flags = Flags::new(settings_builder);
     let triple = Triple::host();
 
-    let isa = cranelift_codegen::isa::lookup(triple)
-        .map_err(|e| BackendError::Compilation(e.to_string()))?
-        .finish(flags.clone())
-        .map_err(|e| BackendError::Compilation(e.to_string()))?;
-
-    Ok((flags, isa))
+    create_isa_from_triple(triple, flags)
 }
 
 impl<M: Module> CodegenBackend<M> {
