@@ -166,6 +166,12 @@ impl PackageReader {
         Some((resources, offset, count))
     }
 
+    /// Helper to read resource path and advance offset
+    fn read_resource_path(data: &[u8], offset: &mut usize) -> Option<String> {
+        let (_, path) = Self::read_resource_header(data, offset).ok()?;
+        Some(path)
+    }
+
     /// Unpack resources without decompression.
     fn unpack_resources(&self, data: &[u8]) -> Result<Vec<ResourceEntry>, PackageError> {
         let (mut resources, mut offset, count) = match Self::init_resource_parser(data) {
@@ -175,9 +181,9 @@ impl PackageReader {
 
         for _ in 0..count {
             // Read path
-            let (_, path) = match Self::read_resource_header(data, &mut offset) {
-                Ok(header) => header,
-                Err(_) => break,
+            let path = match Self::read_resource_path(data, &mut offset) {
+                Some(p) => p,
+                None => break,
             };
 
             // Read data
@@ -221,9 +227,9 @@ impl PackageReader {
 
         for _ in 0..count {
             // Read path
-            let (_, path) = match Self::read_resource_header(data, &mut offset) {
-                Ok(header) => header,
-                Err(_) => break,
+            let path = match Self::read_resource_path(data, &mut offset) {
+                Some(p) => p,
+                None => break,
             };
 
             // Read compressed and uncompressed sizes

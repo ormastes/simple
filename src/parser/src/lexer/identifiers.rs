@@ -79,8 +79,14 @@ impl<'a> super::Lexer<'a> {
             "vec" => TokenKind::Vec,
             "shared" => TokenKind::Shared,
             "gpu" => TokenKind::Gpu,
+            // Contract keywords (new spec)
+            "out" => TokenKind::Out,
+            "out_err" => TokenKind::OutErr,
+            "where" => TokenKind::Where,
+            // Contract keywords (legacy)
             "requires" => TokenKind::Requires,
             "ensures" => TokenKind::Ensures,
+            // Contract keywords (shared)
             "invariant" => TokenKind::Invariant,
             "old" => TokenKind::Old,
             "result" => TokenKind::Result,

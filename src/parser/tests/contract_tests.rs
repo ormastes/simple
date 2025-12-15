@@ -29,8 +29,8 @@ fn assert_function_contract(items: &[Node], name: &str, requires_count: usize, e
         assert!(func.contract.is_some());
         
         let contract = func.contract.as_ref().unwrap();
-        assert_eq!(contract.requires.len(), requires_count);
-        assert_eq!(contract.ensures.len(), ensures_count);
+        assert_eq!(contract.preconditions.len(), requires_count);
+        assert_eq!(contract.postconditions.len(), ensures_count);
     } else {
         panic!("Expected Function node");
     }
@@ -68,8 +68,8 @@ ensures:
         assert!(func.contract.is_some());
 
         let contract = func.contract.as_ref().unwrap();
-        assert_eq!(contract.requires.len(), 0);
-        assert_eq!(contract.ensures.len(), 1);
+        assert_eq!(contract.preconditions.len(), 0);
+        assert_eq!(contract.postconditions.len(), 1);
     } else {
         panic!("Expected Function node");
     }
@@ -111,7 +111,7 @@ requires:
         assert!(func.contract.is_some());
 
         let contract = func.contract.as_ref().unwrap();
-        assert_eq!(contract.requires.len(), 3);
+        assert_eq!(contract.preconditions.len(), 3);
     } else {
         panic!("Expected Function node");
     }
@@ -134,7 +134,7 @@ ensures:
         assert!(func.contract.is_some());
 
         let contract = func.contract.as_ref().unwrap();
-        assert_eq!(contract.ensures.len(), 1);
+        assert_eq!(contract.postconditions.len(), 1);
 
         // Check that the condition contains an old() expression
         // The AST should contain ContractOld expression
@@ -266,7 +266,7 @@ class Stack:
         assert!(method.contract.is_some());
 
         let contract = method.contract.as_ref().unwrap();
-        assert_eq!(contract.ensures.len(), 1);
+        assert_eq!(contract.postconditions.len(), 1);
     } else {
         panic!("Expected Class node");
     }
@@ -315,8 +315,8 @@ ensures:
         assert!(func.contract.is_some());
 
         let contract = func.contract.as_ref().unwrap();
-        assert_eq!(contract.requires.len(), 3);
-        assert_eq!(contract.ensures.len(), 1);
+        assert_eq!(contract.preconditions.len(), 3);
+        assert_eq!(contract.postconditions.len(), 1);
     } else {
         panic!("Expected Function node");
     }

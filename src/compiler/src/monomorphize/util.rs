@@ -1,7 +1,7 @@
 //! Utility functions for type conversion.
 
 use super::types::{ConcreteType, PointerKind};
-use simple_parser::ast::Type as AstType;
+use simple_parser::ast::{Expr, Type as AstType};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -11,9 +11,54 @@ use super::table::MonomorphizationTable;
 #[cfg(test)]
 use super::types::SpecializationKey;
 #[cfg(test)]
-use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node};
+use simple_parser::ast::{Block, FunctionDef, Module, Node};
 #[cfg(test)]
 use simple_parser::Span;
+
+/// Check if a type directly uses a type parameter.
+pub fn type_uses_param(ty: &AstType, param: &str) -> bool {
+    match ty {
+        AstType::Simple(name) => name == param,
+        AstType::Generic { name, args } => {
+            name == param || args.iter().any(|a| type_uses_param(a, param))
+        }
+        AstType::Array { element, .. } => type_uses_param(element, param),
+        AstType::Tuple(elems) => elems.iter().any(|e| type_uses_param(e, param)),
+        AstType::Function { params, ret } => {
+            params.iter().any(|p| type_uses_param(p, param))
+                || ret
+                    .as_ref()
+                    .map_or(false, |r| type_uses_param(r, param))
+        }
+        AstType::Optional(inner) => type_uses_param(inner, param),
+        AstType::Pointer { inner, .. } => type_uses_param(inner, param),
+        _ => false,
+    }
+}
+
+/// Infer the concrete type of an expression.
+pub fn infer_concrete_type(expr: &Expr, type_context: &HashMap<String, ConcreteType>) -> Option<ConcreteType> {
+    match expr {
+        Expr::Integer(_) | Expr::TypedInteger(_, _) => Some(ConcreteType::Int),
+        Expr::Float(_) | Expr::TypedFloat(_, _) => Some(ConcreteType::Float),
+        Expr::Bool(_) => Some(ConcreteType::Bool),
+        Expr::String(_) | Expr::TypedString(_, _) | Expr::FString(_) => {
+            Some(ConcreteType::String)
+        }
+        Expr::Nil => Some(ConcreteType::Nil),
+        Expr::Identifier(name) => type_context.get(name).cloned(),
+        Expr::Array(elems) => {
+            if let Some(first) = elems.first() {
+                Some(ConcreteType::Array(Box::new(
+                    infer_concrete_type(first, type_context)?,
+                )))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
 
 pub fn ast_type_to_concrete(
     ty: &AstType,

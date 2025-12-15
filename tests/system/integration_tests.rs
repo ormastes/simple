@@ -340,6 +340,7 @@ fn test_hir_function_integration() {
             ty: TypeId::I64,
         }))],
         visibility: Visibility::Public,
+        contract: None,
     };
 
     assert_eq!(func.name, "add");

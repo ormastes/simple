@@ -1,6 +1,57 @@
 use crate::token::{NumericSuffix, TokenKind};
 
 impl<'a> super::Lexer<'a> {
+    /// Helper to check if underscore is followed by a unit suffix (not a digit separator).
+    #[inline]
+    fn is_unit_suffix_start(&mut self) -> bool {
+        let mut peek_ahead = self.chars.clone();
+        peek_ahead.next(); // skip '_'
+        if let Some((_, next)) = peek_ahead.next() {
+            next.is_alphabetic()
+        } else {
+            false
+        }
+    }
+
+    /// Helper to scan digits for a given radix, handling underscores and unit suffixes.
+    fn scan_radix_digits<F>(&mut self, num_str: &mut String, is_valid_digit: F) -> bool
+    where
+        F: Fn(char) -> bool,
+    {
+        let mut found_digits = false;
+        while let Some(c) = self.peek() {
+            if is_valid_digit(c) {
+                num_str.push(c);
+                self.advance();
+                found_digits = true;
+            } else if c == '_' {
+                if self.is_unit_suffix_start() {
+                    break; // Unit suffix detected
+                }
+                self.advance(); // Skip digit separator
+            } else {
+                break;
+            }
+        }
+        found_digits
+    }
+
+    /// Helper to parse integers with non-decimal radix
+    fn parse_radix_integer(&mut self, num_str: &str, radix: u32, radix_name: &str) -> TokenKind {
+        match i64::from_str_radix(&num_str[2..], radix) {
+            Ok(n) => {
+                if let Some(suffix) = self.scan_numeric_suffix() {
+                    TokenKind::TypedInteger(n, suffix)
+                } else {
+                    TokenKind::Integer(n)
+                }
+            }
+            Err(_) => {
+                TokenKind::Error(format!("Invalid {} number: {}", radix_name, num_str))
+            }
+        }
+    }
+
     pub(super) fn scan_number(&mut self, first: char) -> TokenKind {
         let mut num_str = String::from(first);
         let mut is_float = false;
@@ -12,29 +63,9 @@ impl<'a> super::Lexer<'a> {
                     'x' | 'X' => {
                         self.advance();
                         num_str.push(ch);
-                        while let Some(c) = self.peek() {
-                            if c.is_ascii_hexdigit() {
-                                num_str.push(c);
-                                self.advance();
-                            } else if c == '_' {
-                                // Look ahead: if underscore is followed by letter (unit suffix), stop
-                                let mut peek_ahead = self.chars.clone();
-                                peek_ahead.next(); // skip '_'
-                                if let Some((_, next)) = peek_ahead.next() {
-                                    if next.is_alphabetic() && !next.is_ascii_hexdigit() {
-                                        // This is a unit suffix like _ip, stop number parsing
-                                        break;
-                                    }
-                                }
-                                // Otherwise it's a digit separator, consume and skip
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
+                        self.scan_radix_digits(&mut num_str, |c| c.is_ascii_hexdigit());
                         return match i64::from_str_radix(&num_str[2..], 16) {
                             Ok(n) => {
-                                // Check for unit suffix
                                 if let Some(suffix) = self.scan_numeric_suffix() {
                                     TokenKind::TypedInteger(n, suffix)
                                 } else {
@@ -47,76 +78,14 @@ impl<'a> super::Lexer<'a> {
                     'o' | 'O' => {
                         self.advance();
                         num_str.push(ch);
-                        while let Some(c) = self.peek() {
-                            if ('0'..='7').contains(&c) {
-                                num_str.push(c);
-                                self.advance();
-                            } else if c == '_' {
-                                // Look ahead: if underscore is followed by letter (unit suffix), stop
-                                let mut peek_ahead = self.chars.clone();
-                                peek_ahead.next(); // skip '_'
-                                if let Some((_, next)) = peek_ahead.next() {
-                                    if next.is_alphabetic() {
-                                        // This is a unit suffix like _ip, stop number parsing
-                                        break;
-                                    }
-                                }
-                                // Otherwise it's a digit separator, consume and skip
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                        return match i64::from_str_radix(&num_str[2..], 8) {
-                            Ok(n) => {
-                                // Check for unit suffix
-                                if let Some(suffix) = self.scan_numeric_suffix() {
-                                    TokenKind::TypedInteger(n, suffix)
-                                } else {
-                                    TokenKind::Integer(n)
-                                }
-                            }
-                            Err(_) => {
-                                TokenKind::Error(format!("Invalid octal number: {}", num_str))
-                            }
-                        };
+                        self.scan_radix_digits(&mut num_str, |c| ('0'..='7').contains(&c));
+                        return self.parse_radix_integer(&num_str, 8, "octal");
                     }
                     'b' | 'B' => {
                         self.advance();
                         num_str.push(ch);
-                        while let Some(c) = self.peek() {
-                            if c == '0' || c == '1' {
-                                num_str.push(c);
-                                self.advance();
-                            } else if c == '_' {
-                                // Look ahead: if underscore is followed by letter (unit suffix), stop
-                                let mut peek_ahead = self.chars.clone();
-                                peek_ahead.next(); // skip '_'
-                                if let Some((_, next)) = peek_ahead.next() {
-                                    if next.is_alphabetic() {
-                                        // This is a unit suffix like _ip, stop number parsing
-                                        break;
-                                    }
-                                }
-                                // Otherwise it's a digit separator, consume and skip
-                                self.advance();
-                            } else {
-                                break;
-                            }
-                        }
-                        return match i64::from_str_radix(&num_str[2..], 2) {
-                            Ok(n) => {
-                                // Check for unit suffix
-                                if let Some(suffix) = self.scan_numeric_suffix() {
-                                    TokenKind::TypedInteger(n, suffix)
-                                } else {
-                                    TokenKind::Integer(n)
-                                }
-                            }
-                            Err(_) => {
-                                TokenKind::Error(format!("Invalid binary number: {}", num_str))
-                            }
-                        };
+                        self.scan_radix_digits(&mut num_str, |c| c == '0' || c == '1');
+                        return self.parse_radix_integer(&num_str, 2, "binary");
                     }
                     _ => {}
                 }

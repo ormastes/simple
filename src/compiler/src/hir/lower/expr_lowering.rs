@@ -7,6 +7,27 @@ use super::lowerer::Lowerer;
 use super::super::types::*;
 
 impl Lowerer {
+    /// Helper to lower builtin function calls with consistent handling
+    fn lower_builtin_call(
+        &mut self,
+        name: &str,
+        args: &[ast::Argument],
+        ret_ty: TypeId,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let mut args_hir = Vec::new();
+        for arg in args {
+            args_hir.push(self.lower_expr(&arg.value, ctx)?);
+        }
+        Ok(HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: name.to_string(),
+                args: args_hir,
+            },
+            ty: ret_ty,
+        })
+    }
+
     pub(super) fn lower_expr(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
         match expr {
             Expr::Integer(n) => Ok(HirExpr {
@@ -193,50 +214,20 @@ impl Lowerer {
                         }
                         // Prelude I/O functions
                         "print" | "println" | "eprint" | "eprintln" => {
-                            let mut args_hir = Vec::new();
-                            for arg in args {
-                                args_hir.push(self.lower_expr(&arg.value, ctx)?);
-                            }
-                            return Ok(HirExpr {
-                                kind: HirExprKind::BuiltinCall {
-                                    name: name.clone(),
-                                    args: args_hir,
-                                },
-                                ty: TypeId::NIL,
-                            });
+                            return self.lower_builtin_call(name, args, TypeId::NIL, ctx);
                         }
                         // Prelude math functions
                         "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
-                            let mut args_hir = Vec::new();
-                            for arg in args {
-                                args_hir.push(self.lower_expr(&arg.value, ctx)?);
-                            }
-                            return Ok(HirExpr {
-                                kind: HirExprKind::BuiltinCall {
-                                    name: name.clone(),
-                                    args: args_hir,
-                                },
-                                ty: TypeId::I64, // Math functions return i64
-                            });
+                            return self.lower_builtin_call(name, args, TypeId::I64, ctx);
                         }
                         // Prelude conversion functions
                         "to_string" | "to_int" => {
-                            let mut args_hir = Vec::new();
-                            for arg in args {
-                                args_hir.push(self.lower_expr(&arg.value, ctx)?);
-                            }
                             let ret_ty = if name == "to_string" {
                                 TypeId::STRING
                             } else {
                                 TypeId::I64
                             };
-                            return Ok(HirExpr {
-                                kind: HirExprKind::BuiltinCall {
-                                    name: name.clone(),
-                                    args: args_hir,
-                                },
-                                ty: ret_ty,
-                            });
+                            return self.lower_builtin_call(name, args, ret_ty, ctx);
                         }
                         _ => {} // Fall through to normal call handling
                     }

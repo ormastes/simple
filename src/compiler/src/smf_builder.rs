@@ -41,67 +41,7 @@ pub fn generate_smf_bytes(return_value: i32, gc: Option<&Arc<dyn GcAllocator>>) 
 
 /// Build an SMF module with the given code bytes and a main symbol.
 fn build_smf_with_code(code_bytes: &[u8], gc: Option<&Arc<dyn GcAllocator>>) -> Vec<u8> {
-    let section_table_offset = SmfHeader::SIZE as u64;
-    let section_table_size = std::mem::size_of::<SmfSection>() as u64;
-    let code_offset = section_table_offset + section_table_size;
-
-    if let Some(gc) = gc {
-        let _ = gc.alloc_bytes(code_bytes);
-    }
-    let symbol_table_offset = code_offset + code_bytes.len() as u64;
-
-    let header = SmfHeader {
-        magic: *SMF_MAGIC,
-        version_major: 0,
-        version_minor: 1,
-        platform: simple_loader::smf::Platform::Any as u8,
-        arch: Arch::X86_64 as u8,
-        flags: SMF_FLAG_EXECUTABLE,
-        section_count: 1,
-        section_table_offset,
-        symbol_table_offset,
-        symbol_count: 1,
-        exported_count: 1,
-        entry_point: 0,
-        module_hash: 0,
-        source_hash: 0,
-        reserved: [0; 8],
-    };
-
-    let mut sec_name = [0u8; 16];
-    sec_name[..4].copy_from_slice(b"code");
-    let code_section = SmfSection {
-        section_type: SectionType::Code,
-        flags: SECTION_FLAG_READ | SECTION_FLAG_EXEC,
-        offset: code_offset,
-        size: code_bytes.len() as u64,
-        virtual_size: code_bytes.len() as u64,
-        alignment: 16,
-        name: sec_name,
-    };
-
-    let string_table = b"main\0".to_vec();
-    let symbol = SmfSymbol {
-        name_offset: 0,
-        name_hash: hash_name("main"),
-        sym_type: SymbolType::Function,
-        binding: SymbolBinding::Global,
-        visibility: 0,
-        flags: 0,
-        value: 0,
-        size: 0,
-        type_id: 0,
-        version: 0,
-    };
-
-    let mut buf = Vec::new();
-    push_struct(&mut buf, &header);
-    push_struct(&mut buf, &code_section);
-    buf.extend_from_slice(code_bytes);
-    push_struct(&mut buf, &symbol);
-    buf.extend_from_slice(&string_table);
-
-    buf
+    build_smf_with_code_for_target(code_bytes, gc, Target::host())
 }
 
 /// Build an SMF module with the given code bytes for a specific target architecture.

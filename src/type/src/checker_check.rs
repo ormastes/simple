@@ -1,4 +1,18 @@
 impl TypeChecker {
+    /// Helper to check match arms (pattern binding, guard, and body statements)
+    fn check_match_arms(&mut self, arms: &[simple_parser::ast::MatchArm]) -> Result<(), TypeError> {
+        for arm in arms {
+            self.bind_pattern(&arm.pattern);
+            if let Some(guard) = &arm.guard {
+                let _ = self.infer_expr(guard)?;
+            }
+            for stmt in &arm.body.statements {
+                self.check_node(stmt)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn check_items(&mut self, items: &[Node]) -> Result<(), TypeError> {
         // Register built-in functions
         let range_ty = self.fresh_var();
@@ -253,15 +267,7 @@ impl TypeChecker {
             }
             Node::Match(match_stmt) => {
                 let _ = self.infer_expr(&match_stmt.subject)?;
-                for arm in &match_stmt.arms {
-                    self.bind_pattern(&arm.pattern);
-                    if let Some(guard) = &arm.guard {
-                        let _ = self.infer_expr(guard)?;
-                    }
-                    for stmt in &arm.body.statements {
-                        self.check_node(stmt)?;
-                    }
-                }
+                self.check_match_arms(&match_stmt.arms)?;
                 Ok(())
             }
             Node::Trait(trait_def) => {

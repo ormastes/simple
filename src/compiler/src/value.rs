@@ -12,7 +12,7 @@ use simple_common::manual_mem::{
     Handle as ManualHandle, HandlePool as ManualHandlePool, ManualGc, Shared as ManualShared,
     Unique as ManualUnique, WeakPtr as ManualWeak,
 };
-use simple_parser::ast::{Expr, FunctionDef};
+use simple_parser::ast::{Expr, FunctionDef, Node};
 
 use crate::error::CompileError;
 
@@ -501,6 +501,12 @@ pub enum Value {
     Lambda {
         params: Vec<String>,
         body: Box<Expr>,
+        env: Env,
+    },
+    /// A block closure - used for BDD DSL colon-blocks like `describe "name": body`
+    /// Contains a list of statements to execute when called
+    BlockClosure {
+        nodes: Vec<Node>,
         env: Env,
     },
     /// A function reference - used for decorators and first-class functions

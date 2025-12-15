@@ -135,10 +135,37 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Identifier("self".to_string()))
             }
+            // Allow certain keywords to be used as identifiers in expressions
+            TokenKind::Out => {
+                self.advance();
+                Ok(Expr::Identifier("out".to_string()))
+            }
+            TokenKind::OutErr => {
+                self.advance();
+                Ok(Expr::Identifier("out_err".to_string()))
+            }
+            TokenKind::Type => {
+                self.advance();
+                Ok(Expr::Identifier("type".to_string()))
+            }
+            // Note: TokenKind::Result is handled above (line 96) for ContractResult
+            // If needed as identifier, use method_name or a different syntax
             TokenKind::Backslash => {
                 // Lambda: \x: expr or \x, y: expr or \: expr
                 self.advance();
                 self.parse_lambda_body(MoveMode::Copy)
+            }
+            TokenKind::Pipe => {
+                // Lambda: |x| body or |x, y| body (Ruby/Rust style)
+                self.advance();
+                let params = self.parse_pipe_lambda_params()?;
+                self.expect(&TokenKind::Pipe)?;
+                let body = self.parse_expression()?;
+                Ok(Expr::Lambda {
+                    params,
+                    body: Box::new(body),
+                    move_mode: MoveMode::Copy,
+                })
             }
             TokenKind::Move => {
                 // Move closure: move \x: expr
@@ -155,6 +182,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LParen => {
                 self.advance();
+                // Skip whitespace tokens inside parens (for multi-line expressions)
+                while self.check(&TokenKind::Newline)
+                    || self.check(&TokenKind::Indent)
+                    || self.check(&TokenKind::Dedent)
+                {
+                    self.advance();
+                }
                 // Check for lambda: (x, y) => expr
                 // Or tuple: (1, 2, 3)
                 // Or grouping: (expr)
@@ -175,15 +209,37 @@ impl<'a> Parser<'a> {
 
                 let first = self.parse_expression()?;
 
+                // Skip whitespace before checking what comes next
+                while self.check(&TokenKind::Newline)
+                    || self.check(&TokenKind::Indent)
+                    || self.check(&TokenKind::Dedent)
+                {
+                    self.advance();
+                }
+
                 if self.check(&TokenKind::Comma) {
                     // Tuple
                     let mut elements = vec![first];
                     while self.check(&TokenKind::Comma) {
                         self.advance();
+                        // Skip whitespace after comma
+                        while self.check(&TokenKind::Newline)
+                            || self.check(&TokenKind::Indent)
+                            || self.check(&TokenKind::Dedent)
+                        {
+                            self.advance();
+                        }
                         if self.check(&TokenKind::RParen) {
                             break;
                         }
                         elements.push(self.parse_expression()?);
+                        // Skip whitespace after element
+                        while self.check(&TokenKind::Newline)
+                            || self.check(&TokenKind::Indent)
+                            || self.check(&TokenKind::Dedent)
+                        {
+                            self.advance();
+                        }
                     }
                     self.expect(&TokenKind::RParen)?;
                     Ok(Expr::Tuple(elements))
@@ -195,6 +251,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LBracket => {
                 self.advance();
+                // Skip whitespace tokens inside brackets (for multi-line arrays)
+                while self.check(&TokenKind::Newline)
+                    || self.check(&TokenKind::Indent)
+                    || self.check(&TokenKind::Dedent)
+                {
+                    self.advance();
+                }
                 // Empty array
                 if self.check(&TokenKind::RBracket) {
                     self.advance();
@@ -208,6 +271,14 @@ impl<'a> Parser<'a> {
 
                 // Parse first expression
                 let first = self.parse_expression()?;
+
+                // Skip whitespace after first element
+                while self.check(&TokenKind::Newline)
+                    || self.check(&TokenKind::Indent)
+                    || self.check(&TokenKind::Dedent)
+                {
+                    self.advance();
+                }
 
                 // Check for list comprehension: [expr for pattern in iterable]
                 if self.check(&TokenKind::For) {
@@ -226,6 +297,13 @@ impl<'a> Parser<'a> {
                 let mut elements = vec![first];
                 while self.check(&TokenKind::Comma) {
                     self.advance();
+                    // Skip whitespace after comma
+                    while self.check(&TokenKind::Newline)
+                        || self.check(&TokenKind::Indent)
+                        || self.check(&TokenKind::Dedent)
+                    {
+                        self.advance();
+                    }
                     if self.check(&TokenKind::RBracket) {
                         break;
                     }
@@ -235,6 +313,13 @@ impl<'a> Parser<'a> {
                         elements.push(Expr::Spread(Box::new(self.parse_expression()?)));
                     } else {
                         elements.push(self.parse_expression()?);
+                    }
+                    // Skip whitespace after element
+                    while self.check(&TokenKind::Newline)
+                        || self.check(&TokenKind::Indent)
+                        || self.check(&TokenKind::Dedent)
+                    {
+                        self.advance();
                     }
                 }
                 self.expect(&TokenKind::RBracket)?;

@@ -122,7 +122,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         name: s.name.clone(),
                         generic_params: s.generic_params.clone(),
                         fields: s.fields.clone(),
-                        methods: vec![],
+                        methods: s.methods.clone(),
                         parent: None,
                         visibility: Visibility::Public,
                         attributes: vec![],

@@ -42,67 +42,10 @@ const CU_MEMCPY_DEVICE_TO_HOST: i32 = 2;
 const CU_MEMCPY_DEVICE_TO_DEVICE: i32 = 3;
 
 // CUDA Driver API FFI
-#[cfg(target_os = "linux")]
-#[link(name = "cuda")]
-extern "C" {
-    fn cuInit(flags: u32) -> CUresult;
-    fn cuDeviceGetCount(count: *mut i32) -> CUresult;
-    fn cuDeviceGet(device: *mut CUdevice, ordinal: i32) -> CUresult;
-    fn cuDeviceGetName(name: *mut i8, len: i32, dev: CUdevice) -> CUresult;
-    fn cuDeviceGetAttribute(pi: *mut i32, attrib: i32, dev: CUdevice) -> CUresult;
-    fn cuDeviceTotalMem_v2(bytes: *mut usize, dev: CUdevice) -> CUresult;
-    fn cuCtxCreate_v2(ctx: *mut CUcontext, flags: u32, dev: CUdevice) -> CUresult;
-    fn cuCtxDestroy_v2(ctx: CUcontext) -> CUresult;
-    fn cuCtxSetCurrent(ctx: CUcontext) -> CUresult;
-    fn cuCtxSynchronize() -> CUresult;
-    fn cuMemAlloc_v2(dptr: *mut CUdeviceptr, bytesize: usize) -> CUresult;
-    fn cuMemFree_v2(dptr: CUdeviceptr) -> CUresult;
-    fn cuMemcpyHtoD_v2(dst: CUdeviceptr, src: *const c_void, bytecount: usize) -> CUresult;
-    fn cuMemcpyDtoH_v2(dst: *mut c_void, src: CUdeviceptr, bytecount: usize) -> CUresult;
-    fn cuMemcpyDtoD_v2(dst: CUdeviceptr, src: CUdeviceptr, bytecount: usize) -> CUresult;
-    fn cuMemcpyHtoDAsync_v2(
-        dst: CUdeviceptr,
-        src: *const c_void,
-        bytecount: usize,
-        stream: CUstream,
-    ) -> CUresult;
-    fn cuMemcpyDtoHAsync_v2(
-        dst: *mut c_void,
-        src: CUdeviceptr,
-        bytecount: usize,
-        stream: CUstream,
-    ) -> CUresult;
-    fn cuMemsetD8_v2(dst: CUdeviceptr, value: u8, n: usize) -> CUresult;
-    fn cuModuleLoadData(module: *mut CUmodule, image: *const c_void) -> CUresult;
-    fn cuModuleUnload(hmod: CUmodule) -> CUresult;
-    fn cuModuleGetFunction(hfunc: *mut CUfunction, hmod: CUmodule, name: *const i8) -> CUresult;
-    fn cuLaunchKernel(
-        f: CUfunction,
-        gridDimX: u32,
-        gridDimY: u32,
-        gridDimZ: u32,
-        blockDimX: u32,
-        blockDimY: u32,
-        blockDimZ: u32,
-        sharedMemBytes: u32,
-        hStream: CUstream,
-        kernelParams: *mut *mut c_void,
-        extra: *mut *mut c_void,
-    ) -> CUresult;
-    fn cuStreamCreate(phStream: *mut CUstream, flags: u32) -> CUresult;
-    fn cuStreamDestroy_v2(hStream: CUstream) -> CUresult;
-    fn cuStreamSynchronize(hStream: CUstream) -> CUresult;
-    fn cuEventCreate(phEvent: *mut CUevent, flags: u32) -> CUresult;
-    fn cuEventDestroy_v2(hEvent: CUevent) -> CUresult;
-    fn cuEventRecord(hEvent: CUevent, hStream: CUstream) -> CUresult;
-    fn cuEventSynchronize(hEvent: CUevent) -> CUresult;
-    fn cuEventQuery(hEvent: CUevent) -> CUresult;
-    fn cuEventElapsedTime(pMilliseconds: *mut f32, hStart: CUevent, hEnd: CUevent) -> CUresult;
-}
-
-// Windows uses a different library name
-#[cfg(target_os = "windows")]
-#[link(name = "nvcuda")]
+// Use cfg_attr to conditionally link to different library names per OS
+#[cfg_attr(target_os = "linux", link(name = "cuda"))]
+#[cfg_attr(target_os = "windows", link(name = "nvcuda"))]
+#[cfg_attr(target_os = "macos", link(name = "cuda"))]
 extern "C" {
     fn cuInit(flags: u32) -> CUresult;
     fn cuDeviceGetCount(count: *mut i32) -> CUresult;

@@ -17,6 +17,8 @@ pub struct Lexer<'a> {
     indent_stack: Vec<usize>,
     pending_tokens: Vec<Token>,
     at_line_start: bool,
+    /// Track bracket depth to suppress INDENT/DEDENT inside delimiters
+    bracket_depth: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -30,6 +32,7 @@ impl<'a> Lexer<'a> {
             indent_stack: vec![0],
             pending_tokens: Vec::new(),
             at_line_start: true,
+            bracket_depth: 0,
         }
     }
 
@@ -54,11 +57,30 @@ impl<'a> Lexer<'a> {
             return token;
         }
 
-        // Handle indentation at line start
+        // Handle indentation at line start (but not inside brackets)
         if self.at_line_start {
             self.at_line_start = false;
-            if let Some(indent_token) = self.handle_indentation() {
-                return indent_token;
+            // Skip indentation handling when inside brackets/parens/braces
+            if self.bracket_depth == 0 {
+                if let Some(indent_token) = self.handle_indentation() {
+                    return indent_token;
+                }
+            } else {
+                // Still need to skip whitespace at line start when inside brackets
+                while let Some(ch) = self.peek() {
+                    match ch {
+                        ' ' | '\t' => {
+                            self.advance();
+                        }
+                        '\n' => {
+                            // Empty line inside brackets
+                            self.advance();
+                            self.line += 1;
+                            self.column = 1;
+                        }
+                        _ => break,
+                    }
+                }
             }
         }
 
@@ -97,13 +119,31 @@ impl<'a> Lexer<'a> {
                 TokenKind::Newline
             }
 
-            // Single-character tokens
-            '(' => TokenKind::LParen,
-            ')' => TokenKind::RParen,
-            '[' => TokenKind::LBracket,
-            ']' => TokenKind::RBracket,
-            '{' => TokenKind::LBrace,
-            '}' => TokenKind::RBrace,
+            // Single-character tokens - track bracket depth for indentation suppression
+            '(' => {
+                self.bracket_depth += 1;
+                TokenKind::LParen
+            }
+            ')' => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                TokenKind::RParen
+            }
+            '[' => {
+                self.bracket_depth += 1;
+                TokenKind::LBracket
+            }
+            ']' => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                TokenKind::RBracket
+            }
+            '{' => {
+                self.bracket_depth += 1;
+                TokenKind::LBrace
+            }
+            '}' => {
+                self.bracket_depth = self.bracket_depth.saturating_sub(1);
+                TokenKind::RBrace
+            }
             ',' => TokenKind::Comma,
             ';' => TokenKind::Semicolon,
             '@' => TokenKind::At,
@@ -172,8 +212,15 @@ impl<'a> Lexer<'a> {
                         self.skip_block_comment()
                     }
                 } else if self.check('/') {
-                    self.advance();
-                    TokenKind::DoubleSlash
+                    self.advance(); // consume second '/'
+                    if self.check('/') {
+                        // Doc comment /// ...
+                        self.advance(); // consume third '/'
+                        return self.read_doc_line_comment(start_pos, start_line, start_column);
+                    } else {
+                        // Floor division //
+                        TokenKind::DoubleSlash
+                    }
                 } else if self.check('=') {
                     self.advance();
                     TokenKind::SlashAssign

@@ -1,5 +1,7 @@
 use crate::token::{Span, Token, TokenKind};
 
+use super::comments::clean_doc_comment;
+
 impl<'a> super::Lexer<'a> {
     pub(super) fn handle_indentation(&mut self) -> Option<Token> {
         let start_pos = self.current_pos;
@@ -94,56 +96,9 @@ impl<'a> super::Lexer<'a> {
                         if self.peek() == Some('*') && self.peek_ahead(1) != Some('/') {
                             // Doc comment /** ... */
                             self.advance(); // Consume second '*'
-                            let mut content = String::new();
-                            let mut depth = 1;
-                            while depth > 0 {
-                                match self.advance() {
-                                    Some((_, '*')) => {
-                                        if self.peek() == Some('/') {
-                                            self.advance();
-                                            depth -= 1;
-                                            if depth > 0 {
-                                                content.push_str("*/");
-                                            }
-                                        } else {
-                                            content.push('*');
-                                        }
-                                    }
-                                    Some((_, '/')) => {
-                                        if self.peek() == Some('*') {
-                                            self.advance();
-                                            depth += 1;
-                                            content.push_str("/*");
-                                        } else {
-                                            content.push('/');
-                                        }
-                                    }
-                                    Some((_, '\n')) => {
-                                        self.line += 1;
-                                        self.column = 1;
-                                        content.push('\n');
-                                    }
-                                    Some((_, ch)) => {
-                                        content.push(ch);
-                                    }
-                                    None => break,
-                                }
-                            }
+                            let content = self.parse_nested_comment();
                             // Clean up the content
-                            let cleaned = content
-                                .lines()
-                                .map(|line| {
-                                    let trimmed = line.trim();
-                                    if trimmed.starts_with('*') {
-                                        trimmed[1..].trim_start()
-                                    } else {
-                                        trimmed
-                                    }
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n")
-                                .trim()
-                                .to_string();
+                            let cleaned = clean_doc_comment(&content);
                             return Some(Token::new(
                                 TokenKind::DocComment(cleaned),
                                 Span::new(
@@ -181,18 +136,50 @@ impl<'a> super::Lexer<'a> {
                         }
                         indent = 0;
                     } else if self.peek() == Some('/') {
-                        // Double slash // - return DoubleSlash token
+                        // Could be // (floor div) or /// (doc comment)
                         self.advance(); // Consume second '/'
-                        return Some(Token::new(
-                            TokenKind::DoubleSlash,
-                            Span::new(
-                                self.current_pos - 2,
-                                self.current_pos,
-                                self.line,
-                                self.column - 2,
-                            ),
-                            "//".to_string(),
-                        ));
+                        if self.peek() == Some('/') {
+                            // Doc comment /// ...
+                            self.advance(); // Consume third '/'
+                            let start_pos = self.current_pos;
+                            let start_line = self.line;
+                            let start_col = self.column;
+                            // Skip leading whitespace
+                            while self.peek() == Some(' ') || self.peek() == Some('\t') {
+                                self.advance();
+                            }
+                            // Read to end of line
+                            let content_start = self.current_pos;
+                            while let Some(c) = self.peek() {
+                                if c == '\n' {
+                                    break;
+                                }
+                                self.advance();
+                            }
+                            let content = self.source[content_start..self.current_pos].trim().to_string();
+                            return Some(Token::new(
+                                TokenKind::DocComment(content),
+                                Span::new(
+                                    start_pos - 3,
+                                    self.current_pos,
+                                    start_line,
+                                    start_col - 3,
+                                ),
+                                self.source[start_pos - 3..self.current_pos].to_string(),
+                            ));
+                        } else {
+                            // Double slash // - return DoubleSlash token
+                            return Some(Token::new(
+                                TokenKind::DoubleSlash,
+                                Span::new(
+                                    self.current_pos - 2,
+                                    self.current_pos,
+                                    self.line,
+                                    self.column - 2,
+                                ),
+                                "//".to_string(),
+                            ));
+                        }
                     } else if self.peek() == Some('=') {
                         // Slash assign /=
                         self.advance(); // Consume '='

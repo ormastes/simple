@@ -357,11 +357,7 @@ fn evaluate_method_call(
         }
         // Add built-in methods for common types
         available_methods.extend(["new", "to_string", "clone", "equals"].iter().copied());
-        let mut msg = format!("unknown method {method} on {class}");
-        if let Some(suggestion) = crate::error::typo::format_suggestion(method, available_methods) {
-            msg.push_str(&format!("; {}", suggestion));
-        }
-        return Err(CompileError::Semantic(msg));
+        bail_unknown_method!(method, class, available_methods);
     }
 
     // Future methods (join, await, get, is_ready)
@@ -375,11 +371,7 @@ fn evaluate_method_call(
             }
             _ => {
                 let available = ["join", "await", "get", "is_ready"];
-                let mut msg = format!("unknown method {method} on Future");
-                if let Some(suggestion) = crate::error::typo::format_suggestion(method, available.iter().copied()) {
-                    msg.push_str(&format!("; {}", suggestion));
-                }
-                return Err(CompileError::Semantic(msg));
+                bail_unknown_method!(method, "Future", available);
             }
         }
     }
@@ -412,11 +404,7 @@ fn evaluate_method_call(
             }
             _ => {
                 let available = ["send", "recv", "try_recv"];
-                let mut msg = format!("unknown method {method} on Channel");
-                if let Some(suggestion) = crate::error::typo::format_suggestion(method, available.iter().copied()) {
-                    msg.push_str(&format!("; {}", suggestion));
-                }
-                return Err(CompileError::Semantic(msg));
+                bail_unknown_method!(method, "Channel", available);
             }
         }
     }
@@ -433,11 +421,7 @@ fn evaluate_method_call(
             }
             _ => {
                 let available = ["submit"];
-                let mut msg = format!("unknown method {method} on ThreadPool");
-                if let Some(suggestion) = crate::error::typo::format_suggestion(method, available.iter().copied()) {
-                    msg.push_str(&format!("; {}", suggestion));
-                }
-                return Err(CompileError::Semantic(msg));
+                bail_unknown_method!(method, "ThreadPool", available);
             }
         }
     }
@@ -522,11 +506,7 @@ fn evaluate_method_call_with_self_update(
             available_methods.extend(methods.iter().map(|m| m.name.as_str()));
         }
         available_methods.extend(["new", "to_string", "clone", "equals"].iter().copied());
-        let mut msg = format!("unknown method {method} on {class}");
-        if let Some(suggestion) = crate::error::typo::format_suggestion(method, available_methods) {
-            msg.push_str(&format!("; {}", suggestion));
-        }
-        return Err(CompileError::Semantic(msg));
+        bail_unknown_method!(method, class, available_methods);
     }
 
     // For non-objects, just use regular method call

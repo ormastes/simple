@@ -94,6 +94,20 @@ impl std::fmt::Debug for BridgeValue {
 }
 
 impl BridgeValue {
+    /// Helper to create a BridgeValue from a Vec of Values with a specific tag
+    fn from_vec_with_tag(items: &[Value], tag: u8) -> Self {
+        let len = items.len();
+        let mut bridge_items: Vec<BridgeValue> =
+            items.iter().map(BridgeValue::from).collect();
+        let ptr = bridge_items.as_mut_ptr();
+        std::mem::forget(bridge_items);
+        Self {
+            tag,
+            payload: len as u64,
+            extended: ptr as *mut u8,
+        }
+    }
+
     /// Create a nil BridgeValue
     #[inline]
     pub const fn nil() -> Self {
@@ -265,30 +279,8 @@ impl From<&Value> for BridgeValue {
             Value::Bool(b) => BridgeValue::bool(*b),
             Value::Str(s) => BridgeValue::string(s),
             Value::Symbol(s) => BridgeValue::symbol(s),
-            Value::Array(items) => {
-                let len = items.len();
-                let mut bridge_items: Vec<BridgeValue> =
-                    items.iter().map(BridgeValue::from).collect();
-                let ptr = bridge_items.as_mut_ptr();
-                std::mem::forget(bridge_items);
-                BridgeValue {
-                    tag: bridge_tags::ARRAY,
-                    payload: len as u64,
-                    extended: ptr as *mut u8,
-                }
-            }
-            Value::Tuple(items) => {
-                let len = items.len();
-                let mut bridge_items: Vec<BridgeValue> =
-                    items.iter().map(BridgeValue::from).collect();
-                let ptr = bridge_items.as_mut_ptr();
-                std::mem::forget(bridge_items);
-                BridgeValue {
-                    tag: bridge_tags::TUPLE,
-                    payload: len as u64,
-                    extended: ptr as *mut u8,
-                }
-            }
+            Value::Array(items) => Self::from_vec_with_tag(items, bridge_tags::ARRAY),
+            Value::Tuple(items) => Self::from_vec_with_tag(items, bridge_tags::TUPLE),
             Value::Dict(_) => {
                 // For now, store dict as a serialized form
                 // Full implementation would need proper serialization
@@ -316,6 +308,11 @@ impl From<&Value> for BridgeValue {
             }
             Value::Lambda { .. } => BridgeValue {
                 tag: bridge_tags::LAMBDA,
+                payload: 0,
+                extended: std::ptr::null_mut(),
+            },
+            Value::BlockClosure { .. } => BridgeValue {
+                tag: bridge_tags::LAMBDA,  // BlockClosures are lambda-like
                 payload: 0,
                 extended: std::ptr::null_mut(),
             },
@@ -408,6 +405,22 @@ impl From<&Value> for BridgeValue {
 // ============================================================================
 
 impl BridgeValue {
+    /// Helper to convert vector-like BridgeValue to Value
+    unsafe fn to_vec_value<F>(&self, wrapper: F) -> Value
+    where
+        F: FnOnce(Vec<Value>) -> Value,
+    {
+        let len = self.payload as usize;
+        if self.extended.is_null() || len == 0 {
+            wrapper(vec![])
+        } else {
+            let slice =
+                std::slice::from_raw_parts(self.extended as *const BridgeValue, len);
+            let items: Vec<Value> = slice.iter().map(|bv| bv.to_value()).collect();
+            wrapper(items)
+        }
+    }
+
     /// Convert to interpreter Value
     ///
     /// # Safety
@@ -434,28 +447,8 @@ impl BridgeValue {
                     Value::Symbol(cstr.to_string_lossy().into_owned())
                 }
             }
-            bridge_tags::ARRAY => {
-                let len = self.payload as usize;
-                if self.extended.is_null() || len == 0 {
-                    Value::Array(vec![])
-                } else {
-                    let slice =
-                        std::slice::from_raw_parts(self.extended as *const BridgeValue, len);
-                    let items: Vec<Value> = slice.iter().map(|bv| bv.to_value()).collect();
-                    Value::Array(items)
-                }
-            }
-            bridge_tags::TUPLE => {
-                let len = self.payload as usize;
-                if self.extended.is_null() || len == 0 {
-                    Value::Tuple(vec![])
-                } else {
-                    let slice =
-                        std::slice::from_raw_parts(self.extended as *const BridgeValue, len);
-                    let items: Vec<Value> = slice.iter().map(|bv| bv.to_value()).collect();
-                    Value::Tuple(items)
-                }
-            }
+            bridge_tags::ARRAY => self.to_vec_value(Value::Array),
+            bridge_tags::TUPLE => self.to_vec_value(Value::Tuple),
             bridge_tags::DICT => {
                 // Return empty dict for now
                 Value::Dict(HashMap::new())

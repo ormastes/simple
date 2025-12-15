@@ -697,26 +697,23 @@ impl LlvmBackend {
         ))
     }
 
-    /// Compile a simple arithmetic function for testing
+    /// Helper for creating test functions with binary operations on constants
+    /// 
+    /// Sets up a function with signature `i64 fn()`, creates two i64 constants,
+    /// applies an operation via the provided closure, and returns the result.
     #[cfg(feature = "llvm")]
-    pub fn compile_simple_function(
+    fn setup_test_function<F>(
         &self,
         name: &str,
         a_val: i64,
         b_val: i64,
-    ) -> Result<(), CompileError> {
-        self.create_module("test_module")?;
-
-        let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
-
-        let builder = self.builder.borrow();
-        let builder = builder
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
-
+        build_op: F,
+    ) -> Result<(), CompileError>
+    where
+        F: FnOnce(&Builder, inkwell::values::IntValue, inkwell::values::IntValue) -> Result<inkwell::values::IntValue, CompileError>,
+    {
+        let (module, builder) = self.get_module_and_builder()?;
+        
         // Create function signature: i64 fn()
         let i64_type = self.context.i64_type();
         let fn_type = i64_type.fn_type(&[], false);
@@ -730,10 +727,8 @@ impl LlvmBackend {
         let a = i64_type.const_int(a_val as u64, true);
         let b = i64_type.const_int(b_val as u64, true);
 
-        // Add them
-        let result = builder
-            .build_int_add(a, b, "add")
-            .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?;
+        // Build operation
+        let result = build_op(builder, a, b)?;
 
         // Return result
         builder
@@ -741,6 +736,39 @@ impl LlvmBackend {
             .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
 
         Ok(())
+    }
+
+    /// Helper to get module and builder references for test functions
+    #[cfg(feature = "llvm")]
+    fn get_module_and_builder(&self) -> Result<(&Module, &Builder), CompileError> {
+        self.create_module("test_module")?;
+
+        let module = self.module.borrow();
+        let module = module
+            .as_ref()
+            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
+
+        let builder = self.builder.borrow();
+        let builder = builder
+            .as_ref()
+            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+
+        Ok((module, builder))
+    }
+
+    /// Compile a simple arithmetic function for testing
+    #[cfg(feature = "llvm")]
+    pub fn compile_simple_function(
+        &self,
+        name: &str,
+        a_val: i64,
+        b_val: i64,
+    ) -> Result<(), CompileError> {
+        self.setup_test_function(name, a_val, b_val, |builder, a, b| {
+            builder
+                .build_int_add(a, b, "add")
+                .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))
+        })
     }
 
     #[cfg(not(feature = "llvm"))]
@@ -764,53 +792,22 @@ impl LlvmBackend {
         a_val: i64,
         b_val: i64,
     ) -> Result<(), CompileError> {
-        self.create_module("test_module")?;
-
-        let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
-
-        let builder = self.builder.borrow();
-        let builder = builder
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
-
-        // Create function signature: i64 fn()
-        let i64_type = self.context.i64_type();
-        let fn_type = i64_type.fn_type(&[], false);
-        let function = module.add_function(name, fn_type, None);
-
-        // Create entry block
-        let entry = self.context.append_basic_block(function, "entry");
-        builder.position_at_end(entry);
-
-        // Create constants
-        let a = i64_type.const_int(a_val as u64, true);
-        let b = i64_type.const_int(b_val as u64, true);
-
-        // Perform operation
-        let result = match op {
-            BinOp::Add => builder
-                .build_int_add(a, b, "add")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?,
-            BinOp::Sub => builder
-                .build_int_sub(a, b, "sub")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build sub: {}", e)))?,
-            BinOp::Mul => builder
-                .build_int_mul(a, b, "mul")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build mul: {}", e)))?,
-            BinOp::Div => builder
-                .build_int_signed_div(a, b, "div")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build div: {}", e)))?,
-        };
-
-        // Return result
-        builder
-            .build_return(Some(&result))
-            .map_err(|e| CompileError::Semantic(format!("Failed to build return: {}", e)))?;
-
-        Ok(())
+        self.setup_test_function(name, a_val, b_val, |builder, a, b| {
+            match op {
+                BinOp::Add => builder
+                    .build_int_add(a, b, "add")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e))),
+                BinOp::Sub => builder
+                    .build_int_sub(a, b, "sub")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build sub: {}", e))),
+                BinOp::Mul => builder
+                    .build_int_mul(a, b, "mul")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build mul: {}", e))),
+                BinOp::Div => builder
+                    .build_int_signed_div(a, b, "div")
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build div: {}", e))),
+            }
+        })
     }
 
     #[cfg(not(feature = "llvm"))]
@@ -835,17 +832,7 @@ impl LlvmBackend {
         then_val: i64,
         else_val: i64,
     ) -> Result<(), CompileError> {
-        self.create_module("test_module")?;
-
-        let module = self.module.borrow();
-        let module = module
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
-
-        let builder = self.builder.borrow();
-        let builder = builder
-            .as_ref()
-            .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
+        let (module, builder) = self.get_module_and_builder()?;
 
         // Create function signature: i64 fn()
         let i64_type = self.context.i64_type();

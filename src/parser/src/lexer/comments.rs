@@ -1,6 +1,67 @@
 use crate::token::{Span, Token, TokenKind};
 
+/// Helper to clean doc comment content by removing leading asterisks.
+pub(super) fn clean_doc_comment(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.starts_with('*') {
+                trimmed[1..].trim_start()
+            } else {
+                trimmed
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 impl<'a> super::Lexer<'a> {
+    /// Parse nested block comment content with proper depth tracking
+    /// 
+    /// Returns the cleaned comment content. Used for both doc comments
+    /// and regular block comments that support nesting.
+    pub(super) fn parse_nested_comment(&mut self) -> String {
+        let mut content = String::new();
+        let mut depth = 1;
+        while depth > 0 {
+            match self.advance() {
+                Some((_, '*')) => {
+                    if self.peek() == Some('/') {
+                        self.advance(); // consume '/'
+                        depth -= 1;
+                        if depth > 0 {
+                            content.push_str("*/");
+                        }
+                    } else {
+                        content.push('*');
+                    }
+                }
+                Some((_, '/')) => {
+                    if self.peek() == Some('*') {
+                        self.advance(); // consume '*'
+                        depth += 1;
+                        content.push_str("/*");
+                    } else {
+                        content.push('/');
+                    }
+                }
+                Some((_, '\n')) => {
+                    self.line += 1;
+                    self.column = 1;
+                    content.push('\n');
+                }
+                Some((_, ch)) => {
+                    content.push(ch);
+                }
+                None => break,
+            }
+        }
+        content
+    }
+
     pub(super) fn skip_comment(&mut self) -> TokenKind {
         // Skip until end of line
         while let Some(ch) = self.peek() {
@@ -52,59 +113,9 @@ impl<'a> super::Lexer<'a> {
         start_column: usize,
     ) -> Token {
         // Read doc comment content until */ is found
-        let mut content = String::new();
-        let mut depth = 1;
-        while depth > 0 {
-            match self.advance() {
-                Some((_, '*')) => {
-                    if self.peek() == Some('/') {
-                        self.advance(); // consume '/'
-                        depth -= 1;
-                        if depth > 0 {
-                            content.push_str("*/");
-                        }
-                    } else {
-                        content.push('*');
-                    }
-                }
-                Some((_, '/')) => {
-                    if self.peek() == Some('*') {
-                        self.advance(); // consume '*'
-                        depth += 1;
-                        content.push_str("/*");
-                    } else {
-                        content.push('/');
-                    }
-                }
-                Some((_, '\n')) => {
-                    self.line += 1;
-                    self.column = 1;
-                    content.push('\n');
-                }
-                Some((_, ch)) => {
-                    content.push(ch);
-                }
-                None => {
-                    // Unterminated doc comment
-                    break;
-                }
-            }
-        }
+        let content = self.parse_nested_comment();
         // Trim leading/trailing whitespace from each line and remove leading *
-        let cleaned = content
-            .lines()
-            .map(|line| {
-                let trimmed = line.trim();
-                if trimmed.starts_with('*') {
-                    trimmed[1..].trim_start()
-                } else {
-                    trimmed
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
+        let cleaned = clean_doc_comment(&content);
 
         Token::new(
             TokenKind::DocComment(cleaned),

@@ -65,7 +65,8 @@ impl<'a> Parser<'a> {
                 }
 
                 // Check for enum variant: Name::Variant or Name::Variant(...)
-                if self.check(&TokenKind::DoubleColon) {
+                // Also supports dot syntax: Name.Variant or Name.Variant(...)
+                if self.check(&TokenKind::DoubleColon) || self.check(&TokenKind::Dot) {
                     self.advance();
                     let variant = self.expect_identifier()?;
                     let payload = if self.check(&TokenKind::LParen) {
@@ -190,6 +191,19 @@ impl<'a> Parser<'a> {
                 }
                 self.expect(&TokenKind::RBracket)?;
                 Ok(Pattern::Array(patterns))
+            }
+            // Allow certain keywords to be used as identifier patterns
+            TokenKind::Out => {
+                self.advance();
+                Ok(Pattern::Identifier("out".to_string()))
+            }
+            TokenKind::OutErr => {
+                self.advance();
+                Ok(Pattern::Identifier("out_err".to_string()))
+            }
+            TokenKind::Type => {
+                self.advance();
+                Ok(Pattern::Identifier("type".to_string()))
             }
             _ => Err(ParseError::unexpected_token(
                 "pattern",

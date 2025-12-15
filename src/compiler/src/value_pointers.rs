@@ -235,6 +235,10 @@ impl Clone for Value {
                 body: body.clone(),
                 env: env.clone(),
             },
+            Value::BlockClosure { nodes, env } => Value::BlockClosure {
+                nodes: nodes.clone(),
+                env: env.clone(),
+            },
             Value::Function {
                 name,
                 def,

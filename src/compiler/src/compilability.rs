@@ -306,6 +306,12 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::CollectionOps);
         }
 
+        // Tuple index access: tuple.0, tuple.1
+        Expr::TupleIndex { receiver, .. } => {
+            analyze_expr(receiver, reasons);
+            // Tuple index with literal index is compilable if receiver is
+        }
+
         // Slice needs collection runtime
         Expr::Slice {
             receiver,
@@ -509,6 +515,13 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
                 reasons,
                 FallbackReason::NotYetImplemented("contract old()".into()),
             );
+        }
+
+        // DoBlock - a sequence of statements (used for BDD DSL colon-blocks)
+        Expr::DoBlock(nodes) => {
+            for node in nodes {
+                analyze_node(node, reasons);
+            }
         }
     }
 }

@@ -29,6 +29,19 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_single_type(&mut self) -> Result<Type, ParseError> {
+        // Handle function type: fn(T) -> U
+        if self.check(&TokenKind::Fn) {
+            self.advance();
+            let params = self.parse_paren_type_list()?;
+            let ret = if self.check(&TokenKind::Arrow) {
+                self.advance();
+                Some(Box::new(self.parse_type()?))
+            } else {
+                None
+            };
+            return Ok(Type::Function { params, ret });
+        }
+
         // Handle pointer types
         match &self.current.kind {
             TokenKind::Ampersand => {

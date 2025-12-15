@@ -154,6 +154,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_function_not_found", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_method_not_found", &[I64, I64, I64, I64], &[I64]),
     // =========================================================================
+    // Contract checking (Design by Contract)
+    // =========================================================================
+    // simple_contract_check(condition: i64, kind: i64, func_name_ptr: i64, func_name_len: i64)
+    RuntimeFuncSpec::new("simple_contract_check", &[I64, I64, I64, I64], &[]),
+    // =========================================================================
     // I/O operations (print, capture)
     // =========================================================================
     RuntimeFuncSpec::new("rt_print_str", &[I64, I64], &[]), // ptr, len
