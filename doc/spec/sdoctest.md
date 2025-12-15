@@ -12,16 +12,51 @@ A Python doctest-inspired interactive test framework for Simple, embedding execu
 
 ## 1. Doctest Syntax
 
-### 1.1 Basic Format
+### 1.1 Basic Format (Python-style docstrings)
+
+Doctests use triple-quote blocks (`"""..."""`) similar to Python. They can appear:
+- **Immediately before** a function/class (no empty line between)
+- **Immediately after** the function/class header (no empty line)
+- **Inside** a `/* */` block comment that touches the target
 
 ```simple
-/// Computes factorial of n
-/// 
-/// Examples:
-/// >>> factorial 5
-/// 120
-/// >>> factorial 0
-/// 1
+# Style 1: Block before function
+"""
+Computes factorial of n
+
+>>> factorial 5
+120
+>>> factorial 0
+1
+"""
+fn factorial(n: Int) -> Int:
+    if n <= 1: return 1
+    return n * factorial(n - 1)
+```
+
+```simple
+# Style 2: Block after function header (no empty line)
+fn factorial(n: Int) -> Int:
+"""
+>>> factorial 5
+120
+>>> factorial 0
+1
+"""
+    if n <= 1: return 1
+    return n * factorial(n - 1)
+```
+
+```simple
+# Style 3: Inside /* */ comment block
+/*
+Computes factorial of n
+
+>>> factorial 5
+120
+>>> factorial 0
+1
+*/
 fn factorial(n: Int) -> Int:
     if n <= 1: return 1
     return n * factorial(n - 1)
@@ -31,16 +66,21 @@ fn factorial(n: Int) -> Int:
 - Lines starting with `>>>` are executed in a REPL-like environment
 - Following lines (without `>>>` or `...`) are expected output
 - Empty lines separate examples
+- Opening `"""` can have a language hint: `"""simple` or `"""sdoctest`
 
 ### 1.2 Multi-line Statements
 
 ```simple
-/// >>> nums = [1, 2, 3]
-/// >>> for x in nums:
-/// ...     print x * 2
-/// 2
-/// 4
-/// 6
+"""
+>>> nums = [1, 2, 3]
+>>> for x in nums:
+...     print x * 2
+2
+4
+6
+"""
+fn process_nums():
+    pass
 ```
 
 **Continuation lines:** Use `...` for indented continuation (loops, blocks, etc.)
@@ -48,10 +88,14 @@ fn factorial(n: Int) -> Int:
 ### 1.3 Expected Exceptions
 
 ```simple
-/// >>> divide 10, 0
-/// Error: DivisionByZero
-/// >>> parse_int "not a number"
-/// Error: ParseError: invalid digit
+"""
+>>> divide 10, 0
+Error: DivisionByZero
+>>> parse_int "not a number"
+Error: ParseError: invalid digit
+"""
+fn divide(a, b):
+    pass
 ```
 
 **Exception format:** `Error: ExceptionType` or `Error: ExceptionType: message`
@@ -59,10 +103,14 @@ fn factorial(n: Int) -> Int:
 ### 1.4 Wildcard Matching
 
 ```simple
-/// >>> generate_uuid()
-/// "........-....-....-....-............"
-/// >>> get_timestamp()
-/// 1702......
+"""
+>>> generate_uuid()
+"........-....-....-....-............"
+>>> get_timestamp()
+1702......
+"""
+fn generate_uuid():
+    pass
 ```
 
 **Wildcards:**
@@ -73,21 +121,25 @@ fn factorial(n: Int) -> Int:
 ### 1.5 Setup/Teardown Blocks
 
 ```simple
-/// Setup:
-/// >>> db = Database.connect("test.db")
-/// >>> db.clear()
-/// 
-/// Example:
-/// >>> user = User.new(name: "Alice")
-/// >>> db.save(user)
-/// >>> db.find_by_name("Alice").name
-/// "Alice"
-/// 
-/// Teardown:
-/// >>> db.close()
+"""
+Setup:
+>>> db = Database.connect("test.db")
+>>> db.clear()
+
+Example:
+>>> user = User.new(name: "Alice")
+>>> db.save(user)
+>>> db.find_by_name("Alice").name
+"Alice"
+
+Teardown:
+>>> db.close()
+"""
+fn database_example():
+    pass
 ```
 
-**Execution order:** Setup → Example → Teardown (per docstring)
+**Execution order:** Setup → Example → Teardown (per doctest block)
 
 ---
 
@@ -97,7 +149,8 @@ fn factorial(n: Int) -> Int:
 
 | Location | Priority | Purpose |
 |----------|----------|---------|
-| Function/method docstrings | High | API examples |
+| Function/method docstrings (`"""..."""`) | High | API examples |
+| Block comments touching target (`/* ... */`) | High | Alternative format |
 | Module-level docs | Medium | Package overview |
 | Markdown `.md` files | Low | Tutorials, guides |
 | Dedicated `.sdt` files | High | Standalone doctest suites |
@@ -105,7 +158,7 @@ fn factorial(n: Int) -> Int:
 ### 2.2 File Patterns
 
 ```
-src/**/*.spl         # Extract from docstrings (///)
+src/**/*.spl         # Extract from """ blocks and /* */ comments
 doc/**/*.md          # Extract from code blocks marked ```simple-doctest
 test/doctest/**/*.sdt # Standalone doctest files
 ```
@@ -274,16 +327,22 @@ struct DoctestExample:
 
 **Discovery algorithm:**
 1. Walk source tree for `.spl` files
-2. Extract `///` docstrings via parser
-3. Parse docstrings for `>>>` examples
-4. Walk doc tree for `.md` files with ` ```simple-doctest `
-5. Walk `test/doctest/` for `.sdt` files
-6. Build `List[DoctestExample]`
+2. Extract `"""..."""` blocks and `/* ... */` comments via lexer
+3. Match blocks to preceding/following functions/classes
+4. Parse blocks for `>>>` examples
+5. Walk doc tree for `.md` files with ` ```simple-doctest `
+6. Walk `test/doctest/` for `.sdt` files
+7. Build `List[DoctestExample]`
 
 **Filtering:**
 - `--tag` filters examples by metadata
 - `--file` filters by source location
 - `--skip-slow` skips examples tagged `@doctest(tag: slow)`
+
+**Matching rules:**
+- `"""` block immediately before function = belongs to that function
+- `"""` block immediately after function header = belongs to that function
+- `/* */` block with no empty line before/after function = belongs to that function
 
 ### 4.6 Integration with spec.runner
 
@@ -366,14 +425,32 @@ skip_tags = ["slow", "manual"]
 ### 6.1 API Documentation
 
 ```simple
-/// Creates a new stack with initial capacity
-/// 
-/// Examples:
-/// >>> s = Stack.new(capacity: 10)
-/// >>> s.capacity
-/// 10
-/// >>> s.size
-/// 0
+"""
+Creates a new stack with initial capacity
+
+>>> s = Stack.new(capacity: 10)
+>>> s.capacity
+10
+>>> s.size
+0
+"""
+struct Stack:
+    capacity: Int
+    items: List[T]
+```
+
+Or using block comment syntax:
+
+```simple
+/*
+Creates a new stack with initial capacity
+
+>>> s = Stack.new(capacity: 10)
+>>> s.capacity
+10
+>>> s.size
+0
+*/
 struct Stack:
     capacity: Int
     items: List[T]
@@ -402,15 +479,16 @@ Simple provides a `Stack` data structure:
 ### 6.3 Error Handling
 
 ```simple
-/// Parses integer from string
-/// 
-/// Examples:
-/// >>> parse_int "123"
-/// 123
-/// >>> parse_int "12.3"
-/// Error: ParseError: invalid character '.'
-/// >>> parse_int ""
-/// Error: ParseError: empty string
+"""
+Parses integer from string
+
+>>> parse_int "123"
+123
+>>> parse_int "12.3"
+Error: ParseError: invalid character '.'
+>>> parse_int ""
+Error: ParseError: empty string
+"""
 fn parse_int(s: String) -> Int:
     ...
 ```
@@ -418,19 +496,23 @@ fn parse_int(s: String) -> Int:
 ### 6.4 Stateful Examples
 
 ```simple
-/// Database connection
-/// 
-/// Setup:
-/// >>> db = Database.connect(":memory:")
-/// 
-/// Examples:
-/// >>> db.execute("CREATE TABLE users (id INT, name TEXT)")
-/// >>> db.execute("INSERT INTO users VALUES (1, 'Alice')")
-/// >>> db.query("SELECT name FROM users").first
-/// "Alice"
-/// 
-/// Teardown:
-/// >>> db.close()
+"""
+Database connection
+
+Setup:
+>>> db = Database.connect(":memory:")
+
+Examples:
+>>> db.execute("CREATE TABLE users (id INT, name TEXT)")
+>>> db.execute("INSERT INTO users VALUES (1, 'Alice')")
+>>> db.query("SELECT name FROM users").first
+"Alice"
+
+Teardown:
+>>> db.close()
+"""
+fn database_example():
+    ...
 ```
 
 ### 6.5 Standalone Test Suite (.sdt)
@@ -567,8 +649,10 @@ Error: EmptyStackError
 
 | Feature | Python doctest | Simple doctest |
 |---------|----------------|----------------|
+| Docstring syntax | `"""..."""` | `"""..."""` (Python-style) |
 | Prompt | `>>>` and `...` | `>>>` and `...` |
-| Discovery | Docstrings only | Docstrings + `.md` + `.sdt` |
+| Discovery | Docstrings only | `"""` blocks, `/* */` comments, `.md` + `.sdt` |
+| Block placement | Anywhere in docstring | Before/after target, inside comments |
 | Execution | Module globals | Isolated REPL |
 | Wildcards | `...` (ellipsis) | `.` and `*` |
 | Setup/Teardown | Manual | Built-in blocks |
@@ -576,8 +660,13 @@ Error: EmptyStackError
 | Coverage | None | Integrated |
 | REPL Recording | None | `--record` flag |
 | Tags/Metadata | None | `@doctest(...)` |
+| Alternative format | None | `/* ... */` block comments |
 
-**Key improvement:** Simple doctest is a first-class citizen of the test framework, not an afterthought.
+**Key improvements:**
+- Simple doctest uses Python's triple-quote syntax for familiarity
+- Multiple syntaxes for flexibility (triple-quotes or block comments)
+- Blocks automatically associated with following/preceding functions
+- First-class citizen of the test framework, not an afterthought
 
 ---
 
