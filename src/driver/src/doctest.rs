@@ -158,7 +158,8 @@ pub fn parse_doctest_text(content: &str, source: impl AsRef<Path>) -> Vec<Doctes
     examples
 }
 
-/// Parse doctest examples from Markdown content that uses ```simple-doctest fences.
+/// Parse doctest examples from Markdown content that uses doctest code fences.
+/// Supports both ```sdoctest and ```simple-doctest language hints.
 pub fn parse_markdown_doctests(content: &str, source: impl AsRef<Path>) -> Vec<DoctestExample> {
     let mut examples = Vec::new();
     let mut in_block = false;
@@ -166,14 +167,20 @@ pub fn parse_markdown_doctests(content: &str, source: impl AsRef<Path>) -> Vec<D
     let mut block_start_line = 0usize;
 
     for (idx, line) in content.lines().enumerate() {
-        if line.trim_start().starts_with("```simple-doctest") {
-            in_block = true;
-            block.clear();
-            block_start_line = idx + 2; // next line after the fence
-            continue;
+        let trimmed = line.trim_start();
+
+        // Check for doctest code fence opening with language hint
+        if trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest") || trimmed.starts_with("```simple") {
+            // Only enter block if the hint is for doctests (not other code blocks)
+            if trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest") {
+                in_block = true;
+                block.clear();
+                block_start_line = idx + 2; // next line after the fence
+                continue;
+            }
         }
 
-        if line.trim_start().starts_with("```") && in_block {
+        if trimmed.starts_with("```") && in_block {
             in_block = false;
             let mut block_examples = parse_doctest_text(&block, source.as_ref());
             for ex in &mut block_examples {
@@ -193,11 +200,115 @@ pub fn parse_markdown_doctests(content: &str, source: impl AsRef<Path>) -> Vec<D
     examples
 }
 
+/// Parse doctest examples from Simple source files (.spl).
+/// Looks for """ docstring blocks with nested ```sdoctest code fences.
+/// Example:
+/// """
+/// Description
+/// ```sdoctest
+/// >>> code
+/// output
+/// ```
+/// """
+pub fn parse_spl_doctests(content: &str, source: impl AsRef<Path>) -> Vec<DoctestExample> {
+    let mut examples = Vec::new();
+    let mut in_docstring = false;
+    let mut docstring = String::new();
+    let mut docstring_start_line = 0usize;
+
+    for (idx, line) in content.lines().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim_start();
+
+        // Check for docstring opening
+        if trimmed.starts_with("\"\"\"") && !in_docstring {
+            in_docstring = true;
+            docstring.clear();
+            docstring_start_line = line_num;
+
+            // Handle inline docstring on same line (e.g., """ content """)
+            let rest = &trimmed[3..];
+            if rest.contains("\"\"\"") && !rest.trim().is_empty() {
+                // Single-line docstring - not supported for now
+                in_docstring = false;
+            } else {
+                docstring.push_str(rest);
+                docstring.push('\n');
+            }
+            continue;
+        }
+
+        // Check for docstring closing
+        if in_docstring && trimmed.starts_with("\"\"\"") {
+            in_docstring = false;
+
+            // Extract code fences from docstring
+            let mut block_examples = parse_docstring_fences(&docstring, source.as_ref());
+            for ex in &mut block_examples {
+                ex.start_line += docstring_start_line;
+            }
+            examples.extend(block_examples);
+            docstring.clear();
+            continue;
+        }
+
+        if in_docstring {
+            docstring.push_str(line);
+            docstring.push('\n');
+        }
+    }
+
+    examples
+}
+
+/// Parse code fences from within a docstring.
+/// Looks for ```sdoctest and ```simple-doctest fences.
+fn parse_docstring_fences(docstring: &str, source: impl AsRef<Path>) -> Vec<DoctestExample> {
+    let mut examples = Vec::new();
+    let mut in_fence = false;
+    let mut fence_content = String::new();
+    let mut fence_start_line = 0usize;
+
+    for (idx, line) in docstring.lines().enumerate() {
+        let line_num = idx + 1;
+        let trimmed = line.trim_start();
+
+        // Check for code fence opening
+        if (trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest")) && !in_fence {
+            in_fence = true;
+            fence_content.clear();
+            fence_start_line = line_num;
+            continue;
+        }
+
+        // Check for code fence closing
+        if trimmed.starts_with("```") && in_fence {
+            in_fence = false;
+
+            // Parse examples from fence content
+            let mut fence_examples = parse_doctest_text(&fence_content, source.as_ref());
+            for ex in &mut fence_examples {
+                ex.start_line += fence_start_line;
+            }
+            examples.extend(fence_examples);
+            fence_content.clear();
+            continue;
+        }
+
+        if in_fence {
+            fence_content.push_str(line);
+            fence_content.push('\n');
+        }
+    }
+
+    examples
+}
+
 /// Discover doctest examples from a path:
 /// - `.sdt`: parsed directly
 /// - `.md`: fenced code blocks
-/// - `.spl`: currently unsupported (returns empty to avoid false positives)
-/// - directories: walks recursively for `.sdt`/`.md`
+/// - `.spl`: """ docstring blocks with ```sdoctest fences
+/// - directories: walks recursively for all supported formats
 pub fn discover_doctests(path: &Path) -> std::io::Result<Vec<DoctestExample>> {
     let mut examples = Vec::new();
 
@@ -206,20 +317,24 @@ pub fn discover_doctests(path: &Path) -> std::io::Result<Vec<DoctestExample>> {
             let entry = entry?;
             if entry.file_type().is_file() {
                 let p = entry.path();
-                if p.extension().and_then(|s| s.to_str()) == Some("sdt") {
-                    examples.extend(parse_doctest_text(&fs::read_to_string(p)?, p));
-                } else if p.extension().and_then(|s| s.to_str()) == Some("md") {
-                    examples.extend(parse_markdown_doctests(&fs::read_to_string(p)?, p));
+                let ext = p.extension().and_then(|s| s.to_str());
+                match ext {
+                    Some("sdt") => examples.extend(parse_doctest_text(&fs::read_to_string(p)?, p)),
+                    Some("md") => examples.extend(parse_markdown_doctests(&fs::read_to_string(p)?, p)),
+                    Some("spl") => examples.extend(parse_spl_doctests(&fs::read_to_string(p)?, p)),
+                    _ => {}
                 }
             }
         }
         return Ok(examples);
     }
 
-    if path.extension().and_then(|s| s.to_str()) == Some("sdt") {
-        examples.extend(parse_doctest_text(&fs::read_to_string(path)?, path));
-    } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
-        examples.extend(parse_markdown_doctests(&fs::read_to_string(path)?, path));
+    let ext = path.extension().and_then(|s| s.to_str());
+    match ext {
+        Some("sdt") => examples.extend(parse_doctest_text(&fs::read_to_string(path)?, path)),
+        Some("md") => examples.extend(parse_markdown_doctests(&fs::read_to_string(path)?, path)),
+        Some("spl") => examples.extend(parse_spl_doctests(&fs::read_to_string(path)?, path)),
+        _ => {}
     }
 
     Ok(examples)
