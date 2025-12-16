@@ -628,3 +628,126 @@ pub extern "C" fn rt_weak_free(weak: RuntimeValue) {
         std::alloc::dealloc(ptr as *mut u8, layout);
     }
 }
+
+// ============================================================================
+// Handle Pointer - Heap structure and FFI functions
+// ============================================================================
+//
+// Handle pointers are pool-allocated index-based references. They provide
+// fast allocation from a pre-allocated pool and enable efficient memory
+// management patterns. Unlike unique/shared pointers, handles don't use
+// reference counting but rely on explicit pool management.
+//
+// A Handle contains:
+// - header: Standard heap header
+// - pool_index: Index into the pool
+// - value: The stored RuntimeValue
+// - valid: Whether the handle is still valid (not freed)
+
+/// Runtime representation of a handle pointer.
+#[repr(C)]
+pub struct RuntimeHandle {
+    pub header: HeapHeader,
+    pub pool_index: u32,
+    pub valid: u32, // 1 = valid, 0 = freed
+    pub value: RuntimeValue,
+}
+
+/// Create a new handle pointer wrapping a value.
+/// Allocates from the heap (a real pool implementation would use a pool allocator).
+#[no_mangle]
+pub extern "C" fn rt_handle_new(value: RuntimeValue) -> RuntimeValue {
+    let size = std::mem::size_of::<RuntimeHandle>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeHandle;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        // Use a simple counter for pool index (in a real impl, this would be from a pool)
+        static NEXT_POOL_INDEX: std::sync::atomic::AtomicU32 =
+            std::sync::atomic::AtomicU32::new(1);
+        let pool_index = NEXT_POOL_INDEX.fetch_add(1, Ordering::SeqCst);
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Unique, size as u32); // Using Unique type for handles
+        (*ptr).pool_index = pool_index;
+        (*ptr).valid = 1;
+        (*ptr).value = value;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Get the value inside a handle pointer.
+/// Returns NIL if the handle is invalid or freed.
+#[no_mangle]
+pub extern "C" fn rt_handle_get(handle: RuntimeValue) -> RuntimeValue {
+    let ptr = handle.as_heap_ptr();
+    if ptr.is_null() {
+        return RuntimeValue::NIL;
+    }
+
+    unsafe {
+        let handle_ptr = ptr as *const RuntimeHandle;
+        if (*handle_ptr).valid == 0 {
+            return RuntimeValue::NIL;
+        }
+        (*handle_ptr).value
+    }
+}
+
+/// Set the value inside a handle pointer.
+/// Returns success as a boolean RuntimeValue.
+#[no_mangle]
+pub extern "C" fn rt_handle_set(handle: RuntimeValue, new_value: RuntimeValue) -> RuntimeValue {
+    let ptr = handle.as_heap_ptr();
+    if ptr.is_null() {
+        return RuntimeValue::from_bool(false);
+    }
+
+    unsafe {
+        let handle_ptr = ptr as *mut RuntimeHandle;
+        if (*handle_ptr).valid == 0 {
+            return RuntimeValue::from_bool(false);
+        }
+        (*handle_ptr).value = new_value;
+        RuntimeValue::from_bool(true)
+    }
+}
+
+/// Free a handle pointer.
+/// Marks the handle as invalid and deallocates the memory.
+#[no_mangle]
+pub extern "C" fn rt_handle_free(handle: RuntimeValue) {
+    let ptr = handle.as_heap_ptr();
+    if ptr.is_null() {
+        return;
+    }
+
+    unsafe {
+        let handle_ptr = ptr as *mut RuntimeHandle;
+        // Mark as invalid first
+        (*handle_ptr).valid = 0;
+
+        // Deallocate
+        let size = std::mem::size_of::<RuntimeHandle>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
+}
+
+/// Check if a handle pointer is still valid.
+#[no_mangle]
+pub extern "C" fn rt_handle_is_valid(handle: RuntimeValue) -> RuntimeValue {
+    let ptr = handle.as_heap_ptr();
+    if ptr.is_null() {
+        return RuntimeValue::from_bool(false);
+    }
+
+    unsafe {
+        let handle_ptr = ptr as *const RuntimeHandle;
+        RuntimeValue::from_bool((*handle_ptr).valid != 0)
+    }
+}

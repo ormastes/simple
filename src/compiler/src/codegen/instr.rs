@@ -659,6 +659,7 @@ fn compile_pointer_new<M: Module>(
     let rt_func = match kind {
         PointerKind::Unique => "rt_unique_new",
         PointerKind::Shared => "rt_shared_new",
+        PointerKind::Handle => "rt_handle_new",
         PointerKind::Weak => {
             // Weak pointers need a shared pointer to downgrade from
             // For now, create a shared pointer and downgrade it
@@ -673,10 +674,6 @@ fn compile_pointer_new<M: Module>(
             let result = builder.inst_results(weak_call)[0];
             ctx.vreg_values.insert(dest, result);
             return Ok(());
-        }
-        PointerKind::Handle => {
-            // Handle pointers are not yet implemented
-            return Err("Handle pointers not yet implemented".to_string());
         }
         PointerKind::Borrow | PointerKind::BorrowMut => {
             // Borrow creation doesn't allocate - it just wraps the address
@@ -723,6 +720,7 @@ fn compile_pointer_deref<M: Module>(
     let rt_func = match kind {
         PointerKind::Unique => "rt_unique_get",
         PointerKind::Shared => "rt_shared_get",
+        PointerKind::Handle => "rt_handle_get",
         PointerKind::Weak => {
             // Weak pointers need to be upgraded first
             let upgrade_id = ctx.runtime_funcs["rt_weak_upgrade"];
@@ -737,9 +735,6 @@ fn compile_pointer_deref<M: Module>(
             let result = builder.inst_results(get_call)[0];
             ctx.vreg_values.insert(dest, result);
             return Ok(());
-        }
-        PointerKind::Handle => {
-            return Err("Handle pointer dereference not yet implemented".to_string());
         }
         PointerKind::Borrow | PointerKind::BorrowMut => {
             // Borrows are currently transparent - just return the value

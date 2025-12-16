@@ -366,6 +366,7 @@ impl RuntimeValue {
                 Some(HeapObjectType::Borrow) => "borrow",
                 Some(HeapObjectType::Channel) => "channel",
                 Some(HeapObjectType::Weak) => "weak",
+                Some(HeapObjectType::ContractViolation) => "contract_violation",
                 None => "null",
             },
             _ => "unknown",

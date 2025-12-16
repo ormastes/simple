@@ -121,6 +121,7 @@ pub enum TokenKind {
     Vec,    // vec (for SIMD vector types)
     Shared, // shared (for GPU shared memory)
     Gpu,    // gpu (for GPU intrinsics namespace)
+    Dyn,    // dyn (for dynamic trait objects)
 
     // Contract keywords (LLM-friendly features)
     // New spec syntax (doc/spec/invariant.md)

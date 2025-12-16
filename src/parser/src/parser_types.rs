@@ -155,6 +155,13 @@ impl<'a> Parser<'a> {
             });
         }
 
+        // Handle dynamic trait object: dyn TraitName
+        if self.check(&TokenKind::Dyn) {
+            self.advance();
+            let trait_name = self.expect_identifier()?;
+            return Ok(Type::DynTrait(trait_name));
+        }
+
         // Simple or generic type
         let name = self.expect_identifier()?;
 

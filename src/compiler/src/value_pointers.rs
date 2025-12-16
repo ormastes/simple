@@ -269,6 +269,10 @@ impl Clone for Value {
             Value::Constructor { class_name } => Value::Constructor {
                 class_name: class_name.clone(),
             },
+            Value::TraitObject { trait_name, inner } => Value::TraitObject {
+                trait_name: trait_name.clone(),
+                inner: inner.clone(),
+            },
             Value::Actor(handle) => Value::Actor(handle.clone()),
             Value::Future(f) => Value::Future(f.clone()),
             Value::Generator(g) => Value::Generator(g.clone()),

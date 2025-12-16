@@ -152,6 +152,10 @@ pub fn ast_type_to_concrete(
             // SIMD types are specialized arrays
             ConcreteType::Array(Box::new(ast_type_to_concrete(element, bindings)))
         }
+        AstType::DynTrait(trait_name) => {
+            // dyn Trait - represents a trait object (fat pointer)
+            ConcreteType::Named(format!("dyn_{}", trait_name))
+        }
     }
 }
 
@@ -193,6 +197,7 @@ mod tests {
             span: Span::new(0, 0, 1, 1),
             name: "identity".to_string(),
             generic_params: vec!["T".to_string()],
+            where_clause: vec![],
             params: vec![],
             return_type: None,
             body: Block {
@@ -205,6 +210,7 @@ mod tests {
             attributes: vec![],
             doc_comment: None,
             contract: None,
+            is_abstract: false,
         };
 
         let mangled = table.request_function("identity", vec![ConcreteType::Int], &func);

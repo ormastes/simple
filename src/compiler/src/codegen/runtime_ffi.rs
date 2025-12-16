@@ -142,6 +142,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_weak_is_valid", &[I64], &[I64]),     // weak -> bool
     RuntimeFuncSpec::new("rt_weak_free", &[I64], &[]),            // weak -> ()
     // =========================================================================
+    // Handle pointer operations (pool-allocated, index-based)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_handle_new", &[I64], &[I64]),        // value -> handle
+    RuntimeFuncSpec::new("rt_handle_get", &[I64], &[I64]),        // handle -> value
+    RuntimeFuncSpec::new("rt_handle_set", &[I64, I64], &[I64]),   // handle, new_value -> success
+    RuntimeFuncSpec::new("rt_handle_free", &[I64], &[]),          // handle -> ()
+    RuntimeFuncSpec::new("rt_handle_is_valid", &[I64], &[I64]),   // handle -> bool
+    // =========================================================================
     // Raw memory allocation (zero-cost struct support)
     // =========================================================================
     RuntimeFuncSpec::new("rt_alloc", &[I64], &[I64]),
@@ -230,6 +238,21 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // simple_contract_check(condition: i64, kind: i64, func_name_ptr: i64, func_name_len: i64)
     RuntimeFuncSpec::new("simple_contract_check", &[I64, I64, I64, I64], &[]),
+    // simple_contract_check_msg(condition: i64, kind: i64, func_name_ptr: i64, func_name_len: i64, msg_ptr: i64, msg_len: i64)
+    RuntimeFuncSpec::new("simple_contract_check_msg", &[I64, I64, I64, I64, I64, I64], &[]),
+    // Contract violation object functions (CTR-050-054)
+    // rt_contract_violation_new(kind: i64, func_name_ptr: i64, func_name_len: i64, msg_ptr: i64, msg_len: i64) -> RuntimeValue
+    RuntimeFuncSpec::new("rt_contract_violation_new", &[I64, I64, I64, I64, I64], &[I64]),
+    // rt_contract_violation_kind(violation: RuntimeValue) -> i64
+    RuntimeFuncSpec::new("rt_contract_violation_kind", &[I64], &[I64]),
+    // rt_contract_violation_func_name(violation: RuntimeValue) -> RuntimeValue (string)
+    RuntimeFuncSpec::new("rt_contract_violation_func_name", &[I64], &[I64]),
+    // rt_contract_violation_message(violation: RuntimeValue) -> RuntimeValue (string or NIL)
+    RuntimeFuncSpec::new("rt_contract_violation_message", &[I64], &[I64]),
+    // rt_is_contract_violation(value: RuntimeValue) -> i64 (1=yes, 0=no)
+    RuntimeFuncSpec::new("rt_is_contract_violation", &[I64], &[I64]),
+    // rt_contract_violation_free(violation: RuntimeValue)
+    RuntimeFuncSpec::new("rt_contract_violation_free", &[I64], &[]),
     // =========================================================================
     // I/O operations (print, capture)
     // =========================================================================

@@ -397,6 +397,9 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Parse optional where clause: where T: Clone + Default
+        let where_clause = self.parse_where_clause()?;
+
         // Skip newlines before checking for contract blocks
         self.skip_newlines();
 
@@ -430,6 +433,7 @@ impl<'a> Parser<'a> {
             generic_params,
             params,
             return_type,
+            where_clause,
             body,
             visibility: Visibility::Private,
             effect: None,
@@ -437,7 +441,54 @@ impl<'a> Parser<'a> {
             attributes,
             doc_comment: None,
             contract,
+            is_abstract: false,
         }))
+    }
+
+    /// Parse optional where clause: `where T: Trait1 + Trait2, U: Other`
+    pub(crate) fn parse_where_clause(&mut self) -> Result<WhereClause, ParseError> {
+        if !self.check(&TokenKind::Where) {
+            return Ok(vec![]);
+        }
+
+        self.advance(); // consume 'where'
+        let mut bounds = Vec::new();
+
+        loop {
+            let span = self.current.span;
+            let type_param = self.expect_identifier()?;
+
+            self.expect(&TokenKind::Colon)?;
+
+            // Parse trait bounds: Trait1 + Trait2 + ...
+            let mut trait_bounds = Vec::new();
+            loop {
+                let bound_name = self.expect_identifier()?;
+                trait_bounds.push(bound_name);
+
+                // Check for + to continue parsing bounds
+                if self.check(&TokenKind::Plus) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+
+            bounds.push(WhereBound {
+                span,
+                type_param,
+                bounds: trait_bounds,
+            });
+
+            // Check for comma to continue parsing more bounds
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(bounds)
     }
 
     // === Doc Comment Variants ===

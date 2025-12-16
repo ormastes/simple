@@ -35,6 +35,7 @@ pub use monomorphize::{
     monomorphize_module, CallSiteAnalyzer, ConcreteType, MonomorphizationTable, Monomorphizer,
     PointerKind, SpecializationKey, TypeBindings,
 };
+pub use mir::ContractMode;
 pub use pipeline::CompilerPipeline;
 pub use project::ProjectContext;
 pub use value::{
