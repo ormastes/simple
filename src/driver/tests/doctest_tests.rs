@@ -1,5 +1,6 @@
 use simple_driver::doctest::{
-    parse_doctest_text, parse_markdown_doctests, run_examples, DoctestStatus, Expected,
+    parse_doctest_text, parse_markdown_doctests, parse_spl_doctests, run_examples, DoctestStatus,
+    Expected,
 };
 
 #[test]
@@ -78,4 +79,114 @@ fn doctest_parses_markdown_fences() {
 
     let results = run_examples(&examples);
     assert!(matches!(results[0].status, DoctestStatus::Passed));
+}
+
+#[test]
+fn doctest_parses_markdown_sdoctest_fences() {
+    let text = r#"
+# Tutorial
+
+```sdoctest
+>>> 2 + 3
+5
+```
+"#;
+
+    let examples = parse_markdown_doctests(text, "tutorial.md");
+    assert_eq!(examples.len(), 1);
+    assert_eq!(examples[0].start_line, 6);
+
+    let results = run_examples(&examples);
+    assert!(matches!(results[0].status, DoctestStatus::Passed));
+}
+
+#[test]
+fn doctest_parses_spl_docstrings() {
+    let text = "\"\"\"
+Factorial function
+
+Examples:
+```sdoctest
+>>> 1 + 1
+2
+```
+\"\"\"
+fn factorial(n: Int) -> Int:
+    return 1
+";
+
+    let examples = parse_spl_doctests(text, "sample.spl");
+    assert_eq!(examples.len(), 1);
+    assert_eq!(examples[0].expected, Expected::Output("2".into()));
+
+    let results = run_examples(&examples);
+    assert!(matches!(results[0].status, DoctestStatus::Passed));
+}
+
+#[test]
+fn doctest_parses_multiple_spl_docstrings() {
+    let text = "\"\"\"
+First function
+
+Examples:
+```sdoctest
+>>> x = 10
+>>> x
+10
+```
+\"\"\"
+fn first():
+    pass
+
+\"\"\"
+Second function
+
+Examples:
+```sdoctest
+>>> 2 * 3
+6
+```
+\"\"\"
+fn second():
+    pass
+";
+
+    let examples = parse_spl_doctests(text, "sample.spl");
+    // First docstring has 2 examples (>>> x = 10, >>> x)
+    // Second docstring has 1 example (>>> 2 * 3)
+    // Total: 3 examples
+    assert_eq!(examples.len(), 3, "Expected 3 examples but got {}", examples.len());
+
+    let results = run_examples(&examples);
+    assert!(matches!(results[0].status, DoctestStatus::Passed));
+    assert!(matches!(results[1].status, DoctestStatus::Passed));
+    assert!(matches!(results[2].status, DoctestStatus::Passed));
+}
+
+#[test]
+fn doctest_parses_spl_with_multiple_examples_per_block() {
+    let text = "\"\"\"
+Math operations
+
+Examples:
+```sdoctest
+>>> 1 + 1
+2
+>>> 2 * 3
+6
+>>> 10 - 5
+5
+```
+\"\"\"
+fn math_demo():
+    pass
+";
+
+    let examples = parse_spl_doctests(text, "sample.spl");
+    assert_eq!(examples.len(), 3);
+
+    let results = run_examples(&examples);
+    assert!(matches!(results[0].status, DoctestStatus::Passed));
+    assert!(matches!(results[1].status, DoctestStatus::Passed));
+    assert!(matches!(results[2].status, DoctestStatus::Passed));
 }
