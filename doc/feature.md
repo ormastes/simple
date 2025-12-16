@@ -151,53 +151,53 @@ test "Should notify when user created":
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| CTR-010 | Type `invariant:` block | 📋 | Class/struct-level invariants |
-| CTR-011 | Entry/exit invariant checking | 📋 | Check on public method boundaries |
-| CTR-012 | Module boundary checking | 📋 | Check when values cross API boundaries |
+| CTR-010 | Type `invariant:` block | ✅ | Class/struct-level invariants |
+| CTR-011 | Entry/exit invariant checking | ✅ | Check on public method boundaries |
+| CTR-012 | Module boundary checking | ✅ | Check when values cross API boundaries |
 
 ### Refinement Types
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| CTR-020 | `where` clause | 📋 | Attach predicates to base types |
-| CTR-021 | Subtype relationships | 📋 | `T where P` is subtype of `T` |
-| CTR-022 | Compile-time proof | 📋 | Constant folding, range propagation |
-| CTR-023 | Runtime fallback | 📋 | Insert checks when proof fails |
+| CTR-020 | `where` clause | ✅ | Attach predicates to base types |
+| CTR-021 | Subtype relationships | ✅ | `T where P` is subtype of `T` |
+| CTR-022 | Compile-time proof | ✅ | Constant folding, range propagation |
+| CTR-023 | Runtime fallback | ✅ | Insert checks when proof fails |
 
 ### Purity Constraints
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| CTR-030 | Pure expression enforcement | 📋 | Contract expressions must be pure |
-| CTR-031 | `@pure` function annotation | 📋 | Mark functions callable in contracts |
-| CTR-032 | Impure call detection | 📋 | Compile error for impure calls |
+| CTR-030 | Pure expression enforcement | ✅ | Contract expressions must be pure |
+| CTR-031 | `#[pure]` function annotation | ✅ | Mark functions callable in contracts |
+| CTR-032 | Impure call detection | ✅ | Compile error for impure calls |
 
 ### Build Modes
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| CTR-040 | `--contracts=off` | 📋 | No checks emitted |
-| CTR-041 | `--contracts=boundary` | 📋 | Checks for public/exported only |
-| CTR-042 | `--contracts=on` | 📋 | All contract checks |
-| CTR-043 | `--contracts=test` | 📋 | Rich diagnostics mode |
+| CTR-040 | `--contracts=off` | ✅ | No checks emitted |
+| CTR-041 | `--contracts=boundary` | ✅ | Checks for public/exported only |
+| CTR-042 | `--contracts=all` | ✅ | All contract checks (default) |
+| CTR-043 | `--contracts=test` | ✅ | Rich diagnostics mode |
 
 ### Contract Violations
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| CTR-050 | `ContractViolation.Pre` | 📋 | Precondition failure |
-| CTR-051 | `ContractViolation.Post` | 📋 | Postcondition failure |
-| CTR-052 | `ContractViolation.ErrPost` | 📋 | Error postcondition failure |
-| CTR-053 | `ContractViolation.InvariantEntry` | 📋 | Invariant failure at entry |
-| CTR-054 | `ContractViolation.InvariantExit` | 📋 | Invariant failure at exit |
+| CTR-050 | `ContractViolation.Pre` | ✅ | Precondition failure |
+| CTR-051 | `ContractViolation.Post` | ✅ | Postcondition failure |
+| CTR-052 | `ContractViolation.ErrPost` | ✅ | Error postcondition failure |
+| CTR-053 | `ContractViolation.InvariantEntry` | ✅ | Invariant failure at entry |
+| CTR-054 | `ContractViolation.InvariantExit` | ✅ | Invariant failure at exit |
 
 ### Snapshot-Safe Types
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| CTR-060 | Primitive snapshot | 📋 | i64, bool, enums in old() |
-| CTR-061 | Immutable struct snapshot | 📋 | Value structs in old() |
-| CTR-062 | `@snapshot` annotation | 📋 | Custom snapshot semantics |
+| CTR-060 | Primitive snapshot | ✅ | i64, bool, string, enums in old() |
+| CTR-061 | Immutable struct snapshot | ✅ | Structs with snapshot-safe fields in old() |
+| CTR-062 | `#[snapshot]` annotation | ✅ | Custom snapshot semantics |
 
 ### Contract Examples
 
@@ -260,9 +260,9 @@ class Account:
 | FV-102 | Error postcondition semantics (`out_err(err):`) | High | 3 | ✅ | CTR-003 |
 | FV-103 | Routine invariant preservation | Medium | 3 | ✅ | CTR-004 |
 | FV-104 | `old(expr)` snapshot correctness | Medium | 2 | ✅ | CTR-005 |
-| FV-105 | Type invariant preservation | Medium | 3 | 📋 | CTR-010 |
-| FV-106 | Refinement type soundness (`where` clause) | High | 4 | 📋 | CTR-020 |
-| FV-107 | Pure expression enforcement | Medium | 2 | 📋 | CTR-030 |
+| FV-105 | Type invariant preservation | Medium | 3 | ✅ | CTR-010 |
+| FV-106 | Refinement type soundness (`where` clause) | High | 4 | ✅ | CTR-020 |
+| FV-107 | Pure expression enforcement | Medium | 2 | ✅ | CTR-030 |
 
 **Lean 4 Model Location:** `verification/type_inference_compile/src/Contracts.lean`
 - Includes contract checking semantics, soundness theorems, refinement types

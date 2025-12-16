@@ -33,7 +33,7 @@ use crate::hir;
 use crate::import_loader::{has_script_statements, load_module_with_imports};
 use crate::interpreter::evaluate_module;
 use crate::lint::{LintChecker, LintConfig, LintDiagnostic};
-use crate::mir;
+use crate::mir::{self, ContractMode};
 use crate::monomorphize::monomorphize_module;
 use crate::project::ProjectContext;
 use crate::value::FUNC_MAIN;
@@ -48,6 +48,8 @@ pub struct CompilerPipeline {
     lint_config: Option<LintConfig>,
     /// Lint diagnostics from the last compilation
     lint_diagnostics: Vec<LintDiagnostic>,
+    /// Contract checking mode (CTR-040 to CTR-043)
+    contract_mode: ContractMode,
 }
 
 impl CompilerPipeline {
@@ -57,6 +59,7 @@ impl CompilerPipeline {
             project: None,
             lint_config: None,
             lint_diagnostics: Vec::new(),
+            contract_mode: ContractMode::All,
         })
     }
 
@@ -66,6 +69,7 @@ impl CompilerPipeline {
             project: None,
             lint_config: None,
             lint_diagnostics: Vec::new(),
+            contract_mode: ContractMode::All,
         })
     }
 
@@ -77,6 +81,7 @@ impl CompilerPipeline {
             project: Some(project),
             lint_config,
             lint_diagnostics: Vec::new(),
+            contract_mode: ContractMode::All,
         })
     }
 
@@ -91,6 +96,7 @@ impl CompilerPipeline {
             project: Some(project),
             lint_config,
             lint_diagnostics: Vec::new(),
+            contract_mode: ContractMode::All,
         })
     }
 
@@ -133,6 +139,22 @@ impl CompilerPipeline {
     /// Check if the last compilation had lint warnings
     pub fn has_lint_warnings(&self) -> bool {
         self.lint_diagnostics.iter().any(|d| d.is_warning())
+    }
+
+    /// Set the contract checking mode
+    ///
+    /// This controls when contract checks (preconditions, postconditions, invariants)
+    /// are emitted during native compilation:
+    /// - `Off`: No contract checks emitted
+    /// - `Boundary`: Only check contracts at public API boundaries
+    /// - `All`: Check all contracts (default)
+    pub fn set_contract_mode(&mut self, mode: ContractMode) {
+        self.contract_mode = mode;
+    }
+
+    /// Get the current contract checking mode
+    pub fn contract_mode(&self) -> ContractMode {
+        self.contract_mode
     }
 
     /// Compile a Simple source file to an SMF at `out`.
@@ -242,8 +264,8 @@ impl CompilerPipeline {
         let hir_module = hir::lower(ast_module)
             .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
 
-        // Lower HIR to MIR
-        mir::lower_to_mir(&hir_module)
+        // Lower HIR to MIR with contract mode
+        mir::lower_to_mir_with_mode(&hir_module, self.contract_mode)
             .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))
     }
 
@@ -720,5 +742,27 @@ main = 0
             result.is_ok(),
             "script match should fall back to interpreter, got {result:?}"
         );
+    }
+
+    // ============== Contract Mode Integration Tests ==============
+
+    #[test]
+    fn test_pipeline_contract_mode_default() {
+        let pipeline = CompilerPipeline::new().expect("pipeline ok");
+        assert_eq!(pipeline.contract_mode(), ContractMode::All);
+    }
+
+    #[test]
+    fn test_pipeline_contract_mode_set() {
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+
+        pipeline.set_contract_mode(ContractMode::Off);
+        assert_eq!(pipeline.contract_mode(), ContractMode::Off);
+
+        pipeline.set_contract_mode(ContractMode::Boundary);
+        assert_eq!(pipeline.contract_mode(), ContractMode::Boundary);
+
+        pipeline.set_contract_mode(ContractMode::All);
+        assert_eq!(pipeline.contract_mode(), ContractMode::All);
     }
 }

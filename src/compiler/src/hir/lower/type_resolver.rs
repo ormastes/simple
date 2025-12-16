@@ -91,7 +91,7 @@ impl Lowerer {
     pub(super) fn get_field_info(&self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
         if let Some(hir_ty) = self.module.types.get(struct_ty) {
             match hir_ty {
-                HirType::Struct { name, fields } => {
+                HirType::Struct { name, fields, .. } => {
                     for (idx, (field_name, field_ty)) in fields.iter().enumerate() {
                         if field_name == field {
                             return Ok((idx, *field_ty));

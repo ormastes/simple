@@ -29,8 +29,8 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params()?;
-        // Parse fields and optional inline methods (ignoring invariant for structs)
-        let (fields, methods, _invariant) = self.parse_indented_fields_and_methods()?;
+        // Parse fields, optional inline methods, and optional invariant
+        let (fields, methods, invariant) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Struct(StructDef {
             span: self.make_span(start_span),
@@ -41,6 +41,7 @@ impl<'a> Parser<'a> {
             visibility: Visibility::Private,
             attributes,
             doc_comment: None,
+            invariant,
         }))
     }
 
