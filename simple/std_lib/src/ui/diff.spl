@@ -1,0 +1,278 @@
+# Diff - Keyed Diffing Algorithm
+#
+# This module implements a keyed diffing algorithm for computing
+# minimal patches between UI element trees. The algorithm handles:
+# - Keyed children (fast O(n) matching by key)
+# - Unkeyed children (positional matching)
+# - Move detection (using Longest Increasing Subsequence)
+
+use core.*
+use ui.element.*
+use ui.patchset.*
+
+# Diff result containing patches to transform old -> new
+pub struct DiffResult:
+    patches: PatchSet
+
+impl DiffResult:
+    pub fn new() -> DiffResult:
+        return DiffResult { patches: PatchSet::new() }
+
+    pub fn patches(self) -> &PatchSet:
+        return &self.patches
+
+    pub fn take_patches(self) -> PatchSet:
+        return self.patches
+
+# Main diff function: compute patches to transform old_tree -> new_tree
+pub fn diff(old_tree: &Element, new_tree: &Element) -> DiffResult:
+    let mut result = DiffResult::new()
+    diff_element(old_tree, new_tree, &mut result.patches)
+    return result
+
+# Diff two elements
+fn diff_element(old: &Element, new: &Element, patches: &mut PatchSet):
+    # If IDs differ, this is a full replacement
+    if old.id != new.id:
+        patches.replace(old.id, new.clone())
+        return
+
+    # Diff element kind - if different, replace
+    if old.kind != new.kind:
+        patches.replace(old.id, new.clone())
+        return
+
+    # Diff text content
+    match (&old.text, &new.text):
+        case (Some(old_text), Some(new_text)):
+            if old_text != new_text:
+                patches.set_text(old.id, new_text)
+        case (None, Some(new_text)):
+            patches.set_text(old.id, new_text)
+        case (Some(_), None):
+            patches.set_text(old.id, "")
+        case (None, None): pass
+
+    # Diff attributes
+    diff_attrs(old, new, patches)
+
+    # Diff classes
+    diff_classes(old, new, patches)
+
+    # Diff focus state
+    if old.focused != new.focused:
+        if new.focused:
+            patches.focus(new.id)
+        else:
+            patches.add(PatchOp::ClearFocus { node_id: old.id })
+
+    # Diff children
+    diff_children(old.id, &old.children, &new.children, patches)
+
+# Diff attributes between old and new element
+fn diff_attrs(old: &Element, new: &Element, patches: &mut PatchSet):
+    # Find changed/added attrs
+    for (name, new_value) in &new.attrs:
+        match old.attrs.get(name):
+            case Some(old_value):
+                if old_value != new_value:
+                    patches.set_attr(old.id, name, new_value)
+            case None:
+                patches.set_attr(old.id, name, new_value)
+
+    # Find removed attrs
+    for (name, _) in &old.attrs:
+        if not new.attrs.contains_key(name):
+            patches.remove_attr(old.id, name)
+
+# Diff classes between old and new element
+fn diff_classes(old: &Element, new: &Element, patches: &mut PatchSet):
+    let old_set = old.classes.to_set()
+    let new_set = new.classes.to_set()
+
+    # Added classes
+    for class in &new.classes:
+        if not old_set.contains(class):
+            patches.add_class(old.id, class)
+
+    # Removed classes
+    for class in &old.classes:
+        if not new_set.contains(class):
+            patches.remove_class(old.id, class)
+
+# Diff children of a parent element (keyed diffing)
+fn diff_children(
+    parent_id: NodeId,
+    old_children: &Array[Element],
+    new_children: &Array[Element],
+    patches: &mut PatchSet
+):
+    # Build key maps
+    let mut old_key_map: Dict[String, u64] = Dict::new()
+    let mut old_id_map: Dict[u64, u64] = Dict::new()
+
+    for i in 0..old_children.len():
+        let child = &old_children[i]
+        if let Some(key) = &child.key:
+            old_key_map.set(key.clone(), i)
+        old_id_map.set(child.id.value(), i)
+
+    let mut new_key_map: Dict[String, u64] = Dict::new()
+    for i in 0..new_children.len():
+        if let Some(key) = &new_children[i].key:
+            new_key_map.set(key.clone(), i)
+
+    # Track which old children are matched
+    let mut old_matched: Array[bool] = []
+    for _ in 0..old_children.len():
+        old_matched.push(false)
+
+    # Track matching: new_index -> old_index
+    let mut matches: Array[Option[u64]] = []
+    for _ in 0..new_children.len():
+        matches.push(None)
+
+    # Phase 1: Match by key
+    for new_idx in 0..new_children.len():
+        let new_child = &new_children[new_idx]
+        if let Some(key) = &new_child.key:
+            if let Some(old_idx) = old_key_map.get(key):
+                matches[new_idx] = Some(old_idx)
+                old_matched[old_idx] = true
+
+    # Phase 2: Match unkeyed children by position
+    let mut next_unkeyed_old: u64 = 0
+    for new_idx in 0..new_children.len():
+        if matches[new_idx].is_some():
+            continue
+        let new_child = &new_children[new_idx]
+        if new_child.key.is_some():
+            continue
+
+        # Find next unmatched, unkeyed old child
+        while next_unkeyed_old < old_children.len():
+            if not old_matched[next_unkeyed_old] and old_children[next_unkeyed_old].key.is_none():
+                matches[new_idx] = Some(next_unkeyed_old)
+                old_matched[next_unkeyed_old] = true
+                next_unkeyed_old = next_unkeyed_old + 1
+                break
+            next_unkeyed_old = next_unkeyed_old + 1
+
+    # Phase 3: Remove unmatched old children
+    for old_idx in 0..old_children.len():
+        if not old_matched[old_idx]:
+            patches.remove_child(parent_id, old_children[old_idx].id)
+
+    # Phase 4: Process new children (insert/update/move)
+    # First, find LIS of matched old indices for minimal moves
+    let mut matched_indices: Array[u64] = []
+    for m in &matches:
+        if let Some(idx) = m:
+            matched_indices.push(idx)
+
+    let lis = longest_increasing_subsequence(&matched_indices)
+    let lis_set = lis.to_set()
+
+    # Process each new child
+    for new_idx in 0..new_children.len():
+        let new_child = &new_children[new_idx]
+
+        match matches[new_idx]:
+            case Some(old_idx):
+                let old_child = &old_children[old_idx]
+
+                # Recurse to diff the matched children
+                diff_element(old_child, new_child, patches)
+
+                # Check if we need to move this child
+                # Only move if not in LIS (to minimize moves)
+                let in_lis = matched_indices.iter()
+                    .position(|x| x == old_idx)
+                    .map(|pos| lis_set.contains(&pos))
+                    .unwrap_or(false)
+
+                if not in_lis and old_idx != new_idx:
+                    patches.move_child(parent_id, old_child.id, old_idx, new_idx)
+
+            case None:
+                # New child - insert at position
+                patches.insert_child(parent_id, new_idx, new_child.clone())
+
+# Compute Longest Increasing Subsequence
+# Returns indices into the input array that form the LIS
+fn longest_increasing_subsequence(arr: &Array[u64]) -> Array[u64]:
+    let n = arr.len()
+    if n == 0:
+        return []
+
+    # dp[i] = smallest tail element for LIS of length i+1
+    let mut dp: Array[u64] = []
+    # parent[i] = index of previous element in LIS ending at i
+    let mut parent: Array[Option[u64]] = []
+    # indices[i] = index in original array for dp[i]
+    let mut indices: Array[u64] = []
+
+    for _ in 0..n:
+        parent.push(None)
+
+    for i in 0..n:
+        let val = arr[i]
+
+        # Binary search for position in dp
+        let pos = binary_search_insert_pos(&dp, val)
+
+        if pos == dp.len():
+            dp.push(val)
+            indices.push(i)
+        else:
+            dp[pos] = val
+            indices[pos] = i
+
+        if pos > 0:
+            parent[i] = Some(indices[pos - 1])
+
+    # Reconstruct LIS
+    let mut result: Array[u64] = []
+    let mut current = if indices.is_empty() { None } else { Some(indices[indices.len() - 1]) }
+
+    while let Some(idx) = current:
+        result.push(idx)
+        current = parent[idx]
+
+    result.reverse()
+    return result
+
+# Binary search to find insertion position in sorted array
+fn binary_search_insert_pos(arr: &Array[u64], val: u64) -> u64:
+    let mut lo: u64 = 0
+    let mut hi: u64 = arr.len()
+
+    while lo < hi:
+        let mid = lo + (hi - lo) / 2
+        if arr[mid] < val:
+            lo = mid + 1
+        else:
+            hi = mid
+
+    return lo
+
+# Snapshot of a child element for diffing
+pub struct ChildSnapshot:
+    id: NodeId
+    key: Option[String]
+    element: Element
+
+impl ChildSnapshot:
+    pub fn from_element(elem: &Element) -> ChildSnapshot:
+        return ChildSnapshot {
+            id: elem.id,
+            key: elem.key.clone(),
+            element: elem.clone()
+        }
+
+# Create snapshots from children
+pub fn snapshot_children(children: &Array[Element]) -> Array[ChildSnapshot]:
+    let mut result: Array[ChildSnapshot] = []
+    for child in children:
+        result.push(ChildSnapshot::from_element(child))
+    return result

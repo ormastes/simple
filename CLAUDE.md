@@ -504,6 +504,12 @@ cargo test -p simple-driver simple_stdlib_system_spec_matchers_spec_matchers_spe
 cargo test -p simple-driver simple_stdlib_system_doctest_parser_parser_spec
 cargo test -p simple-driver simple_stdlib_system_doctest_matcher_matcher_spec
 
+# Run UI framework tests
+cargo test -p simple-driver simple_stdlib_unit_ui                 # All UI tests
+cargo test -p simple-driver simple_stdlib_unit_ui_element_spec    # Element tests
+cargo test -p simple-driver simple_stdlib_unit_ui_gui             # All GUI tests
+cargo test -p simple-driver simple_stdlib_unit_ui_gui_theme_spec  # Theme tests
+
 # Run directly with Simple interpreter
 ./target/debug/simple simple/std_lib/test/unit/core/arithmetic_spec.spl
 ./target/debug/simple simple/std_lib/test/system/spec/spec_framework_spec.spl
@@ -528,8 +534,17 @@ cargo test -p simple-driver simple_stdlib_system_doctest_matcher_matcher_spec
 - `simple/std_lib/test/system/doctest/` - Doctest framework system tests
   - `doctest_advanced_spec.spl` - Edge cases, error handling, Unicode support
   - `parser/parser_spec.spl` - Docstring parsing and code extraction
-  - `matcher/matcher_spec.spl` - Output matching, pattern normalization, wildcards
-  - `runner/runner_spec.spl` - Example execution and error handling
+
+- `simple/std_lib/test/unit/ui/` - UI framework unit tests
+  - `element_spec.spl` - Element/NodeId/ElementTree tests
+  - `patchset_spec.spl` - PatchOp and PatchSet tests
+  - `diff_spec.spl` - Keyed diffing algorithm tests
+  - `widgets_spec.spl` - TUI widget tests (Menu, Dialog, etc.)
+
+- `simple/std_lib/test/unit/ui/gui/` - GUI renderer tests
+  - `theme_spec.spl` - Theme palette, typography, spacing tests
+  - `html_spec.spl` - HTML renderer and hydration manifest tests
+  - `gui_widgets_spec.spl` - GUI widget tests (Card, Chip, Avatar, etc.)
 
 - `simple/std_lib/test/integration/doctest/` - Integration tests
   - `discovery_spec.spl` - Cross-module doctest discovery and execution
@@ -540,11 +555,67 @@ cargo test -p simple-driver simple_stdlib_system_doctest_matcher_matcher_spec
 
 **Test Discovery:** Files matching `*_spec.spl` or `*_test.spl` are auto-discovered by build.rs
 
-**Current Coverage (14 test files, 250+ test cases):**
-- ✅ Unit Tests: 7 files (core: arithmetic, comparison, primitives, collections, strings, hello; units: units)
+**Current Coverage (31 test files, 400+ test cases):**
+- ✅ Unit Tests: 14 files (core: 7, units: 1, ui: 4, ui/gui: 3, spec: 6)
 - ✅ System Tests: 6 files (spec: framework, matchers; doctest: parser, matcher, runner, advanced)
 - ✅ Integration Tests: 1 file (doctest discovery)
 - ✅ Plus Fixtures: 2 files (fixture_spec, doctest samples)
+
+### Writing Simple (.spl) Tests
+
+Simple tests are automatically linked to Rust's test framework via `build.rs`. This allows running all tests through `cargo test`.
+
+**How the linkage works:**
+
+1. `src/driver/build.rs` scans `simple/std_lib/test/` for `*_spec.spl` and `*_test.spl` files
+2. Generates Rust test wrappers in `OUT_DIR/simple_stdlib_tests.rs`
+3. Each SPL test becomes a Rust test: `simple_stdlib_{path}` (path sanitized)
+4. Tests are included via `include!()` in `src/driver/tests/simple_stdlib_tests.rs`
+
+**Path to test name mapping:**
+
+| SPL File Path | Rust Test Name |
+|---------------|----------------|
+| `test/unit/core/arithmetic_spec.spl` | `simple_stdlib_unit_core_arithmetic_spec` |
+| `test/unit/ui/element_spec.spl` | `simple_stdlib_unit_ui_element_spec` |
+| `test/unit/ui/gui/theme_spec.spl` | `simple_stdlib_unit_ui_gui_theme_spec` |
+
+**Creating a new SPL test:**
+
+1. Create test file in appropriate directory:
+   ```
+   simple/std_lib/test/unit/{module}/{name}_spec.spl
+   ```
+
+2. Use BDD-style spec syntax:
+   ```simple
+   use spec.*
+   use {module_to_test}.*
+
+   describe "FeatureName":
+       it "does something":
+           let result = some_function()
+           expect(result).to_equal(expected)
+
+       context "when condition":
+           it "behaves differently":
+               expect(other_function()).to_be_true()
+   ```
+
+3. Rebuild to link tests:
+   ```bash
+   cargo build -p simple-driver
+   ```
+
+4. Run the new test:
+   ```bash
+   cargo test -p simple-driver simple_stdlib_{path_to_test}
+   ```
+
+**Test file naming conventions:**
+- `*_spec.spl` - BDD-style specification tests (preferred)
+- `*_test.spl` - Traditional test files
+- Files in `fixtures/` directories are **skipped** (not auto-linked)
 
 ## Code Quality Tools
 
