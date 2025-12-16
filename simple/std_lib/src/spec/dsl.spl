@@ -1,7 +1,8 @@
 # BDD DSL - RSpec-style describe/context/it blocks
 # Implements example group registration and hook management
+# Extended with Context Sharing support
 
-import registry.{ExampleGroup, Example, Hook}
+import registry.{ExampleGroup, Example, Hook, ContextDefinition, Given}
 
 # Current execution context (stack of groups)
 let group_stack: List[ExampleGroup] = []
@@ -9,6 +10,27 @@ let current_group: Option[ExampleGroup] = None
 
 # Shared example definitions
 let shared_example_defs: Dict[String, Fn() -> Void] = {}
+
+# Current context definition being built (for Context { ... })
+let current_context_def: Option[ContextDefinition] = None
+
+# Context: Define a reusable named context (capital C)
+# Usage: Context :admin_user do: ...
+export fn Context(name: Symbol, block: Fn() -> Void) -> Void:
+    let def = ContextDefinition.new(name)
+    current_context_def = Some(def)
+
+    # Execute block to collect givens
+    block()
+
+    # Register the context definition
+    match current_context_def:
+        case Some(context_def):
+            registry.register_context(name, context_def)
+        case None:
+            pass
+
+    current_context_def = None
 
 # describe: Create a top-level example group
 # Usage: describe "MyClass": ...
@@ -38,14 +60,65 @@ export fn context(description: String, block: Fn() -> Void) -> Void:
             parent.add_child(group)
             group_stack.push(group)
             current_group = Some(group)
-            
+
             block()
-            
+
             group_stack.pop()
             current_group = Some(parent)
         case None:
             # If no parent, treat as top-level describe
             describe(description, block)
+
+# context: Reference a single reusable context (capital C Context definition)
+# Usage: context :admin_user: ...
+export fn context(name: Symbol, block: Fn() -> Void) -> Void:
+    context_with_symbols([name], block)
+
+# context_compose: Reference and compose multiple reusable contexts
+# Usage: context_compose :admin_user, :with_database: ...
+export fn context_compose(names: List[Symbol], block: Fn() -> Void) -> Void:
+    context_with_symbols(names, block)
+
+# context_with_symbols: Create nested group and apply context definitions
+# Internal helper for context(:symbol) syntax
+fn context_with_symbols(names: List[Symbol], block: Fn() -> Void) -> Void:
+    match current_group:
+        case Some(parent):
+            # Create intermediate group for composing contexts
+            let context_names = names.map(fn(s): s.to_string())
+            let group_desc = "with " + context_names.join(", ")
+
+            group = ExampleGroup.new(group_desc, parent=Some(parent))
+            parent.add_child(group)
+            group_stack.push(group)
+            current_group = Some(group)
+
+            # Apply each context definition's givens as before_each hooks
+            for name in names:
+                match registry.get_context(name):
+                    case Some(context_def):
+                        # Add givens as hooks
+                        for given in context_def.givens:
+                            match given:
+                                case Given.Lazy(given_name, given_block):
+                                    # Create before_each hook that stores the value
+                                    let lazy_hook = Hook.BeforeEach(fn():
+                                        let value = given_block()
+                                        runtime.set_example_state(given_name.to_string(), value)
+                                    )
+                                    group.add_hook(lazy_hook)
+                                case Given.Eager(given_block):
+                                    # Add eager setup as before_each
+                                    group.add_hook(Hook.BeforeEach(given_block))
+                    case None:
+                        panic("Context ${name} not found")
+
+            block()
+
+            group_stack.pop()
+            current_group = Some(parent)
+        case None:
+            panic("context() must be called within a describe or context block")
 
 # it: Define a single test example
 # Usage: it "does something": ...
@@ -64,6 +137,41 @@ export macro let(name, value):
     quote:
         before_each:
             $name = $value
+
+# given: Define a fixture (Lazy or Eager) for use in Context definitions
+# Usage in Context: given(:user) { User.new("test") }  -> Lazy
+# Usage in Context: given { db.clear() }                -> Eager
+# Usage in context: given { some_setup() }              -> Eager (before_each)
+export fn given(block: Fn() -> Void) -> Void:
+    match current_context_def:
+        case Some(def):
+            # Eager given inside a Context definition
+            def.add_given(Given.Eager(block))
+        case None:
+            # Regular eager setup (like before_each) when not in Context definition
+            match current_group:
+                case Some(group):
+                    group.add_hook(Hook.BeforeEach(block))
+                case None:
+                    panic("given() must be called within a describe/context block or Context definition")
+
+# given_lazy: Define a lazy (memoized) fixture inside a Context
+# Usage: given_lazy :user, fn(): User.new("test")
+# Note: This is typically called as given(:name) { } via macro
+export fn given_lazy(name: Symbol, block: Fn() -> Any) -> Void:
+    match current_context_def:
+        case Some(def):
+            def.add_given(Given.Lazy(name, block))
+        case None:
+            panic("given_lazy() must be called within a Context definition")
+
+# then: BDD-style assertion (optional - synonym for expect truthy)
+# Usage: then { expression_is_truthy }
+# This is syntactic sugar for: expect(...).to be_truthy
+export fn then(block: Fn() -> Bool) -> Void:
+    result = block()
+    if not result:
+        panic("Expected truthy value in then block")
 
 # Hook definitions
 export fn before_each(block: Fn() -> Void) -> Void:
