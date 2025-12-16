@@ -2,7 +2,7 @@
 
 use super::types::ConcreteType;
 use super::util::{ast_type_to_concrete, infer_concrete_type, type_uses_param};
-use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node, Type as AstType};
+use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node};
 use std::collections::HashMap;
 
 

@@ -208,6 +208,56 @@ fn handle(result: Result[i64]):
 - **Can be parameterized** - Generic enums like `Result[T]`
 - **Pattern matching** - Safe, exhaustive branching on variants
 
+### Impl Blocks for Enums
+
+Enums can have methods added via impl blocks:
+
+```simple
+enum Shape:
+    Circle(radius: f64)
+    Rectangle(width: f64, height: f64)
+
+impl Shape:
+    fn area(self) -> f64:
+        match self:
+            case Circle(r): return 3.14159 * r * r
+            case Rectangle(w, h): return w * h
+
+    fn scale(self, factor: f64) -> Shape:
+        match self:
+            case Circle(r): return Shape.Circle(radius: r * factor)
+            case Rectangle(w, h): return Shape.Rectangle(width: w * factor, height: h * factor)
+
+    # Associated function (no self)
+    fn unit_circle() -> Shape:
+        return Shape.Circle(radius: 1.0)
+
+# Usage
+let s = Shape.Circle(radius: 5.0)
+print s.area()           # 78.54
+let s2 = s.scale(2.0)    # Circle with radius 10.0
+```
+
+### Trait Implementations for Enums
+
+```simple
+trait Drawable:
+    fn draw(self)
+
+impl Drawable for Shape:
+    fn draw(self):
+        match self:
+            case Circle(r): draw_circle(r)
+            case Rectangle(w, h): draw_rect(w, h)
+
+# Common traits can be derived
+#[derive(Eq, Clone, Debug)]
+enum Color:
+    Red
+    Green
+    Blue
+```
+
 ---
 
 ## Strong Enums
@@ -367,6 +417,128 @@ class User:
 
 ---
 
+## Result Type
+
+A common enum representing "success or error":
+
+```simple
+enum Result[T, E]:
+    Ok(value: T)
+    Err(error: E)
+
+fn parse_int(s: str) -> Result[i64, ParseError]:
+    if s.is_numeric():
+        return Ok(s.to_int())
+    return Err(ParseError(msg: "Invalid number: {s}"))
+```
+
+### Error Propagation Operator (`?`)
+
+The `?` operator propagates errors automatically:
+
+```simple
+fn read_config() -> Result[Config, IoError]:
+    let content = read_file("config.toml")?  # Returns early if Err
+    let parsed = parse_toml(content)?        # Returns early if Err
+    return Ok(Config(parsed))
+
+# Equivalent to:
+fn read_config_verbose() -> Result[Config, IoError]:
+    match read_file("config.toml"):
+        case Ok(content):
+            match parse_toml(content):
+                case Ok(parsed): return Ok(Config(parsed))
+                case Err(e): return Err(e)
+        case Err(e): return Err(e)
+```
+
+### Result Methods
+
+```simple
+impl Result[T, E]:
+    fn is_ok() -> bool
+    fn is_err() -> bool
+    fn unwrap() -> T                    # Panics if Err
+    fn unwrap_or(default: T) -> T
+    fn unwrap_err() -> E                # Panics if Ok
+    fn map[U](f: fn(T) -> U) -> Result[U, E]
+    fn map_err[F](f: fn(E) -> F) -> Result[T, F]
+    fn and_then[U](f: fn(T) -> Result[U, E]) -> Result[U, E]
+```
+
+### Shorthand Syntax
+
+```simple
+# These are equivalent:
+fn foo() -> Result[i64, Error]
+fn foo() -> i64 | Error
+```
+
+---
+
+## Bitfields
+
+Bitfields allow compact representation of data at the bit level, useful for hardware registers, protocol headers, and flags.
+
+### Defining a Bitfield
+
+```simple
+bitfield Flags(u8):
+    readable: 1      # bit 0
+    writable: 1      # bit 1
+    executable: 1    # bit 2
+    _reserved: 5     # bits 3-7 (padding, not accessible)
+```
+
+The backing type (`u8`, `u16`, `u32`, `u64`) determines the total size.
+
+### Using Bitfields
+
+```simple
+let f = Flags(readable: 1, writable: 1, executable: 0)
+print f.readable     # 1
+f.writable = 0       # Clear write bit
+let raw = f.raw()    # Get underlying u8 value: 0b00000001
+```
+
+### Multi-Bit Fields
+
+Fields can span multiple bits:
+
+```simple
+bitfield Color(u32):
+    red: 8           # bits 0-7
+    green: 8         # bits 8-15
+    blue: 8          # bits 16-23
+    alpha: 8         # bits 24-31
+
+let c = Color(red: 255, green: 128, blue: 64, alpha: 255)
+```
+
+### Bitfield Characteristics
+
+| Property | Description |
+|----------|-------------|
+| Packed | Fields are tightly packed with no padding between them |
+| Little-endian | Fields fill from LSB to MSB |
+| Value type | Copied on assignment like structs |
+| FFI-safe | Compatible with C bitfields |
+
+### Named Constants
+
+```simple
+bitfield Permission(u8):
+    read: 1
+    write: 1
+    execute: 1
+
+    const READ_ONLY = Permission(read: 1, write: 0, execute: 0)
+    const READ_WRITE = Permission(read: 1, write: 1, execute: 0)
+    const FULL = Permission(read: 1, write: 1, execute: 1)
+```
+
+---
+
 ## Related Specifications
 
 - [Types and Mutability](types.md)
@@ -374,3 +546,4 @@ class User:
 - [Functions and Pattern Matching](functions.md)
 - [Memory and Ownership](memory.md)
 - [Traits](traits.md)
+- [Design TODOs](../design/type_system_features.md)

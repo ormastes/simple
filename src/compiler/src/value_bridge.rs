@@ -396,6 +396,18 @@ impl From<&Value> for BridgeValue {
                 // ThreadPools cannot be bridged across FFI - use nil
                 BridgeValue::nil()
             }
+            Value::Mock(_) => {
+                // Mocks cannot be bridged across FFI - use nil
+                BridgeValue::nil()
+            }
+            Value::Matcher(_) => {
+                // Matchers cannot be bridged across FFI - use nil
+                BridgeValue::nil()
+            }
+            Value::TraitObject { inner, .. } => {
+                // Bridge the inner value - trait info is lost in FFI
+                BridgeValue::from(inner.as_ref())
+            }
         }
     }
 }

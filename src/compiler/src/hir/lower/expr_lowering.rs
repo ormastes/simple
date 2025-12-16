@@ -456,6 +456,25 @@ impl Lowerer {
                 })
             }
 
+            // Pointer allocation: new &T(value) or new *T(value)
+            Expr::New { kind, expr } => {
+                let value_hir = Box::new(self.lower_expr(expr, ctx)?);
+                let inner_ty = value_hir.ty;
+                let ptr_kind: PointerKind = (*kind).into();
+                let ptr_type = HirType::Pointer {
+                    kind: ptr_kind,
+                    inner: inner_ty,
+                };
+                let ptr_ty = self.module.types.register(ptr_type);
+                Ok(HirExpr {
+                    kind: HirExprKind::PointerNew {
+                        kind: ptr_kind,
+                        value: value_hir,
+                    },
+                    ty: ptr_ty,
+                })
+            }
+
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }

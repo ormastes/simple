@@ -429,6 +429,643 @@ impl LlvmBackend {
                         global.set_constant(true);
                         vreg_map.insert(*dest, global.as_pointer_value().into());
                     }
+                    MirInst::Call { dest, target, args } => {
+                        // Get or declare the called function
+                        let func_name = target.name();
+                        let called_func = module.get_function(func_name).ok_or_else(|| {
+                            // Function not found, try to declare it
+                            // For now, assume all functions return i64 and take i64 params
+                            let i64_type = self.context.i64_type();
+                            let param_types: Vec<BasicTypeEnum> =
+                                args.iter().map(|_| i64_type.into()).collect();
+                            let fn_type = i64_type.fn_type(&param_types, false);
+                            module.add_function(func_name, fn_type, None)
+                        });
+
+                        let called_func = match called_func {
+                            Ok(f) => f,
+                            Err(f) => f, // Use the declared function
+                        };
+
+                        // Collect argument values
+                        let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
+                        for arg in args {
+                            let val = vreg_map.get(arg).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", arg))
+                            })?;
+                            arg_vals.push((*val).into());
+                        }
+
+                        // Build the call
+                        let call_site = builder
+                            .build_call(called_func, &arg_vals, "call")
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build call: {}", e))
+                            })?;
+
+                        // Store result if there's a destination
+                        if let Some(d) = dest {
+                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                                vreg_map.insert(*d, ret_val);
+                            }
+                        }
+                    }
+                    MirInst::ArrayLit { dest, elements } => {
+                        // Create array on stack and initialize elements
+                        let i64_type = self.context.i64_type();
+                        let array_type = i64_type.array_type(elements.len() as u32);
+                        let alloc = builder.build_alloca(array_type, "array").map_err(|e| {
+                            CompileError::Semantic(format!("Failed to build alloca: {}", e))
+                        })?;
+
+                        // Store each element
+                        for (i, elem) in elements.iter().enumerate() {
+                            let elem_val = vreg_map.get(elem).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", elem))
+                            })?;
+
+                            let indices = [
+                                self.context.i32_type().const_int(0, false),
+                                self.context.i32_type().const_int(i as u64, false),
+                            ];
+                            let gep = unsafe {
+                                builder.build_gep(array_type, alloc, &indices, "elem_ptr")
+                            }
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build gep: {}", e))
+                            })?;
+
+                            builder.build_store(gep, *elem_val).map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build store: {}", e))
+                            })?;
+                        }
+
+                        vreg_map.insert(*dest, alloc.into());
+                    }
+                    MirInst::TupleLit { dest, elements } => {
+                        // Tuples are similar to arrays - create struct on stack
+                        let i64_type = self.context.i64_type();
+                        let field_types: Vec<BasicTypeEnum> =
+                            elements.iter().map(|_| i64_type.into()).collect();
+                        let struct_type = self.context.struct_type(&field_types, false);
+                        let alloc = builder.build_alloca(struct_type, "tuple").map_err(|e| {
+                            CompileError::Semantic(format!("Failed to build alloca: {}", e))
+                        })?;
+
+                        // Store each element
+                        for (i, elem) in elements.iter().enumerate() {
+                            let elem_val = vreg_map.get(elem).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", elem))
+                            })?;
+
+                            let gep = builder
+                                .build_struct_gep(struct_type, alloc, i as u32, "tuple_elem")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!(
+                                        "Failed to build struct gep: {}",
+                                        e
+                                    ))
+                                })?;
+
+                            builder.build_store(gep, *elem_val).map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build store: {}", e))
+                            })?;
+                        }
+
+                        vreg_map.insert(*dest, alloc.into());
+                    }
+                    MirInst::IndexGet {
+                        dest,
+                        collection,
+                        index,
+                    } => {
+                        let coll_val = vreg_map.get(collection).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", collection))
+                        })?;
+                        let idx_val = vreg_map.get(index).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", index))
+                        })?;
+
+                        // Collection should be a pointer to array
+                        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = coll_val {
+                            if let inkwell::values::BasicValueEnum::IntValue(idx) = idx_val {
+                                let i64_type = self.context.i64_type();
+                                let arr_type = i64_type.array_type(0); // Dynamic size
+
+                                let indices = [
+                                    self.context.i32_type().const_int(0, false),
+                                    *idx,
+                                ];
+                                let gep = unsafe {
+                                    builder.build_gep(arr_type, *ptr, &indices, "elem_ptr")
+                                }
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!("Failed to build gep: {}", e))
+                                })?;
+
+                                let loaded = builder
+                                    .build_load(i64_type, gep, "elem")
+                                    .map_err(|e| {
+                                        CompileError::Semantic(format!(
+                                            "Failed to build load: {}",
+                                            e
+                                        ))
+                                    })?;
+
+                                vreg_map.insert(*dest, loaded);
+                            }
+                        }
+                    }
+                    MirInst::IndexSet {
+                        collection,
+                        index,
+                        value,
+                    } => {
+                        let coll_val = vreg_map.get(collection).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", collection))
+                        })?;
+                        let idx_val = vreg_map.get(index).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", index))
+                        })?;
+                        let val = vreg_map.get(value).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", value))
+                        })?;
+
+                        // Collection should be a pointer to array
+                        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = coll_val {
+                            if let inkwell::values::BasicValueEnum::IntValue(idx) = idx_val {
+                                let i64_type = self.context.i64_type();
+                                let arr_type = i64_type.array_type(0);
+
+                                let indices = [
+                                    self.context.i32_type().const_int(0, false),
+                                    *idx,
+                                ];
+                                let gep = unsafe {
+                                    builder.build_gep(arr_type, *ptr, &indices, "elem_ptr")
+                                }
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!("Failed to build gep: {}", e))
+                                })?;
+
+                                builder.build_store(gep, *val).map_err(|e| {
+                                    CompileError::Semantic(format!("Failed to build store: {}", e))
+                                })?;
+                            }
+                        }
+                    }
+                    MirInst::InterpCall {
+                        dest,
+                        func_name,
+                        args,
+                    } => {
+                        // Call interpreter bridge function rt_interp_call
+                        let i64_type = self.context.i64_type();
+                        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+                        // Declare rt_interp_call if not exists
+                        let interp_call = module.get_function("rt_interp_call").unwrap_or_else(|| {
+                            let fn_type = i64_type.fn_type(
+                                &[i8_ptr_type.into(), i64_type.into(), i64_type.into(), i8_ptr_type.into()],
+                                false,
+                            );
+                            module.add_function("rt_interp_call", fn_type, None)
+                        });
+
+                        // Create string constant for function name
+                        let name_bytes = func_name.as_bytes();
+                        let name_const = self.context.const_string(name_bytes, false);
+                        let name_global = module.add_global(name_const.get_type(), None, "func_name");
+                        name_global.set_initializer(&name_const);
+                        name_global.set_constant(true);
+                        let name_ptr = name_global.as_pointer_value();
+                        let name_len = i64_type.const_int(name_bytes.len() as u64, false);
+
+                        // For now, pass null for args array (simplified)
+                        let argc = i64_type.const_int(args.len() as u64, false);
+                        let argv = i8_ptr_type.const_null();
+
+                        let call_args = [
+                            name_ptr.into(),
+                            name_len.into(),
+                            argc.into(),
+                            argv.into(),
+                        ];
+
+                        let call_site = builder
+                            .build_call(interp_call, &call_args, "interp_call")
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build call: {}", e))
+                            })?;
+
+                        if let Some(d) = dest {
+                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                                vreg_map.insert(*d, ret_val);
+                            }
+                        }
+                    }
+                    MirInst::DictLit { dest, keys, values } => {
+                        // Dictionaries are represented as a struct with keys array and values array
+                        let i64_type = self.context.i64_type();
+                        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+                        // Declare rt_dict_new if not exists
+                        let dict_new = module.get_function("rt_dict_new").unwrap_or_else(|| {
+                            let fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+                            module.add_function("rt_dict_new", fn_type, None)
+                        });
+
+                        // Declare rt_dict_insert if not exists
+                        let dict_insert = module.get_function("rt_dict_insert").unwrap_or_else(|| {
+                            let fn_type = self.context.void_type().fn_type(
+                                &[i8_ptr_type.into(), i64_type.into(), i64_type.into()],
+                                false,
+                            );
+                            module.add_function("rt_dict_insert", fn_type, None)
+                        });
+
+                        // Create new dict with initial capacity
+                        let capacity = i64_type.const_int(keys.len() as u64, false);
+                        let dict_ptr = builder
+                            .build_call(dict_new, &[capacity.into()], "dict")
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build dict_new call: {}", e))
+                            })?
+                            .try_as_basic_value()
+                            .left()
+                            .ok_or_else(|| {
+                                CompileError::Semantic("dict_new returned void".to_string())
+                            })?;
+
+                        // Insert each key-value pair
+                        for (key, value) in keys.iter().zip(values.iter()) {
+                            let key_val = vreg_map.get(key).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", key))
+                            })?;
+                            let value_val = vreg_map.get(value).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", value))
+                            })?;
+
+                            builder
+                                .build_call(
+                                    dict_insert,
+                                    &[dict_ptr.into(), (*key_val).into(), (*value_val).into()],
+                                    "",
+                                )
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!(
+                                        "Failed to build dict_insert call: {}",
+                                        e
+                                    ))
+                                })?;
+                        }
+
+                        vreg_map.insert(*dest, dict_ptr);
+                    }
+                    MirInst::StructInit { dest, fields, ty: _ } => {
+                        // Structs are represented as LLVM struct types
+                        let i64_type = self.context.i64_type();
+                        let field_types: Vec<BasicTypeEnum> =
+                            fields.iter().map(|_| i64_type.into()).collect();
+                        let struct_type = self.context.struct_type(&field_types, false);
+                        let alloc = builder.build_alloca(struct_type, "struct").map_err(|e| {
+                            CompileError::Semantic(format!("Failed to build alloca: {}", e))
+                        })?;
+
+                        // Store each field
+                        for (i, (_name, value)) in fields.iter().enumerate() {
+                            let field_val = vreg_map.get(value).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", value))
+                            })?;
+
+                            let gep = builder
+                                .build_struct_gep(struct_type, alloc, i as u32, "field")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!(
+                                        "Failed to build struct gep: {}",
+                                        e
+                                    ))
+                                })?;
+
+                            builder.build_store(gep, *field_val).map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build store: {}", e))
+                            })?;
+                        }
+
+                        vreg_map.insert(*dest, alloc.into());
+                    }
+                    MirInst::FieldGet {
+                        dest,
+                        object,
+                        field_index,
+                        ty: _,
+                    } => {
+                        let obj_val = vreg_map.get(object).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", object))
+                        })?;
+
+                        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = obj_val {
+                            let i64_type = self.context.i64_type();
+                            // Create a struct type with enough fields for the index
+                            let field_types: Vec<BasicTypeEnum> =
+                                (0..=*field_index).map(|_| i64_type.into()).collect();
+                            let struct_type = self.context.struct_type(&field_types, false);
+
+                            let gep = builder
+                                .build_struct_gep(struct_type, *ptr, *field_index as u32, "field_ptr")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!(
+                                        "Failed to build struct gep: {}",
+                                        e
+                                    ))
+                                })?;
+
+                            let loaded = builder.build_load(i64_type, gep, "field").map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build load: {}", e))
+                            })?;
+
+                            vreg_map.insert(*dest, loaded);
+                        } else {
+                            return Err(CompileError::Semantic(
+                                "FieldGet requires pointer to struct".to_string(),
+                            ));
+                        }
+                    }
+                    MirInst::FieldSet {
+                        object,
+                        field_index,
+                        value,
+                        ty: _,
+                    } => {
+                        let obj_val = vreg_map.get(object).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", object))
+                        })?;
+                        let val = vreg_map.get(value).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", value))
+                        })?;
+
+                        if let inkwell::values::BasicValueEnum::PointerValue(ptr) = obj_val {
+                            let i64_type = self.context.i64_type();
+                            let field_types: Vec<BasicTypeEnum> =
+                                (0..=*field_index).map(|_| i64_type.into()).collect();
+                            let struct_type = self.context.struct_type(&field_types, false);
+
+                            let gep = builder
+                                .build_struct_gep(struct_type, *ptr, *field_index as u32, "field_ptr")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!(
+                                        "Failed to build struct gep: {}",
+                                        e
+                                    ))
+                                })?;
+
+                            builder.build_store(gep, *val).map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build store: {}", e))
+                            })?;
+                        } else {
+                            return Err(CompileError::Semantic(
+                                "FieldSet requires pointer to struct".to_string(),
+                            ));
+                        }
+                    }
+                    MirInst::ClosureCreate {
+                        dest,
+                        func_name,
+                        captures,
+                    } => {
+                        // Closures are represented as a struct with function pointer + captures
+                        let i64_type = self.context.i64_type();
+                        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+                        // Closure struct: [func_ptr, capture_count, capture0, capture1, ...]
+                        let mut field_types: Vec<BasicTypeEnum> =
+                            vec![i8_ptr_type.into(), i64_type.into()];
+                        for _ in captures {
+                            field_types.push(i64_type.into());
+                        }
+                        let closure_type = self.context.struct_type(&field_types, false);
+                        let alloc = builder.build_alloca(closure_type, "closure").map_err(|e| {
+                            CompileError::Semantic(format!("Failed to build alloca: {}", e))
+                        })?;
+
+                        // Get or declare the function
+                        let func_ptr = module
+                            .get_function(func_name)
+                            .map(|f| f.as_global_value().as_pointer_value())
+                            .unwrap_or_else(|| i8_ptr_type.const_null());
+
+                        // Store function pointer
+                        let func_ptr_gep = builder
+                            .build_struct_gep(closure_type, alloc, 0, "func_ptr")
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build struct gep: {}", e))
+                            })?;
+                        builder.build_store(func_ptr_gep, func_ptr).map_err(|e| {
+                            CompileError::Semantic(format!("Failed to build store: {}", e))
+                        })?;
+
+                        // Store capture count
+                        let capture_count = i64_type.const_int(captures.len() as u64, false);
+                        let count_gep = builder
+                            .build_struct_gep(closure_type, alloc, 1, "capture_count")
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build struct gep: {}", e))
+                            })?;
+                        builder.build_store(count_gep, capture_count).map_err(|e| {
+                            CompileError::Semantic(format!("Failed to build store: {}", e))
+                        })?;
+
+                        // Store each capture
+                        for (i, capture) in captures.iter().enumerate() {
+                            let capture_val = vreg_map.get(capture).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", capture))
+                            })?;
+
+                            let capture_gep = builder
+                                .build_struct_gep(closure_type, alloc, (i + 2) as u32, "capture")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!(
+                                        "Failed to build struct gep: {}",
+                                        e
+                                    ))
+                                })?;
+
+                            builder.build_store(capture_gep, *capture_val).map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build store: {}", e))
+                            })?;
+                        }
+
+                        vreg_map.insert(*dest, alloc.into());
+                    }
+                    MirInst::IndirectCall { dest, callee, args } => {
+                        let i64_type = self.context.i64_type();
+                        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+                        let callee_val = vreg_map.get(callee).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", callee))
+                        })?;
+
+                        // Get the function pointer from closure (first field)
+                        if let inkwell::values::BasicValueEnum::PointerValue(closure_ptr) = callee_val
+                        {
+                            // Extract function pointer (index 0)
+                            let closure_type = self.context.struct_type(
+                                &[i8_ptr_type.into(), i64_type.into()],
+                                false,
+                            );
+                            let func_ptr_gep = builder
+                                .build_struct_gep(closure_type, *closure_ptr, 0, "func_ptr")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!(
+                                        "Failed to build struct gep: {}",
+                                        e
+                                    ))
+                                })?;
+
+                            let func_ptr = builder
+                                .build_load(i8_ptr_type, func_ptr_gep, "loaded_func")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!("Failed to build load: {}", e))
+                                })?;
+
+                            if let inkwell::values::BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
+                                // Collect arguments
+                                let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> =
+                                    Vec::new();
+                                for arg in args {
+                                    let val = vreg_map.get(arg).ok_or_else(|| {
+                                        CompileError::Semantic(format!("Undefined vreg: {:?}", arg))
+                                    })?;
+                                    arg_vals.push((*val).into());
+                                }
+
+                                // Create function type for indirect call
+                                let param_types: Vec<BasicTypeEnum> =
+                                    args.iter().map(|_| i64_type.into()).collect();
+                                let fn_type = i64_type.fn_type(&param_types, false);
+
+                                let call_site = builder
+                                    .build_indirect_call(fn_type, fn_ptr, &arg_vals, "indirect_call")
+                                    .map_err(|e| {
+                                        CompileError::Semantic(format!(
+                                            "Failed to build indirect call: {}",
+                                            e
+                                        ))
+                                    })?;
+
+                                if let Some(d) = dest {
+                                    if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                                        vreg_map.insert(*d, ret_val);
+                                    }
+                                }
+                            }
+                        } else {
+                            return Err(CompileError::Semantic(
+                                "IndirectCall requires closure pointer".to_string(),
+                            ));
+                        }
+                    }
+                    MirInst::ConstSymbol { dest, name } => {
+                        // Symbols are represented as interned string pointers
+                        let str_val = self.context.const_string(name.as_bytes(), false);
+                        let global = module.add_global(str_val.get_type(), None, &format!("sym_{}", name));
+                        global.set_initializer(&str_val);
+                        global.set_constant(true);
+                        vreg_map.insert(*dest, global.as_pointer_value().into());
+                    }
+                    MirInst::Slice {
+                        dest,
+                        collection,
+                        start,
+                        end,
+                    } => {
+                        let i64_type = self.context.i64_type();
+                        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+                        // Declare rt_slice if not exists
+                        let slice_fn = module.get_function("rt_slice").unwrap_or_else(|| {
+                            let fn_type = i8_ptr_type.fn_type(
+                                &[i8_ptr_type.into(), i64_type.into(), i64_type.into()],
+                                false,
+                            );
+                            module.add_function("rt_slice", fn_type, None)
+                        });
+
+                        let coll_val = vreg_map.get(collection).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", collection))
+                        })?;
+
+                        // Get start index (default to 0 if None)
+                        let start_val = if let Some(s) = start {
+                            vreg_map.get(s).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", s))
+                            })?
+                        } else {
+                            &inkwell::values::BasicValueEnum::IntValue(
+                                i64_type.const_int(0, false),
+                            )
+                        };
+
+                        // Get end index (default to -1 meaning end of collection)
+                        let end_val = if let Some(e) = end {
+                            vreg_map.get(e).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", e))
+                            })?
+                        } else {
+                            &inkwell::values::BasicValueEnum::IntValue(
+                                i64_type.const_int(u64::MAX, false),
+                            )
+                        };
+
+                        let call_site = builder
+                            .build_call(
+                                slice_fn,
+                                &[(*coll_val).into(), (*start_val).into(), (*end_val).into()],
+                                "slice",
+                            )
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build slice call: {}", e))
+                            })?;
+
+                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            vreg_map.insert(*dest, ret_val);
+                        }
+                    }
+                    MirInst::InterpEval { dest, code } => {
+                        // Call interpreter to evaluate code string
+                        let i64_type = self.context.i64_type();
+                        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+                        // Declare rt_interp_eval if not exists
+                        let interp_eval = module.get_function("rt_interp_eval").unwrap_or_else(|| {
+                            let fn_type = i64_type.fn_type(
+                                &[i8_ptr_type.into(), i64_type.into()],
+                                false,
+                            );
+                            module.add_function("rt_interp_eval", fn_type, None)
+                        });
+
+                        // Create string constant for code
+                        let code_bytes = code.as_bytes();
+                        let code_const = self.context.const_string(code_bytes, false);
+                        let code_global = module.add_global(code_const.get_type(), None, "eval_code");
+                        code_global.set_initializer(&code_const);
+                        code_global.set_constant(true);
+                        let code_ptr = code_global.as_pointer_value();
+                        let code_len = i64_type.const_int(code_bytes.len() as u64, false);
+
+                        let call_site = builder
+                            .build_call(interp_eval, &[code_ptr.into(), code_len.into()], "eval")
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build call: {}", e))
+                            })?;
+
+                        if let Some(d) = dest {
+                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                                vreg_map.insert(*d, ret_val);
+                            }
+                        }
+                    }
                     _ => {
                         // Other instructions not yet implemented
                     }

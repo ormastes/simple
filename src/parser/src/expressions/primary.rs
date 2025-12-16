@@ -94,8 +94,10 @@ impl<'a> Parser<'a> {
                 Ok(Expr::ContractOld(Box::new(expr)))
             }
             TokenKind::Result => {
+                // Allow 'result' as a regular identifier (like 'type', 'out', etc.)
+                // ContractResult expression is only generated in contract blocks
                 self.advance();
-                Ok(Expr::ContractResult)
+                Ok(Expr::Identifier("result".to_string()))
             }
             TokenKind::Identifier(name) => {
                 let name = name.clone();

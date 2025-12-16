@@ -336,7 +336,69 @@ Source Code (.spl)
 | Async | 5 | FutureCreate, Await, ActorSpawn, ActorSend |
 | Generators | 3 | GeneratorCreate, Yield, GeneratorNext |
 | Errors | 5 | TryUnwrap, OptionSome, ResultOk, ResultErr |
+| **Contracts** | 2 | ContractCheck, ContractOldCapture |
 | Fallback | 2 | InterpCall, InterpEval |
+
+### Contract System (Design by Contract)
+
+**Status:** MIR lowering complete, runtime FFI ready, formal verification in Lean 4
+
+Simple supports Design by Contract with preconditions, postconditions, invariants, and `old()` snapshots.
+
+#### Contract Syntax
+
+```simple
+fn div(a: i64, b: i64) -> (i64 | DivByZero):
+    in:                           # Preconditions
+        b != 0
+    invariant:                    # Routine invariants (entry + exit)
+        true
+
+    if b == 0:
+        return DivByZero(msg: "division by zero")
+    return a / b
+
+    out(ret):                     # Postconditions (success)
+        ret * b == a
+    out_err(err):                 # Postconditions (error)
+        old(b) == 0
+
+class Account:
+    balance: i64
+    invariant:                    # Class invariant
+        balance >= 0
+```
+
+#### Contract Checking Order (per Lean model)
+
+| Phase | Checks | MIR Instruction |
+|-------|--------|-----------------|
+| Entry | 1. Preconditions (`in:`) | `ContractCheck(Precondition)` |
+| Entry | 2. Capture `old()` values | `ContractOldCapture` |
+| Entry | 3. Entry invariants | `ContractCheck(InvariantEntry)` |
+| Exit (success) | 4. Exit invariants | `ContractCheck(InvariantExit)` |
+| Exit (success) | 5. Postconditions (`out(ret):`) | `ContractCheck(Postcondition)` |
+| Exit (error) | 4. Exit invariants | `ContractCheck(InvariantExit)` |
+| Exit (error) | 6. Error postconditions (`out_err(err):`) | `ContractCheck(ErrorPostcondition)` |
+
+#### Implementation Files
+
+| Layer | File | Description |
+|-------|------|-------------|
+| Parser | `src/parser/src/statements/contract.rs` | Contract block parsing |
+| AST | `src/parser/src/ast/nodes.rs` | `ContractBlock`, `ContractClause`, `InvariantBlock` |
+| HIR | `src/compiler/src/hir/types.rs` | `HirContract`, `HirContractClause`, `HirClass`, `HirClassInvariant` |
+| MIR | `src/compiler/src/mir/instructions.rs` | `ContractCheck`, `ContractOldCapture`, `ContractKind` |
+| MIR Lower | `src/compiler/src/mir/lower.rs` | `lower_contract_entry()`, `lower_contract_success_exit()`, `lower_contract_error_exit()`, `lower_class_invariant()` |
+| Codegen | `src/compiler/src/codegen/instr.rs` | `compile_contract_check()` |
+| Runtime | `src/runtime/src/value/ffi.rs` | `simple_contract_check()` |
+| Lean Model | `verification/type_inference_compile/src/Contracts.lean` | Formal verification |
+
+#### Class Invariant Rules
+
+- Checked after constructor (`new` or `__init__`)
+- Checked after all public methods
+- Uses `ContractKind::InvariantExit` for consistency
 
 ### Codegen status snapshot (runtime FFI)
 - Actors: Spawn/Send/Recv now call runtime FFI; actor bodies still use a no-op stub until outlining is added.

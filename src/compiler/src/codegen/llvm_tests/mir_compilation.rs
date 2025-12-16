@@ -326,3 +326,216 @@ fn test_mir_string_const() {
 
     backend.verify().unwrap();
 }
+
+/// Test MIR struct initialization and field access
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_struct_ops() {
+    use crate::hir::TypeId as T;
+    use crate::mir::{MirInst, Terminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("struct_test").unwrap();
+
+    // fn test() -> i64 { let s = {x: 10, y: 20}; return s.x; }
+    let mut func = MirFunction::new("test".to_string(), T::I64, Visibility::Public);
+
+    let v0 = VReg(0); // const 10
+    let v1 = VReg(1); // const 20
+    let v2 = VReg(2); // struct
+    let v3 = VReg(3); // field value
+
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v0,
+        value: 10,
+    });
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v1,
+        value: 20,
+    });
+    func.blocks[0].instructions.push(MirInst::StructInit {
+        dest: v2,
+        fields: vec![
+            ("x".to_string(), v0),
+            ("y".to_string(), v1),
+        ],
+        ty: T::I64,
+    });
+    func.blocks[0].instructions.push(MirInst::FieldGet {
+        dest: v3,
+        object: v2,
+        field_index: 0,
+        ty: T::I64,
+    });
+    func.blocks[0].terminator = Terminator::Return(Some(v3));
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("struct"));
+    assert!(ir.contains("getelementptr"));
+    assert!(ir.contains("load"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR array and tuple operations
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_array_tuple() {
+    use crate::hir::TypeId as T;
+    use crate::mir::{MirInst, Terminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("array_test").unwrap();
+
+    // fn test() -> i64 { let arr = [1, 2, 3]; return arr[1]; }
+    let mut func = MirFunction::new("test".to_string(), T::I64, Visibility::Public);
+
+    let v0 = VReg(0); // const 1
+    let v1 = VReg(1); // const 2
+    let v2 = VReg(2); // const 3
+    let v3 = VReg(3); // array
+    let v4 = VReg(4); // index
+    let v5 = VReg(5); // result
+
+    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 1 });
+    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v1, value: 2 });
+    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v2, value: 3 });
+    func.blocks[0].instructions.push(MirInst::ArrayLit {
+        dest: v3,
+        elements: vec![v0, v1, v2],
+    });
+    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v4, value: 1 });
+    func.blocks[0].instructions.push(MirInst::IndexGet {
+        dest: v5,
+        collection: v3,
+        index: v4,
+    });
+    func.blocks[0].terminator = Terminator::Return(Some(v5));
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("array"));
+    assert!(ir.contains("getelementptr"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR symbol constant compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_symbol_const() {
+    use crate::hir::TypeId as T;
+    use crate::mir::{MirInst, Terminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("sym_test").unwrap();
+
+    // fn test() -> *i8 { return :my_symbol; }
+    let mut func = MirFunction::new("test".to_string(), T::Pointer, Visibility::Public);
+
+    let v0 = VReg(0);
+    func.blocks[0].instructions.push(MirInst::ConstSymbol {
+        dest: v0,
+        name: "my_symbol".to_string(),
+    });
+    func.blocks[0].terminator = Terminator::Return(Some(v0));
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("my_symbol"));
+    assert!(ir.contains("@sym_"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR function call compilation
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_function_call() {
+    use crate::hir::TypeId as T;
+    use crate::mir::{CallTarget, MirInst, Terminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("call_test").unwrap();
+
+    // fn test() -> i64 { return add(10, 20); }
+    let mut func = MirFunction::new("test".to_string(), T::I64, Visibility::Public);
+
+    let v0 = VReg(0); // const 10
+    let v1 = VReg(1); // const 20
+    let v2 = VReg(2); // result
+
+    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 10 });
+    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v1, value: 20 });
+    func.blocks[0].instructions.push(MirInst::Call {
+        dest: Some(v2),
+        target: CallTarget::Pure("add".to_string()),
+        args: vec![v0, v1],
+    });
+    func.blocks[0].terminator = Terminator::Return(Some(v2));
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("call"));
+    assert!(ir.contains("add"));
+
+    backend.verify().unwrap();
+}
+
+/// Test MIR InterpCall compilation (interpreter fallback)
+#[test]
+#[cfg(feature = "llvm")]
+fn test_mir_interp_call() {
+    use crate::hir::TypeId as T;
+    use crate::mir::{MirInst, Terminator, VReg};
+    use crate::mir::MirFunction;
+    use simple_parser::ast::Visibility;
+
+    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+    let backend = LlvmBackend::new(target).unwrap();
+
+    backend.create_module("interp_test").unwrap();
+
+    // fn test() -> i64 { return interp_call("complex_fn", 42); }
+    let mut func = MirFunction::new("test".to_string(), T::I64, Visibility::Public);
+
+    let v0 = VReg(0); // const 42
+    let v1 = VReg(1); // result
+
+    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 42 });
+    func.blocks[0].instructions.push(MirInst::InterpCall {
+        dest: Some(v1),
+        func_name: "complex_fn".to_string(),
+        args: vec![v0],
+    });
+    func.blocks[0].terminator = Terminator::Return(Some(v1));
+
+    backend.compile_function(&func).unwrap();
+
+    let ir = backend.get_ir().unwrap();
+    assert!(ir.contains("rt_interp_call"));
+    assert!(ir.contains("complex_fn"));
+
+    backend.verify().unwrap();
+}

@@ -38,6 +38,7 @@ impl<'a> super::Lexer<'a> {
             "struct" => TokenKind::Struct,
             "class" => TokenKind::Class,
             "enum" => TokenKind::Enum,
+            "union" => TokenKind::Union,
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,
             "actor" => TokenKind::Actor,
@@ -79,6 +80,7 @@ impl<'a> super::Lexer<'a> {
             "vec" => TokenKind::Vec,
             "shared" => TokenKind::Shared,
             "gpu" => TokenKind::Gpu,
+            "dyn" => TokenKind::Dyn,
             // Contract keywords (new spec)
             "out" => TokenKind::Out,
             "out_err" => TokenKind::OutErr,

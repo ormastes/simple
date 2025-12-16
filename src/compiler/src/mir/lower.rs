@@ -1111,6 +1111,58 @@ impl<'a> MirLowerer<'a> {
                 self.lower_expr(inner)
             }
 
+            // =========================================================================
+            // Pointer operations
+            // =========================================================================
+            HirExprKind::PointerNew { kind, value } => {
+                let kind = *kind;
+                let value_reg = self.lower_expr(value)?;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::PointerNew {
+                        dest,
+                        kind,
+                        value: value_reg,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::Ref(inner) => {
+                let source_reg = self.lower_expr(inner)?;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::PointerRef {
+                        dest,
+                        kind: crate::hir::PointerKind::Borrow,
+                        source: source_reg,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::Deref(inner) => {
+                let pointer_reg = self.lower_expr(inner)?;
+                // Determine pointer kind from the inner expression's type
+                // For now, default to Borrow
+                let kind = crate::hir::PointerKind::Borrow;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::PointerDeref {
+                        dest,
+                        pointer: pointer_reg,
+                        kind,
+                    });
+                    dest
+                })
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }

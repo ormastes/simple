@@ -533,6 +533,7 @@ fn format_type(ty: &Type) -> String {
             .map(format_type)
             .collect::<Vec<_>>()
             .join(" | "),
+        Type::DynTrait(trait_name) => format!("dyn {}", trait_name),
         Type::Constructor { target, args } => match args {
             Some(args) => format!(
                 "Constructor[{}, ({})]",

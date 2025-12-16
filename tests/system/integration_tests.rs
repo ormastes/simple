@@ -83,6 +83,7 @@ fn test_type_registry_register_integration() {
             ("x".to_string(), TypeId::F64),
             ("y".to_string(), TypeId::F64),
         ],
+        has_snapshot: false,
     };
     let struct_id = registry.register_named("Point".to_string(), struct_type.clone());
     assert_eq!(registry.get(struct_id), Some(&struct_type));
@@ -341,6 +342,7 @@ fn test_hir_function_integration() {
         }))],
         visibility: Visibility::Public,
         contract: None,
+        is_pure: false,
     };
 
     assert_eq!(func.name, "add");

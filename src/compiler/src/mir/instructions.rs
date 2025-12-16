@@ -2,7 +2,7 @@
 //!
 //! This module defines all MIR instructions, patterns, and related types.
 
-use crate::hir::{BinOp, TypeId, UnaryOp};
+use crate::hir::{BinOp, PointerKind, TypeId, UnaryOp};
 
 use super::effects::{CallTarget, Effect, HasEffects};
 
@@ -68,6 +68,30 @@ pub enum MirInst {
 
     /// Blocking wait (explicit for verification)
     Wait { dest: Option<VReg>, target: VReg },
+
+    // =========================================================================
+    // Pointer instructions
+    // =========================================================================
+    /// Allocate a new pointer wrapping a value
+    PointerNew {
+        dest: VReg,
+        kind: PointerKind,
+        value: VReg,
+    },
+
+    /// Create a borrow reference (immutable or mutable)
+    PointerRef {
+        dest: VReg,
+        kind: PointerKind, // Borrow or BorrowMut
+        source: VReg,
+    },
+
+    /// Dereference a pointer to get its value
+    PointerDeref {
+        dest: VReg,
+        pointer: VReg,
+        kind: PointerKind,
+    },
 
     // =========================================================================
     // Interpreter fallback instructions (will be removed once all codegen implemented)
@@ -509,7 +533,8 @@ impl HasEffects for MirInst {
             | MirInst::EnumPayload { .. }
             | MirInst::PatternTest { .. }
             | MirInst::PatternBind { .. }
-            | MirInst::ContractOldCapture { .. } => Effect::Compute,
+            | MirInst::ContractOldCapture { .. }
+            | MirInst::PointerDeref { .. } => Effect::Compute,
 
             // Contract checks may panic (Io effect due to potential panic)
             MirInst::ContractCheck { .. } => Effect::Io,
@@ -529,7 +554,9 @@ impl HasEffects for MirInst {
             | MirInst::ResultOk { .. }
             | MirInst::ResultErr { .. }
             | MirInst::FutureCreate { .. }
-            | MirInst::GeneratorCreate { .. } => Effect::GcAlloc,
+            | MirInst::GeneratorCreate { .. }
+            | MirInst::PointerNew { .. }
+            | MirInst::PointerRef { .. } => Effect::GcAlloc,
 
             // Function calls - effect depends on target
             MirInst::Call { target, .. } => target.effect(),
@@ -617,7 +644,10 @@ impl MirInst {
             | MirInst::ResultOk { dest, .. }
             | MirInst::ResultErr { dest, .. }
             | MirInst::InterpEval { dest, .. }
-            | MirInst::ContractOldCapture { dest, .. } => Some(*dest),
+            | MirInst::ContractOldCapture { dest, .. }
+            | MirInst::PointerNew { dest, .. }
+            | MirInst::PointerRef { dest, .. }
+            | MirInst::PointerDeref { dest, .. } => Some(*dest),
             MirInst::Call { dest, .. }
             | MirInst::IndirectCall { dest, .. }
             | MirInst::Wait { dest, .. }
@@ -742,6 +772,9 @@ impl MirInst {
             MirInst::InterpEval { .. } => vec![],
             MirInst::ContractCheck { condition, .. } => vec![*condition],
             MirInst::ContractOldCapture { value, .. } => vec![*value],
+            MirInst::PointerNew { value, .. } => vec![*value],
+            MirInst::PointerRef { source, .. } => vec![*source],
+            MirInst::PointerDeref { pointer, .. } => vec![*pointer],
         }
     }
 }

@@ -1,15 +1,12 @@
 # BDD DSL - RSpec-style describe/context/it blocks
 # Implements example group registration and hook management
-# Extended with Context Sharing support
+# Extended with Context Sharing support and Shared Examples (TEST-010, TEST-011)
 
-import registry.{ExampleGroup, Example, Hook, ContextDefinition, Given}
+import registry.{ExampleGroup, Example, Hook, ContextDefinition, Given, SharedExampleDefinition}
 
 # Current execution context (stack of groups)
 let group_stack: List[ExampleGroup] = []
 let current_group: Option[ExampleGroup] = None
-
-# Shared example definitions
-let shared_example_defs: Dict[String, Fn() -> Void] = {}
 
 # Current context definition being built (for Context { ... })
 let current_context_def: Option[ContextDefinition] = None
@@ -130,13 +127,80 @@ export fn it(description: String, block: Fn() -> Void) -> Void:
         case None:
             panic("it() must be called within a describe or context block")
 
-# let: Define memoized per-example state
+# skip: Define a pending/skipped test example
+# Usage: skip "does something not yet implemented": ...
+export fn skip(description: String, block: Fn() -> Void) -> Void:
+    match current_group:
+        case Some(group):
+            example = Example.new(description, block).skip()
+            group.add_example(example)
+        case None:
+            panic("skip() must be called within a describe or context block")
+
+# ============================================================================
+# TEST-012: Let Memoization - Per-example state management
+# ============================================================================
+#
+# Simple provides two styles of let for different use cases:
+#
+# 1. `let` (macro) - Eager evaluation before each example
+#    - Value is computed before each example runs
+#    - Use when the value is always needed
+#    - Syntax: let x = make_x()
+#
+# 2. `let_lazy` - True lazy memoization
+#    - Value is computed only on first access within an example
+#    - Value is cached for the duration of the example
+#    - Access via: `x` (implicit) or `get_let(:x)` (explicit)
+#    - Use for expensive computations that may not be needed
+#    - Syntax: let_lazy :x, \: make_x()
+#
+# Both are reset/cleared between examples automatically.
+
+# let: Define eager per-example state (runs before each example)
 # Usage: let user = User.new("test")
 # Note: This is a compile-time macro that transforms to before_each
 export macro let(name, value):
     quote:
         before_each:
             $name = $value
+
+# let_lazy: Define truly lazy memoized per-example state
+# Usage: let_lazy :user, \: User.new("test")
+# The block is only evaluated when the value is first accessed within an example
+export fn let_lazy(name: Symbol, block: Fn() -> Any) -> Void:
+    match current_group:
+        case Some(group):
+            # Create a before_each hook that registers the memoized block
+            # The block itself is NOT called here - only when accessed
+            let name_str = name.to_string()
+            let lazy_hook = Hook.BeforeEach(fn():
+                runtime.set_memoized(name_str, block)
+            )
+            group.add_hook(lazy_hook)
+        case None:
+            panic("let_lazy() must be called within a describe or context block")
+
+# get_let: Explicitly get a lazy memoized value (triggers evaluation if needed)
+# Usage: let value = get_let(:user)
+# This is useful when you want to be explicit about accessing memoized state
+export fn get_let(name: Symbol) -> Any:
+    let name_str = name.to_string()
+    match runtime.get_memoized(name_str):
+        case Some(value):
+            return value
+        case None:
+            # Fall back to regular example state
+            match runtime.get_example_state(name_str):
+                case Some(value):
+                    return value
+                case None:
+                    panic("No let/let_lazy value found for '${name_str}'")
+
+# Check if a let value exists (either lazy or eager)
+export fn has_let(name: Symbol) -> Bool:
+    let name_str = name.to_string()
+    return runtime.has_memoized(name_str) or runtime.get_example_state(name_str).is_some()
 
 # given: Define a fixture (unnamed eager setup)
 # Usage: given { setup_code() }  -> Runs before each example
@@ -255,13 +319,74 @@ export fn after_all(block: Fn() -> Void) -> Void:
         case None:
             panic("after_all() must be called within a describe or context block")
 
-# Shared examples
+# ============================================================================
+# TEST-010: Shared Examples - Define reusable example groups
+# ============================================================================
+#
+# shared_examples allows you to define a group of examples that can be
+# included in multiple describe/context blocks using it_behaves_like.
+#
+# The shared examples block has access to helper functions and fixtures
+# defined in the scope where it_behaves_like is called.
+#
+# Usage:
+#   shared_examples "a stack-like container":
+#       it "supports push/pop":
+#           s = make()  # Uses 'make' function from calling scope
+#           s.push(1)
+#           expect s.pop() to eq 1
+#
+#   describe "Stack":
+#       fn make() -> Stack:
+#           return Stack.new()
+#
+#       it_behaves_like "a stack-like container"
+#
 export fn shared_examples(name: String, block: Fn() -> Void) -> Void:
-    shared_example_defs[name] = block
+    let definition = SharedExampleDefinition.new(name, block)
+    registry.register_shared_examples(name, definition)
 
+# Variant with description for documentation
+export fn shared_examples(name: String, description: String, block: Fn() -> Void) -> Void:
+    let definition = SharedExampleDefinition.new(name, block).with_description(description)
+    registry.register_shared_examples(name, definition)
+
+# ============================================================================
+# TEST-011: it_behaves_like - Include shared examples in current context
+# ============================================================================
+#
+# it_behaves_like includes the examples from a shared_examples definition
+# into the current describe/context block. It creates a nested context
+# named "behaves like {name}" and executes the shared block within it.
+#
+# The shared examples have access to:
+# - Helper functions defined in the current scope (e.g., factory functions)
+# - Fixtures defined via given/given_lazy in the current context
+# - The full example group hierarchy for hook execution
+#
+# Usage:
+#   describe "Stack":
+#       fn make() -> Stack:
+#           return Stack.new()
+#
+#       it_behaves_like "a stack-like container"
+#
+#   describe "Deque":
+#       fn make() -> Deque:
+#           return Deque.new()
+#
+#       it_behaves_like "a stack-like container"
+#
 export fn it_behaves_like(name: String) -> Void:
-    match shared_example_defs.get(name):
-        case Some(block):
-            block()
+    match registry.get_shared_examples(name):
+        case Some(definition):
+            # Create a nested context for the shared examples
+            # This provides proper isolation and hook inheritance
+            let context_name = "behaves like ${name}"
+            context(context_name, definition.block)
         case None:
-            panic("Shared example '${name}' not found")
+            panic("Shared example '${name}' not found. Did you define it with shared_examples(\"${name}\")?")
+
+# Variant: include_examples is an alias for it_behaves_like (RSpec compatibility)
+export fn include_examples(name: String) -> Void:
+    it_behaves_like(name)

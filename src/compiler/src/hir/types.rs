@@ -634,6 +634,12 @@ pub enum HirExprKind {
     // Memory operations
     Ref(Box<HirExpr>),
     Deref(Box<HirExpr>),
+    /// Allocate a new pointer wrapping a value
+    /// Created from `new &T(value)` or `new *T(value)` syntax
+    PointerNew {
+        kind: PointerKind,
+        value: Box<HirExpr>,
+    },
 
     // Cast
     Cast {
@@ -722,6 +728,10 @@ impl HirExprKind {
             },
             HirExprKind::Ref(inner) => HirExprKind::Ref(Box::new(inner.substitute_local(from_idx, to_idx))),
             HirExprKind::Deref(inner) => HirExprKind::Deref(Box::new(inner.substitute_local(from_idx, to_idx))),
+            HirExprKind::PointerNew { kind, value } => HirExprKind::PointerNew {
+                kind: *kind,
+                value: Box::new(value.substitute_local(from_idx, to_idx)),
+            },
             HirExprKind::Cast { expr, target } => HirExprKind::Cast {
                 expr: Box::new(expr.substitute_local(from_idx, to_idx)),
                 target: *target,
@@ -782,6 +792,10 @@ impl HirExprKind {
             },
             HirExprKind::Ref(inner) => HirExprKind::Ref(Box::new(inner.substitute_self_with_result())),
             HirExprKind::Deref(inner) => HirExprKind::Deref(Box::new(inner.substitute_self_with_result())),
+            HirExprKind::PointerNew { kind, value } => HirExprKind::PointerNew {
+                kind: *kind,
+                value: Box::new(value.substitute_self_with_result()),
+            },
             HirExprKind::Cast { expr, target } => HirExprKind::Cast {
                 expr: Box::new(expr.substitute_self_with_result()),
                 target: *target,

@@ -17,8 +17,9 @@ pub enum HeapObjectType {
     Unique = 0x0B,
     Shared = 0x0C,
     Borrow = 0x0D,
-    /// Contract violation (CTR-050-054)
-    ContractViolation = 0x0E,
+    Channel = 0x0E,
+    Weak = 0x0F,
+    ContractViolation = 0x10,
 }
 
 /// Header for all heap-allocated objects

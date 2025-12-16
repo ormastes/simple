@@ -264,11 +264,24 @@ impl<'a> Parser<'a> {
                 | TokenKind::Nil
                 | TokenKind::Symbol(_)
                 | TokenKind::Identifier(_)
+                | TokenKind::Result     // 'result' can be used as variable name
+                | TokenKind::Type       // 'type' can be used as variable name
+                | TokenKind::Out        // 'out' can be used as variable name
+                | TokenKind::OutErr     // 'out_err' can be used as variable name
                 | TokenKind::LParen
                 | TokenKind::LBracket
                 | TokenKind::LBrace
                 | TokenKind::Backslash
                 | TokenKind::Colon // for named args like name: "value"
+                // Unary prefix operators that can start expressions
+                | TokenKind::Await    // await expr
+                | TokenKind::Yield    // yield expr
+                | TokenKind::Not      // not expr
+                | TokenKind::Minus    // -expr (negation)
+                | TokenKind::Plus     // +expr
+                | TokenKind::Tilde    // ~expr (bitwise not)
+                | TokenKind::Ampersand // &expr (reference)
+                | TokenKind::Star     // *expr (dereference)
         )
     }
 

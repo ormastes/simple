@@ -121,6 +121,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         span: Span::new(0, 0, 0, 0),
                         name: s.name.clone(),
                         generic_params: s.generic_params.clone(),
+                        where_clause: vec![],
                         fields: s.fields.clone(),
                         methods: s.methods.clone(),
                         parent: None,
@@ -428,6 +429,137 @@ pub fn set_interp_var(name: &str, value: Value) {
 /// Get a variable from the interpreter environment (Rust API).
 pub fn get_interp_var(name: &str) -> Option<Value> {
     INTERP_ENV.with(|env| env.borrow().get(name).cloned())
+}
+
+// ============================================================================
+// RuntimeValue FFI bridge (for hybrid execution)
+// ============================================================================
+
+thread_local! {
+    /// Registry of expressions for rt_interp_eval.
+    /// Expressions are stored by index for efficient lookup from compiled code.
+    static EXPR_REGISTRY: RefCell<Vec<Expr>> = RefCell::new(Vec::new());
+}
+
+/// Register an expression for later evaluation via rt_interp_eval.
+/// Returns the expression index.
+pub fn register_expr_for_eval(expr: Expr) -> u32 {
+    EXPR_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let index = registry.len() as u32;
+        registry.push(expr);
+        index
+    })
+}
+
+/// Clear the expression registry.
+pub fn clear_expr_registry() {
+    EXPR_REGISTRY.with(|registry| {
+        registry.borrow_mut().clear();
+    });
+}
+
+/// Internal handler for rt_interp_call.
+///
+/// This is registered with the runtime via `init_interpreter_handlers()`.
+///
+/// # Safety
+/// All pointers must be valid.
+unsafe extern "C" fn interp_call_handler(
+    func_name_ptr: *const u8,
+    func_name_len: u64,
+    argc: u64,
+    argv: *const simple_runtime::RuntimeValue,
+) -> simple_runtime::RuntimeValue {
+    use crate::value_bridge::{runtime_to_value, value_to_runtime};
+
+    // Parse function name
+    if func_name_ptr.is_null() {
+        tracing::error!("rt_interp_call: null function name");
+        return simple_runtime::RuntimeValue::NIL;
+    }
+
+    let name_bytes = std::slice::from_raw_parts(func_name_ptr, func_name_len as usize);
+    let name = match std::str::from_utf8(name_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::error!("rt_interp_call: invalid function name encoding");
+            return simple_runtime::RuntimeValue::NIL;
+        }
+    };
+
+    // Convert arguments from RuntimeValue to interpreter Value
+    let args: Vec<Value> = if argc > 0 && !argv.is_null() {
+        let arg_slice = std::slice::from_raw_parts(argv, argc as usize);
+        arg_slice.iter().map(|rv| runtime_to_value(*rv)).collect()
+    } else {
+        vec![]
+    };
+
+    // Look up and call the function
+    let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
+        if let Some(func) = funcs.get(name) {
+            call_interpreted_function(func, args.clone(), env, funcs, classes, enums, impl_methods)
+        } else {
+            tracing::error!("rt_interp_call: function not found: {}", name);
+            Err(CompileError::Semantic(format!(
+                "function not found: {}",
+                name
+            )))
+        }
+    });
+
+    match result {
+        Ok(value) => value_to_runtime(&value),
+        Err(e) => {
+            tracing::error!("rt_interp_call error: {:?}", e);
+            simple_runtime::RuntimeValue::NIL
+        }
+    }
+}
+
+/// Internal handler for rt_interp_eval.
+///
+/// This is registered with the runtime via `init_interpreter_handlers()`.
+extern "C" fn interp_eval_handler(expr_index: i64) -> simple_runtime::RuntimeValue {
+    use crate::value_bridge::value_to_runtime;
+
+    let result = EXPR_REGISTRY.with(|registry| {
+        let registry = registry.borrow();
+        if let Some(expr) = registry.get(expr_index as usize) {
+            with_interp_state(|env, funcs, classes, enums, impl_methods| {
+                evaluate_expr(expr, env, funcs, classes, enums, impl_methods)
+            })
+        } else {
+            tracing::error!("rt_interp_eval: invalid expression index: {}", expr_index);
+            Err(CompileError::Semantic(format!(
+                "invalid expression index: {}",
+                expr_index
+            )))
+        }
+    });
+
+    match result {
+        Ok(value) => value_to_runtime(&value),
+        Err(e) => {
+            tracing::error!("rt_interp_eval error: {:?}", e);
+            simple_runtime::RuntimeValue::NIL
+        }
+    }
+}
+
+/// Initialize the interpreter handlers in the runtime.
+///
+/// This must be called before executing any compiled code that might
+/// fall back to the interpreter. Typically called during driver initialization.
+///
+/// # Safety
+/// Must be called from a single thread before any compiled code runs.
+pub fn init_interpreter_handlers() {
+    unsafe {
+        simple_runtime::value::set_interp_call_handler(interp_call_handler);
+        simple_runtime::value::set_interp_eval_handler(interp_eval_handler);
+    }
 }
 
 // ============================================================================

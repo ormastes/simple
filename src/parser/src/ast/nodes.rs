@@ -93,6 +93,25 @@ impl DocComment {
     }
 }
 
+/// A single where bound: `T: Trait1 + Trait2`
+///
+/// Example:
+/// ```simple
+/// fn make[T]() -> T where T: Clone + Default:
+///     return T.default()
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct WhereBound {
+    pub span: Span,
+    /// The type parameter being constrained (e.g., "T")
+    pub type_param: String,
+    /// The trait bounds (e.g., ["Clone", "Default"])
+    pub bounds: Vec<String>,
+}
+
+/// A where clause containing multiple bounds
+pub type WhereClause = Vec<WhereBound>;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionDef {
     pub span: Span,
@@ -101,6 +120,8 @@ pub struct FunctionDef {
     pub generic_params: Vec<String>,
     pub params: Vec<Parameter>,
     pub return_type: Option<Type>,
+    /// Where clause for trait bounds: where T: Clone + Default
+    pub where_clause: WhereClause,
     pub body: Block,
     pub visibility: Visibility,
     pub effect: Option<Effect>,
@@ -112,6 +133,8 @@ pub struct FunctionDef {
     pub doc_comment: Option<DocComment>,
     /// Contract specification (requires/ensures)
     pub contract: Option<ContractBlock>,
+    /// Whether this is an abstract method (trait method without body)
+    pub is_abstract: bool,
 }
 
 impl FunctionDef {
@@ -272,6 +295,8 @@ pub struct StructDef {
     pub name: String,
     /// Generic type parameters: struct Foo<T, U>
     pub generic_params: Vec<String>,
+    /// Where clause for trait bounds: where T: Clone + Default
+    pub where_clause: WhereClause,
     pub fields: Vec<Field>,
     /// Inline method definitions
     pub methods: Vec<FunctionDef>,
@@ -298,6 +323,8 @@ pub struct ClassDef {
     pub name: String,
     /// Generic type parameters: class Foo<T, U>
     pub generic_params: Vec<String>,
+    /// Where clause for trait bounds: where T: Clone + Default
+    pub where_clause: WhereClause,
     pub fields: Vec<Field>,
     pub methods: Vec<FunctionDef>,
     pub parent: Option<String>,
@@ -334,6 +361,8 @@ pub struct EnumDef {
     pub name: String,
     /// Generic type parameters: enum Result<T, E>
     pub generic_params: Vec<String>,
+    /// Where clause for trait bounds: where T: Clone + Default
+    pub where_clause: WhereClause,
     pub variants: Vec<EnumVariant>,
     pub visibility: Visibility,
     /// Attributes like #[strong]
@@ -387,6 +416,8 @@ pub struct TraitDef {
     pub name: String,
     /// Generic type parameters: trait Foo<T>
     pub generic_params: Vec<String>,
+    /// Where clause for trait bounds: where T: Clone + Default
+    pub where_clause: WhereClause,
     pub methods: Vec<FunctionDef>,
     pub visibility: Visibility,
     /// Documentation comment for API doc generation
@@ -396,6 +427,10 @@ pub struct TraitDef {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplBlock {
     pub span: Span,
+    /// Generic type parameters: impl[T]
+    pub generic_params: Vec<String>,
+    /// Where clause for trait bounds: where T: Clone + Default
+    pub where_clause: WhereClause,
     pub target_type: Type,
     pub trait_name: Option<String>,
     pub methods: Vec<FunctionDef>,
@@ -667,6 +702,9 @@ pub enum Type {
         ret: Option<Box<Type>>,
     },
     Union(Vec<Type>),
+    /// Dynamic trait object: dyn Trait
+    /// Allows storing any type that implements the trait
+    DynTrait(String),
     Optional(Box<Type>),
     /// Constructor type: Constructor[T] or Constructor[T, (args)]
     /// Represents a constructor that produces T or a subtype of T
