@@ -1,0 +1,239 @@
+/// Comprehensive tests for the Mock library
+/// Tests Mocks, Spies, Stubs, and Call Verification
+
+import std.spec
+
+describe "Mock Objects":
+
+    describe "Mock - Basic Usage":
+        it "mock returns configured value":
+            let mock = Mock.new(42)
+            let result = mock.call([])
+            expect result == 42
+
+        it "mock tracks calls":
+            let mock = Mock.new("hello")
+            mock.call([])
+            expect mock.called()
+
+        it "mock records call arguments":
+            let mock = Mock.new(nil)
+            mock.call([1, 2, 3])
+            let args = mock.last_call_args()
+            expect args.len() == 3
+            expect args[0] == 1
+
+    describe "Mock - Call Tracking":
+        given_lazy :mock, \:
+            Mock.new(100)
+
+        it "tracks multiple calls":
+            mock.call([1])
+            mock.call([2])
+            mock.call([3])
+            expect mock.call_count() == 3
+
+        it "returns all call history":
+            mock.call([10])
+            mock.call([20])
+            let calls = mock.calls()
+            expect calls.len() == 2
+
+        it "can reset call history":
+            mock.call([])
+            expect mock.call_count() == 1
+            mock.reset()
+            expect mock.call_count() == 0
+
+    describe "Mock - Configuration":
+        it "can change return value":
+            let mock = Mock.new(1)
+            expect mock.call([]) == 1
+            mock.returns(2)
+            expect mock.call([]) == 2
+
+        it "can be configured to throw":
+            let mock = Mock.new(42)
+            mock.throws("error message")
+
+            let error_caught = false
+            try:
+                mock.call([])
+            catch:
+                error_caught = true
+
+            expect error_caught
+
+    describe "Mock - Call Verification":
+        it "verifies call count":
+            let mock = Mock.new(nil)
+            mock.call([1])
+            mock.call([2])
+            expect mock.call_count() == 2
+
+        it "verifies mock was called":
+            let mock = Mock.new(nil)
+            expect not mock.called()
+            mock.call([])
+            expect mock.called()
+
+        it "verifies last call arguments":
+            let mock = Mock.new(nil)
+            mock.call([10, 20])
+            let last_args = mock.last_call_args()
+            expect last_args[0] == 10
+            expect last_args[1] == 20
+
+    describe "Spy - Wrapping Real Functions":
+        it "spy calls real function":
+            let real_fn = fn(args: List[Any]) -> Int:
+                return 42
+
+            let spy = Spy.new(real_fn)
+            let result = spy.call([])
+            expect result == 42
+
+        it "spy tracks real function calls":
+            let real_fn = fn(args: List[Any]) -> String:
+                return "real result"
+
+            let spy = Spy.new(real_fn)
+            spy.call([])
+            spy.call([])
+            expect spy.call_count() == 2
+
+        it "spy records function arguments":
+            let real_fn = fn(args: List[Any]) -> Any:
+                return args[0]
+
+            let spy = Spy.new(real_fn)
+            spy.call([100])
+            spy.call([200])
+
+            let first_call = spy.call_at(0)
+            let second_call = spy.call_at(1)
+            expect first_call.args[0] == 100
+            expect second_call.args[0] == 200
+
+        it "spy can be reset":
+            let real_fn = fn(args: List[Any]) -> Int:
+                return 99
+
+            let spy = Spy.new(real_fn)
+            spy.call([])
+            expect spy.call_count() == 1
+            spy.reset()
+            expect spy.call_count() == 0
+
+    describe "Stub - Simple Replacement":
+        it "stub returns value":
+            let stub = Stub.new(100)
+            expect stub.call() == 100
+
+        it "stub can be reconfigured":
+            let stub = Stub.new(1)
+            expect stub.call() == 1
+            stub.returns(2)
+            expect stub.call() == 2
+
+    describe "Call Verification - Helpers":
+        it "verifies called count":
+            let mock = Mock.new(nil)
+            mock.call([])
+            mock.call([])
+            let call_count = mock.call_count()
+            # Would use: CallVerifier.verify_called(call_count, 2, "mock_name")
+            expect call_count == 2
+
+        it "verifies not called":
+            let mock = Mock.new(nil)
+            expect mock.call_count() == 0
+            expect not mock.called()
+
+        it "verifies called at least":
+            let mock = Mock.new(nil)
+            mock.call([])
+            mock.call([])
+            mock.call([])
+            expect mock.call_count() >= 2
+
+    describe "Real-World Patterns":
+        context "mocking a service":
+            given_lazy :user_service, \:
+                Mock.new({ id: 1, name: "Alice", email: "alice@example.com" })
+
+            it "mock service returns test data":
+                let user = user_service.call([1])
+                expect user.id == 1
+                expect user.name == "Alice"
+
+            it "tracks service calls":
+                user_service.call([1])
+                user_service.call([2])
+                user_service.call([3])
+                expect user_service.call_count() == 3
+
+        context "spying on database operations":
+            given_lazy :db_spy, \:
+                Spy.new(fn(args: List[Any]) -> Int:
+                    return args.len()  # Return arg count
+                )
+
+            it "spy tracks database calls":
+                db_spy.call([1, 2, 3])
+                db_spy.call([4, 5])
+                expect db_spy.call_count() == 2
+
+            it "spy verifies call arguments":
+                db_spy.call([10, 20, 30])
+                let args = db_spy.last_call_args()
+                expect args[0] == 10
+                expect args[1] == 20
+
+        context "stubbing external dependencies":
+            given_lazy :config_stub, \:
+                Stub.new({ api_key: "test_key", timeout: 30 })
+
+            it "stub provides test configuration":
+                let config = config_stub.call()
+                expect config.api_key == "test_key"
+                expect config.timeout == 30
+
+describe "Mock Integration Patterns":
+
+    describe "Testing with mocks":
+        context "testing api client":
+            given_lazy :http_mock, \:
+                Mock.new({ status: 200, body: "success" })
+
+            given_lazy :api_client, \:
+                { make_request: http_mock }
+
+            it "api client uses mock response":
+                let response = api_client.make_request.call([])
+                expect response.status == 200
+
+            it "tracks api calls":
+                api_client.make_request.call([])
+                expect api_client.make_request.call_count() == 1
+
+    describe "Combining mocks and expectations":
+        context "with multiple mocks":
+            given_lazy :user_mock, \:
+                Mock.new({ id: 42, name: "Test" })
+
+            given_lazy :db_mock, \:
+                Mock.new(true)  # Success response
+
+            it "both mocks track calls":
+                user_mock.call([])
+                db_mock.call([])
+                expect user_mock.called()
+                expect db_mock.called()
+
+            it "verify both were called":
+                user_mock.call([1])
+                db_mock.call([1])
+                user_mock.call([2])
+                expect user_mock.call_count() == 2
+                expect db_mock.call_count() == 1

@@ -132,9 +132,22 @@ impl<'a> Parser<'a> {
                 value,
             }))
         } else {
+            // Check for colon-block on plain identifier FIRST
+            // e.g., `given:` or `describe:` without arguments
+            // This must come before can_start_argument() check because colon is in that list
+            if self.is_callable_expr(&expr) && self.is_at_colon_block() {
+                if let Some(block_lambda) = self.try_parse_colon_block()? {
+                    let args = vec![Argument {
+                        name: None,
+                        value: block_lambda,
+                    }];
+                    let call_expr = self.make_call_expr(expr, args);
+                    return Ok(Node::Expression(call_expr));
+                }
+            }
             // Check for no-parentheses call at statement level
             // Only for identifiers or field access followed by argument-starting tokens
-            if self.is_callable_expr(&expr) && self.can_start_argument() {
+            else if self.is_callable_expr(&expr) && self.can_start_argument() {
                 let mut args = self.parse_no_paren_arguments()?;
 
                 // Check for trailing colon-block: func arg:
@@ -154,18 +167,6 @@ impl<'a> Parser<'a> {
                     return Ok(Node::Expression(call_expr));
                 }
             }
-            // Also check for colon-block on plain identifier (no other args)
-            // e.g., `describe:` without string argument
-            else if self.is_callable_expr(&expr) && self.check(&TokenKind::Colon) {
-                if let Some(block_lambda) = self.try_parse_colon_block()? {
-                    let args = vec![Argument {
-                        name: None,
-                        value: block_lambda,
-                    }];
-                    let call_expr = self.make_call_expr(expr, args);
-                    return Ok(Node::Expression(call_expr));
-                }
-            }
             Ok(Node::Expression(expr))
         }
     }
@@ -176,6 +177,17 @@ impl<'a> Parser<'a> {
             expr,
             Expr::Identifier(_) | Expr::FieldAccess { .. } | Expr::Path(_)
         )
+    }
+
+    /// Check if we're at a colon-block pattern: `:` followed by newline and indent
+    /// This is used to distinguish `func:` blocks from `func name: value` named args
+    fn is_at_colon_block(&mut self) -> bool {
+        if !self.check(&TokenKind::Colon) {
+            return false;
+        }
+
+        // Peek ahead to see if there's a newline after the colon
+        self.peek_is(&TokenKind::Newline)
     }
 
     /// Check if current token can start an argument (for no-parens calls)
