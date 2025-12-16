@@ -117,6 +117,31 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_enum_discriminant", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_enum_payload", &[I64], &[I64]),
     // =========================================================================
+    // Unique pointer operations (GC-collaborative manual memory)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_unique_new", &[I64], &[I64]),        // value -> unique ptr
+    RuntimeFuncSpec::new("rt_unique_get", &[I64], &[I64]),        // unique -> value
+    RuntimeFuncSpec::new("rt_unique_set", &[I64, I64], &[I64]),   // unique, new_value -> success
+    RuntimeFuncSpec::new("rt_unique_free", &[I64], &[]),          // unique -> ()
+    RuntimeFuncSpec::new("rt_unique_needs_trace", &[I64], &[I64]), // unique -> bool
+    // =========================================================================
+    // Shared pointer operations (reference-counted, GC-collaborative)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_shared_new", &[I64], &[I64]),        // value -> shared ptr
+    RuntimeFuncSpec::new("rt_shared_get", &[I64], &[I64]),        // shared -> value
+    RuntimeFuncSpec::new("rt_shared_clone", &[I64], &[I64]),      // shared -> shared (inc refcount)
+    RuntimeFuncSpec::new("rt_shared_ref_count", &[I64], &[I64]),  // shared -> count
+    RuntimeFuncSpec::new("rt_shared_release", &[I64], &[I64]),    // shared -> freed?
+    RuntimeFuncSpec::new("rt_shared_needs_trace", &[I64], &[I64]), // shared -> bool
+    RuntimeFuncSpec::new("rt_shared_downgrade", &[I64], &[I64]),  // shared -> weak
+    // =========================================================================
+    // Weak pointer operations (non-owning reference to shared)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_weak_new", &[I64, I64], &[I64]),     // shared_value, addr -> weak
+    RuntimeFuncSpec::new("rt_weak_upgrade", &[I64], &[I64]),      // weak -> shared or NIL
+    RuntimeFuncSpec::new("rt_weak_is_valid", &[I64], &[I64]),     // weak -> bool
+    RuntimeFuncSpec::new("rt_weak_free", &[I64], &[]),            // weak -> ()
+    // =========================================================================
     // Raw memory allocation (zero-cost struct support)
     // =========================================================================
     RuntimeFuncSpec::new("rt_alloc", &[I64], &[I64]),
@@ -129,9 +154,54 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_wait", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_future_new", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_future_await", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_future_is_ready", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_future_get_result", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_future_all", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_future_race", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_future_resolve", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_future_reject", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_actor_spawn", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_actor_send", &[I64, I64], &[]),
     RuntimeFuncSpec::new("rt_actor_recv", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_actor_join", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_actor_id", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_actor_is_alive", &[I64], &[I64]),
+    // =========================================================================
+    // Channel operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_channel_new", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_channel_send", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_channel_recv", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_channel_try_recv", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_channel_recv_timeout", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_channel_close", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_channel_is_closed", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_channel_id", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_channel_free", &[I64], &[]),
+    // =========================================================================
+    // Executor operations (thread pool / manual mode)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_executor_set_mode", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_executor_get_mode", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_executor_start", &[], &[]),
+    RuntimeFuncSpec::new("rt_executor_set_workers", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_executor_poll", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_executor_poll_all", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_executor_pending_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_executor_shutdown", &[], &[]),
+    RuntimeFuncSpec::new("rt_executor_is_manual", &[], &[I64]),
+    // =========================================================================
+    // Isolated Thread operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_thread_spawn_isolated", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_thread_spawn_isolated2", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_thread_join", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_thread_is_done", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_thread_id", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_thread_free", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_thread_available_parallelism", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_thread_sleep", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_thread_yield", &[], &[]),
     // =========================================================================
     // Generator operations
     // =========================================================================
@@ -144,9 +214,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_generator_get_ctx", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_generator_mark_done", &[I64], &[]),
     // =========================================================================
-    // Interpreter bridge FFI
+    // Interpreter bridge FFI (for hybrid execution)
     // =========================================================================
-    RuntimeFuncSpec::new("rt_interp_call", &[I64, I64, I64], &[I64]),
+    // rt_interp_call(func_name_ptr: i64, func_name_len: i64, argc: i64, argv: i64) -> i64
+    RuntimeFuncSpec::new("rt_interp_call", &[I64, I64, I64, I64], &[I64]),
+    // rt_interp_eval(expr_index: i64) -> i64
     RuntimeFuncSpec::new("rt_interp_eval", &[I64], &[I64]),
     // =========================================================================
     // Error handling

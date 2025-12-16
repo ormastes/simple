@@ -1,10 +1,58 @@
 # Runtime configuration and state management
 # Manages global test settings and execution context
+# Extended with true lazy memoization support (TEST-012)
 
 # Global configuration
 let default_tags: List[Symbol] = []
 let default_timeout_ms: Int = 5000
 let current_example_state: Dict[String, Any] = {}
+
+# ============================================================================
+# TEST-012: MemoizedValue - True lazy memoization for let blocks
+# ============================================================================
+#
+# MemoizedValue wraps a block and caches its result on first access.
+# This enables true lazy evaluation - the block is only called when
+# the value is actually needed.
+#
+# Usage:
+#   let memo = MemoizedValue.new(\: expensive_computation())
+#   # ... later, only when needed:
+#   let value = memo.get()  # Evaluates block on first call
+#   let same = memo.get()   # Returns cached value
+#
+export class MemoizedValue[T]:
+    block: Fn() -> T
+    cached: Option[T]
+    evaluated: Bool
+
+    fn new(block: Fn() -> T) -> MemoizedValue[T]:
+        return MemoizedValue[T] {
+            block: block,
+            cached: None,
+            evaluated: false
+        }
+
+    # Get the memoized value, evaluating the block on first access
+    fn get(self) -> T:
+        if not self.evaluated:
+            self.cached = Some(self.block())
+            self.evaluated = true
+        match self.cached:
+            case Some(value):
+                return value
+            case None:
+                # This should never happen since we set evaluated=true above
+                panic("MemoizedValue: cached value is None after evaluation")
+
+    # Check if the value has been evaluated
+    fn is_evaluated(self) -> Bool:
+        return self.evaluated
+
+    # Reset the memoization (for use between examples)
+    fn reset(self) -> Void:
+        self.cached = None
+        self.evaluated = false
 
 # Set default tag for all examples in scope
 export fn tag_default(tag: Symbol) -> Void:
@@ -23,6 +71,29 @@ export fn set_example_state(key: String, value: Any) -> Void:
 
 export fn clear_example_state() -> Void:
     current_example_state.clear()
+
+# ============================================================================
+# Memoized value helpers for let blocks
+# ============================================================================
+
+# Store a memoized value block (lazy - not evaluated until accessed)
+export fn set_memoized(key: String, block: Fn() -> Any) -> Void:
+    let memo = MemoizedValue.new(block)
+    current_example_state[key] = memo
+
+# Get a memoized value, evaluating the block on first access
+export fn get_memoized(key: String) -> Option[Any]:
+    match current_example_state.get(key):
+        case Some(memo):
+            # Cast to MemoizedValue and get the value
+            let memoized = memo as MemoizedValue[Any]
+            return Some(memoized.get())
+        case None:
+            return None
+
+# Check if a memoized value exists
+export fn has_memoized(key: String) -> Bool:
+    return current_example_state.contains_key(key)
 
 # Execution context
 export class ExecutionContext:

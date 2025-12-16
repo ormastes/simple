@@ -17,6 +17,8 @@ pub enum HeapObjectType {
     Unique = 0x0B,
     Shared = 0x0C,
     Borrow = 0x0D,
+    Channel = 0x0E,
+    Weak = 0x0F,
 }
 
 /// Header for all heap-allocated objects

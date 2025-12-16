@@ -29,6 +29,7 @@ use simple_type::check as type_check;
 use tracing::instrument;
 
 use crate::codegen::Codegen;
+use crate::compilability::analyze_module;
 use crate::hir;
 use crate::import_loader::{has_script_statements, load_module_with_imports};
 use crate::interpreter::evaluate_module;
@@ -294,8 +295,16 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
-        // 4-6. Type check and lower to MIR
-        let mir_module = self.type_check_and_lower(&ast_module)?;
+        // 4. Compilability analysis for hybrid execution
+        let compilability = analyze_module(&ast_module.items);
+        let non_compilable: HashSet<String> = compilability
+            .iter()
+            .filter(|(_, status)| !status.is_compilable())
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        // 5-7. Type check and lower to MIR
+        let mut mir_module = self.type_check_and_lower(&ast_module)?;
 
         // Check if we have a main function. If not, fall back to interpreter mode.
         // This handles cases like `main = 42` which are module-level constants,
@@ -308,13 +317,22 @@ impl CompilerPipeline {
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
-        // 7. Generate machine code via Cranelift
+        // 8. Apply hybrid transformation if needed
+        if !non_compilable.is_empty() {
+            mir::apply_hybrid_transform(&mut mir_module, &non_compilable);
+            tracing::debug!(
+                "Hybrid execution: {} functions require interpreter fallback",
+                non_compilable.len()
+            );
+        }
+
+        // 9. Generate machine code via Cranelift
         let codegen = Codegen::new().map_err(|e| CompileError::Codegen(format!("{e}")))?;
         let object_code = codegen
             .compile_module(&mir_module)
             .map_err(|e| CompileError::Codegen(format!("{e}")))?;
 
-        // 8. Wrap object code in SMF format
+        // 10. Wrap object code in SMF format
         Ok(generate_smf_from_object(&object_code, self.gc.as_ref()))
     }
 
@@ -353,8 +371,16 @@ impl CompilerPipeline {
             ));
         }
 
-        // 4-6. Type check and lower to MIR
-        let mir_module = self.type_check_and_lower(&ast_module)?;
+        // 4. Compilability analysis for hybrid execution
+        let compilability = analyze_module(&ast_module.items);
+        let non_compilable: HashSet<String> = compilability
+            .iter()
+            .filter(|(_, status)| !status.is_compilable())
+            .map(|(name, _)| name.clone())
+            .collect();
+
+        // 5-7. Type check and lower to MIR
+        let mut mir_module = self.type_check_and_lower(&ast_module)?;
 
         // Check if we have a main function. If not, fall back to interpreter mode.
         let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
@@ -370,14 +396,24 @@ impl CompilerPipeline {
             ));
         }
 
-        // 7. Generate machine code via Cranelift for the target architecture
+        // 8. Apply hybrid transformation if needed
+        if !non_compilable.is_empty() {
+            mir::apply_hybrid_transform(&mut mir_module, &non_compilable);
+            tracing::debug!(
+                "Hybrid execution (target {:?}): {} functions require interpreter fallback",
+                target,
+                non_compilable.len()
+            );
+        }
+
+        // 9. Generate machine code via Cranelift for the target architecture
         let codegen =
             Codegen::for_target(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
         let object_code = codegen
             .compile_module(&mir_module)
             .map_err(|e| CompileError::Codegen(format!("{e}")))?;
 
-        // 8. Wrap object code in SMF format for the target
+        // 10. Wrap object code in SMF format for the target
         Ok(generate_smf_from_object_for_target(
             &object_code,
             self.gc.as_ref(),

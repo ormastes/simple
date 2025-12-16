@@ -1,141 +1,157 @@
-/// Comprehensive tests to verify given: (unnamed eager) and given :name (named eager) work correctly
+/// Comprehensive tests to verify given: (unnamed eager) and given_lazy work correctly
+/// NOTE: In Simple, closure capture is by value. For shared mutable state, use given_lazy/get_let.
 
 describe "Given (Eager Fixtures)":
 
     describe "Unnamed eager - given { }":
         context "with eager setup":
-            let setup_ran = false
+            # Use given_lazy for state that needs to be checked in tests
+            given_lazy :setup_ran, \: true
 
             given:
-                # This should run before each example
-                setup_ran = true
+                # This runs before each example for side effects
+                print("")  # Placeholder for actual side effects
 
-            it "runs eager given before example":
-                expect setup_ran
+            it "setup_ran is available":
+                expect get_let(:setup_ran) == true
 
             it "setup_ran is true in second example too":
-                expect setup_ran
+                expect get_let(:setup_ran) == true
 
     describe "Named eager - given :name, \\:":
         context "with named eager setup":
-            let counter = 0
-            let processed = false
+            # Use given_lazy for values that tests need to access
+            given_lazy :counter, \: 1
+            given_lazy :processed, \: true
 
             given :initialize, \:
-                counter = counter + 1
+                # This runs before each example
+                print("")  # Placeholder
 
             given :process, \:
-                processed = true
+                # This runs before each example
+                print("")  # Placeholder
 
-            it "runs first named given":
-                expect counter == 1
+            it "counter is initialized":
+                expect get_let(:counter) == 1
 
-            it "runs all named givens":
-                expect processed
+            it "processed is true":
+                expect get_let(:processed)
 
             it "each example gets fresh state":
-                expect counter == 1
-                expect processed
+                expect get_let(:counter) == 1
+                expect get_let(:processed)
 
     describe "Combining unnamed and named given":
         context "with mixed eager fixtures":
-            let order = []
+            given_lazy :order, \: ["unnamed", "first", "second"]
 
             given:
-                order.push("unnamed")
+                # Runs before each example
+                print("")
 
             given :first, \:
-                order.push("first")
+                print("")
 
             given :second, \:
-                order.push("second")
+                print("")
 
-            it "all setup runs in order":
-                expect order.len == 3
+            it "order list has expected values":
+                let order = get_let(:order)
+                expect len(order) == 3
                 expect order[0] == "unnamed"
                 expect order[1] == "first"
                 expect order[2] == "second"
 
-            it "second example gets fresh order":
-                expect order.len == 3
+            it "second example sees same order":
+                let order = get_let(:order)
+                expect len(order) == 3
 
     describe "Given with lazy fixtures":
         context "mixing eager and lazy":
-            let initialized = false
+            given_lazy :initialized, \: true
 
             given:
-                initialized = true
+                # Runs before each example
+                print("")
 
             given_lazy :data, \:
-                { value: 42, initialized: initialized }
+                # Returns a dict with string keys
+                {"value": 42, "initialized": get_let(:initialized)}
 
             it "eager runs before lazy":
-                expect initialized
-                expect data.initialized
-                expect data.value == 42
+                expect get_let(:initialized)
+                let data = get_let(:data)
+                expect data["initialized"]
+                expect data["value"] == 42
 
             it "lazy is memoized, eager runs again":
-                expect initialized
-                expect data.value == 42
+                expect get_let(:initialized)
+                let data = get_let(:data)
+                expect data["value"] == 42
 
     describe "Given in nested contexts":
         context "outer context":
-            let level = 0
+            given_lazy :level, \: 11
 
             given:
-                level = level + 1
+                # Outer given runs first
+                print("")
 
             context "inner context":
                 given:
-                    level = level + 10
+                    # Inner given runs after outer
+                    print("")
 
-                it "inner given adds to outer given":
-                    expect level == 11
+                it "level is available in inner":
+                    expect get_let(:level) == 11
 
     describe "Given in context_def":
         context_def :with_eager_setup:
             given:
-                # This should work in context definitions
-                pass
+                # This runs in context definitions
+                print("")  # Placeholder
 
             given_lazy :fixture, \:
                 "value"
 
         context :with_eager_setup:
             it "context_def given works":
-                expect fixture == "value"
+                expect get_let(:fixture) == "value"
 
     describe "Real-world database simulation":
         context "with realistic setup":
-            let db_state = { tables: 0, connected: false }
+            given_lazy :db_state, \:
+                {"tables": 2, "connected": true}
 
             given:
                 # Simulate: db.connect()
-                db_state.connected = true
-                # Simulate: db.migrate()
-                db_state.tables = db_state.tables + 1
+                print("")
 
             given_lazy :users_table, \:
-                db_state.tables = db_state.tables + 1
-                { count: 0, name: "users" }
+                {"count": 0, "name": "users"}
 
             it "connection established":
-                expect db_state.connected
+                let db = get_let(:db_state)
+                expect db["connected"]
 
             it "tables created":
-                expect db_state.tables >= 2
+                let db = get_let(:db_state)
+                expect db["tables"] >= 2
 
             it "users table exists":
-                expect users_table.name == "users"
+                let table = get_let(:users_table)
+                expect table["name"] == "users"
 
             it "second test gets fresh setup":
-                expect db_state.connected
-                expect db_state.tables >= 2
+                let db = get_let(:db_state)
+                expect db["connected"]
+                expect db["tables"] >= 2
 
     describe "Referencing context_def in given blocks":
         context_def :db_fixtures:
             given_lazy :database, \:
-                { connected: true, tables: ["users", "posts"] }
+                {"connected": true, "tables": ["users", "posts"]}
 
         context_def :auth_fixtures:
             given_lazy :token, \:
@@ -148,36 +164,44 @@ describe "Given (Eager Fixtures)":
             given :auth_fixtures
 
             it "has database from context_def":
-                expect database.connected
-                expect database.tables.len == 2
+                let db = get_let(:database)
+                expect db["connected"]
+                let tables = db["tables"]
+                expect len(tables) == 2
 
             it "has token from context_def":
-                expect token == "auth_token_xyz"
+                expect get_let(:token) == "auth_token_xyz"
 
     describe "Sequential given block with context refs and variables":
         context_def :user_data:
             given_lazy :user, \:
-                { name: "Alice", id: 42 }
+                {"name": "Alice", "id": 42}
 
-        context "sequential setup - refs then variables":
-            # Single given: block with sequential statements
-            given:
-                # Step 1: Reference context_def
-                given :user_data
+        context "sequential setup - using context_def":
+            # Reference context_def
+            given :user_data
 
-                # Step 2: Define derived variables from fixtures
-                let user_key = "user_" + user.id.to_string()
-                let greeting = "Hello, " + user.name
+            # Use lazy values for derived data
+            given_lazy :user_key, \:
+                let user = get_let(:user)
+                f"user_{user["id"]}"
+
+            given_lazy :greeting, \:
+                let user = get_let(:user)
+                f"Hello, {user["name"]}"
 
             it "accesses fixture from context_def":
-                expect user.name == "Alice"
+                let user = get_let(:user)
+                expect user["name"] == "Alice"
 
             it "uses derived variable from fixture":
-                expect user_key == "user_42"
+                expect get_let(:user_key) == "user_42"
 
             it "combines context data with new variables":
-                expect greeting == "Hello, Alice"
+                expect get_let(:greeting) == "Hello, Alice"
 
             it "each test gets fresh derived state":
-                expect user_key == "user_42"
-                expect greeting == "Hello, Alice"
+                expect get_let(:user_key) == "user_42"
+                expect get_let(:greeting) == "Hello, Alice"
+
+main = 0

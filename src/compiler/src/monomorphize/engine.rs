@@ -1,7 +1,7 @@
 //! Monomorphization engine implementation.
 
 use super::table::MonomorphizationTable;
-use super::types::{ConcreteType, SpecializationKey, TypeBindings};
+use super::types::{ConcreteType, SpecializationKey};
 use super::util::{ast_type_to_concrete, concrete_to_ast_type};
 use simple_parser::ast::{
     Block, ClassDef, Expr, FunctionDef, Module, Node, StructDef, Type as AstType, Field,

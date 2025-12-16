@@ -474,3 +474,28 @@ fn parse_class_with_methods() {
 fn parse_match_with_patterns() {
     parse_ok("match opt:\n    Option::Some(x) =>\n        x\n    Option::None =>\n        0");
 }
+
+/// `expect await f == 42` should parse as `expect((await f) == 42)`
+/// This tests that `await` is recognized as starting an argument in no-paren calls.
+#[test]
+fn test_expect_await_parsing() {
+    let items = parse("expect await f == 42");
+    // Should parse as a single expression (function call), not two separate statements
+    assert_eq!(items.len(), 1, "should be single statement, not two");
+    // The expression should be a call to 'expect'
+    match &items[0] {
+        Node::Expression(Expr::Call { callee, args }) => {
+            assert!(matches!(**callee, Expr::Identifier(ref name) if name == "expect"));
+            assert_eq!(args.len(), 1);
+            // The argument should be: (await f) == 42
+            match &args[0].value {
+                Expr::Binary { op: BinOp::Eq, left, right } => {
+                    assert!(matches!(**left, Expr::Await(_)));
+                    assert!(matches!(**right, Expr::Integer(42)));
+                }
+                other => panic!("expected Binary Eq, got {:#?}", other),
+            }
+        }
+        other => panic!("expected Call expression, got {:#?}", other),
+    }
+}

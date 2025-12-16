@@ -370,6 +370,61 @@ pub(crate) fn evaluate_expr(
                         Err(CompileError::Semantic(format!("unknown class {class_name}")))
                     }
                 }
+                // String property access (e.g., str.len, str.is_empty)
+                Value::Str(ref s) => {
+                    match field.as_str() {
+                        "len" => Ok(Value::Int(s.len() as i64)),
+                        "byte_len" => Ok(Value::Int(s.len() as i64)),
+                        "char_count" => Ok(Value::Int(s.chars().count() as i64)),
+                        "is_empty" => Ok(Value::Bool(s.is_empty())),
+                        _ => Err(CompileError::Semantic(format!("unknown property '{field}' on String"))),
+                    }
+                }
+                // Array property access (e.g., arr.len, arr.is_empty)
+                Value::Array(ref arr) => {
+                    match field.as_str() {
+                        "len" => Ok(Value::Int(arr.len() as i64)),
+                        "is_empty" => Ok(Value::Bool(arr.is_empty())),
+                        _ => Err(CompileError::Semantic(format!("unknown property '{field}' on Array"))),
+                    }
+                }
+                // Tuple property access (e.g., tup.len)
+                Value::Tuple(ref tup) => {
+                    match field.as_str() {
+                        "len" => Ok(Value::Int(tup.len() as i64)),
+                        _ => Err(CompileError::Semantic(format!("unknown property '{field}' on Tuple"))),
+                    }
+                }
+                // Dict property access (e.g., dict.len, dict.is_empty)
+                Value::Dict(ref map) => {
+                    match field.as_str() {
+                        "len" => Ok(Value::Int(map.len() as i64)),
+                        "is_empty" => Ok(Value::Bool(map.is_empty())),
+                        _ => Err(CompileError::Semantic(format!("unknown property '{field}' on Dict"))),
+                    }
+                }
+                // Enum property access (Option/Result properties)
+                Value::Enum { ref enum_name, ref variant, .. } => {
+                    // Option properties: is_some, is_none
+                    if enum_name == "Option" {
+                        match field.as_str() {
+                            "is_some" => Ok(Value::Bool(variant == "Some")),
+                            "is_none" => Ok(Value::Bool(variant == "None")),
+                            _ => Err(CompileError::Semantic(format!("unknown property '{field}' on Option"))),
+                        }
+                    }
+                    // Result properties: is_ok, is_err
+                    else if enum_name == "Result" {
+                        match field.as_str() {
+                            "is_ok" => Ok(Value::Bool(variant == "Ok")),
+                            "is_err" => Ok(Value::Bool(variant == "Err")),
+                            _ => Err(CompileError::Semantic(format!("unknown property '{field}' on Result"))),
+                        }
+                    }
+                    else {
+                        Err(CompileError::Semantic(format!("unknown property '{field}' on enum {enum_name}")))
+                    }
+                }
                 _ => Err(CompileError::Semantic("field access on non-object".into())),
             }
         }

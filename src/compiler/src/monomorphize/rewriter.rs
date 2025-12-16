@@ -2,9 +2,9 @@
 
 use super::analyzer::CallSiteAnalyzer;
 use super::engine::Monomorphizer;
-use super::types::{ConcreteType, PointerKind};
-use super::util::{concrete_to_ast_type, infer_concrete_type, type_uses_param};
-use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node, Type as AstType};
+use super::types::ConcreteType;
+use super::util::{infer_concrete_type, type_uses_param};
+use simple_parser::ast::{Block, Expr, FunctionDef, Module, Node};
 use std::collections::HashMap;
 
 /// Convenience function to analyze a module and run monomorphization.

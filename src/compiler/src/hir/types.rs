@@ -535,6 +535,11 @@ pub enum HirExprKind {
     // Memory operations
     Ref(Box<HirExpr>),
     Deref(Box<HirExpr>),
+    /// Allocate a new pointer wrapping a value
+    PointerNew {
+        kind: PointerKind,
+        value: Box<HirExpr>,
+    },
 
     // Cast
     Cast {
@@ -567,6 +572,16 @@ pub enum HirExprKind {
         name: String,
         args: Vec<HirExpr>,
     },
+
+    // Contract expressions (Design by Contract support)
+    /// Reference to an old() snapshot captured at function entry.
+    /// The index refers to the position in HirContract.old_values.
+    ContractOld {
+        snapshot_index: usize,
+    },
+    /// Reference to the return value (ret) or error value (err) in postconditions.
+    /// Used in out(ret): and out_err(err): blocks.
+    ContractResult,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -722,6 +737,13 @@ pub struct HirContract {
     /// Captured "old" values - (local_index, snapshot_index)
     /// These are expressions evaluated at function entry for use in postconditions
     pub old_values: Vec<(usize, HirExpr)>,
+
+    // Union return type info for success/error detection
+    /// For union return types (T | E1 | E2 | ...), the TypeId of the success type (T).
+    /// If Some, the return type is a union and we can distinguish success/error exits.
+    pub success_type: Option<TypeId>,
+    /// For union return types, the TypeIds of error types (E1, E2, ...).
+    pub error_types: Vec<TypeId>,
 }
 
 impl HirContract {
@@ -731,6 +753,22 @@ impl HirContract {
             && self.invariants.is_empty()
             && self.postconditions.is_empty()
             && self.error_postconditions.is_empty()
+    }
+
+    /// Check if this contract has a union return type (success/error distinction)
+    pub fn has_union_return(&self) -> bool {
+        self.success_type.is_some()
+    }
+
+    /// Check if a given type is an error type (not the success type)
+    pub fn is_error_type(&self, ty: TypeId) -> bool {
+        if let Some(success_ty) = self.success_type {
+            // If it's not the success type, it's an error type
+            ty != success_ty
+        } else {
+            // No union return type, so no error types
+            false
+        }
     }
 }
 
@@ -754,12 +792,51 @@ impl HirFunction {
     }
 }
 
+/// HIR class/type invariant - checked after constructor and public methods
+#[derive(Debug, Clone, Default)]
+pub struct HirClassInvariant {
+    /// Invariant conditions to check
+    pub conditions: Vec<HirContractClause>,
+}
+
+impl HirClassInvariant {
+    /// Check if the invariant has any conditions
+    pub fn is_empty(&self) -> bool {
+        self.conditions.is_empty()
+    }
+}
+
+/// HIR class definition
+#[derive(Debug, Clone)]
+pub struct HirClass {
+    pub name: String,
+    pub type_id: TypeId,
+    pub fields: Vec<(String, TypeId)>,
+    pub methods: Vec<HirFunction>,
+    pub visibility: Visibility,
+    /// Class invariant - checked after constructor and all public methods
+    pub invariant: Option<HirClassInvariant>,
+}
+
+impl HirClass {
+    /// Check if this class has an invariant to check
+    pub fn has_invariant(&self) -> bool {
+        self.invariant.as_ref().map(|i| !i.is_empty()).unwrap_or(false)
+    }
+
+    /// Check if this class is public
+    pub fn is_public(&self) -> bool {
+        self.visibility.is_public()
+    }
+}
+
 /// HIR module
 #[derive(Debug)]
 pub struct HirModule {
     pub name: Option<String>,
     pub types: TypeRegistry,
     pub functions: Vec<HirFunction>,
+    pub classes: Vec<HirClass>,
     pub globals: Vec<(String, TypeId)>,
 }
 
@@ -769,6 +846,7 @@ impl HirModule {
             name: None,
             types: TypeRegistry::new(),
             functions: Vec::new(),
+            classes: Vec::new(),
             globals: Vec::new(),
         }
     }

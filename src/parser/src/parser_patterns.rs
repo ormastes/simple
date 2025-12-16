@@ -90,17 +90,27 @@ impl<'a> Parser<'a> {
                     });
                 }
 
-                // Check for builtin enum pattern without qualifier: Some(x), Ok(val), Err(e)
-                // These are shorthand for Option::Some, Result::Ok, Result::Err
+                // Check for unit enum variants without parentheses: None
+                // These are builtin variants that don't take a payload
+                if name == "None" {
+                    return Ok(Pattern::Enum {
+                        name: "Option".to_string(),
+                        variant: "None".to_string(),
+                        payload: None,
+                    });
+                }
+
+                // Check for enum variant pattern with parentheses: VariantName(...)
+                // This handles both builtin (Some, Ok, Err) and user-defined variants
                 if self.check(&TokenKind::LParen) {
+                    // Map builtin variants to their enum types
                     let (enum_name, variant) = match name.as_str() {
                         "Some" => ("Option".to_string(), "Some".to_string()),
                         "Ok" => ("Result".to_string(), "Ok".to_string()),
                         "Err" => ("Result".to_string(), "Err".to_string()),
-                        _ => {
-                            // Not a known builtin enum variant, treat as identifier
-                            return Ok(Pattern::Identifier(name));
-                        }
+                        // For user-defined variants, use "_" as placeholder enum name
+                        // The interpreter will resolve based on the value being matched
+                        _ => ("_".to_string(), name.clone()),
                     };
                     self.advance(); // consume LParen
                     let mut patterns = Vec::new();

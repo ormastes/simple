@@ -266,27 +266,103 @@ for msg in results:
 
 ## Futures and Promises
 
-Simple provides TypeScript-style async/await for asynchronous computations.
+Simple provides TypeScript/JavaScript-style async/await for asynchronous computations with configurable execution modes.
+
+### Execution Modes
+
+Simple supports two execution modes for futures, selectable at program startup:
+
+| Mode | Description | Use Case |
+|------|-------------|----------|
+| **Threaded** (default) | Futures execute in a background thread pool | General applications, like JavaScript |
+| **Manual** | Futures are queued and must be polled | Embedded systems, game loops |
+
+#### Threaded Mode (Default)
+
+In threaded mode, futures execute in a background thread pool similar to JavaScript's event loop. When you create a future, it immediately starts executing in a worker thread.
+
+```simple
+# Futures run in background automatically
+let f1 = future(expensive_computation())
+let f2 = future(fetch_data())
+
+# await blocks until the future completes
+let result1 = await f1
+let result2 = await f2
+```
+
+Configure the thread pool size:
+
+```simple
+async_workers(8)  # Use 8 worker threads
+```
+
+#### Manual Mode (Embedded)
+
+For embedded systems or game loops where you need precise control over when async work executes, use manual mode:
+
+```simple
+# Set manual mode before creating any futures
+async_mode("manual")
+
+# Create futures - they don't execute yet
+let f1 = future(compute_physics())
+let f2 = future(update_ai())
+
+# In your main loop, poll futures explicitly
+fn game_loop():
+    while running:
+        # Poll individual futures
+        poll_future(f1)
+        poll_future(f2)
+
+        # Or poll all pending futures
+        poll_all_futures()
+
+        # Check results
+        if is_ready(f1):
+            let physics = await f1
+
+        render()
+```
+
+#### Configuration Functions
+
+| Function | Description |
+|----------|-------------|
+| `async_mode()` | Get current mode ("threaded" or "manual") |
+| `async_mode("threaded")` | Set threaded mode |
+| `async_mode("manual")` | Set manual mode |
+| `async_workers(n)` | Set thread pool size (threaded mode only) |
+| `poll_future(f)` | Poll a future manually (manual mode) |
+| `poll_all_futures()` | Poll all pending futures |
+| `pending_futures()` | Get count of pending futures |
 
 ### Future Type
 
 ```simple
-enum Future<T>:
-    Pending
-    Running
-    Resolved(T)
-    Rejected(Error)
+enum FutureState:
+    Pending     # Not started
+    Running     # Currently executing
+    Fulfilled   # Completed successfully
+    Rejected    # Completed with error
 ```
 
-### Promise Type
+### Creating Futures
 
 ```simple
-let (future, promise) = promise<i64>()
+# Create a future that computes a value
+let f = future(compute_value())
 
-# Later, resolve or reject
-promise.resolve(42)
-# or
-promise.reject(Error("Something went wrong"))
+# Create an already-resolved future
+let resolved = resolved(42)
+
+# Create an already-rejected future
+let rejected = rejected("error message")
+
+# Check if a future is ready
+if is_ready(f):
+    let result = await f
 ```
 
 ### Async/Await Syntax
@@ -297,7 +373,7 @@ fn fetch_data() async -> Data:
     return parse(response)
 ```
 
-`await` can only be used inside `async` functions.
+`await` can only be used inside `async` functions. In manual mode, `await` automatically polls the future if needed.
 
 ### Future Combinators
 
@@ -447,6 +523,98 @@ actor GameWorld:
 ```
 
 See [Unit Types](units.md) for the complete type safety policy.
+
+---
+
+## Runtime Implementation Status
+
+### Actor FFI Functions
+
+| Function | Status | Description |
+|----------|--------|-------------|
+| `rt_actor_spawn(body_func, ctx)` | ✅ | Spawn actor with body function pointer |
+| `rt_actor_send(actor, msg)` | ✅ | Send message (as RuntimeValue bits) |
+| `rt_actor_recv()` | ✅ | Receive from current actor inbox (5s timeout) |
+| `rt_actor_join(actor)` | ✅ | Wait for actor to complete |
+| `rt_actor_id(actor)` | ✅ | Get actor ID |
+| `rt_actor_is_alive(actor)` | ✅ | Check if actor is running |
+| `rt_wait(target)` | ✅ | Generic wait (stub - returns value immediately) |
+
+### Channel FFI Functions
+
+| Function | Status | Description |
+|----------|--------|-------------|
+| `rt_channel_new()` | ✅ | Create MPSC channel pair |
+| `rt_channel_send(ch, val)` | ✅ | Send value (returns 1 on success) |
+| `rt_channel_recv(ch)` | ✅ | Blocking receive (30s timeout) |
+| `rt_channel_try_recv(ch)` | ✅ | Non-blocking receive |
+| `rt_channel_recv_timeout(ch, ms)` | ✅ | Receive with custom timeout |
+| `rt_channel_close(ch)` | ✅ | Close channel (no more sends) |
+| `rt_channel_is_closed(ch)` | ✅ | Check if closed |
+| `rt_channel_id(ch)` | ✅ | Get channel ID |
+| `rt_channel_free(ch)` | ✅ | Free channel resources |
+
+### Future FFI Functions
+
+| Function | Status | Description |
+|----------|--------|-------------|
+| `rt_future_new(body_func, ctx)` | ✅ | Create future (eager execution) |
+| `rt_future_await(future)` | ✅ | Get result (returns immediately if ready) |
+| `rt_future_is_ready(future)` | ✅ | Check if future completed |
+| `rt_future_get_result(future)` | ✅ | Get result without blocking |
+| `rt_future_all(array)` | ✅ | Wait for all futures |
+| `rt_future_race(array)` | ✅ | Wait for first future |
+| `rt_future_resolve(value)` | ✅ | Create resolved future |
+| `rt_future_reject(error)` | ✅ | Create rejected future |
+
+### Generator FFI Functions
+
+| Function | Status | Description |
+|----------|--------|-------------|
+| `rt_generator_new(body, slots, ctx)` | ✅ | Create generator with frame slots |
+| `rt_generator_next(gen)` | ✅ | Resume generator, get next value |
+| `rt_generator_get_state(gen)` | ✅ | Get current state |
+| `rt_generator_set_state(gen, state)` | ✅ | Set state |
+| `rt_generator_store_slot(gen, idx, val)` | ✅ | Store local variable |
+| `rt_generator_load_slot(gen, idx)` | ✅ | Load local variable |
+| `rt_generator_get_ctx(gen)` | ✅ | Get captured context |
+| `rt_generator_mark_done(gen)` | ✅ | Mark as exhausted |
+
+### Executor FFI Functions
+
+| Function | Status | Description |
+|----------|--------|-------------|
+| `rt_executor_set_mode(mode)` | ✅ | Set mode: 0=Threaded, 1=Manual |
+| `rt_executor_get_mode()` | ✅ | Get current mode |
+| `rt_executor_start()` | ✅ | Start executor (spawn workers) |
+| `rt_executor_set_workers(n)` | ✅ | Set worker thread count |
+| `rt_executor_poll()` | ✅ | Poll one task (manual mode) |
+| `rt_executor_poll_all()` | ✅ | Poll all tasks (manual mode) |
+| `rt_executor_pending_count()` | ✅ | Get pending task count |
+| `rt_executor_shutdown()` | ✅ | Shutdown executor |
+| `rt_executor_is_manual()` | ✅ | Check if manual mode |
+
+### Isolated Thread FFI Functions
+
+| Function | Status | Description |
+|----------|--------|-------------|
+| `rt_thread_spawn_isolated(closure, data)` | ✅ | Spawn isolated OS thread with copied data |
+| `rt_thread_spawn_isolated2(closure, d1, d2)` | ✅ | Spawn with two data arguments |
+| `rt_thread_join(handle)` | ✅ | Wait for thread and get result |
+| `rt_thread_is_done(handle)` | ✅ | Check if thread completed (non-blocking) |
+| `rt_thread_id(handle)` | ✅ | Get unique thread ID |
+| `rt_thread_free(handle)` | ✅ | Free thread handle (detach if not joined) |
+| `rt_thread_available_parallelism()` | ✅ | Get available CPU cores |
+| `rt_thread_sleep(ms)` | ✅ | Sleep current thread |
+| `rt_thread_yield()` | ✅ | Yield to other threads |
+
+### Pending Work
+
+- [ ] Actor body outlining (bodies use stub pointer until MIR body block outlining)
+- [ ] Full async runtime integration (futures are eagerly executed)
+- [ ] Proper Future pending/polling state machine
+- [ ] Parser/codegen integration for channel syntax
+- [ ] Parser/codegen integration for actor/spawn syntax
 
 ---
 

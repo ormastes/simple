@@ -1,49 +1,211 @@
 // Async and concurrent value types for the interpreter
 // These are split from value.rs for maintainability
 // Note: This file is included via include!() - imports come from parent value.rs
+//
+// Supports two execution modes:
+// - Threaded (default): Futures execute in background thread pool (like JavaScript)
+// - Manual (embedded): Futures are queued and must be polled manually
 
-/// A future that wraps a thread join handle and result
-#[derive(Debug)]
+use simple_runtime::{executor, is_manual_mode};
+use std::sync::Condvar;
+
+/// Execution state for a future
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FutureState {
+    /// Future has not started execution
+    Pending,
+    /// Future is currently executing
+    Running,
+    /// Future completed successfully
+    Fulfilled,
+    /// Future completed with an error
+    Rejected,
+}
+
+/// A future that wraps a computation with configurable execution mode
 pub struct FutureValue {
+    /// The result once computed
     result: Arc<Mutex<Option<Result<Value, String>>>>,
+    /// Thread join handle (for threaded mode)
     handle: Arc<Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Current state
+    state: Arc<Mutex<FutureState>>,
+    /// Waker for blocking await
+    waker: Arc<(Mutex<bool>, Condvar)>,
+    /// The work to execute (for manual mode)
+    work: Arc<Mutex<Option<Box<dyn FnOnce() -> Result<Value, String> + Send + 'static>>>>,
+}
+
+impl std::fmt::Debug for FutureValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FutureValue")
+            .field("state", &self.state())
+            .field("is_ready", &self.is_ready())
+            .finish()
+    }
 }
 
 impl FutureValue {
     /// Create a new future from a computation
+    /// In Threaded mode: Immediately starts execution in background thread
+    /// In Manual mode: Queues the work for later polling
     pub fn new<F>(f: F) -> Self
     where
         F: FnOnce() -> Result<Value, String> + Send + 'static,
     {
         let result: Arc<Mutex<Option<Result<Value, String>>>> = Arc::new(Mutex::new(None));
-        let result_clone = result.clone();
-        let handle = std::thread::spawn(move || {
-            let res = f();
-            *result_clone.lock().unwrap() = Some(res);
-        });
+        let state = Arc::new(Mutex::new(FutureState::Pending));
+        let waker = Arc::new((Mutex::new(false), Condvar::new()));
+
+        if is_manual_mode() {
+            // Manual mode: store work for later polling
+            FutureValue {
+                result,
+                handle: Arc::new(Mutex::new(None)),
+                state,
+                waker,
+                work: Arc::new(Mutex::new(Some(Box::new(f)))),
+            }
+        } else {
+            // Threaded mode: spawn in executor's thread pool
+            let result_clone = result.clone();
+            let state_clone = state.clone();
+            let waker_clone = waker.clone();
+
+            *state.lock().unwrap() = FutureState::Running;
+
+            // Submit to the executor's thread pool
+            executor().submit(move || {
+                let res = f();
+                let mut result_guard = result_clone.lock().unwrap();
+                *result_guard = Some(res.clone());
+
+                // Update state
+                let mut state_guard = state_clone.lock().unwrap();
+                *state_guard = if res.is_ok() {
+                    FutureState::Fulfilled
+                } else {
+                    FutureState::Rejected
+                };
+                drop(state_guard);
+
+                // Wake any waiting threads
+                let (lock, cvar) = &*waker_clone;
+                let mut ready = lock.lock().unwrap();
+                *ready = true;
+                cvar.notify_all();
+            });
+
+            FutureValue {
+                result,
+                handle: Arc::new(Mutex::new(None)),
+                state,
+                waker,
+                work: Arc::new(Mutex::new(None)),
+            }
+        }
+    }
+
+    /// Create a future that is already resolved with a value
+    pub fn resolved(value: Value) -> Self {
+        let result = Arc::new(Mutex::new(Some(Ok(value))));
+        let state = Arc::new(Mutex::new(FutureState::Fulfilled));
+        let waker = Arc::new((Mutex::new(true), Condvar::new()));
         FutureValue {
             result,
-            handle: Arc::new(Mutex::new(Some(handle))),
+            handle: Arc::new(Mutex::new(None)),
+            state,
+            waker,
+            work: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Create a future that is already rejected with an error
+    pub fn rejected(error: String) -> Self {
+        let result = Arc::new(Mutex::new(Some(Err(error))));
+        let state = Arc::new(Mutex::new(FutureState::Rejected));
+        let waker = Arc::new((Mutex::new(true), Condvar::new()));
+        FutureValue {
+            result,
+            handle: Arc::new(Mutex::new(None)),
+            state,
+            waker,
+            work: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Poll the future (Manual mode only)
+    /// Returns true if the future completed, false if still pending
+    pub fn poll(&self) -> bool {
+        // Check if already completed
+        if self.is_ready() {
+            return true;
+        }
+
+        // Take and execute the work if present
+        let work = self.work.lock().unwrap().take();
+        if let Some(f) = work {
+            *self.state.lock().unwrap() = FutureState::Running;
+
+            let res = f();
+            let mut result_guard = self.result.lock().unwrap();
+            *result_guard = Some(res.clone());
+
+            let mut state_guard = self.state.lock().unwrap();
+            *state_guard = if res.is_ok() {
+                FutureState::Fulfilled
+            } else {
+                FutureState::Rejected
+            };
+
+            // Wake any waiting threads
+            let (lock, cvar) = &*self.waker;
+            let mut ready = lock.lock().unwrap();
+            *ready = true;
+            cvar.notify_all();
+
+            true
+        } else {
+            false
         }
     }
 
     /// Wait for the future to complete and return the result
     pub fn await_result(&self) -> Result<Value, String> {
-        // First, join the thread if it's still running
+        // In manual mode, poll first
+        if is_manual_mode() {
+            self.poll();
+        }
+
+        // First, join the thread if it's still running (legacy path)
         if let Some(handle) = self.handle.lock().unwrap().take() {
             let _ = handle.join();
         }
+
+        // Wait for completion using condvar
+        let (lock, cvar) = &*self.waker;
+        let mut ready = lock.lock().unwrap();
+        while !*ready && !self.is_ready() {
+            ready = cvar.wait(ready).unwrap();
+        }
+
         // Then get the result
         self.result
             .lock()
             .unwrap()
-            .take()
-            .unwrap_or(Err("future result already consumed".to_string()))
+            .clone()
+            .unwrap_or(Err("future result not available".to_string()))
     }
 
     /// Check if the future is completed without blocking
     pub fn is_ready(&self) -> bool {
-        self.result.lock().unwrap().is_some()
+        let state = *self.state.lock().unwrap();
+        state == FutureState::Fulfilled || state == FutureState::Rejected
+    }
+
+    /// Get the current state
+    pub fn state(&self) -> FutureState {
+        *self.state.lock().unwrap()
     }
 }
 
@@ -52,6 +214,9 @@ impl Clone for FutureValue {
         FutureValue {
             result: self.result.clone(),
             handle: self.handle.clone(),
+            state: self.state.clone(),
+            waker: self.waker.clone(),
+            work: self.work.clone(),
         }
     }
 }

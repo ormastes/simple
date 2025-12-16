@@ -2,9 +2,10 @@ use super::{
     blocks::Terminator,
     effects::{CallTarget, LocalKind},
     function::{MirFunction, MirLocal, MirModule},
-    instructions::{BlockId, MirInst, VReg},
+    instructions::{BlockId, ContractKind, MirInst, VReg},
 };
-use crate::hir::{HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
+use crate::hir::PointerKind;
+use crate::hir::{HirContract, HirContractClause, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
 use thiserror::Error;
 
 //==============================================================================
@@ -168,6 +169,10 @@ pub enum MirLowerError {
     BreakOutsideLoop,
     #[error("Continue outside loop")]
     ContinueOutsideLoop,
+    #[error("Invalid old() reference: snapshot index {index} not found")]
+    InvalidOldReference { index: usize },
+    #[error("ContractResult used outside postcondition context")]
+    ContractResultOutsidePostcondition,
 }
 
 pub type MirLowerResult<T> = Result<T, MirLowerError>;
@@ -175,12 +180,26 @@ pub type MirLowerResult<T> = Result<T, MirLowerError>;
 /// Lowers HIR to MIR with explicit state tracking
 pub struct MirLowerer {
     state: LowererState,
+
+    // Contract lowering state
+    /// The contract for the function currently being lowered
+    current_contract: Option<HirContract>,
+    /// Name of the function being lowered (for error messages)
+    current_func_name: String,
+    /// Mapping of old() snapshot indices to captured VRegs
+    old_snapshots: std::collections::HashMap<usize, VReg>,
+    /// VReg for the return/error value in postconditions (ret/err binding)
+    contract_result_vreg: Option<VReg>,
 }
 
 impl MirLowerer {
     pub fn new() -> Self {
         Self {
             state: LowererState::Idle,
+            current_contract: None,
+            current_func_name: String::new(),
+            old_snapshots: std::collections::HashMap::new(),
+            contract_result_vreg: None,
         }
     }
 
@@ -273,13 +292,254 @@ impl MirLowerer {
         })
     }
 
+    // =========================================================================
+    // Contract Lowering (Design by Contract support)
+    // Per Lean model in verification/type_inference_compile/src/Contracts.lean
+    // =========================================================================
+
+    /// Lower contract entry checks (preconditions, old captures, entry invariants).
+    /// Per Lean: checkEntry order is preconditions → old snapshots → entry invariants.
+    fn lower_contract_entry(&mut self, contract: &HirContract) -> MirLowerResult<()> {
+        let func_name = self.current_func_name.clone();
+
+        // Step 1: Check preconditions (in: block)
+        // Per Lean: checkPreconditions before anything else
+        for clause in &contract.preconditions {
+            self.lower_contract_clause(clause, ContractKind::Precondition, &func_name)?;
+        }
+
+        // Step 2: Capture old() values AFTER preconditions pass
+        // Per Lean: takeSnapshots only after preconditions succeed
+        for (snapshot_idx, old_expr) in &contract.old_values {
+            let value_vreg = self.lower_expr(old_expr)?;
+            let dest_vreg = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ContractOldCapture {
+                    dest,
+                    value: value_vreg,
+                });
+                dest
+            })?;
+            self.old_snapshots.insert(*snapshot_idx, dest_vreg);
+        }
+
+        // Step 3: Check entry invariants
+        // Per Lean: checkInvariantsEntry after snapshots
+        for clause in &contract.invariants {
+            self.lower_contract_clause(clause, ContractKind::InvariantEntry, &func_name)?;
+        }
+
+        Ok(())
+    }
+
+    /// Lower contract success exit checks (exit invariants + postconditions).
+    /// Per Lean: checkSuccessExit order is invariants at exit → postconditions.
+    fn lower_contract_success_exit(&mut self, ret_vreg: Option<VReg>) -> MirLowerResult<()> {
+        let contract = match &self.current_contract {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+        let func_name = self.current_func_name.clone();
+
+        // Step 4: Check invariants at exit
+        for clause in &contract.invariants {
+            self.lower_contract_clause(&clause, ContractKind::InvariantExit, &func_name)?;
+        }
+
+        // Step 5: Check postconditions (out(ret): block)
+        // Bind 'ret' to the return value
+        if let Some(ret) = ret_vreg {
+            self.contract_result_vreg = Some(ret);
+            for clause in &contract.postconditions {
+                self.lower_contract_clause(&clause, ContractKind::Postcondition, &func_name)?;
+            }
+            self.contract_result_vreg = None;
+        }
+
+        Ok(())
+    }
+
+    /// Lower contract error exit checks (exit invariants + error postconditions).
+    /// Per Lean: checkErrorExit order is invariants at exit → error postconditions.
+    fn lower_contract_error_exit(&mut self, err_vreg: Option<VReg>) -> MirLowerResult<()> {
+        let contract = match &self.current_contract {
+            Some(c) => c.clone(),
+            None => return Ok(()),
+        };
+        let func_name = self.current_func_name.clone();
+
+        // Step 4: Check invariants at exit
+        for clause in &contract.invariants {
+            self.lower_contract_clause(&clause, ContractKind::InvariantExit, &func_name)?;
+        }
+
+        // Step 6: Check error postconditions (out_err(err): block)
+        // Bind 'err' to the error value
+        if let Some(err) = err_vreg {
+            self.contract_result_vreg = Some(err);
+            for clause in &contract.error_postconditions {
+                self.lower_contract_clause(&clause, ContractKind::ErrorPostcondition, &func_name)?;
+            }
+            self.contract_result_vreg = None;
+        }
+
+        Ok(())
+    }
+
+    /// Lower a single contract clause - evaluate condition and emit check instruction.
+    fn lower_contract_clause(
+        &mut self,
+        clause: &HirContractClause,
+        kind: ContractKind,
+        func_name: &str,
+    ) -> MirLowerResult<()> {
+        let cond_vreg = self.lower_expr(&clause.condition)?;
+        let func_name = func_name.to_string();
+        let message = clause.message.clone();
+
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::ContractCheck {
+                condition: cond_vreg,
+                kind,
+                func_name,
+                message,
+            });
+        })
+    }
+
+    /// Reset contract state after function lowering.
+    fn reset_contract_state(&mut self) {
+        self.current_contract = None;
+        self.current_func_name = String::new();
+        self.old_snapshots.clear();
+        self.contract_result_vreg = None;
+    }
+
+    // =========================================================================
+    // Class Invariant Support
+    // =========================================================================
+
+    /// Lower class invariant checks after method body.
+    /// Called at the end of constructor and public methods.
+    ///
+    /// Per Lean model: Type invariants are checked after constructor
+    /// and after every public method that could modify state.
+    fn lower_class_invariant(
+        &mut self,
+        invariant: &crate::hir::HirClassInvariant,
+        class_name: &str,
+    ) -> MirLowerResult<()> {
+        for clause in &invariant.conditions {
+            let cond_vreg = self.lower_expr(&clause.condition)?;
+            let func_name = format!("{}.<invariant>", class_name);
+            let message = clause.message.clone();
+
+            self.with_func(|func, current_block| {
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ContractCheck {
+                    condition: cond_vreg,
+                    kind: ContractKind::InvariantExit, // Type invariant uses exit kind
+                    func_name,
+                    message,
+                });
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Lower a class method with invariant checking.
+    /// Invariants are checked after constructor and public methods.
+    fn lower_class_method(
+        &mut self,
+        method: &HirFunction,
+        class_name: &str,
+        invariant: Option<&crate::hir::HirClassInvariant>,
+    ) -> MirLowerResult<MirFunction> {
+        // Set up function state
+        let mut mir_func = MirFunction::new(
+            format!("{}::{}", class_name, method.name),
+            method.return_type,
+            method.visibility,
+        );
+
+        // Add parameters (including implicit self)
+        for param in &method.params {
+            mir_func.params.push(MirLocal {
+                name: param.name.clone(),
+                ty: param.ty,
+                kind: LocalKind::Parameter,
+            });
+        }
+
+        // Add locals
+        for local in &method.locals {
+            mir_func.locals.push(MirLocal {
+                name: local.name.clone(),
+                ty: local.ty,
+                kind: LocalKind::Local,
+            });
+        }
+
+        // Set up contract state
+        self.current_func_name = format!("{}::{}", class_name, method.name);
+        self.current_contract = method.contract.clone();
+
+        self.begin_function(mir_func)?;
+
+        // Contract entry checks (same as regular functions)
+        if let Some(contract) = &method.contract {
+            self.lower_contract_entry(contract)?;
+        }
+
+        // Lower body
+        for stmt in &method.body {
+            self.lower_stmt(stmt)?;
+        }
+
+        // Class invariant check for constructor and public methods
+        let is_constructor = method.name == "new" || method.name == "__init__";
+        let should_check_invariant = is_constructor || method.is_public();
+
+        if should_check_invariant {
+            if let Some(inv) = invariant {
+                if !inv.is_empty() {
+                    self.lower_class_invariant(inv, class_name)?;
+                }
+            }
+        }
+
+        // Ensure we have a return
+        self.with_func(|func, current_block| {
+            if let Some(block) = func.block_mut(current_block) {
+                if matches!(block.terminator, Terminator::Unreachable) {
+                    block.terminator = Terminator::Return(None);
+                }
+            }
+        })?;
+
+        self.reset_contract_state();
+        self.end_function()
+    }
+
     pub fn lower_module(mut self, hir: &HirModule) -> MirLowerResult<MirModule> {
         let mut module = MirModule::new();
         module.name = hir.name.clone();
 
+        // Lower standalone functions
         for func in &hir.functions {
             let mir_func = self.lower_function(func)?;
             module.functions.push(mir_func);
+        }
+
+        // Lower class methods with invariant checking
+        for class in &hir.classes {
+            let invariant = class.invariant.as_ref();
+            for method in &class.methods {
+                let mir_func = self.lower_class_method(method, &class.name, invariant)?;
+                module.functions.push(mir_func);
+            }
         }
 
         Ok(module)
@@ -306,8 +566,20 @@ impl MirLowerer {
             });
         }
 
+        // Set up contract state before lowering
+        self.current_func_name = func.name.clone();
+        self.current_contract = func.contract.clone();
+
         // Explicit state transition: Idle -> Lowering
         self.begin_function(mir_func)?;
+
+        // =========================================================================
+        // CONTRACT ENTRY CHECKS (per Lean model checkEntry)
+        // Order: preconditions → old() snapshots → entry invariants
+        // =========================================================================
+        if let Some(contract) = &func.contract {
+            self.lower_contract_entry(contract)?;
+        }
 
         // Lower body
         for stmt in &func.body {
@@ -322,6 +594,9 @@ impl MirLowerer {
                 }
             }
         })?;
+
+        // Reset contract state after function lowering
+        self.reset_contract_state();
 
         // Explicit state transition: Lowering -> Idle
         self.end_function()
@@ -370,11 +645,32 @@ impl MirLowerer {
             }
 
             HirStmt::Return(value) => {
-                let ret_reg = if let Some(v) = value {
-                    Some(self.lower_expr(v)?)
+                // Get the return expression's type for error detection
+                let (ret_reg, ret_type) = if let Some(v) = value {
+                    let ty = v.ty;
+                    (Some(self.lower_expr(v)?), Some(ty))
                 } else {
-                    None
+                    (None, None)
                 };
+
+                // =========================================================================
+                // CONTRACT EXIT CHECKS (per Lean model checkSuccessExit/checkErrorExit)
+                // Order: exit invariants → postconditions
+                // =========================================================================
+                if let Some(contract) = &self.current_contract.clone() {
+                    // Determine if this is a success or error exit based on return type
+                    let is_error = ret_type
+                        .map(|ty| contract.is_error_type(ty))
+                        .unwrap_or(false);
+
+                    if is_error {
+                        // Error exit path: invariants → error postconditions
+                        self.lower_contract_error_exit(ret_reg)?;
+                    } else {
+                        // Success exit path: invariants → postconditions
+                        self.lower_contract_success_exit(ret_reg)?;
+                    }
+                }
 
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
@@ -818,6 +1114,83 @@ impl MirLowerer {
                 })
             }
 
+            // =========================================================================
+            // Contract Expressions (Design by Contract support)
+            // =========================================================================
+
+            HirExprKind::ContractOld { snapshot_index } => {
+                // Look up the captured snapshot value from entry
+                let snapshot_index = *snapshot_index;
+                if let Some(&vreg) = self.old_snapshots.get(&snapshot_index) {
+                    Ok(vreg)
+                } else {
+                    Err(MirLowerError::InvalidOldReference { index: snapshot_index })
+                }
+            }
+
+            HirExprKind::ContractResult => {
+                // Return the bound 'ret' or 'err' value in postconditions
+                if let Some(vreg) = self.contract_result_vreg {
+                    Ok(vreg)
+                } else {
+                    Err(MirLowerError::ContractResultOutsidePostcondition)
+                }
+            }
+
+            // =========================================================================
+            // Pointer Operations
+            // =========================================================================
+
+            HirExprKind::PointerNew { kind, value } => {
+                let kind = *kind;
+                let value_vreg = self.lower_expr(value)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::PointerNew {
+                        dest,
+                        kind,
+                        value: value_vreg,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::Ref(inner) => {
+                let source_vreg = self.lower_expr(inner)?;
+                // Determine borrow kind from the result type
+                let kind = match self.get_pointer_kind(expr_ty) {
+                    Some(k) => k,
+                    None => PointerKind::Borrow, // Default to immutable borrow
+                };
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::PointerRef {
+                        dest,
+                        kind,
+                        source: source_vreg,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::Deref(inner) => {
+                let pointer_vreg = self.lower_expr(inner)?;
+                // Get the pointer kind from the inner expression's type
+                let kind = self.get_pointer_kind(inner.ty).unwrap_or(PointerKind::Shared);
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::PointerDeref {
+                        dest,
+                        pointer: pointer_vreg,
+                        kind,
+                    });
+                    dest
+                })
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }
@@ -838,6 +1211,14 @@ impl MirLowerer {
             }
             _ => Err(MirLowerError::Unsupported("complex lvalue".to_string())),
         }
+    }
+
+    /// Get pointer kind from a type ID if it's a pointer type.
+    /// Returns None if type information is not available or type is not a pointer.
+    fn get_pointer_kind(&self, _ty: TypeId) -> Option<PointerKind> {
+        // TODO: Once type store is available in MirLowerer, look up the actual pointer kind
+        // For now, return None and let callers use defaults
+        None
     }
 }
 

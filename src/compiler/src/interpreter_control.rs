@@ -115,12 +115,67 @@ fn exec_context(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    // BDD_INDENT, BDD_LAZY_VALUES, BDD_CONTEXT_DEFS are defined in interpreter_call.rs
+    // which is also include!d into interpreter.rs, so they're in scope directly
+
     let context_obj = evaluate_expr(&ctx_stmt.context, env, functions, classes, enums, impl_methods)?;
-    let prev_context = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
-    CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(context_obj));
-    let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
-    CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = prev_context);
-    result
+
+    // Check if this is a BDD-style context (string or symbol description)
+    match &context_obj {
+        Value::Str(name) | Value::Symbol(name) => {
+            // BDD-style context: context "description": block
+            let name_str = if matches!(context_obj, Value::Symbol(_)) {
+                format!("with {}", name)
+            } else {
+                name.clone()
+            };
+
+            // Check if this is a symbol referencing a context_def
+            let ctx_def_blocks = if matches!(context_obj, Value::Symbol(_)) {
+                BDD_CONTEXT_DEFS.with(|cell: &RefCell<HashMap<String, Vec<Value>>>| {
+                    cell.borrow().get(name).cloned()
+                })
+            } else {
+                None
+            };
+
+            // Get current indent level
+            let indent = BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow());
+            let indent_str = "  ".repeat(indent);
+
+            // Print context name
+            println!("{}{}", indent_str, name_str);
+
+            // Increase indent for nested blocks
+            BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow_mut() += 1);
+
+            // If this is a context_def reference, execute its givens first
+            if let Some(ctx_blocks) = ctx_def_blocks {
+                for ctx_block in ctx_blocks {
+                    exec_block_value(ctx_block, env, functions, classes, enums, impl_methods)?;
+                }
+            }
+
+            // Execute the block
+            let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
+
+            // Clear lazy values after context exits
+            BDD_LAZY_VALUES.with(|cell: &RefCell<HashMap<String, (Value, Option<Value>)>>| cell.borrow_mut().clear());
+
+            // Restore indent
+            BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow_mut() -= 1);
+
+            result
+        }
+        _ => {
+            // Non-BDD context: set context object and execute block
+            let prev_context = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
+            CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(context_obj));
+            let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
+            CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = prev_context);
+            result
+        }
+    }
 }
 
 /// Execute a with statement (context manager pattern)
@@ -364,7 +419,7 @@ fn match_sequence_pattern(
     Ok(true)
 }
 
-fn pattern_matches(
+pub(crate) fn pattern_matches(
     pattern: &Pattern,
     value: &Value,
     bindings: &mut HashMap<String, Value>,
@@ -406,6 +461,25 @@ fn pattern_matches(
                         Ok(false)
                     }
                 }
+                // Handle FString patterns (strings parsed as f-strings with only literal parts)
+                Expr::FString(parts) => {
+                    // Build the full string from literal parts
+                    let mut pattern_str = String::new();
+                    for part in parts {
+                        match part {
+                            FStringPart::Literal(s) => pattern_str.push_str(s),
+                            FStringPart::Expr(_) => {
+                                // FStrings with expressions cannot be used as patterns
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    if let Value::Str(v) = value {
+                        Ok(v == &pattern_str)
+                    } else {
+                        Ok(false)
+                    }
+                }
                 Expr::Symbol(sym) => {
                     if let Value::Symbol(v) = value {
                         Ok(v == sym)
@@ -428,16 +502,36 @@ fn pattern_matches(
         Pattern::Enum { name: enum_name, variant, payload } => {
             if let Value::Enum { enum_name: ve, variant: vv, payload: value_payload } = value {
                 if enum_name == ve && variant == vv {
+                    // Both have no payload
                     if payload.is_none() && value_payload.is_none() {
                         return Ok(true);
                     }
+                    // Pattern has payload patterns, value has payload
                     if let (Some(patterns), Some(vp)) = (payload, value_payload) {
                         if patterns.len() == 1 {
+                            // Single payload - match directly
                             if pattern_matches(&patterns[0], vp.as_ref(), bindings, enums)? {
                                 return Ok(true);
                             }
+                        } else {
+                            // Multiple payload patterns - payload should be a tuple
+                            if let Value::Tuple(values) = vp.as_ref() {
+                                if patterns.len() == values.len() {
+                                    let mut all_match = true;
+                                    for (pat, val) in patterns.iter().zip(values.iter()) {
+                                        if !pattern_matches(pat, val, bindings, enums)? {
+                                            all_match = false;
+                                            break;
+                                        }
+                                    }
+                                    if all_match {
+                                        return Ok(true);
+                                    }
+                                }
+                            }
                         }
                     }
+                    // Pattern has no payload but value does - match any payload
                     if payload.is_none() && value_payload.is_some() {
                         return Ok(true);
                     }

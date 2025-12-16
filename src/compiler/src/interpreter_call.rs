@@ -1,17 +1,33 @@
 // Call expression evaluation (part of interpreter module)
 
 // BDD testing state (thread-local for test isolation)
+// Made pub(crate) so interpreter_control.rs can access for context statement handling
 thread_local! {
     // Current indentation level for nested describe/context blocks
-    static BDD_INDENT: RefCell<usize> = RefCell::new(0);
+    pub(crate) static BDD_INDENT: RefCell<usize> = RefCell::new(0);
     // (passed, failed) counts for current describe block
-    static BDD_COUNTS: RefCell<(usize, usize)> = RefCell::new((0, 0));
+    pub(crate) static BDD_COUNTS: RefCell<(usize, usize)> = RefCell::new((0, 0));
     // Whether current "it" block has a failed expectation
     static BDD_EXPECT_FAILED: RefCell<bool> = RefCell::new(false);
     // Whether we're currently inside an "it" block (expect should be silent)
     static BDD_INSIDE_IT: RefCell<bool> = RefCell::new(false);
     // Failure message from expect (for display in it block)
     static BDD_FAILURE_MSG: RefCell<Option<String>> = RefCell::new(None);
+
+    // TEST-010: Shared examples registry - maps name to block
+    pub(crate) static BDD_SHARED_EXAMPLES: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+
+    // Context definitions registry - maps symbol name to (givens, block)
+    pub(crate) static BDD_CONTEXT_DEFS: RefCell<HashMap<String, Vec<Value>>> = RefCell::new(HashMap::new());
+
+    // before_each hooks for current context (stack of hook lists for nesting)
+    pub(crate) static BDD_BEFORE_EACH: RefCell<Vec<Vec<Value>>> = RefCell::new(vec![vec![]]);
+
+    // after_each hooks for current context (stack of hook lists for nesting)
+    pub(crate) static BDD_AFTER_EACH: RefCell<Vec<Vec<Value>>> = RefCell::new(vec![vec![]]);
+
+    // TEST-012: Memoized lazy values (name -> (block, Option<cached_value>))
+    pub(crate) static BDD_LAZY_VALUES: RefCell<HashMap<String, (Value, Option<Value>)>> = RefCell::new(HashMap::new());
 }
 
 /// Build a helpful failure message for expect by inspecting the expression
@@ -235,6 +251,68 @@ fn evaluate_call(
                 }
                 bail_semantic!("is_ready expects a future");
             }
+            // Async configuration builtins
+            "async_mode" => {
+                // async_mode() - Get current mode as string
+                // async_mode("threaded") - Set threaded mode
+                // async_mode("manual") - Set manual mode (for embedded)
+                if args.is_empty() {
+                    let mode = if simple_runtime::is_manual_mode() {
+                        "manual"
+                    } else {
+                        "threaded"
+                    };
+                    return Ok(Value::Str(mode.to_string()));
+                }
+                let mode_arg = eval_arg(args, 0, Value::Str("threaded".to_string()), env, functions, classes, enums, impl_methods)?;
+                match mode_arg {
+                    Value::Str(s) => {
+                        match s.as_str() {
+                            "threaded" => simple_runtime::configure_async_mode(simple_runtime::AsyncMode::Threaded),
+                            "manual" | "embedded" => simple_runtime::configure_async_mode(simple_runtime::AsyncMode::Manual),
+                            _ => bail_semantic!("async_mode expects 'threaded' or 'manual'"),
+                        }
+                        return Ok(Value::Nil);
+                    }
+                    _ => bail_semantic!("async_mode expects a string"),
+                }
+            }
+            "async_workers" => {
+                // async_workers(n) - Set number of worker threads (only for threaded mode)
+                let count = eval_arg_int(args, 0, 4, env, functions, classes, enums, impl_methods)?;
+                simple_runtime::configure_worker_count(count as usize);
+                return Ok(Value::Nil);
+            }
+            "poll_future" => {
+                // poll_future(f) - Poll a future manually (for embedded mode)
+                let future_arg = args.get(0).ok_or_else(|| semantic_err!("poll_future expects a future"))?;
+                let val = evaluate_expr(&future_arg.value, env, functions, classes, enums, impl_methods)?;
+                if let Value::Future(f) = val {
+                    return Ok(Value::Bool(f.poll()));
+                }
+                bail_semantic!("poll_future expects a future");
+            }
+            "poll_all_futures" => {
+                // poll_all_futures() - Poll all pending futures (for embedded mode)
+                let count = simple_runtime::poll_all();
+                return Ok(Value::Int(count as i64));
+            }
+            "pending_futures" => {
+                // pending_futures() - Get number of pending futures (for embedded mode)
+                let count = simple_runtime::pending_count();
+                return Ok(Value::Int(count as i64));
+            }
+            "resolved" => {
+                // resolved(value) - Create an already-resolved future
+                let value = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Future(FutureValue::resolved(value)));
+            }
+            "rejected" => {
+                // rejected(error) - Create an already-rejected future
+                let error = eval_arg(args, 0, Value::Str("error".to_string()), env, functions, classes, enums, impl_methods)?;
+                let error_str = error.to_display_string();
+                return Ok(Value::Future(FutureValue::rejected(error_str)));
+            }
             "generator" => {
                 let inner_expr = args.get(0).ok_or_else(|| semantic_err!("generator expects a lambda"))?;
                 let val = evaluate_expr(&inner_expr.value, env, functions, classes, enums, impl_methods)?;
@@ -283,12 +361,22 @@ fn evaluate_call(
             // BDD testing builtins
             "describe" | "context" => {
                 // describe(name, block) or describe "name": block
-                // Prints the name, evaluates the block, shows summary
-                let name = eval_arg(args, 0, Value::Str("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
-                let name_str = match &name {
-                    Value::Str(s) => s.clone(),
-                    _ => "unnamed".to_string(),
+                // context can also take a symbol to reference a context_def
+                let first_arg = eval_arg(args, 0, Value::Str("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+
+                // Check if it's a symbol (context_def reference) or a string (description)
+                let (name_str, ctx_def_blocks) = match &first_arg {
+                    Value::Symbol(ctx_name) => {
+                        // Reference to a context_def
+                        let blocks = BDD_CONTEXT_DEFS.with(|cell| {
+                            cell.borrow().get(ctx_name).cloned()
+                        });
+                        (format!("with {}", ctx_name), blocks)
+                    }
+                    Value::Str(s) => (s.clone(), None),
+                    _ => ("unnamed".to_string(), None),
                 };
+
                 let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
 
                 // Get current indent level
@@ -301,14 +389,26 @@ fn evaluate_call(
                 // Increase indent for nested blocks
                 BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
 
+                // If this is a context_def reference, execute its givens first
+                if let Some(ctx_blocks) = ctx_def_blocks {
+                    for ctx_block in ctx_blocks {
+                        exec_block_value(ctx_block, env, functions, classes, enums, impl_methods)?;
+                    }
+                }
+
                 // Execute the block
                 let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
+
+                // Note: lazy values persist within the describe block
+                // They'll be overwritten if a sibling context defines the same name
 
                 // Restore indent
                 BDD_INDENT.with(|cell| *cell.borrow_mut() -= 1);
 
-                // Print summary at top level
+                // Print summary and clear lazy values at top level only
                 if indent == 0 {
+                    // Clear lazy values when exiting the top-level describe
+                    BDD_LAZY_VALUES.with(|cell| cell.borrow_mut().clear());
                     let (passed, failed) = BDD_COUNTS.with(|cell| {
                         let counts = cell.borrow();
                         (counts.0, counts.1)
@@ -342,8 +442,31 @@ fn evaluate_call(
                 BDD_FAILURE_MSG.with(|cell| *cell.borrow_mut() = None);
                 BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
 
-                // Execute the block
+                // Reset lazy value cache for this test (each test gets fresh memoization)
+                BDD_LAZY_VALUES.with(|cell| {
+                    for (_, (_, cached)) in cell.borrow_mut().iter_mut() {
+                        *cached = None;
+                    }
+                });
+
+                // Execute before_each hooks from all levels (outer to inner)
+                let before_hooks: Vec<Value> = BDD_BEFORE_EACH.with(|cell| {
+                    cell.borrow().iter().flat_map(|level| level.clone()).collect()
+                });
+                for hook in before_hooks {
+                    exec_block_value(hook, env, functions, classes, enums, impl_methods)?;
+                }
+
+                // Execute the test block
                 let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
+
+                // Execute after_each hooks from all levels (inner to outer - reverse order)
+                let after_hooks: Vec<Value> = BDD_AFTER_EACH.with(|cell| {
+                    cell.borrow().iter().rev().flat_map(|level| level.clone()).collect()
+                });
+                for hook in after_hooks {
+                    let _ = exec_block_value(hook, env, functions, classes, enums, impl_methods);
+                }
 
                 // No longer inside it block
                 BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = false);
@@ -409,6 +532,346 @@ fn evaluate_call(
 
                 return Ok(Value::Bool(passed));
             }
+            // TEST-010: shared_examples - define reusable example groups
+            "shared_examples" => {
+                let name = eval_arg(args, 0, Value::Str("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+                let name_str = match &name {
+                    Value::Str(s) => s.clone(),
+                    Value::Symbol(s) => s.clone(),
+                    _ => "unnamed".to_string(),
+                };
+                let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+                // Store the block in the shared examples registry
+                BDD_SHARED_EXAMPLES.with(|cell| {
+                    cell.borrow_mut().insert(name_str.clone(), block);
+                });
+
+                return Ok(Value::Nil);
+            }
+            // TEST-011: it_behaves_like - include shared examples
+            "it_behaves_like" | "include_examples" => {
+                let name = eval_arg(args, 0, Value::Str("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+                let name_str = match &name {
+                    Value::Str(s) => s.clone(),
+                    Value::Symbol(s) => s.clone(),
+                    _ => "unnamed".to_string(),
+                };
+
+                // Look up and execute the shared examples block
+                let block = BDD_SHARED_EXAMPLES.with(|cell| {
+                    cell.borrow().get(&name_str).cloned()
+                });
+
+                match block {
+                    Some(block) => {
+                        // Create a nested context for the shared examples
+                        let indent = BDD_INDENT.with(|cell| *cell.borrow());
+                        let indent_str = "  ".repeat(indent);
+                        println!("{}behaves like {}", indent_str, name_str);
+
+                        BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
+                        let result = exec_block_value(block, env, functions, classes, enums, impl_methods);
+                        BDD_INDENT.with(|cell| *cell.borrow_mut() -= 1);
+
+                        return result;
+                    }
+                    None => {
+                        bail_semantic!("Shared example '{}' not found", name_str);
+                    }
+                }
+            }
+            // before_each - add a hook to run before each it block
+            "before_each" => {
+                let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+                BDD_BEFORE_EACH.with(|cell| {
+                    let mut hooks = cell.borrow_mut();
+                    if let Some(current) = hooks.last_mut() {
+                        current.push(block);
+                    }
+                });
+
+                return Ok(Value::Nil);
+            }
+            // after_each - add a hook to run after each it block
+            "after_each" => {
+                let block = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+                BDD_AFTER_EACH.with(|cell| {
+                    let mut hooks = cell.borrow_mut();
+                    if let Some(current) = hooks.last_mut() {
+                        current.push(block);
+                    }
+                });
+
+                return Ok(Value::Nil);
+            }
+            // context_def - define a reusable context
+            "context_def" => {
+                let name = eval_arg(args, 0, Value::Symbol("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+                let name_str = match &name {
+                    Value::Symbol(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
+                    _ => "unnamed".to_string(),
+                };
+                let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+                // Collect givens by executing the block in a special mode
+                // For now, just store the block - we'll execute it when referenced
+                BDD_CONTEXT_DEFS.with(|cell| {
+                    cell.borrow_mut().insert(name_str, vec![block]);
+                });
+
+                return Ok(Value::Nil);
+            }
+            // given_lazy - define a lazy fixture
+            "given_lazy" => {
+                let name = eval_arg(args, 0, Value::Symbol("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+                let name_str = match &name {
+                    Value::Symbol(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
+                    _ => "unnamed".to_string(),
+                };
+                let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+                // Store the block (not evaluated yet) with no cached value
+                BDD_LAZY_VALUES.with(|cell| {
+                    cell.borrow_mut().insert(name_str, (block, None));
+                });
+
+                return Ok(Value::Nil);
+            }
+            // given - define an eager fixture (runs immediately)
+            "given" => {
+                let first_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+                // Check if it's a symbol (context reference) or a block
+                match &first_arg {
+                    Value::Symbol(ctx_name) => {
+                        // Reference to a context_def - execute its givens
+                        let ctx_block = BDD_CONTEXT_DEFS.with(|cell| {
+                            cell.borrow().get(ctx_name).cloned()
+                        });
+                        if let Some(blocks) = ctx_block {
+                            for block in blocks {
+                                exec_block_value(block, env, functions, classes, enums, impl_methods)?;
+                            }
+                        }
+                    }
+                    _ => {
+                        // It's a block - check if there's a second argument (named given)
+                        if args.len() >= 2 {
+                            // named given: given :name, \: block
+                            let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                            exec_block_value(block, env, functions, classes, enums, impl_methods)?;
+                        } else {
+                            // unnamed given: given { block }
+                            exec_block_value(first_arg, env, functions, classes, enums, impl_methods)?;
+                        }
+                    }
+                }
+
+                return Ok(Value::Nil);
+            }
+            // TEST-012: let_lazy - define a truly lazy memoized value
+            "let_lazy" => {
+                let name = eval_arg(args, 0, Value::Symbol("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+                let name_str = match &name {
+                    Value::Symbol(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
+                    _ => "unnamed".to_string(),
+                };
+                let block = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+
+                // Store the block (not evaluated yet) with no cached value
+                BDD_LAZY_VALUES.with(|cell| {
+                    cell.borrow_mut().insert(name_str, (block, None));
+                });
+
+                return Ok(Value::Nil);
+            }
+            // get_let - get a lazy memoized value (evaluates on first access)
+            "get_let" => {
+                let name = eval_arg(args, 0, Value::Symbol("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+                let name_str = match &name {
+                    Value::Symbol(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
+                    _ => "unnamed".to_string(),
+                };
+
+                // Check if we have a cached value
+                let cached = BDD_LAZY_VALUES.with(|cell| {
+                    cell.borrow().get(&name_str).cloned()
+                });
+
+                match cached {
+                    Some((_block, Some(value))) => {
+                        // Already evaluated - return cached value
+                        return Ok(value);
+                    }
+                    Some((block, None)) => {
+                        // Not yet evaluated - evaluate and cache
+                        let value = exec_block_value(block.clone(), env, functions, classes, enums, impl_methods)?;
+                        BDD_LAZY_VALUES.with(|cell| {
+                            if let Some(entry) = cell.borrow_mut().get_mut(&name_str) {
+                                entry.1 = Some(value.clone());
+                            }
+                        });
+                        return Ok(value);
+                    }
+                    None => {
+                        bail_semantic!("No lazy value found for '{}'", name_str);
+                    }
+                }
+            }
+            // has_let - check if a lazy value exists
+            "has_let" => {
+                let name = eval_arg(args, 0, Value::Symbol("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+                let name_str = match &name {
+                    Value::Symbol(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
+                    _ => "unnamed".to_string(),
+                };
+
+                let exists = BDD_LAZY_VALUES.with(|cell| {
+                    cell.borrow().contains_key(&name_str)
+                });
+
+                return Ok(Value::Bool(exists));
+            }
+            // ================================================================
+            // Mock Library Builtins (MOCK-001 through MOCK-012)
+            // ================================================================
+            // mock(type_name) - Create a mock object
+            "mock" => {
+                let type_name = eval_arg(args, 0, Value::Str("Mock".to_string()), env, functions, classes, enums, impl_methods)?;
+                let type_str = match &type_name {
+                    Value::Str(s) => s.clone(),
+                    Value::Symbol(s) => s.clone(),
+                    _ => "Mock".to_string(),
+                };
+                return Ok(Value::Mock(crate::value::MockValue::new(type_str)));
+            }
+            // spy(type_name) - Create a spy object
+            "spy" => {
+                let type_name = eval_arg(args, 0, Value::Str("Spy".to_string()), env, functions, classes, enums, impl_methods)?;
+                let type_str = match &type_name {
+                    Value::Str(s) => s.clone(),
+                    Value::Symbol(s) => s.clone(),
+                    _ => "Spy".to_string(),
+                };
+                return Ok(Value::Mock(crate::value::MockValue::new_spy(type_str)));
+            }
+            // any() - Match any argument
+            "any" => {
+                return Ok(Value::Matcher(crate::value::MatcherValue::Any));
+            }
+            // eq(value) / be(value) - Match exact value (BDD matchers)
+            "eq" | "be" => {
+                let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(val))));
+            }
+            // be_gt(n) - BDD alias for gt (greater than)
+            "be_gt" => {
+                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Matcher(crate::value::MatcherValue::GreaterThan(n)));
+            }
+            // be_lt(n) - BDD alias for lt (less than)
+            "be_lt" => {
+                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Matcher(crate::value::MatcherValue::LessThan(n)));
+            }
+            // be_nil - Match nil/None value
+            "be_nil" => {
+                return Ok(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(Value::Nil))));
+            }
+            // be_empty - Match empty collection/string
+            "be_empty" => {
+                return Ok(Value::Matcher(crate::value::MatcherValue::Custom(Box::new(Value::Nil)))); // Placeholder
+            }
+            // include(value) - Match collection/string containing value
+            "include" => {
+                let val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                match &val {
+                    Value::Str(s) => return Ok(Value::Matcher(crate::value::MatcherValue::Contains(s.clone()))),
+                    _ => return Ok(Value::Matcher(crate::value::MatcherValue::Exact(Box::new(val)))),
+                }
+            }
+            // start_with(s) - BDD alias for starts_with
+            "start_with" => {
+                let s = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let s_str = match &s {
+                    Value::Str(s) => s.clone(),
+                    _ => "".to_string(),
+                };
+                return Ok(Value::Matcher(crate::value::MatcherValue::StartsWith(s_str)));
+            }
+            // end_with(s) - BDD alias for ends_with
+            "end_with" => {
+                let s = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let s_str = match &s {
+                    Value::Str(s) => s.clone(),
+                    _ => "".to_string(),
+                };
+                return Ok(Value::Matcher(crate::value::MatcherValue::EndsWith(s_str)));
+            }
+            // gt(n) - Match value greater than n
+            "gt" => {
+                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Matcher(crate::value::MatcherValue::GreaterThan(n)));
+            }
+            // lt(n) - Match value less than n
+            "lt" => {
+                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Matcher(crate::value::MatcherValue::LessThan(n)));
+            }
+            // gte(n) - Match value greater than or equal to n
+            "gte" => {
+                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Matcher(crate::value::MatcherValue::GreaterOrEqual(n)));
+            }
+            // lte(n) - Match value less than or equal to n
+            "lte" => {
+                let n = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Matcher(crate::value::MatcherValue::LessOrEqual(n)));
+            }
+            // contains(s) - Match string containing substring
+            "contains" => {
+                let s = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let s_str = match &s {
+                    Value::Str(s) => s.clone(),
+                    _ => "".to_string(),
+                };
+                return Ok(Value::Matcher(crate::value::MatcherValue::Contains(s_str)));
+            }
+            // starts_with(s) - Match string starting with prefix
+            "starts_with" => {
+                let s = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let s_str = match &s {
+                    Value::Str(s) => s.clone(),
+                    _ => "".to_string(),
+                };
+                return Ok(Value::Matcher(crate::value::MatcherValue::StartsWith(s_str)));
+            }
+            // ends_with(s) - Match string ending with suffix
+            "ends_with" => {
+                let s = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let s_str = match &s {
+                    Value::Str(s) => s.clone(),
+                    _ => "".to_string(),
+                };
+                return Ok(Value::Matcher(crate::value::MatcherValue::EndsWith(s_str)));
+            }
+            // of_type(type_name) - Match value of specific type
+            "of_type" => {
+                let type_name = eval_arg(args, 0, Value::Str("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let type_str = match &type_name {
+                    Value::Str(s) => s.clone(),
+                    _ => "".to_string(),
+                };
+                return Ok(Value::Matcher(crate::value::MatcherValue::OfType(type_str)));
+            }
             _ => {
                 // Check env first for decorated functions and closures
                 if let Some(val) = env.get(name) {
@@ -457,10 +920,18 @@ fn evaluate_call(
             let variant = &segments[1];
             if let Some(enum_def) = enums.get(enum_name) {
                 if enum_def.variants.iter().any(|v| &v.name == variant) {
-                    let payload = if !args.is_empty() {
+                    let payload = if args.is_empty() {
+                        None
+                    } else if args.len() == 1 {
+                        // Single payload - store directly
                         Some(Box::new(evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?))
                     } else {
-                        None
+                        // Multiple payloads - store as tuple
+                        let mut values = Vec::new();
+                        for arg in args {
+                            values.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+                        }
+                        Some(Box::new(Value::Tuple(values)))
                     };
                     return Ok(Value::Enum {
                         enum_name: enum_name.clone(),
@@ -615,6 +1086,41 @@ fn exec_lambda(
     evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)
 }
 
+/// Helper to get iterator values from various iterable types
+fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
+    match iterable {
+        Value::Array(arr) => Ok(arr.clone()),
+        Value::Tuple(t) => Ok(t.clone()),
+        Value::Str(s) => {
+            Ok(s.chars().map(|c| Value::Str(c.to_string())).collect())
+        }
+        Value::Generator(gen) => {
+            Ok(gen.collect_remaining())
+        }
+        Value::Object { class, fields } => {
+            // Handle Range class objects
+            if class == "Range" {
+                let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
+                let end = fields.get("end").and_then(|v| v.as_int().ok()).unwrap_or(0);
+                let inclusive = fields.get("inclusive").map(|v| v.truthy()).unwrap_or(false);
+                let mut values = Vec::new();
+                if inclusive {
+                    for i in start..=end {
+                        values.push(Value::Int(i));
+                    }
+                } else {
+                    for i in start..end {
+                        values.push(Value::Int(i));
+                    }
+                }
+                return Ok(values);
+            }
+            bail_semantic!("Object is not iterable")
+        }
+        _ => bail_semantic!("Value is not iterable"),
+    }
+}
+
 /// Execute a block closure (BDD DSL colon-block)
 /// Executes each statement in sequence and returns the last expression's value (or Nil)
 fn exec_block_closure(
@@ -654,8 +1160,159 @@ fn exec_block_closure(
                 }
                 last_value = Value::Nil;
             }
+            Node::Context(ctx_stmt) => {
+                // Handle context statement for BDD nested contexts
+                let context_obj = evaluate_expr(&ctx_stmt.context, &local_env, functions, classes, enums, impl_methods)?;
+
+                // Check if this is a BDD-style context (string or symbol description)
+                match &context_obj {
+                    Value::Str(name) | Value::Symbol(name) => {
+                        // BDD-style context: context "description": block
+                        let name_str = if matches!(context_obj, Value::Symbol(_)) {
+                            format!("with {}", name)
+                        } else {
+                            name.clone()
+                        };
+
+                        // Check if this is a symbol referencing a context_def
+                        let ctx_def_blocks = if matches!(context_obj, Value::Symbol(_)) {
+                            BDD_CONTEXT_DEFS.with(|cell| {
+                                cell.borrow().get(name).cloned()
+                            })
+                        } else {
+                            None
+                        };
+
+                        // Get current indent level
+                        let indent = BDD_INDENT.with(|cell| *cell.borrow());
+                        let indent_str = "  ".repeat(indent);
+
+                        // Print context name
+                        println!("{}{}", indent_str, name_str);
+
+                        // Increase indent for nested blocks
+                        BDD_INDENT.with(|cell| *cell.borrow_mut() += 1);
+
+                        // Push new hook level for this context
+                        BDD_BEFORE_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+                        BDD_AFTER_EACH.with(|cell| cell.borrow_mut().push(vec![]));
+
+                        // If this is a context_def reference, execute its givens first
+                        if let Some(ctx_blocks) = ctx_def_blocks {
+                            for ctx_block in ctx_blocks {
+                                exec_block_value(ctx_block, &local_env, functions, classes, enums, impl_methods)?;
+                            }
+                        }
+
+                        // Execute the block by recursively processing its nodes
+                        last_value = exec_block_closure(&ctx_stmt.body.statements, &local_env, functions, classes, enums, impl_methods)?;
+
+                        // Pop hook level
+                        BDD_BEFORE_EACH.with(|cell| { cell.borrow_mut().pop(); });
+                        BDD_AFTER_EACH.with(|cell| { cell.borrow_mut().pop(); });
+
+                        // Note: lazy values persist within the describe block
+                        // They'll be overwritten if a sibling context defines the same name
+
+                        // Restore indent
+                        BDD_INDENT.with(|cell| *cell.borrow_mut() -= 1);
+                    }
+                    _ => {
+                        // Non-BDD context: execute body with context object set
+                        // For now, just execute the body
+                        last_value = exec_block_closure(&ctx_stmt.body.statements, &local_env, functions, classes, enums, impl_methods)?;
+                    }
+                }
+            }
+            Node::If(if_stmt) => {
+                // Handle if-let patterns: if let PATTERN = EXPR:
+                if let Some(pattern) = &if_stmt.let_pattern {
+                    let value = evaluate_expr(&if_stmt.condition, &local_env, functions, classes, enums, impl_methods)?;
+                    let mut bindings = std::collections::HashMap::new();
+                    if pattern_matches(pattern, &value, &mut bindings, enums)? {
+                        // Pattern matched - add bindings to local env for this block
+                        for (name, val) in bindings {
+                            local_env.insert(name, val);
+                        }
+                        last_value = exec_block_closure_mut(&if_stmt.then_block.statements, &mut local_env, functions, classes, enums, impl_methods)?;
+                    } else if let Some(ref else_block) = if_stmt.else_block {
+                        last_value = exec_block_closure_mut(&else_block.statements, &mut local_env, functions, classes, enums, impl_methods)?;
+                    } else {
+                        last_value = Value::Nil;
+                    }
+                } else {
+                    // Handle normal if statements in block closures
+                    if evaluate_expr(&if_stmt.condition, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+                        last_value = exec_block_closure_mut(&if_stmt.then_block.statements, &mut local_env, functions, classes, enums, impl_methods)?;
+                    } else if let Some(ref else_block) = if_stmt.else_block {
+                        last_value = exec_block_closure_mut(&else_block.statements, &mut local_env, functions, classes, enums, impl_methods)?;
+                    } else {
+                        last_value = Value::Nil;
+                    }
+                }
+            }
+            Node::For(for_stmt) => {
+                // Handle for loops in block closures
+                let iterable = evaluate_expr(&for_stmt.iterable, &local_env, functions, classes, enums, impl_methods)?;
+                let iter_values = get_iterator_values(&iterable)?;
+                for val in iter_values {
+                    // Bind the loop variable
+                    if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
+                        local_env.insert(name.clone(), val);
+                    } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
+                        local_env.insert(name.clone(), val);
+                    }
+                    last_value = exec_block_closure(&for_stmt.body.statements, &local_env, functions, classes, enums, impl_methods)?;
+                }
+            }
             _ => {
                 // For other node types, just skip for now
+                last_value = Value::Nil;
+            }
+        }
+    }
+
+    Ok(last_value)
+}
+
+/// Execute statements in an already-existing mutable environment.
+/// Used for if-let blocks where assignments should propagate to the outer scope.
+fn exec_block_closure_mut(
+    nodes: &[simple_parser::ast::Node],
+    local_env: &mut Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    use simple_parser::ast::Node;
+
+    let mut last_value = Value::Nil;
+
+    for node in nodes {
+        match node {
+            Node::Expression(expr) => {
+                last_value = evaluate_expr(expr, local_env, functions, classes, enums, impl_methods)?;
+            }
+            Node::Let(let_stmt) => {
+                if let Some(ref value_expr) = let_stmt.value {
+                    let val = evaluate_expr(value_expr, local_env, functions, classes, enums, impl_methods)?;
+                    if let simple_parser::ast::Pattern::Identifier(name) = &let_stmt.pattern {
+                        local_env.insert(name.clone(), val);
+                    } else if let simple_parser::ast::Pattern::MutIdentifier(name) = &let_stmt.pattern {
+                        local_env.insert(name.clone(), val);
+                    }
+                }
+                last_value = Value::Nil;
+            }
+            Node::Assignment(assign_stmt) => {
+                let val = evaluate_expr(&assign_stmt.value, local_env, functions, classes, enums, impl_methods)?;
+                if let simple_parser::ast::Expr::Identifier(name) = &assign_stmt.target {
+                    local_env.insert(name.clone(), val);
+                }
+                last_value = Value::Nil;
+            }
+            _ => {
                 last_value = Value::Nil;
             }
         }

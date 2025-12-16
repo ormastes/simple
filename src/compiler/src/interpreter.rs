@@ -167,6 +167,13 @@ pub(crate) struct UnitFamilyInfo {
     pub conversions: HashMap<String, f64>,
 }
 
+/// Stores trait definitions: trait_name -> TraitDef
+pub(crate) type Traits = HashMap<String, simple_parser::ast::TraitDef>;
+
+/// Stores trait implementations: (trait_name, type_name) -> list of methods
+/// Used to track which types implement which traits
+pub(crate) type TraitImpls = HashMap<(String, String), Vec<FunctionDef>>;
+
 /// Control flow for statement execution.
 pub(crate) enum Control {
     Next,
@@ -277,6 +284,8 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
     let mut macros: Macros = HashMap::new();
     let mut units: Units = HashMap::new();
     let mut unit_families: UnitFamilies = HashMap::new();
+    let mut traits: Traits = HashMap::new();
+    let mut trait_impls: TraitImpls = HashMap::new();
 
     // First pass: register all functions (needed for decorator lookup)
     for item in items {
@@ -398,9 +407,39 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             }
             Node::Impl(impl_block) => {
                 let type_name = get_type_name(&impl_block.target_type);
-                let methods = impl_methods.entry(type_name).or_insert_with(Vec::new);
+                let methods = impl_methods.entry(type_name.clone()).or_insert_with(Vec::new);
                 for method in &impl_block.methods {
                     methods.push(method.clone());
+                }
+
+                // If this is a trait implementation, verify and register it
+                if let Some(ref trait_name) = impl_block.trait_name {
+                    // Verify trait exists
+                    if let Some(trait_def) = traits.get(trait_name) {
+                        // Check all trait methods are implemented
+                        let impl_method_names: std::collections::HashSet<_> = impl_block
+                            .methods
+                            .iter()
+                            .map(|m| m.name.clone())
+                            .collect();
+
+                        for trait_method in &trait_def.methods {
+                            if !impl_method_names.contains(&trait_method.name) {
+                                return Err(CompileError::Semantic(format!(
+                                    "type `{}` does not implement required method `{}` from trait `{}`",
+                                    type_name, trait_method.name, trait_name
+                                )));
+                            }
+                        }
+
+                        // Store the trait implementation
+                        trait_impls.insert(
+                            (trait_name.clone(), type_name.clone()),
+                            impl_block.methods.clone(),
+                        );
+                    }
+                    // Note: If trait not found, it might be defined in another module
+                    // For now, we silently allow this for forward compatibility
                 }
             }
             Node::Extern(ext) => {
@@ -412,8 +451,8 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
             }
             Node::Trait(t) => {
-                // Register trait - currently traits are checked at type-check time
-                // Store trait name for later use in impl checking
+                // Register trait definition for use in impl checking
+                traits.insert(t.name.clone(), t.clone());
                 env.insert(t.name.clone(), Value::Nil);
             }
             Node::Actor(a) => {
@@ -872,6 +911,8 @@ pub(crate) fn exec_block_fn(
 // Error handling macros to reduce boilerplate
 //==============================================================================
 
+// These macros are defined for potential future use
+#[allow(unused_macros)]
 /// Create a runtime error with message
 macro_rules! runtime_err {
     ($msg:expr) => {
@@ -892,6 +933,7 @@ macro_rules! semantic_err {
     };
 }
 
+#[allow(unused_macros)]
 /// Create a codegen error with message
 macro_rules! codegen_err {
     ($msg:expr) => {
@@ -902,6 +944,7 @@ macro_rules! codegen_err {
     };
 }
 
+#[allow(unused_macros)]
 /// Return early with a runtime error
 macro_rules! bail_runtime {
     ($msg:expr) => {
