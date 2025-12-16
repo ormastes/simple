@@ -474,7 +474,7 @@ fn test_feature_80_or_pattern() {
     let result = runner
         .run_source(
             r#"
-fn describe(x):
+fn classify(x):
     match x:
         1 | 2 | 3 =>
             return 10
@@ -484,7 +484,7 @@ fn describe(x):
             return 0
     return -1
 
-main = describe(2)
+main = classify(2)
 "#,
         )
         .expect("or pattern");

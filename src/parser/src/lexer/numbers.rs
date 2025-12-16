@@ -2,15 +2,28 @@ use crate::token::{NumericSuffix, TokenKind};
 
 impl<'a> super::Lexer<'a> {
     /// Helper to check if underscore is followed by a unit suffix (not a digit separator).
+    /// Takes a validator to check if a character is a valid digit for the current radix.
     #[inline]
-    fn is_unit_suffix_start(&mut self) -> bool {
+    fn is_unit_suffix_start_with_validator<F>(&mut self, is_valid_digit: &F) -> bool
+    where
+        F: Fn(char) -> bool,
+    {
         let mut peek_ahead = self.chars.clone();
         peek_ahead.next(); // skip '_'
         if let Some((_, next)) = peek_ahead.next() {
-            next.is_alphabetic()
+            // It's a unit suffix only if it's alphabetic AND not a valid digit for current radix
+            // This handles hex numbers where 'a'-'f' are valid digits, not unit suffixes
+            next.is_alphabetic() && !is_valid_digit(next)
         } else {
             false
         }
+    }
+
+    /// Helper to check if underscore is followed by a unit suffix (not a digit separator).
+    /// For decimal numbers only.
+    #[inline]
+    fn is_unit_suffix_start(&mut self) -> bool {
+        self.is_unit_suffix_start_with_validator(&|c: char| c.is_ascii_digit())
     }
 
     /// Helper to scan digits for a given radix, handling underscores and unit suffixes.
@@ -25,7 +38,7 @@ impl<'a> super::Lexer<'a> {
                 self.advance();
                 found_digits = true;
             } else if c == '_' {
-                if self.is_unit_suffix_start() {
+                if self.is_unit_suffix_start_with_validator(&is_valid_digit) {
                     break; // Unit suffix detected
                 }
                 self.advance(); // Skip digit separator
