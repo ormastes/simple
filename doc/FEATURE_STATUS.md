@@ -573,40 +573,39 @@ This document consolidates all feature implementation status from `doc/status/*.
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
-| Core Language | 50 | 38 | 8 | 4 |
-| Codegen | 5 | 3 | 2 | 0 |
-| Extended | 21 | 1 | 0 | 20 |
-| Testing | 4 | 2 | 1 | 1 |
-| Advanced | 127 | 0 | 0 | 127 |
-| Infrastructure | 5 | 5 | 0 | 0 |
-| **TOTAL** | **212** | **49** | **11** | **152** |
+| Core Language | 47 | 38 | 8 | 1 |
+| Codegen | 6 | 6 | 0 | 0 |
+| Testing & CLI | 39 | 39 | 0 | 0 |
+| Concurrency Runtime | 33 | 33 | 0 | 0 |
+| Contracts | 32 | 32 | 0 | 0 |
+| Extended - Units | 10 | 0 | 0 | 10 |
+| Extended - Networking | 6 | 0 | 0 | 6 |
+| Advanced - Effects | 6 | 6 | 0 | 0 |
+| Advanced - UI | 6 | 0 | 0 | 6 |
+| Advanced - Web | 17 | 0 | 0 | 17 |
+| Advanced - GPU/SIMD | 11 | 0 | 0 | 11 |
+| **TOTAL** | **211** | **154** | **8** | **51** |
 
-**Overall Progress:** 23% (49/212 complete)
+**Overall Progress:** 73% (154/211 complete)
 
 ---
 
 ## Next Priorities
 
 ### Immediate (Sprint)
-1. Complete Feature #99 (Body Block Outlining) - unblocks actors/generators/futures
-2. Finish Module System dependency graph
-3. Type Inference full AST integration
+1. Complete `dyn Trait` runtime support (TraitObject creation)
+2. Finish Type Inference AST integration
+3. Unique/Shared pointer RAII semantics
 
 ### Short Term (Month)
-1. Memory pointer types (#25-28)
-2. Trait dynamic dispatch (#15)
-3. Union types (#37)
-4. Named arguments (#18)
+1. Memory pointer types - Handle pointers
+2. Unit type basics (#200-204)
+3. Effect system foundation (#320-322)
 
 ### Medium Term (Quarter)
-1. Unit types (#200-209)
-2. Networking APIs (#210-215)
-3. Contract blocks (#400-405)
-
-### Long Term (Year)
-1. UI Framework (#510-512)
-2. Web Framework (#520-536)
-3. GPU Kernels (#126)
+1. GPU kernel basics (#405-409)
+2. UI framework prototype (#500-505)
+3. Web framework basics (#520-528)
 
 ---
 

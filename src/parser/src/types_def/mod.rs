@@ -416,7 +416,7 @@ impl<'a> Parser<'a> {
             where_clause,
             body,
             visibility: Visibility::Private,
-            effect: None,
+            effects: vec![],
             decorators: vec![],
             attributes: vec![],
             doc_comment: None,
