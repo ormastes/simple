@@ -12,7 +12,7 @@ Context Sharing allows you to define reusable test setup (fixtures) once and use
 
 ```simple
 context_def :context_name:
-    given_lazy :fixture_name, \
+    given_lazy :fixture_name, \:
         # Return the fixture value (evaluated once per example)
         create_fixture()
 
@@ -63,10 +63,10 @@ context_compose :context1, :context2:
 ```simple
 # Define the context
 context_def :user_fixtures:
-    given_lazy :admin_user, \
+    given_lazy :admin_user, \:
         { name: "Admin", role: "admin", permissions: ["read", "write", "delete"] }
 
-    given_lazy :regular_user, \
+    given_lazy :regular_user, \:
         { name: "User", role: "user", permissions: ["read"] }
 
 # Use it in multiple places
@@ -88,7 +88,7 @@ context_def :with_database:
         db.clear_tables()
 
     # Lazy given - connection is memoized
-    given_lazy :connection, \
+    given_lazy :connection, \:
         db.connect("test")
 
 describe "Database Operations":
@@ -105,13 +105,13 @@ describe "Database Operations":
 
 ```simple
 context_def :math_fixtures:
-    given_lazy :x, \
+    given_lazy :x, \:
         10
 
-    given_lazy :y, \
+    given_lazy :y, \:
         x * 2  # y depends on x
 
-    given_lazy :sum, \
+    given_lazy :sum, \:
         x + y  # sum depends on both
 
 describe "Math":
@@ -130,14 +130,14 @@ describe "Math":
 
 ```simple
 context_def :authenticated:
-    given_lazy :auth_token, \
+    given_lazy :auth_token, \:
         "token_xyz123abc"
 
-    given_lazy :user_id, \
+    given_lazy :user_id, \:
         42
 
 context_def :with_rate_limit:
-    given_lazy :requests_remaining, \
+    given_lazy :requests_remaining, \:
         100
 
 describe "API Endpoint":
@@ -160,7 +160,7 @@ describe "API Endpoint":
 
 ```simple
 context_def :calculator_state:
-    given_lazy :calculator, \
+    given_lazy :calculator, \:
         { value: 0 }
 
 describe "Calculator":
@@ -205,7 +205,7 @@ describe "User":
 
 ```simple
 context_def :admin_user:
-    given_lazy :user, \
+    given_lazy :user, \:
         { role: "admin" }
 
 describe "User":
@@ -248,7 +248,7 @@ context_def :database_session:
         db.migrate()
 
     # No after_all needed - each test gets fresh data via given
-    given_lazy :connection, \
+    given_lazy :connection, \:
         db
 ```
 
@@ -256,11 +256,11 @@ context_def :database_session:
 
 ```simple
 context_def :empty_list:
-    given_lazy :items, \
+    given_lazy :items, \:
         []
 
 context_def :list_with_items:
-    given_lazy :items, \
+    given_lazy :items, \:
         [1, 2, 3, 4, 5]
 
 describe "List Operations":
@@ -277,16 +277,16 @@ describe "List Operations":
 
 ```simple
 context_def :user_with_orders:
-    given_lazy :user, \
+    given_lazy :user, \:
         create_user("test@example.com")
 
-    given_lazy :orders, \
+    given_lazy :orders, \:
         [
             { id: 1, total: 100 },
             { id: 2, total: 200 }
         ]
 
-    given_lazy :total_spent, \
+    given_lazy :total_spent, \:
         orders.map(fn(o): o.total).sum()
 
 describe "User Orders":
@@ -323,11 +323,11 @@ describe "Array Operations":
 ```simple
 # test_fixtures.spl
 context_def :string_fixtures:
-    given_lazy :str, \
+    given_lazy :str, \:
         "hello world"
 
 context_def :array_fixtures:
-    given_lazy :arr, \
+    given_lazy :arr, \:
         [1, 2, 3]
 
 # string_spec.spl
@@ -352,7 +352,7 @@ describe "Array Operations":
 ```simple
 # Wrong - fixture won't be available
 context_def :my_context:
-    given_lazy :value, \
+    given_lazy :value, \:
         42
     # Forget to reference it
 
@@ -369,7 +369,7 @@ context :my_context:
 ```simple
 context_def :counter:
     # Wrong - count is memoized
-    given_lazy :count, \
+    given_lazy :count, \:
         0
 
 # Right - count is fresh
@@ -385,7 +385,7 @@ context_def :counter:
 ```simple
 # Context must be defined
 context_def :my_context:
-    given_lazy :value, \
+    given_lazy :value, \:
         42
 
 describe "Tests":
