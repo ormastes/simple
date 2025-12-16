@@ -85,6 +85,21 @@ impl Lowerer {
             }),
 
             Expr::Identifier(name) => {
+                // Check if this is a contract binding (ret, err, result in postconditions)
+                if ctx.is_postcondition_binding(name) {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::ContractResult,
+                        ty: ctx.return_type,
+                    });
+                }
+                if ctx.is_error_binding(name) {
+                    // Error binding also refers to the return value (the error part)
+                    return Ok(HirExpr {
+                        kind: HirExprKind::ContractResult,
+                        ty: ctx.return_type,
+                    });
+                }
+
                 if let Some(idx) = ctx.lookup(name) {
                     let ty = ctx.locals[idx].ty;
                     Ok(HirExpr {
@@ -244,6 +259,23 @@ impl Lowerer {
                     }
                 }
 
+                // CTR-030-032: Check for impure function calls in contract expressions
+                if ctx.contract_ctx.is_some() {
+                    if let Expr::Identifier(name) = callee.as_ref() {
+                        // Check if function is pure (marked with #[pure])
+                        // Some builtins are implicitly pure: comparisons, math, etc.
+                        let is_implicitly_pure = matches!(name.as_str(),
+                            "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" |
+                            "len" | "is_empty" | "contains" | "to_string" | "to_int"
+                        );
+                        if !is_implicitly_pure && !self.is_pure_function(name) {
+                            return Err(LowerError::ImpureFunctionInContract {
+                                func_name: name.clone(),
+                            });
+                        }
+                    }
+                }
+
                 let func_hir = Box::new(self.lower_expr(callee, ctx)?);
                 let mut args_hir = Vec::new();
                 for arg in args {
@@ -397,20 +429,49 @@ impl Lowerer {
                 })
             }
 
+            // Contract expressions (Design by Contract)
+            Expr::ContractResult => {
+                // ContractResult refers to the return value in postconditions
+                // The type is determined by the function's return type from context
+                Ok(HirExpr {
+                    kind: HirExprKind::ContractResult,
+                    ty: ctx.return_type,
+                })
+            }
+
+            Expr::ContractOld(inner) => {
+                // old(expr) captures the value of expr at function entry
+                let inner_hir = Box::new(self.lower_expr(inner, ctx)?);
+                let ty = inner_hir.ty;
+
+                // CTR-060-062: Check that the type is snapshot-safe
+                // Snapshot-safe types include primitives, enums, and immutable structs
+                if !self.module.types.is_snapshot_safe(ty) {
+                    return Err(LowerError::NotSnapshotSafe);
+                }
+
+                Ok(HirExpr {
+                    kind: HirExprKind::ContractOld(inner_hir),
+                    ty,
+                })
+            }
+
+            // Pointer allocation: new &T(value) or new *T(value)
             Expr::New { kind, expr } => {
                 let value_hir = Box::new(self.lower_expr(expr, ctx)?);
                 let inner_ty = value_hir.ty;
+                let ptr_kind: PointerKind = (*kind).into();
                 let ptr_type = HirType::Pointer {
-                    kind: (*kind).into(),
+                    kind: ptr_kind,
                     inner: inner_ty,
                 };
-                let ty = self.module.types.register(ptr_type);
+                let ptr_ty = self.module.types.register(ptr_type);
                 Ok(HirExpr {
                     kind: HirExprKind::PointerNew {
-                        kind: (*kind).into(),
+                        kind: ptr_kind,
                         value: value_hir,
                     },
-                    ty,
+                    ty: ptr_ty,
                 })
             }
 

@@ -80,6 +80,7 @@ impl<'a> super::Lexer<'a> {
             "vec" => TokenKind::Vec,
             "shared" => TokenKind::Shared,
             "gpu" => TokenKind::Gpu,
+            "dyn" => TokenKind::Dyn,
             // Contract keywords (new spec)
             "out" => TokenKind::Out,
             "out_err" => TokenKind::OutErr,

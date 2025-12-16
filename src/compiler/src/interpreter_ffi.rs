@@ -121,6 +121,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         span: Span::new(0, 0, 0, 0),
                         name: s.name.clone(),
                         generic_params: s.generic_params.clone(),
+                        where_clause: vec![],
                         fields: s.fields.clone(),
                         methods: s.methods.clone(),
                         parent: None,

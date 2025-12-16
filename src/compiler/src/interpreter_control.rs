@@ -329,10 +329,13 @@ fn exec_for(
     Ok(Control::Next)
 }
 
-fn is_catch_all_pattern(pattern: &Pattern) -> bool {
+/// Check if a pattern is a catch-all that covers any value.
+pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Wildcard => true,
         Pattern::Identifier(_) | Pattern::MutIdentifier(_) => true,
+        Pattern::Or(patterns) => patterns.iter().any(is_catch_all_pattern),
+        Pattern::Typed { pattern, .. } => is_catch_all_pattern(pattern),
         _ => false,
     }
 }
@@ -406,17 +409,70 @@ fn match_sequence_pattern(
     } else {
         return Ok(false);
     };
-    
-    if patterns.len() != values.len() {
-        return Ok(false);
-    }
-    
-    for (pat, val) in patterns.iter().zip(values.iter()) {
-        if !pattern_matches(pat, val, bindings, enums)? {
+
+    // Check for Rest pattern to support variable-length matching
+    // e.g., [first, ..rest] or [first, second, ..]
+    let rest_index = patterns.iter().position(|p| matches!(p, Pattern::Rest));
+
+    if let Some(rest_idx) = rest_index {
+        // Patterns before the rest
+        let before_rest = &patterns[..rest_idx];
+        // Patterns after the rest (if any - skip the Rest itself)
+        let after_rest = if rest_idx + 1 < patterns.len() {
+            &patterns[rest_idx + 1..]
+        } else {
+            &[]
+        };
+
+        // Minimum values needed: before_rest.len() + after_rest.len()
+        let min_needed = before_rest.len() + after_rest.len();
+        if values.len() < min_needed {
             return Ok(false);
         }
+
+        // Match patterns before rest
+        for (pat, val) in before_rest.iter().zip(values.iter()) {
+            if !pattern_matches(pat, val, bindings, enums)? {
+                return Ok(false);
+            }
+        }
+
+        // Match patterns after rest (from the end)
+        for (i, pat) in after_rest.iter().enumerate() {
+            let val_idx = values.len() - after_rest.len() + i;
+            if !pattern_matches(pat, &values[val_idx], bindings, enums)? {
+                return Ok(false);
+            }
+        }
+
+        // Collect rest elements
+        let rest_start = before_rest.len();
+        let rest_end = values.len() - after_rest.len();
+        let rest_values: Vec<Value> = values[rest_start..rest_end].to_vec();
+
+        // If there's an identifier after .., bind it to the rest
+        // Look for NamedRest pattern which would be Pattern::Identifier after Rest
+        // For now, rest patterns just match (they don't bind)
+        // A future enhancement could support [first, ..rest] with named rest
+
+        // Store rest in a special binding if followed by an identifier
+        // This is a simplified approach - full support would need parser changes
+        bindings.insert("__rest__".to_string(), Value::Array(rest_values));
+
+        Ok(true)
+    } else {
+        // No rest pattern - exact match required
+        if patterns.len() != values.len() {
+            return Ok(false);
+        }
+
+        for (pat, val) in patterns.iter().zip(values.iter()) {
+            if !pattern_matches(pat, val, bindings, enums)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
-    Ok(true)
 }
 
 pub(crate) fn pattern_matches(
@@ -619,5 +675,84 @@ pub(crate) fn pattern_matches(
         Pattern::Rest => {
             Ok(true)
         }
+    }
+}
+
+/// Extract the covered variant name from a pattern (for exhaustiveness checking).
+/// Returns Some(variant_name) for enum patterns, None for wildcards/catch-all.
+fn extract_covered_variant(pattern: &Pattern) -> Option<String> {
+    match pattern {
+        Pattern::Enum { variant, .. } => Some(variant.clone()),
+        Pattern::Or(patterns) => {
+            // Or patterns cover all their sub-patterns
+            // Return the first one for simplicity (all should be checked)
+            patterns.first().and_then(extract_covered_variant)
+        }
+        Pattern::Typed { pattern, .. } => extract_covered_variant(pattern),
+        // Wildcard, Identifier, etc. are catch-all - they cover everything
+        _ => None,
+    }
+}
+
+/// Collect all variant names covered by a list of match arm patterns.
+/// Returns (covered_variants, has_catch_all).
+pub(crate) fn collect_covered_variants(patterns: &[&Pattern]) -> (Vec<String>, bool) {
+    let mut covered = Vec::new();
+    let mut has_catch_all = false;
+
+    for pattern in patterns {
+        if is_catch_all_pattern(pattern) {
+            has_catch_all = true;
+        } else if let Some(variant) = extract_covered_variant(pattern) {
+            if !covered.contains(&variant) {
+                covered.push(variant);
+            }
+        }
+        // For Or patterns, collect all sub-variants
+        if let Pattern::Or(sub_patterns) = pattern {
+            for sub_pat in sub_patterns {
+                if let Some(variant) = extract_covered_variant(sub_pat) {
+                    if !covered.contains(&variant) {
+                        covered.push(variant);
+                    }
+                }
+            }
+        }
+    }
+
+    (covered, has_catch_all)
+}
+
+/// Check if a match expression covers all variants of an enum.
+/// Returns None if exhaustive, Some(missing_variants) otherwise.
+pub(crate) fn check_enum_exhaustiveness(
+    enum_name: &str,
+    arm_patterns: &[&Pattern],
+    enums: &Enums,
+) -> Option<Vec<String>> {
+    // Get the enum definition
+    let enum_def = enums.get(enum_name)?;
+
+    // Get all variant names from the enum definition
+    let all_variants: Vec<String> = enum_def.variants.iter().map(|v| v.name.clone()).collect();
+
+    // Collect covered variants from patterns
+    let (covered, has_catch_all) = collect_covered_variants(arm_patterns);
+
+    // If there's a catch-all, all variants are covered
+    if has_catch_all {
+        return None;
+    }
+
+    // Find missing variants
+    let missing: Vec<String> = all_variants
+        .into_iter()
+        .filter(|v| !covered.contains(v))
+        .collect();
+
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
     }
 }

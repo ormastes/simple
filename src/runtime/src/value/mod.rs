@@ -21,6 +21,7 @@ mod actors;
 mod async_gen;
 mod channels;
 mod collections;
+mod contracts;
 mod core;
 mod doctest_io;
 mod ffi;
@@ -117,6 +118,13 @@ pub use ffi::{
 pub use doctest_io::{
     doctest_is_dir, doctest_is_file, doctest_path_contains, doctest_path_exists,
     doctest_path_has_extension, doctest_read_file, doctest_walk_directory,
+};
+
+// Re-export contract violation types and FFI functions (CTR-050-054)
+pub use contracts::{
+    ContractViolationKind, RuntimeContractViolation,
+    rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
+    rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation,
 };
 
 // ============================================================================

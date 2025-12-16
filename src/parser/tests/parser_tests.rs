@@ -255,9 +255,106 @@ fn parse_generic_struct() {
     parse_ok("struct Box<T>:\n    value: T");
 }
 
+// Where clause tests
+#[test]
+fn parse_function_where_clause() {
+    parse_ok("fn show<T>(x: T) where T: Display:\n    return x");
+}
+
+#[test]
+fn parse_function_where_clause_multiple_bounds() {
+    parse_ok("fn process<T>(x: T) where T: Clone + Debug:\n    return x");
+}
+
+#[test]
+fn parse_function_where_clause_multiple_params() {
+    parse_ok("fn combine<T, U>(a: T, b: U) where T: Clone, U: Copy:\n    return a");
+}
+
+#[test]
+fn parse_struct_where_clause() {
+    let items = parse("struct Container<T> where T: Clone:\n    value: T");
+    assert_eq!(items.len(), 1);
+    if let Node::Struct(s) = &items[0] {
+        assert_eq!(s.name, "Container");
+        assert_eq!(s.where_clause.len(), 1);
+        assert_eq!(s.where_clause[0].type_param, "T");
+        assert_eq!(s.where_clause[0].bounds, vec!["Clone"]);
+    } else {
+        panic!("Expected struct");
+    }
+}
+
+#[test]
+fn parse_trait_where_clause() {
+    parse_ok("trait Comparable<T> where T: Ord:\n    fn compare(self, other: T) -> i64:\n        return 0");
+}
+
+#[test]
+fn parse_impl_where_clause() {
+    parse_ok("impl<T> Clone for Container[T] where T: Clone:\n    fn clone(self) -> Container[T]:\n        return Container(self.value)");
+}
+
+#[test]
+fn parse_impl_generic_params() {
+    let items = parse("impl<T> Clone for Container[T] where T: Clone:\n    fn clone(self) -> Container[T]:\n        return self");
+    if let Node::Impl(impl_block) = &items[0] {
+        assert_eq!(impl_block.generic_params, vec!["T"]);
+        assert_eq!(impl_block.trait_name, Some("Clone".to_string()));
+        assert_eq!(impl_block.where_clause.len(), 1);
+        assert_eq!(impl_block.where_clause[0].type_param, "T");
+    } else {
+        panic!("Expected impl block");
+    }
+}
+
 #[test]
 fn parse_trait_impl() {
     parse_ok("impl Show for Point:\n    fn show(self):\n        return 0");
+}
+
+// Default trait implementation tests
+#[test]
+fn parse_trait_abstract_method() {
+    // Trait with abstract method (no body)
+    let items = parse("trait Greet:\n    fn greet(self) -> str");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.methods.len(), 1);
+        assert!(t.methods[0].is_abstract);
+        assert_eq!(t.methods[0].name, "greet");
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_default_method() {
+    // Trait with default implementation
+    let items = parse("trait Greet:\n    fn greet(self) -> str:\n        return 'Hello'");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.methods.len(), 1);
+        assert!(!t.methods[0].is_abstract);
+        assert_eq!(t.methods[0].name, "greet");
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_mixed_methods() {
+    // Trait with both abstract and default methods
+    let items = parse("trait Animal:\n    fn speak(self) -> str\n    fn sleep(self):\n        return 0");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.methods.len(), 2);
+        // speak is abstract (no body)
+        assert!(t.methods[0].is_abstract);
+        assert_eq!(t.methods[0].name, "speak");
+        // sleep has default implementation
+        assert!(!t.methods[1].is_abstract);
+        assert_eq!(t.methods[1].name, "sleep");
+    } else {
+        panic!("Expected trait");
+    }
 }
 
 // Generic types use brackets: List[i64]
@@ -497,5 +594,36 @@ fn test_expect_await_parsing() {
             }
         }
         other => panic!("expected Call expression, got {:#?}", other),
+    }
+}
+
+// === dyn Trait Tests ===
+
+#[test]
+fn parse_dyn_trait_type_annotation() {
+    // dyn Trait as type annotation in function parameter
+    parse_ok("fn process(obj: dyn Display):\n    pass");
+}
+
+#[test]
+fn parse_dyn_trait_return_type() {
+    // dyn Trait as function return type
+    parse_ok("fn create() -> dyn Printable:\n    pass");
+}
+
+#[test]
+fn parse_dyn_trait_in_array() {
+    // Array of dyn Trait objects
+    parse_ok("let items: [dyn Drawable] = []");
+}
+
+#[test]
+fn parse_dyn_trait_parses_correctly() {
+    let items = parse("fn take(x: dyn Trait):\n    pass");
+    if let Node::Function(f) = &items[0] {
+        assert_eq!(f.params.len(), 1);
+        assert!(matches!(&f.params[0].ty, Some(Type::DynTrait(name)) if name == "Trait"));
+    } else {
+        panic!("expected function");
     }
 }

@@ -78,6 +78,7 @@ impl Value {
             | Value::BlockClosure { .. }
             | Value::Function { .. }
             | Value::Constructor { .. }
+            | Value::TraitObject { .. }
             | Value::Actor(_)
             | Value::Future(_)
             | Value::Generator(_)
@@ -163,6 +164,7 @@ impl Value {
             Value::Object { .. } => "object",
             Value::Enum { .. } => "enum",
             Value::Constructor { .. } => "constructor",
+            Value::TraitObject { .. } => "trait_object",
             Value::Actor(_) => "actor",
             Value::Future(_) => "future",
             Value::Generator(_) => "generator",

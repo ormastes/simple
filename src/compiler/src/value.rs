@@ -533,6 +533,12 @@ pub enum Value {
     Constructor {
         class_name: String,
     },
+    /// Dynamic trait object - wraps a value with its trait for dynamic dispatch
+    /// Enables polymorphism via trait implementations (dyn Trait syntax)
+    TraitObject {
+        trait_name: String,
+        inner: Box<Value>,
+    },
     Actor(ActorHandle),
     Future(FutureValue),
     Generator(GeneratorValue),

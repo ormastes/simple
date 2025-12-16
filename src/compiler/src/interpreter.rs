@@ -382,6 +382,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                         span: s.span,
                         name: s.name.clone(),
                         generic_params: Vec::new(),
+                        where_clause: vec![],
                         fields: s.fields.clone(),
                         methods: s.methods.clone(),
                         parent: None,
@@ -416,7 +417,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 if let Some(ref trait_name) = impl_block.trait_name {
                     // Verify trait exists
                     if let Some(trait_def) = traits.get(trait_name) {
-                        // Check all trait methods are implemented
+                        // Check all abstract trait methods are implemented
                         let impl_method_names: std::collections::HashSet<_> = impl_block
                             .methods
                             .iter()
@@ -424,7 +425,10 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                             .collect();
 
                         for trait_method in &trait_def.methods {
-                            if !impl_method_names.contains(&trait_method.name) {
+                            // Only require implementation of abstract methods
+                            if trait_method.is_abstract
+                                && !impl_method_names.contains(&trait_method.name)
+                            {
                                 return Err(CompileError::Semantic(format!(
                                     "type `{}` does not implement required method `{}` from trait `{}`",
                                     type_name, trait_method.name, trait_name
@@ -432,10 +436,23 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                             }
                         }
 
-                        // Store the trait implementation
+                        // Build combined methods: impl methods + default trait methods
+                        let mut combined_methods = impl_block.methods.clone();
+                        for trait_method in &trait_def.methods {
+                            // Add default implementations that weren't overridden
+                            if !trait_method.is_abstract
+                                && !impl_method_names.contains(&trait_method.name)
+                            {
+                                combined_methods.push(trait_method.clone());
+                                // Also add to impl_methods so method dispatch can find it
+                                methods.push(trait_method.clone());
+                            }
+                        }
+
+                        // Store the trait implementation with combined methods
                         trait_impls.insert(
                             (trait_name.clone(), type_name.clone()),
-                            impl_block.methods.clone(),
+                            combined_methods,
                         );
                     }
                     // Note: If trait not found, it might be defined in another module
@@ -464,6 +481,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                         span: a.span,
                         name: a.name.clone(),
                         generic_params: Vec::new(),
+                        where_clause: vec![],
                         fields: a.fields.clone(),
                         methods: a.methods.clone(),
                         parent: None,

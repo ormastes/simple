@@ -19,6 +19,7 @@ pub enum HeapObjectType {
     Borrow = 0x0D,
     Channel = 0x0E,
     Weak = 0x0F,
+    ContractViolation = 0x10,
 }
 
 /// Header for all heap-allocated objects

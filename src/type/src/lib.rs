@@ -298,6 +298,8 @@ pub enum Type {
         lanes: u32,
         element: Box<Type>,
     },
+    /// Dynamic trait object: dyn Trait
+    DynTrait(String),
 }
 
 impl Type {

@@ -1,6 +1,6 @@
 use simple_parser::{self as ast, Module, Node};
 
-use super::context::FunctionContext;
+use super::context::{ContractLoweringContext, FunctionContext};
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use super::super::types::*;
@@ -18,25 +18,13 @@ impl Lowerer {
                 Node::Function(f) => {
                     let ret_ty = self.resolve_type_opt(&f.return_type)?;
                     self.globals.insert(f.name.clone(), ret_ty);
+                    // Track pure functions for CTR-030-032
+                    if f.is_pure() {
+                        self.pure_functions.insert(f.name.clone());
+                    }
                 }
                 Node::Class(c) => {
-                    let fields: Vec<_> = c
-                        .fields
-                        .iter()
-                        .map(|f| {
-                            (
-                                f.name.clone(),
-                                self.resolve_type(&f.ty).unwrap_or(TypeId::VOID),
-                            )
-                        })
-                        .collect();
-                    self.module.types.register_named(
-                        c.name.clone(),
-                        HirType::Struct {
-                            name: c.name.clone(),
-                            fields,
-                        },
-                    );
+                    self.register_class(c)?;
                 }
                 Node::Enum(e) => {
                     let variants = e
@@ -60,9 +48,11 @@ impl Lowerer {
                         },
                     );
                 }
+                Node::TypeAlias(ta) => {
+                    self.register_type_alias(ta)?;
+                }
                 Node::Trait(_)
                 | Node::Actor(_)
-                | Node::TypeAlias(_)
                 | Node::Impl(_)
                 | Node::Extern(_)
                 | Node::Macro(_)
@@ -91,15 +81,75 @@ impl Lowerer {
             }
         }
 
-        // Second pass: lower function bodies
+        // Second pass: lower function bodies and class/struct methods
         for item in &ast_module.items {
-            if let Node::Function(f) = item {
-                let hir_func = self.lower_function(f)?;
-                self.module.functions.push(hir_func);
+            match item {
+                Node::Function(f) => {
+                    let hir_func = self.lower_function(f, None)?;
+                    self.module.functions.push(hir_func);
+                }
+                Node::Class(c) => {
+                    // Lower class methods with type invariant injection
+                    for method in &c.methods {
+                        let hir_func = self.lower_function(method, Some(&c.name))?;
+                        self.module.functions.push(hir_func);
+                    }
+                }
+                Node::Struct(s) => {
+                    // Lower struct methods with type invariant injection
+                    for method in &s.methods {
+                        let hir_func = self.lower_function(method, Some(&s.name))?;
+                        self.module.functions.push(hir_func);
+                    }
+                }
+                _ => {}
             }
         }
 
         Ok(self.module)
+    }
+
+    /// Register a class type and its invariant
+    fn register_class(&mut self, c: &ast::ClassDef) -> LowerResult<TypeId> {
+        let fields: Vec<_> = c
+            .fields
+            .iter()
+            .map(|f| {
+                (
+                    f.name.clone(),
+                    self.resolve_type(&f.ty).unwrap_or(TypeId::VOID),
+                )
+            })
+            .collect();
+
+        let type_id = self.module.types.register_named(
+            c.name.clone(),
+            HirType::Struct {
+                name: c.name.clone(),
+                fields,
+                has_snapshot: c.is_snapshot(),
+            },
+        );
+
+        // Register class invariant if present
+        if let Some(ref invariant) = c.invariant {
+            let mut ctx = FunctionContext::new(TypeId::VOID);
+            let mut hir_invariant = HirTypeInvariant::default();
+
+            for clause in &invariant.conditions {
+                let condition = self.lower_expr(&clause.condition, &mut ctx)?;
+                hir_invariant.conditions.push(HirContractClause {
+                    condition,
+                    message: clause.message.clone(),
+                });
+            }
+
+            self.module
+                .type_invariants
+                .insert(c.name.clone(), hir_invariant);
+        }
+
+        Ok(type_id)
     }
 
     fn register_struct(&mut self, s: &ast::StructDef) -> LowerResult<TypeId> {
@@ -112,12 +162,71 @@ impl Lowerer {
         let hir_type = HirType::Struct {
             name: s.name.clone(),
             fields,
+            has_snapshot: s.is_snapshot(),
         };
 
-        Ok(self.module.types.register_named(s.name.clone(), hir_type))
+        let type_id = self.module.types.register_named(s.name.clone(), hir_type);
+
+        // Register struct invariant if present
+        if let Some(ref invariant) = s.invariant {
+            let mut ctx = FunctionContext::new(TypeId::VOID);
+            let mut hir_invariant = HirTypeInvariant::default();
+
+            for clause in &invariant.conditions {
+                let condition = self.lower_expr(&clause.condition, &mut ctx)?;
+                hir_invariant.conditions.push(HirContractClause {
+                    condition,
+                    message: clause.message.clone(),
+                });
+            }
+
+            self.module
+                .type_invariants
+                .insert(s.name.clone(), hir_invariant);
+        }
+
+        Ok(type_id)
     }
 
-    fn lower_function(&mut self, f: &ast::FunctionDef) -> LowerResult<HirFunction> {
+    /// Register a type alias, with optional refinement predicate (CTR-020)
+    fn register_type_alias(&mut self, ta: &ast::TypeAliasDef) -> LowerResult<TypeId> {
+        let base_type = self.resolve_type(&ta.ty)?;
+
+        // Register the type alias name as an alias to the base type
+        // For now, we just use the base type ID directly
+        // The refinement predicate is stored separately for runtime checks
+
+        if let Some(ref where_clause) = ta.where_clause {
+            // This is a refined type: `type PosI64 = i64 where self > 0`
+            // Lower the predicate with a synthetic 'self' binding
+            let mut ctx = FunctionContext::new(base_type);
+            // Add 'self' as a local variable for the predicate
+            ctx.add_local("self".to_string(), base_type, simple_parser::Mutability::Immutable);
+
+            let predicate = self.lower_expr(where_clause, &mut ctx)?;
+
+            let refined_type = super::super::types::HirRefinedType {
+                name: ta.name.clone(),
+                base_type,
+                predicate,
+            };
+
+            self.module.refined_types.insert(ta.name.clone(), refined_type);
+        }
+
+        // Register the type alias name to map to the base type
+        self.module.types.register_alias(ta.name.clone(), base_type);
+
+        Ok(base_type)
+    }
+
+    /// Lower a function, optionally injecting type invariants for methods
+    /// `owner_type`: If this function is a method, the name of the owning type
+    fn lower_function(
+        &mut self,
+        f: &ast::FunctionDef,
+        owner_type: Option<&str>,
+    ) -> LowerResult<HirFunction> {
         let return_type = self.resolve_type_opt(&f.return_type)?;
         let mut ctx = FunctionContext::new(return_type);
 
@@ -136,12 +245,65 @@ impl Lowerer {
 
         let body = self.lower_block(&f.body, &mut ctx)?;
 
-        // Lower contract if present
-        let contract = if let Some(ref ast_contract) = f.contract {
+        // Lower contract if present, or create one for type invariants
+        let mut contract = if let Some(ref ast_contract) = f.contract {
             Some(self.lower_contract(ast_contract, &mut ctx)?)
         } else {
             None
         };
+
+        // Inject type invariants for public methods (CTR-011)
+        if let Some(type_name) = owner_type {
+            if f.visibility.is_public() {
+                if let Some(type_invariant) = self.module.type_invariants.get(type_name).cloned() {
+                    // Add type invariants to function invariants
+                    let contract = contract.get_or_insert_with(HirContract::default);
+                    for clause in type_invariant.conditions {
+                        contract.invariants.push(clause);
+                    }
+                }
+            }
+        }
+
+        // CTR-012: Module boundary checking for public functions
+        // Check type invariants for parameters and return values that cross module boundaries
+        if f.visibility.is_public() && owner_type.is_none() {
+            // Check parameter types for invariants (add as preconditions)
+            for (param_idx, param) in params.iter().enumerate() {
+                if let Some(type_name) = self.module.types.get_type_name(param.ty) {
+                    if let Some(type_invariant) = self.module.type_invariants.get(type_name).cloned() {
+                        let contract = contract.get_or_insert_with(HirContract::default);
+                        for clause in &type_invariant.conditions {
+                            // Substitute self (local 0) with the parameter index
+                            let substituted_condition = clause.condition.substitute_local(0, param_idx);
+                            contract.preconditions.push(HirContractClause {
+                                condition: substituted_condition,
+                                message: clause.message.clone().or_else(|| {
+                                    Some(format!("Type invariant for parameter '{}'", param.name))
+                                }),
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Check return type for invariants (add as postconditions)
+            if let Some(type_name) = self.module.types.get_type_name(return_type) {
+                if let Some(type_invariant) = self.module.type_invariants.get(type_name).cloned() {
+                    let contract = contract.get_or_insert_with(HirContract::default);
+                    for clause in &type_invariant.conditions {
+                        // Substitute self (local 0) with ContractResult
+                        let substituted_condition = clause.condition.substitute_self_with_result();
+                        contract.postconditions.push(HirContractClause {
+                            condition: substituted_condition,
+                            message: clause.message.clone().or_else(|| {
+                                Some("Type invariant for return value".to_string())
+                            }),
+                        });
+                    }
+                }
+            }
+        }
 
         Ok(HirFunction {
             name: f.name.clone(),
@@ -151,6 +313,7 @@ impl Lowerer {
             body,
             visibility: f.visibility,
             contract,
+            is_pure: f.is_pure(),
         })
     }
 
@@ -161,7 +324,14 @@ impl Lowerer {
     ) -> LowerResult<HirContract> {
         let mut hir_contract = HirContract::default();
 
-        // Lower preconditions
+        // Set contract context BEFORE lowering any expressions (CTR-030-032)
+        // This enables purity checking for all contract expressions
+        ctx.contract_ctx = Some(ContractLoweringContext {
+            postcondition_binding: contract.postcondition_binding.clone(),
+            error_binding: contract.error_binding.clone(),
+        });
+
+        // Lower preconditions (purity checked via contract_ctx)
         for clause in &contract.preconditions {
             let condition = self.lower_expr(&clause.condition, ctx)?;
             hir_contract.preconditions.push(HirContractClause {
@@ -170,7 +340,7 @@ impl Lowerer {
             });
         }
 
-        // Lower invariants
+        // Lower invariants (purity checked via contract_ctx)
         for clause in &contract.invariants {
             let condition = self.lower_expr(&clause.condition, ctx)?;
             hir_contract.invariants.push(HirContractClause {
@@ -179,11 +349,15 @@ impl Lowerer {
             });
         }
 
-        // Lower postconditions
-        // First, add the return value binding if specified
+        // Lower postconditions with contract context for binding names
         if let Some(ref binding) = contract.postcondition_binding {
             hir_contract.postcondition_binding = Some(binding.clone());
         }
+        if let Some(ref binding) = contract.error_binding {
+            hir_contract.error_binding = Some(binding.clone());
+        }
+
+        // Lower postconditions (binding names are converted to ContractResult)
         for clause in &contract.postconditions {
             let condition = self.lower_expr(&clause.condition, ctx)?;
             hir_contract.postconditions.push(HirContractClause {
@@ -193,9 +367,6 @@ impl Lowerer {
         }
 
         // Lower error postconditions
-        if let Some(ref binding) = contract.error_binding {
-            hir_contract.error_binding = Some(binding.clone());
-        }
         for clause in &contract.error_postconditions {
             let condition = self.lower_expr(&clause.condition, ctx)?;
             hir_contract.error_postconditions.push(HirContractClause {
@@ -203,6 +374,9 @@ impl Lowerer {
                 message: clause.message.clone(),
             });
         }
+
+        // Clear contract context
+        ctx.contract_ctx = None;
 
         Ok(hir_contract)
     }

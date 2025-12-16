@@ -117,6 +117,8 @@ pub enum HirType {
     Struct {
         name: String,
         fields: Vec<(String, TypeId)>,
+        /// CTR-062: Whether this struct has custom snapshot semantics (#[snapshot])
+        has_snapshot: bool,
     },
     Enum {
         name: String,
@@ -466,6 +468,79 @@ impl TypeRegistry {
     pub fn lookup(&self, name: &str) -> Option<TypeId> {
         self.name_to_id.get(name).copied()
     }
+
+    /// Register a type alias - maps a name to an existing type ID
+    /// Used for simple type aliases and refined types (CTR-020)
+    pub fn register_alias(&mut self, name: String, type_id: TypeId) {
+        self.name_to_id.insert(name, type_id);
+    }
+
+    /// Check if a type is snapshot-safe for use in old() expressions (CTR-060-062)
+    ///
+    /// Snapshot-safe types can be safely captured at function entry and compared
+    /// in postconditions. These include:
+    /// - CTR-060: Primitives (bool, integers, floats)
+    /// - CTR-060: Nil type
+    /// - CTR-060: Enums (captured by discriminant)
+    /// - CTR-061: Immutable value types (structs with no mutable references)
+    ///
+    /// Types that are NOT snapshot-safe:
+    /// - Mutable references
+    /// - Types containing mutable state
+    /// - Function types
+    /// - Unknown types
+    pub fn is_snapshot_safe(&self, type_id: TypeId) -> bool {
+        match self.get(type_id) {
+            Some(HirType::Void) => true,
+            Some(HirType::Bool) => true,
+            Some(HirType::Int { .. }) => true,
+            Some(HirType::Float { .. }) => true,
+            Some(HirType::String) => true, // Strings are immutable
+            Some(HirType::Nil) => true,
+            Some(HirType::Enum { .. }) => true, // Enums captured by discriminant
+
+            // Tuples are safe if all elements are safe
+            Some(HirType::Tuple(elements)) => {
+                elements.iter().all(|e| self.is_snapshot_safe(*e))
+            }
+
+            // Arrays are safe if elements are safe (assuming immutable array)
+            Some(HirType::Array { element, .. }) => self.is_snapshot_safe(*element),
+
+            // CTR-061: Structs are snapshot-safe if all fields are snapshot-safe
+            // CTR-062: Structs with #[snapshot] attribute have custom snapshot semantics
+            Some(HirType::Struct { fields, has_snapshot, .. }) => {
+                // If marked with #[snapshot], always consider it snapshot-safe
+                if *has_snapshot {
+                    return true;
+                }
+                // Otherwise, check all fields recursively
+                fields.iter().all(|(_, ty)| self.is_snapshot_safe(*ty))
+            }
+
+            // Pointers are only safe if they're immutable borrows
+            Some(HirType::Pointer { kind, inner }) => {
+                matches!(kind, PointerKind::Borrow) && self.is_snapshot_safe(*inner)
+            }
+
+            // Functions and unknown types are not snapshot-safe
+            Some(HirType::Function { .. }) => false,
+            Some(HirType::Unknown) => false,
+            None => false,
+        }
+    }
+
+    /// Get the name of a struct/class/enum type for invariant lookup (CTR-012)
+    ///
+    /// Returns the type name if the type is a named type (struct, class, enum),
+    /// otherwise returns None.
+    pub fn get_type_name(&self, type_id: TypeId) -> Option<&str> {
+        match self.get(type_id) {
+            Some(HirType::Struct { name, .. }) => Some(name.as_str()),
+            Some(HirType::Enum { name, .. }) => Some(name.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// HIR expression with type information attached
@@ -473,6 +548,30 @@ impl TypeRegistry {
 pub struct HirExpr {
     pub kind: HirExprKind,
     pub ty: TypeId,
+}
+
+impl HirExpr {
+    /// Substitute local variable references in an expression (CTR-012)
+    ///
+    /// This is used for module boundary checking to adapt type invariants
+    /// (which reference `self` as local 0) to work with different parameters.
+    ///
+    /// For example, if an invariant references `self.x > 0` and we want to
+    /// check it for parameter `param` at index 2, we substitute local 0 with local 2.
+    pub fn substitute_local(&self, from_idx: usize, to_idx: usize) -> HirExpr {
+        HirExpr {
+            kind: self.kind.substitute_local(from_idx, to_idx),
+            ty: self.ty,
+        }
+    }
+
+    /// Substitute local index 0 (self) with ContractResult for return value checking
+    pub fn substitute_self_with_result(&self) -> HirExpr {
+        HirExpr {
+            kind: self.kind.substitute_self_with_result(),
+            ty: self.ty,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -536,6 +635,7 @@ pub enum HirExprKind {
     Ref(Box<HirExpr>),
     Deref(Box<HirExpr>),
     /// Allocate a new pointer wrapping a value
+    /// Created from `new &T(value)` or `new *T(value)` syntax
     PointerNew {
         kind: PointerKind,
         value: Box<HirExpr>,
@@ -573,15 +673,143 @@ pub enum HirExprKind {
         args: Vec<HirExpr>,
     },
 
-    // Contract expressions (Design by Contract support)
-    /// Reference to an old() snapshot captured at function entry.
-    /// The index refers to the position in HirContract.old_values.
-    ContractOld {
-        snapshot_index: usize,
-    },
-    /// Reference to the return value (ret) or error value (err) in postconditions.
-    /// Used in out(ret): and out_err(err): blocks.
+    // Contract-specific expressions (Design by Contract support)
+    /// Result identifier in postconditions - refers to return value
+    /// Used in `out(ret):` and `ensures:` blocks
     ContractResult,
+    /// old(expr) in postconditions - refers to value at function entry
+    /// The expression is evaluated at function entry and stored for use in postconditions
+    ContractOld(Box<HirExpr>),
+}
+
+impl HirExprKind {
+    /// Substitute local variable references (CTR-012)
+    pub fn substitute_local(&self, from_idx: usize, to_idx: usize) -> HirExprKind {
+        match self {
+            HirExprKind::Local(idx) if *idx == from_idx => HirExprKind::Local(to_idx),
+            HirExprKind::Local(idx) => HirExprKind::Local(*idx),
+
+            // Recursively substitute in nested expressions
+            HirExprKind::Binary { op, left, right } => HirExprKind::Binary {
+                op: *op,
+                left: Box::new(left.substitute_local(from_idx, to_idx)),
+                right: Box::new(right.substitute_local(from_idx, to_idx)),
+            },
+            HirExprKind::Unary { op, operand } => HirExprKind::Unary {
+                op: *op,
+                operand: Box::new(operand.substitute_local(from_idx, to_idx)),
+            },
+            HirExprKind::Call { func, args } => HirExprKind::Call {
+                func: Box::new(func.substitute_local(from_idx, to_idx)),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
+            },
+            HirExprKind::FieldAccess { receiver, field_index } => HirExprKind::FieldAccess {
+                receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
+                field_index: *field_index,
+            },
+            HirExprKind::Index { receiver, index } => HirExprKind::Index {
+                receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
+                index: Box::new(index.substitute_local(from_idx, to_idx)),
+            },
+            HirExprKind::Tuple(elements) => HirExprKind::Tuple(
+                elements.iter().map(|e| e.substitute_local(from_idx, to_idx)).collect(),
+            ),
+            HirExprKind::Array(elements) => HirExprKind::Array(
+                elements.iter().map(|e| e.substitute_local(from_idx, to_idx)).collect(),
+            ),
+            HirExprKind::StructInit { ty, fields } => HirExprKind::StructInit {
+                ty: *ty,
+                fields: fields.iter().map(|f| f.substitute_local(from_idx, to_idx)).collect(),
+            },
+            HirExprKind::If { condition, then_branch, else_branch } => HirExprKind::If {
+                condition: Box::new(condition.substitute_local(from_idx, to_idx)),
+                then_branch: Box::new(then_branch.substitute_local(from_idx, to_idx)),
+                else_branch: else_branch.as_ref().map(|e| Box::new(e.substitute_local(from_idx, to_idx))),
+            },
+            HirExprKind::Ref(inner) => HirExprKind::Ref(Box::new(inner.substitute_local(from_idx, to_idx))),
+            HirExprKind::Deref(inner) => HirExprKind::Deref(Box::new(inner.substitute_local(from_idx, to_idx))),
+            HirExprKind::PointerNew { kind, value } => HirExprKind::PointerNew {
+                kind: *kind,
+                value: Box::new(value.substitute_local(from_idx, to_idx)),
+            },
+            HirExprKind::Cast { expr, target } => HirExprKind::Cast {
+                expr: Box::new(expr.substitute_local(from_idx, to_idx)),
+                target: *target,
+            },
+            HirExprKind::ContractOld(inner) => HirExprKind::ContractOld(Box::new(inner.substitute_local(from_idx, to_idx))),
+            HirExprKind::BuiltinCall { name, args } => HirExprKind::BuiltinCall {
+                name: name.clone(),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
+            },
+
+            // Literals and other non-local expressions are unchanged
+            _ => self.clone(),
+        }
+    }
+
+    /// Substitute local index 0 (self) with ContractResult for return value checking (CTR-012)
+    pub fn substitute_self_with_result(&self) -> HirExprKind {
+        match self {
+            HirExprKind::Local(0) => HirExprKind::ContractResult,
+            HirExprKind::Local(idx) => HirExprKind::Local(*idx),
+
+            // Recursively substitute in nested expressions
+            HirExprKind::Binary { op, left, right } => HirExprKind::Binary {
+                op: *op,
+                left: Box::new(left.substitute_self_with_result()),
+                right: Box::new(right.substitute_self_with_result()),
+            },
+            HirExprKind::Unary { op, operand } => HirExprKind::Unary {
+                op: *op,
+                operand: Box::new(operand.substitute_self_with_result()),
+            },
+            HirExprKind::Call { func, args } => HirExprKind::Call {
+                func: Box::new(func.substitute_self_with_result()),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
+            },
+            HirExprKind::FieldAccess { receiver, field_index } => HirExprKind::FieldAccess {
+                receiver: Box::new(receiver.substitute_self_with_result()),
+                field_index: *field_index,
+            },
+            HirExprKind::Index { receiver, index } => HirExprKind::Index {
+                receiver: Box::new(receiver.substitute_self_with_result()),
+                index: Box::new(index.substitute_self_with_result()),
+            },
+            HirExprKind::Tuple(elements) => HirExprKind::Tuple(
+                elements.iter().map(|e| e.substitute_self_with_result()).collect(),
+            ),
+            HirExprKind::Array(elements) => HirExprKind::Array(
+                elements.iter().map(|e| e.substitute_self_with_result()).collect(),
+            ),
+            HirExprKind::StructInit { ty, fields } => HirExprKind::StructInit {
+                ty: *ty,
+                fields: fields.iter().map(|f| f.substitute_self_with_result()).collect(),
+            },
+            HirExprKind::If { condition, then_branch, else_branch } => HirExprKind::If {
+                condition: Box::new(condition.substitute_self_with_result()),
+                then_branch: Box::new(then_branch.substitute_self_with_result()),
+                else_branch: else_branch.as_ref().map(|e| Box::new(e.substitute_self_with_result())),
+            },
+            HirExprKind::Ref(inner) => HirExprKind::Ref(Box::new(inner.substitute_self_with_result())),
+            HirExprKind::Deref(inner) => HirExprKind::Deref(Box::new(inner.substitute_self_with_result())),
+            HirExprKind::PointerNew { kind, value } => HirExprKind::PointerNew {
+                kind: *kind,
+                value: Box::new(value.substitute_self_with_result()),
+            },
+            HirExprKind::Cast { expr, target } => HirExprKind::Cast {
+                expr: Box::new(expr.substitute_self_with_result()),
+                target: *target,
+            },
+            HirExprKind::ContractOld(inner) => HirExprKind::ContractOld(Box::new(inner.substitute_self_with_result())),
+            HirExprKind::BuiltinCall { name, args } => HirExprKind::BuiltinCall {
+                name: name.clone(),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
+            },
+
+            // Literals and other expressions are unchanged
+            _ => self.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -737,13 +965,6 @@ pub struct HirContract {
     /// Captured "old" values - (local_index, snapshot_index)
     /// These are expressions evaluated at function entry for use in postconditions
     pub old_values: Vec<(usize, HirExpr)>,
-
-    // Union return type info for success/error detection
-    /// For union return types (T | E1 | E2 | ...), the TypeId of the success type (T).
-    /// If Some, the return type is a union and we can distinguish success/error exits.
-    pub success_type: Option<TypeId>,
-    /// For union return types, the TypeIds of error types (E1, E2, ...).
-    pub error_types: Vec<TypeId>,
 }
 
 impl HirContract {
@@ -753,22 +974,6 @@ impl HirContract {
             && self.invariants.is_empty()
             && self.postconditions.is_empty()
             && self.error_postconditions.is_empty()
-    }
-
-    /// Check if this contract has a union return type (success/error distinction)
-    pub fn has_union_return(&self) -> bool {
-        self.success_type.is_some()
-    }
-
-    /// Check if a given type is an error type (not the success type)
-    pub fn is_error_type(&self, ty: TypeId) -> bool {
-        if let Some(success_ty) = self.success_type {
-            // If it's not the success type, it's an error type
-            ty != success_ty
-        } else {
-            // No union return type, so no error types
-            false
-        }
     }
 }
 
@@ -783,6 +988,9 @@ pub struct HirFunction {
     pub visibility: Visibility,
     /// Function contract (preconditions, postconditions, invariants)
     pub contract: Option<HirContract>,
+    /// Whether this function is marked as pure (no side effects)
+    /// Pure functions can be called from contract expressions (CTR-030-032)
+    pub is_pure: bool,
 }
 
 impl HirFunction {
@@ -792,41 +1000,80 @@ impl HirFunction {
     }
 }
 
-/// HIR class/type invariant - checked after constructor and public methods
+/// Type invariant for struct/class types
 #[derive(Debug, Clone, Default)]
-pub struct HirClassInvariant {
-    /// Invariant conditions to check
+pub struct HirTypeInvariant {
+    /// Invariant conditions (using 'self' to refer to the instance)
     pub conditions: Vec<HirContractClause>,
 }
 
-impl HirClassInvariant {
-    /// Check if the invariant has any conditions
-    pub fn is_empty(&self) -> bool {
-        self.conditions.is_empty()
-    }
-}
-
-/// HIR class definition
+/// Refined type definition (CTR-020)
+///
+/// A refined type is a type alias with a predicate that constrains values.
+/// Example: `type PosI64 = i64 where self > 0`
 #[derive(Debug, Clone)]
-pub struct HirClass {
+pub struct HirRefinedType {
+    /// Name of the refined type
     pub name: String,
-    pub type_id: TypeId,
-    pub fields: Vec<(String, TypeId)>,
-    pub methods: Vec<HirFunction>,
-    pub visibility: Visibility,
-    /// Class invariant - checked after constructor and all public methods
-    pub invariant: Option<HirClassInvariant>,
+    /// Base type that is being refined
+    pub base_type: TypeId,
+    /// Refinement predicate (using 'self' to refer to the value)
+    pub predicate: HirExpr,
 }
 
-impl HirClass {
-    /// Check if this class has an invariant to check
-    pub fn has_invariant(&self) -> bool {
-        self.invariant.as_ref().map(|i| !i.is_empty()).unwrap_or(false)
-    }
+/// CTR-021: Subtype relationship result
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubtypeResult {
+    /// Types are the same - no coercion needed
+    Same,
+    /// Source is a subtype of target - no runtime check needed (widening)
+    /// Example: PosI64 -> i64 (refined to base)
+    Subtype,
+    /// Target is a subtype of source - runtime check needed (narrowing)
+    /// Example: i64 -> PosI64 (base to refined)
+    NeedsCheck,
+    /// Types are incompatible
+    Incompatible,
+}
 
-    /// Check if this class is public
-    pub fn is_public(&self) -> bool {
-        self.visibility.is_public()
+impl HirRefinedType {
+    /// CTR-022: Attempt to evaluate a constant predicate at compile time
+    ///
+    /// Returns Some(true) if the predicate is definitely satisfied,
+    /// Some(false) if it's definitely violated, or None if we can't determine.
+    pub fn try_const_eval(&self, value: &HirExpr) -> Option<bool> {
+        // Simple constant folding for common cases
+        match (&self.predicate.kind, &value.kind) {
+            // For predicates like `self > 0` with integer constants
+            (HirExprKind::Binary { op, left, right }, HirExprKind::Integer(val)) => {
+                // Check if predicate is in form: self <op> <const>
+                if let (HirExprKind::Local(0), HirExprKind::Integer(bound)) = (&left.kind, &right.kind) {
+                    match op {
+                        BinOp::Gt => return Some(*val > *bound),
+                        BinOp::GtEq => return Some(*val >= *bound),
+                        BinOp::Lt => return Some(*val < *bound),
+                        BinOp::LtEq => return Some(*val <= *bound),
+                        BinOp::Eq => return Some(*val == *bound),
+                        BinOp::NotEq => return Some(*val != *bound),
+                        _ => {}
+                    }
+                }
+                // Check reversed: <const> <op> self
+                if let (HirExprKind::Integer(bound), HirExprKind::Local(0)) = (&left.kind, &right.kind) {
+                    match op {
+                        BinOp::Gt => return Some(*bound > *val),
+                        BinOp::GtEq => return Some(*bound >= *val),
+                        BinOp::Lt => return Some(*bound < *val),
+                        BinOp::LtEq => return Some(*bound <= *val),
+                        BinOp::Eq => return Some(*bound == *val),
+                        BinOp::NotEq => return Some(*bound != *val),
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+        None
     }
 }
 
@@ -836,8 +1083,11 @@ pub struct HirModule {
     pub name: Option<String>,
     pub types: TypeRegistry,
     pub functions: Vec<HirFunction>,
-    pub classes: Vec<HirClass>,
     pub globals: Vec<(String, TypeId)>,
+    /// Type invariants: maps type name to its invariant
+    pub type_invariants: std::collections::HashMap<String, HirTypeInvariant>,
+    /// Refined types: maps refined type name to its definition (CTR-020)
+    pub refined_types: std::collections::HashMap<String, HirRefinedType>,
 }
 
 impl HirModule {
@@ -846,8 +1096,93 @@ impl HirModule {
             name: None,
             types: TypeRegistry::new(),
             functions: Vec::new(),
-            classes: Vec::new(),
             globals: Vec::new(),
+            type_invariants: std::collections::HashMap::new(),
+            refined_types: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Get the type invariant for a type by name
+    pub fn get_type_invariant(&self, type_name: &str) -> Option<&HirTypeInvariant> {
+        self.type_invariants.get(type_name)
+    }
+
+    /// Get the refined type definition by name (CTR-020)
+    pub fn get_refined_type(&self, type_name: &str) -> Option<&HirRefinedType> {
+        self.refined_types.get(type_name)
+    }
+
+    /// CTR-021: Check subtype relationship between two types
+    ///
+    /// Returns the relationship between `from_type` and `to_type`:
+    /// - `Same`: Types are identical
+    /// - `Subtype`: from_type is a subtype of to_type (no check needed)
+    /// - `NeedsCheck`: Narrowing from base to refined (runtime check needed)
+    /// - `Incompatible`: Types are not related
+    pub fn check_subtype(&self, from_type: TypeId, to_type: TypeId) -> SubtypeResult {
+        if from_type == to_type {
+            return SubtypeResult::Same;
+        }
+
+        // Check if either type is a refined type
+        let from_type_name = self.types.get_type_name(from_type);
+        let to_type_name = self.types.get_type_name(to_type);
+
+        // Check refined type relationships
+        if let Some(from_name) = from_type_name {
+            if let Some(refined) = self.refined_types.get(from_name) {
+                // from_type is refined, check if to_type is its base
+                if refined.base_type == to_type {
+                    // Widening: refined -> base (no check needed)
+                    return SubtypeResult::Subtype;
+                }
+            }
+        }
+
+        if let Some(to_name) = to_type_name {
+            if let Some(refined) = self.refined_types.get(to_name) {
+                // to_type is refined, check if from_type is its base
+                if refined.base_type == from_type {
+                    // Narrowing: base -> refined (check needed)
+                    return SubtypeResult::NeedsCheck;
+                }
+            }
+        }
+
+        // Check through type aliases
+        if let Some(from_name) = from_type_name {
+            if let Some(from_alias_id) = self.types.lookup(from_name) {
+                if from_alias_id == to_type {
+                    return SubtypeResult::Same;
+                }
+            }
+        }
+
+        SubtypeResult::Incompatible
+    }
+
+    /// CTR-022/CTR-023: Check if a value satisfies a refined type's predicate
+    ///
+    /// Returns:
+    /// - `Ok(true)`: Predicate is provably satisfied at compile time
+    /// - `Ok(false)`: Predicate is provably violated at compile time
+    /// - `Err(predicate)`: Cannot prove at compile time, need runtime check
+    pub fn check_refinement(
+        &self,
+        type_name: &str,
+        value: &HirExpr,
+    ) -> Result<bool, HirExpr> {
+        if let Some(refined) = self.refined_types.get(type_name) {
+            // CTR-022: Try compile-time evaluation
+            if let Some(result) = refined.try_const_eval(value) {
+                return Ok(result);
+            }
+            // CTR-023: Can't prove at compile time, return predicate for runtime check
+            // Substitute self (local 0) with the actual value
+            Err(refined.predicate.clone())
+        } else {
+            // Not a refined type, always satisfied
+            Ok(true)
         }
     }
 }
@@ -921,6 +1256,7 @@ mod tests {
                 ("x".to_string(), TypeId::F64),
                 ("y".to_string(), TypeId::F64),
             ],
+            has_snapshot: false,
         };
 
         let id = registry.register_named("Point".to_string(), struct_type.clone());
@@ -1000,6 +1336,7 @@ mod tests {
             }))],
             visibility: Visibility::Public,
             contract: None,
+            is_pure: false,
         };
 
         assert_eq!(func.name, "add");

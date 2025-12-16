@@ -404,6 +404,10 @@ impl From<&Value> for BridgeValue {
                 // Matchers cannot be bridged across FFI - use nil
                 BridgeValue::nil()
             }
+            Value::TraitObject { inner, .. } => {
+                // Bridge the inner value - trait info is lost in FFI
+                BridgeValue::from(inner.as_ref())
+            }
         }
     }
 }
