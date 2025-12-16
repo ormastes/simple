@@ -188,14 +188,18 @@ describe "Calculator":
                     expect calculator.value == 10
 ```
 
-### Pattern 6: Named Eager Fixtures (given :name)
+### Pattern 6: Named Eager Fixtures - BDD "When" Setup (given :name)
 
-You can now name your eager setup blocks with `given :name, \: block`. This documents the purpose of the setup and creates parallel syntax to `given_lazy`:
+You can name your eager setup blocks with `given :name, \: block`. This documents the "When" action in BDD Given-When-Then and creates parallel syntax to `given_lazy`:
 
 ```simple
 describe "API Tests":
     context "with infrastructure":
-        # Named eager fixtures - runs before each test
+        # Given: initial fixtures
+        given_lazy :config, \:
+            load_config()
+
+        # When: setup database and cache
         given :database_setup, \:
             db.connect()
             db.migrate()
@@ -203,21 +207,25 @@ describe "API Tests":
         given :cache_setup, \:
             cache.clear()
 
-        given_lazy :api_client, \:
-            create_client()
-
-        it "has fresh database":
+        # Then: verify setup complete
+        it "database is ready":
             expect true
 
-        it "has empty cache":
+        it "cache is empty":
             expect true
 ```
 
+**BDD Pattern:**
+- **Given** (`given_lazy`) - Initial test data/state
+- **When** (`given :name`) - Setup actions that prepare the test environment
+- **Then** (`it`) - Assertions that verify behavior
+
 **Key Points:**
 - Named `given` runs eagerly (before each example) - not memoized
-- Useful for documenting what setup does
+- Documents the "When" action in BDD Given-When-Then pattern
 - Works in both `context_def` and regular `context` blocks
 - Parallel syntax to `given_lazy :name, \: ...`
+- Multiple `given :name` blocks run in order before each example
 
 ### Pattern 7: Inline Lazy Fixtures (given_lazy in Regular Context)
 
@@ -308,32 +316,44 @@ describe "User":
 - **Mutate fixtures**: Fixtures should return fresh data
 - **Create context dependencies**: One context shouldn't depend on another being defined first
 
-## Fixture Types: Quick Reference
+## Fixture Types & BDD Pattern
 
-| Type | Syntax | Timing | Use Case |
-|------|--------|--------|----------|
-| **Unnamed eager** | `given { ... }` | Before each example | Simple setup, side effects |
-| **Named eager** | `given :name, \: ...` | Before each example | Documented setup, multiple setup blocks |
-| **Named lazy** | `given_lazy :name, \: ...` | Per example (memoized) | Test data, complex objects |
+| Type | Syntax | BDD Role | Timing | Use Case |
+|------|--------|----------|--------|----------|
+| **Unnamed eager** | `given { ... }` | When (setup) | Before each example | Simple setup, side effects |
+| **Named eager** | `given :name, \: ...` | When (named action) | Before each example | Documented setup actions |
+| **Named lazy** | `given_lazy :name, \: ...` | Given (state) | Per example (memoized) | Test data, fixtures |
 
-**Example:**
+**BDD Given-When-Then Pattern:**
 ```simple
-context "with all fixture types":
-    # Runs every example (unnamed)
-    given:
-        db.connect()
+context "with complete BDD pattern":
+    # Given: test data/initial state (lazy - memoized)
+    given_lazy :user, \:
+        { id: 42, role: "admin" }
 
-    # Runs every example (named)
-    given :cache_setup, \:
+    # When: setup database (named eager)
+    given :database_setup, \:
+        db.connect()
+        db.migrate()
+
+    # When: initialize cache (unnamed eager)
+    given:
         cache.clear()
 
-    # Memoized, runs once per example
-    given_lazy :user, \:
-        create_user()
+    # Then: verify the behavior
+    it "admin has correct permissions":
+        expect user.role == "admin"
 
-    it "test 1": expect user.id == 42
-    it "test 2": expect user.id == 42  # Same user instance
+    it "each test gets fresh data":
+        expect user.id == 42  # Same user (memoized)
 ```
+
+**Execution Order:**
+1. `given_lazy` fixtures are memoized once per example
+2. `given :name` blocks run in order
+3. `given { }` blocks run in order
+4. Each `it` block executes
+5. Fresh state for next example
 
 ## When to Use: context_def vs inline fixtures
 
