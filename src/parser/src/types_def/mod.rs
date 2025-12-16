@@ -177,13 +177,14 @@ impl<'a> Parser<'a> {
         let generic_params = self.parse_generic_params()?;
         let where_clause = self.parse_where_clause()?;
 
-        let methods = self.parse_indented_trait_methods()?;
+        let (associated_types, methods) = self.parse_indented_trait_body()?;
 
         Ok(Node::Trait(TraitDef {
             span: self.make_span(start_span),
             name,
             generic_params,
             where_clause,
+            associated_types,
             methods,
             visibility: Visibility::Private,
             doc_comment: None,
@@ -210,7 +211,7 @@ impl<'a> Parser<'a> {
         };
 
         let where_clause = self.parse_where_clause()?;
-        let methods = self.parse_indented_methods()?;
+        let (associated_types, methods) = self.parse_indented_impl_body()?;
 
         Ok(Node::Impl(ImplBlock {
             span: self.make_span(start_span),
@@ -218,6 +219,7 @@ impl<'a> Parser<'a> {
             target_type,
             trait_name,
             where_clause,
+            associated_types,
             methods,
         }))
     }
@@ -342,35 +344,124 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse methods in an indented block (impl only - all methods must have bodies)
-    fn parse_indented_methods(&mut self) -> Result<Vec<FunctionDef>, ParseError> {
+    /// Parse impl body: associated type implementations and methods
+    fn parse_indented_impl_body(&mut self) -> Result<(Vec<AssociatedTypeImpl>, Vec<FunctionDef>), ParseError> {
         self.expect_block_start()?;
+        let mut associated_types = Vec::new();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) {
                 break;
             }
-            let item = self.parse_function()?;
-            if let Node::Function(f) = item {
-                methods.push(f);
+            // Check for associated type impl: `type Item = i64`
+            if self.check(&TokenKind::Type) {
+                associated_types.push(self.parse_associated_type_impl()?);
+            } else {
+                let item = self.parse_function()?;
+                if let Node::Function(f) = item {
+                    methods.push(f);
+                }
             }
         }
         self.consume_dedent();
+        Ok((associated_types, methods))
+    }
+
+    /// Parse associated type implementation in an impl block
+    /// `type Item = i64`
+    fn parse_associated_type_impl(&mut self) -> Result<AssociatedTypeImpl, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Type)?;
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Assign)?;
+        let ty = self.parse_type()?;
+
+        // Consume newline
+        if self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        Ok(AssociatedTypeImpl {
+            span: self.make_span(start_span),
+            name,
+            ty,
+        })
+    }
+
+    /// Parse methods only (legacy)
+    fn parse_indented_methods(&mut self) -> Result<Vec<FunctionDef>, ParseError> {
+        let (_, methods) = self.parse_indented_impl_body()?;
         Ok(methods)
     }
 
-    /// Parse trait methods in an indented block (can be abstract or have default impl)
-    fn parse_indented_trait_methods(&mut self) -> Result<Vec<FunctionDef>, ParseError> {
+    /// Parse trait body: associated types and methods
+    fn parse_indented_trait_body(&mut self) -> Result<(Vec<AssociatedTypeDef>, Vec<FunctionDef>), ParseError> {
         self.expect_block_start()?;
+        let mut associated_types = Vec::new();
         let mut methods = Vec::new();
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) {
                 break;
             }
-            methods.push(self.parse_trait_method()?);
+            // Check for associated type: `type Name` or `type Name: Bound` or `type Name = Default`
+            if self.check(&TokenKind::Type) {
+                associated_types.push(self.parse_associated_type_def()?);
+            } else {
+                methods.push(self.parse_trait_method()?);
+            }
         }
         self.consume_dedent();
+        Ok((associated_types, methods))
+    }
+
+    /// Parse associated type declaration in a trait
+    /// `type Item` or `type Item: Clone` or `type Item = i64`
+    fn parse_associated_type_def(&mut self) -> Result<AssociatedTypeDef, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Type)?;
+        let name = self.expect_identifier()?;
+
+        // Parse optional bounds: `type Item: Clone + Default`
+        let bounds = if self.check(&TokenKind::Colon) {
+            self.advance();
+            let mut bounds = Vec::new();
+            bounds.push(self.expect_identifier()?);
+            while self.check(&TokenKind::Plus) {
+                self.advance();
+                bounds.push(self.expect_identifier()?);
+            }
+            bounds
+        } else {
+            Vec::new()
+        };
+
+        // Parse optional default: `type Item = i64`
+        let default = if self.check(&TokenKind::Assign) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        // Consume newline
+        if self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        Ok(AssociatedTypeDef {
+            span: self.make_span(start_span),
+            name,
+            bounds,
+            default,
+        })
+    }
+
+    /// Parse trait methods in an indented block (can be abstract or have default impl)
+    /// Legacy function for backwards compatibility
+    fn parse_indented_trait_methods(&mut self) -> Result<Vec<FunctionDef>, ParseError> {
+        let (_, methods) = self.parse_indented_trait_body()?;
         Ok(methods)
     }
 

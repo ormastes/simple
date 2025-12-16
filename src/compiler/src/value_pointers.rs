@@ -273,6 +273,15 @@ impl Clone for Value {
                 trait_name: trait_name.clone(),
                 inner: inner.clone(),
             },
+            Value::Unit {
+                value,
+                suffix,
+                family,
+            } => Value::Unit {
+                value: value.clone(),
+                suffix: suffix.clone(),
+                family: family.clone(),
+            },
             Value::Actor(handle) => Value::Actor(handle.clone()),
             Value::Future(f) => Value::Future(f.clone()),
             Value::Generator(g) => Value::Generator(g.clone()),
@@ -357,6 +366,18 @@ impl PartialEq for Value {
             (Value::Handle(a), Value::Handle(b)) => a == b,
             (Value::Borrow(a), Value::Borrow(b)) => a == b,
             (Value::BorrowMut(a), Value::BorrowMut(b)) => a == b,
+            (
+                Value::Unit {
+                    value: va,
+                    suffix: sa,
+                    family: fa,
+                },
+                Value::Unit {
+                    value: vb,
+                    suffix: sb,
+                    family: fb,
+                },
+            ) => va == vb && sa == sb && fa == fb,
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }

@@ -357,6 +357,75 @@ fn parse_trait_mixed_methods() {
     }
 }
 
+// Associated types tests
+#[test]
+fn parse_trait_associated_type_simple() {
+    // Trait with simple associated type
+    let items = parse("trait Iterator:\n    type Item\n    fn next(self) -> Item");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.name, "Iterator");
+        assert_eq!(t.associated_types.len(), 1);
+        assert_eq!(t.associated_types[0].name, "Item");
+        assert!(t.associated_types[0].bounds.is_empty());
+        assert!(t.associated_types[0].default.is_none());
+        assert_eq!(t.methods.len(), 1);
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_associated_type_with_bounds() {
+    // Associated type with trait bounds
+    let items = parse("trait Collection:\n    type Item: Clone + Default\n    fn get(self) -> Item");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.associated_types.len(), 1);
+        assert_eq!(t.associated_types[0].name, "Item");
+        assert_eq!(t.associated_types[0].bounds, vec!["Clone", "Default"]);
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_trait_associated_type_with_default() {
+    // Associated type with default type
+    let items = parse("trait Container:\n    type Item = i64\n    fn get(self) -> Item");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.associated_types.len(), 1);
+        assert_eq!(t.associated_types[0].name, "Item");
+        assert!(t.associated_types[0].default.is_some());
+    } else {
+        panic!("Expected trait");
+    }
+}
+
+#[test]
+fn parse_impl_associated_type() {
+    // Impl block with associated type implementation
+    let items = parse("impl Iterator for List:\n    type Item = i64\n    fn next(self) -> i64:\n        return 0");
+    if let Node::Impl(impl_block) = &items[0] {
+        assert_eq!(impl_block.associated_types.len(), 1);
+        assert_eq!(impl_block.associated_types[0].name, "Item");
+        assert_eq!(impl_block.methods.len(), 1);
+    } else {
+        panic!("Expected impl block");
+    }
+}
+
+#[test]
+fn parse_trait_multiple_associated_types() {
+    // Multiple associated types
+    let items = parse("trait Map:\n    type Key\n    type Value\n    fn get(self, k: Key) -> Value");
+    if let Node::Trait(t) = &items[0] {
+        assert_eq!(t.associated_types.len(), 2);
+        assert_eq!(t.associated_types[0].name, "Key");
+        assert_eq!(t.associated_types[1].name, "Value");
+    } else {
+        panic!("Expected trait");
+    }
+}
+
 // Generic types use brackets: List[i64]
 #[test]
 fn parse_type_alias() {
@@ -625,5 +694,147 @@ fn parse_dyn_trait_parses_correctly() {
         assert!(matches!(&f.params[0].ty, Some(Type::DynTrait(name)) if name == "Trait"));
     } else {
         panic!("expected function");
+    }
+}
+
+// === Unit Arithmetic Tests ===
+
+#[test]
+fn parse_unit_family_basic() {
+    // Basic unit family without arithmetic
+    let items = parse("unit length(base: f64): m = 1.0, km = 1000.0");
+    if let Node::UnitFamily(uf) = &items[0] {
+        assert_eq!(uf.name, "length");
+        assert_eq!(uf.variants.len(), 2);
+        assert_eq!(uf.variants[0].suffix, "m");
+        assert_eq!(uf.variants[0].factor, 1.0);
+        assert_eq!(uf.variants[1].suffix, "km");
+        assert_eq!(uf.variants[1].factor, 1000.0);
+        assert!(uf.arithmetic.is_none());
+    } else {
+        panic!("expected UnitFamily");
+    }
+}
+
+#[test]
+fn parse_unit_family_with_arithmetic() {
+    // Unit family with arithmetic rules
+    let code = r#"unit length(base: f64): m = 1.0, km = 1000.0:
+    allow add(length) -> length
+    allow sub(length) -> length
+    allow mul(f64) -> length
+    allow neg -> length"#;
+    let items = parse(code);
+    if let Node::UnitFamily(uf) = &items[0] {
+        assert_eq!(uf.name, "length");
+        let arith = uf.arithmetic.as_ref().expect("arithmetic");
+        assert_eq!(arith.binary_rules.len(), 3);
+        assert_eq!(arith.unary_rules.len(), 1);
+        // Check binary rules
+        assert!(matches!(arith.binary_rules[0].op, BinaryArithmeticOp::Add));
+        assert!(matches!(arith.binary_rules[1].op, BinaryArithmeticOp::Sub));
+        assert!(matches!(arith.binary_rules[2].op, BinaryArithmeticOp::Mul));
+        // Check unary rules
+        assert!(matches!(arith.unary_rules[0].op, UnaryArithmeticOp::Neg));
+    } else {
+        panic!("expected UnitFamily");
+    }
+}
+
+#[test]
+fn parse_unit_family_with_custom_fn() {
+    // Unit family with custom function
+    let code = r#"unit length(base: f64): m = 1.0:
+    allow add(length) -> length
+    fn sqrt(self) -> f64:
+        return sqrt(self.value())"#;
+    let items = parse(code);
+    if let Node::UnitFamily(uf) = &items[0] {
+        let arith = uf.arithmetic.as_ref().expect("arithmetic");
+        assert_eq!(arith.binary_rules.len(), 1);
+        assert_eq!(arith.custom_fns.len(), 1);
+        assert_eq!(arith.custom_fns[0].name, "sqrt");
+    } else {
+        panic!("expected UnitFamily");
+    }
+}
+
+#[test]
+fn parse_compound_unit_basic() {
+    // Simple compound unit
+    let items = parse("unit velocity = length / time");
+    if let Node::CompoundUnit(cu) = &items[0] {
+        assert_eq!(cu.name, "velocity");
+        assert!(matches!(&cu.expr, UnitExpr::Div(_, _)));
+        assert!(cu.arithmetic.is_none());
+    } else {
+        panic!("expected CompoundUnit");
+    }
+}
+
+#[test]
+fn parse_compound_unit_with_power() {
+    // Compound unit with exponent
+    let items = parse("unit acceleration = length / time^2");
+    if let Node::CompoundUnit(cu) = &items[0] {
+        assert_eq!(cu.name, "acceleration");
+        if let UnitExpr::Div(left, right) = &cu.expr {
+            assert!(matches!(left.as_ref(), UnitExpr::Base(n) if n == "length"));
+            assert!(matches!(right.as_ref(), UnitExpr::Pow(_, 2)));
+        } else {
+            panic!("expected Div");
+        }
+    } else {
+        panic!("expected CompoundUnit");
+    }
+}
+
+#[test]
+fn parse_compound_unit_with_arithmetic() {
+    // Compound unit with arithmetic rules
+    let code = r#"unit velocity = length / time:
+    allow add(velocity) -> velocity
+    allow mul(time) -> length"#;
+    let items = parse(code);
+    if let Node::CompoundUnit(cu) = &items[0] {
+        assert_eq!(cu.name, "velocity");
+        let arith = cu.arithmetic.as_ref().expect("arithmetic");
+        assert_eq!(arith.binary_rules.len(), 2);
+        // velocity + velocity -> velocity
+        assert!(matches!(arith.binary_rules[0].op, BinaryArithmeticOp::Add));
+        // velocity * time -> length
+        assert!(matches!(arith.binary_rules[1].op, BinaryArithmeticOp::Mul));
+    } else {
+        panic!("expected CompoundUnit");
+    }
+}
+
+#[test]
+fn parse_compound_unit_multiplication() {
+    // Compound unit with multiplication
+    let items = parse("unit area = length * length");
+    if let Node::CompoundUnit(cu) = &items[0] {
+        assert_eq!(cu.name, "area");
+        assert!(matches!(&cu.expr, UnitExpr::Mul(_, _)));
+    } else {
+        panic!("expected CompoundUnit");
+    }
+}
+
+#[test]
+fn parse_compound_unit_complex() {
+    // Complex compound unit: force = mass * length / time^2
+    let items = parse("unit force = mass * length / time^2");
+    if let Node::CompoundUnit(cu) = &items[0] {
+        assert_eq!(cu.name, "force");
+        // Should parse as (mass * length) / time^2
+        if let UnitExpr::Div(left, right) = &cu.expr {
+            assert!(matches!(left.as_ref(), UnitExpr::Mul(_, _)));
+            assert!(matches!(right.as_ref(), UnitExpr::Pow(_, 2)));
+        } else {
+            panic!("expected Div");
+        }
+    } else {
+        panic!("expected CompoundUnit");
     }
 }

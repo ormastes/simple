@@ -122,6 +122,7 @@ pub enum TokenKind {
     Shared, // shared (for GPU shared memory)
     Gpu,    // gpu (for GPU intrinsics namespace)
     Dyn,    // dyn (for dynamic trait objects)
+    // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with #[allow(...)]
 
     // Contract keywords (LLM-friendly features)
     // New spec syntax (doc/spec/invariant.md)

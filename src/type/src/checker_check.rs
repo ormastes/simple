@@ -108,6 +108,11 @@ impl TypeChecker {
                     let ty = self.fresh_var();
                     self.env.insert(uf.name.clone(), ty);
                 }
+                Node::CompoundUnit(cu) => {
+                    // Register compound unit type
+                    let ty = self.fresh_var();
+                    self.env.insert(cu.name.clone(), ty);
+                }
                 Node::Impl(_) => {
                     // Impl blocks don't introduce new names
                 }

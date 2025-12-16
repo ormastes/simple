@@ -14,9 +14,10 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use simple_common::actor::{ActorSpawner, Message, ThreadSpawner};
 use simple_parser::ast::{
-    AssignOp, BinOp, Block, ClassDef, ContextStmt, EnumDef, Expr, ExternDef, FStringPart,
-    FunctionDef, IfStmt, LambdaParam, MacroArg, MacroBody, MacroDef, MacroParam, MatchStmt, Node,
-    Pattern, PointerKind, RangeBound, Type, UnaryOp, UnitDef, WithStmt,
+    AssignOp, BinOp, BinaryArithmeticOp, Block, ClassDef, ContextStmt, EnumDef, Expr, ExternDef,
+    FStringPart, FunctionDef, IfStmt, LambdaParam, MacroArg, MacroBody, MacroDef, MacroParam,
+    MatchStmt, Node, Pattern, PointerKind, RangeBound, Type, UnaryArithmeticOp, UnaryOp, UnitDef,
+    WithStmt,
 };
 use tracing::instrument;
 
@@ -136,6 +137,283 @@ thread_local! {
     pub(crate) static USER_MACROS: RefCell<HashMap<String, MacroDef>> = RefCell::new(HashMap::new());
     /// Type-safe execution mode (new, replaces Option fields above)
     pub(crate) static EXECUTION_MODE: RefCell<ExecutionMode> = RefCell::new(ExecutionMode::Normal);
+    /// Maps unit suffix -> family name (for looking up which family a unit belongs to)
+    pub(crate) static UNIT_SUFFIX_TO_FAMILY: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Maps family_name -> (suffix -> conversion_factor) for unit conversions
+    pub(crate) static UNIT_FAMILY_CONVERSIONS: RefCell<HashMap<String, HashMap<String, f64>>> = RefCell::new(HashMap::new());
+    /// Maps family_name -> UnitArithmeticRules for type-safe arithmetic checking
+    pub(crate) static UNIT_FAMILY_ARITHMETIC: RefCell<HashMap<String, UnitArithmeticRules>> = RefCell::new(HashMap::new());
+    /// Maps compound_unit_name -> Dimension (for dimensional analysis)
+    pub(crate) static COMPOUND_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
+    /// Maps base_family_name -> Dimension (for base unit families like length, time)
+    pub(crate) static BASE_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
+}
+
+/// Represents a physical dimension as exponents of base units
+/// e.g., velocity = length^1 * time^-1 is represented as {length: 1, time: -1}
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Dimension {
+    /// Maps base unit name -> exponent
+    pub exponents: HashMap<String, i32>,
+}
+
+impl Dimension {
+    /// Create a new dimension from a single base unit with exponent 1
+    pub fn base(name: &str) -> Self {
+        let mut exponents = HashMap::new();
+        exponents.insert(name.to_string(), 1);
+        Dimension { exponents }
+    }
+
+    /// Multiply two dimensions (add exponents)
+    pub fn mul(&self, other: &Dimension) -> Dimension {
+        let mut result = self.exponents.clone();
+        for (unit, exp) in &other.exponents {
+            *result.entry(unit.clone()).or_insert(0) += exp;
+        }
+        // Remove zero exponents
+        result.retain(|_, v| *v != 0);
+        Dimension { exponents: result }
+    }
+
+    /// Divide two dimensions (subtract exponents)
+    pub fn div(&self, other: &Dimension) -> Dimension {
+        let mut result = self.exponents.clone();
+        for (unit, exp) in &other.exponents {
+            *result.entry(unit.clone()).or_insert(0) -= exp;
+        }
+        // Remove zero exponents
+        result.retain(|_, v| *v != 0);
+        Dimension { exponents: result }
+    }
+
+    /// Raise dimension to a power (multiply all exponents)
+    pub fn pow(&self, power: i32) -> Dimension {
+        let mut result = HashMap::new();
+        for (unit, exp) in &self.exponents {
+            let new_exp = exp * power;
+            if new_exp != 0 {
+                result.insert(unit.clone(), new_exp);
+            }
+        }
+        Dimension { exponents: result }
+    }
+
+    /// Check if this dimension is dimensionless (all exponents are zero)
+    pub fn is_dimensionless(&self) -> bool {
+        self.exponents.is_empty()
+    }
+
+    /// Convert a UnitExpr AST to a Dimension
+    pub fn from_unit_expr(expr: &simple_parser::ast::UnitExpr) -> Self {
+        use simple_parser::ast::UnitExpr;
+        match expr {
+            UnitExpr::Base(name) => {
+                // Look up if this is a known dimension, otherwise treat as base
+                BASE_UNIT_DIMENSIONS.with(|cell| {
+                    cell.borrow()
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| Dimension::base(name))
+                })
+            }
+            UnitExpr::Mul(left, right) => {
+                let left_dim = Dimension::from_unit_expr(left);
+                let right_dim = Dimension::from_unit_expr(right);
+                left_dim.mul(&right_dim)
+            }
+            UnitExpr::Div(left, right) => {
+                let left_dim = Dimension::from_unit_expr(left);
+                let right_dim = Dimension::from_unit_expr(right);
+                left_dim.div(&right_dim)
+            }
+            UnitExpr::Pow(base, power) => {
+                let base_dim = Dimension::from_unit_expr(base);
+                base_dim.pow(*power)
+            }
+        }
+    }
+}
+
+/// Look up the dimension for a unit family name
+pub(crate) fn get_unit_dimension(family: &str) -> Option<Dimension> {
+    // First check compound units
+    let compound = COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow().get(family).cloned());
+    if compound.is_some() {
+        return compound;
+    }
+    // Then check base units
+    BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow().get(family).cloned())
+}
+
+/// Find a compound unit name that matches the given dimension
+pub(crate) fn find_compound_unit_for_dimension(dim: &Dimension) -> Option<String> {
+    COMPOUND_UNIT_DIMENSIONS.with(|cell| {
+        for (name, unit_dim) in cell.borrow().iter() {
+            if unit_dim == dim {
+                return Some(name.clone());
+            }
+        }
+        None
+    })
+}
+
+/// Stores arithmetic rules for a unit family
+#[derive(Debug, Clone, Default)]
+pub(crate) struct UnitArithmeticRules {
+    /// Binary rules: (op, operand_type) -> result_type
+    pub binary_rules: Vec<(BinaryArithmeticOp, String, String)>,
+    /// Unary rules: op -> result_type
+    pub unary_rules: Vec<(UnaryArithmeticOp, String)>,
+}
+
+/// Convert a Type to a family name string (for arithmetic rule storage)
+fn type_to_family_name(ty: &Type) -> String {
+    match ty {
+        Type::Simple(name) => name.clone(),
+        Type::Generic { name, .. } => name.clone(),
+        _ => format!("{:?}", ty), // Fallback for complex types
+    }
+}
+
+/// Check if a binary operation is allowed between two unit values
+/// Returns Ok(result_family) if allowed, Err with error message if not
+pub(crate) fn check_unit_binary_op(
+    left_family: &str,
+    right_family: &str,
+    op: BinOp,
+) -> Result<Option<String>, String> {
+    // Convert BinOp to BinaryArithmeticOp
+    let arith_op = match op {
+        BinOp::Add => BinaryArithmeticOp::Add,
+        BinOp::Sub => BinaryArithmeticOp::Sub,
+        BinOp::Mul => BinaryArithmeticOp::Mul,
+        BinOp::Div => BinaryArithmeticOp::Div,
+        BinOp::Mod => BinaryArithmeticOp::Mod,
+        // Comparison ops are always allowed between same-family units
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::Gt | BinOp::LtEq | BinOp::GtEq => {
+            if left_family == right_family {
+                return Ok(None); // Returns bool, not a unit
+            } else {
+                return Err(format!(
+                    "Cannot compare '{}' and '{}' - different unit families",
+                    left_family, right_family
+                ));
+            }
+        }
+        // Other ops not applicable to units
+        _ => return Ok(None),
+    };
+
+    // Look up arithmetic rules for the left operand's family
+    UNIT_FAMILY_ARITHMETIC.with(|cell| {
+        let rules = cell.borrow();
+        if let Some(family_rules) = rules.get(left_family) {
+            // This family has explicit rules - enforce them strictly
+            // Check if there's a rule allowing this operation
+            for (rule_op, operand_type, result_type) in &family_rules.binary_rules {
+                if *rule_op == arith_op && operand_type == right_family {
+                    return Ok(Some(result_type.clone()));
+                }
+            }
+            // No rule found for this operation
+            Err(format!(
+                "Operation '{:?}' not allowed: '{}' has no rule for '{:?}({}) -> ?'",
+                op, left_family, arith_op, right_family
+            ))
+        } else {
+            // No arithmetic rules defined for this family
+            // For add/sub: require same family (permissive mode for ad-hoc units)
+            // For mul/div: use dimensional analysis to compute result
+            match arith_op {
+                BinaryArithmeticOp::Add | BinaryArithmeticOp::Sub => {
+                    if left_family == right_family {
+                        // Same family - allow and return the same family
+                        Ok(Some(left_family.to_string()))
+                    } else {
+                        Err(format!(
+                            "Cannot perform {:?} between '{}' and '{}' - different unit families",
+                            op, left_family, right_family
+                        ))
+                    }
+                }
+                BinaryArithmeticOp::Mul | BinaryArithmeticOp::Div => {
+                    // Dimensional analysis: compute the resulting dimension
+                    let left_dim = get_unit_dimension(left_family)
+                        .unwrap_or_else(|| Dimension::base(left_family));
+                    let right_dim = get_unit_dimension(right_family)
+                        .unwrap_or_else(|| Dimension::base(right_family));
+
+                    let result_dim = if arith_op == BinaryArithmeticOp::Mul {
+                        left_dim.mul(&right_dim)
+                    } else {
+                        left_dim.div(&right_dim)
+                    };
+
+                    // Look up if there's a known compound unit for this dimension
+                    if result_dim.is_dimensionless() {
+                        // Result is dimensionless (e.g., length / length)
+                        Ok(None) // Returns a plain number, not a unit
+                    } else if let Some(compound_name) = find_compound_unit_for_dimension(&result_dim) {
+                        // Found a matching compound unit
+                        Ok(Some(compound_name))
+                    } else {
+                        // No matching compound unit - return a dimension string representation
+                        let dim_str = format!("{:?}", result_dim.exponents);
+                        Ok(Some(dim_str))
+                    }
+                }
+                BinaryArithmeticOp::Mod => {
+                    // Modulo only works with same family
+                    if left_family == right_family {
+                        Ok(Some(left_family.to_string()))
+                    } else {
+                        Err(format!(
+                            "Cannot perform {:?} between '{}' and '{}' - different unit families",
+                            op, left_family, right_family
+                        ))
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// Check if a unary operation is allowed for a unit value
+/// Returns Ok(result_family) if allowed, Err with error message if not
+pub(crate) fn check_unit_unary_op(
+    family: &str,
+    op: UnaryOp,
+) -> Result<Option<String>, String> {
+    // Convert UnaryOp to UnaryArithmeticOp
+    let arith_op = match op {
+        UnaryOp::Neg => UnaryArithmeticOp::Neg,
+        // Other unary ops not handled as arithmetic
+        _ => return Ok(None),
+    };
+
+    // Look up arithmetic rules for the family
+    UNIT_FAMILY_ARITHMETIC.with(|cell| {
+        let rules = cell.borrow();
+        if let Some(family_rules) = rules.get(family) {
+            // This family has explicit rules - enforce them strictly
+            // Check if there's a rule allowing this operation
+            for (rule_op, result_type) in &family_rules.unary_rules {
+                if *rule_op == arith_op {
+                    return Ok(Some(result_type.clone()));
+                }
+            }
+            // No rule found for this operation
+            Err(format!(
+                "Operation '{:?}' not allowed for unit family '{}'",
+                op, family
+            ))
+        } else {
+            // No arithmetic rules defined for this family
+            // Allow negation by default (permissive mode for ad-hoc units)
+            Ok(Some(family.to_string()))
+        }
+    })
 }
 
 /// Stores enum definitions: name -> EnumDef
@@ -274,6 +552,12 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             externs.insert(name.to_string());
         }
     });
+    // Clear unit family info from previous runs
+    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
+    UNIT_FAMILY_CONVERSIONS.with(|cell| cell.borrow_mut().clear());
+    UNIT_FAMILY_ARITHMETIC.with(|cell| cell.borrow_mut().clear());
+    COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
+    BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
 
     let mut env = Env::new();
     let mut functions: HashMap<String, FunctionDef> = HashMap::new();
@@ -527,17 +811,68 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                     units.insert(variant.suffix.clone(), unit_def);
                     // Store conversion factor for to_X() methods
                     conversions.insert(variant.suffix.clone(), variant.factor);
+                    // Register suffix -> family mapping in thread-local for expression evaluation
+                    UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                        cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+                    });
                 }
                 // Store the family with all conversion factors
                 unit_families.insert(
                     uf.name.clone(),
                     UnitFamilyInfo {
                         base_type: uf.base_type.clone(),
-                        conversions,
+                        conversions: conversions.clone(),
                     },
                 );
+                // Register family conversions in thread-local for method dispatch
+                UNIT_FAMILY_CONVERSIONS.with(|cell| {
+                    cell.borrow_mut().insert(uf.name.clone(), conversions);
+                });
+                // Store arithmetic rules if present
+                if let Some(arith) = &uf.arithmetic {
+                    let rules = UnitArithmeticRules {
+                        binary_rules: arith.binary_rules.iter().map(|r| {
+                            (r.op, type_to_family_name(&r.operand_type), type_to_family_name(&r.result_type))
+                        }).collect(),
+                        unary_rules: arith.unary_rules.iter().map(|r| {
+                            (r.op, type_to_family_name(&r.result_type))
+                        }).collect(),
+                    };
+                    UNIT_FAMILY_ARITHMETIC.with(|cell| {
+                        cell.borrow_mut().insert(uf.name.clone(), rules);
+                    });
+                }
                 // Store the family name for reference
                 env.insert(uf.name.clone(), Value::Nil);
+                // Register this as a base dimension (self-referential)
+                // e.g., "length" has dimension {length: 1}
+                BASE_UNIT_DIMENSIONS.with(|cell| {
+                    cell.borrow_mut().insert(uf.name.clone(), Dimension::base(&uf.name));
+                });
+            }
+            Node::CompoundUnit(cu) => {
+                // Compound unit defines a derived unit (e.g., velocity = length / time)
+                // Register the compound unit name in the environment
+                env.insert(cu.name.clone(), Value::Nil);
+                // Store arithmetic rules if present
+                if let Some(arith) = &cu.arithmetic {
+                    let rules = UnitArithmeticRules {
+                        binary_rules: arith.binary_rules.iter().map(|r| {
+                            (r.op, type_to_family_name(&r.operand_type), type_to_family_name(&r.result_type))
+                        }).collect(),
+                        unary_rules: arith.unary_rules.iter().map(|r| {
+                            (r.op, type_to_family_name(&r.result_type))
+                        }).collect(),
+                    };
+                    UNIT_FAMILY_ARITHMETIC.with(|cell| {
+                        cell.borrow_mut().insert(cu.name.clone(), rules);
+                    });
+                }
+                // Convert the UnitExpr to a Dimension and store it
+                let dimension = Dimension::from_unit_expr(&cu.expr);
+                COMPOUND_UNIT_DIMENSIONS.with(|cell| {
+                    cell.borrow_mut().insert(cu.name.clone(), dimension);
+                });
             }
             Node::Let(_)
             | Node::Const(_)
@@ -654,6 +989,15 @@ pub(crate) fn exec_node(
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
                 }
+                // Coerce to TraitObject if type annotation is `dyn Trait`
+                let value = if let Some(Type::DynTrait(trait_name)) = &let_stmt.ty {
+                    Value::TraitObject {
+                        trait_name: trait_name.clone(),
+                        inner: Box::new(value),
+                    }
+                } else {
+                    value
+                };
                 let is_mutable = let_stmt.mutability.is_mutable();
                 bind_pattern_value(&let_stmt.pattern, value, is_mutable, env);
             }

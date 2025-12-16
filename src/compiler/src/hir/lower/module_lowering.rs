@@ -78,7 +78,8 @@ impl Lowerer {
                 | Node::CommonUseStmt(_)
                 | Node::ExportUseStmt(_)
                 | Node::AutoImportStmt(_)
-                | Node::RequiresCapabilities(_) => {}
+                | Node::RequiresCapabilities(_)
+                | Node::CompoundUnit(_) => {}
             }
         }
 

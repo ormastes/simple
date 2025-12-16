@@ -1,3 +1,175 @@
+/// Look up the family name for a unit suffix from the thread-local registry
+fn lookup_unit_family(suffix: &str) -> Option<String> {
+    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned())
+}
+
+/// Perform a binary operation on the inner values of two units
+fn evaluate_unit_binary_inner(
+    left: &Value,
+    right: &Value,
+    op: BinOp,
+) -> Result<Value, CompileError> {
+    match op {
+        BinOp::Add => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => Ok(Value::Int(l + r)),
+            (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l + r)),
+            (Value::Int(l), Value::Float(r)) => Ok(Value::Float(*l as f64 + r)),
+            (Value::Float(l), Value::Int(r)) => Ok(Value::Float(l + *r as f64)),
+            _ => Err(CompileError::Semantic(format!(
+                "cannot add unit values of types {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        BinOp::Sub => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => Ok(Value::Int(l - r)),
+            (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l - r)),
+            (Value::Int(l), Value::Float(r)) => Ok(Value::Float(*l as f64 - r)),
+            (Value::Float(l), Value::Int(r)) => Ok(Value::Float(l - *r as f64)),
+            _ => Err(CompileError::Semantic(format!(
+                "cannot subtract unit values of types {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        BinOp::Mul => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => Ok(Value::Int(l * r)),
+            (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
+            (Value::Int(l), Value::Float(r)) => Ok(Value::Float(*l as f64 * r)),
+            (Value::Float(l), Value::Int(r)) => Ok(Value::Float(l * *r as f64)),
+            _ => Err(CompileError::Semantic(format!(
+                "cannot multiply unit values of types {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        BinOp::Div => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => {
+                if *r == 0 {
+                    Err(CompileError::Semantic("division by zero".into()))
+                } else {
+                    Ok(Value::Int(l / r))
+                }
+            }
+            (Value::Float(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(CompileError::Semantic("division by zero".into()))
+                } else {
+                    Ok(Value::Float(l / r))
+                }
+            }
+            (Value::Int(l), Value::Float(r)) => {
+                if *r == 0.0 {
+                    Err(CompileError::Semantic("division by zero".into()))
+                } else {
+                    Ok(Value::Float(*l as f64 / r))
+                }
+            }
+            (Value::Float(l), Value::Int(r)) => {
+                if *r == 0 {
+                    Err(CompileError::Semantic("division by zero".into()))
+                } else {
+                    Ok(Value::Float(l / *r as f64))
+                }
+            }
+            _ => Err(CompileError::Semantic(format!(
+                "cannot divide unit values of types {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        BinOp::Mod => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => {
+                if *r == 0 {
+                    Err(CompileError::Semantic("modulo by zero".into()))
+                } else {
+                    Ok(Value::Int(l % r))
+                }
+            }
+            _ => Err(CompileError::Semantic(format!(
+                "modulo only supported for integer unit values, got {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        // Comparison operations return bool, not unit
+        BinOp::Eq => Ok(Value::Bool(left == right)),
+        BinOp::NotEq => Ok(Value::Bool(left != right)),
+        BinOp::Lt => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l < r)),
+            (Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l < r)),
+            (Value::Int(l), Value::Float(r)) => Ok(Value::Bool((*l as f64) < *r)),
+            (Value::Float(l), Value::Int(r)) => Ok(Value::Bool(*l < (*r as f64))),
+            _ => Err(CompileError::Semantic(format!(
+                "cannot compare unit values of types {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        BinOp::Gt => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l > r)),
+            (Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l > r)),
+            (Value::Int(l), Value::Float(r)) => Ok(Value::Bool((*l as f64) > *r)),
+            (Value::Float(l), Value::Int(r)) => Ok(Value::Bool(*l > (*r as f64))),
+            _ => Err(CompileError::Semantic(format!(
+                "cannot compare unit values of types {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        BinOp::LtEq => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l <= r)),
+            (Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l <= r)),
+            (Value::Int(l), Value::Float(r)) => Ok(Value::Bool((*l as f64) <= *r)),
+            (Value::Float(l), Value::Int(r)) => Ok(Value::Bool(*l <= (*r as f64))),
+            _ => Err(CompileError::Semantic(format!(
+                "cannot compare unit values of types {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        BinOp::GtEq => match (left, right) {
+            (Value::Int(l), Value::Int(r)) => Ok(Value::Bool(l >= r)),
+            (Value::Float(l), Value::Float(r)) => Ok(Value::Bool(l >= r)),
+            (Value::Int(l), Value::Float(r)) => Ok(Value::Bool((*l as f64) >= *r)),
+            (Value::Float(l), Value::Int(r)) => Ok(Value::Bool(*l >= (*r as f64))),
+            _ => Err(CompileError::Semantic(format!(
+                "cannot compare unit values of types {} and {}",
+                left.type_name(),
+                right.type_name()
+            ))),
+        },
+        _ => Err(CompileError::Semantic(format!(
+            "unsupported binary operation {:?} on unit values",
+            op
+        ))),
+    }
+}
+
+/// Perform a unary operation on the inner value of a unit
+fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Value, CompileError> {
+    match op {
+        UnaryOp::Neg => match value {
+            Value::Int(v) => Ok(Value::Int(-v)),
+            Value::Float(v) => Ok(Value::Float(-v)),
+            _ => Err(CompileError::Semantic(format!(
+                "cannot negate unit value of type {}",
+                value.type_name()
+            ))),
+        },
+        UnaryOp::Not => Err(CompileError::Semantic(
+            "cannot apply logical NOT to unit value".into(),
+        )),
+        UnaryOp::BitNot => Err(CompileError::Semantic(
+            "cannot apply bitwise NOT to unit value".into(),
+        )),
+        _ => Err(CompileError::Semantic(format!(
+            "unsupported unary operation {:?} on unit value",
+            op
+        ))),
+    }
+}
+
 /// Evaluate a constant expression at compile time
 #[instrument(skip(env, functions, classes, enums, impl_methods))]
 pub(crate) fn evaluate_expr(
@@ -10,23 +182,55 @@ pub(crate) fn evaluate_expr(
 ) -> Result<Value, CompileError> {
     match expr {
         Expr::Integer(value) => Ok(Value::Int(*value)),
-        Expr::TypedInteger(value, _suffix) => {
-            // For now, we treat typed integers the same as regular integers
-            // The type suffix is used for type checking, not runtime behavior
-            Ok(Value::Int(*value))
+        Expr::TypedInteger(value, suffix) => {
+            use simple_parser::token::NumericSuffix;
+            match suffix {
+                NumericSuffix::Unit(unit_name) => {
+                    // Create a Unit value for unit-suffixed integers
+                    // Look up family from thread-local registry
+                    let family = lookup_unit_family(unit_name);
+                    Ok(Value::Unit {
+                        value: Box::new(Value::Int(*value)),
+                        suffix: unit_name.clone(),
+                        family,
+                    })
+                }
+                _ => {
+                    // For primitive type suffixes (i8, i32, etc.), just use the value
+                    Ok(Value::Int(*value))
+                }
+            }
         }
         Expr::Float(value) => Ok(Value::Float(*value)),
-        Expr::TypedFloat(value, _suffix) => {
-            // For now, we treat typed floats the same as regular floats
-            Ok(Value::Float(*value))
+        Expr::TypedFloat(value, suffix) => {
+            use simple_parser::token::NumericSuffix;
+            match suffix {
+                NumericSuffix::Unit(unit_name) => {
+                    // Create a Unit value for unit-suffixed floats
+                    let family = lookup_unit_family(unit_name);
+                    Ok(Value::Unit {
+                        value: Box::new(Value::Float(*value)),
+                        suffix: unit_name.clone(),
+                        family,
+                    })
+                }
+                _ => {
+                    // For primitive type suffixes (f32, f64), just use the value
+                    Ok(Value::Float(*value))
+                }
+            }
         }
         Expr::Bool(b) => Ok(Value::Bool(*b)),
         Expr::Nil => Ok(Value::Nil),
         Expr::String(s) => Ok(Value::Str(s.clone())),
-        Expr::TypedString(s, _suffix) => {
-            // For now, we treat typed strings the same as regular strings
-            // The unit suffix is used for type checking, not runtime behavior
-            Ok(Value::Str(s.clone()))
+        Expr::TypedString(s, suffix) => {
+            // Create a Unit value for unit-suffixed strings (e.g., "127.0.0.1"_ip)
+            let family = lookup_unit_family(suffix);
+            Ok(Value::Unit {
+                value: Box::new(Value::Str(s.clone())),
+                suffix: suffix.clone(),
+                family,
+            })
         }
         Expr::FString(parts) => {
             let mut out = String::new();
@@ -101,6 +305,74 @@ pub(crate) fn evaluate_expr(
         Expr::Binary { op, left, right } => {
             let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
             let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+
+            // Check for unit arithmetic type safety
+            match (&left_val, &right_val) {
+                (
+                    Value::Unit { value: lv, suffix: ls, family: lf },
+                    Value::Unit { value: rv, suffix: rs, family: rf },
+                ) => {
+                    // Both operands are units - check if operation is allowed
+                    let left_family = lf.as_ref().map(|s| s.as_str()).unwrap_or(ls.as_str());
+                    let right_family = rf.as_ref().map(|s| s.as_str()).unwrap_or(rs.as_str());
+
+                    match check_unit_binary_op(left_family, right_family, *op) {
+                        Ok(result_family) => {
+                            // Operation allowed - perform it on inner values
+                            let result_val = evaluate_unit_binary_inner(lv, rv, *op)?;
+                            // Return unit with result family (or left family if same-family operation)
+                            let result_suffix = if let Some(ref fam) = result_family {
+                                fam.clone()
+                            } else {
+                                ls.clone()
+                            };
+                            return Ok(Value::Unit {
+                                value: Box::new(result_val),
+                                suffix: result_suffix,
+                                family: result_family.or_else(|| lf.clone()),
+                            });
+                        }
+                        Err(err) => {
+                            return Err(CompileError::Semantic(err));
+                        }
+                    }
+                }
+                // Mixed unit/non-unit operations: allow scaling (mul/div)
+                (Value::Unit { value, suffix, family }, other)
+                | (other, Value::Unit { value, suffix, family })
+                    if matches!(op, BinOp::Mul | BinOp::Div) =>
+                {
+                    // Scaling: unit * scalar or scalar * unit (or division)
+                    let inner_result = evaluate_unit_binary_inner(value, other, *op)?;
+                    return Ok(Value::Unit {
+                        value: Box::new(inner_result),
+                        suffix: suffix.clone(),
+                        family: family.clone(),
+                    });
+                }
+                // Mixed unit/non-unit for non-scaling ops is an error
+                (Value::Unit { suffix: ls, .. }, _) => {
+                    if !matches!(op, BinOp::Eq | BinOp::NotEq) {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot apply {:?} between unit '{}' and non-unit value",
+                            op, ls
+                        )));
+                    }
+                    // Fall through for equality comparison
+                }
+                (_, Value::Unit { suffix: rs, .. }) => {
+                    if !matches!(op, BinOp::Eq | BinOp::NotEq) {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot apply {:?} between non-unit value and unit '{}'",
+                            op, rs
+                        )));
+                    }
+                    // Fall through for equality comparison
+                }
+                _ => {} // Neither is a unit - fall through to normal handling
+            }
+
+            // Standard binary operation handling (for non-unit operations)
             match op {
                 BinOp::Add => match (left_val, right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
@@ -183,6 +455,46 @@ pub(crate) fn evaluate_expr(
         }
         Expr::Unary { op, operand } => {
             let val = evaluate_expr(operand, env, functions, classes, enums, impl_methods)?;
+
+            // Check for unit type safety
+            if let Value::Unit { value, suffix, family } = &val {
+                match op {
+                    UnaryOp::Neg => {
+                        // Check if negation is allowed for this unit family
+                        let unit_family = family.as_ref().map(|s| s.as_str()).unwrap_or(suffix.as_str());
+                        match check_unit_unary_op(unit_family, *op) {
+                            Ok(_result_family) => {
+                                // Negation allowed - perform it on inner value
+                                let inner_result = evaluate_unit_unary_inner(value, *op)?;
+                                return Ok(Value::Unit {
+                                    value: Box::new(inner_result),
+                                    suffix: suffix.clone(),
+                                    family: family.clone(),
+                                });
+                            }
+                            Err(err) => {
+                                return Err(CompileError::Semantic(err));
+                            }
+                        }
+                    }
+                    UnaryOp::Not | UnaryOp::BitNot => {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot apply {:?} to unit value '{}'",
+                            op, suffix
+                        )));
+                    }
+                    UnaryOp::Ref => {
+                        return Ok(Value::Borrow(BorrowValue::new(val)));
+                    }
+                    UnaryOp::RefMut => {
+                        return Ok(Value::BorrowMut(BorrowMutValue::new(val)));
+                    }
+                    UnaryOp::Deref => {
+                        return Ok(val.deref_pointer());
+                    }
+                }
+            }
+
             match op {
                 UnaryOp::Neg => Ok(Value::Int(-val.as_int()?)),
                 UnaryOp::Not => Ok(Value::Bool(!val.truthy())),

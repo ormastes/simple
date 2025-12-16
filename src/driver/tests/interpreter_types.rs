@@ -472,15 +472,118 @@ main = 1
 }
 
 #[test]
-#[ignore = "unit conversion methods (.to_m()) not yet implemented"]
 fn interpreter_unit_family_to_base() {
-    // Convert to base unit (placeholder until conversions are implemented)
+    // Convert km to m using unit family conversion
     let code = r#"
 unit length(base: f64): m = 1.0, km = 1000.0
 
 let d = 2_km
 let meters = d.to_m()
-main = 1
+main = meters.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2000); // 2 km = 2000 m
+}
+
+#[test]
+fn interpreter_unit_conversion_m_to_km() {
+    // Convert m to km - should get fractional result stored as int
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+let d = 5000_m
+let kilometers = d.to_km()
+main = kilometers.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5); // 5000 m = 5 km
+}
+
+#[test]
+fn interpreter_unit_conversion_preserves_suffix() {
+    // Converted value should have the target suffix
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+let d = 3_km
+let meters = d.to_m()
+let suffix = meters.suffix()
+main = if suffix == "m": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_unit_time_family() {
+    // Test time unit family with multiple conversions
+    let code = r#"
+unit time(base: f64): s = 1.0, ms = 0.001, hr = 3600.0
+
+let duration = 2_hr
+let seconds = duration.to_s()
+main = seconds.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 7200); // 2 hours = 7200 seconds
+}
+
+#[test]
+fn interpreter_unit_chained_conversion() {
+    // Convert and then access value
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0, cm = 0.01
+
+let d = 1_km
+let centimeters = d.to_cm()
+# 1 km = 100,000 cm (1000 / 0.01)
+main = if centimeters.value() == 100000: 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_unit_value_method() {
+    // .value() returns the underlying numeric value
+    let code = r#"
+let d = 42_km
+main = d.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_unit_suffix_method() {
+    // .suffix() returns the unit suffix as a string
+    let code = r#"
+let d = 100_bytes
+let s = d.suffix()
+main = if s == "bytes": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_unit_to_string_method() {
+    // .to_string() returns the full representation
+    let code = r#"
+let d = 5_km
+let s = d.to_string()
+main = if s == "5_km": 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_unit_float_suffix() {
+    // Float values with unit suffix
+    let code = r#"
+let speed = 3.5_mps
+main = if speed.value() == 3.5: 1 else: 0
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 1);
@@ -516,4 +619,225 @@ main = get_count()
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);
+}
+
+// ============= Type-Safe Unit Arithmetic Tests (#203) =============
+
+#[test]
+fn interpreter_unit_arithmetic_same_family_allowed() {
+    // Same-family addition should work when explicitly allowed
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0:
+    allow add(length) -> length
+    allow sub(length) -> length
+
+let a = 100_m
+let b = 50_m
+main = (a + b).value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 150);
+}
+
+#[test]
+fn interpreter_unit_arithmetic_subtraction_allowed() {
+    // Same-family subtraction when allowed
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0:
+    allow sub(length) -> length
+
+let a = 100_m
+let b = 30_m
+main = (a - b).value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 70);
+}
+
+#[test]
+fn interpreter_unit_arithmetic_default_deny() {
+    // Operations not in explicit allow list should fail
+    // This unit family only allows sub, so add should fail
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0:
+    allow sub(length) -> length
+
+let a = 100_m
+let b = 50_m
+main = (a + b).value()
+"#;
+    run_expect_error(code, "not allowed");
+}
+
+#[test]
+fn interpreter_unit_arithmetic_cross_family_denied() {
+    // Different families cannot be added even with allow on each
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0:
+    allow add(length) -> length
+
+unit time(base: f64): s = 1.0, hr = 3600.0:
+    allow add(time) -> time
+
+let dist = 100_m
+let dur = 10_s
+main = (dist + dur).value()
+"#;
+    run_expect_error(code, "not allowed");
+}
+
+#[test]
+fn interpreter_unit_scaling_allowed() {
+    // Scaling (unit * scalar) should always work
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let d = 10_m
+let scaled = d * 3
+main = scaled.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 30);
+}
+
+#[test]
+fn interpreter_unit_negation_allowed() {
+    // Unary negation when allowed
+    let code = r#"
+unit temperature(base: f64): c = 1.0, k = 1.0:
+    allow neg -> temperature
+
+let t = 10_c
+let neg_t = -t
+main = neg_t.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, -10);
+}
+
+#[test]
+fn interpreter_unit_negation_default_deny() {
+    // Negation not in explicit allow list should fail
+    // This unit family only allows add, so neg should fail
+    let code = r#"
+unit length(base: f64): m = 1.0:
+    allow add(length) -> length
+
+let d = 10_m
+main = (-d).value()
+"#;
+    run_expect_error(code, "not allowed");
+}
+
+#[test]
+fn interpreter_unit_comparison_always_allowed() {
+    // Same-family comparison should always work (no allow needed)
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let a = 100_m
+let b = 50_m
+main = if a > b: 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+// ============= Compound Unit Tests (#206) =============
+
+#[test]
+fn interpreter_compound_unit_basic_definition() {
+    // Define a compound unit and verify parsing works
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+unit velocity = length / time
+
+main = 1
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_compound_unit_division_produces_compound() {
+    // When dividing length / time, result should be velocity dimension
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+unit velocity = length / time
+
+let dist = 100_m
+let dur = 10_s
+let speed = dist / dur
+main = speed.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10); // 100 / 10 = 10
+}
+
+#[test]
+fn interpreter_compound_unit_multiplication() {
+    // velocity * time should give length
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+unit velocity = length / time
+
+let speed = 10_m  # We'll simulate velocity with m for now
+let dur = 5_s
+let result = speed * dur
+main = result.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 50); // 10 * 5 = 50
+}
+
+#[test]
+fn interpreter_compound_unit_same_unit_cancellation() {
+    // length / length should give dimensionless (plain number)
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let dist1 = 100_m
+let dist2 = 20_m
+let ratio = dist1 / dist2
+main = ratio
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5); // 100 / 20 = 5 (dimensionless)
+}
+
+#[test]
+fn interpreter_compound_unit_area() {
+    // length * length = area
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit area = length * length
+
+let width = 10_m
+let height = 5_m
+let a = width * height
+main = a.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 50); // 10 * 5 = 50
+}
+
+#[test]
+fn interpreter_compound_unit_complex() {
+    // Define acceleration = length / time^2
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+unit acceleration = length / time / time
+
+let accel = 10_m  # simplified
+let t = 2_s
+let t2 = 3_s
+let result = accel / t / t2
+main = result.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1); // 10 / 2 / 3 = 1 (integer division)
 }

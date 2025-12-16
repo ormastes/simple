@@ -17,6 +17,7 @@ pub enum Node {
     Macro(MacroDef),
     Unit(UnitDef),
     UnitFamily(UnitFamilyDef),
+    CompoundUnit(CompoundUnitDef),
 
     // Module system (Features #104-111)
     ModDecl(ModDecl),
@@ -450,6 +451,85 @@ pub struct UnitFamilyDef {
     pub base_type: Type, // e.g., f64
     pub variants: Vec<UnitVariant>,
     pub visibility: Visibility,
+    /// Optional arithmetic rules block
+    pub arithmetic: Option<UnitArithmetic>,
+}
+
+/// Arithmetic rules for a unit family
+/// Defines allowed operations like `allow add(length) -> length`
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitArithmetic {
+    pub binary_rules: Vec<BinaryArithmeticRule>,
+    pub unary_rules: Vec<UnaryArithmeticRule>,
+    pub custom_fns: Vec<FunctionDef>,
+}
+
+/// Binary arithmetic operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryArithmeticOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+}
+
+/// Unary arithmetic operation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryArithmeticOp {
+    Neg,
+    Abs,
+}
+
+/// Binary arithmetic rule: `allow add(length) -> length`
+#[derive(Debug, Clone, PartialEq)]
+pub struct BinaryArithmeticRule {
+    pub op: BinaryArithmeticOp,
+    pub operand_type: Type,
+    pub result_type: Type,
+}
+
+/// Unary arithmetic rule: `allow neg -> length`
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnaryArithmeticRule {
+    pub op: UnaryArithmeticOp,
+    pub result_type: Type,
+}
+
+/// Compound unit definition: `unit velocity = length / time`
+/// Defines derived units from base unit families
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompoundUnitDef {
+    pub span: Span,
+    pub name: String,         // e.g., "velocity"
+    pub expr: UnitExpr,       // e.g., length / time
+    pub arithmetic: Option<UnitArithmetic>,
+    pub visibility: Visibility,
+}
+
+/// Unit expression for compound units
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnitExpr {
+    /// Base unit family reference
+    Base(String),
+    /// Multiplication: length * length
+    Mul(Box<UnitExpr>, Box<UnitExpr>),
+    /// Division: length / time
+    Div(Box<UnitExpr>, Box<UnitExpr>),
+    /// Power: time^2
+    Pow(Box<UnitExpr>, i32),
+}
+
+/// Associated type declaration in a trait
+/// Example: `type Item` or `type Item: Clone` or `type Item = i64`
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssociatedTypeDef {
+    pub span: Span,
+    pub name: String,
+    /// Optional trait bounds: `type Item: Clone + Default`
+    pub bounds: Vec<String>,
+    /// Optional default type: `type Item = i64`
+    pub default: Option<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -460,10 +540,21 @@ pub struct TraitDef {
     pub generic_params: Vec<String>,
     /// Where clause for trait bounds: where T: Clone + Default
     pub where_clause: WhereClause,
+    /// Associated types: `type Item`, `type Item: Clone`
+    pub associated_types: Vec<AssociatedTypeDef>,
     pub methods: Vec<FunctionDef>,
     pub visibility: Visibility,
     /// Documentation comment for API doc generation
     pub doc_comment: Option<DocComment>,
+}
+
+/// Associated type implementation in an impl block
+/// Example: `type Item = i64`
+#[derive(Debug, Clone, PartialEq)]
+pub struct AssociatedTypeImpl {
+    pub span: Span,
+    pub name: String,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -475,6 +566,8 @@ pub struct ImplBlock {
     pub where_clause: WhereClause,
     pub target_type: Type,
     pub trait_name: Option<String>,
+    /// Associated type implementations: `type Item = i64`
+    pub associated_types: Vec<AssociatedTypeImpl>,
     pub methods: Vec<FunctionDef>,
 }
 

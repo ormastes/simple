@@ -81,6 +81,8 @@ impl<'a> super::Lexer<'a> {
             "shared" => TokenKind::Shared,
             "gpu" => TokenKind::Gpu,
             "dyn" => TokenKind::Dyn,
+            // Note: "allow" is NOT a keyword - it's parsed contextually in unit definitions
+            // to avoid conflicts with #[allow(...)] attributes
             // Contract keywords (new spec)
             "out" => TokenKind::Out,
             "out_err" => TokenKind::OutErr,

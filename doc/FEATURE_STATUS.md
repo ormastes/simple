@@ -115,12 +115,14 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Constraint checking
 - Specialization for concrete types
 
-### #15: Traits 🔄
-**Status:** IN PROGRESS  
-**Implementation:** Parser complete, codegen pending
+### #15: Traits ✅
+**Status:** COMPLETE
+**Implementation:** Parser + interpreter complete
 - Trait definitions parsed
 - Impl blocks supported
-- **Next:** Dynamic dispatch
+- Associated types ✅ (parser complete, 5 tests)
+- Dynamic dispatch via TraitObject ✅ (4 tests)
+- Coercion in let bindings and function parameters
 
 ### #16: Impl Blocks ✅
 **Status:** COMPLETE  
@@ -573,7 +575,7 @@ This document consolidates all feature implementation status from `doc/status/*.
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
-| Core Language | 47 | 38 | 8 | 1 |
+| Core Language | 47 | 45 | 1 | 1 |
 | Codegen | 6 | 6 | 0 | 0 |
 | Testing & CLI | 39 | 39 | 0 | 0 |
 | Concurrency Runtime | 33 | 33 | 0 | 0 |
@@ -584,18 +586,16 @@ This document consolidates all feature implementation status from `doc/status/*.
 | Advanced - UI | 6 | 0 | 0 | 6 |
 | Advanced - Web | 17 | 0 | 0 | 17 |
 | Advanced - GPU/SIMD | 11 | 0 | 0 | 11 |
-| **TOTAL** | **211** | **154** | **8** | **51** |
+| **TOTAL** | **211** | **161** | **1** | **51** |
 
-**Overall Progress:** 73% (154/211 complete)
+**Overall Progress:** 76% (161/211 complete)
 
 ---
 
 ## Next Priorities
 
 ### Immediate (Sprint)
-1. Complete `dyn Trait` runtime support (TraitObject creation)
-2. Finish Type Inference AST integration
-3. Unique/Shared pointer RAII semantics
+1. Unique/Shared pointer RAII semantics
 
 ### Short Term (Month)
 1. Memory pointer types - Handle pointers

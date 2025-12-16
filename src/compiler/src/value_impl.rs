@@ -4,6 +4,7 @@ impl Value {
             Value::Int(i) => Ok(*i),
             Value::Float(f) => Ok(*f as i64),
             Value::Bool(b) => Ok(if *b { 1 } else { 0 }),
+            Value::Unit { value, .. } => value.as_int(),
             Value::Unique(u) => u.inner().as_int(),
             Value::Shared(s) => s.inner().as_int(),
             Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).as_int(),
@@ -24,6 +25,7 @@ impl Value {
             Value::Float(f) => Ok(*f),
             Value::Int(i) => Ok(*i as f64),
             Value::Bool(b) => Ok(if *b { 1.0 } else { 0.0 }),
+            Value::Unit { value, .. } => value.as_float(),
             Value::Unique(u) => u.inner().as_float(),
             Value::Shared(s) => s.inner().as_float(),
             Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).as_float(),
@@ -44,6 +46,7 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Str(s) => s.clone(),
             Value::Symbol(s) => s.clone(),
+            Value::Unit { value, suffix, .. } => format!("{}_{}", value.to_key_string(), suffix),
             Value::Unique(u) => u.inner().to_key_string(),
             Value::Shared(s) => s.inner().to_key_string(),
             Value::Weak(w) => w.upgrade_inner().unwrap_or(Value::Nil).to_key_string(),
@@ -66,6 +69,7 @@ impl Value {
             Value::Tuple(t) => !t.is_empty(),
             Value::Dict(d) => !d.is_empty(),
             Value::Nil => false,
+            Value::Unit { value, .. } => value.truthy(),
             Value::Unique(u) => u.inner().truthy(),
             Value::Shared(s) => s.inner().truthy(),
             Value::Weak(w) => w.upgrade_inner().map_or(false, |v| v.truthy()),
@@ -112,6 +116,9 @@ impl Value {
                 format!("{{{}}}", parts.join(", "))
             }
             Value::Nil => "nil".into(),
+            Value::Unit { value, suffix, .. } => {
+                format!("{}_{}", value.to_display_string(), suffix)
+            }
             Value::Unique(u) => format!("&{}", u.inner().to_display_string()),
             Value::Shared(s) => format!("*{}", s.inner().to_display_string()),
             Value::Weak(w) => {
@@ -143,6 +150,7 @@ impl Value {
             Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil),
             Value::Borrow(b) => b.inner().clone(),
             Value::BorrowMut(b) => b.inner().clone(),
+            // Unit values pass through (they're not pointers)
             other => other,
         }
     }
@@ -165,6 +173,7 @@ impl Value {
             Value::Enum { .. } => "enum",
             Value::Constructor { .. } => "constructor",
             Value::TraitObject { .. } => "trait_object",
+            Value::Unit { .. } => "unit",
             Value::Actor(_) => "actor",
             Value::Future(_) => "future",
             Value::Generator(_) => "generator",
@@ -205,12 +214,16 @@ impl Value {
             "tuple" | "Tuple" => matches!(self, Value::Tuple(_)),
             // Dict
             "dict" | "Dict" => matches!(self, Value::Dict(_)),
-            // Check for object class name
+            // Unit types - match by suffix
+            "unit" | "Unit" => matches!(self, Value::Unit { .. }),
+            // Check for object class name, enum name, or unit suffix
             _ => {
                 if let Value::Object { class, .. } = self {
                     class == type_name
                 } else if let Value::Enum { enum_name, .. } = self {
                     enum_name == type_name
+                } else if let Value::Unit { suffix, .. } = self {
+                    suffix == type_name
                 } else {
                     false
                 }
