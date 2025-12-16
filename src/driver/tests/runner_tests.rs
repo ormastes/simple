@@ -690,3 +690,45 @@ main = d[key]"#,
     );
     run_expect("let d = {}\nmain = 42", 42);
 }
+
+// =============================================================================
+// Pointer tests (tests both interpreter and JIT/compiled paths)
+// =============================================================================
+
+#[test]
+fn runner_handles_unique_pointer_allocation() {
+    // Test unique pointer with & syntax
+    run_expect_interp("let p = new & 42\nmain = p", 42);
+}
+
+#[test]
+fn runner_handles_shared_pointer_allocation() {
+    // Test shared pointer with * syntax
+    run_expect_interp("let p = new * 42\nmain = p", 42);
+}
+
+#[test]
+fn runner_handles_pointer_arithmetic() {
+    // Test arithmetic with pointers (auto-deref)
+    run_expect_interp(
+        r#"
+let a = new * 10
+let b = new * 5
+main = a + b
+"#,
+        15,
+    );
+}
+
+#[test]
+fn runner_handles_multiple_shared_refs() {
+    // Test multiple references to same shared value
+    run_expect_interp(
+        r#"
+let a = new * 42
+let b = a
+main = a + b
+"#,
+        84,
+    );
+}

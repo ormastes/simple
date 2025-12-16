@@ -115,12 +115,67 @@ fn exec_context(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    // BDD_INDENT, BDD_LAZY_VALUES, BDD_CONTEXT_DEFS are defined in interpreter_call.rs
+    // which is also include!d into interpreter.rs, so they're in scope directly
+
     let context_obj = evaluate_expr(&ctx_stmt.context, env, functions, classes, enums, impl_methods)?;
-    let prev_context = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
-    CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(context_obj));
-    let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
-    CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = prev_context);
-    result
+
+    // Check if this is a BDD-style context (string or symbol description)
+    match &context_obj {
+        Value::Str(name) | Value::Symbol(name) => {
+            // BDD-style context: context "description": block
+            let name_str = if matches!(context_obj, Value::Symbol(_)) {
+                format!("with {}", name)
+            } else {
+                name.clone()
+            };
+
+            // Check if this is a symbol referencing a context_def
+            let ctx_def_blocks = if matches!(context_obj, Value::Symbol(_)) {
+                BDD_CONTEXT_DEFS.with(|cell: &RefCell<HashMap<String, Vec<Value>>>| {
+                    cell.borrow().get(name).cloned()
+                })
+            } else {
+                None
+            };
+
+            // Get current indent level
+            let indent = BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow());
+            let indent_str = "  ".repeat(indent);
+
+            // Print context name
+            println!("{}{}", indent_str, name_str);
+
+            // Increase indent for nested blocks
+            BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow_mut() += 1);
+
+            // If this is a context_def reference, execute its givens first
+            if let Some(ctx_blocks) = ctx_def_blocks {
+                for ctx_block in ctx_blocks {
+                    exec_block_value(ctx_block, env, functions, classes, enums, impl_methods)?;
+                }
+            }
+
+            // Execute the block
+            let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
+
+            // Clear lazy values after context exits
+            BDD_LAZY_VALUES.with(|cell: &RefCell<HashMap<String, (Value, Option<Value>)>>| cell.borrow_mut().clear());
+
+            // Restore indent
+            BDD_INDENT.with(|cell: &RefCell<usize>| *cell.borrow_mut() -= 1);
+
+            result
+        }
+        _ => {
+            // Non-BDD context: set context object and execute block
+            let prev_context = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
+            CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(context_obj));
+            let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
+            CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = prev_context);
+            result
+        }
+    }
 }
 
 /// Execute a with statement (context manager pattern)
@@ -274,10 +329,13 @@ fn exec_for(
     Ok(Control::Next)
 }
 
-fn is_catch_all_pattern(pattern: &Pattern) -> bool {
+/// Check if a pattern is a catch-all that covers any value.
+pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Wildcard => true,
         Pattern::Identifier(_) | Pattern::MutIdentifier(_) => true,
+        Pattern::Or(patterns) => patterns.iter().any(is_catch_all_pattern),
+        Pattern::Typed { pattern, .. } => is_catch_all_pattern(pattern),
         _ => false,
     }
 }
@@ -351,20 +409,73 @@ fn match_sequence_pattern(
     } else {
         return Ok(false);
     };
-    
-    if patterns.len() != values.len() {
-        return Ok(false);
-    }
-    
-    for (pat, val) in patterns.iter().zip(values.iter()) {
-        if !pattern_matches(pat, val, bindings, enums)? {
+
+    // Check for Rest pattern to support variable-length matching
+    // e.g., [first, ..rest] or [first, second, ..]
+    let rest_index = patterns.iter().position(|p| matches!(p, Pattern::Rest));
+
+    if let Some(rest_idx) = rest_index {
+        // Patterns before the rest
+        let before_rest = &patterns[..rest_idx];
+        // Patterns after the rest (if any - skip the Rest itself)
+        let after_rest = if rest_idx + 1 < patterns.len() {
+            &patterns[rest_idx + 1..]
+        } else {
+            &[]
+        };
+
+        // Minimum values needed: before_rest.len() + after_rest.len()
+        let min_needed = before_rest.len() + after_rest.len();
+        if values.len() < min_needed {
             return Ok(false);
         }
+
+        // Match patterns before rest
+        for (pat, val) in before_rest.iter().zip(values.iter()) {
+            if !pattern_matches(pat, val, bindings, enums)? {
+                return Ok(false);
+            }
+        }
+
+        // Match patterns after rest (from the end)
+        for (i, pat) in after_rest.iter().enumerate() {
+            let val_idx = values.len() - after_rest.len() + i;
+            if !pattern_matches(pat, &values[val_idx], bindings, enums)? {
+                return Ok(false);
+            }
+        }
+
+        // Collect rest elements
+        let rest_start = before_rest.len();
+        let rest_end = values.len() - after_rest.len();
+        let rest_values: Vec<Value> = values[rest_start..rest_end].to_vec();
+
+        // If there's an identifier after .., bind it to the rest
+        // Look for NamedRest pattern which would be Pattern::Identifier after Rest
+        // For now, rest patterns just match (they don't bind)
+        // A future enhancement could support [first, ..rest] with named rest
+
+        // Store rest in a special binding if followed by an identifier
+        // This is a simplified approach - full support would need parser changes
+        bindings.insert("__rest__".to_string(), Value::Array(rest_values));
+
+        Ok(true)
+    } else {
+        // No rest pattern - exact match required
+        if patterns.len() != values.len() {
+            return Ok(false);
+        }
+
+        for (pat, val) in patterns.iter().zip(values.iter()) {
+            if !pattern_matches(pat, val, bindings, enums)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
-    Ok(true)
 }
 
-fn pattern_matches(
+pub(crate) fn pattern_matches(
     pattern: &Pattern,
     value: &Value,
     bindings: &mut HashMap<String, Value>,
@@ -406,6 +517,25 @@ fn pattern_matches(
                         Ok(false)
                     }
                 }
+                // Handle FString patterns (strings parsed as f-strings with only literal parts)
+                Expr::FString(parts) => {
+                    // Build the full string from literal parts
+                    let mut pattern_str = String::new();
+                    for part in parts {
+                        match part {
+                            FStringPart::Literal(s) => pattern_str.push_str(s),
+                            FStringPart::Expr(_) => {
+                                // FStrings with expressions cannot be used as patterns
+                                return Ok(false);
+                            }
+                        }
+                    }
+                    if let Value::Str(v) = value {
+                        Ok(v == &pattern_str)
+                    } else {
+                        Ok(false)
+                    }
+                }
                 Expr::Symbol(sym) => {
                     if let Value::Symbol(v) = value {
                         Ok(v == sym)
@@ -428,16 +558,36 @@ fn pattern_matches(
         Pattern::Enum { name: enum_name, variant, payload } => {
             if let Value::Enum { enum_name: ve, variant: vv, payload: value_payload } = value {
                 if enum_name == ve && variant == vv {
+                    // Both have no payload
                     if payload.is_none() && value_payload.is_none() {
                         return Ok(true);
                     }
+                    // Pattern has payload patterns, value has payload
                     if let (Some(patterns), Some(vp)) = (payload, value_payload) {
                         if patterns.len() == 1 {
+                            // Single payload - match directly
                             if pattern_matches(&patterns[0], vp.as_ref(), bindings, enums)? {
                                 return Ok(true);
                             }
+                        } else {
+                            // Multiple payload patterns - payload should be a tuple
+                            if let Value::Tuple(values) = vp.as_ref() {
+                                if patterns.len() == values.len() {
+                                    let mut all_match = true;
+                                    for (pat, val) in patterns.iter().zip(values.iter()) {
+                                        if !pattern_matches(pat, val, bindings, enums)? {
+                                            all_match = false;
+                                            break;
+                                        }
+                                    }
+                                    if all_match {
+                                        return Ok(true);
+                                    }
+                                }
+                            }
                         }
                     }
+                    // Pattern has no payload but value does - match any payload
                     if payload.is_none() && value_payload.is_some() {
                         return Ok(true);
                     }
@@ -525,5 +675,84 @@ fn pattern_matches(
         Pattern::Rest => {
             Ok(true)
         }
+    }
+}
+
+/// Extract the covered variant name from a pattern (for exhaustiveness checking).
+/// Returns Some(variant_name) for enum patterns, None for wildcards/catch-all.
+fn extract_covered_variant(pattern: &Pattern) -> Option<String> {
+    match pattern {
+        Pattern::Enum { variant, .. } => Some(variant.clone()),
+        Pattern::Or(patterns) => {
+            // Or patterns cover all their sub-patterns
+            // Return the first one for simplicity (all should be checked)
+            patterns.first().and_then(extract_covered_variant)
+        }
+        Pattern::Typed { pattern, .. } => extract_covered_variant(pattern),
+        // Wildcard, Identifier, etc. are catch-all - they cover everything
+        _ => None,
+    }
+}
+
+/// Collect all variant names covered by a list of match arm patterns.
+/// Returns (covered_variants, has_catch_all).
+pub(crate) fn collect_covered_variants(patterns: &[&Pattern]) -> (Vec<String>, bool) {
+    let mut covered = Vec::new();
+    let mut has_catch_all = false;
+
+    for pattern in patterns {
+        if is_catch_all_pattern(pattern) {
+            has_catch_all = true;
+        } else if let Some(variant) = extract_covered_variant(pattern) {
+            if !covered.contains(&variant) {
+                covered.push(variant);
+            }
+        }
+        // For Or patterns, collect all sub-variants
+        if let Pattern::Or(sub_patterns) = pattern {
+            for sub_pat in sub_patterns {
+                if let Some(variant) = extract_covered_variant(sub_pat) {
+                    if !covered.contains(&variant) {
+                        covered.push(variant);
+                    }
+                }
+            }
+        }
+    }
+
+    (covered, has_catch_all)
+}
+
+/// Check if a match expression covers all variants of an enum.
+/// Returns None if exhaustive, Some(missing_variants) otherwise.
+pub(crate) fn check_enum_exhaustiveness(
+    enum_name: &str,
+    arm_patterns: &[&Pattern],
+    enums: &Enums,
+) -> Option<Vec<String>> {
+    // Get the enum definition
+    let enum_def = enums.get(enum_name)?;
+
+    // Get all variant names from the enum definition
+    let all_variants: Vec<String> = enum_def.variants.iter().map(|v| v.name.clone()).collect();
+
+    // Collect covered variants from patterns
+    let (covered, has_catch_all) = collect_covered_variants(arm_patterns);
+
+    // If there's a catch-all, all variants are covered
+    if has_catch_all {
+        return None;
+    }
+
+    // Find missing variants
+    let missing: Vec<String> = all_variants
+        .into_iter()
+        .filter(|v| !covered.contains(v))
+        .collect();
+
+    if missing.is_empty() {
+        None
+    } else {
+        Some(missing)
     }
 }

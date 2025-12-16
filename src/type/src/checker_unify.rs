@@ -189,6 +189,7 @@ impl TypeChecker {
                     element: Box::new(elem_type),
                 }
             }
+            AstType::DynTrait(trait_name) => Type::DynTrait(trait_name.clone()),
         }
     }
 

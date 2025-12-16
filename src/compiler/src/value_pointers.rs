@@ -21,6 +21,11 @@ impl ManualUniqueValue {
     pub fn into_inner(self) -> Value {
         self.ptr.into_inner()
     }
+
+    /// Get a mutable reference to the inner value (update functionality)
+    pub fn inner_mut(&mut self) -> &mut Value {
+        &mut self.ptr
+    }
 }
 
 impl Clone for ManualUniqueValue {
@@ -264,6 +269,10 @@ impl Clone for Value {
             Value::Constructor { class_name } => Value::Constructor {
                 class_name: class_name.clone(),
             },
+            Value::TraitObject { trait_name, inner } => Value::TraitObject {
+                trait_name: trait_name.clone(),
+                inner: inner.clone(),
+            },
             Value::Actor(handle) => Value::Actor(handle.clone()),
             Value::Future(f) => Value::Future(f.clone()),
             Value::Generator(g) => Value::Generator(g.clone()),
@@ -275,6 +284,8 @@ impl Clone for Value {
             Value::Handle(h) => Value::Handle(h.clone()),
             Value::Borrow(b) => Value::Borrow(b.clone()),
             Value::BorrowMut(b) => Value::BorrowMut(b.clone()),
+            Value::Mock(m) => Value::Mock(m.clone()),
+            Value::Matcher(m) => Value::Matcher(m.clone()),
             Value::Nil => Value::Nil,
         }
     }

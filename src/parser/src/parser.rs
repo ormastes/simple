@@ -98,6 +98,7 @@ impl<'a> Parser<'a> {
             TokenKind::Struct => self.parse_struct_with_doc(doc_comment),
             TokenKind::Class => self.parse_class_with_doc(doc_comment),
             TokenKind::Enum => self.parse_enum_with_doc(doc_comment),
+            TokenKind::Union => self.parse_union_with_doc(doc_comment),
             TokenKind::Trait => self.parse_trait_with_doc(doc_comment),
             TokenKind::Impl => self.parse_impl(),
             TokenKind::Actor => self.parse_actor(),
@@ -227,6 +228,13 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            TokenKind::Union => {
+                let mut node = self.parse_union_with_doc(doc_comment)?;
+                if let Node::Enum(ref mut e) = node {
+                    e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
             TokenKind::Trait => {
                 let mut node = self.parse_trait_with_doc(doc_comment)?;
                 if let Node::Trait(ref mut t) = node {
@@ -270,6 +278,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Enum => {
                 let mut node = self.parse_enum()?;
+                if let Node::Enum(ref mut e) = node {
+                    e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Union => {
+                let mut node = self.parse_union()?;
                 if let Node::Enum(ref mut e) = node {
                     e.visibility = Visibility::Public;
                 }
@@ -382,6 +397,9 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Parse optional where clause: where T: Clone + Default
+        let where_clause = self.parse_where_clause()?;
+
         // Skip newlines before checking for contract blocks
         self.skip_newlines();
 
@@ -415,6 +433,7 @@ impl<'a> Parser<'a> {
             generic_params,
             params,
             return_type,
+            where_clause,
             body,
             visibility: Visibility::Private,
             effect: None,
@@ -422,7 +441,54 @@ impl<'a> Parser<'a> {
             attributes,
             doc_comment: None,
             contract,
+            is_abstract: false,
         }))
+    }
+
+    /// Parse optional where clause: `where T: Trait1 + Trait2, U: Other`
+    pub(crate) fn parse_where_clause(&mut self) -> Result<WhereClause, ParseError> {
+        if !self.check(&TokenKind::Where) {
+            return Ok(vec![]);
+        }
+
+        self.advance(); // consume 'where'
+        let mut bounds = Vec::new();
+
+        loop {
+            let span = self.current.span;
+            let type_param = self.expect_identifier()?;
+
+            self.expect(&TokenKind::Colon)?;
+
+            // Parse trait bounds: Trait1 + Trait2 + ...
+            let mut trait_bounds = Vec::new();
+            loop {
+                let bound_name = self.expect_identifier()?;
+                trait_bounds.push(bound_name);
+
+                // Check for + to continue parsing bounds
+                if self.check(&TokenKind::Plus) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+
+            bounds.push(WhereBound {
+                span,
+                type_param,
+                bounds: trait_bounds,
+            });
+
+            // Check for comma to continue parsing more bounds
+            if self.check(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        Ok(bounds)
     }
 
     // === Doc Comment Variants ===
@@ -484,6 +550,14 @@ impl<'a> Parser<'a> {
 
     fn parse_enum_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_enum()?;
+        if let Node::Enum(ref mut e) = node {
+            e.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    fn parse_union_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_union()?;
         if let Node::Enum(ref mut e) = node {
             e.doc_comment = doc_comment;
         }
@@ -557,13 +631,14 @@ impl<'a> Parser<'a> {
             TokenKind::Struct => self.parse_struct_with_attrs(attributes),
             TokenKind::Class => self.parse_class_with_attrs(attributes),
             TokenKind::Enum => self.parse_enum_with_attrs(attributes),
+            TokenKind::Union => self.parse_union_with_attrs(attributes),
             TokenKind::Pub => {
                 self.advance();
                 self.parse_pub_item_with_attrs(attributes)
             }
             TokenKind::Mod => self.parse_mod(Visibility::Private, attributes),
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, mod, or pub after attributes",
+                "fn, struct, class, enum, union, mod, or pub after attributes",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),

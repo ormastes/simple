@@ -125,6 +125,77 @@ main = c.add(25)
 }
 
 #[test]
+fn interpreter_trait_default_method() {
+    // Test that default trait methods work when not overridden
+    let code = r#"
+trait Greeter:
+    fn greet(self) -> i64
+    fn farewell(self) -> i64:
+        return 99
+
+struct Person:
+    name: str
+
+impl Greeter for Person:
+    fn greet(self) -> i64:
+        return 42
+
+let p = Person { name: "Alice" }
+main = p.farewell()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 99); // Uses default implementation
+}
+
+#[test]
+fn interpreter_trait_default_overridden() {
+    // Test that default trait methods can be overridden
+    let code = r#"
+trait Greeter:
+    fn greet(self) -> i64
+    fn farewell(self) -> i64:
+        return 99
+
+struct Person:
+    name: str
+
+impl Greeter for Person:
+    fn greet(self) -> i64:
+        return 42
+    fn farewell(self) -> i64:
+        return 7
+
+let p = Person { name: "Bob" }
+main = p.farewell()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 7); // Uses overridden implementation
+}
+
+#[test]
+fn interpreter_trait_mixed_abstract_default() {
+    // Test trait with both abstract and default methods
+    let code = r#"
+trait Calculator:
+    fn compute(self) -> i64
+    fn double(self) -> i64:
+        return self.compute() * 2
+
+struct Value:
+    n: i64
+
+impl Calculator for Value:
+    fn compute(self) -> i64:
+        return self.n
+
+let v = Value { n: 21 }
+main = v.double()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42); // 21 * 2 = 42
+}
+
+#[test]
 fn interpreter_context_block_basic() {
     // Simple context block - method calls dispatch to the context object
     let code = r#"
@@ -290,4 +361,63 @@ main = b2.get_content()
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 100);
+}
+
+// ============ dyn Trait Tests (#new) ============
+
+#[test]
+fn interpreter_dyn_trait_parsing_in_function() {
+    // Verify dyn Trait syntax is accepted in function parameters
+    // Note: Full runtime support requires TraitObject creation from assignments
+    let code = r#"
+trait Drawable:
+    fn draw(self) -> i64
+
+struct Circle:
+    radius: i64
+
+impl Drawable for Circle:
+    fn draw(self) -> i64:
+        return self.radius * 2
+
+# Function with dyn Trait parameter (syntax test - parsed but not fully dynamic yet)
+fn process(obj: dyn Drawable) -> i64:
+    return 42
+
+# Use regular trait dispatch (this works)
+let c = Circle { radius: 21 }
+main = c.draw()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42); // 21 * 2 = 42
+}
+
+#[test]
+fn interpreter_trait_polymorphism_without_dyn() {
+    // Multiple types implementing same trait - polymorphism works through impl
+    let code = r#"
+trait Shape:
+    fn area(self) -> i64
+
+struct Square:
+    side: i64
+
+struct Rectangle:
+    width: i64
+    height: i64
+
+impl Shape for Square:
+    fn area(self) -> i64:
+        return self.side * self.side
+
+impl Shape for Rectangle:
+    fn area(self) -> i64:
+        return self.width * self.height
+
+let s = Square { side: 5 }
+let r = Rectangle { width: 4, height: 3 }
+main = s.area() + r.area()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 37); // 25 + 12 = 37
 }

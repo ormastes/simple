@@ -78,11 +78,14 @@ impl Value {
             | Value::BlockClosure { .. }
             | Value::Function { .. }
             | Value::Constructor { .. }
+            | Value::TraitObject { .. }
             | Value::Actor(_)
             | Value::Future(_)
             | Value::Generator(_)
             | Value::Channel(_)
-            | Value::ThreadPool(_) => true,
+            | Value::ThreadPool(_)
+            | Value::Mock(_)
+            | Value::Matcher(_) => true,
         }
     }
 
@@ -161,6 +164,7 @@ impl Value {
             Value::Object { .. } => "object",
             Value::Enum { .. } => "enum",
             Value::Constructor { .. } => "constructor",
+            Value::TraitObject { .. } => "trait_object",
             Value::Actor(_) => "actor",
             Value::Future(_) => "future",
             Value::Generator(_) => "generator",
@@ -172,6 +176,8 @@ impl Value {
             Value::Handle(_) => "handle",
             Value::Borrow(_) => "borrow",
             Value::BorrowMut(_) => "borrow_mut",
+            Value::Mock(_) => "mock",
+            Value::Matcher(_) => "matcher",
             Value::Nil => "nil",
         }
     }

@@ -198,49 +198,109 @@ pub extern "C" fn rt_value_eq(a: RuntimeValue, b: RuntimeValue) -> u8 {
 // ============================================================================
 // Interpreter bridge FFI (for hybrid execution)
 // ============================================================================
+// These functions call through function pointers that can be set by the compiler
+// crate. This allows the interpreter to be plugged in without circular dependencies.
+
+use std::sync::atomic::{AtomicPtr, Ordering};
+
+/// Type for rt_interp_call handler function
+pub type InterpCallFn = unsafe extern "C" fn(
+    name_ptr: *const u8,
+    name_len: u64,
+    argc: u64,
+    argv: *const RuntimeValue,
+) -> RuntimeValue;
+
+/// Type for rt_interp_eval handler function
+pub type InterpEvalFn = extern "C" fn(expr_index: i64) -> RuntimeValue;
+
+/// Default handler that returns NIL (no interpreter available)
+unsafe extern "C" fn default_interp_call(
+    _name_ptr: *const u8,
+    _name_len: u64,
+    _argc: u64,
+    _argv: *const RuntimeValue,
+) -> RuntimeValue {
+    RuntimeValue::NIL
+}
+
+/// Default handler that returns NIL (no interpreter available)
+extern "C" fn default_interp_eval(_expr_index: i64) -> RuntimeValue {
+    RuntimeValue::NIL
+}
+
+/// Global function pointer for rt_interp_call.
+/// Set by compiler crate via `set_interp_call_handler`.
+static INTERP_CALL_HANDLER: AtomicPtr<()> =
+    AtomicPtr::new(default_interp_call as *const () as *mut ());
+
+/// Global function pointer for rt_interp_eval.
+/// Set by compiler crate via `set_interp_eval_handler`.
+static INTERP_EVAL_HANDLER: AtomicPtr<()> =
+    AtomicPtr::new(default_interp_eval as *const () as *mut ());
+
+/// Set the interpreter call handler. Called by compiler crate during initialization.
+///
+/// # Safety
+/// The handler function must have the correct signature and remain valid for the
+/// lifetime of the program.
+pub unsafe fn set_interp_call_handler(handler: InterpCallFn) {
+    INTERP_CALL_HANDLER.store(handler as *const () as *mut (), Ordering::SeqCst);
+}
+
+/// Set the interpreter eval handler. Called by compiler crate during initialization.
+///
+/// # Safety
+/// The handler function must have the correct signature and remain valid for the
+/// lifetime of the program.
+pub unsafe fn set_interp_eval_handler(handler: InterpEvalFn) {
+    INTERP_EVAL_HANDLER.store(handler as *const () as *mut (), Ordering::SeqCst);
+}
 
 /// Call an interpreted function by name with RuntimeValue arguments.
-/// This is a simpler FFI wrapper that avoids BridgeValue complexity.
+///
+/// This dispatches to the handler set by the compiler crate, or returns NIL
+/// if no handler has been set.
 ///
 /// # Arguments
 /// * `name_ptr` - Pointer to function name string (UTF-8)
 /// * `name_len` - Length of function name
-/// * `args` - RuntimeValue array containing arguments
+/// * `argc` - Number of arguments
+/// * `argv` - Pointer to array of RuntimeValue arguments
 ///
 /// # Returns
-/// RuntimeValue result (NIL if function not found or error)
+/// RuntimeValue containing the result (NIL if no interpreter available)
 ///
 /// # Safety
 /// name_ptr must be a valid pointer to name_len bytes of UTF-8 data.
+/// argv must be a valid pointer to argc RuntimeValue elements (or null if argc is 0).
 #[no_mangle]
 pub unsafe extern "C" fn rt_interp_call(
     name_ptr: *const u8,
     name_len: u64,
-    args: RuntimeValue,
+    argc: u64,
+    argv: *const RuntimeValue,
 ) -> RuntimeValue {
-    // This is a stub implementation - the actual interpreter bridge
-    // is in the compiler crate (interpreter_ffi.rs).
-    // For now, return NIL to indicate interpreter not available.
-    // The compiled code should call simple_interp_call directly
-    // when proper interpreter integration is needed.
-    let _ = (name_ptr, name_len, args);
-    RuntimeValue::NIL
+    let handler_ptr = INTERP_CALL_HANDLER.load(Ordering::SeqCst);
+    let handler: InterpCallFn = std::mem::transmute(handler_ptr);
+    handler(name_ptr, name_len, argc, argv)
 }
 
-/// Evaluate an expression by index (stub).
-/// The actual expression storage and evaluation is handled
-/// by the compiler's interpreter_ffi module.
+/// Evaluate an expression by index via the interpreter.
+///
+/// This dispatches to the handler set by the compiler crate, or returns NIL
+/// if no handler has been set.
 ///
 /// # Arguments
 /// * `expr_index` - Index of the stored expression
 ///
 /// # Returns
-/// RuntimeValue result (NIL if expression not found or error)
+/// RuntimeValue containing the result (NIL if no interpreter available)
 #[no_mangle]
-pub extern "C" fn rt_interp_eval(expr_index: u64) -> RuntimeValue {
-    // Stub - actual implementation in compiler crate
-    let _ = expr_index;
-    RuntimeValue::NIL
+pub extern "C" fn rt_interp_eval(expr_index: i64) -> RuntimeValue {
+    let handler_ptr = INTERP_EVAL_HANDLER.load(Ordering::SeqCst);
+    let handler: InterpEvalFn = unsafe { std::mem::transmute(handler_ptr) };
+    handler(expr_index)
 }
 
 // ============================================================================

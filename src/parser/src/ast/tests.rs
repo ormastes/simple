@@ -26,6 +26,7 @@ fn test_function_def() {
         span: Span::new(0, 10, 1, 1),
         name: "add".to_string(),
         generic_params: vec![],
+        where_clause: vec![],
         params: vec![Parameter {
             span: Span::new(4, 5, 1, 5),
             name: "a".to_string(),
@@ -41,6 +42,7 @@ fn test_function_def() {
         attributes: vec![],
         doc_comment: None,
         contract: None,
+        is_abstract: false,
     };
     assert_eq!(func.name, "add");
     assert_eq!(func.params.len(), 1);
@@ -52,6 +54,7 @@ fn test_generic_function_def() {
         span: Span::new(0, 20, 1, 1),
         name: "identity".to_string(),
         generic_params: vec!["T".to_string()],
+        where_clause: vec![],
         params: vec![Parameter {
             span: Span::new(10, 11, 1, 11),
             name: "x".to_string(),
@@ -67,6 +70,7 @@ fn test_generic_function_def() {
         attributes: vec![],
         doc_comment: None,
         contract: None,
+        is_abstract: false,
     };
     assert_eq!(func.name, "identity");
     assert_eq!(func.generic_params, vec!["T"]);
@@ -78,6 +82,7 @@ fn test_generic_struct_def() {
         span: Span::new(0, 30, 1, 1),
         name: "Box".to_string(),
         generic_params: vec!["T".to_string()],
+        where_clause: vec![],
         fields: vec![Field {
             span: Span::new(10, 20, 2, 5),
             name: "value".to_string(),
@@ -90,6 +95,7 @@ fn test_generic_struct_def() {
         visibility: Visibility::Private,
         attributes: vec![],
         doc_comment: None,
+        invariant: None,
     };
     assert_eq!(s.name, "Box");
     assert_eq!(s.generic_params, vec!["T"]);

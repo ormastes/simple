@@ -133,3 +133,84 @@ impl GcAllocator for GcRuntime {
         self.collect("ffi");
     }
 }
+
+// ============================================================================
+// Unique Pointer GC Root Registration
+// ============================================================================
+//
+// Unique pointers are manually allocated (not through GC), but they may contain
+// references to GC-managed values. To prevent those nested values from being
+// collected, unique pointers register as GC roots.
+
+use std::cell::RefCell;
+
+thread_local! {
+    /// Registry of unique pointer addresses that contain GC-traceable values
+    static UNIQUE_ROOTS: RefCell<Vec<*mut u8>> = RefCell::new(Vec::new());
+}
+
+/// Register a unique pointer as a GC root.
+/// Called when a unique pointer is created with a value that contains heap references.
+pub fn register_unique_root(ptr: *mut u8) {
+    UNIQUE_ROOTS.with(|roots| {
+        roots.borrow_mut().push(ptr);
+    });
+}
+
+/// Unregister a unique pointer from GC roots.
+/// Called when a unique pointer is deallocated.
+pub fn unregister_unique_root(ptr: *mut u8) {
+    UNIQUE_ROOTS.with(|roots| {
+        roots.borrow_mut().retain(|&p| p != ptr);
+    });
+}
+
+/// Get all registered unique roots for GC tracing.
+/// Returns a snapshot of currently registered unique pointer addresses.
+pub fn get_unique_roots() -> Vec<*mut u8> {
+    UNIQUE_ROOTS.with(|roots| roots.borrow().clone())
+}
+
+/// Get the count of registered unique roots.
+pub fn unique_root_count() -> usize {
+    UNIQUE_ROOTS.with(|roots| roots.borrow().len())
+}
+
+// ============================================================================
+// Shared Pointer GC Root Registration
+// ============================================================================
+//
+// Shared pointers are reference-counted and manually allocated. Like unique
+// pointers, they may contain references to GC-managed values and need to
+// register as GC roots.
+
+thread_local! {
+    /// Registry of shared pointer addresses that contain GC-traceable values
+    static SHARED_ROOTS: RefCell<Vec<*mut u8>> = RefCell::new(Vec::new());
+}
+
+/// Register a shared pointer as a GC root.
+/// Called when a shared pointer is created with a value that contains heap references.
+pub fn register_shared_root(ptr: *mut u8) {
+    SHARED_ROOTS.with(|roots| {
+        roots.borrow_mut().push(ptr);
+    });
+}
+
+/// Unregister a shared pointer from GC roots.
+/// Called when a shared pointer's reference count drops to zero.
+pub fn unregister_shared_root(ptr: *mut u8) {
+    SHARED_ROOTS.with(|roots| {
+        roots.borrow_mut().retain(|&p| p != ptr);
+    });
+}
+
+/// Get all registered shared roots for GC tracing.
+pub fn get_shared_roots() -> Vec<*mut u8> {
+    SHARED_ROOTS.with(|roots| roots.borrow().clone())
+}
+
+/// Get the count of registered shared roots.
+pub fn shared_root_count() -> usize {
+    SHARED_ROOTS.with(|roots| roots.borrow().len())
+}

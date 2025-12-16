@@ -1,7 +1,7 @@
 //! Monomorphization engine implementation.
 
 use super::table::MonomorphizationTable;
-use super::types::{ConcreteType, SpecializationKey, TypeBindings};
+use super::types::{ConcreteType, SpecializationKey};
 use super::util::{ast_type_to_concrete, concrete_to_ast_type};
 use simple_parser::ast::{
     Block, ClassDef, Expr, FunctionDef, Module, Node, StructDef, Type as AstType, Field,
@@ -169,10 +169,14 @@ impl<'a> Monomorphizer<'a> {
         // Build type bindings: T -> Int, U -> String, etc.
         let bindings = self.build_bindings(&func.generic_params, &key.type_args);
 
+        // TODO: Check where clause bounds against concrete types
+        // For now, where clauses are parsed but not validated during monomorphization
+
         // Create specialized function with mangled name
         let mut specialized = func.clone();
         specialized.name = key.mangled_name();
         specialized.generic_params.clear(); // No longer generic
+        specialized.where_clause.clear(); // Where clause no longer needed
 
         // Substitute types in parameters
         for param in &mut specialized.params {
@@ -237,6 +241,7 @@ impl<'a> Monomorphizer<'a> {
         let mut specialized = s.clone();
         specialized.name = key.mangled_name();
         specialized.generic_params.clear();
+        specialized.where_clause.clear();
 
         self.substitute_in_fields_and_methods(&mut specialized, &bindings);
 
@@ -250,6 +255,7 @@ impl<'a> Monomorphizer<'a> {
         let mut specialized = c.clone();
         specialized.name = key.mangled_name();
         specialized.generic_params.clear();
+        specialized.where_clause.clear();
 
         self.substitute_in_fields_and_methods(&mut specialized, &bindings);
 
@@ -370,6 +376,8 @@ impl<'a> Monomorphizer<'a> {
                 lanes: *lanes,
                 element: Box::new(self.substitute_ast_type(element, bindings)),
             },
+            // dyn Trait doesn't have type parameters to substitute
+            AstType::DynTrait(trait_name) => AstType::DynTrait(trait_name.clone()),
         }
     }
 

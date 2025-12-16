@@ -34,13 +34,14 @@ pub enum BackendKind {
 
 impl BackendKind {
     /// Select the appropriate backend for a target
+    #[allow(unused_variables)]
     pub fn for_target(target: &Target) -> Self {
         // Use LLVM for 32-bit targets if available, Cranelift for 64-bit
         #[cfg(feature = "llvm")]
         if target.arch.is_32bit() {
             return BackendKind::Llvm;
         }
-        
+
         // Default to Cranelift (available for all targets)
         BackendKind::Cranelift
     }

@@ -20,6 +20,9 @@ use crate::error::CompileError;
 // These are split into a separate file for maintainability
 include!("value_async.rs");
 
+// Mock and Spy types for testing
+include!("value_mock.rs");
+
 //==============================================================================
 // Magic Names (for formal verification)
 //==============================================================================
@@ -530,6 +533,12 @@ pub enum Value {
     Constructor {
         class_name: String,
     },
+    /// Dynamic trait object - wraps a value with its trait for dynamic dispatch
+    /// Enables polymorphism via trait implementations (dyn Trait syntax)
+    TraitObject {
+        trait_name: String,
+        inner: Box<Value>,
+    },
     Actor(ActorHandle),
     Future(FutureValue),
     Generator(GeneratorValue),
@@ -541,6 +550,10 @@ pub enum Value {
     Handle(ManualHandleValue),
     Borrow(BorrowValue),
     BorrowMut(BorrowMutValue),
+    /// Mock object for testing - stores method configurations and call records
+    Mock(MockValue),
+    /// Argument matcher for mock verification
+    Matcher(MatcherValue),
     Nil,
 }
 
