@@ -749,7 +749,7 @@ pub(crate) fn evaluate_expr(
             impl_methods,
         )),
         Expr::Await(inner) => {
-            check_async_violation("await")?;
+            check_effect_violations("await")?;
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
             match val {
                 Value::Future(f) => f.await_result().map_err(|e| CompileError::Semantic(e)),

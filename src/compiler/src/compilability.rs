@@ -128,8 +128,8 @@ pub fn analyze_function(f: &FunctionDef) -> CompilabilityStatus {
         reasons.push(FallbackReason::Decorators);
     }
 
-    // Check for async effect
-    if f.effect.is_some() {
+    // Check for effects - functions with effects may need interpreter fallback
+    if !f.effects.is_empty() {
         reasons.push(FallbackReason::AsyncAwait);
     }
 

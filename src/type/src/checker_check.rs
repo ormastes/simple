@@ -131,7 +131,8 @@ impl TypeChecker {
                 | Node::UseStmt(_)
                 | Node::CommonUseStmt(_)
                 | Node::ExportUseStmt(_)
-                | Node::AutoImportStmt(_) => {
+                | Node::AutoImportStmt(_)
+                | Node::RequiresCapabilities(_) => {
                     // Module system nodes don't introduce type bindings directly
                 }
             }

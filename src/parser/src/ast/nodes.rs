@@ -24,6 +24,7 @@ pub enum Node {
     CommonUseStmt(CommonUseStmt),
     ExportUseStmt(ExportUseStmt),
     AutoImportStmt(AutoImportStmt),
+    RequiresCapabilities(RequiresCapabilitiesStmt),
 
     // Statements
     Let(LetStmt),
@@ -124,8 +125,11 @@ pub struct FunctionDef {
     pub where_clause: WhereClause,
     pub body: Block,
     pub visibility: Visibility,
-    pub effect: Option<Effect>,
-    /// Decorators applied to the function: @decorator
+    /// Effect annotations: @pure, @io, @net, @fs, @unsafe, @async
+    /// Multiple effects can be stacked: @io @net fn fetch()
+    /// Empty = unrestricted (can do anything)
+    pub effects: Vec<Effect>,
+    /// Decorators applied to the function: @decorator (non-effect decorators)
     pub decorators: Vec<Decorator>,
     /// Attributes applied to the function: #[inline], #[deprecated]
     pub attributes: Vec<Attribute>,
@@ -138,10 +142,48 @@ pub struct FunctionDef {
 }
 
 impl FunctionDef {
-    /// Check if this function is marked as pure via #[pure] attribute (CTR-031)
-    /// Pure functions can be called from contract expressions.
+    /// Check if this function is marked as pure via @pure effect or #[pure] attribute.
+    /// Pure functions cannot perform I/O, network, filesystem, or GC operations.
+    /// Pure functions can be called from contract expressions (CTR-031).
     pub fn is_pure(&self) -> bool {
-        self.attributes.iter().any(|attr| attr.name == "pure")
+        self.effects.contains(&Effect::Pure)
+            || self.attributes.iter().any(|attr| attr.name == "pure")
+    }
+
+    /// Check if this function has the @async effect.
+    /// Async functions cannot call blocking operations.
+    pub fn is_async(&self) -> bool {
+        self.effects.contains(&Effect::Async)
+    }
+
+    /// Check if this function has the @io effect.
+    /// Functions with @io can perform console I/O operations.
+    pub fn has_io(&self) -> bool {
+        self.effects.contains(&Effect::Io)
+    }
+
+    /// Check if this function has the @net effect.
+    /// Functions with @net can perform network operations.
+    pub fn has_net(&self) -> bool {
+        self.effects.contains(&Effect::Net)
+    }
+
+    /// Check if this function has the @fs effect.
+    /// Functions with @fs can perform filesystem operations.
+    pub fn has_fs(&self) -> bool {
+        self.effects.contains(&Effect::Fs)
+    }
+
+    /// Check if this function has the @unsafe effect.
+    /// Functions with @unsafe can perform unchecked operations.
+    pub fn has_unsafe(&self) -> bool {
+        self.effects.contains(&Effect::Unsafe)
+    }
+
+    /// Check if this function has any effect annotations.
+    /// Functions without effects are unrestricted.
+    pub fn has_effects(&self) -> bool {
+        !self.effects.is_empty()
     }
 }
 
@@ -731,9 +773,156 @@ pub enum PointerKind {
     BorrowMut, // &mut T_borrow (mutable borrow)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Function effect annotations for capability-based effect tracking.
+///
+/// Effects declare what side effects a function may perform.
+/// Functions without effect annotations are unrestricted (can do anything).
+/// Functions with @pure cannot perform any I/O, network, or filesystem operations.
+///
+/// Example:
+/// ```simple
+/// @pure
+/// fn add(x: i64, y: i64) -> i64:
+///     return x + y
+///
+/// @io @net
+/// fn fetch_and_log(url: str):
+///     let data = http_get(url)
+///     print(data)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
+    /// Non-blocking guarantee - cannot call blocking operations
     Async,
+    /// No side effects - cannot do I/O, network, filesystem, or GC allocation
+    Pure,
+    /// I/O operations allowed (console, general I/O)
+    Io,
+    /// Network operations allowed (HTTP, TCP, UDP)
+    Net,
+    /// Filesystem operations allowed (read/write files, directories)
+    Fs,
+    /// Unsafe/unchecked operations allowed (raw pointers, FFI)
+    Unsafe,
+}
+
+impl Effect {
+    /// Parse an effect from a decorator name.
+    /// Returns None if the name is not a recognized effect.
+    pub fn from_decorator_name(name: &str) -> Option<Self> {
+        match name {
+            "async" => Some(Effect::Async),
+            "pure" => Some(Effect::Pure),
+            "io" => Some(Effect::Io),
+            "net" => Some(Effect::Net),
+            "fs" => Some(Effect::Fs),
+            "unsafe" => Some(Effect::Unsafe),
+            _ => None,
+        }
+    }
+
+    /// Get the decorator name for this effect.
+    pub fn decorator_name(&self) -> &'static str {
+        match self {
+            Effect::Async => "async",
+            Effect::Pure => "pure",
+            Effect::Io => "io",
+            Effect::Net => "net",
+            Effect::Fs => "fs",
+            Effect::Unsafe => "unsafe",
+        }
+    }
+}
+
+/// Module capability declarations for restricting what effects are allowed.
+///
+/// Capabilities are declared at the module level in `__init__.spl` files
+/// using the `requires [cap1, cap2]` syntax. A module can only define
+/// functions with effects that are subsets of its declared capabilities.
+///
+/// Example:
+/// ```simple
+/// # In __init__.spl
+/// requires [pure, io]
+///
+/// # This module can only contain @pure and @io functions
+/// # @net or @fs functions would be compile errors
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Capability {
+    /// Pure computation only - no side effects
+    Pure,
+    /// I/O operations (console, general I/O)
+    Io,
+    /// Network operations (HTTP, TCP, UDP)
+    Net,
+    /// Filesystem operations (read/write files, directories)
+    Fs,
+    /// Unsafe/unchecked operations (raw pointers, FFI)
+    Unsafe,
+    /// Garbage collection allowed
+    Gc,
+}
+
+impl Capability {
+    /// Parse a capability from its name.
+    /// Returns None if the name is not a recognized capability.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "pure" => Some(Capability::Pure),
+            "io" => Some(Capability::Io),
+            "net" => Some(Capability::Net),
+            "fs" => Some(Capability::Fs),
+            "unsafe" => Some(Capability::Unsafe),
+            "gc" => Some(Capability::Gc),
+            _ => None,
+        }
+    }
+
+    /// Get the name of this capability.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Capability::Pure => "pure",
+            Capability::Io => "io",
+            Capability::Net => "net",
+            Capability::Fs => "fs",
+            Capability::Unsafe => "unsafe",
+            Capability::Gc => "gc",
+        }
+    }
+
+    /// Convert an Effect to its corresponding Capability (if applicable).
+    /// Note: Async is not a capability since it's about execution model, not permissions.
+    pub fn from_effect(effect: &Effect) -> Option<Self> {
+        match effect {
+            Effect::Pure => Some(Capability::Pure),
+            Effect::Io => Some(Capability::Io),
+            Effect::Net => Some(Capability::Net),
+            Effect::Fs => Some(Capability::Fs),
+            Effect::Unsafe => Some(Capability::Unsafe),
+            Effect::Async => None, // Async is execution model, not capability
+        }
+    }
+}
+
+/// Module capability requirements statement.
+///
+/// Declared in `__init__.spl` to restrict what effects functions in this
+/// module (and child modules) can use.
+///
+/// Syntax: `requires [pure, io, net]`
+///
+/// Example:
+/// ```simple
+/// # In std_lib/src/core/__init__.spl
+/// requires [pure]
+///
+/// # All functions in core/ must be @pure
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequiresCapabilitiesStmt {
+    pub span: Span,
+    pub capabilities: Vec<Capability>,
 }
 
 // Expressions

@@ -949,20 +949,22 @@ fn comprehension_iterate(
 // ============================================================================
 
 /// Execute a closure with the given function's effect context.
-/// Saves the current effect, sets the function's effect if present,
-/// executes the closure, and restores the previous effect.
-fn with_effect_context<F, T>(func_effect: &Option<simple_parser::ast::Effect>, f: F) -> T
+/// Saves the current effects, sets the function's effects if present,
+/// executes the closure, and restores the previous effects.
+pub(crate) fn with_effect_context<F, T>(func_effects: &[simple_parser::ast::Effect], f: F) -> T
 where
     F: FnOnce() -> T,
 {
-    let prev_effect = CURRENT_EFFECT.with(|cell| cell.borrow().clone());
-    if func_effect.is_some() {
-        CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = func_effect.clone());
+    use crate::effects::{restore_effects, set_current_effects};
+
+    // Only change context if function has explicit effects
+    if func_effects.is_empty() {
+        return f();
     }
 
+    let prev_effects = set_current_effects(func_effects);
     let result = f();
-
-    CURRENT_EFFECT.with(|cell| *cell.borrow_mut() = prev_effect);
+    restore_effects(prev_effects);
     result
 }
 

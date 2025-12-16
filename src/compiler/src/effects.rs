@@ -1,13 +1,16 @@
-//! Effect checking for async functions.
+//! Effect checking for functions with effect annotations.
 //!
-//! This module tracks blocking operations and validates that async
-//! functions don't perform blocking operations.
+//! This module tracks effects and validates that:
+//! - `@async` functions don't perform blocking operations
+//! - `@pure` functions don't perform any I/O, network, or filesystem operations
+//! - Functions have required capabilities for operations they perform
 
 use crate::CompileError;
 use simple_parser::ast::Effect;
 use std::cell::RefCell;
+use std::collections::HashSet;
 
-/// Operations that are considered "blocking" and not allowed in async functions
+/// Operations that are considered "blocking" and not allowed in @async functions
 const BLOCKING_OPERATIONS: &[&str] = &[
     "recv",      // Blocking receive from channel
     "join",      // Blocking wait for actor/future
@@ -20,20 +23,97 @@ const BLOCKING_OPERATIONS: &[&str] = &[
     "input", // User input
 ];
 
+/// Operations that require @io effect (console I/O)
+const IO_OPERATIONS: &[&str] = &[
+    "print",
+    "println",
+    "eprint",
+    "eprintln",
+    "input",
+    "flush",
+];
+
+/// Operations that require @fs effect (filesystem)
+const FS_OPERATIONS: &[&str] = &[
+    "read_file",
+    "write_file",
+    "read_dir",
+    "list_dir",
+    "create_dir",
+    "remove_file",
+    "remove_dir",
+    "rename",
+    "copy",
+    "exists",
+    "is_file",
+    "is_dir",
+    "native_fs_read",
+    "native_fs_write",
+    "native_fs_exists",
+    "native_fs_remove",
+    "native_fs_rename",
+    "native_fs_create_dir",
+    "native_fs_remove_dir",
+    "native_fs_list_dir",
+    "native_fs_metadata",
+    "native_fs_is_file",
+    "native_fs_is_dir",
+    "native_file_create",
+    "native_file_open",
+    "native_file_read",
+    "native_file_write",
+    "native_file_close",
+    "native_file_seek",
+    "native_file_flush",
+];
+
+/// Operations that require @net effect (network)
+const NET_OPERATIONS: &[&str] = &[
+    "http_get",
+    "http_post",
+    "tcp_connect",
+    "tcp_listen",
+    "udp_bind",
+    "udp_send",
+    "dns_lookup",
+];
+
 thread_local! {
-    /// Current function effect for effect checking (Async, None)
-    pub(crate) static CURRENT_EFFECT: RefCell<Option<Effect>> = RefCell::new(None);
+    /// Current function effects for effect checking
+    /// Empty set = unrestricted (no effect annotations)
+    pub(crate) static CURRENT_EFFECTS: RefCell<HashSet<Effect>> = RefCell::new(HashSet::new());
 }
 
-/// Check if an operation is blocking (not allowed in async functions)
+/// Check if an operation is blocking (not allowed in @async functions)
 pub fn is_blocking_operation(name: &str) -> bool {
     BLOCKING_OPERATIONS.contains(&name)
 }
 
-/// Check if we're in an async context and report error if blocking operation is used
+/// Check if an operation requires @io effect
+pub fn is_io_operation(name: &str) -> bool {
+    IO_OPERATIONS.contains(&name)
+}
+
+/// Check if an operation requires @fs effect
+pub fn is_fs_operation(name: &str) -> bool {
+    FS_OPERATIONS.contains(&name)
+}
+
+/// Check if an operation requires @net effect
+pub fn is_net_operation(name: &str) -> bool {
+    NET_OPERATIONS.contains(&name)
+}
+
+/// Check if an operation has any side effects (for @pure checking)
+pub fn has_side_effects(name: &str) -> bool {
+    is_io_operation(name) || is_fs_operation(name) || is_net_operation(name)
+}
+
+/// Check if we're in an @async context and report error if blocking operation is used
 pub fn check_async_violation(operation: &str) -> Result<(), CompileError> {
-    CURRENT_EFFECT.with(|cell| {
-        if let Some(Effect::Async) = *cell.borrow() {
+    CURRENT_EFFECTS.with(|cell| {
+        let effects = cell.borrow();
+        if effects.contains(&Effect::Async) {
             if is_blocking_operation(operation) {
                 return Err(CompileError::Semantic(format!(
                     "blocking operation '{}' not allowed in async function",
@@ -43,4 +123,54 @@ pub fn check_async_violation(operation: &str) -> Result<(), CompileError> {
         }
         Ok(())
     })
+}
+
+/// Check if we're in a @pure context and report error if side-effecting operation is used
+pub fn check_pure_violation(operation: &str) -> Result<(), CompileError> {
+    CURRENT_EFFECTS.with(|cell| {
+        let effects = cell.borrow();
+        if effects.contains(&Effect::Pure) {
+            if has_side_effects(operation) {
+                return Err(CompileError::Semantic(format!(
+                    "side-effecting operation '{}' not allowed in pure function",
+                    operation
+                )));
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Check all effect violations for an operation.
+/// Returns Ok if the operation is allowed, Err with message otherwise.
+pub fn check_effect_violations(operation: &str) -> Result<(), CompileError> {
+    // Check @async constraint
+    check_async_violation(operation)?;
+
+    // Check @pure constraint
+    check_pure_violation(operation)?;
+
+    Ok(())
+}
+
+/// Set the current effects for effect checking.
+/// Returns the previous effects so they can be restored.
+pub fn set_current_effects(effects: &[Effect]) -> HashSet<Effect> {
+    CURRENT_EFFECTS.with(|cell| {
+        let prev = cell.borrow().clone();
+        *cell.borrow_mut() = effects.iter().copied().collect();
+        prev
+    })
+}
+
+/// Restore previously saved effects.
+pub fn restore_effects(effects: HashSet<Effect>) {
+    CURRENT_EFFECTS.with(|cell| {
+        *cell.borrow_mut() = effects;
+    });
+}
+
+/// Check if currently in a function with the given effect.
+pub fn has_effect(effect: Effect) -> bool {
+    CURRENT_EFFECTS.with(|cell| cell.borrow().contains(&effect))
 }

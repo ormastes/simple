@@ -24,8 +24,8 @@ use simple_dependency_tracker::{
     },
 };
 use simple_parser::ast::{
-    Attribute, AutoImportStmt, CommonUseStmt, ExportUseStmt, ImportTarget, Module, ModulePath,
-    Node, Visibility,
+    Attribute, AutoImportStmt, Capability, CommonUseStmt, ExportUseStmt, ImportTarget, Module,
+    ModulePath, Node, Visibility,
 };
 use simple_parser::Parser;
 use std::collections::{HashMap, HashSet};
@@ -51,6 +51,9 @@ pub struct DirectoryManifest {
     pub exports: Vec<ExportUseStmt>,
     /// Macro auto-imports (auto import)
     pub auto_imports: Vec<AutoImportStmt>,
+    /// Required capabilities (from `requires [pure, io, ...]`)
+    /// Empty means unrestricted (all effects allowed)
+    pub capabilities: Vec<Capability>,
 }
 
 impl DirectoryManifest {
@@ -102,6 +105,113 @@ impl DirectoryManifest {
         self.child_modules
             .iter()
             .any(|c| c.name == name && c.visibility == Visibility::Public)
+    }
+
+    /// Check if this manifest's capabilities are a subset of the parent's capabilities.
+    /// Returns true if all of this manifest's capabilities are present in the parent.
+    /// If parent has no capabilities (empty), child can have any capabilities (unrestricted parent).
+    /// If this manifest has no capabilities, it inherits from parent (valid).
+    pub fn capabilities_are_subset_of(&self, parent: &[Capability]) -> bool {
+        // Empty parent means unrestricted - child can declare anything
+        if parent.is_empty() {
+            return true;
+        }
+        // Empty child means it inherits parent's capabilities - always valid
+        if self.capabilities.is_empty() {
+            return true;
+        }
+        // Check that all child capabilities are in parent
+        self.capabilities.iter().all(|cap| parent.contains(cap))
+    }
+
+    /// Compute effective capabilities by intersecting with parent.
+    /// If this manifest has no explicit capabilities, inherit from parent.
+    /// If both have capabilities, use the intersection.
+    pub fn effective_capabilities(&self, parent: &[Capability]) -> Vec<Capability> {
+        if self.capabilities.is_empty() {
+            // Inherit parent's capabilities
+            parent.to_vec()
+        } else if parent.is_empty() {
+            // Parent is unrestricted, use child's capabilities
+            self.capabilities.clone()
+        } else {
+            // Intersection of child and parent capabilities
+            self.capabilities
+                .iter()
+                .filter(|cap| parent.contains(cap))
+                .copied()
+                .collect()
+        }
+    }
+
+    /// Check if a function's effects are allowed by this module's capabilities.
+    /// Returns Ok if valid, Err with explanation if invalid.
+    /// Effects without corresponding capabilities: Async is always allowed (execution model)
+    pub fn validate_function_effects(
+        &self,
+        func_name: &str,
+        effects: &[simple_parser::ast::Effect],
+    ) -> Result<(), String> {
+        use simple_parser::ast::Effect;
+
+        // If module has no capabilities (unrestricted), all effects are allowed
+        if self.capabilities.is_empty() {
+            return Ok(());
+        }
+
+        for effect in effects {
+            match effect {
+                // Async is an execution model, not a capability - always allowed
+                Effect::Async => {}
+                // Pure requires the Pure capability
+                Effect::Pure => {
+                    if !self.capabilities.contains(&Capability::Pure) {
+                        return Err(format!(
+                            "function '{}' has @pure effect but module does not allow 'pure' capability",
+                            func_name
+                        ));
+                    }
+                }
+                // I/O requires the Io capability
+                Effect::Io => {
+                    if !self.capabilities.contains(&Capability::Io) {
+                        return Err(format!(
+                            "function '{}' has @io effect but module does not allow 'io' capability",
+                            func_name
+                        ));
+                    }
+                }
+                // Network requires the Net capability
+                Effect::Net => {
+                    if !self.capabilities.contains(&Capability::Net) {
+                        return Err(format!(
+                            "function '{}' has @net effect but module does not allow 'net' capability",
+                            func_name
+                        ));
+                    }
+                }
+                // Filesystem requires the Fs capability
+                Effect::Fs => {
+                    if !self.capabilities.contains(&Capability::Fs) {
+                        return Err(format!(
+                            "function '{}' has @fs effect but module does not allow 'fs' capability",
+                            func_name
+                        ));
+                    }
+                }
+                // Unsafe requires the Unsafe capability
+                Effect::Unsafe => {
+                    if !self.capabilities.contains(&Capability::Unsafe) {
+                        return Err(format!(
+                            "function '{}' has @unsafe effect but module does not allow 'unsafe' capability",
+                            func_name
+                        ));
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -318,6 +428,40 @@ impl ModuleResolver {
         Ok(manifest)
     }
 
+    /// Load a manifest and validate its capabilities against parent capabilities.
+    ///
+    /// This enforces the capability inheritance rule: child modules can only
+    /// restrict capabilities, not expand them. A child's capabilities must be
+    /// a subset of its parent's capabilities.
+    ///
+    /// # Arguments
+    /// * `dir_path` - Path to the directory containing __init__.spl
+    /// * `parent_capabilities` - Capabilities from the parent module (empty = unrestricted)
+    ///
+    /// # Returns
+    /// The loaded manifest, or an error if capabilities are invalid.
+    pub fn load_manifest_with_capability_check(
+        &mut self,
+        dir_path: &Path,
+        parent_capabilities: &[Capability],
+    ) -> ResolveResult<DirectoryManifest> {
+        let manifest = self.load_manifest(dir_path)?;
+
+        // Validate capability inheritance
+        if !manifest.capabilities_are_subset_of(parent_capabilities) {
+            let child_caps: Vec<&str> = manifest.capabilities.iter().map(|c| c.name()).collect();
+            let parent_caps: Vec<&str> = parent_capabilities.iter().map(|c| c.name()).collect();
+            return Err(CompileError::Semantic(format!(
+                "module '{}' declares capabilities [{}] which are not a subset of parent capabilities [{}]",
+                manifest.name,
+                child_caps.join(", "),
+                parent_caps.join(", ")
+            )));
+        }
+
+        Ok(manifest)
+    }
+
     /// Parse a directory manifest from source
     fn parse_manifest(&self, source: &str, dir_path: &Path) -> ResolveResult<DirectoryManifest> {
         let mut parser = Parser::new(source);
@@ -369,6 +513,10 @@ impl ModuleResolver {
                 }
                 Node::AutoImportStmt(stmt) => {
                     manifest.auto_imports.push(stmt.clone());
+                }
+                Node::RequiresCapabilities(stmt) => {
+                    // Extract capabilities from requires [...] statement
+                    manifest.capabilities = stmt.capabilities.clone();
                 }
                 Node::UseStmt(_) => {
                     // Regular use statements in __init__.spl are allowed but
@@ -771,5 +919,293 @@ auto import router.route
             .unwrap_err()
             .to_string()
             .contains("Circular dependency"));
+    }
+
+    // ========================================================================
+    // Capability Inheritance Tests
+    // ========================================================================
+
+    #[test]
+    fn test_capabilities_subset_unrestricted_parent() {
+        // Empty parent means unrestricted - child can declare anything
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure, Capability::Io],
+            ..Default::default()
+        };
+        let parent: Vec<Capability> = vec![];
+
+        assert!(manifest.capabilities_are_subset_of(&parent));
+    }
+
+    #[test]
+    fn test_capabilities_subset_inherit_from_parent() {
+        // Empty child inherits from parent - always valid
+        let manifest = DirectoryManifest {
+            capabilities: vec![],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io];
+
+        assert!(manifest.capabilities_are_subset_of(&parent));
+    }
+
+    #[test]
+    fn test_capabilities_subset_valid_restriction() {
+        // Child restricts to subset of parent - valid
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io, Capability::Net];
+
+        assert!(manifest.capabilities_are_subset_of(&parent));
+    }
+
+    #[test]
+    fn test_capabilities_subset_invalid_expansion() {
+        // Child tries to add capability not in parent - invalid
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure, Capability::Net],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io];
+
+        assert!(!manifest.capabilities_are_subset_of(&parent));
+    }
+
+    #[test]
+    fn test_effective_capabilities_inherit() {
+        // Empty child inherits parent's capabilities
+        let manifest = DirectoryManifest {
+            capabilities: vec![],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io];
+
+        let effective = manifest.effective_capabilities(&parent);
+        assert_eq!(effective, parent);
+    }
+
+    #[test]
+    fn test_effective_capabilities_unrestricted_parent() {
+        // Unrestricted parent - child's capabilities become effective
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure],
+            ..Default::default()
+        };
+        let parent: Vec<Capability> = vec![];
+
+        let effective = manifest.effective_capabilities(&parent);
+        assert_eq!(effective, vec![Capability::Pure]);
+    }
+
+    #[test]
+    fn test_effective_capabilities_intersection() {
+        // Intersection of child and parent
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure, Capability::Io, Capability::Net],
+            ..Default::default()
+        };
+        let parent = vec![Capability::Pure, Capability::Io, Capability::Fs];
+
+        let effective = manifest.effective_capabilities(&parent);
+        assert_eq!(effective.len(), 2);
+        assert!(effective.contains(&Capability::Pure));
+        assert!(effective.contains(&Capability::Io));
+    }
+
+    #[test]
+    fn test_validate_effects_unrestricted() {
+        use simple_parser::ast::Effect;
+
+        // Unrestricted module allows all effects
+        let manifest = DirectoryManifest {
+            capabilities: vec![],
+            ..Default::default()
+        };
+
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Pure, Effect::Io, Effect::Net])
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_effects_allowed() {
+        use simple_parser::ast::Effect;
+
+        // Module allows matching effects
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure, Capability::Io],
+            ..Default::default()
+        };
+
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Pure])
+            .is_ok());
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Io])
+            .is_ok());
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Pure, Effect::Io])
+            .is_ok());
+    }
+
+    #[test]
+    fn test_validate_effects_blocked() {
+        use simple_parser::ast::Effect;
+
+        // Module blocks effects not in capabilities
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure],
+            ..Default::default()
+        };
+
+        // @io is not allowed
+        let result = manifest.validate_function_effects("test", &[Effect::Io]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'io' capability"));
+
+        // @net is not allowed
+        let result = manifest.validate_function_effects("test", &[Effect::Net]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'net' capability"));
+    }
+
+    #[test]
+    fn test_validate_effects_async_always_allowed() {
+        use simple_parser::ast::Effect;
+
+        // @async is always allowed (execution model, not capability)
+        let manifest = DirectoryManifest {
+            capabilities: vec![Capability::Pure],
+            ..Default::default()
+        };
+
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Async])
+            .is_ok());
+        assert!(manifest
+            .validate_function_effects("test", &[Effect::Pure, Effect::Async])
+            .is_ok());
+    }
+
+    // ========================================================================
+    // Module Load with Capability Check Tests
+    // ========================================================================
+
+    #[test]
+    fn test_load_manifest_with_capability_check_unrestricted_parent() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        // Child module with [pure, io] capabilities
+        fs::write(
+            child.join("__init__.spl"),
+            "mod child\nrequires [pure, io]",
+        )
+        .unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        // Unrestricted parent (empty) - child can declare anything
+        let parent_caps: Vec<Capability> = vec![];
+        let manifest = resolver
+            .load_manifest_with_capability_check(&child, &parent_caps)
+            .unwrap();
+
+        assert_eq!(manifest.capabilities.len(), 2);
+        assert!(manifest.capabilities.contains(&Capability::Pure));
+        assert!(manifest.capabilities.contains(&Capability::Io));
+    }
+
+    #[test]
+    fn test_load_manifest_with_capability_check_valid_subset() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        // Child restricts to [pure] which is a subset of parent's [pure, io]
+        fs::write(child.join("__init__.spl"), "mod child\nrequires [pure]").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let parent_caps = vec![Capability::Pure, Capability::Io];
+        let manifest = resolver
+            .load_manifest_with_capability_check(&child, &parent_caps)
+            .unwrap();
+
+        assert_eq!(manifest.capabilities, vec![Capability::Pure]);
+    }
+
+    #[test]
+    fn test_load_manifest_with_capability_check_invalid_expansion() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        // Child tries [pure, net] but parent only allows [pure, io]
+        fs::write(
+            child.join("__init__.spl"),
+            "mod child\nrequires [pure, net]",
+        )
+        .unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let parent_caps = vec![Capability::Pure, Capability::Io];
+        let result = resolver.load_manifest_with_capability_check(&child, &parent_caps);
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("not a subset"));
+        assert!(err_msg.contains("pure, net"));
+        assert!(err_msg.contains("pure, io"));
+    }
+
+    #[test]
+    fn test_load_manifest_with_capability_check_empty_child() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+
+        // Child has no requires statement - inherits from parent
+        fs::write(child.join("__init__.spl"), "mod child").unwrap();
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let parent_caps = vec![Capability::Pure, Capability::Io];
+        let manifest = resolver
+            .load_manifest_with_capability_check(&child, &parent_caps)
+            .unwrap();
+
+        // Child inherits parent capabilities (empty means inherit)
+        assert!(manifest.capabilities.is_empty());
+        // Effective capabilities would be parent's
+        let effective = manifest.effective_capabilities(&parent_caps);
+        assert_eq!(effective, parent_caps);
+    }
+
+    #[test]
+    fn test_load_manifest_with_capability_check_no_manifest() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let child = src.join("child");
+        fs::create_dir_all(&child).unwrap();
+        // No __init__.spl - directory without manifest
+
+        let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+
+        let parent_caps = vec![Capability::Pure];
+        let manifest = resolver
+            .load_manifest_with_capability_check(&child, &parent_caps)
+            .unwrap();
+
+        // Empty manifest with no capabilities (inherits parent)
+        assert!(manifest.capabilities.is_empty());
     }
 }
