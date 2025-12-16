@@ -90,6 +90,9 @@ impl<'a> super::Lexer<'a> {
             "invariant" => TokenKind::Invariant,
             "old" => TokenKind::Old,
             "result" => TokenKind::Result,
+            // Infix keywords (for BDD spec framework)
+            "to" => TokenKind::To,
+            "not_to" => TokenKind::NotTo,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
         }

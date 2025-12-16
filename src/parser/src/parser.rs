@@ -13,6 +13,18 @@ use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Span, Token, TokenKind};
 
+/// Parser mode controlling strictness of no-parentheses call syntax.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParserMode {
+    /// Normal mode: Allow nested no-paren calls (current behavior)
+    #[default]
+    Normal,
+    /// Strict mode: Allow only ONE level of no-paren call.
+    /// Inner function calls within arguments must use parentheses.
+    /// Used for GPU kernel code to prevent ambiguity.
+    Strict,
+}
+
 pub struct Parser<'a> {
     pub(crate) lexer: Lexer<'a>,
     pub(crate) current: Token,
@@ -20,6 +32,10 @@ pub struct Parser<'a> {
     #[allow(dead_code)]
     source: &'a str,
     pub(crate) pending_token: Option<Token>,
+    /// Parser mode (Normal or Strict)
+    pub(crate) mode: ParserMode,
+    /// Depth of no-paren calls (for strict mode enforcement)
+    pub(crate) no_paren_depth: u32,
 }
 
 impl<'a> Parser<'a> {
@@ -34,7 +50,17 @@ impl<'a> Parser<'a> {
             previous,
             source,
             pending_token: None,
+            mode: ParserMode::Normal,
+            no_paren_depth: 0,
         }
+    }
+
+    /// Create a parser with a specific mode (Normal or Strict).
+    /// Strict mode requires parentheses for inner function calls within no-paren call arguments.
+    pub fn with_mode(source: &'a str, mode: ParserMode) -> Self {
+        let mut parser = Self::new(source);
+        parser.mode = mode;
+        parser
     }
 
     pub fn parse(&mut self) -> Result<Module, ParseError> {
@@ -966,6 +992,9 @@ impl<'a> Parser<'a> {
             TokenKind::Result => "result",
             TokenKind::Out => "out",
             TokenKind::OutErr => "out_err",
+            // Infix keywords can also be method names
+            TokenKind::To => "to",
+            TokenKind::NotTo => "not_to",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

@@ -205,6 +205,18 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Pattern::Identifier("type".to_string()))
             }
+            TokenKind::Result => {
+                self.advance();
+                Ok(Pattern::Identifier("result".to_string()))
+            }
+            TokenKind::To => {
+                self.advance();
+                Ok(Pattern::Identifier("to".to_string()))
+            }
+            TokenKind::NotTo => {
+                self.advance();
+                Ok(Pattern::Identifier("not_to".to_string()))
+            }
             _ => Err(ParseError::unexpected_token(
                 "pattern",
                 format!("{:?}", self.current.kind),

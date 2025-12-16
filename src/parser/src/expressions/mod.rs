@@ -5,6 +5,7 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
+use crate::parser::ParserMode;
 use crate::token::{FStringToken, TokenKind};
 
 use super::Parser;
@@ -132,43 +133,99 @@ impl<'a> Parser<'a> {
                 value,
             }))
         } else {
-            // Check for colon-block on plain identifier FIRST
-            // e.g., `given:` or `describe:` without arguments
-            // This must come before can_start_argument() check because colon is in that list
-            if self.is_callable_expr(&expr) && self.is_at_colon_block() {
-                if let Some(block_lambda) = self.try_parse_colon_block()? {
-                    let args = vec![Argument {
-                        name: None,
-                        value: block_lambda,
-                    }];
-                    let call_expr = self.make_call_expr(expr, args);
-                    return Ok(Node::Expression(call_expr));
-                }
-            }
-            // Check for no-parentheses call at statement level
-            // Only for identifiers or field access followed by argument-starting tokens
-            else if self.is_callable_expr(&expr) && self.can_start_argument() {
-                let mut args = self.parse_no_paren_arguments()?;
+            // Parse the expression with potential no-paren calls
+            let expr = self.parse_with_no_paren_calls(expr)?;
 
-                // Check for trailing colon-block: func arg:
-                //     body
-                // This becomes: func(arg, fn(): body)
-                if self.check(&TokenKind::Colon) {
-                    if let Some(block_lambda) = self.try_parse_colon_block()? {
-                        args.push(Argument {
-                            name: None,
-                            value: block_lambda,
-                        });
-                    }
-                }
+            // Check for infix keywords (to, not_to) and convert to method calls
+            // e.g., `expect 5 to eq 5` → `expect(5).to(eq(5))`
+            let expr = self.parse_infix_keywords(expr)?;
 
-                if !args.is_empty() {
-                    let call_expr = self.make_call_expr(expr, args);
-                    return Ok(Node::Expression(call_expr));
-                }
-            }
             Ok(Node::Expression(expr))
         }
+    }
+
+    /// Parse no-paren calls on an expression
+    fn parse_with_no_paren_calls(&mut self, expr: Expr) -> Result<Expr, ParseError> {
+        // Check for colon-block on plain identifier FIRST
+        // e.g., `given:` or `describe:` without arguments
+        // This must come before can_start_argument() check because colon is in that list
+        if self.is_callable_expr(&expr) && self.is_at_colon_block() {
+            if let Some(block_lambda) = self.try_parse_colon_block()? {
+                let args = vec![Argument {
+                    name: None,
+                    value: block_lambda,
+                }];
+                return Ok(self.make_call_expr(expr, args));
+            }
+        }
+        // Check for no-parentheses call at statement level
+        // Only for identifiers or field access followed by argument-starting tokens
+        else if self.is_callable_expr(&expr) && self.can_start_argument() {
+            // In strict mode, only allow outermost no-paren call
+            // If we're already inside a no-paren call (depth > 0), require parentheses
+            if self.mode == ParserMode::Strict && self.no_paren_depth > 0 {
+                return Ok(expr);
+            }
+
+            // Track depth for strict mode
+            self.no_paren_depth += 1;
+            let mut args = self.parse_no_paren_arguments()?;
+            self.no_paren_depth -= 1;
+
+            // Check for trailing lambda: func arg \x: body
+            if self.check(&TokenKind::Backslash) {
+                let trailing_lambda = self.parse_trailing_lambda()?;
+                args.push(Argument {
+                    name: None,
+                    value: trailing_lambda,
+                });
+            }
+            // Check for trailing colon-block: func arg:
+            //     body
+            // This becomes: func(arg, fn(): body)
+            else if self.check(&TokenKind::Colon) {
+                if let Some(block_lambda) = self.try_parse_colon_block()? {
+                    args.push(Argument {
+                        name: None,
+                        value: block_lambda,
+                    });
+                }
+            }
+
+            if !args.is_empty() {
+                return Ok(self.make_call_expr(expr, args));
+            }
+        }
+        Ok(expr)
+    }
+
+    /// Parse infix keywords (to, not_to) as method calls
+    /// e.g., `expect 5 to eq 5` → `expect(5).to(eq(5))`
+    fn parse_infix_keywords(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
+        loop {
+            let method_name = match &self.current.kind {
+                TokenKind::To => "to",
+                TokenKind::NotTo => "not_to",
+                _ => break,
+            };
+
+            self.advance(); // consume `to` or `not_to`
+
+            // Parse the argument expression (with no-paren calls allowed)
+            let arg_expr = self.parse_expression()?;
+            let arg_expr = self.parse_with_no_paren_calls(arg_expr)?;
+
+            // Convert to method call: expr.to(arg) or expr.not_to(arg)
+            expr = Expr::MethodCall {
+                receiver: Box::new(expr),
+                method: method_name.to_string(),
+                args: vec![Argument {
+                    name: None,
+                    value: arg_expr,
+                }],
+            };
+        }
+        Ok(expr)
     }
 
     /// Check if an expression can be a callee for no-parens calls
@@ -215,7 +272,9 @@ impl<'a> Parser<'a> {
         )
     }
 
-    /// Parse arguments without parentheses (comma-separated on same line)
+    /// Parse arguments without parentheses.
+    /// - Normal mode: comma-separated (required)
+    /// - Strict mode: commas optional, space-separated allowed
     fn parse_no_paren_arguments(&mut self) -> Result<Vec<Argument>, ParseError> {
         let mut args = Vec::new();
 
@@ -226,9 +285,29 @@ impl<'a> Parser<'a> {
             return Ok(args);
         }
 
-        // Parse remaining comma-separated arguments
-        while self.check(&TokenKind::Comma) {
-            self.advance();
+        // Parse remaining arguments
+        loop {
+            // Check for comma (required in normal mode, optional in strict mode)
+            let has_comma = self.check(&TokenKind::Comma);
+            if has_comma {
+                self.advance(); // consume comma
+            }
+
+            // In strict mode, continue parsing if we can start another argument
+            // In normal mode, require comma to continue
+            if self.mode == ParserMode::Strict {
+                // Strict mode: commas optional, continue if can start argument
+                if !self.can_start_argument() {
+                    break;
+                }
+            } else {
+                // Normal mode: require comma to continue
+                if !has_comma {
+                    break;
+                }
+            }
+
+            // Parse next argument
             if let Ok(arg) = self.parse_single_argument() {
                 args.push(arg);
             } else {
@@ -248,7 +327,13 @@ impl<'a> Parser<'a> {
             if self.peek_is(&TokenKind::Colon) {
                 self.advance(); // consume identifier
                 self.advance(); // consume colon
+                // In strict mode, track depth when parsing named argument value
+                let prev_depth = self.no_paren_depth;
+                if self.mode == ParserMode::Strict {
+                    self.no_paren_depth += 1;
+                }
                 let value = self.parse_expression()?;
+                self.no_paren_depth = prev_depth;
                 return Ok(Argument {
                     name: Some(name_clone),
                     value,
@@ -256,7 +341,13 @@ impl<'a> Parser<'a> {
             }
         }
         // Positional argument
+        // In strict mode, track depth when parsing argument value
+        let prev_depth = self.no_paren_depth;
+        if self.mode == ParserMode::Strict {
+            self.no_paren_depth += 1;
+        }
         let value = self.parse_expression()?;
+        self.no_paren_depth = prev_depth;
         Ok(Argument { name: None, value })
     }
 
@@ -636,7 +727,23 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Backslash)?;
         let params = self.parse_lambda_params()?;
         self.expect(&TokenKind::Colon)?;
-        let body = self.parse_expression()?;
+
+        // Check if body is an indented block or inline expression
+        let body = if self.check(&TokenKind::Newline) {
+            // Peek ahead to see if we have a newline + indent (block body)
+            if self.peek_is(&TokenKind::Indent) {
+                // Parse as block
+                let block = self.parse_block()?;
+                Expr::DoBlock(block.statements)
+            } else {
+                // Just a newline, parse next expression
+                self.parse_expression()?
+            }
+        } else {
+            // Inline expression
+            self.parse_expression()?
+        };
+
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),
@@ -906,11 +1013,27 @@ impl<'a> Parser<'a> {
         Ok((pattern, iterable, condition))
     }
 
-    /// Parse lambda body (params, colon, expression) with given move mode
+    /// Parse lambda body (params, colon, expression or block) with given move mode
     fn parse_lambda_body(&mut self, move_mode: MoveMode) -> Result<Expr, ParseError> {
         let params = self.parse_lambda_params()?;
         self.expect(&TokenKind::Colon)?;
-        let body = self.parse_expression()?;
+
+        // Check if body is an indented block or inline expression
+        let body = if self.check(&TokenKind::Newline) {
+            // Peek ahead to see if we have a newline + indent (block body)
+            if self.peek_is(&TokenKind::Indent) {
+                // Parse as block
+                let block = self.parse_block()?;
+                Expr::DoBlock(block.statements)
+            } else {
+                // Just a newline, parse next expression
+                self.parse_expression()?
+            }
+        } else {
+            // Inline expression
+            self.parse_expression()?
+        };
+
         Ok(Expr::Lambda {
             params,
             body: Box::new(body),
