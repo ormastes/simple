@@ -14,10 +14,11 @@ A Python doctest-inspired interactive test framework for Simple, embedding execu
 
 ### 1.1 Basic Format (Python-style docstrings)
 
-Doctests use triple-quote blocks (`"""..."""`) similar to Python. They can appear:
-- **Immediately before** a function/class (no empty line between)
+Doctests use triple-quote blocks (`"""..."""`) similar to Python for functions and classes. They can appear:
+- **Immediately before** the function/class definition (no empty line between)
 - **Immediately after** the function/class header (no empty line)
-- **Inside** a `/* */` block comment that touches the target
+
+Block comments `/* */` are **NOT** used for function doctests - use `"""` instead.
 
 ```simple
 # Style 1: Block before function
@@ -43,21 +44,6 @@ fn factorial(n: Int) -> Int:
 >>> factorial 0
 1
 """
-    if n <= 1: return 1
-    return n * factorial(n - 1)
-```
-
-```simple
-# Style 3: Inside /* */ comment block
-/*
-Computes factorial of n
-
->>> factorial 5
-120
->>> factorial 0
-1
-*/
-fn factorial(n: Int) -> Int:
     if n <= 1: return 1
     return n * factorial(n - 1)
 ```
@@ -150,8 +136,7 @@ fn database_example():
 | Location | Priority | Purpose |
 |----------|----------|---------|
 | Function/method docstrings (`"""..."""`) | High | API examples |
-| Block comments touching target (`/* ... */`) | High | Alternative format |
-| Module-level docs | Medium | Package overview |
+| Module-level docs (`///` comments) | Medium | Package overview |
 | Markdown `.md` files | Low | Tutorials, guides |
 | Dedicated `.sdt` files | High | Standalone doctest suites |
 
@@ -327,12 +312,13 @@ struct DoctestExample:
 
 **Discovery algorithm:**
 1. Walk source tree for `.spl` files
-2. Extract `"""..."""` blocks and `/* ... */` comments via lexer
-3. Match blocks to preceding/following functions/classes
+2. Extract `"""..."""` blocks via lexer
+3. Match blocks to preceding/following functions/classes (no empty line rule)
 4. Parse blocks for `>>>` examples
-5. Walk doc tree for `.md` files with ` ```simple-doctest `
-6. Walk `test/doctest/` for `.sdt` files
-7. Build `List[DoctestExample]`
+5. Extract `///` module-level docs for module/package examples
+6. Walk doc tree for `.md` files with ` ```simple-doctest `
+7. Walk `test/doctest/` for `.sdt` files
+8. Build `List[DoctestExample]`
 
 **Filtering:**
 - `--tag` filters examples by metadata
@@ -340,9 +326,9 @@ struct DoctestExample:
 - `--skip-slow` skips examples tagged `@doctest(tag: slow)`
 
 **Matching rules:**
-- `"""` block immediately before function = belongs to that function
-- `"""` block immediately after function header = belongs to that function
-- `/* */` block with no empty line before/after function = belongs to that function
+- `"""` block immediately before function/class = belongs to that function/class
+- `"""` block immediately after function/class header = belongs to that function/class
+- No empty line between `"""` and target = automatic association
 
 ### 4.6 Integration with spec.runner
 
@@ -434,23 +420,6 @@ Creates a new stack with initial capacity
 >>> s.size
 0
 """
-struct Stack:
-    capacity: Int
-    items: List[T]
-```
-
-Or using block comment syntax:
-
-```simple
-/*
-Creates a new stack with initial capacity
-
->>> s = Stack.new(capacity: 10)
->>> s.capacity
-10
->>> s.size
-0
-*/
 struct Stack:
     capacity: Int
     items: List[T]
@@ -651,8 +620,8 @@ Error: EmptyStackError
 |---------|----------------|----------------|
 | Docstring syntax | `"""..."""` | `"""..."""` (Python-style) |
 | Prompt | `>>>` and `...` | `>>>` and `...` |
-| Discovery | Docstrings only | `"""` blocks, `/* */` comments, `.md` + `.sdt` |
-| Block placement | Anywhere in docstring | Before/after target, inside comments |
+| Discovery | Module docstrings | Function/class `"""` blocks, module `///` docs, `.md` + `.sdt` |
+| Block placement | Anywhere in docstring | Before/after function/class (no empty line rule) |
 | Execution | Module globals | Isolated REPL |
 | Wildcards | `...` (ellipsis) | `.` and `*` |
 | Setup/Teardown | Manual | Built-in blocks |
@@ -660,12 +629,11 @@ Error: EmptyStackError
 | Coverage | None | Integrated |
 | REPL Recording | None | `--record` flag |
 | Tags/Metadata | None | `@doctest(...)` |
-| Alternative format | None | `/* ... */` block comments |
 
 **Key improvements:**
 - Simple doctest uses Python's triple-quote syntax for familiarity
-- Multiple syntaxes for flexibility (triple-quotes or block comments)
-- Blocks automatically associated with following/preceding functions
+- Automatic association of `"""` blocks with functions/classes
+- Clean separation: `"""` for functions, `///` for modules/legacy
 - First-class citizen of the test framework, not an afterthought
 
 ---
