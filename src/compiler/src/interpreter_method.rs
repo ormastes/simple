@@ -202,6 +202,89 @@ fn evaluate_method_call(
         }
     }
 
+    // Built-in methods for Unit values (unit-suffixed numbers/strings)
+    if let Value::Unit { value, suffix, family } = &recv_val {
+        match method {
+            "value" => return Ok((**value).clone()),
+            "suffix" => return Ok(Value::Str(suffix.clone())),
+            "family" => return Ok(family.clone().map_or(Value::Nil, Value::Str)),
+            "to_string" => return Ok(Value::Str(format!("{}_{}", value.to_display_string(), suffix))),
+            // For dynamic to_X() conversion methods, check if method starts with "to_"
+            other if other.starts_with("to_") => {
+                let target_suffix = &other[3..]; // Remove "to_" prefix
+
+                // Get the family name - either from the Unit value or look it up
+                let family_name = family.clone().or_else(|| {
+                    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned())
+                });
+
+                let Some(family_name) = family_name else {
+                    return Err(CompileError::Semantic(format!(
+                        "Unit '{}' does not belong to a unit family, cannot convert to '{}'",
+                        suffix, target_suffix
+                    )));
+                };
+
+                // Look up conversions for this family
+                let conversion_result = UNIT_FAMILY_CONVERSIONS.with(|cell| {
+                    let families = cell.borrow();
+                    let Some(conversions) = families.get(&family_name) else {
+                        return Err(CompileError::Semantic(format!(
+                            "Unit family '{}' not found", family_name
+                        )));
+                    };
+
+                    // Get source and target conversion factors
+                    let Some(source_factor) = conversions.get(suffix) else {
+                        return Err(CompileError::Semantic(format!(
+                            "Unit '{}' not found in family '{}'", suffix, family_name
+                        )));
+                    };
+                    let Some(target_factor) = conversions.get(target_suffix) else {
+                        return Err(CompileError::Semantic(format!(
+                            "Target unit '{}' not found in family '{}'. Available: {:?}",
+                            target_suffix, family_name, conversions.keys().collect::<Vec<_>>()
+                        )));
+                    };
+
+                    Ok((*source_factor, *target_factor))
+                })?;
+
+                let (source_factor, target_factor) = conversion_result;
+
+                // Perform the conversion: new_value = old_value * (source_factor / target_factor)
+                // e.g., 2_km to m: 2 * (1000.0 / 1.0) = 2000
+                let converted_value = match value.as_ref() {
+                    Value::Int(n) => {
+                        let converted = (*n as f64) * (source_factor / target_factor);
+                        // Keep as float if not a whole number
+                        if converted.fract() == 0.0 {
+                            Value::Int(converted as i64)
+                        } else {
+                            Value::Float(converted)
+                        }
+                    }
+                    Value::Float(f) => {
+                        Value::Float(f * (source_factor / target_factor))
+                    }
+                    _ => {
+                        return Err(CompileError::Semantic(format!(
+                            "Cannot convert non-numeric unit value: {:?}", value
+                        )));
+                    }
+                };
+
+                // Return a new Unit value with the target suffix
+                return Ok(Value::Unit {
+                    value: Box::new(converted_value),
+                    suffix: target_suffix.to_string(),
+                    family: Some(family_name),
+                });
+            }
+            _ => {}
+        }
+    }
+
     // Built-in methods for Bool
     if let Value::Bool(b) = recv_val {
         match method {

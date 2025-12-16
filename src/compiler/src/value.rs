@@ -539,6 +539,13 @@ pub enum Value {
         trait_name: String,
         inner: Box<Value>,
     },
+    /// Unit value - wraps a numeric value with its unit suffix
+    /// Enables type-safe unit arithmetic and conversion methods
+    Unit {
+        value: Box<Value>,
+        suffix: String,
+        family: Option<String>, // Name of unit family for conversions
+    },
     Actor(ActorHandle),
     Future(FutureValue),
     Generator(GeneratorValue),

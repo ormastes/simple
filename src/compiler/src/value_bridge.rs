@@ -408,6 +408,10 @@ impl From<&Value> for BridgeValue {
                 // Bridge the inner value - trait info is lost in FFI
                 BridgeValue::from(inner.as_ref())
             }
+            Value::Unit { value, .. } => {
+                // Bridge the inner value - unit suffix is lost in FFI
+                BridgeValue::from(value.as_ref())
+            }
         }
     }
 }

@@ -421,3 +421,86 @@ main = s.area() + r.area()
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 37); // 25 + 12 = 37
 }
+
+#[test]
+fn interpreter_dyn_trait_let_binding_coercion() {
+    // Test TraitObject creation via let binding with dyn Trait type annotation
+    let code = r#"
+trait Drawable:
+    fn draw(self) -> i64
+
+struct Circle:
+    radius: i64
+
+impl Drawable for Circle:
+    fn draw(self) -> i64:
+        return self.radius * 3
+
+let c = Circle { radius: 7 }
+# Coerce Circle to dyn Drawable - creates a TraitObject
+let drawable: dyn Drawable = c
+# Method call on trait object uses dynamic dispatch
+main = drawable.draw()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 21); // 7 * 3 = 21
+}
+
+#[test]
+fn interpreter_dyn_trait_function_parameter_coercion() {
+    // Test TraitObject creation via function parameter with dyn Trait type
+    let code = r#"
+trait Shape:
+    fn area(self) -> i64
+
+struct Square:
+    side: i64
+
+impl Shape for Square:
+    fn area(self) -> i64:
+        return self.side * self.side
+
+# Function accepting dyn Trait parameter - coerces argument to TraitObject
+fn process_shape(s: dyn Shape) -> i64:
+    return s.area()
+
+let sq = Square { side: 6 }
+# Passing concrete type to dyn Trait parameter triggers coercion
+main = process_shape(sq)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 36); // 6 * 6 = 36
+}
+
+#[test]
+fn interpreter_dyn_trait_multiple_types() {
+    // Test dynamic dispatch with multiple types implementing same trait
+    let code = r#"
+trait Describable:
+    fn value(self) -> i64
+
+struct A:
+    x: i64
+
+struct B:
+    y: i64
+
+impl Describable for A:
+    fn value(self) -> i64:
+        return self.x * 10
+
+impl Describable for B:
+    fn value(self) -> i64:
+        return self.y + 100
+
+fn get_value(d: dyn Describable) -> i64:
+    return d.value()
+
+let a = A { x: 5 }
+let b = B { y: 7 }
+# Both types coerced to dyn Describable
+main = get_value(a) + get_value(b)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 157); // (5*10) + (7+100) = 50 + 107 = 157
+}

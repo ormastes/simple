@@ -725,9 +725,251 @@ let feet = Feet.from_meters(meters)
 
 ---
 
-## 7. Lint Attributes and Enforcement
+## 7. Type-Safe Unit Arithmetic
 
-### 7.1 The `primitive_api` Lint
+### 7.1 Overview
+
+Simple supports **type-safe unit arithmetic** - operations that prevent invalid combinations like adding kilometers to hours. Unit families can declare allowed operations, compound units enable derived types like velocity, and custom functions support domain-specific operations.
+
+**Design Principles:**
+- **Default deny**: No arithmetic allowed unless explicitly declared
+- **Compile-time safety**: Invalid operations fail at compile time
+- **Extensibility**: Custom operations (log, exp, sqrt) for domain needs
+
+### 7.2 Arithmetic Rules Grammar
+
+Unit families can declare arithmetic rules in an optional block:
+
+```ebnf
+unit_family_def = "unit" IDENT "(" "base" ":" type ")" ":" variant_list [ ":" NEWLINE INDENT arithmetic_block DEDENT ]
+
+variant_list = variant ("," variant)*
+variant = IDENT "=" NUMBER
+
+arithmetic_block = arithmetic_rule+
+arithmetic_rule = binary_rule | unary_rule | custom_fn
+
+binary_rule = "allow" binary_op "(" type_param ")" "->" type_result
+unary_rule = "allow" unary_op "->" type_result
+custom_fn = "fn" IDENT "(" params ")" [ "->" type ] ":" NEWLINE INDENT body DEDENT
+
+binary_op = "add" | "sub" | "mul" | "div" | "mod"
+unary_op = "neg" | "abs"
+```
+
+### 7.3 Unit Family with Arithmetic Rules
+
+```simple
+unit length(base: f64): m = 1.0, km = 1000.0, cm = 0.01:
+    # Type-safe: length + length -> length
+    allow add(length) -> length
+    allow sub(length) -> length
+
+    # Scaling: length * number -> length
+    allow mul(f64) -> length
+    allow div(f64) -> length
+
+    # Unary operations
+    allow neg -> length
+    allow abs -> length
+
+    # Custom operations (return raw value, loses unit)
+    fn log(self) -> f64:
+        return log(self.value())
+
+    fn exp(self) -> f64:
+        return exp(self.value())
+
+    fn sqrt(self) -> f64:
+        return sqrt(self.value())
+```
+
+### 7.4 Default Arithmetic Behavior
+
+If a unit family has **no arithmetic block**, no arithmetic is allowed:
+
+```simple
+unit user_id(base: u64): uid = 1
+# user_id + user_id -> ERROR (no rules defined)
+
+let a = 1_uid
+let b = 2_uid
+let c = a + b    # Compile error: arithmetic not allowed for user_id
+```
+
+This prevents accidental operations on ID types, counters, or other semantic units where arithmetic is meaningless.
+
+### 7.5 Compound Units
+
+Compound units represent derived quantities like velocity (length/time) or force (mass × acceleration):
+
+```ebnf
+compound_unit_def = "unit" IDENT "=" unit_expr [ ":" NEWLINE INDENT arithmetic_block DEDENT ]
+
+unit_expr = unit_term (("*" | "/") unit_term)*
+unit_term = IDENT [ "^" INTEGER ]
+```
+
+**Examples:**
+
+```simple
+# Velocity = length / time
+unit velocity = length / time:
+    allow add(velocity) -> velocity
+    allow sub(velocity) -> velocity
+    allow mul(f64) -> velocity
+    allow div(f64) -> velocity
+
+    # velocity * time -> length
+    allow mul(time) -> length
+
+# Acceleration = velocity / time = length / time²
+unit acceleration = length / time^2:
+    allow add(acceleration) -> acceleration
+    allow sub(acceleration) -> acceleration
+    allow mul(f64) -> acceleration
+
+    # acceleration * time -> velocity
+    allow mul(time) -> velocity
+
+# Force = mass * acceleration (Newton's second law)
+unit mass(base: f64): kg = 1.0, g = 0.001, lb = 0.453592
+
+unit force = mass * acceleration:
+    allow add(force) -> force
+    allow sub(force) -> force
+    allow mul(f64) -> force
+    allow div(f64) -> force
+```
+
+### 7.6 Arithmetic Type Checking
+
+The compiler enforces these rules:
+
+| Expression | Rule Required | Example |
+|------------|---------------|---------|
+| `a + b` | `allow add(typeof(b)) -> result` in `typeof(a)` | `length + length` |
+| `a - b` | `allow sub(typeof(b)) -> result` | `length - length` |
+| `a * b` | `allow mul(typeof(b)) -> result` | `length * f64` |
+| `a / b` | `allow div(typeof(b)) -> result` | `length / time -> velocity` |
+| `-a` | `allow neg -> result` | `-5_km` |
+| `a.abs()` | `allow abs -> result` | `(-5_km).abs()` |
+
+**Valid Operations:**
+
+```simple
+unit length(base: f64): m = 1.0, km = 1000.0:
+    allow add(length) -> length
+    allow mul(f64) -> length
+
+unit time(base: f64): s = 1.0, hr = 3600.0:
+    allow add(time) -> time
+
+let d1 = 5_km
+let d2 = 3_km
+let total = d1 + d2      # OK: length + length -> length
+let scaled = d1 * 2.0    # OK: length * f64 -> length
+
+let t1 = 2_hr
+let t2 = 1_hr
+let duration = t1 + t2   # OK: time + time -> time
+```
+
+**Invalid Operations (Compile Errors):**
+
+```simple
+let invalid = d1 + t1    # ERROR: cannot add length + time
+let bad = d1 * d2        # ERROR: length * length not allowed (need explicit rule)
+```
+
+### 7.7 Automatic Unit Conversion in Operations
+
+Operations between same-family units auto-convert to base unit:
+
+```simple
+let d1 = 5_km            # 5000 meters internally
+let d2 = 3000_m          # 3000 meters
+let total = d1 + d2      # 8000 meters (base unit)
+
+# Result is in base unit; convert as needed
+print total.to_km()      # 8.0
+print total.to_m()       # 8000.0
+```
+
+### 7.8 Compound Unit Resolution
+
+When compound units are defined, the compiler creates implicit conversion rules:
+
+```simple
+unit velocity = length / time
+
+# These operations become valid:
+let d = 100_km
+let t = 2_hr
+let v = d / t            # Produces velocity type
+
+let d2 = v * 3_hr        # velocity * time -> length (300 km)
+```
+
+### 7.9 Custom Unit Functions
+
+Custom functions enable domain-specific operations that may not fit standard arithmetic:
+
+```simple
+unit length(base: f64): m = 1.0, km = 1000.0:
+    allow add(length) -> length
+    allow mul(f64) -> length
+
+    # Logarithm of length (returns raw value - dimensionless)
+    fn log(self) -> f64:
+        return log(self.value())
+
+    # Exponential (returns raw value)
+    fn exp(self) -> f64:
+        return exp(self.value())
+
+    # Square root (could return length^0.5, but simplified to f64)
+    fn sqrt(self) -> f64:
+        return sqrt(self.value())
+
+    # Custom conversion with unit transformation
+    fn squared(self) -> area:
+        return area.from_base(self.value() * self.value())
+
+# Usage
+let d = 100_m
+let log_d = d.log()           # f64: ~4.605
+let area = d.squared()        # area type
+```
+
+### 7.10 Error Messages
+
+Clear error messages help users understand and fix type mismatches:
+
+```
+error: cannot add `length` and `time`
+  --> example.spl:10:15
+   |
+10 | let x = d1 + t1
+   |              ^^ `time` cannot be added to `length`
+   |
+   = help: `length` only allows: add(length) -> length
+   = note: different unit families cannot be combined
+
+error: multiplication not allowed for `user_id`
+  --> example.spl:15:12
+   |
+15 | let x = id * 2
+   |            ^ `user_id` has no arithmetic rules defined
+   |
+   = help: define arithmetic rules in the unit family, or use `.value()` to access raw value
+```
+
+---
+
+## 8. Lint Attributes and Enforcement
+
+### 8.1 The `primitive_api` Lint
 
 The `primitive_api` lint controls warnings for bare primitives in public APIs.
 
@@ -736,7 +978,7 @@ The `primitive_api` lint controls warnings for bare primitives in public APIs.
 - `deny` - Treat as compile error
 - `allow` - Suppress entirely
 
-### 7.2 The `bare_string` Lint
+### 8.2 The `bare_string` Lint
 
 The `bare_string` lint controls warnings for bare `str`/`String` types in public APIs. String values should use semantic unit types like `FilePath`, `Url`, `IpAddr`, etc.
 
@@ -770,7 +1012,7 @@ pub fn log(message: str):
     ...
 ```
 
-### 7.3 Attribute Syntax
+### 8.3 Attribute Syntax
 
 ```simple
 # Directory-level (in __init__.spl, applies to entire directory tree)
@@ -798,7 +1040,7 @@ When `#[deny(primitive_api)]` is placed in a directory's `__init__.spl`, it appl
 - All files directly in that directory
 - All child directories (recursively, unless overridden)
 
-### 7.4 Project Configuration (simple.toml)
+### 8.4 Project Configuration (simple.toml)
 
 ```toml
 [lint]
@@ -812,7 +1054,7 @@ bare_bool = "warn"         # Warn on bool parameters
 # bare_bool = "deny"
 ```
 
-### 7.5 Standard Library Policy
+### 8.5 Standard Library Policy
 
 The standard library declares strict lints in its root `__init__.spl`:
 
@@ -840,7 +1082,7 @@ All stdlib modules inherit these settings through `__init__.spl` attribute inher
 - User code: warnings by default (educational, non-blocking)
 - Standard library: errors (strict enforcement, zero tolerance)
 
-### 7.6 Recommended Project Settings
+### 8.6 Recommended Project Settings
 
 | Project Type | Setting | Rationale |
 |--------------|---------|-----------|
@@ -850,7 +1092,7 @@ All stdlib modules inherit these settings through `__init__.spl` attribute inher
 | Legacy migration | `allow` | Gradual adoption |
 | Standard library | `deny` all | Exemplary code quality |
 
-### 7.7 Related Lints Summary
+### 8.7 Related Lints Summary
 
 | Lint | Default | Description |
 |------|---------|-------------|
@@ -870,9 +1112,9 @@ bare_bool = "deny"
 
 ---
 
-## 8. Migration Guide
+## 9. Migration Guide
 
-### 8.1 From Bare Primitives
+### 9.1 From Bare Primitives
 
 ```simple
 # Before
@@ -893,7 +1135,7 @@ enum UserStatus:
     Pending
 ```
 
-### 8.2 From Bare Strings
+### 9.2 From Bare Strings
 
 ```simple
 # Before
@@ -922,7 +1164,7 @@ let conn = connect("example.com"_host, 443_port)
 let resp = fetch_url("https://api.example.com"_http)
 ```
 
-### 8.3 From Nullable Returns
+### 9.3 From Nullable Returns
 
 ```simple
 # Before
@@ -936,7 +1178,7 @@ fn find_user(id: UserId) -> Option[User]:
         case _: None
 ```
 
-### 8.4 From Boolean Parameters
+### 9.4 From Boolean Parameters
 
 ```simple
 # Before

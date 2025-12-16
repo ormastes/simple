@@ -229,16 +229,45 @@ impl<'a> Parser<'a> {
         }))
     }
 
-    /// Parse unit definition: either standalone or family
+    /// Parse unit definition: standalone, family, or compound
     /// Standalone: `unit UserId: i64 as uid`
     /// Family: `unit length(base: f64): m = 1.0, km = 1000.0`
+    /// Family with arithmetic: `unit length(base: f64): m = 1.0, km = 1000.0: allow add(length) -> length`
+    /// Compound: `unit velocity = length / time`
     pub(crate) fn parse_unit(&mut self) -> Result<Node, ParseError> {
-        use crate::ast::UnitFamilyDef;
+        use crate::ast::{UnitFamilyDef, CompoundUnitDef};
 
         let start_span = self.current.span;
         self.expect(&TokenKind::Unit)?;
 
         let name = self.expect_identifier()?;
+
+        // Check if this is a compound unit: unit name = unit_expr
+        if self.check(&TokenKind::Assign) {
+            self.advance(); // consume '='
+            let expr = self.parse_unit_expr()?;
+
+            // Check for optional arithmetic block
+            let arithmetic = if self.check(&TokenKind::Colon) {
+                self.advance(); // consume ':'
+                Some(self.parse_unit_arithmetic_block()?)
+            } else {
+                None
+            };
+
+            return Ok(Node::CompoundUnit(CompoundUnitDef {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                name,
+                expr,
+                arithmetic,
+                visibility: Visibility::Private,
+            }));
+        }
 
         // Check if this is a unit family: unit name(base: Type): ...
         if self.check(&TokenKind::LParen) {
@@ -256,6 +285,7 @@ impl<'a> Parser<'a> {
             // Parse variants: suffix = factor, suffix = factor, ...
             // Can be on same line or indented block
             let mut variants = Vec::new();
+            let mut arithmetic = None;
 
             // Skip newline if present
             if self.check(&TokenKind::Newline) {
@@ -296,6 +326,13 @@ impl<'a> Parser<'a> {
                     }
                     self.advance(); // consume comma
                 }
+
+                // Check for arithmetic block after single-line variants
+                // unit length(base: f64): m = 1.0, km = 1000.0:
+                if self.check(&TokenKind::Colon) {
+                    self.advance(); // consume ':'
+                    arithmetic = Some(self.parse_unit_arithmetic_block()?);
+                }
             }
 
             return Ok(Node::UnitFamily(UnitFamilyDef {
@@ -309,6 +346,7 @@ impl<'a> Parser<'a> {
                 base_type,
                 variants,
                 visibility: Visibility::Private,
+                arithmetic,
             }));
         }
 
@@ -344,6 +382,197 @@ impl<'a> Parser<'a> {
             suffix,
             visibility: Visibility::Private,
         }))
+    }
+
+    /// Parse unit expression for compound units: length / time, mass * acceleration, time^2
+    fn parse_unit_expr(&mut self) -> Result<UnitExpr, ParseError> {
+        let mut left = self.parse_unit_term()?;
+
+        while self.check(&TokenKind::Star) || self.check(&TokenKind::Slash) {
+            let op = self.current.kind.clone();
+            self.advance();
+            let right = self.parse_unit_term()?;
+
+            left = match op {
+                TokenKind::Star => UnitExpr::Mul(Box::new(left), Box::new(right)),
+                TokenKind::Slash => UnitExpr::Div(Box::new(left), Box::new(right)),
+                _ => unreachable!(),
+            };
+        }
+
+        Ok(left)
+    }
+
+    /// Parse a unit term: identifier or identifier^exponent
+    fn parse_unit_term(&mut self) -> Result<UnitExpr, ParseError> {
+        let name = self.expect_identifier()?;
+        let base = UnitExpr::Base(name);
+
+        // Check for power: time^2
+        if self.check(&TokenKind::Caret) {
+            self.advance();
+            // Parse integer exponent (can be negative)
+            let negative = if self.check(&TokenKind::Minus) {
+                self.advance();
+                true
+            } else {
+                false
+            };
+
+            let exp = match &self.current.kind {
+                TokenKind::Integer(n) => {
+                    let val = *n as i32;
+                    self.advance();
+                    if negative { -val } else { val }
+                }
+                _ => {
+                    return Err(ParseError::syntax_error_with_span(
+                        "Expected integer exponent after '^'",
+                        self.current.span,
+                    ));
+                }
+            };
+
+            Ok(UnitExpr::Pow(Box::new(base), exp))
+        } else {
+            Ok(base)
+        }
+    }
+
+    /// Parse unit arithmetic block: allow rules and custom functions
+    fn parse_unit_arithmetic_block(&mut self) -> Result<UnitArithmetic, ParseError> {
+        let mut binary_rules = Vec::new();
+        let mut unary_rules = Vec::new();
+        let mut custom_fns = Vec::new();
+
+        // Skip newline if present
+        if self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        // Expect indented block
+        if !self.check(&TokenKind::Indent) {
+            return Err(ParseError::syntax_error_with_span(
+                "Expected indented block for unit arithmetic rules",
+                self.current.span,
+            ));
+        }
+        self.advance(); // consume indent
+
+        // Parse rules until dedent
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            // Skip newlines
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
+
+            // Parse rule: 'allow' or 'fn'
+            // Note: 'allow' is parsed as identifier to avoid conflict with #[allow(...)] attributes
+            if matches!(&self.current.kind, TokenKind::Identifier(s) if s == "allow") {
+                self.advance(); // consume 'allow'
+                self.parse_arithmetic_rule(&mut binary_rules, &mut unary_rules)?;
+            } else if self.check(&TokenKind::Fn) {
+                // Parse custom function
+                let func = self.parse_function()?;
+                if let Node::Function(f) = func {
+                    custom_fns.push(f);
+                }
+            } else {
+                return Err(ParseError::syntax_error_with_span(
+                    format!(
+                        "Expected 'allow' or 'fn' in unit arithmetic block, got {:?}",
+                        self.current.kind
+                    ),
+                    self.current.span,
+                ));
+            }
+
+            // Skip newlines
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+        }
+
+        // Consume dedent
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+
+        Ok(UnitArithmetic {
+            binary_rules,
+            unary_rules,
+            custom_fns,
+        })
+    }
+
+    /// Parse an arithmetic rule: binary or unary
+    /// Binary: add(type) -> result_type
+    /// Unary: neg -> result_type
+    fn parse_arithmetic_rule(
+        &mut self,
+        binary_rules: &mut Vec<BinaryArithmeticRule>,
+        unary_rules: &mut Vec<UnaryArithmeticRule>,
+    ) -> Result<(), ParseError> {
+        // Parse operation name
+        let op_name = self.expect_identifier()?;
+
+        // Check if this is a binary op (has parentheses) or unary (just ->)
+        if self.check(&TokenKind::LParen) {
+            // Binary operation: add(type) -> result
+            self.advance(); // consume '('
+            let operand_type = self.parse_type()?;
+            self.expect(&TokenKind::RParen)?;
+            self.expect(&TokenKind::Arrow)?;
+            let result_type = self.parse_type()?;
+
+            let op = match op_name.as_str() {
+                "add" => BinaryArithmeticOp::Add,
+                "sub" => BinaryArithmeticOp::Sub,
+                "mul" => BinaryArithmeticOp::Mul,
+                "div" => BinaryArithmeticOp::Div,
+                "mod" => BinaryArithmeticOp::Mod,
+                _ => {
+                    return Err(ParseError::syntax_error_with_span(
+                        format!(
+                            "Unknown binary arithmetic operation '{}'. Expected: add, sub, mul, div, mod",
+                            op_name
+                        ),
+                        self.previous.span,
+                    ));
+                }
+            };
+
+            binary_rules.push(BinaryArithmeticRule {
+                op,
+                operand_type,
+                result_type,
+            });
+        } else {
+            // Unary operation: neg -> result
+            self.expect(&TokenKind::Arrow)?;
+            let result_type = self.parse_type()?;
+
+            let op = match op_name.as_str() {
+                "neg" => UnaryArithmeticOp::Neg,
+                "abs" => UnaryArithmeticOp::Abs,
+                _ => {
+                    return Err(ParseError::syntax_error_with_span(
+                        format!(
+                            "Unknown unary arithmetic operation '{}'. Expected: neg, abs",
+                            op_name
+                        ),
+                        self.previous.span,
+                    ));
+                }
+            };
+
+            unary_rules.push(UnaryArithmeticRule { op, result_type });
+        }
+
+        Ok(())
     }
 
     pub(crate) fn parse_extern(&mut self) -> Result<Node, ParseError> {

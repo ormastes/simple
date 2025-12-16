@@ -1006,6 +1006,7 @@ fn bind_args(
     impl_methods: &ImplMethods,
     self_mode: simple_parser::ast::SelfMode,
 ) -> Result<HashMap<String, Value>, CompileError> {
+    use simple_parser::ast::Type;
     let params_to_bind: Vec<_> = params
         .iter()
         .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
@@ -1016,15 +1017,34 @@ fn bind_args(
     for arg in args {
         let val = evaluate_expr(&arg.value, outer_env, functions, classes, enums, impl_methods)?;
         if let Some(name) = &arg.name {
-            if !params_to_bind.iter().any(|p| &p.name == name) {
+            let param = params_to_bind.iter().find(|p| &p.name == name);
+            if param.is_none() {
                 bail_semantic!("unknown argument {}", name);
             }
+            // Coerce to TraitObject if parameter type is `dyn Trait`
+            let val = if let Some(Type::DynTrait(trait_name)) = param.and_then(|p| p.ty.as_ref()) {
+                Value::TraitObject {
+                    trait_name: trait_name.clone(),
+                    inner: Box::new(val),
+                }
+            } else {
+                val
+            };
             bound.insert(name.clone(), val);
         } else {
             if positional_idx >= params_to_bind.len() {
                 bail_semantic!("too many arguments");
             }
             let param = params_to_bind[positional_idx];
+            // Coerce to TraitObject if parameter type is `dyn Trait`
+            let val = if let Some(Type::DynTrait(trait_name)) = &param.ty {
+                Value::TraitObject {
+                    trait_name: trait_name.clone(),
+                    inner: Box::new(val),
+                }
+            } else {
+                val
+            };
             bound.insert(param.name.clone(), val);
             positional_idx += 1;
         }
@@ -1034,6 +1054,15 @@ fn bind_args(
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
                 let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
+                // Coerce to TraitObject if parameter type is `dyn Trait`
+                let v = if let Some(Type::DynTrait(trait_name)) = &param.ty {
+                    Value::TraitObject {
+                        trait_name: trait_name.clone(),
+                        inner: Box::new(v),
+                    }
+                } else {
+                    v
+                };
                 bound.insert(param.name.clone(), v);
             } else {
                 bail_semantic!("missing argument {}", param.name);
