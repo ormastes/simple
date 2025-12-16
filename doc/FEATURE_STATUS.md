@@ -511,13 +511,18 @@ This document consolidates all feature implementation status from `doc/status/*.
 - WASM client build
 - Server-side rendering
 
-### #126: GPU Kernels 📋
-**Status:** PLANNED  
-**Implementation:** `doc/spec/gpu_simd.md`
-- `#[gpu]` attribute
-- Kernel compilation
-- Device memory management
-- **Blocked:** GPU backend integration
+### #126: GPU Kernels 🔄
+**Status:** IN PROGRESS
+**Implementation:** `src/compiler/src/codegen/llvm/gpu.rs`, `src/runtime/src/value/gpu.rs`
+- ✅ GPU MIR instructions (GpuGlobalId, GpuBarrier, GpuAtomic, etc.)
+- ✅ Software backend for CPU execution
+- ✅ LLVM GPU backend for PTX generation
+- ✅ CUDA runtime wrapper
+- ✅ GPU FFI functions (30+ functions)
+- 📋 `#[gpu]` attribute parsing
+- 📋 Kernel validation rules
+- 📋 Full CUDA kernel launch integration
+- **See:** `doc/llvm_backend.md` for GPU support details
 
 ---
 

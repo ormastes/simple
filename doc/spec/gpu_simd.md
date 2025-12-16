@@ -528,15 +528,42 @@ The compiler uses LLVM's vector intrinsics through Cranelift's SIMD support.
 ### GPU Backend
 
 The GPU backend supports multiple implementations:
-- **WGPU** (default): Cross-platform WebGPU-based compute
-- **CUDA** (optional): NVIDIA GPUs
-- **Metal** (optional): Apple GPUs
-- **Vulkan Compute** (optional): Cross-platform
+- **Software** (default): CPU-based execution for testing/fallback
+- **CUDA/LLVM** (native): NVIDIA GPUs via PTX code generation
+- **WGPU** (planned): Cross-platform WebGPU-based compute
+- **Metal** (planned): Apple GPUs
+- **Vulkan Compute** (planned): Cross-platform
 
 The `#[gpu]` attribute triggers special compilation:
-1. Function is lowered to SPIR-V or target-specific IR
-2. Runtime loads and JIT-compiles the kernel
-3. Kernel is cached for subsequent calls
+1. Function is lowered to GPU MIR instructions
+2. LLVM backend generates PTX code (NVIDIA) or software fallback
+3. Runtime loads and executes the kernel
+4. Kernel is cached for subsequent calls
+
+### Current Implementation
+
+**GPU MIR Instructions** (`src/compiler/src/mir/instructions.rs`):
+- Thread identification: `GpuGlobalId`, `GpuLocalId`, `GpuGroupId`
+- Grid dimensions: `GpuGlobalSize`, `GpuLocalSize`, `GpuNumGroups`
+- Synchronization: `GpuBarrier`, `GpuMemFence`
+- Atomics: `GpuAtomic` (add, sub, xchg, cmpxchg, min, max, and, or, xor)
+- Memory: `GpuSharedAlloc`
+
+**LLVM GPU Backend** (`src/compiler/src/codegen/llvm/gpu.rs`):
+- Generates NVPTX target code for NVIDIA GPUs
+- Supports compute capabilities SM50-SM90
+- PTX assembly emission for kernel compilation
+
+**CUDA Runtime** (`src/runtime/src/cuda_runtime.rs`):
+- CUDA Driver API wrapper
+- Device enumeration and context management
+- Module loading and kernel launching
+- Device memory allocation
+
+**Software Backend** (`src/runtime/src/value/gpu.rs`):
+- Thread-local work item state simulation
+- 1D and 3D kernel execution on CPU
+- Useful for testing and systems without GPU
 
 ### Safety Guarantees
 

@@ -2,6 +2,7 @@ pub mod backend_trait;
 pub mod common_backend;
 mod cranelift;
 pub mod instr;
+pub mod instr_gpu;
 mod jit;
 pub mod llvm;
 pub mod runtime_ffi;

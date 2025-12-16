@@ -2,9 +2,9 @@ use super::{
     blocks::Terminator,
     effects::{CallTarget, LocalKind},
     function::{MirFunction, MirLocal, MirModule},
-    instructions::{BlockId, ContractKind, MirInst, VReg},
+    instructions::{BlockId, ContractKind, GpuMemoryScope, MirInst, VReg},
 };
-use crate::hir::{HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
+use crate::hir::{GpuIntrinsicKind, HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -1163,7 +1163,123 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
+            HirExprKind::GpuIntrinsic { intrinsic, args } => {
+                self.lower_gpu_intrinsic(*intrinsic, args)
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
+        }
+    }
+
+    /// Lower a GPU intrinsic call to MIR instructions
+    fn lower_gpu_intrinsic(&mut self, intrinsic: GpuIntrinsicKind, args: &[HirExpr]) -> MirLowerResult<VReg> {
+        match intrinsic {
+            GpuIntrinsicKind::GlobalId => {
+                let dim = self.get_gpu_dim_arg(args)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuGlobalId { dest, dim });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::LocalId => {
+                let dim = self.get_gpu_dim_arg(args)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuLocalId { dest, dim });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::GroupId => {
+                let dim = self.get_gpu_dim_arg(args)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuGroupId { dest, dim });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::GlobalSize => {
+                let dim = self.get_gpu_dim_arg(args)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuGlobalSize { dest, dim });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::LocalSize => {
+                let dim = self.get_gpu_dim_arg(args)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuLocalSize { dest, dim });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::NumGroups => {
+                let dim = self.get_gpu_dim_arg(args)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuNumGroups { dest, dim });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::Barrier => {
+                // Barrier doesn't return a meaningful value, use dummy vreg
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuBarrier);
+                    dest
+                })
+            }
+            GpuIntrinsicKind::MemFence => {
+                let scope = self.get_gpu_scope_arg(args)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuMemFence { scope });
+                    dest
+                })
+            }
+        }
+    }
+
+    /// Extract dimension argument (0, 1, or 2) from GPU intrinsic args
+    fn get_gpu_dim_arg(&self, args: &[HirExpr]) -> MirLowerResult<u8> {
+        if args.is_empty() {
+            return Ok(0); // Default to dimension 0 (x)
+        }
+        match &args[0].kind {
+            HirExprKind::Integer(n) => {
+                if *n >= 0 && *n <= 2 {
+                    Ok(*n as u8)
+                } else {
+                    Err(MirLowerError::Unsupported("GPU dimension must be 0, 1, or 2".to_string()))
+                }
+            }
+            _ => Err(MirLowerError::Unsupported("GPU dimension must be a constant integer".to_string())),
+        }
+    }
+
+    /// Extract memory scope argument from GPU intrinsic args
+    fn get_gpu_scope_arg(&self, args: &[HirExpr]) -> MirLowerResult<GpuMemoryScope> {
+        if args.is_empty() {
+            return Ok(GpuMemoryScope::All); // Default to all memory
+        }
+        match &args[0].kind {
+            HirExprKind::Integer(n) => {
+                match *n {
+                    0 => Ok(GpuMemoryScope::WorkGroup),
+                    1 => Ok(GpuMemoryScope::Device),
+                    _ => Ok(GpuMemoryScope::All),
+                }
+            }
+            _ => Ok(GpuMemoryScope::All),
         }
     }
 
