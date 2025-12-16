@@ -155,15 +155,27 @@ export fn given(block: Fn() -> Void) -> Void:
                 case None:
                     panic("given() must be called within a describe/context block or Context definition")
 
-# given_lazy: Define a lazy (memoized) fixture inside a Context
-# Usage: given_lazy :user, fn(): User.new("test")
-# Note: This is typically called as given(:name) { } via macro
+# given_lazy: Define a lazy (memoized) fixture
+# Usage in Context definition: given_lazy :user, \: User.new("test")
+# Usage in context block: given_lazy :user, \: User.new("test")
+# Lazy fixtures are memoized per example (called once, cached for duration of example)
 export fn given_lazy(name: Symbol, block: Fn() -> Any) -> Void:
     match current_context_def:
         case Some(def):
+            # In context definition - add to context's givens list
             def.add_given(Given.Lazy(name, block))
         case None:
-            panic("given_lazy() must be called within a Context definition")
+            # In regular context/describe block - create before_each hook with memoization
+            match current_group:
+                case Some(group):
+                    # Create a before_each hook that memoizes the value
+                    let lazy_hook = Hook.BeforeEach(fn():
+                        let value = block()
+                        runtime.set_example_state(name.to_string(), value)
+                    )
+                    group.add_hook(lazy_hook)
+                case None:
+                    panic("given_lazy() must be called within a describe/context block or Context definition")
 
 # then: BDD-style assertion (optional - synonym for expect truthy)
 # Usage: then { expression_is_truthy }
