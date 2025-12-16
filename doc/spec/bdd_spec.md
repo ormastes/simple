@@ -229,99 +229,152 @@ Shared example groups are stored and only realized when included in another grou
 **Syntax:**
 
 ```simple
-# Define a named, reusable Context (capital C)
-Context :as_admin do
-  given(:user) { create(:user, :admin) }
-  given { login_as(user) }
-end
+# Define a named, reusable context_def (lowercase)
+context_def :as_admin:
+    given_lazy :user, \:
+        create(:user, :admin)
 
-Context :with_database do
-  given { db = Database.connect(:test) }
-  given { db.migrate() }
-end
+    given:
+        login_as(user)
+
+context_def :with_database:
+    given:
+        db = Database.connect(:test)
+        db.migrate()
 
 describe "AdminDashboard":
-  # Reference a Context by symbol
-  context :as_admin do
-    it "shows admin panel":
-      expect page.has_selector?(".admin-panel")
+    # Reference a context_def by symbol
+    context :as_admin:
+        it "shows admin panel":
+            expect page.has_selector?(".admin-panel")
 
-  # Compose multiple Contexts (mix-in semantics)
-  context :as_admin, :with_database do
-    it "loads from database":
-      expect user.data.persisted?
+    # Compose multiple contexts (mix-in semantics)
+    context_compose :as_admin, :with_database:
+        it "loads from database":
+            expect user.data.persisted?
 
-  # Inline context (anonymous) with inline given
-  context "when user logs out":
-    given { logout_as(user) }
+    # Inline context (anonymous) with inline given
+    context "when user logs out":
+        given:
+            logout_as(user)
 
-    it "shows login form":
-      expect page.has_selector?(".login-form")
+        it "shows login form":
+            expect page.has_selector?(".login-form")
 
-  # Mix: reference Context + extend with inline given
-  context :as_admin do
-    given(:extra_perms) { :super }
+    # Mix: reference context_def + extend with inline given
+    context :as_admin:
+        given_lazy :extra_perms, \:
+            :super
 
-    it "has extra permissions":
-      expect user.permissions.includes?(:super)
-end
+        it "has extra permissions":
+            expect user.permissions.includes?(extra_perms)
 ```
 
 **Keywords:**
 
 | Keyword | Purpose | Semantics |
 |---------|---------|-----------|
-| `Context :name do` | Define reusable context | Singleton definition (like a class) |
-| `context :symbol` | Reference named Context | Mix-in: runs all givens from that Context |
-| `context "string"` | Anonymous context | Current behavior (nested describe) |
-| `context :a, :b` | Compose multiple Contexts | Sequential: :a givens run, then :b givens |
-| `given(:name) { }` | Lazy fixture (memoized) | Like `let` - evaluated once per example |
-| `given { }` | Eager setup | Anonymous given - runs before each example |
-| `then { }` | BDD-style assertion | Optional - synonym for `expect(...).to_be_truthy` |
+| `context_def :name:` | Define reusable context | Global singleton (stored in registry) |
+| `context :symbol:` | Reference named context_def | Mix-in: runs all givens from that context |
+| `context_compose :a, :b:` | Compose multiple contexts | Sequential: :a givens run, then :b givens |
+| `context "string":` | Anonymous context | Nested describe (nested group) |
+| `given_lazy :name, \: ...` | Lazy fixture (memoized) | Evaluated once per example, cached |
+| `given :name, \: ...` | Named eager fixture | Runs before each example (not memoized) |
+| `given:` | Unnamed eager setup | Runs before each example (like before_each) |
+| `then { }` | BDD-style assertion | Optional - synonym for truthy check |
 
 **Semantics:**
 
-- **Context definition** is stored globally (name registered in context registry)
-- **context reference** `:symbol` looks up definition and runs all `given` blocks
-- **given composition** is depth-first: outer Contexts' givens run first, then inline givens
-- **given(:name)** creates a memoized fixture (stored in example state, cleaned after example)
-- **given { }** (anonymous) runs eagerly before each example (like `before_each`)
-- **then** is optional sugar for common BDD pattern (assert on mutable state)
+- **context_def definition** is stored globally (name registered in context registry)
+- **context reference** `:symbol:` looks up definition and runs all givens from that context
+- **context_compose** composes multiple contexts in order: context A givens run, then context B givens
+- **given_lazy** creates memoized fixture (stored per example, cleared after example)
+- **given :name** runs eagerly before each example with clear documentation
+- **given:block** runs eagerly before each example (like before_each hook)
+- **then** is optional sugar for common BDD pattern
 
-**Example: BDD "Given-When-Then" style**
+**BDD "Given-When-Then" Pattern:**
 
 ```simple
-Context :empty_stack do
-  given(:stack) { Stack.new }
-end
+context_def :empty_stack:
+    # Given: initial state
+    given_lazy :stack, \:
+        Stack.new
 
 describe "Stack":
-  context :empty_stack do
+    context :empty_stack:
+        # Scenario: push operation
+        context "when pushed":
+            # When: perform action
+            given:
+                stack.push(42)
 
-    context "when pushed":
-      given { stack.push(42) }  # When (anonymous given)
+            # Then: verify results
+            it "size increases":
+                expect stack.size == 1
 
-      then { stack.size == 1 }
-      then { stack.top == 42 }
+            it "top is correct":
+                expect stack.top == 42
 
-    context "when popped":
-      given { stack.push(99) }
-      given { stack.push(42) }
+        # Scenario: pop operation
+        context "when popped":
+            # When: setup state
+            given:
+                stack.push(99)
+                stack.push(42)
 
-      then { stack.pop == 42 }
-      then { stack.size == 1 }
+            # Then: verify behavior
+            it "pops correct value":
+                expect stack.pop == 42
+
+            it "size decreases":
+                expect stack.size == 1
 ```
 
-**Ordering Example:**
+**Sequential Given Block Example (Contexts + Variables):**
 
 ```simple
-Context :setup_a do
-  given(:x) { 10 }
-end
+context_def :user_data:
+    given_lazy :user, \:
+        { name: "Alice", id: 42 }
 
-Context :setup_b do
-  given(:y) { x + 5 }
-end
+context_def :db_setup:
+    given:
+        db.connect()
+        db.migrate()
+
+describe "Integrated Setup":
+    context "with sequential given":
+        # Single given: block with multiple sequential steps
+        given:
+            # Step 1: Apply database setup context
+            given :db_setup
+
+            # Step 2: Apply user fixtures context
+            given :user_data
+
+            # Step 3: Define derived variables
+            let user_key = "user_" + user.id.to_string()
+            let greeting = "Welcome, " + user.name
+
+        it "has user from context":
+            expect user.name == "Alice"
+
+        it "has derived variables":
+            expect user_key == "user_42"
+            expect greeting == "Welcome, Alice"
+```
+
+**Fixture Composition Example:**
+
+```simple
+context_def :setup_a:
+    given_lazy :x, \:
+        10
+
+context_def :setup_b:
+    given_lazy :y, \:
+        x + 5  # y depends on x (when composed after :setup_a)
 
 describe "Test":
   context :setup_a, :setup_b do
