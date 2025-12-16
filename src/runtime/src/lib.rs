@@ -117,3 +117,10 @@ pub use value::{
 
 // Re-export RuntimeDict struct
 pub use value::RuntimeDict;
+
+// Re-export contract violation types and FFI functions (CTR-050-054)
+pub use value::{
+    ContractViolationKind, RuntimeContractViolation,
+    rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
+    rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation,
+};

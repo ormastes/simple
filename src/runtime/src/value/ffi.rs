@@ -304,6 +304,8 @@ pub unsafe extern "C" fn rt_method_not_found(
 // Contract Checking (Design by Contract support)
 // ============================================================================
 
+use super::contracts::{ContractViolationKind, RuntimeContractViolation};
+
 /// Check a contract condition and panic if it fails.
 /// This is called from compiled code when contract checking is enabled.
 ///
@@ -327,29 +329,99 @@ pub unsafe extern "C" fn simple_contract_check(
         return;
     }
 
-    // Contract violated - panic with error message
-    let kind_name = match kind {
-        0 => "Precondition",
-        1 => "Postcondition",
-        2 => "Error postcondition",
-        3 => "Entry invariant",
-        4 => "Exit invariant",
-        _ => "Contract",
-    };
+    // Contract violated - create violation object and panic
+    let violation_kind = ContractViolationKind::from_i64(kind)
+        .unwrap_or(ContractViolationKind::Pre);
 
     let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
-        "<unknown>".to_string()
+        "<unknown>"
     } else {
         let slice = std::slice::from_raw_parts(func_name_ptr, func_name_len as usize);
-        std::str::from_utf8(slice)
-            .unwrap_or("<invalid UTF-8>")
-            .to_string()
+        std::str::from_utf8(slice).unwrap_or("<invalid UTF-8>")
     };
 
-    panic!(
-        "{} violation in function '{}': contract condition failed",
-        kind_name, func_name
-    );
+    // Create the violation object for inspection
+    let violation = RuntimeContractViolation::new(violation_kind, func_name, None);
+    let message = if violation.is_null() {
+        format!(
+            "{} violation in function '{}': contract condition failed",
+            violation_kind.name(),
+            func_name
+        )
+    } else {
+        let msg = (*violation).format();
+        RuntimeContractViolation::free(violation);
+        msg
+    };
+
+    panic!("{}", message);
+}
+
+/// Check a contract condition with a custom message and panic if it fails.
+/// This is called from compiled code when contract checking is enabled.
+///
+/// # Arguments
+/// * `condition` - The boolean condition (1 = true, 0 = false)
+/// * `kind` - Type of contract (0=Pre, 1=Post, 2=ErrPost, 3=InvEntry, 4=InvExit)
+/// * `func_name_ptr` - Pointer to function name string (UTF-8), may be null
+/// * `func_name_len` - Length of function name
+/// * `message_ptr` - Pointer to message string (UTF-8), may be null
+/// * `message_len` - Length of message
+///
+/// # Safety
+/// Pointers must be valid or null.
+#[no_mangle]
+pub unsafe extern "C" fn simple_contract_check_msg(
+    condition: i64,
+    kind: i64,
+    func_name_ptr: *const u8,
+    func_name_len: i64,
+    message_ptr: *const u8,
+    message_len: i64,
+) {
+    if condition != 0 {
+        // Condition is true, contract satisfied
+        return;
+    }
+
+    // Contract violated - create violation object and panic
+    let violation_kind = ContractViolationKind::from_i64(kind)
+        .unwrap_or(ContractViolationKind::Pre);
+
+    let func_name = if func_name_ptr.is_null() || func_name_len <= 0 {
+        "<unknown>"
+    } else {
+        let slice = std::slice::from_raw_parts(func_name_ptr, func_name_len as usize);
+        std::str::from_utf8(slice).unwrap_or("<invalid UTF-8>")
+    };
+
+    let message = if message_ptr.is_null() || message_len <= 0 {
+        None
+    } else {
+        let slice = std::slice::from_raw_parts(message_ptr, message_len as usize);
+        std::str::from_utf8(slice).ok()
+    };
+
+    // Create the violation object for inspection
+    let violation = RuntimeContractViolation::new(violation_kind, func_name, message);
+    let error_msg = if violation.is_null() {
+        let base = format!(
+            "{} violation in function '{}': contract condition failed",
+            violation_kind.name(),
+            func_name
+        );
+        if let Some(msg) = message {
+            format!("{} ({})", base, msg)
+        } else {
+            base
+        }
+    } else {
+        let msg = (*violation).format();
+        RuntimeContractViolation::free(violation);
+        msg
+    };
+
+    panic!("{}", error_msg);
 }
 
 // ============================================================================

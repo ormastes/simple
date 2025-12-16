@@ -114,6 +114,14 @@ pub struct FunctionDef {
     pub contract: Option<ContractBlock>,
 }
 
+impl FunctionDef {
+    /// Check if this function is marked as pure via #[pure] attribute (CTR-031)
+    /// Pure functions can be called from contract expressions.
+    pub fn is_pure(&self) -> bool {
+        self.attributes.iter().any(|attr| attr.name == "pure")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Parameter {
     pub span: Span,
@@ -272,6 +280,16 @@ pub struct StructDef {
     pub attributes: Vec<Attribute>,
     /// Documentation comment for API doc generation
     pub doc_comment: Option<DocComment>,
+    /// Struct invariant (checked after constructor and public methods)
+    pub invariant: Option<InvariantBlock>,
+}
+
+impl StructDef {
+    /// Check if this struct is marked with #[snapshot] attribute (CTR-062)
+    /// Types with #[snapshot] have custom snapshot semantics for old() expressions.
+    pub fn is_snapshot(&self) -> bool {
+        self.attributes.iter().any(|attr| attr.name == "snapshot")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -290,6 +308,14 @@ pub struct ClassDef {
     pub doc_comment: Option<DocComment>,
     /// Class invariant (checked after constructor and public methods)
     pub invariant: Option<InvariantBlock>,
+}
+
+impl ClassDef {
+    /// Check if this class is marked with #[snapshot] attribute (CTR-062)
+    /// Types with #[snapshot] have custom snapshot semantics for old() expressions.
+    pub fn is_snapshot(&self) -> bool {
+        self.attributes.iter().any(|attr| attr.name == "snapshot")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -384,12 +410,19 @@ pub struct ActorDef {
     pub visibility: Visibility,
 }
 
+/// Type alias definition with optional refinement predicate (CTR-020)
+///
+/// Simple: `type UserId = i64`
+/// Refined: `type PosI64 = i64 where self > 0`
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeAliasDef {
     pub span: Span,
     pub name: String,
     pub ty: Type,
     pub visibility: Visibility,
+    /// Refinement predicate: `where self > 0`
+    /// In the predicate, `self` refers to a value of the base type
+    pub where_clause: Option<Expr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

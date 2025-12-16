@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use simple_parser::Pattern;
 
@@ -7,6 +7,9 @@ use super::super::types::{HirModule, TypeId};
 pub struct Lowerer {
     pub(super) module: HirModule,
     pub(super) globals: HashMap<String, TypeId>,
+    /// Set of function names that are marked with #[pure] (CTR-031)
+    /// These functions can be called from contract expressions
+    pub(super) pure_functions: HashSet<String>,
 }
 
 impl Lowerer {
@@ -14,7 +17,13 @@ impl Lowerer {
         Self {
             module: HirModule::new(),
             globals: HashMap::new(),
+            pure_functions: HashSet::new(),
         }
+    }
+
+    /// Check if a function is marked as pure
+    pub fn is_pure_function(&self, name: &str) -> bool {
+        self.pure_functions.contains(name)
     }
 
     pub(super) fn extract_pattern_name(pattern: &Pattern) -> Option<String> {

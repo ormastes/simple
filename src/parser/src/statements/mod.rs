@@ -195,6 +195,10 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse type alias with optional refinement predicate (CTR-020)
+    ///
+    /// Simple: `type UserId = i64`
+    /// Refined: `type PosI64 = i64 where self > 0`
     pub(crate) fn parse_type_alias(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Type)?;
@@ -202,6 +206,14 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
         self.expect(&TokenKind::Assign)?;
         let ty = self.parse_type()?;
+
+        // Parse optional refinement predicate: `where self > 0`
+        let where_clause = if self.check(&TokenKind::Where) {
+            self.advance(); // consume 'where'
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
 
         Ok(Node::TypeAlias(TypeAliasDef {
             span: Span::new(
@@ -213,6 +225,7 @@ impl<'a> Parser<'a> {
             name,
             ty,
             visibility: Visibility::Private,
+            where_clause,
         }))
     }
 

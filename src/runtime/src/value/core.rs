@@ -330,6 +330,7 @@ impl RuntimeValue {
                 Some(HeapObjectType::Unique) => "unique",
                 Some(HeapObjectType::Shared) => "shared",
                 Some(HeapObjectType::Borrow) => "borrow",
+                Some(HeapObjectType::ContractViolation) => "contract_violation",
                 None => "null",
             },
             _ => "unknown",
