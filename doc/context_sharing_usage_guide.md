@@ -11,7 +11,7 @@ Context Sharing allows you to define reusable test setup (fixtures) once and use
 ### 1. Define a Reusable Context
 
 ```simple
-Context :context_name do
+Context :context_name:
     given_lazy :fixture_name, fn():
         # Return the fixture value (evaluated once per example)
         create_fixture()
@@ -23,6 +23,7 @@ Context :context_name do
 
 **Key Points:**
 - Use capital `C` for `Context` (different from lowercase `context`)
+- Use `:` to mark the block start (consistent with Simple's if/while style)
 - Use `given_lazy(:name)` for memoized fixtures
 - Use `given { }` for eager setup blocks
 - Contexts are registered globally
@@ -61,7 +62,7 @@ context_compose :context1, :context2:
 
 ```simple
 # Define the context
-Context :user_fixtures do
+Context :user_fixtures:
     given_lazy :admin_user, fn():
         { name: "Admin", role: "admin", permissions: ["read", "write", "delete"] }
 
@@ -81,7 +82,7 @@ describe "User Permissions":
 ### Pattern 2: Database/External Service Setup
 
 ```simple
-Context :with_database do
+Context :with_database:
     # Eager given - setup runs before each test
     given:
         db.clear_tables()
@@ -103,7 +104,7 @@ describe "Database Operations":
 ### Pattern 3: Fixture Dependencies
 
 ```simple
-Context :math_fixtures do
+Context :math_fixtures:
     given_lazy :x, fn():
         10
 
@@ -128,14 +129,14 @@ describe "Math":
 ### Pattern 4: API/Authentication Setup
 
 ```simple
-Context :authenticated do
+Context :authenticated:
     given_lazy :auth_token, fn():
         "token_xyz123abc"
 
     given_lazy :user_id, fn():
         42
 
-Context :with_rate_limit do
+Context :with_rate_limit:
     given_lazy :requests_remaining, fn():
         100
 
@@ -158,7 +159,7 @@ describe "API Endpoint":
 ### Pattern 5: BDD Given-When-Then Style
 
 ```simple
-Context :calculator_state do
+Context :calculator_state:
     given_lazy :calculator, fn():
         { value: 0 }
 
@@ -203,7 +204,7 @@ describe "User":
 ### New Style (Context Sharing)
 
 ```simple
-Context :admin_user do
+Context :admin_user:
     given_lazy :user, fn():
         { role: "admin" }
 
@@ -241,7 +242,7 @@ describe "User":
 ### Setup and Teardown
 
 ```simple
-Context :database_session do
+Context :database_session:
     given:
         db.connect()
         db.migrate()
@@ -254,11 +255,11 @@ Context :database_session do
 ### Multiple Test Data Variants
 
 ```simple
-Context :empty_list do
+Context :empty_list:
     given_lazy :items, fn():
         []
 
-Context :list_with_items do
+Context :list_with_items:
     given_lazy :items, fn():
         [1, 2, 3, 4, 5]
 
@@ -275,7 +276,7 @@ describe "List Operations":
 ### Shared Complex Setup
 
 ```simple
-Context :user_with_orders do
+Context :user_with_orders:
     given_lazy :user, fn():
         create_user("test@example.com")
 
@@ -321,11 +322,11 @@ describe "Array Operations":
 
 ```simple
 # test_fixtures.spl
-Context :string_fixtures do
+Context :string_fixtures:
     given_lazy :str, fn():
         "hello world"
 
-Context :array_fixtures do
+Context :array_fixtures:
     given_lazy :arr, fn():
         [1, 2, 3]
 
@@ -350,7 +351,7 @@ describe "Array Operations":
 
 ```simple
 # Wrong - fixture won't be available
-Context :my_context do
+Context :my_context:
     given_lazy :value, fn():
         42
     # Forget to reference it
@@ -366,13 +367,13 @@ context :my_context:
 **Solution:** Lazy fixtures are memoized per example. If you need fresh data, use `given` instead:
 
 ```simple
-Context :counter do
+Context :counter:
     # Wrong - count is memoized
     given_lazy :count, fn():
         0
 
 # Right - count is fresh
-Context :counter do
+Context :counter:
     given:
         let count = 0  # Fresh per example
 ```
@@ -383,7 +384,7 @@ Context :counter do
 
 ```simple
 # Context must be defined
-Context :my_context do
+Context :my_context:
     given_lazy :value, fn():
         42
 
