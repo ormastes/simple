@@ -18,17 +18,20 @@ Doctests use triple-quote blocks (`"""..."""`) similar to Python for functions a
 - **Immediately before** the function/class definition (no empty line between)
 - **Immediately after** the function/class header (no empty line)
 
-Block comments `/* */` are **NOT** used for function doctests - use `"""` instead.
+Doctest examples within `"""` blocks are wrapped with Markdown code fences to clearly separate description from executable examples:
 
 ```simple
 # Style 1: Block before function
 """
 Computes factorial of n
 
+Examples:
+```sdoctest
 >>> factorial 5
 120
 >>> factorial 0
 1
+```
 """
 fn factorial(n: Int) -> Int:
     if n <= 1: return 1
@@ -39,31 +42,42 @@ fn factorial(n: Int) -> Int:
 # Style 2: Block after function header (no empty line)
 fn factorial(n: Int) -> Int:
 """
+Computes factorial of n
+
+Examples:
+```sdoctest
 >>> factorial 5
 120
 >>> factorial 0
 1
+```
 """
     if n <= 1: return 1
     return n * factorial(n - 1)
 ```
 
-**Execution:**
+**Syntax Structure:**
+- `"""..."""` - Outer docstring block (contains description + examples)
+- ` ```sdoctest ... ``` ` - Markdown code fence marking executable doctest examples (language hint: `sdoctest` or `simple`)
 - Lines starting with `>>>` are executed in a REPL-like environment
 - Following lines (without `>>>` or `...`) are expected output
 - Empty lines separate examples
-- Opening `"""` can have a language hint: `"""simple` or `"""sdoctest`
 
 ### 1.2 Multi-line Statements
 
 ```simple
 """
+Process a list of numbers
+
+Examples:
+```sdoctest
 >>> nums = [1, 2, 3]
 >>> for x in nums:
 ...     print x * 2
 2
 4
 6
+```
 """
 fn process_nums():
     pass
@@ -75,10 +89,15 @@ fn process_nums():
 
 ```simple
 """
+Divide two numbers
+
+Examples:
+```sdoctest
 >>> divide 10, 0
 Error: DivisionByZero
 >>> parse_int "not a number"
 Error: ParseError: invalid digit
+```
 """
 fn divide(a, b):
     pass
@@ -90,10 +109,15 @@ fn divide(a, b):
 
 ```simple
 """
+Generate a unique identifier
+
+Examples:
+```sdoctest
 >>> generate_uuid()
 "........-....-....-....-............"
 >>> get_timestamp()
 1702......
+```
 """
 fn generate_uuid():
     pass
@@ -108,18 +132,26 @@ fn generate_uuid():
 
 ```simple
 """
+Database operations with cleanup
+
 Setup:
+```sdoctest
 >>> db = Database.connect("test.db")
 >>> db.clear()
+```
 
-Example:
+Examples:
+```sdoctest
 >>> user = User.new(name: "Alice")
 >>> db.save(user)
 >>> db.find_by_name("Alice").name
 "Alice"
+```
 
 Teardown:
+```sdoctest
 >>> db.close()
+```
 """
 fn database_example():
     pass
@@ -143,9 +175,9 @@ fn database_example():
 ### 2.2 File Patterns
 
 ```
-src/**/*.spl         # Extract from """ blocks and /* */ comments
-doc/**/*.md          # Extract from code blocks marked ```simple-doctest
-test/doctest/**/*.sdt # Standalone doctest files
+src/**/*.spl         # Extract from """ blocks (with ```sdoctest fences for examples)
+doc/**/*.md          # Extract from code blocks marked ```sdoctest or ```simple-doctest
+test/doctest/**/*.sdt # Standalone doctest files (raw doctest format)
 ```
 
 ### 2.3 Execution Modes
@@ -312,13 +344,14 @@ struct DoctestExample:
 
 **Discovery algorithm:**
 1. Walk source tree for `.spl` files
-2. Extract `"""..."""` blocks via lexer
-3. Match blocks to preceding/following functions/classes (no empty line rule)
-4. Parse blocks for `>>>` examples
-5. Extract `///` module-level docs for module/package examples
-6. Walk doc tree for `.md` files with ` ```simple-doctest `
-7. Walk `test/doctest/` for `.sdt` files
-8. Build `List[DoctestExample]`
+2. Extract `"""..."""` blocks (docstring blocks for functions/classes/modules)
+3. Within each `"""` block, extract ` ```sdoctest ... ``` ` fenced sections (contains actual doctest examples)
+4. Match blocks to preceding/following functions/classes (no empty line rule)
+5. Parse ` ```sdoctest ` sections for `>>>` examples, `...` continuations, expected output
+6. Extract `///` module-level docs for module/package examples
+7. Walk doc tree for `.md` files with ` ```sdoctest ` or ` ```simple-doctest `
+8. Walk `test/doctest/` for `.sdt` files
+9. Build `List[DoctestExample]`
 
 **Filtering:**
 - `--tag` filters examples by metadata
@@ -414,11 +447,13 @@ skip_tags = ["slow", "manual"]
 """
 Creates a new stack with initial capacity
 
+```sdoctest
 >>> s = Stack.new(capacity: 10)
 >>> s.capacity
 10
 >>> s.size
 0
+```
 """
 struct Stack:
     capacity: Int
@@ -451,12 +486,14 @@ Simple provides a `Stack` data structure:
 """
 Parses integer from string
 
+```sdoctest
 >>> parse_int "123"
 123
 >>> parse_int "12.3"
 Error: ParseError: invalid character '.'
 >>> parse_int ""
 Error: ParseError: empty string
+```
 """
 fn parse_int(s: String) -> Int:
     ...
@@ -469,16 +506,22 @@ fn parse_int(s: String) -> Int:
 Database connection
 
 Setup:
+```sdoctest
 >>> db = Database.connect(":memory:")
+```
 
 Examples:
+```sdoctest
 >>> db.execute("CREATE TABLE users (id INT, name TEXT)")
 >>> db.execute("INSERT INTO users VALUES (1, 'Alice')")
 >>> db.query("SELECT name FROM users").first
 "Alice"
+```
 
 Teardown:
+```sdoctest
 >>> db.close()
+```
 """
 fn database_example():
     ...
