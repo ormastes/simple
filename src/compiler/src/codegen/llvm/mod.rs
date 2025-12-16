@@ -8,6 +8,9 @@
 /// Requires the `llvm` feature flag and LLVM 18 toolchain to be enabled.
 
 mod types;
+pub mod gpu;
+
+pub use gpu::{GpuComputeCapability, LlvmGpuBackend};
 pub use types::{BinOp, LlvmType};
 
 use crate::codegen::backend_trait::NativeBackend;
@@ -1066,6 +1069,58 @@ impl LlvmBackend {
                             }
                         }
                     }
+                    // GPU instructions - call runtime FFI functions
+                    MirInst::GpuGlobalId { dest, dim } => {
+                        let result = self.compile_gpu_global_id(*dim, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
+                    MirInst::GpuLocalId { dest, dim } => {
+                        let result = self.compile_gpu_local_id(*dim, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
+                    MirInst::GpuGroupId { dest, dim } => {
+                        let result = self.compile_gpu_group_id(*dim, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
+                    MirInst::GpuGlobalSize { dest, dim } => {
+                        let result = self.compile_gpu_global_size(*dim, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
+                    MirInst::GpuLocalSize { dest, dim } => {
+                        let result = self.compile_gpu_local_size(*dim, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
+                    MirInst::GpuNumGroups { dest, dim } => {
+                        let result = self.compile_gpu_num_groups(*dim, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
+                    MirInst::GpuBarrier => {
+                        self.compile_gpu_barrier(builder, module)?;
+                    }
+                    MirInst::GpuMemFence { scope } => {
+                        self.compile_gpu_mem_fence(*scope, builder, module)?;
+                    }
+                    MirInst::GpuAtomic { dest, op, addr, value, expected } => {
+                        let addr_val = vreg_map.get(addr).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", addr))
+                        })?;
+                        let value_val = vreg_map.get(value).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", value))
+                        })?;
+                        let expected_val = if let Some(exp) = expected {
+                            Some(*vreg_map.get(exp).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", exp))
+                            })?)
+                        } else {
+                            None
+                        };
+                        let result = self.compile_gpu_atomic(*op, *addr_val, *value_val, expected_val, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
+                    MirInst::GpuSharedAlloc { dest, element_type: _, size } => {
+                        let result = self.compile_gpu_shared_alloc(*size, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
                     _ => {
                         // Other instructions not yet implemented
                     }
@@ -1620,6 +1675,321 @@ impl LlvmBackend {
         Err(CompileError::Semantic(
             "LLVM feature not enabled".to_string(),
         ))
+    }
+
+    // ========================
+    // GPU instruction helpers
+    // ========================
+
+    /// Compile GPU global_id intrinsic - returns global work item ID for dimension
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_global_id(
+        &self,
+        dim: u8,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+
+        // Declare rt_gpu_global_id if not exists
+        let gpu_global_id = module.get_function("rt_gpu_global_id").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i32_type.into()], false);
+            module.add_function("rt_gpu_global_id", fn_type, None)
+        });
+
+        let dim_val = i32_type.const_int(dim as u64, false);
+        let call_site = builder
+            .build_call(gpu_global_id, &[dim_val.into()], "global_id")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("rt_gpu_global_id returned void".to_string()))
+    }
+
+    /// Compile GPU local_id intrinsic - returns local work item ID within workgroup
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_local_id(
+        &self,
+        dim: u8,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+
+        let gpu_local_id = module.get_function("rt_gpu_local_id").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i32_type.into()], false);
+            module.add_function("rt_gpu_local_id", fn_type, None)
+        });
+
+        let dim_val = i32_type.const_int(dim as u64, false);
+        let call_site = builder
+            .build_call(gpu_local_id, &[dim_val.into()], "local_id")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("rt_gpu_local_id returned void".to_string()))
+    }
+
+    /// Compile GPU group_id intrinsic - returns workgroup ID
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_group_id(
+        &self,
+        dim: u8,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+
+        let gpu_group_id = module.get_function("rt_gpu_group_id").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i32_type.into()], false);
+            module.add_function("rt_gpu_group_id", fn_type, None)
+        });
+
+        let dim_val = i32_type.const_int(dim as u64, false);
+        let call_site = builder
+            .build_call(gpu_group_id, &[dim_val.into()], "group_id")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("rt_gpu_group_id returned void".to_string()))
+    }
+
+    /// Compile GPU global_size intrinsic - returns total number of work items
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_global_size(
+        &self,
+        dim: u8,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+
+        let gpu_global_size = module.get_function("rt_gpu_global_size").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i32_type.into()], false);
+            module.add_function("rt_gpu_global_size", fn_type, None)
+        });
+
+        let dim_val = i32_type.const_int(dim as u64, false);
+        let call_site = builder
+            .build_call(gpu_global_size, &[dim_val.into()], "global_size")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("rt_gpu_global_size returned void".to_string()))
+    }
+
+    /// Compile GPU local_size intrinsic - returns workgroup size
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_local_size(
+        &self,
+        dim: u8,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+
+        let gpu_local_size = module.get_function("rt_gpu_local_size").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i32_type.into()], false);
+            module.add_function("rt_gpu_local_size", fn_type, None)
+        });
+
+        let dim_val = i32_type.const_int(dim as u64, false);
+        let call_site = builder
+            .build_call(gpu_local_size, &[dim_val.into()], "local_size")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("rt_gpu_local_size returned void".to_string()))
+    }
+
+    /// Compile GPU num_groups intrinsic - returns number of workgroups
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_num_groups(
+        &self,
+        dim: u8,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let i32_type = self.context.i32_type();
+
+        let gpu_num_groups = module.get_function("rt_gpu_num_groups").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i32_type.into()], false);
+            module.add_function("rt_gpu_num_groups", fn_type, None)
+        });
+
+        let dim_val = i32_type.const_int(dim as u64, false);
+        let call_site = builder
+            .build_call(gpu_num_groups, &[dim_val.into()], "num_groups")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("rt_gpu_num_groups returned void".to_string()))
+    }
+
+    /// Compile GPU barrier intrinsic - synchronize all threads in workgroup
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_barrier(
+        &self,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<(), CompileError> {
+        let void_type = self.context.void_type();
+
+        let gpu_barrier = module.get_function("rt_gpu_barrier").unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[], false);
+            module.add_function("rt_gpu_barrier", fn_type, None)
+        });
+
+        builder
+            .build_call(gpu_barrier, &[], "barrier")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Compile GPU mem_fence intrinsic - memory fence with given scope
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_mem_fence(
+        &self,
+        scope: crate::mir::instructions::GpuMemoryScope,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<(), CompileError> {
+        use crate::mir::instructions::GpuMemoryScope;
+
+        let void_type = self.context.void_type();
+        let i32_type = self.context.i32_type();
+
+        let gpu_mem_fence = module.get_function("rt_gpu_mem_fence").unwrap_or_else(|| {
+            let fn_type = void_type.fn_type(&[i32_type.into()], false);
+            module.add_function("rt_gpu_mem_fence", fn_type, None)
+        });
+
+        let scope_val = match scope {
+            GpuMemoryScope::WorkGroup => i32_type.const_int(0, false),
+            GpuMemoryScope::Device => i32_type.const_int(1, false),
+            GpuMemoryScope::All => i32_type.const_int(2, false),
+        };
+
+        builder
+            .build_call(gpu_mem_fence, &[scope_val.into()], "mem_fence")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Compile GPU atomic operation
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_atomic(
+        &self,
+        op: crate::mir::instructions::GpuAtomicOp,
+        addr: inkwell::values::BasicValueEnum,
+        value: inkwell::values::BasicValueEnum,
+        expected: Option<inkwell::values::BasicValueEnum>,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        use crate::mir::instructions::GpuAtomicOp;
+
+        let i64_type = self.context.i64_type();
+        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        // Select the appropriate atomic function based on operation
+        let (func_name, needs_expected) = match op {
+            GpuAtomicOp::Add => ("rt_gpu_atomic_add_i64", false),
+            GpuAtomicOp::Sub => ("rt_gpu_atomic_sub_i64", false),
+            GpuAtomicOp::Xchg => ("rt_gpu_atomic_xchg_i64", false),
+            GpuAtomicOp::CmpXchg => ("rt_gpu_atomic_cmpxchg_i64", true),
+            GpuAtomicOp::Min => ("rt_gpu_atomic_min_i64", false),
+            GpuAtomicOp::Max => ("rt_gpu_atomic_max_i64", false),
+            GpuAtomicOp::And => ("rt_gpu_atomic_and_i64", false),
+            GpuAtomicOp::Or => ("rt_gpu_atomic_or_i64", false),
+            GpuAtomicOp::Xor => ("rt_gpu_atomic_xor_i64", false),
+        };
+
+        let atomic_fn = if needs_expected {
+            // CmpXchg takes 3 arguments: addr, expected, value
+            module.get_function(func_name).unwrap_or_else(|| {
+                let fn_type = i64_type.fn_type(
+                    &[i8_ptr_type.into(), i64_type.into(), i64_type.into()],
+                    false,
+                );
+                module.add_function(func_name, fn_type, None)
+            })
+        } else {
+            // Other atomics take 2 arguments: addr, value
+            module.get_function(func_name).unwrap_or_else(|| {
+                let fn_type = i64_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
+                module.add_function(func_name, fn_type, None)
+            })
+        };
+
+        let call_site = if needs_expected {
+            let expected_val = expected.ok_or_else(|| {
+                CompileError::Semantic("CmpXchg requires expected value".to_string())
+            })?;
+            builder
+                .build_call(
+                    atomic_fn,
+                    &[addr.into(), expected_val.into(), value.into()],
+                    "atomic",
+                )
+                .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?
+        } else {
+            builder
+                .build_call(atomic_fn, &[addr.into(), value.into()], "atomic")
+                .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?
+        };
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("Atomic operation returned void".to_string()))
+    }
+
+    /// Compile GPU shared memory allocation
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_shared_alloc(
+        &self,
+        size: u32,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        let gpu_shared_alloc = module.get_function("rt_gpu_shared_alloc").unwrap_or_else(|| {
+            let fn_type = i8_ptr_type.fn_type(&[i64_type.into()], false);
+            module.add_function("rt_gpu_shared_alloc", fn_type, None)
+        });
+
+        let size_val = i64_type.const_int(size as u64, false);
+        let call_site = builder
+            .build_call(gpu_shared_alloc, &[size_val.into()], "shared_alloc")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("rt_gpu_shared_alloc returned void".to_string()))
     }
 }
 

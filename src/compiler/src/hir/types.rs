@@ -331,6 +331,27 @@ impl From<simple_parser::PointerKind> for PointerKind {
     }
 }
 
+/// GPU intrinsic function kind for kernel-side operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuIntrinsicKind {
+    /// Get global work item ID for a dimension
+    GlobalId,
+    /// Get local work item ID within work group
+    LocalId,
+    /// Get work group ID
+    GroupId,
+    /// Get global work size
+    GlobalSize,
+    /// Get local work group size
+    LocalSize,
+    /// Get number of work groups
+    NumGroups,
+    /// Work group barrier
+    Barrier,
+    /// Memory fence
+    MemFence,
+}
+
 /// Type ID allocator for formal verification.
 ///
 /// Separates ID allocation from type storage, making allocation semantics explicit:
@@ -680,6 +701,13 @@ pub enum HirExprKind {
     /// old(expr) in postconditions - refers to value at function entry
     /// The expression is evaluated at function entry and stored for use in postconditions
     ContractOld(Box<HirExpr>),
+
+    // GPU intrinsic operations
+    /// GPU intrinsic call (global_id, local_id, barrier, etc.)
+    GpuIntrinsic {
+        intrinsic: GpuIntrinsicKind,
+        args: Vec<HirExpr>,
+    },
 }
 
 impl HirExprKind {
@@ -739,6 +767,10 @@ impl HirExprKind {
             HirExprKind::ContractOld(inner) => HirExprKind::ContractOld(Box::new(inner.substitute_local(from_idx, to_idx))),
             HirExprKind::BuiltinCall { name, args } => HirExprKind::BuiltinCall {
                 name: name.clone(),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
+            },
+            HirExprKind::GpuIntrinsic { intrinsic, args } => HirExprKind::GpuIntrinsic {
+                intrinsic: *intrinsic,
                 args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
             },
 
@@ -803,6 +835,10 @@ impl HirExprKind {
             HirExprKind::ContractOld(inner) => HirExprKind::ContractOld(Box::new(inner.substitute_self_with_result())),
             HirExprKind::BuiltinCall { name, args } => HirExprKind::BuiltinCall {
                 name: name.clone(),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
+            },
+            HirExprKind::GpuIntrinsic { intrinsic, args } => HirExprKind::GpuIntrinsic {
+                intrinsic: *intrinsic,
                 args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
             },
 

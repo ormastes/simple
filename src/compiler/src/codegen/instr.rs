@@ -582,6 +582,49 @@ pub fn compile_instruction<M: Module>(
         MirInst::PointerDeref { dest, pointer, kind } => {
             compile_pointer_deref(ctx, builder, *dest, *pointer, *kind)?;
         }
+
+        // =========================================================================
+        // GPU instructions
+        // =========================================================================
+        MirInst::GpuGlobalId { dest, dim } => {
+            super::instr_gpu::compile_gpu_global_id(ctx, builder, *dest, *dim)?;
+        }
+
+        MirInst::GpuLocalId { dest, dim } => {
+            super::instr_gpu::compile_gpu_local_id(ctx, builder, *dest, *dim)?;
+        }
+
+        MirInst::GpuGroupId { dest, dim } => {
+            super::instr_gpu::compile_gpu_group_id(ctx, builder, *dest, *dim)?;
+        }
+
+        MirInst::GpuGlobalSize { dest, dim } => {
+            super::instr_gpu::compile_gpu_global_size(ctx, builder, *dest, *dim)?;
+        }
+
+        MirInst::GpuLocalSize { dest, dim } => {
+            super::instr_gpu::compile_gpu_local_size(ctx, builder, *dest, *dim)?;
+        }
+
+        MirInst::GpuNumGroups { dest, dim } => {
+            super::instr_gpu::compile_gpu_num_groups(ctx, builder, *dest, *dim)?;
+        }
+
+        MirInst::GpuBarrier => {
+            super::instr_gpu::compile_gpu_barrier(ctx, builder)?;
+        }
+
+        MirInst::GpuMemFence { scope } => {
+            super::instr_gpu::compile_gpu_mem_fence(ctx, builder, *scope)?;
+        }
+
+        MirInst::GpuAtomic { dest, op, addr, value, expected } => {
+            super::instr_gpu::compile_gpu_atomic(ctx, builder, *dest, *op, *addr, *value, *expected)?;
+        }
+
+        MirInst::GpuSharedAlloc { dest, element_type, size } => {
+            super::instr_gpu::compile_gpu_shared_alloc(ctx, builder, *dest, *element_type, *size)?;
+        }
     }
     Ok(())
 }
