@@ -134,6 +134,11 @@ pub enum TokenKind {
     Old,       // old() (previous value in postconditions)
     Result,    // result (return value in ensures) - legacy
 
+    // Infix keywords (for BDD spec framework)
+    // These parse as infix method calls: `A to B` → `A.to(B)`
+    To,    // to (positive assertion: expect x to eq 5)
+    NotTo, // not_to (negative assertion: expect x not_to eq 5)
+
     // Operators
     Plus,        // +
     Minus,       // -
