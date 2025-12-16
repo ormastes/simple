@@ -188,7 +188,38 @@ describe "Calculator":
                     expect calculator.value == 10
 ```
 
-### Pattern 6: Inline Lazy Fixtures (given_lazy in Regular Context)
+### Pattern 6: Named Eager Fixtures (given :name)
+
+You can now name your eager setup blocks with `given :name, \: block`. This documents the purpose of the setup and creates parallel syntax to `given_lazy`:
+
+```simple
+describe "API Tests":
+    context "with infrastructure":
+        # Named eager fixtures - runs before each test
+        given :database_setup, \:
+            db.connect()
+            db.migrate()
+
+        given :cache_setup, \:
+            cache.clear()
+
+        given_lazy :api_client, \:
+            create_client()
+
+        it "has fresh database":
+            expect true
+
+        it "has empty cache":
+            expect true
+```
+
+**Key Points:**
+- Named `given` runs eagerly (before each example) - not memoized
+- Useful for documenting what setup does
+- Works in both `context_def` and regular `context` blocks
+- Parallel syntax to `given_lazy :name, \: ...`
+
+### Pattern 7: Inline Lazy Fixtures (given_lazy in Regular Context)
 
 `given_lazy` now works inline in regular `context` blocks, not just in `context_def`. This allows you to define lazy (memoized) fixtures without creating a separate context definition:
 
@@ -263,11 +294,12 @@ describe "User":
 ### ✅ Do
 
 - **Name contexts clearly**: `context_def :with_authenticated_user` not `context_def :ctx`
-- **Use lazy fixtures by default**: `given_lazy` is memoized per example
-- **Use eager given for setup**: `given { }` for database clearing, file cleanup, etc.
+- **Name your setup blocks**: Use `given :db_setup, \: ...` when you have multiple setup steps
+- **Use lazy fixtures by default**: `given_lazy` is memoized per example (better performance)
+- **Use eager given for side effects**: `given { ... }` or `given :name, \: ...` for setup that must run
 - **Compose related contexts**: `context_compose :db, :auth, :logging`
 - **Keep contexts focused**: One concern per context
-- **Document context purpose**: Add comments explaining what fixtures it provides
+- **Mix fixture types**: Combine eager and lazy fixtures in one block for clarity
 
 ### ❌ Don't
 
@@ -276,7 +308,34 @@ describe "User":
 - **Mutate fixtures**: Fixtures should return fresh data
 - **Create context dependencies**: One context shouldn't depend on another being defined first
 
-## When to Use: context_def vs inline given_lazy
+## Fixture Types: Quick Reference
+
+| Type | Syntax | Timing | Use Case |
+|------|--------|--------|----------|
+| **Unnamed eager** | `given { ... }` | Before each example | Simple setup, side effects |
+| **Named eager** | `given :name, \: ...` | Before each example | Documented setup, multiple setup blocks |
+| **Named lazy** | `given_lazy :name, \: ...` | Per example (memoized) | Test data, complex objects |
+
+**Example:**
+```simple
+context "with all fixture types":
+    # Runs every example (unnamed)
+    given:
+        db.connect()
+
+    # Runs every example (named)
+    given :cache_setup, \:
+        cache.clear()
+
+    # Memoized, runs once per example
+    given_lazy :user, \:
+        create_user()
+
+    it "test 1": expect user.id == 42
+    it "test 2": expect user.id == 42  # Same user instance
+```
+
+## When to Use: context_def vs inline fixtures
 
 | Scenario | Use | Example |
 |----------|-----|---------|
@@ -284,8 +343,9 @@ describe "User":
 | **Fixtures used in 3+ test suites** | `context_def` + `context :name` | Reusable across files |
 | **Simple test data** | Inline `given_lazy` | Quick fixtures without setup |
 | **Complex setup** | `context_def` + `given` | Database, external service |
+| **Multiple setup steps** | Named `given :name` | Clarity on what each setup does |
 | **Composing fixtures** | `context_compose` | Multiple `context_def` definitions |
-| **Both eager + lazy setup** | Mix both | `given { ... } given_lazy :x, ...` |
+| **Both eager + lazy** | Mix `given` + `given_lazy` | `given :db, ... given_lazy :user, ...` |
 
 ## Common Patterns
 
