@@ -2,7 +2,7 @@
 
 ## Summary Statistics
 
-**Overall Progress:** 59% (125/211 features complete)
+**Overall Progress:** 73% (154/211 features complete)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
@@ -10,10 +10,10 @@
 | Codegen | 6 | 6 | 0 | 0 |
 | Testing & CLI | 39 | 39 | 0 | 0 |
 | Concurrency Runtime | 33 | 33 | 0 | 0 |
-| Contracts | 32 | 9 | 1 | 22 |
+| Contracts | 32 | 32 | 0 | 0 |
 | Extended - Units | 10 | 0 | 0 | 10 |
 | Extended - Networking | 6 | 0 | 0 | 6 |
-| Advanced - Effects | 6 | 0 | 0 | 6 |
+| Advanced - Effects | 6 | 6 | 0 | 0 |
 | Advanced - UI | 6 | 0 | 0 | 6 |
 | Advanced - Web | 17 | 0 | 0 | 17 |
 | Advanced - GPU/SIMD | 11 | 0 | 0 | 11 |
@@ -26,6 +26,8 @@
 
 | Feature | Status | Description |
 |---------|--------|-------------|
+| **Effects (EFF-001-006)** | ✅ | Algebraic effects, handlers, inference (39 tests) |
+| **Contracts (CTR-001-062)** | ✅ | Full Design-by-Contract system |
 | Codegen Parity (#99-103) | ✅ | Body outlining, hybrid execution, InterpCall fallback |
 | Pattern Matching | ✅ | All pattern types (79 BDD tests) |
 | Where Clauses | ✅ | Generic trait bounds (`where T: Clone + Default`) |
@@ -59,13 +61,6 @@
 | Shared Pointers (*T) | 🔄 | Runtime ✅, Parser/codegen ✅ |
 | Weak Pointers (-T) | 🔄 | Runtime ✅, Parser/codegen ✅ |
 | Handle Pointers (+T) | 📋 | Pool-managed handles |
-
-### Contracts
-
-| Feature | Status | Notes |
-|---------|--------|-------|
-| `old(expr)` Snapshots | 🔄 | Parser done, codegen pending |
-| Contract Inheritance | 📋 | Subtype contract propagation |
 
 ---
 
