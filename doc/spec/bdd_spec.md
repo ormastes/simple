@@ -219,7 +219,127 @@ describe "Stack":
     return Stack.new
   it_behaves_like "a stack-like container"
 
-Shared example groups are stored and only realized when included in another group (RSpec behavior). 
+Shared example groups are stored and only realized when included in another group (RSpec behavior).
+
+
+3.6 Reusable Contexts (Context Sharing)
+
+**Overview:** Define reusable setup/fixture groups once, compose them across multiple tests.
+
+**Syntax:**
+
+```simple
+# Define a named, reusable Context (capital C)
+Context :as_admin do
+  given(:user) { create(:user, :admin) }
+  given { login_as(user) }
+end
+
+Context :with_database do
+  given { db = Database.connect(:test) }
+  given { db.migrate() }
+end
+
+describe "AdminDashboard":
+  # Reference a Context by symbol
+  context :as_admin do
+    it "shows admin panel":
+      expect page.has_selector?(".admin-panel")
+
+  # Compose multiple Contexts (mix-in semantics)
+  context :as_admin, :with_database do
+    it "loads from database":
+      expect user.data.persisted?
+
+  # Inline context (anonymous) with inline given
+  context "when user logs out":
+    given { logout_as(user) }
+
+    it "shows login form":
+      expect page.has_selector?(".login-form")
+
+  # Mix: reference Context + extend with inline given
+  context :as_admin do
+    given(:extra_perms) { :super }
+
+    it "has extra permissions":
+      expect user.permissions.includes?(:super)
+end
+```
+
+**Keywords:**
+
+| Keyword | Purpose | Semantics |
+|---------|---------|-----------|
+| `Context :name do` | Define reusable context | Singleton definition (like a class) |
+| `context :symbol` | Reference named Context | Mix-in: runs all givens from that Context |
+| `context "string"` | Anonymous context | Current behavior (nested describe) |
+| `context :a, :b` | Compose multiple Contexts | Sequential: :a givens run, then :b givens |
+| `given(:name) { }` | Lazy fixture (memoized) | Like `let` - evaluated once per example |
+| `given { }` | Eager setup | Anonymous given - runs before each example |
+| `then { }` | BDD-style assertion | Optional - synonym for `expect(...).to_be_truthy` |
+
+**Semantics:**
+
+- **Context definition** is stored globally (name registered in context registry)
+- **context reference** `:symbol` looks up definition and runs all `given` blocks
+- **given composition** is depth-first: outer Contexts' givens run first, then inline givens
+- **given(:name)** creates a memoized fixture (stored in example state, cleaned after example)
+- **given { }** (anonymous) runs eagerly before each example (like `before_each`)
+- **then** is optional sugar for common BDD pattern (assert on mutable state)
+
+**Example: BDD "Given-When-Then" style**
+
+```simple
+Context :empty_stack do
+  given(:stack) { Stack.new }
+end
+
+describe "Stack":
+  context :empty_stack do
+
+    context "when pushed":
+      given { stack.push(42) }  # When (anonymous given)
+
+      then { stack.size == 1 }
+      then { stack.top == 42 }
+
+    context "when popped":
+      given { stack.push(99) }
+      given { stack.push(42) }
+
+      then { stack.pop == 42 }
+      then { stack.size == 1 }
+```
+
+**Ordering Example:**
+
+```simple
+Context :setup_a do
+  given(:x) { 10 }
+end
+
+Context :setup_b do
+  given(:y) { x + 5 }
+end
+
+describe "Test":
+  context :setup_a, :setup_b do
+    given(:z) { y * 2 }
+
+    it "composes in order":
+      # x = 10 (from :setup_a)
+      # y = 15 (from :setup_b, uses x)
+      # z = 30 (from inline, uses y)
+      expect z == 30
+end
+```
+
+**Future considerations (edge cases):**
+
+- Context inheritance: `Context :admin < :user do` (extend a Context)
+- Parameterized Contexts: `Context :with_role do |role|` (pass arguments)
+- Context composition operators: `context :a & :b` (merge), `context :a | :b` (choose)
 
 
 ---
