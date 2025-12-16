@@ -147,6 +147,9 @@ pub fn nogc_singleton(i: &NogcInstr) -> bool {
 /// Effect marker for instructions (combined for production use).
 /// Combines async safety (from AsyncCompile.lean) and GC safety (from NogcCompile.lean)
 /// into a single enum for convenient tracking.
+///
+/// Extended with capability-related effects (Net, Fs, Unsafe) to support
+/// the module capability system.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Effect {
     /// Pure computation, no side effects
@@ -157,6 +160,12 @@ pub enum Effect {
     Wait,
     /// GC allocation
     GcAlloc,
+    /// Network operation (requires @net capability)
+    Net,
+    /// Filesystem operation (requires @fs capability)
+    Fs,
+    /// Unsafe/unchecked operation (requires @unsafe capability)
+    Unsafe,
 }
 
 impl Effect {
@@ -172,13 +181,63 @@ impl Effect {
         !matches!(self, Effect::GcAlloc)
     }
 
+    /// Check if this effect is pure (no side effects).
+    pub fn is_pure(&self) -> bool {
+        matches!(self, Effect::Compute)
+    }
+
+    /// Check if this effect requires network capability.
+    pub fn is_net(&self) -> bool {
+        matches!(self, Effect::Net)
+    }
+
+    /// Check if this effect requires filesystem capability.
+    pub fn is_fs(&self) -> bool {
+        matches!(self, Effect::Fs)
+    }
+
+    /// Check if this effect requires unsafe capability.
+    pub fn is_unsafe(&self) -> bool {
+        matches!(self, Effect::Unsafe)
+    }
+
     /// Convert to AsyncEffect (for Lean model correspondence).
     pub fn to_async(&self) -> AsyncEffect {
         match self {
             Effect::Compute => AsyncEffect::Compute,
             Effect::Io => AsyncEffect::Io,
             Effect::Wait => AsyncEffect::Wait,
-            Effect::GcAlloc => AsyncEffect::Compute, // GcAlloc is not blocking
+            // These are non-blocking, so they map to Compute or Io
+            Effect::GcAlloc => AsyncEffect::Compute,
+            Effect::Net => AsyncEffect::Io,    // Network is I/O
+            Effect::Fs => AsyncEffect::Io,     // Filesystem is I/O
+            Effect::Unsafe => AsyncEffect::Compute, // Unsafe is computation
+        }
+    }
+
+    /// Convert from AST Effect to MIR Effect.
+    pub fn from_ast_effect(ast_effect: &simple_parser::ast::Effect) -> Self {
+        use simple_parser::ast::Effect as AstEffect;
+        match ast_effect {
+            AstEffect::Async => Effect::Wait, // Async functions may wait
+            AstEffect::Pure => Effect::Compute,
+            AstEffect::Io => Effect::Io,
+            AstEffect::Net => Effect::Net,
+            AstEffect::Fs => Effect::Fs,
+            AstEffect::Unsafe => Effect::Unsafe,
+        }
+    }
+
+    /// Get the name of this effect for error messages.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Effect::Compute => "compute",
+            Effect::Io => "io",
+            Effect::Wait => "wait",
+            Effect::GcAlloc => "gc_alloc",
+            Effect::Net => "net",
+            Effect::Fs => "fs",
+            Effect::Unsafe => "unsafe",
         }
     }
 }
@@ -263,6 +322,37 @@ impl EffectSet {
         self.effects.is_empty()
     }
 
+    /// Check if all effects are pure (no side effects).
+    pub fn is_pure(&self) -> bool {
+        self.effects.iter().all(|e| e.is_pure())
+    }
+
+    /// Check if any effect requires network capability.
+    pub fn has_net(&self) -> bool {
+        self.effects.iter().any(|e| e.is_net())
+    }
+
+    /// Check if any effect requires filesystem capability.
+    pub fn has_fs(&self) -> bool {
+        self.effects.iter().any(|e| e.is_fs())
+    }
+
+    /// Check if any effect requires unsafe capability.
+    pub fn has_unsafe(&self) -> bool {
+        self.effects.iter().any(|e| e.is_unsafe())
+    }
+
+    /// Get all unique effect kinds in this set.
+    pub fn effect_kinds(&self) -> Vec<Effect> {
+        let mut kinds = Vec::new();
+        for e in &self.effects {
+            if !kinds.contains(e) {
+                kinds.push(*e);
+            }
+        }
+        kinds
+    }
+
     /// Convert to AsyncEffect list for Lean model correspondence.
     pub fn to_async(&self) -> Vec<AsyncEffect> {
         self.effects.iter().map(|e| e.to_async()).collect()
@@ -302,6 +392,23 @@ pub enum BuiltinFunc {
     Write,
     Send,
     Spawn,
+    // Network operations
+    HttpGet,
+    HttpPost,
+    TcpConnect,
+    TcpListen,
+    UdpBind,
+    // Filesystem operations
+    ReadFile,
+    WriteFile,
+    OpenFile,
+    DeleteFile,
+    ListDir,
+    CreateDir,
+    // Unsafe operations
+    UnsafePtr,
+    UnsafeDeref,
+    UnsafeCast,
 }
 
 impl BuiltinFunc {
@@ -322,26 +429,63 @@ impl BuiltinFunc {
             | BuiltinFunc::Write
             | BuiltinFunc::Send
             | BuiltinFunc::Spawn => Effect::Io,
+
+            BuiltinFunc::HttpGet
+            | BuiltinFunc::HttpPost
+            | BuiltinFunc::TcpConnect
+            | BuiltinFunc::TcpListen
+            | BuiltinFunc::UdpBind => Effect::Net,
+
+            BuiltinFunc::ReadFile
+            | BuiltinFunc::WriteFile
+            | BuiltinFunc::OpenFile
+            | BuiltinFunc::DeleteFile
+            | BuiltinFunc::ListDir
+            | BuiltinFunc::CreateDir => Effect::Fs,
+
+            BuiltinFunc::UnsafePtr
+            | BuiltinFunc::UnsafeDeref
+            | BuiltinFunc::UnsafeCast => Effect::Unsafe,
         }
     }
 
     /// Try to parse a builtin from a string name
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
+            // Blocking
             "await" => Some(BuiltinFunc::Await),
             "wait" => Some(BuiltinFunc::Wait),
             "join" => Some(BuiltinFunc::Join),
             "recv" => Some(BuiltinFunc::Recv),
             "sleep" => Some(BuiltinFunc::Sleep),
+            // GC
             "gc_alloc" => Some(BuiltinFunc::GcAlloc),
             "gc_new" => Some(BuiltinFunc::GcNew),
             "box" => Some(BuiltinFunc::Box),
+            // I/O
             "print" => Some(BuiltinFunc::Print),
             "println" => Some(BuiltinFunc::Println),
             "read" => Some(BuiltinFunc::Read),
             "write" => Some(BuiltinFunc::Write),
             "send" => Some(BuiltinFunc::Send),
             "spawn" => Some(BuiltinFunc::Spawn),
+            // Network
+            "http_get" => Some(BuiltinFunc::HttpGet),
+            "http_post" => Some(BuiltinFunc::HttpPost),
+            "tcp_connect" => Some(BuiltinFunc::TcpConnect),
+            "tcp_listen" => Some(BuiltinFunc::TcpListen),
+            "udp_bind" => Some(BuiltinFunc::UdpBind),
+            // Filesystem
+            "read_file" => Some(BuiltinFunc::ReadFile),
+            "write_file" => Some(BuiltinFunc::WriteFile),
+            "open_file" => Some(BuiltinFunc::OpenFile),
+            "delete_file" => Some(BuiltinFunc::DeleteFile),
+            "list_dir" => Some(BuiltinFunc::ListDir),
+            "create_dir" => Some(BuiltinFunc::CreateDir),
+            // Unsafe
+            "unsafe_ptr" => Some(BuiltinFunc::UnsafePtr),
+            "unsafe_deref" => Some(BuiltinFunc::UnsafeDeref),
+            "unsafe_cast" => Some(BuiltinFunc::UnsafeCast),
             _ => None,
         }
     }
@@ -349,20 +493,40 @@ impl BuiltinFunc {
     /// Get the canonical string name
     pub fn name(&self) -> &'static str {
         match self {
+            // Blocking
             BuiltinFunc::Await => "await",
             BuiltinFunc::Wait => "wait",
             BuiltinFunc::Join => "join",
             BuiltinFunc::Recv => "recv",
             BuiltinFunc::Sleep => "sleep",
+            // GC
             BuiltinFunc::GcAlloc => "gc_alloc",
             BuiltinFunc::GcNew => "gc_new",
             BuiltinFunc::Box => "box",
+            // I/O
             BuiltinFunc::Print => "print",
             BuiltinFunc::Println => "println",
             BuiltinFunc::Read => "read",
             BuiltinFunc::Write => "write",
             BuiltinFunc::Send => "send",
             BuiltinFunc::Spawn => "spawn",
+            // Network
+            BuiltinFunc::HttpGet => "http_get",
+            BuiltinFunc::HttpPost => "http_post",
+            BuiltinFunc::TcpConnect => "tcp_connect",
+            BuiltinFunc::TcpListen => "tcp_listen",
+            BuiltinFunc::UdpBind => "udp_bind",
+            // Filesystem
+            BuiltinFunc::ReadFile => "read_file",
+            BuiltinFunc::WriteFile => "write_file",
+            BuiltinFunc::OpenFile => "open_file",
+            BuiltinFunc::DeleteFile => "delete_file",
+            BuiltinFunc::ListDir => "list_dir",
+            BuiltinFunc::CreateDir => "create_dir",
+            // Unsafe
+            BuiltinFunc::UnsafePtr => "unsafe_ptr",
+            BuiltinFunc::UnsafeDeref => "unsafe_deref",
+            BuiltinFunc::UnsafeCast => "unsafe_cast",
         }
     }
 }
@@ -385,6 +549,12 @@ pub enum CallTarget {
     Blocking(String),
     /// GC-allocating function - allocates on the GC heap
     GcAllocating(String),
+    /// Network function - requires @net capability
+    Net(String),
+    /// Filesystem function - requires @fs capability
+    Fs(String),
+    /// Unsafe function - requires @unsafe capability
+    Unsafe(String),
 }
 
 impl CallTarget {
@@ -395,6 +565,9 @@ impl CallTarget {
             CallTarget::Io(n) => n,
             CallTarget::Blocking(n) => n,
             CallTarget::GcAllocating(n) => n,
+            CallTarget::Net(n) => n,
+            CallTarget::Fs(n) => n,
+            CallTarget::Unsafe(n) => n,
         }
     }
 
@@ -405,6 +578,9 @@ impl CallTarget {
             CallTarget::Io(_) => Effect::Io,
             CallTarget::Blocking(_) => Effect::Wait,
             CallTarget::GcAllocating(_) => Effect::GcAlloc,
+            CallTarget::Net(_) => Effect::Net,
+            CallTarget::Fs(_) => Effect::Fs,
+            CallTarget::Unsafe(_) => Effect::Unsafe,
         }
     }
 
@@ -418,6 +594,21 @@ impl CallTarget {
         self.effect().is_nogc()
     }
 
+    /// Check if this call requires network capability.
+    pub fn is_net(&self) -> bool {
+        self.effect().is_net()
+    }
+
+    /// Check if this call requires filesystem capability.
+    pub fn is_fs(&self) -> bool {
+        self.effect().is_fs()
+    }
+
+    /// Check if this call requires unsafe capability.
+    pub fn is_unsafe(&self) -> bool {
+        self.effect().is_unsafe()
+    }
+
     /// Create from function name using known function effect database.
     pub fn from_name(name: &str) -> Self {
         match name {
@@ -428,6 +619,17 @@ impl CallTarget {
             // I/O functions
             "print" | "println" | "read" | "write" | "send" | "spawn" => {
                 CallTarget::Io(name.to_string())
+            }
+            // Network functions
+            "http_get" | "http_post" | "tcp_connect" | "tcp_listen" | "udp_bind" => {
+                CallTarget::Net(name.to_string())
+            }
+            // Filesystem functions
+            "read_file" | "write_file" | "open_file" | "delete_file" | "list_dir"
+            | "create_dir" => CallTarget::Fs(name.to_string()),
+            // Unsafe functions
+            "unsafe_ptr" | "unsafe_deref" | "unsafe_cast" => {
+                CallTarget::Unsafe(name.to_string())
             }
             // Pure functions (default)
             _ => CallTarget::Pure(name.to_string()),

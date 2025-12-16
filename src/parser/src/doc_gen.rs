@@ -370,8 +370,11 @@ fn format_function_signature(f: &FunctionDef) -> String {
         sig.push_str("pub ");
     }
 
-    if let Some(Effect::Async) = f.effect {
-        sig.push_str("async ");
+    // Show effect decorators
+    for effect in &f.effects {
+        sig.push('@');
+        sig.push_str(effect.decorator_name());
+        sig.push(' ');
     }
 
     sig.push_str("fn ");

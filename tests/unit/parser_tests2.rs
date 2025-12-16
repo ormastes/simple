@@ -110,7 +110,7 @@ fn test_parse_async_function() {
     let source = "async fn fetch():\n    return await get()";
     let module = parse(source).unwrap();
     if let Node::Function(func) = &module.items[0] {
-        assert_eq!(func.effect, Some(Effect::Async));
+        assert!(func.effects.contains(&Effect::Async));
     } else {
         panic!("Expected async function");
     }

@@ -22,7 +22,7 @@ fn call_extern_function(
     match name {
         // I/O functions - now use runtime capture system
         "print" => {
-            check_async_violation("print")?;
+            check_effect_violations("print")?;
             for (i, val) in evaluated.iter().enumerate() {
                 if i > 0 {
                     print_to_stdout(" ");
@@ -33,7 +33,7 @@ fn call_extern_function(
             Ok(Value::Nil)
         }
         "println" => {
-            check_async_violation("println")?;
+            check_effect_violations("println")?;
             for (i, val) in evaluated.iter().enumerate() {
                 if i > 0 {
                     print_to_stdout(" ");
@@ -45,7 +45,7 @@ fn call_extern_function(
             Ok(Value::Nil)
         }
         "eprint" => {
-            check_async_violation("eprint")?;
+            check_effect_violations("eprint")?;
             for (i, val) in evaluated.iter().enumerate() {
                 if i > 0 {
                     print_to_stderr(" ");
@@ -56,7 +56,7 @@ fn call_extern_function(
             Ok(Value::Nil)
         }
         "eprintln" => {
-            check_async_violation("eprintln")?;
+            check_effect_violations("eprintln")?;
             for (i, val) in evaluated.iter().enumerate() {
                 if i > 0 {
                     print_to_stderr(" ");
@@ -68,7 +68,7 @@ fn call_extern_function(
             Ok(Value::Nil)
         }
         "input" => {
-            check_async_violation("input")?;
+            check_effect_violations("input")?;
             // Print prompt if provided
             if let Some(prompt) = evaluated.first() {
                 print_to_stdout(&prompt.to_display_string());
@@ -149,71 +149,71 @@ fn call_extern_function(
         // Native Filesystem Operations (simple/std_lib/src/host/async_nogc/io/fs.spl)
         // =====================================================================
         "native_fs_read" => {
-            check_async_violation("native_fs_read")?;
+            check_effect_violations("native_fs_read")?;
             native_fs_read(&evaluated)
         }
         "native_fs_write" => {
-            check_async_violation("native_fs_write")?;
+            check_effect_violations("native_fs_write")?;
             native_fs_write(&evaluated)
         }
         "native_fs_append" => {
-            check_async_violation("native_fs_append")?;
+            check_effect_violations("native_fs_append")?;
             native_fs_append(&evaluated)
         }
         "native_fs_create_dir" => {
-            check_async_violation("native_fs_create_dir")?;
+            check_effect_violations("native_fs_create_dir")?;
             native_fs_create_dir(&evaluated)
         }
         "native_fs_remove_file" => {
-            check_async_violation("native_fs_remove_file")?;
+            check_effect_violations("native_fs_remove_file")?;
             native_fs_remove_file(&evaluated)
         }
         "native_fs_remove_dir" => {
-            check_async_violation("native_fs_remove_dir")?;
+            check_effect_violations("native_fs_remove_dir")?;
             native_fs_remove_dir(&evaluated)
         }
         "native_fs_rename" => {
-            check_async_violation("native_fs_rename")?;
+            check_effect_violations("native_fs_rename")?;
             native_fs_rename(&evaluated)
         }
         "native_fs_copy" => {
-            check_async_violation("native_fs_copy")?;
+            check_effect_violations("native_fs_copy")?;
             native_fs_copy(&evaluated)
         }
         "native_fs_metadata" => {
-            check_async_violation("native_fs_metadata")?;
+            check_effect_violations("native_fs_metadata")?;
             native_fs_metadata(&evaluated)
         }
         "native_fs_read_dir" => {
-            check_async_violation("native_fs_read_dir")?;
+            check_effect_violations("native_fs_read_dir")?;
             native_fs_read_dir(&evaluated)
         }
         "native_fs_open" => {
-            check_async_violation("native_fs_open")?;
+            check_effect_violations("native_fs_open")?;
             native_fs_open(&evaluated)
         }
         "native_file_read" => {
-            check_async_violation("native_file_read")?;
+            check_effect_violations("native_file_read")?;
             native_file_read(&evaluated)
         }
         "native_file_write" => {
-            check_async_violation("native_file_write")?;
+            check_effect_violations("native_file_write")?;
             native_file_write(&evaluated)
         }
         "native_file_flush" => {
-            check_async_violation("native_file_flush")?;
+            check_effect_violations("native_file_flush")?;
             native_file_flush(&evaluated)
         }
         "native_file_seek" => {
-            check_async_violation("native_file_seek")?;
+            check_effect_violations("native_file_seek")?;
             native_file_seek(&evaluated)
         }
         "native_file_sync" => {
-            check_async_violation("native_file_sync")?;
+            check_effect_violations("native_file_sync")?;
             native_file_sync(&evaluated)
         }
         "native_file_close" => {
-            check_async_violation("native_file_close")?;
+            check_effect_violations("native_file_close")?;
             native_file_close(&evaluated)
         }
 
@@ -228,23 +228,23 @@ fn call_extern_function(
         "native_disable_raw_mode" => native_disable_raw_mode(&evaluated),
         "native_get_term_size" => native_get_term_size(&evaluated),
         "native_term_write" => {
-            check_async_violation("native_term_write")?;
+            check_effect_violations("native_term_write")?;
             native_term_write(&evaluated)
         }
         "native_term_read" => {
-            check_async_violation("native_term_read")?;
+            check_effect_violations("native_term_read")?;
             native_term_read(&evaluated)
         }
         "native_term_read_timeout" => {
-            check_async_violation("native_term_read_timeout")?;
+            check_effect_violations("native_term_read_timeout")?;
             native_term_read_timeout(&evaluated)
         }
         "native_term_flush" => {
-            check_async_violation("native_term_flush")?;
+            check_effect_violations("native_term_flush")?;
             native_term_flush(&evaluated)
         }
         "native_term_poll" => {
-            check_async_violation("native_term_poll")?;
+            check_effect_violations("native_term_poll")?;
             native_term_poll(&evaluated)
         }
 

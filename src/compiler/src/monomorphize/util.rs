@@ -205,7 +205,7 @@ mod tests {
                 statements: vec![],
             },
             visibility: simple_parser::ast::Visibility::Private,
-            effect: None,
+            effects: vec![],
             decorators: vec![],
             attributes: vec![],
             doc_comment: None,

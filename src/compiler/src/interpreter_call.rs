@@ -170,7 +170,7 @@ fn evaluate_call(
                 bail_semantic!("send target must be actor");
             }
             "recv" => {
-                check_async_violation("recv")?;
+                check_effect_violations("recv")?;
                 if args.is_empty() {
                     let msg = ACTOR_INBOX.with(|cell| {
                         cell.borrow()
@@ -212,7 +212,7 @@ fn evaluate_call(
                 return Ok(Value::Nil);
             }
             "join" => {
-                check_async_violation("join")?;
+                check_effect_violations("join")?;
                 let handle_arg = args.get(0).ok_or_else(|| semantic_err!("join expects actor handle"))?;
                 let handle_val = evaluate_expr(&handle_arg.value, env, functions, classes, enums, impl_methods)?;
                 if let Value::Actor(handle) = handle_val {
@@ -1331,7 +1331,7 @@ fn exec_function(
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
-    with_effect_context(&func.effect, || {
+    with_effect_context(&func.effects, || {
         exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx)
     })
 }
@@ -1347,7 +1347,7 @@ fn exec_function_with_captured_env(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    with_effect_context(&func.effect, || {
+    with_effect_context(&func.effects, || {
         // Start with the captured environment (for closure variables)
         let mut local_env = captured_env.clone();
 

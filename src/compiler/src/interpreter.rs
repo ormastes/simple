@@ -20,7 +20,7 @@ use simple_parser::ast::{
 };
 use tracing::instrument;
 
-use crate::effects::{check_async_violation, CURRENT_EFFECT};
+use crate::effects::check_effect_violations;
 use crate::error::CompileError;
 use crate::value::{
     BorrowMutValue, BorrowValue, ChannelValue, Env, FutureValue, GeneratorValue, ManualHandleValue,
@@ -610,7 +610,8 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             | Node::UseStmt(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
-            | Node::AutoImportStmt(_) => {
+            | Node::AutoImportStmt(_)
+            | Node::RequiresCapabilities(_) => {
                 // Module system is handled by the module resolver
                 // These are no-ops in the interpreter
             }

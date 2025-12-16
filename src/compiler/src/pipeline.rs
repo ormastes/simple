@@ -28,6 +28,8 @@ use simple_common::target::Target;
 use simple_type::check as type_check;
 use tracing::instrument;
 
+use simple_parser::ast::{Capability, Node};
+
 use crate::codegen::Codegen;
 use crate::compilability::analyze_module;
 use crate::hir;
@@ -213,6 +215,9 @@ impl CompilerPipeline {
         // Run lint checks
         self.run_lint_checks(&module.items)?;
 
+        // Validate function effects against module capabilities
+        self.validate_capabilities(&module.items)?;
+
         // If the module has script-style statements, skip type_check and interpret directly.
         if !has_script_statements(&module.items) {
             // Type inference/checking (features #13/#14 scaffolding)
@@ -248,6 +253,60 @@ impl CompilerPipeline {
                 .map(|d| d.format())
                 .collect();
             return Err(CompileError::Lint(errors.join("\n")));
+        }
+
+        Ok(())
+    }
+
+    /// Validate function effects against module capabilities.
+    ///
+    /// If a module declares `requires [pure, io]`, all functions with effects
+    /// must only use effects that correspond to those capabilities.
+    ///
+    /// Effects map to capabilities as follows:
+    /// - @pure → Pure capability
+    /// - @io → Io capability
+    /// - @net → Net capability
+    /// - @fs → Fs capability
+    /// - @unsafe → Unsafe capability
+    /// - @async → Always allowed (execution model, not capability)
+    fn validate_capabilities(&self, items: &[Node]) -> Result<(), CompileError> {
+        // Extract module capabilities from RequiresCapabilities statement
+        let mut capabilities: Vec<Capability> = Vec::new();
+        for item in items {
+            if let Node::RequiresCapabilities(stmt) = item {
+                capabilities = stmt.capabilities.clone();
+                break; // Only one requires statement per module
+            }
+        }
+
+        // If no capabilities declared, module is unrestricted
+        if capabilities.is_empty() {
+            return Ok(());
+        }
+
+        // Validate each function's effects against capabilities
+        for item in items {
+            if let Node::Function(func) = item {
+                for effect in &func.effects {
+                    let cap = Capability::from_effect(effect);
+
+                    // Async is always allowed (execution model, not capability)
+                    if cap.is_none() {
+                        continue;
+                    }
+
+                    let cap = cap.unwrap();
+                    if !capabilities.contains(&cap) {
+                        return Err(CompileError::Semantic(format!(
+                            "function '{}' has @{} effect but module only allows capabilities: [{}]",
+                            func.name,
+                            effect.decorator_name(),
+                            capabilities.iter().map(|c| c.name()).collect::<Vec<_>>().join(", ")
+                        )));
+                    }
+                }
+            }
         }
 
         Ok(())

@@ -144,6 +144,7 @@ impl<'a> Parser<'a> {
             TokenKind::Common => self.parse_common_use(),
             TokenKind::Export => self.parse_export_use(),
             TokenKind::Auto => self.parse_auto_import(),
+            TokenKind::Requires => self.parse_requires_capabilities(),
             TokenKind::If => self.parse_if(),
             TokenKind::Match => self.parse_match_stmt(),
             TokenKind::For => self.parse_for(),
@@ -361,7 +362,7 @@ impl<'a> Parser<'a> {
         self.advance(); // consume 'async'
         let mut func = self.parse_function()?;
         if let Node::Function(ref mut f) = func {
-            f.effect = Some(Effect::Async);
+            f.effects.push(Effect::Async);
         }
         Ok(func)
     }
@@ -436,7 +437,7 @@ impl<'a> Parser<'a> {
             where_clause,
             body,
             visibility: Visibility::Private,
-            effect: None,
+            effects: vec![],
             decorators,
             attributes,
             doc_comment: None,
@@ -609,22 +610,41 @@ impl<'a> Parser<'a> {
         // Could be function, struct, class, etc.
         match &self.current.kind {
             TokenKind::At => {
-                // Attributes followed by decorators
+                // Attributes followed by decorators - extract effect decorators
                 let mut decorators = Vec::new();
+                let mut effects = Vec::new();
                 while self.check(&TokenKind::At) {
-                    decorators.push(self.parse_decorator()?);
+                    let decorator = self.parse_decorator()?;
+
+                    // Check if this is an effect decorator
+                    if let Expr::Identifier(name) = &decorator.name {
+                        if let Some(effect) = Effect::from_decorator_name(name) {
+                            effects.push(effect);
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+                            continue;
+                        }
+                    }
+
+                    decorators.push(decorator);
                     while self.check(&TokenKind::Newline) {
                         self.advance();
                     }
                 }
-                self.parse_function_with_attrs(decorators, attributes)
+
+                let mut node = self.parse_function_with_attrs(decorators, attributes)?;
+                if let Node::Function(ref mut f) = node {
+                    f.effects = effects;
+                }
+                Ok(node)
             }
             TokenKind::Fn => self.parse_function_with_attrs(vec![], attributes),
             TokenKind::Async => {
                 self.advance();
                 let mut func = self.parse_function_with_attrs(vec![], attributes)?;
                 if let Node::Function(ref mut f) = func {
-                    f.effect = Some(Effect::Async);
+                    f.effects.push(Effect::Async);
                 }
                 Ok(func)
             }
@@ -748,29 +768,62 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse a decorated function: @decorator fn foo(): ...
+    /// Effect decorators (@pure, @io, @net, @fs, @unsafe, @async) are extracted
+    /// into the function's effects field; other decorators remain in decorators field.
     fn parse_decorated_function(&mut self) -> Result<Node, ParseError> {
         let mut decorators = Vec::new();
+        let mut effects = Vec::new();
 
-        // Parse all decorators (can be multiple: @a @b fn foo)
+        // Parse all decorators (can be multiple: @pure @io fn foo)
         while self.check(&TokenKind::At) {
-            decorators.push(self.parse_decorator()?);
+            let decorator = self.parse_decorator()?;
+
+            // Check if this is an effect decorator
+            if let Expr::Identifier(name) = &decorator.name {
+                if let Some(effect) = Effect::from_decorator_name(name) {
+                    effects.push(effect);
+                    // Skip newlines after effect decorator
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
+                    continue;
+                }
+            }
+
+            // Not an effect decorator - keep as regular decorator
+            decorators.push(decorator);
+
             // Skip newlines between decorators
             while self.check(&TokenKind::Newline) {
                 self.advance();
             }
         }
 
-        // Now parse the function with the collected decorators
-        self.parse_function_with_decorators(decorators)
+        // Now parse the function with the collected decorators and effects
+        let mut node = self.parse_function_with_decorators(decorators)?;
+
+        // Set the effects on the function
+        if let Node::Function(ref mut f) = node {
+            f.effects = effects;
+        }
+
+        Ok(node)
     }
 
     /// Parse a single decorator: @name or @name(args)
+    /// Also handles @async which uses a keyword instead of identifier.
     fn parse_decorator(&mut self) -> Result<Decorator, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::At)?;
 
-        // Parse the decorator name (can be dotted: @module.decorator)
-        let name = self.parse_primary()?;
+        // Handle @async specially since 'async' is a keyword
+        let name = if self.check(&TokenKind::Async) {
+            self.advance();
+            Expr::Identifier("async".to_string())
+        } else {
+            // Parse the decorator name (can be dotted: @module.decorator)
+            self.parse_primary()?
+        };
 
         // Check for arguments: @decorator(arg1, arg2)
         let args = self.parse_optional_paren_args()?;

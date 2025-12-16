@@ -978,4 +978,60 @@ impl<'a> Parser<'a> {
             macro_name,
         }))
     }
+
+    /// Parse requires capabilities statement: requires [pure, io, net]
+    ///
+    /// This declares the capabilities allowed in the current module.
+    /// Must appear at the top of __init__.spl files.
+    pub(crate) fn parse_requires_capabilities(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Requires)?;
+        self.expect(&TokenKind::LBracket)?;
+
+        let mut capabilities = Vec::new();
+
+        // Parse capability list
+        if !self.check(&TokenKind::RBracket) {
+            loop {
+                // Parse capability name as identifier
+                let cap_name = self.expect_identifier()?;
+
+                // Convert to Capability enum
+                let capability = Capability::from_name(&cap_name).ok_or_else(|| {
+                    ParseError::syntax_error_with_span(
+                        format!(
+                            "unknown capability '{}'. Valid capabilities: pure, io, net, fs, unsafe, gc",
+                            cap_name
+                        ),
+                        self.previous.span,
+                    )
+                })?;
+
+                capabilities.push(capability);
+
+                // Check for comma or end
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                    // Allow trailing comma
+                    if self.check(&TokenKind::RBracket) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.expect(&TokenKind::RBracket)?;
+
+        Ok(Node::RequiresCapabilities(RequiresCapabilitiesStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            capabilities,
+        }))
+    }
 }
