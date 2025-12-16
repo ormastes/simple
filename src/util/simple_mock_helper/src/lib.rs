@@ -1,5 +1,6 @@
 pub mod api_scanner;
 pub mod coverage;
+pub mod coverage_extended;
 pub mod mock_policy;
 pub mod test_check;
 
@@ -11,6 +12,10 @@ pub use coverage::{
     compute_class_coverage, load_llvm_cov_export, load_public_api_spec, parse_llvm_cov_export,
     parse_public_api_spec, print_class_coverage_table, ClassCoverage, CoverageSummary,
     LlvmCovExport, MethodCoverage, PublicApiSpec,
+};
+pub use coverage_extended::{
+    print_coverage_summary, CoverageAnalyzer, CoverageType, ExtendedCoverageReport,
+    ExtendedCoverageSummary, FunctionCoverage, TypeCoverage,
 };
 pub use mock_policy::{
     are_mocks_enabled, check_mock_use_from, get_allowed_patterns, init_mocks_for_only,

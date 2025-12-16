@@ -1,6 +1,18 @@
-# Simple BDD Spec Framework - Complete Guide
+# Simple BDD Spec Framework - Guide
 
-The Simple BDD Spec Framework provides a Ruby/RSpec-style testing DSL for writing behavior-driven tests.
+A Ruby/RSpec-style testing DSL for behavior-driven tests.
+
+## Contents
+
+1. [Quick Start](#quick-start)
+2. [Core Concepts](#core-concepts)
+3. [Context Sharing](#context-sharing)
+4. [BDD Pattern](#bdd-given-when-then-pattern)
+5. [Test Organization](#test-organization)
+6. [Best Practices](#best-practices)
+7. [Troubleshooting](#troubleshooting)
+
+---
 
 ## Quick Start
 
@@ -20,48 +32,46 @@ describe "Calculator":
             expect 10 - 3 == 7
 ```
 
-Run tests with:
+Run tests:
 ```bash
 simple test
 ```
 
+---
+
 ## Core Concepts
 
-### 1. Test Groups (describe/context)
+### 1. Test Groups
 
-**describe** - Top-level test group
+**describe** - Top-level group:
 ```simple
 describe "String":
     it "works":
         expect true
 ```
 
-**context** - Nested test group (alias for describe)
+**context** - Nested group (alias for describe):
 ```simple
 describe "Array":
     context "when empty":
         it "returns 0 length":
-            expect [].len == 0
+            expect [].len() == 0
 
     context "when populated":
         it "returns length":
-            expect [1, 2, 3].len == 3
+            expect [1, 2, 3].len() == 3
 ```
 
-### 2. Test Cases (it)
+### 2. Test Cases
 
-Define individual test cases:
 ```simple
-it "description of what it does":
-    # test body
+it "description of behavior":
     expect actual == expected
 ```
 
-Each `it` block is one test example.
+### 3. Fixtures
 
-### 3. Fixtures (given, given_lazy, let)
-
-**Unnamed eager setup** - Runs before each example
+**Unnamed eager setup** - Runs before each example:
 ```simple
 context "setup":
     given:
@@ -72,7 +82,7 @@ context "setup":
         expect true
 ```
 
-**Named lazy fixture** - Memoized once per example
+**Lazy fixture** - Memoized once per example:
 ```simple
 context "with user":
     given_lazy :user, \:
@@ -82,10 +92,10 @@ context "with user":
         expect user.name == "Alice"
 
     it "same user in example":
-        expect user.id == 42  # Memoized
+        expect user.id == 42
 ```
 
-**Named eager setup** - Documented setup step
+**Named eager setup** - Documented setup step:
 ```simple
 context "complex setup":
     given :db_connect, \:
@@ -98,7 +108,7 @@ context "complex setup":
         expect true
 ```
 
-**Plain variables** - Using let
+**Plain variables** - Using let:
 ```simple
 context "with values":
     let x = 10
@@ -108,94 +118,67 @@ context "with values":
         expect x + y == 30
 ```
 
-### 4. Hooks (before/after)
+### 4. Hooks
 
-**before_each** - Runs before each example
 ```simple
 context "with hooks":
     before_each:
         setup()
 
-    it "example 1":
-        expect true
-
-    it "example 2":
-        expect true  # Both examples run setup
-```
-
-**after_each** - Runs after each example
-```simple
-context "cleanup":
     after_each:
         cleanup()
 
-    it "cleans up":
-        expect true
-```
-
-**before_all** - Runs once before all examples in group
-```simple
-context "expensive setup":
     before_all:
         expensive_init()
 
-    it "test 1":
-        expect true
-
-    it "test 2":
-        expect true  # expensive_init runs only once
-```
-
-**after_all** - Runs once after all examples in group
-```simple
-context "cleanup":
     after_all:
         expensive_cleanup()
 
-    it "test 1":
+    it "example":
         expect true
 ```
 
-### 5. Assertions (expect/expect_raises)
+### 5. Assertions
 
-**Value assertions**
+**Value assertions:**
 ```simple
 expect value == expected
 expect value != expected
 expect value > other
 expect value < other
-expect value.includes?(item)
 ```
 
-**Matcher assertions**
+**Matcher assertions:**
 ```simple
 expect 5 to eq 5
-expect 10 to be_gt 5
+expect 10 to gt 5
 expect [1, 2] to include 1
 expect "" to be_empty
 expect nil to be_nil
 ```
 
-**Negation**
+**Negation:**
 ```simple
 expect 5 not_to eq 6
-expect 10 not_to be_lt 5
+expect 10 not_to lt 5
 ```
 
-**Exception assertions**
+**Exception assertions:**
 ```simple
 expect_raises ValueError:
-    raise ValueError("something went wrong")
+    raise ValueError("error")
 
 expect_raises:
     risky_operation()
 ```
 
-## Context Sharing (Advanced)
+---
 
-Define reusable contexts once, use them everywhere.
+## Context Sharing
 
-### Define a Context
+Define reusable contexts once, use everywhere.
+
+### Define
 
 ```simple
 context_def :admin_user:
@@ -206,7 +189,7 @@ context_def :admin_user:
         authorize_admin()
 ```
 
-### Reference a Context
+### Reference
 
 ```simple
 describe "AdminPanel":
@@ -215,7 +198,7 @@ describe "AdminPanel":
             expect user.role == "admin"
 ```
 
-### Compose Multiple Contexts
+### Compose Multiple
 
 ```simple
 context_def :auth:
@@ -231,7 +214,7 @@ describe "API":
             expect true
 ```
 
-### Sequential Setup (Contexts + Variables)
+### Sequential Setup
 
 Combine context references with variable definitions:
 
@@ -242,10 +225,7 @@ context_def :users:
 
 context "test":
     given:
-        # Step 1: Reference context
         given :users
-
-        # Step 2: Define derived variables
         let admin_key = "admin_" + admin.id.to_string()
         let greeting = "Hi, " + admin.name
 
@@ -254,34 +234,11 @@ context "test":
         expect greeting == "Hi, Admin"
 ```
 
-### Reference Context Within Given Block
-
-Apply a context's givens inline:
-
-```simple
-context_def :api_setup:
-    given:
-        start_server()
-
-    given_lazy :client, \:
-        API.new()
-
-context "test":
-    given:
-        given :api_setup  # Apply all givens
-
-        let request = {
-            endpoint: "/api/test",
-            client: client
-        }
-
-    it "has setup":
-        expect true
-```
+---
 
 ## BDD Given-When-Then Pattern
 
-Structure tests as Given-When-Then scenarios:
+Structure tests as scenarios:
 
 ```simple
 context_def :calculator_state:
@@ -295,28 +252,30 @@ describe "Calculator":
             expect calc.value == 0
 
         context "when adding 5":
-            # When: perform action
+            # When: action
             given:
                 calc.add(5)
 
-            # Then: verify result
+            # Then: verify
             it "value is 5":
                 expect calc.value == 5
 
         context "when multiplying by 2":
-            # When: perform action
+            # When: action
             given:
                 calc.multiply(2)
 
-            # Then: verify result
+            # Then: verify
             it "value is 0":
                 expect calc.value == 0
 ```
 
-Comments show BDD intent:
-- **Given** - Context with `context_def` and `given_lazy`
-- **When** - Action with `given:` block
-- **Then** - Assertion with `it` block
+Mapping:
+- **Given** → `context_def` with `given_lazy`
+- **When** → `given:` block
+- **Then** → `it` block
+
+---
 
 ## Test Organization
 
@@ -324,10 +283,9 @@ Comments show BDD intent:
 
 ```
 test/
-  __init__.spl           # Shared imports (std.spec.*)
+  __init__.spl
   unit/
     feature_spec.spl
-    helper_spec.spl
   integration/
     api_spec.spl
   system/
@@ -336,61 +294,61 @@ test/
 
 ### Naming Conventions
 
-- File names: `feature_spec.spl` or `feature_tests.spl`
-- Describe blocks: `describe "ClassName":`
-- Context blocks: `context "when condition":`
-- Test cases: `it "should do something":`
+- Files: `feature_spec.spl`
+- Describe: `describe "ClassName":`
+- Context: `context "when condition":`
+- Test: `it "does something":`
 
 ### Test Levels
 
-**Unit Tests** - Fast, isolated, no external dependencies
+**Unit** - Fast, isolated:
 ```simple
 describe "Parser":
     it "parses tokens":
         expect Parser.parse("1 + 2") != nil
 ```
 
-**Integration Tests** - Test module boundaries, limited external deps
+**Integration** - Module boundaries:
 ```simple
 describe "Database":
-    context "with connection":
-        before_all:
-            db.connect()
+    before_all:
+        db.connect()
 
-        it "queries work":
-            expect db.query("SELECT 1") != nil
+    it "queries work":
+        expect db.query("SELECT 1") != nil
 ```
 
-**System Tests** - Full end-to-end, realistic environment
+**System** - End-to-end:
 ```simple
 describe "API Server":
-    context "with server running":
-        before_all:
-            start_server()
+    before_all:
+        start_server()
 
-        it "handles requests":
-            expect api.get("/health").status == 200
+    it "handles requests":
+        expect api.get("/health").status == 200
 ```
+
+---
 
 ## Best Practices
 
-### ✅ Do
+### Do
 
-- **Name clearly**: `it "adds two positive numbers":` not `it "works":`
-- **One assertion per concept**: Group related assertions together
-- **Use context sharing**: Define fixtures once, reuse everywhere
-- **Use BDD comments**: Mark Given-When-Then steps clearly
-- **Keep tests focused**: One behavior per test
-- **Use fixtures**: `given_lazy` for test data, `given:` for setup
+- Name clearly: `it "adds two positive numbers":` not `it "works":`
+- One assertion concept per test
+- Use context sharing for reusable fixtures
+- Mark Given-When-Then with comments
+- Use `given_lazy` for test data, `given:` for setup
 
-### ❌ Don't
+### Don't
 
-- **Multiple behaviors per test**: One assertion concept per test
-- **Test implementation**: Test behavior, not internal details
-- **Share state between tests**: Each test should be independent
-- **Ignore test names**: Test names are documentation
-- **Skip tests silently**: Use `skip` or `pending` if needed
-- **Create tight couples**: Mock external dependencies
+- Multiple behaviors per test
+- Test implementation details
+- Share mutable state between tests
+- Use vague test names
+- Skip without marking `pending`
+
+---
 
 ## Common Patterns
 
@@ -408,9 +366,6 @@ describe "API":
 
         it "test 2":
             expect client != nil
-
-        it "test 3":
-            expect client != nil
 ```
 
 ### Test Data Variants
@@ -425,14 +380,14 @@ context_def :filled_list:
 describe "List":
     context :empty_list:
         it "is empty":
-            expect items.len == 0
+            expect items.len() == 0
 
     context :filled_list:
         it "has items":
-            expect items.len == 3
+            expect items.len() == 3
 ```
 
-### Composed Complex Setup
+### Composed Setup
 
 ```simple
 context_def :database:
@@ -452,19 +407,20 @@ describe "Integration":
             expect true
 ```
 
+---
+
 ## Troubleshooting
 
 ### Fixture not available
 
-**Problem**: Trying to use `user` but it's not defined
+**Problem:**
 ```simple
 context "test":
-    # Wrong - fixture not defined
     it "uses user":
-        expect user.name == "Alice"
+        expect user.name == "Alice"  # Error: user undefined
 ```
 
-**Solution**: Define the fixture
+**Solution:**
 ```simple
 context "test":
     given_lazy :user, \:
@@ -476,28 +432,26 @@ context "test":
 
 ### Context not found
 
-**Problem**: Referencing undefined context_def
+**Problem:**
 ```simple
-context "test":
-    context :undefined_context:
-        it "fails":
-            expect true
+context :undefined_context:  # Error: not found
+    it "fails":
+        expect true
 ```
 
-**Solution**: Define the context first
+**Solution:**
 ```simple
 context_def :my_context:
     given_lazy :value, \: 42
 
-context "test":
-    context :my_context:
-        it "works":
-            expect value == 42
+context :my_context:
+    it "works":
+        expect value == 42
 ```
 
-### Fresh setup not happening
+### State leaking between tests
 
-**Problem**: State from one test leaks to next
+**Problem:**
 ```simple
 context "test":
     let x = 0
@@ -507,10 +461,10 @@ context "test":
         expect x == 5
 
     it "should be fresh":
-        expect x == 0  # Fails - x is still 5
+        expect x == 0  # Fails: x is still 5
 ```
 
-**Solution**: Use fixtures or reset in before_each
+**Solution:**
 ```simple
 context "test":
     given:
@@ -520,13 +474,13 @@ context "test":
         x = 5
         expect x == 5
 
-    it "should be fresh":
-        # Fresh setup before this test
-        expect x == 0
+    it "is fresh":
+        expect x == 0  # Passes: fresh setup
 ```
+
+---
 
 ## See Also
 
-- [Context Sharing Usage Guide](doc/context_sharing_usage_guide.md)
-- [BDD Specification](doc/spec/bdd_spec.md)
-- [Matchers Reference](doc/spec_matchers.md) (if available)
+- [BDD Specification](spec/bdd_spec.md)
+- [Matchers Reference](spec_matchers_reference.md)

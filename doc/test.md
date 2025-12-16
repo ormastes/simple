@@ -4,7 +4,7 @@
 
 This document defines the test strategy for the Simple language compiler, using `simple_mock_helper` for mock policy enforcement and coverage tracking.
 
-**Current Test Count: 631+ tests**
+**Current Test Count: 807+ tests**
 
 ## Test Categories and Directory Structure
 
@@ -131,6 +131,84 @@ Separate Raw Data (for specific coverage metrics):
   - Test external library integrations
   - Simulate different environment scenarios (filesystem, network, etc.)
   - Test error handling for external dependencies
+
+## Full Test Mode with Automatic Coverage
+
+Full test mode runs all tests with LLVM coverage instrumentation and automatically generates extended coverage reports.
+
+### Quick Start
+
+```bash
+# Run all tests + generate coverage reports (System, Integration, Merged)
+make test-full
+
+# Run tests with coverage but skip extended reports
+make test-full-quick
+
+# Run full tests + verify coverage thresholds
+make test-full-check
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SIMPLE_COVERAGE` | `1` | Set to `0` to disable coverage (just run tests) |
+| `SIMPLE_COV_THRESHOLD` | `80` | Coverage threshold percentage for pass/fail |
+
+### Generated Reports
+
+Full test mode generates three types of extended coverage reports:
+
+| Report | File | Coverage Metric |
+|--------|------|-----------------|
+| **System** | `coverage_system.json` | Public class/struct method coverage |
+| **Integration** | `coverage_integration.json` | Public function coverage |
+| **Merged** | `coverage_merged.json` | All metrics combined |
+
+Reports are written to `target/coverage/extended/`.
+
+### Coverage Tool CLI
+
+The `coverage_gen` tool provides commands for working with coverage data:
+
+```bash
+# Generate extended reports from LLVM coverage data
+cargo run -p simple_mock_helper --bin coverage_gen -- generate \
+    --llvm-cov target/coverage/coverage.json \
+    --api public_api.yml \
+    --output-dir target/coverage/extended \
+    --report-type all  # system, integration, merged, or all
+
+# Check coverage against threshold
+cargo run -p simple_mock_helper --bin coverage_gen -- check \
+    --coverage target/coverage/extended/coverage_system.json \
+    --threshold 80
+
+# Print coverage summary
+cargo run -p simple_mock_helper --bin coverage_gen -- summary \
+    --coverage target/coverage/extended/coverage_merged.json
+```
+
+### Public API Specification
+
+The `public_api.yml` file defines which types and functions are tracked for coverage:
+
+```yaml
+# Public functions for Integration test coverage
+public_functions:
+  simple_driver:
+    - Runner::new
+    - Runner::run_file
+    - Interpreter::run
+
+# Types for System test coverage (class/struct methods)
+types:
+  simple_driver::Runner:
+    methods: [new, run_file, run_source, compile_to_smf]
+  simple_parser::Parser:
+    methods: [new, parse]
+```
 
 ## Using simple_mock_helper
 

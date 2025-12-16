@@ -10,6 +10,7 @@
 //!   4) Call `compute_class_coverage`
 //!   5) Optionally use `print_class_coverage_table` or your own output.
 
+use rustc_demangle::demangle;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -120,23 +121,25 @@ pub fn load_public_api_spec<P: AsRef<Path>>(path: P) -> anyhow::Result<PublicApi
 /// If any instance of that function has non-zero count, we treat it as covered.
 pub fn compute_class_coverage(cov: &LlvmCovExport, api: &PublicApiSpec) -> Vec<ClassCoverage> {
     // Flatten all functions from all "data" entries.
-    let mut fn_names_counts: Vec<(&str, u64)> = Vec::new();
+    // Demangle Rust symbol names to human-readable form.
+    let mut fn_names_counts: Vec<(String, u64)> = Vec::new();
     for d in &cov.data {
         for f in &d.functions {
-            fn_names_counts.push((&f.name, f.count));
+            let demangled = demangle_rust_name(&f.name);
+            fn_names_counts.push((demangled, f.count));
         }
     }
 
     // Build a set of covered (type, method) pairs.
     let mut covered_pairs: HashSet<(String, String)> = HashSet::new();
 
-    for (fname, count) in fn_names_counts {
-        if count == 0 {
+    for (fname, count) in &fn_names_counts {
+        if *count == 0 {
             continue;
         }
 
-        // Heuristic: C++ member functions typically appear as
-        // "Namespace::Type::method(...)" or "Type::method".
+        // Heuristic: Rust methods typically appear as
+        // "crate::module::Type::method" or "Type::method".
         if let Some((type_name, method_name)) = split_type_method(fname) {
             covered_pairs.insert((type_name.to_string(), method_name.to_string()));
         }
@@ -172,6 +175,20 @@ pub fn compute_class_coverage(cov: &LlvmCovExport, api: &PublicApiSpec) -> Vec<C
     }
 
     results
+}
+
+/// Demangle a Rust symbol name to human-readable form.
+///
+/// Example: `_RNvNtCs...::run` -> `my_crate::module::run`
+fn demangle_rust_name(mangled: &str) -> String {
+    let demangled = demangle(mangled).to_string();
+    // Remove hash suffix like `::h1234abcd`
+    if let Some(idx) = demangled.rfind("::h") {
+        if demangled[idx + 3..].chars().all(|c| c.is_ascii_hexdigit()) {
+            return demangled[..idx].to_string();
+        }
+    }
+    demangled
 }
 
 /// Split a fully-qualified function name into (type_name, method_name)

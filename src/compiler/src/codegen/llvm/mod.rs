@@ -40,12 +40,17 @@ use std::cell::RefCell;
 /// LLVM-based code generator
 pub struct LlvmBackend {
     target: Target,
+    /// Enable coverage instrumentation
+    coverage_enabled: bool,
     #[cfg(feature = "llvm")]
     context: Context,
     #[cfg(feature = "llvm")]
     module: RefCell<Option<Module<'static>>>,
     #[cfg(feature = "llvm")]
     builder: RefCell<Option<Builder<'static>>>,
+    /// Counter for coverage basic blocks
+    #[cfg(feature = "llvm")]
+    coverage_counter: RefCell<u32>,
 }
 
 // Manual Debug implementation since Context/Module/Builder don't implement Debug
@@ -53,6 +58,7 @@ impl std::fmt::Debug for LlvmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlvmBackend")
             .field("target", &self.target)
+            .field("coverage_enabled", &self.coverage_enabled)
             .field("has_module", &cfg!(feature = "llvm"))
             .finish()
     }
@@ -67,22 +73,35 @@ impl LlvmBackend {
         #[cfg(not(feature = "llvm"))]
         {
             let _ = target; // Suppress unused warning when feature disabled
-            return Err(CompileError::Semantic(
+            Err(CompileError::Semantic(
                 "LLVM backend requires 'llvm' feature flag. \
                  Build with: cargo build --features llvm"
                     .to_string(),
-            ));
+            ))
         }
 
         #[cfg(feature = "llvm")]
         {
             Ok(Self {
                 target,
+                coverage_enabled: false,
                 context: Context::create(),
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
+                coverage_counter: RefCell::new(0),
             })
         }
+    }
+
+    /// Enable coverage instrumentation
+    pub fn with_coverage(mut self, enabled: bool) -> Self {
+        self.coverage_enabled = enabled;
+        self
+    }
+
+    /// Check if coverage is enabled
+    pub fn coverage_enabled(&self) -> bool {
+        self.coverage_enabled
     }
 
     /// Get the target for this backend
@@ -308,6 +327,11 @@ impl LlvmBackend {
         for block in &func.blocks {
             let bb = llvm_blocks[&block.id];
             builder.position_at_end(bb);
+
+            // Emit coverage counter increment if coverage is enabled
+            if self.coverage_enabled {
+                self.emit_coverage_counter(module, builder, &func.name, block.id.0)?;
+            }
 
             // Compile each instruction
             for inst in &block.instructions {
@@ -646,6 +670,66 @@ impl LlvmBackend {
                 )))
             }
         }
+
+        Ok(())
+    }
+
+    /// Emit a coverage counter increment for a basic block
+    #[cfg(feature = "llvm")]
+    fn emit_coverage_counter(
+        &self,
+        module: &Module,
+        builder: &Builder,
+        func_name: &str,
+        block_id: u32,
+    ) -> Result<(), CompileError> {
+        // Get next counter id
+        let counter_id = {
+            let mut counter = self.coverage_counter.borrow_mut();
+            let id = *counter;
+            *counter += 1;
+            id
+        };
+
+        // Create global counter variable name
+        let counter_name = format!("__simple_cov_{}_{}", func_name, block_id);
+
+        // Check if counter already exists, if not create it
+        let counter_global = if let Some(global) = module.get_global(&counter_name) {
+            global
+        } else {
+            let i64_type = self.context.i64_type();
+            let global = module.add_global(i64_type, None, &counter_name);
+            global.set_initializer(&i64_type.const_zero());
+            global.set_linkage(inkwell::module::Linkage::Internal);
+            global
+        };
+
+        // Load current value
+        let i64_type = self.context.i64_type();
+        let current = builder
+            .build_load(i64_type, counter_global.as_pointer_value(), "cov_load")
+            .map_err(|e| CompileError::Semantic(format!("Failed to load coverage counter: {}", e)))?;
+
+        // Increment
+        if let inkwell::values::BasicValueEnum::IntValue(current_int) = current {
+            let one = i64_type.const_int(1, false);
+            let incremented = builder
+                .build_int_add(current_int, one, "cov_inc")
+                .map_err(|e| {
+                    CompileError::Semantic(format!("Failed to increment coverage counter: {}", e))
+                })?;
+
+            // Store back
+            builder
+                .build_store(counter_global.as_pointer_value(), incremented)
+                .map_err(|e| {
+                    CompileError::Semantic(format!("Failed to store coverage counter: {}", e))
+                })?;
+        }
+
+        // Track counter for later retrieval
+        let _ = counter_id; // Will be used in coverage mapping later
 
         Ok(())
     }

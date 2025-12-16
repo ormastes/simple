@@ -9,9 +9,11 @@
 #   make clean       - Clean build artifacts
 
 .PHONY: all test test-verbose test-unit test-integration test-system test-environment \
+        test-full test-full-quick test-full-coverage test-full-extended test-full-check \
         coverage coverage-html coverage-lcov coverage-json coverage-summary \
         coverage-unit coverage-integration coverage-system coverage-environment coverage-merged coverage-all \
         coverage-check coverage-check-unit coverage-check-integration coverage-check-system \
+        coverage-extended coverage-extended-system coverage-extended-integration coverage-extended-all coverage-extended-check \
         duplication duplication-simple lint lint-fix fmt fmt-check \
         check check-full unused-deps outdated audit build build-release \
         clean clean-coverage clean-duplication install-tools help
@@ -45,6 +47,80 @@ test-system:
 # Environment tests: tests/ crate environment level
 test-environment:
 	cargo test -p simple-tests --test environment
+
+# ============================================================================
+# Full Test Mode with Automatic Coverage
+# ============================================================================
+# Runs all tests with LLVM coverage instrumentation and automatically generates
+# extended coverage reports (system, integration, merged).
+#
+# Usage:
+#   make test-full         - Run tests with coverage + generate all reports
+#   make test-full-quick   - Run tests with coverage (skip extended reports)
+#
+# Environment variables:
+#   SIMPLE_COVERAGE=0      - Disable coverage (just run tests)
+#   SIMPLE_COV_THRESHOLD=80 - Coverage threshold for pass/fail (default: 80)
+# ============================================================================
+
+SIMPLE_COV_THRESHOLD ?= 80
+
+test-full: test-full-coverage test-full-extended
+	@echo ""
+	@echo "=============================================="
+	@echo "FULL TEST COMPLETE"
+	@echo "=============================================="
+	@echo "Coverage reports:"
+	@echo "  HTML:        $(COVERAGE_DIR)/html/index.html"
+	@echo "  System:      $(COVERAGE_DIR)/extended/coverage_system.json"
+	@echo "  Integration: $(COVERAGE_DIR)/extended/coverage_integration.json"
+	@echo "  Merged:      $(COVERAGE_DIR)/extended/coverage_merged.json"
+	@echo ""
+
+test-full-quick: test-full-coverage
+	@echo "Quick test complete (coverage collected, extended reports skipped)"
+
+test-full-coverage:
+	@echo "=== RUNNING FULL TESTS WITH LLVM COVERAGE ==="
+	@mkdir -p $(COVERAGE_DIR)
+	@if [ "$${SIMPLE_COVERAGE:-1}" = "0" ]; then \
+		echo "Coverage disabled (SIMPLE_COVERAGE=0), running plain tests..."; \
+		cargo test --workspace; \
+	else \
+		echo "Running tests with LLVM coverage instrumentation..."; \
+		cargo llvm-cov --workspace --json --output-path=$(COVERAGE_DIR)/coverage.json; \
+		cargo llvm-cov --workspace --html --output-dir=$(COVERAGE_DIR)/html; \
+		echo "Base coverage collected: $(COVERAGE_DIR)/coverage.json"; \
+	fi
+
+test-full-extended:
+	@echo ""
+	@echo "=== GENERATING EXTENDED COVERAGE REPORTS ==="
+	@mkdir -p $(COVERAGE_DIR)/extended
+	@if [ -f $(COVERAGE_DIR)/coverage.json ] && [ -f public_api.yml ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
+			--llvm-cov $(COVERAGE_DIR)/coverage.json \
+			--api public_api.yml \
+			--output-dir $(COVERAGE_DIR)/extended \
+			--report-type all; \
+	else \
+		echo "Skipping extended reports (missing coverage.json or public_api.yml)"; \
+	fi
+
+test-full-check: test-full
+	@echo ""
+	@echo "=== CHECKING COVERAGE THRESHOLDS ==="
+	@if [ -f $(COVERAGE_DIR)/extended/coverage_system.json ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- check \
+			--coverage $(COVERAGE_DIR)/extended/coverage_system.json \
+			--threshold $(SIMPLE_COV_THRESHOLD) || exit 1; \
+	fi
+	@if [ -f $(COVERAGE_DIR)/extended/coverage_integration.json ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- check \
+			--coverage $(COVERAGE_DIR)/extended/coverage_integration.json \
+			--threshold $(SIMPLE_COV_THRESHOLD) || exit 1; \
+	fi
+	@echo "All coverage thresholds passed!"
 
 # ============================================================================
 # Coverage (requires cargo-llvm-cov)
@@ -143,6 +219,68 @@ coverage-all: coverage-unit coverage-integration coverage-system coverage-enviro
 	@echo "  Integration (public func touch): $(COVERAGE_DIR)/integration/"
 	@echo "  System (class/struct touch):     $(COVERAGE_DIR)/system/"
 	@echo "  Environment (branch/cond):       $(COVERAGE_DIR)/environment/"
+
+# Extended coverage reports (per coverage_json_format.md spec)
+# Generates: coverage_system.json, coverage_integration.json, coverage_merged.json
+coverage-extended: coverage-json
+	@echo "=== GENERATING EXTENDED COVERAGE REPORTS ==="
+	@mkdir -p $(COVERAGE_DIR)/extended
+	@if [ -f public_api.yml ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
+			--llvm-cov $(COVERAGE_DIR)/coverage.json \
+			--api public_api.yml \
+			--output-dir $(COVERAGE_DIR)/extended; \
+	else \
+		echo "Warning: public_api.yml not found, skipping extended reports"; \
+	fi
+
+# Extended coverage by test level
+coverage-extended-system:
+	@mkdir -p $(COVERAGE_DIR)/extended
+	@echo "=== EXTENDED SYSTEM COVERAGE ==="
+	cargo llvm-cov -p simple-tests --test system \
+		--json --output-path=$(COVERAGE_DIR)/system_raw.json
+	@if [ -f public_api.yml ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
+			--llvm-cov $(COVERAGE_DIR)/system_raw.json \
+			--api public_api.yml \
+			--output-dir $(COVERAGE_DIR)/extended \
+			--report-type system; \
+	fi
+
+coverage-extended-integration:
+	@mkdir -p $(COVERAGE_DIR)/extended
+	@echo "=== EXTENDED INTEGRATION COVERAGE ==="
+	cargo llvm-cov -p simple-tests --test integration \
+		--json --output-path=$(COVERAGE_DIR)/integration_raw.json
+	@if [ -f public_api.yml ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
+			--llvm-cov $(COVERAGE_DIR)/integration_raw.json \
+			--api public_api.yml \
+			--output-dir $(COVERAGE_DIR)/extended \
+			--report-type integration; \
+	fi
+
+coverage-extended-all: coverage-extended-system coverage-extended-integration coverage-extended
+	@echo ""
+	@echo "Extended coverage reports generated:"
+	@echo "  System (class/struct methods): $(COVERAGE_DIR)/extended/coverage_system.json"
+	@echo "  Integration (public functions): $(COVERAGE_DIR)/extended/coverage_integration.json"
+	@echo "  Merged (all metrics): $(COVERAGE_DIR)/extended/coverage_merged.json"
+
+# Check extended coverage thresholds
+coverage-extended-check:
+	@echo "=== CHECKING EXTENDED COVERAGE THRESHOLDS ==="
+	@if [ -f $(COVERAGE_DIR)/extended/coverage_system.json ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- check \
+			--coverage $(COVERAGE_DIR)/extended/coverage_system.json \
+			--threshold 80; \
+	fi
+	@if [ -f $(COVERAGE_DIR)/extended/coverage_integration.json ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- check \
+			--coverage $(COVERAGE_DIR)/extended/coverage_integration.json \
+			--threshold 80; \
+	fi
 
 # Coverage threshold checks (per test.md: 100% for all)
 coverage-check: coverage-check-unit coverage-check-integration coverage-check-system
@@ -299,13 +437,21 @@ install-tools:
 help:
 	@echo "Simple Language Project - Available Commands"
 	@echo ""
-	@echo "Testing (631+ tests total):"
+	@echo "Testing (807+ tests total):"
 	@echo "  make test               - Run all tests"
 	@echo "  make test-verbose       - Run tests with output"
 	@echo "  make test-unit          - Run all workspace unit tests"
 	@echo "  make test-integration   - Run integration tests only"
 	@echo "  make test-system        - Run system tests only"
 	@echo "  make test-environment   - Run environment tests only"
+	@echo ""
+	@echo "Full Test Mode (automatic coverage):"
+	@echo "  make test-full          - Run tests + generate all coverage reports"
+	@echo "  make test-full-quick    - Run tests + collect coverage (no extended reports)"
+	@echo "  make test-full-check    - Run test-full + verify thresholds"
+	@echo "  Environment variables:"
+	@echo "    SIMPLE_COVERAGE=0       - Disable coverage (just run tests)"
+	@echo "    SIMPLE_COV_THRESHOLD=80 - Coverage threshold % (default: 80)"
 	@echo ""
 	@echo "Coverage (per test.md policy):"
 	@echo "  make coverage              - Generate HTML coverage report"
@@ -317,6 +463,10 @@ help:
 	@echo "  make coverage-all          - Generate all coverage reports"
 	@echo "  make coverage-check        - Verify all coverage thresholds (100%)"
 	@echo "  make coverage-summary      - Print coverage summary"
+	@echo ""
+	@echo "Extended Coverage (public API):"
+	@echo "  make coverage-extended     - Generate extended reports from existing data"
+	@echo "  make coverage-extended-all - Generate all extended report types"
 	@echo ""
 	@echo "Duplication:"
 	@echo "  make duplication   - Check for code duplication"

@@ -17,6 +17,7 @@ mod cli_tests;
 mod core_tests;
 mod coverage_tests;
 mod coverage_tests2;
+mod coverage_verification_tests;
 mod execution_tests;
 mod feature_tests_advanced;
 mod feature_tests_basic;
