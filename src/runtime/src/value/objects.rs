@@ -269,3 +269,362 @@ pub extern "C" fn rt_enum_payload(value: RuntimeValue) -> RuntimeValue {
     get_typed_ptr::<RuntimeEnum>(value, HeapObjectType::Enum)
         .map_or(RuntimeValue::NIL, |p| unsafe { (*p).payload })
 }
+
+// ============================================================================
+// Unique Pointer - Heap structure and FFI functions
+// ============================================================================
+//
+// Unique pointers provide single-owner semantics with RAII cleanup.
+// They collaborate with GC by registering as roots when containing GC-managed values.
+
+use crate::memory::gc::{register_unique_root, unregister_unique_root};
+
+/// A heap-allocated unique pointer with GC root registration capability.
+///
+/// When the contained value references GC-managed objects, this unique pointer
+/// registers as a GC root to prevent those objects from being collected.
+#[repr(C)]
+pub struct RuntimeUnique {
+    pub header: HeapHeader,
+    /// The wrapped RuntimeValue
+    pub value: RuntimeValue,
+    /// Flag indicating if GC tracing is needed (1 = yes, 0 = no)
+    pub needs_trace: u8,
+    /// Reserved for alignment
+    pub reserved: [u8; 7],
+}
+
+/// Allocate a new unique pointer wrapping the given value.
+/// If the value contains heap references, the unique pointer is registered as a GC root.
+#[no_mangle]
+pub extern "C" fn rt_unique_new(value: RuntimeValue) -> RuntimeValue {
+    let size = std::mem::size_of::<RuntimeUnique>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeUnique;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Unique, size as u32);
+        (*ptr).value = value;
+        (*ptr).needs_trace = if value.is_heap() { 1 } else { 0 };
+        (*ptr).reserved = [0; 7];
+
+        // Register as GC root if value contains heap references
+        if (*ptr).needs_trace != 0 {
+            register_unique_root(ptr as *mut u8);
+        }
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Get the value inside a unique pointer (read-only).
+#[no_mangle]
+pub extern "C" fn rt_unique_get(unique: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr::<RuntimeUnique>(unique, HeapObjectType::Unique) else {
+        return RuntimeValue::NIL;
+    };
+    unsafe { (*ptr).value }
+}
+
+/// Set the value inside a unique pointer (mutable access / update).
+/// Updates GC root registration if the new value's heap status differs.
+#[no_mangle]
+pub extern "C" fn rt_unique_set(unique: RuntimeValue, new_value: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr_mut::<RuntimeUnique>(unique, HeapObjectType::Unique) else {
+        return RuntimeValue::from_bool(false);
+    };
+    unsafe {
+        let old_needs_trace = (*ptr).needs_trace;
+        let new_needs_trace = if new_value.is_heap() { 1 } else { 0 };
+
+        (*ptr).value = new_value;
+        (*ptr).needs_trace = new_needs_trace;
+
+        // Update GC root registration if needed
+        if old_needs_trace == 0 && new_needs_trace != 0 {
+            // Newly needs tracing, register as root
+            register_unique_root(ptr as *mut u8);
+        } else if old_needs_trace != 0 && new_needs_trace == 0 {
+            // No longer needs tracing, unregister from roots
+            unregister_unique_root(ptr as *mut u8);
+        }
+
+        RuntimeValue::from_bool(true)
+    }
+}
+
+/// Free a unique pointer and unregister from GC roots.
+#[no_mangle]
+pub extern "C" fn rt_unique_free(unique: RuntimeValue) {
+    let Some(ptr) = get_typed_ptr_mut::<RuntimeUnique>(unique, HeapObjectType::Unique) else {
+        return;
+    };
+    unsafe {
+        // Unregister from GC roots if it was registered
+        if (*ptr).needs_trace != 0 {
+            unregister_unique_root(ptr as *mut u8);
+        }
+
+        let size = std::mem::size_of::<RuntimeUnique>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
+}
+
+/// Check if unique pointer needs GC tracing.
+#[no_mangle]
+pub extern "C" fn rt_unique_needs_trace(unique: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr::<RuntimeUnique>(unique, HeapObjectType::Unique) else {
+        return RuntimeValue::from_bool(false);
+    };
+    unsafe { RuntimeValue::from_bool((*ptr).needs_trace != 0) }
+}
+
+// ============================================================================
+// Shared Pointer - Heap structure and FFI functions
+// ============================================================================
+//
+// Shared pointers (*T) provide reference-counted ownership semantics.
+// Multiple owners can share the same value. The value is freed when
+// the last owner releases it (ref count drops to 0).
+
+use crate::memory::gc::{register_shared_root, unregister_shared_root};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A heap-allocated shared (reference-counted) pointer with GC root registration.
+///
+/// When the contained value references GC-managed objects, this shared pointer
+/// registers as a GC root to prevent those objects from being collected.
+#[repr(C)]
+pub struct RuntimeShared {
+    pub header: HeapHeader,
+    /// The wrapped RuntimeValue
+    pub value: RuntimeValue,
+    /// Reference count (atomic for thread safety)
+    pub ref_count: AtomicU64,
+    /// Flag indicating if GC tracing is needed (1 = yes, 0 = no)
+    pub needs_trace: u8,
+    /// Reserved for alignment
+    pub reserved: [u8; 7],
+}
+
+/// Allocate a new shared pointer wrapping the given value.
+/// Initial reference count is 1.
+#[no_mangle]
+pub extern "C" fn rt_shared_new(value: RuntimeValue) -> RuntimeValue {
+    let size = std::mem::size_of::<RuntimeShared>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeShared;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Shared, size as u32);
+        (*ptr).value = value;
+        (*ptr).ref_count = AtomicU64::new(1);
+        (*ptr).needs_trace = if value.is_heap() { 1 } else { 0 };
+        (*ptr).reserved = [0; 7];
+
+        // Register as GC root if value contains heap references
+        if (*ptr).needs_trace != 0 {
+            register_shared_root(ptr as *mut u8);
+        }
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Get the value inside a shared pointer (read-only).
+#[no_mangle]
+pub extern "C" fn rt_shared_get(shared: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr::<RuntimeShared>(shared, HeapObjectType::Shared) else {
+        return RuntimeValue::NIL;
+    };
+    unsafe { (*ptr).value }
+}
+
+/// Increment the reference count (clone the shared pointer).
+/// Returns the same shared pointer value.
+#[no_mangle]
+pub extern "C" fn rt_shared_clone(shared: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr::<RuntimeShared>(shared, HeapObjectType::Shared) else {
+        return RuntimeValue::NIL;
+    };
+    unsafe {
+        (*ptr).ref_count.fetch_add(1, Ordering::SeqCst);
+    }
+    shared
+}
+
+/// Get the current reference count.
+#[no_mangle]
+pub extern "C" fn rt_shared_ref_count(shared: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr::<RuntimeShared>(shared, HeapObjectType::Shared) else {
+        return RuntimeValue::from_int(-1);
+    };
+    unsafe { RuntimeValue::from_int((*ptr).ref_count.load(Ordering::SeqCst) as i64) }
+}
+
+/// Decrement the reference count and free if it reaches zero.
+/// Returns true if the shared pointer was freed, false otherwise.
+#[no_mangle]
+pub extern "C" fn rt_shared_release(shared: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr_mut::<RuntimeShared>(shared, HeapObjectType::Shared) else {
+        return RuntimeValue::from_bool(false);
+    };
+    unsafe {
+        let old_count = (*ptr).ref_count.fetch_sub(1, Ordering::SeqCst);
+        if old_count == 1 {
+            // Last reference, free the memory
+            if (*ptr).needs_trace != 0 {
+                unregister_shared_root(ptr as *mut u8);
+            }
+            let size = std::mem::size_of::<RuntimeShared>();
+            let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+            std::alloc::dealloc(ptr as *mut u8, layout);
+            RuntimeValue::from_bool(true)
+        } else {
+            RuntimeValue::from_bool(false)
+        }
+    }
+}
+
+/// Check if shared pointer needs GC tracing.
+#[no_mangle]
+pub extern "C" fn rt_shared_needs_trace(shared: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr::<RuntimeShared>(shared, HeapObjectType::Shared) else {
+        return RuntimeValue::from_bool(false);
+    };
+    unsafe { RuntimeValue::from_bool((*ptr).needs_trace != 0) }
+}
+
+/// Create a weak pointer from a shared pointer.
+/// The weak pointer does not increment the reference count.
+#[no_mangle]
+pub extern "C" fn rt_shared_downgrade(shared: RuntimeValue) -> RuntimeValue {
+    let Some(ptr) = get_typed_ptr::<RuntimeShared>(shared, HeapObjectType::Shared) else {
+        return RuntimeValue::NIL;
+    };
+    // Create a weak pointer that references this shared pointer
+    rt_weak_new(shared, ptr as *const u8 as u64)
+}
+
+// ============================================================================
+// Weak Pointer - Heap structure and FFI functions
+// ============================================================================
+//
+// Weak pointers (-T) are non-owning references to shared pointers.
+// They do not affect the reference count and can become dangling
+// if all strong (shared) references are released.
+
+/// A heap-allocated weak pointer referencing a shared pointer.
+///
+/// Weak pointers store the address of a RuntimeShared and check validity
+/// before dereferencing.
+#[repr(C)]
+pub struct RuntimeWeak {
+    pub header: HeapHeader,
+    /// Address of the RuntimeShared this weak pointer references
+    pub shared_addr: u64,
+    /// The original shared RuntimeValue (for type checking)
+    pub shared_value: RuntimeValue,
+}
+
+/// Allocate a new weak pointer referencing a shared pointer.
+/// Internal function - use rt_shared_downgrade instead.
+#[no_mangle]
+pub extern "C" fn rt_weak_new(shared_value: RuntimeValue, shared_addr: u64) -> RuntimeValue {
+    let size = std::mem::size_of::<RuntimeWeak>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeWeak;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Borrow, size as u32);
+        (*ptr).shared_addr = shared_addr;
+        (*ptr).shared_value = shared_value;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Attempt to upgrade a weak pointer to a shared pointer.
+/// Returns NIL if the shared pointer has been freed.
+/// If successful, increments the reference count and returns the shared pointer.
+#[no_mangle]
+pub extern "C" fn rt_weak_upgrade(weak: RuntimeValue) -> RuntimeValue {
+    let Some(weak_ptr) = get_typed_ptr::<RuntimeWeak>(weak, HeapObjectType::Borrow) else {
+        return RuntimeValue::NIL;
+    };
+    unsafe {
+        let shared_addr = (*weak_ptr).shared_addr;
+        if shared_addr == 0 {
+            return RuntimeValue::NIL;
+        }
+
+        // Validate the shared pointer is still valid
+        let shared_ptr = shared_addr as *const RuntimeShared;
+
+        // Check if the header still indicates a shared pointer
+        if (*shared_ptr).header.object_type != HeapObjectType::Shared {
+            return RuntimeValue::NIL;
+        }
+
+        // Check if reference count is > 0 (not freed)
+        let ref_count = (*shared_ptr).ref_count.load(Ordering::SeqCst);
+        if ref_count == 0 {
+            return RuntimeValue::NIL;
+        }
+
+        // Increment reference count and return the shared pointer
+        (*shared_ptr).ref_count.fetch_add(1, Ordering::SeqCst);
+        (*weak_ptr).shared_value
+    }
+}
+
+/// Check if the weak pointer is still valid (shared pointer exists).
+#[no_mangle]
+pub extern "C" fn rt_weak_is_valid(weak: RuntimeValue) -> RuntimeValue {
+    let Some(weak_ptr) = get_typed_ptr::<RuntimeWeak>(weak, HeapObjectType::Borrow) else {
+        return RuntimeValue::from_bool(false);
+    };
+    unsafe {
+        let shared_addr = (*weak_ptr).shared_addr;
+        if shared_addr == 0 {
+            return RuntimeValue::from_bool(false);
+        }
+
+        let shared_ptr = shared_addr as *const RuntimeShared;
+
+        // Check header type and reference count
+        if (*shared_ptr).header.object_type != HeapObjectType::Shared {
+            return RuntimeValue::from_bool(false);
+        }
+
+        let ref_count = (*shared_ptr).ref_count.load(Ordering::SeqCst);
+        RuntimeValue::from_bool(ref_count > 0)
+    }
+}
+
+/// Free a weak pointer.
+/// This does not affect the shared pointer's reference count.
+#[no_mangle]
+pub extern "C" fn rt_weak_free(weak: RuntimeValue) {
+    let Some(ptr) = get_typed_ptr_mut::<RuntimeWeak>(weak, HeapObjectType::Borrow) else {
+        return;
+    };
+    unsafe {
+        let size = std::mem::size_of::<RuntimeWeak>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(ptr as *mut u8, layout);
+    }
+}

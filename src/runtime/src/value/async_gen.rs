@@ -237,3 +237,114 @@ pub extern "C" fn rt_generator_next(generator: RuntimeValue) -> RuntimeValue {
         func(gen_val)
     }
 }
+
+// ============================================================================
+// Future Combinators
+// ============================================================================
+
+use super::collections::rt_array_new;
+
+/// Check if a future is ready.
+/// Returns 1 if ready, 0 if still pending.
+#[no_mangle]
+pub extern "C" fn rt_future_is_ready(future: RuntimeValue) -> i64 {
+    let fut = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, 0);
+    unsafe {
+        if (*fut).state == 1 { 1 } else { 0 }
+    }
+}
+
+/// Get the result of a ready future without blocking.
+/// Returns NIL if the future is not ready.
+#[no_mangle]
+pub extern "C" fn rt_future_get_result(future: RuntimeValue) -> RuntimeValue {
+    let fut = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, RuntimeValue::NIL);
+    unsafe {
+        if (*fut).state == 1 {
+            (*fut).result
+        } else {
+            RuntimeValue::NIL
+        }
+    }
+}
+
+/// Wait for all futures in an array to complete.
+/// Returns an array of results in the same order.
+/// Note: In eager execution mode, all futures complete immediately.
+#[no_mangle]
+pub extern "C" fn rt_future_all(futures_array: RuntimeValue) -> RuntimeValue {
+    use super::collections::{rt_array_get, rt_array_len, rt_array_push};
+
+    let len = rt_array_len(futures_array);
+    if len == 0 {
+        return rt_array_new(0);
+    }
+
+    // Create result array
+    let results = rt_array_new(len as u64);
+
+    // Collect results from each future
+    for i in 0..len {
+        let future = rt_array_get(futures_array, i);
+        let result = rt_future_await(future);
+        rt_array_push(results, result);
+    }
+
+    results
+}
+
+/// Wait for the first future in an array to complete.
+/// Returns the result of the first completed future.
+/// Note: In eager execution mode, returns the first future's result.
+#[no_mangle]
+pub extern "C" fn rt_future_race(futures_array: RuntimeValue) -> RuntimeValue {
+    use super::collections::{rt_array_get, rt_array_len};
+
+    let len = rt_array_len(futures_array);
+    if len == 0 {
+        return RuntimeValue::NIL;
+    }
+
+    // In eager mode, all futures are already complete
+    // Return the first one that's ready
+    for i in 0..len {
+        let future = rt_array_get(futures_array, i);
+        if rt_future_is_ready(future) == 1 {
+            return rt_future_get_result(future);
+        }
+    }
+
+    // Fall back to awaiting the first future
+    let first_future = rt_array_get(futures_array, 0);
+    rt_future_await(first_future)
+}
+
+/// Create a resolved future with an immediate value.
+#[no_mangle]
+pub extern "C" fn rt_future_resolve(value: RuntimeValue) -> RuntimeValue {
+    let size = std::mem::size_of::<RuntimeFuture>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeFuture;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Future, size as u32);
+        (*ptr).state = 1; // already ready
+        (*ptr).result = value;
+        (*ptr).body_func = 0;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+/// Create a rejected future (for error handling).
+/// The error value is stored as the result.
+#[no_mangle]
+pub extern "C" fn rt_future_reject(error: RuntimeValue) -> RuntimeValue {
+    // For now, rejection is modeled as a ready future with an error value
+    // A proper implementation would track rejection state separately
+    rt_future_resolve(error)
+}

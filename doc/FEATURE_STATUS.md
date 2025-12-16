@@ -93,11 +93,13 @@ This document consolidates all feature implementation status from `doc/status/*.
 - FFI: `rt_enum_*` functions
 
 ### #12: Pattern Matching ✅
-**Status:** COMPLETE  
-**Implementation:** `src/compiler/src/mir/types.rs`
-- Match expressions
-- Pattern types: literal, bind, wildcard, struct, tuple, array
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/interpreter_control.rs`, `src/compiler/src/mir/types.rs`
+- Match expressions with all pattern types
+- Pattern types: literal (int/bool/string), bind, wildcard, struct, tuple, array, enum (single and multi-payload), range, or-patterns, guards
+- `if-let` pattern matching
 - MIR instructions: PatternTest, PatternBind
+- **BDD Tests:** 79 passing (`simple/std_lib/test/unit/core/pattern_matching_spec.spl`)
 
 ### #13: Type Inference 🔄
 **Status:** IN PROGRESS  
@@ -260,12 +262,31 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Dynamic method dispatch fallback
 - **Blocked:** Runtime implementation
 
-### #37: Union Types 🔄
-**Status:** PLANNED  
-**Implementation:** Parser design complete
-- Syntax: `T | U`
-- Type checking
-- **Blocked:** Type system integration
+### #37: Union Types 📋
+**Status:** DESIGN REQUIRED
+**Implementation:** Not started
+**Design:** See `doc/design/type_system_features.md`
+- Tagged unions (algebraic data types)
+- Syntax: `union Shape: Circle(r: f64) | Rectangle(w: f64, h: f64)`
+- Pattern matching integration
+- Variant constructors
+- **Blocked:** Type system design
+
+### #37b: Result Type 📋
+**Status:** DESIGN REQUIRED
+**Implementation:** Not started (depends on #37)
+**Design:** See `doc/design/type_system_features.md`
+- `Result[T, E]` = `Ok(T) | Err(E)`
+- `?` operator for error propagation
+- `unwrap()`, `map()`, `and_then()` methods
+
+### #37c: Bitfields 📋
+**Status:** DESIGN REQUIRED
+**Implementation:** Not started
+**Design:** See `doc/design/type_system_features.md`
+- Packed bit-level structs
+- Syntax: `bitfield Flags(u8): readable: 1, writable: 1`
+- Hardware register access, FFI compatibility
 
 ### #38: Option Type ✅
 **Status:** COMPLETE  
@@ -355,12 +376,13 @@ This document consolidates all feature implementation status from `doc/status/*.
 
 ## Codegen Features (#99-103)
 
-### #99: Body Block Outlining 📋
-**Status:** PLANNED  
-**Implementation:** Design in `doc/codegen_technical_features.md`
-- Extract actor/generator/future bodies to separate functions
-- Enable proper closure capture
-- **Blocked:** Codegen refactor
+### #99: Body Block Outlining ✅
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/codegen/shared.rs`
+- `expand_with_outlined()` extracts actor/generator/future bodies
+- `create_outlined_function()` creates separate MirFunction for each body_block
+- Live-in analysis and capture buffer support
+- Used by both AOT and JIT backends
 
 ### #100: Capture Buffer & VReg Remapping ✅
 **Status:** COMPLETE  
@@ -376,19 +398,21 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Yield point lowering
 - Resume logic
 
-### #102: Future Body Execution (Compiled) 📋
-**Status:** PLANNED  
-**Implementation:** Design complete
-- Async body compilation
-- Await point handling
-- **Blocked:** Feature #99 (outlining)
+### #102: Future Body Execution 🔄
+**Status:** IN PROGRESS
+**Implementation:** `src/runtime/src/value/async_gen.rs`
+- Eager execution implemented
+- Full async/await state machine pending
+- **Dependency:** Feature #99 complete, unblocked
 
 ### #103: Codegen Parity Completion 🔄
-**Status:** IN PROGRESS  
+**Status:** IN PROGRESS
 **Implementation:** Multiple codegen modules
-- RuntimeValue bridge complete
-- 50+ FFI functions defined
-- **Next:** Complete stub replacements
+- Native codegen handles most MIR instructions
+- 50+ FFI functions defined in `runtime_ffi.rs`
+- `compilability.rs` analysis exists but not integrated
+- `InterpCall`/`InterpEval` defined but not emitted
+- **Next:** Integrate hybrid execution (see `doc/status/codegen_parity_completion.md`)
 
 ---
 
@@ -508,13 +532,16 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Global cache with hard links
 - Commands: init, add, install, update, list, cache
 
-### Module System 🔄
-**Status:** IN PROGRESS  
-**Implementation:** `src/compiler/src/module_resolver.rs`
+### Module System ✅
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/module_resolver.rs`, `src/dependency_tracker/`
 - Parsing: ✅ Complete
 - Path resolution: ✅ Complete
 - __init__.spl: ✅ Complete
-- **Next:** Import dependency graph
+- Import dependency graph: ✅ Complete (38 tests passing)
+- Cycle detection: ✅ Complete
+- Visibility rules: ✅ Complete
+- Symbol resolution: ✅ Complete
 
 ### Interpreter Interface ✅
 **Status:** COMPLETE  
@@ -547,14 +574,14 @@ This document consolidates all feature implementation status from `doc/status/*.
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
 | Core Language | 50 | 38 | 8 | 4 |
-| Codegen | 5 | 2 | 1 | 2 |
+| Codegen | 5 | 3 | 2 | 0 |
 | Extended | 21 | 1 | 0 | 20 |
 | Testing | 4 | 2 | 1 | 1 |
 | Advanced | 127 | 0 | 0 | 127 |
-| Infrastructure | 5 | 4 | 1 | 0 |
-| **TOTAL** | **212** | **47** | **11** | **154** |
+| Infrastructure | 5 | 5 | 0 | 0 |
+| **TOTAL** | **212** | **49** | **11** | **152** |
 
-**Overall Progress:** 22% (47/212 complete)
+**Overall Progress:** 23% (49/212 complete)
 
 ---
 

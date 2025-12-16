@@ -38,6 +38,7 @@ impl<'a> super::Lexer<'a> {
             "struct" => TokenKind::Struct,
             "class" => TokenKind::Class,
             "enum" => TokenKind::Enum,
+            "union" => TokenKind::Union,
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,
             "actor" => TokenKind::Actor,

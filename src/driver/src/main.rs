@@ -20,6 +20,7 @@ use simple_log;
 use simple_pkg::commands::{add, cache_cmd, init, install, list, update};
 
 use cli::repl::run_repl;
+use cli::test_runner;
 
 const VERSION: &str = "0.1.0";
 
@@ -34,6 +35,18 @@ fn print_help() {
     eprintln!("  simple compile <src> [-o <out>] [--target <arch>] [--snapshot]  Compile to SMF");
     eprintln!("  simple watch <file.spl>     Watch and auto-recompile");
     eprintln!("  simple targets              List available target architectures");
+    eprintln!();
+    eprintln!("Testing:");
+    eprintln!("  simple test [path]          Run tests (default: test/)");
+    eprintln!("  simple test --unit          Run unit tests only");
+    eprintln!("  simple test --integration   Run integration tests only");
+    eprintln!("  simple test --system        Run system tests only");
+    eprintln!("  simple test --tag <name>    Filter by tag");
+    eprintln!("  simple test --fail-fast     Stop on first failure");
+    eprintln!("  simple test --seed <N>      Deterministic shuffle");
+    eprintln!("  simple test --format <fmt>  Output format: text, json, doc");
+    eprintln!("  simple test --json          Shorthand for --format json");
+    eprintln!("  simple test --doc           Shorthand for --format doc");
     eprintln!();
     eprintln!("Package Management:");
     eprintln!("  simple init [name]          Create a new project");
@@ -271,6 +284,9 @@ fn watch_file(path: &PathBuf) -> i32 {
 fn main() {
     simple_log::init();
 
+    // Initialize interpreter handlers for hybrid execution
+    simple_compiler::interpreter_ffi::init_interpreter_handlers();
+
     let args: Vec<String> = env::args().skip(1).collect();
 
     // Parse global flags
@@ -352,6 +368,25 @@ fn main() {
             }
             let path = PathBuf::from(&args[1]);
             std::process::exit(watch_file(&path));
+        }
+        "test" => {
+            // Parse test options from remaining args
+            let test_args: Vec<String> = args[1..].to_vec();
+            let mut options = test_runner::parse_test_args(&test_args);
+            options.gc_log = gc_log;
+            options.gc_off = gc_off;
+
+            // Only print header for non-JSON output
+            if !matches!(options.format, test_runner::OutputFormat::Json) {
+                println!("Simple Test Runner v{}", VERSION);
+                println!();
+            }
+
+            let format = options.format;
+            let result = test_runner::run_tests(options);
+            test_runner::print_summary(&result, format);
+
+            std::process::exit(if result.success() { 0 } else { 1 });
         }
         "init" => {
             let name = args.get(1).map(|s| s.as_str());

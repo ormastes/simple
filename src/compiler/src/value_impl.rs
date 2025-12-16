@@ -82,7 +82,9 @@ impl Value {
             | Value::Future(_)
             | Value::Generator(_)
             | Value::Channel(_)
-            | Value::ThreadPool(_) => true,
+            | Value::ThreadPool(_)
+            | Value::Mock(_)
+            | Value::Matcher(_) => true,
         }
     }
 
@@ -172,6 +174,8 @@ impl Value {
             Value::Handle(_) => "handle",
             Value::Borrow(_) => "borrow",
             Value::BorrowMut(_) => "borrow_mut",
+            Value::Mock(_) => "mock",
+            Value::Matcher(_) => "matcher",
             Value::Nil => "nil",
         }
     }

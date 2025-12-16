@@ -130,3 +130,49 @@ pub extern "C" fn rt_wait(target: RuntimeValue) -> RuntimeValue {
     // For now, just return the value - proper async support will implement blocking
     target
 }
+
+/// Join an actor, waiting for it to complete.
+/// Returns 1 on success, 0 on failure (invalid actor or already joined).
+#[no_mangle]
+pub extern "C" fn rt_actor_join(actor: RuntimeValue) -> i64 {
+    if let Some(actor_ptr) = as_actor_ptr(actor) {
+        unsafe {
+            let id = (*actor_ptr).handle.id();
+            match crate::concurrency::join_actor(id) {
+                Ok(()) => 1,
+                Err(_) => 0,
+            }
+        }
+    } else {
+        0
+    }
+}
+
+/// Get the actor ID.
+#[no_mangle]
+pub extern "C" fn rt_actor_id(actor: RuntimeValue) -> i64 {
+    if let Some(actor_ptr) = as_actor_ptr(actor) {
+        unsafe { (*actor_ptr).handle.id() as i64 }
+    } else {
+        0
+    }
+}
+
+/// Check if an actor is still running.
+/// Returns 1 if running, 0 if not.
+#[no_mangle]
+pub extern "C" fn rt_actor_is_alive(actor: RuntimeValue) -> i64 {
+    if let Some(actor_ptr) = as_actor_ptr(actor) {
+        unsafe {
+            // Check if the inbox sender can still send
+            // This is an approximation - a proper implementation would track state
+            if (*actor_ptr).handle.id() > 0 {
+                1
+            } else {
+                0
+            }
+        }
+    } else {
+        0
+    }
+}

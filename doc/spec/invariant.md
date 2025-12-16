@@ -398,4 +398,190 @@ Contract checking is controlled by build mode (§4.3).
 
 ---
 
-If you want, I can now integrate this directly into your repo’s documentation style (matching the existing Simple spec format) and also define the standard library helper types and idioms you’ll likely want with union returns (e.g., is_err(x), unwrap(x), match patterns) so contract code stays compact.
+10. Implementation Status
+
+| Feature | Parser | HIR | MIR | Codegen | Runtime |
+|---------|--------|-----|-----|---------|---------|
+| Preconditions (`in:`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Postconditions (`out(ret):`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Error postconditions (`out_err(err):`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Routine invariants (`invariant:`) | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `old(expr)` snapshots | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Class invariants | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Union return type detection | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Refinement types (`where`) | ✅ | 📋 | 📋 | 📋 | 📋 |
+| Build modes (`--contracts=`) | 📋 | 📋 | 📋 | 📋 | 📋 |
+
+Legend: ✅ Complete, 📋 Planned
+
+---
+
+11. Doctests
+
+The following examples serve as executable documentation for the contract system.
+
+### 11.1 Function Preconditions
+
+```simple
+/// Division with precondition check.
+///
+/// Example:
+///     >>> div_safe(10, 2)
+///     5
+///     >>> div_safe(10, 0)  # doctest: +RAISES ContractViolation
+///     ContractViolation: Precondition violation in function 'div_safe'
+fn div_safe(a: i64, b: i64) -> i64:
+    in:
+        b != 0
+    return a / b
+```
+
+### 11.2 Postconditions with Return Value
+
+```simple
+/// Absolute value with postcondition.
+///
+/// Example:
+///     >>> abs_val(-5)
+///     5
+///     >>> abs_val(3)
+///     3
+///     >>> abs_val(0)
+///     0
+fn abs_val(x: i64) -> i64:
+    if x < 0:
+        return -x
+    return x
+    out(ret):
+        ret >= 0
+```
+
+### 11.3 Union Return with Success/Error Postconditions
+
+```simple
+/// Safe division returning union type.
+///
+/// Example:
+///     >>> safe_div(10, 2)
+///     Ok(5)
+///     >>> safe_div(10, 0)
+///     Err(DivByZero)
+struct DivByZero:
+    msg: Str
+
+fn safe_div(a: i64, b: i64) -> (i64 | DivByZero):
+    in:
+        true  # No precondition - we handle zero gracefully
+
+    if b == 0:
+        return DivByZero(msg: "division by zero")
+    return a / b
+
+    out(ret):
+        ret * b == a
+    out_err(err):
+        old(b) == 0
+```
+
+### 11.4 Class with Invariant
+
+```simple
+/// Bank account with balance invariant.
+///
+/// Example:
+///     >>> acc = Account(balance: 100)
+///     >>> acc.balance
+///     100
+///     >>> acc.deposit(50)
+///     150
+///     >>> acc.withdraw(30)
+///     120
+class Account:
+    balance: i64
+
+    invariant:
+        balance >= 0
+
+    fn new(initial: i64) -> Account:
+        in:
+            initial >= 0
+        return Account(balance: initial)
+
+    fn deposit(amount: i64) -> i64:
+        in:
+            amount > 0
+        balance += amount
+        return balance
+        out(ret):
+            ret == old(balance) + amount
+
+    fn withdraw(amount: i64) -> (i64 | Str):
+        in:
+            amount > 0
+
+        if amount > balance:
+            return "insufficient funds"
+
+        balance -= amount
+        return balance
+
+        out(ret):
+            ret == old(balance) - amount
+            ret >= 0
+        out_err(err):
+            old(balance) < amount
+```
+
+### 11.5 old() Expression Usage
+
+```simple
+/// Increment with old value verification.
+///
+/// Example:
+///     >>> counter = 0
+///     >>> increment(counter)
+///     1
+fn increment(x: i64) -> i64:
+    let result = x + 1
+    return result
+    out(ret):
+        ret == old(x) + 1
+        ret > old(x)
+```
+
+### 11.6 Routine Invariant
+
+```simple
+/// Function with routine invariant.
+///
+/// Example:
+///     >>> bounded_add(5, 3, 100)
+///     8
+///     >>> bounded_add(50, 60, 100)
+///     100
+fn bounded_add(a: i64, b: i64, max: i64) -> i64:
+    invariant:
+        max > 0
+
+    let sum = a + b
+    if sum > max:
+        return max
+    return sum
+
+    out(ret):
+        ret <= max
+```
+
+---
+
+12. Formal Verification
+
+The contract semantics are formally verified in Lean 4:
+- `verification/type_inference_compile/src/Contracts.lean`
+
+Key theorems:
+- `invariant_preservation_when_unchanged`: If state unchanged, exit invariant passes if entry passed
+- `empty_contract_passes`: Empty contract always passes
+- `old_after_preconditions`: Snapshots taken only after `in:` passes
+- `postcondition_only_on_success`: `out(ret):` only checked on success path
+- `errpost_only_on_error`: `out_err(err):` only checked on error path

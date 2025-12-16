@@ -96,6 +96,30 @@ impl<'a> Parser<'a> {
     ) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Enum)?;
+        self.parse_enum_body(start_span, attributes)
+    }
+
+    // === Union (alias for enum with data variants) ===
+
+    pub(crate) fn parse_union(&mut self) -> Result<Node, ParseError> {
+        self.parse_union_with_attrs(vec![])
+    }
+
+    pub(crate) fn parse_union_with_attrs(
+        &mut self,
+        attributes: Vec<Attribute>,
+    ) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Union)?;
+        self.parse_enum_body(start_span, attributes)
+    }
+
+    /// Shared parsing logic for enum and union bodies
+    fn parse_enum_body(
+        &mut self,
+        start_span: Span,
+        attributes: Vec<Attribute>,
+    ) -> Result<Node, ParseError> {
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params()?;
 

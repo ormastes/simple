@@ -11,7 +11,7 @@ use super::table::MonomorphizationTable;
 #[cfg(test)]
 use super::types::SpecializationKey;
 #[cfg(test)]
-use simple_parser::ast::{Block, FunctionDef, Module, Node};
+use simple_parser::ast::{Block, FunctionDef, Node};
 #[cfg(test)]
 use simple_parser::Span;
 

@@ -98,6 +98,7 @@ impl<'a> Parser<'a> {
             TokenKind::Struct => self.parse_struct_with_doc(doc_comment),
             TokenKind::Class => self.parse_class_with_doc(doc_comment),
             TokenKind::Enum => self.parse_enum_with_doc(doc_comment),
+            TokenKind::Union => self.parse_union_with_doc(doc_comment),
             TokenKind::Trait => self.parse_trait_with_doc(doc_comment),
             TokenKind::Impl => self.parse_impl(),
             TokenKind::Actor => self.parse_actor(),
@@ -227,6 +228,13 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            TokenKind::Union => {
+                let mut node = self.parse_union_with_doc(doc_comment)?;
+                if let Node::Enum(ref mut e) = node {
+                    e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
             TokenKind::Trait => {
                 let mut node = self.parse_trait_with_doc(doc_comment)?;
                 if let Node::Trait(ref mut t) = node {
@@ -270,6 +278,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Enum => {
                 let mut node = self.parse_enum()?;
+                if let Node::Enum(ref mut e) = node {
+                    e.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Union => {
+                let mut node = self.parse_union()?;
                 if let Node::Enum(ref mut e) = node {
                     e.visibility = Visibility::Public;
                 }
@@ -490,6 +505,14 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
+    fn parse_union_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+        let mut node = self.parse_union()?;
+        if let Node::Enum(ref mut e) = node {
+            e.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
     fn parse_trait_with_doc(
         &mut self,
         doc_comment: Option<DocComment>,
@@ -557,13 +580,14 @@ impl<'a> Parser<'a> {
             TokenKind::Struct => self.parse_struct_with_attrs(attributes),
             TokenKind::Class => self.parse_class_with_attrs(attributes),
             TokenKind::Enum => self.parse_enum_with_attrs(attributes),
+            TokenKind::Union => self.parse_union_with_attrs(attributes),
             TokenKind::Pub => {
                 self.advance();
                 self.parse_pub_item_with_attrs(attributes)
             }
             TokenKind::Mod => self.parse_mod(Visibility::Private, attributes),
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, mod, or pub after attributes",
+                "fn, struct, class, enum, union, mod, or pub after attributes",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),

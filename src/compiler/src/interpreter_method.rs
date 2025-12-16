@@ -24,6 +24,22 @@ fn evaluate_method_call(
 
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
+    // BDD assertion methods: to(matcher) and not_to(matcher)
+    // These work on any value type and are used with matchers like eq(5), gt(3), etc.
+    match method {
+        "to" | "not_to" => {
+            let matcher = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let matched = match &matcher {
+                Value::Matcher(m) => m.matches(&recv_val),
+                // If the argument isn't a Matcher, treat it as an equality check
+                other => recv_val == *other,
+            };
+            let passed = if method == "not_to" { !matched } else { matched };
+            return Ok(Value::Bool(passed));
+        }
+        _ => {}
+    }
+
     // Built-in methods for Array
     if let Value::Array(ref arr) = recv_val {
         match method {
@@ -338,6 +354,19 @@ fn evaluate_method_call(
                 _ => {}
             }
         }
+
+        // User-defined methods on enums via impl blocks
+        if let Some(methods) = impl_methods.get(enum_name) {
+            for m in methods {
+                if m.name == method {
+                    // For enum methods, we pass self as a special context
+                    // Create a fields map with just "self" for the enum value
+                    let mut enum_fields = HashMap::new();
+                    enum_fields.insert("self".to_string(), recv_val.clone());
+                    return exec_function(m, args, env, functions, classes, enums, impl_methods, Some((enum_name, &enum_fields)));
+                }
+            }
+        }
     }
 
     // Object methods (class/struct)
@@ -470,6 +499,124 @@ fn evaluate_method_call(
             msg.push_str(&format!("; {}", suggestion));
         }
         return Err(CompileError::Semantic(msg));
+    }
+
+    // Mock object methods (when, with, returns, returnsOnce, verify, called, calledTimes, calledWith, reset)
+    if let Value::Mock(ref mock) = recv_val {
+        match method {
+            // when(:method_name) - Configure a method for stubbing
+            "when" => {
+                let method_name = eval_arg(args, 0, Value::Symbol("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let method_str = match &method_name {
+                    Value::Symbol(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
+                    _ => return Err(CompileError::Semantic("when expects symbol or string method name".into())),
+                };
+                mock.when_method(&method_str);
+                return Ok(Value::Mock(mock.clone()));
+            }
+            // withArgs(args...) - Set argument matchers for current configuration
+            // Note: "with" is a reserved keyword, so we use "withArgs" or "with_args"
+            "withArgs" | "with_args" => {
+                let mut matchers = Vec::new();
+                for arg in args {
+                    let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                    let matcher = match val {
+                        Value::Matcher(m) => m,
+                        other => crate::value::MatcherValue::Exact(Box::new(other)),
+                    };
+                    matchers.push(matcher);
+                }
+                mock.with_args(matchers);
+                return Ok(Value::Mock(mock.clone()));
+            }
+            // returns(value) - Set return value for configured method
+            "returns" => {
+                let return_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                mock.returns(return_val);
+                return Ok(Value::Mock(mock.clone()));
+            }
+            // returnsOnce(value) - Set return value for next call only
+            "returnsOnce" | "returns_once" => {
+                let return_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                mock.returns_once(return_val);
+                return Ok(Value::Mock(mock.clone()));
+            }
+            // verify(:method_name) - Start verification for a method
+            "verify" => {
+                let method_name = eval_arg(args, 0, Value::Symbol("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let method_str = match &method_name {
+                    Value::Symbol(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
+                    _ => return Err(CompileError::Semantic("verify expects symbol or string method name".into())),
+                };
+                mock.when_method(&method_str); // Reuse to set current method
+                return Ok(Value::Mock(mock.clone()));
+            }
+            // called() - Check if method was called at least once (returns bool)
+            "called" => {
+                let configuring = mock.configuring_method.lock().unwrap();
+                if let Some(ref method_name) = *configuring {
+                    let was_called = mock.was_called(method_name);
+                    return Ok(Value::Bool(was_called));
+                }
+                return Err(CompileError::Semantic("called() must be chained after verify(:method)".into()));
+            }
+            // calledTimes(n) - Check exact call count (returns bool)
+            "calledTimes" | "called_times" => {
+                let expected = eval_arg_int(args, 0, 1, env, functions, classes, enums, impl_methods)?;
+                let configuring = mock.configuring_method.lock().unwrap();
+                if let Some(ref method_name) = *configuring {
+                    let actual = mock.call_count(method_name) as i64;
+                    return Ok(Value::Bool(actual == expected));
+                }
+                return Err(CompileError::Semantic("calledTimes() must be chained after verify(:method)".into()));
+            }
+            // calledWith(args...) - Check if method was called with specific arguments (returns bool)
+            "calledWith" | "called_with" => {
+                let mut expected_args = Vec::new();
+                for arg in args {
+                    let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                    expected_args.push(val);
+                }
+                let configuring = mock.configuring_method.lock().unwrap();
+                if let Some(ref method_name) = *configuring {
+                    let was_called_with = mock.was_called_with(method_name, &expected_args);
+                    return Ok(Value::Bool(was_called_with));
+                }
+                return Err(CompileError::Semantic("calledWith() must be chained after verify(:method)".into()));
+            }
+            // reset() - Clear all call records
+            "reset" => {
+                mock.reset();
+                return Ok(Value::Mock(mock.clone()));
+            }
+            // getCalls(:method) - Get all calls to a method (for debugging/custom assertions)
+            "getCalls" | "get_calls" => {
+                let method_name = eval_arg(args, 0, Value::Symbol("".to_string()), env, functions, classes, enums, impl_methods)?;
+                let method_str = match &method_name {
+                    Value::Symbol(s) => s.clone(),
+                    Value::Str(s) => s.clone(),
+                    _ => return Err(CompileError::Semantic("getCalls expects symbol or string method name".into())),
+                };
+                let calls = mock.get_calls(&method_str);
+                let call_arrays: Vec<Value> = calls.into_iter().map(Value::Array).collect();
+                return Ok(Value::Array(call_arrays));
+            }
+            // Any other method is treated as a mock call that should be recorded
+            _ => {
+                // Evaluate arguments
+                let mut call_args = Vec::new();
+                for arg in args {
+                    let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+                    call_args.push(val);
+                }
+                // Record the call
+                mock.record_call(method, call_args.clone());
+                // Return configured value
+                return Ok(mock.get_return_value(method, &call_args));
+            }
+        }
     }
 
     Err(CompileError::Semantic(format!("method call on unsupported type: {method}")))

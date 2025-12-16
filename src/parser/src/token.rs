@@ -79,6 +79,7 @@ pub enum TokenKind {
     Struct,
     Class,
     Enum,
+    Union, // union (tagged union, alias for enum with data)
     Trait,
     Impl,
     Actor,

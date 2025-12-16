@@ -20,6 +20,9 @@ use crate::error::CompileError;
 // These are split into a separate file for maintainability
 include!("value_async.rs");
 
+// Mock and Spy types for testing
+include!("value_mock.rs");
+
 //==============================================================================
 // Magic Names (for formal verification)
 //==============================================================================
@@ -541,6 +544,10 @@ pub enum Value {
     Handle(ManualHandleValue),
     Borrow(BorrowValue),
     BorrowMut(BorrowMutValue),
+    /// Mock object for testing - stores method configurations and call records
+    Mock(MockValue),
+    /// Argument matcher for mock verification
+    Matcher(MatcherValue),
     Nil,
 }
 

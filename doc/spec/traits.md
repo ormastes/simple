@@ -336,6 +336,61 @@ See [Primitive as Object](primitive_as_obj.md) for full collection trait definit
 
 ---
 
+## Inherent Impl Blocks
+
+Methods can be added directly to types without using traits:
+
+```simple
+struct Point:
+    x: f64
+    y: f64
+
+impl Point:
+    fn new(x: f64, y: f64) -> Point:
+        return Point(x: x, y: y)
+
+    fn distance(self, other: Point) -> f64:
+        let dx = self.x - other.x
+        let dy = self.y - other.y
+        return (dx * dx + dy * dy).sqrt()
+
+    fn origin() -> Point:  # Associated function (no self)
+        return Point(x: 0.0, y: 0.0)
+
+# Usage
+let p1 = Point.new(3.0, 4.0)
+let p2 = Point.origin()
+let d = p1.distance(p2)  # 5.0
+```
+
+### Impl Block Features
+
+| Feature | Description |
+|---------|-------------|
+| Instance methods | Take `self` as first parameter |
+| Associated functions | No `self`, called via `Type.method()` |
+| Constructors | Associated functions returning `Self` |
+| Multiple impl blocks | A type can have multiple impl blocks |
+
+### Extension Methods (Planned)
+
+Extension methods allow adding methods to types defined elsewhere:
+
+```simple
+# In your module
+impl String:
+    fn to_title_case(self) -> String:
+        # implementation
+        ...
+
+# Now all Strings have to_title_case()
+let title = "hello world".to_title_case()  # "Hello World"
+```
+
+**Note:** Extension methods follow coherence rules - you can only extend types if either the type or the impl is in your crate.
+
+---
+
 ## Related Specifications
 
 - [Data Structures](data_structures.md)
@@ -343,3 +398,4 @@ See [Primitive as Object](primitive_as_obj.md) for full collection trait definit
 - [Types](types.md)
 - [Unit Types](units.md)
 - [Primitive as Object](primitive_as_obj.md)
+- [Design TODOs](../design/type_system_features.md)
