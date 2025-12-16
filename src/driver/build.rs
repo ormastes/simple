@@ -54,9 +54,8 @@ fn main() {
             if !file_name.ends_with("_spec.spl") && !file_name.ends_with("_test.spl") {
                 return false;
             }
-            // Skip fixture files and skip directory
-            let path_str = path.to_string_lossy();
-            if path_str.contains("fixture") || path_str.contains("/skip/") {
+            // Skip fixture files
+            if path.to_string_lossy().contains("fixture") {
                 return false;
             }
             true
