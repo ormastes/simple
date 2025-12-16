@@ -153,6 +153,33 @@ export fn given(block: Fn() -> Void) -> Void:
                 case None:
                     panic("given() must be called within a describe/context block or Context definition")
 
+# given: Reference a context_def within a given block (overloaded version)
+# Usage: given :context_name -> Apply context_def givens inside given block
+# This allows composing contexts inline within setup blocks
+export fn given(context_name: Symbol) -> Void:
+    match current_group:
+        case Some(group):
+            # Look up the context definition
+            match registry.get_context(context_name):
+                case Some(context_def):
+                    # Apply each given from the context as before_each hooks
+                    for given in context_def.givens:
+                        match given:
+                            case Given.Lazy(given_name, given_block):
+                                # Create before_each hook that stores the memoized value
+                                let lazy_hook = Hook.BeforeEach(fn():
+                                    let value = given_block()
+                                    runtime.set_example_state(given_name.to_string(), value)
+                                )
+                                group.add_hook(lazy_hook)
+                            case Given.Eager(given_block):
+                                # Add eager setup as before_each
+                                group.add_hook(Hook.BeforeEach(given_block))
+                case None:
+                    panic("Context ${context_name} not found")
+        case None:
+            panic("given() must be called within a describe/context block")
+
 # given: Define a named eager fixture (overloaded version)
 # Usage: given :setup, \: setup_code()  -> Named eager setup that runs before each example
 # Named eager fixtures run eagerly (before each example) but can be documented/identified by name
