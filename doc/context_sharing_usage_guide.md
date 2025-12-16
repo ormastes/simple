@@ -188,6 +188,45 @@ describe "Calculator":
                     expect calculator.value == 10
 ```
 
+### Pattern 6: Inline Lazy Fixtures (given_lazy in Regular Context)
+
+`given_lazy` now works inline in regular `context` blocks, not just in `context_def`. This allows you to define lazy (memoized) fixtures without creating a separate context definition:
+
+```simple
+describe "User Service":
+    context "with authenticated user":
+        # Define lazy fixture inline (memoized per example)
+        given_lazy :user, \:
+            { id: 42, email: "user@example.com", role: "admin" }
+
+        it "has user email":
+            expect user.email == "user@example.com"
+
+        it "user is same instance in example":
+            # Same user object within this example
+            expect user.id == 42
+
+    context "with multiple fixtures":
+        # Combine eager and lazy fixtures inline
+        given:
+            setup_test_database()
+
+        given_lazy :config, \:
+            { timeout: 30, retries: 3 }
+
+        given_lazy :client, \:
+            create_client(config)
+
+        it "client uses config":
+            expect client.timeout == 30
+```
+
+**Key Points:**
+- `given_lazy` works in both `context_def` definitions AND regular `context` blocks
+- Lazy fixtures are still memoized per example (called once, cached)
+- Combine `given` (eager setup) with `given_lazy` (lazy fixtures) in the same block
+- Useful for quick inline fixtures without defining a reusable context
+
 ## Comparing Old vs New
 
 ### Old Style (Still Supported)
@@ -236,6 +275,17 @@ describe "User":
 - **Overuse composition**: Composing 5+ contexts is hard to reason about
 - **Mutate fixtures**: Fixtures should return fresh data
 - **Create context dependencies**: One context shouldn't depend on another being defined first
+
+## When to Use: context_def vs inline given_lazy
+
+| Scenario | Use | Example |
+|----------|-----|---------|
+| **Fixtures used in 1 test suite** | Inline `given_lazy` | `context "with user": given_lazy :user, ...` |
+| **Fixtures used in 3+ test suites** | `context_def` + `context :name` | Reusable across files |
+| **Simple test data** | Inline `given_lazy` | Quick fixtures without setup |
+| **Complex setup** | `context_def` + `given` | Database, external service |
+| **Composing fixtures** | `context_compose` | Multiple `context_def` definitions |
+| **Both eager + lazy setup** | Mix both | `given { ... } given_lazy :x, ...` |
 
 ## Common Patterns
 
