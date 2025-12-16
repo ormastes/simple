@@ -227,7 +227,61 @@ describe "API Tests":
 - Parallel syntax to `given_lazy :name, \: ...`
 - Multiple `given :name` blocks run in order before each example
 
-### Pattern 7: Inline Lazy Fixtures (given_lazy in Regular Context)
+### Pattern 7: Sequential Given Blocks - Contexts + Variables
+
+You can create complex setup sequences in `given:` blocks by combining context references with variable definitions:
+
+```simple
+context_def :user_data:
+    given_lazy :user, \:
+        { name: "Alice", email: "alice@example.com", id: 42 }
+
+context_def :db_setup:
+    given:
+        # Simulate: db.connect(), db.migrate()
+        pass
+
+describe "Integrated Setup":
+    context "with sequential given block":
+        # Single given: block with multiple sequential steps
+        given:
+            # Step 1: Apply database setup from context_def
+            given :db_setup
+
+            # Step 2: Apply user fixtures from context_def
+            given :user_data
+
+            # Step 3: Define derived variables from fixtures
+            let user_key = "user_" + user.id.to_string()
+            let welcome_msg = "Welcome, " + user.name
+            let contact = user.email
+
+        # Then: all variables are available
+        it "has user from context":
+            expect user.name == "Alice"
+
+        it "has derived variables from fixtures":
+            expect user_key == "user_42"
+            expect welcome_msg == "Welcome, Alice"
+
+        it "can use any combination of fixtures and variables":
+            expect contact == "alice@example.com"
+```
+
+**Sequential Execution:**
+1. `given :context_name` - applies all givens from that context_def
+2. `let variable = value` - defines new variables (can reference fixtures)
+3. Each subsequent statement can use previous results
+4. All executes before each example
+
+**Key Points:**
+- `given :context_name` applies all givens from that context_def
+- Mix context references and variable definitions in any order
+- Derived variables can reference fixtures from contexts
+- All statements in `given:` block run sequentially before each example
+- Fresh execution for each test (no sharing between examples)
+
+### Pattern 8: Inline Lazy Fixtures (given_lazy in Regular Context)
 
 `given_lazy` now works inline in regular `context` blocks, not just in `context_def`. This allows you to define lazy (memoized) fixtures without creating a separate context definition:
 
