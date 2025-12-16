@@ -543,16 +543,17 @@ Bitfields support [unit types](units.md) with explicit bit representations, enab
 
 #### Compact Syntax (`:` notation)
 
-Use `unit:repr` for simple bit-width specification:
+Use `suffix:repr` for simple bit-width specification. In type positions, use **bare unit suffix** (no underscore):
 
 ```simple
 bitfield RobotArm:
-    x: _cm:i12          # 12-bit signed centimeters
-    y: _cm:i12          # 12-bit signed centimeters
-    z: _cm:u10          # 10-bit unsigned centimeters
-    angle: _deg:u9      # 9-bit unsigned degrees (0-511)
-    grip: _pct:u7       # 7-bit percentage (0-100)
+    x: cm:i12           # 12-bit signed centimeters
+    y: cm:i12           # 12-bit signed centimeters
+    z: cm:u10           # 10-bit unsigned centimeters
+    angle: deg:u9       # 9-bit unsigned degrees (0-511)
+    grip: pct:u7        # 7-bit percentage (0-100)
 
+# Literals still use underscore prefix
 let arm = RobotArm(x: 100_cm, y: -50_cm, z: 200_cm, angle: 180_deg, grip: 75_pct)
 print arm.x              # 100_cm (typed value, not raw bits)
 print arm.angle          # 180_deg
@@ -565,19 +566,19 @@ Use `where` for range inference, overflow behavior, and debug checking:
 ```simple
 bitfield SensorData:
     # Range inference - compiler calculates minimum bits
-    temp: _celsius where range: -40..125           # infers i8
-    humidity: _pct where range: 0..100             # infers u7
+    temp: celsius where range: -40..125            # infers i8
+    humidity: pct where range: 0..100              # infers u7
 
     # Explicit repr + overflow behavior
-    pressure: _hpa:u16 where checked               # panic on overflow
-    altitude: _m:i16 where saturate                # clamp to min/max
-    heading: _deg:u9 where wrap                    # modular arithmetic (0-511)
+    pressure: hpa:u16 where checked                # panic on overflow
+    altitude: m:i16 where saturate                 # clamp to min/max
+    heading: deg:u9 where wrap                     # modular arithmetic (0-511)
 
 bitfield MotorControl:
     # Combined constraints
-    position: _cm where range: -1000..1000, checked    # i11, debug-checked
-    velocity: _mps:u8 where saturate                   # clamp to 0-255
-    torque: _nm where range: 0..100, default: 0_nm     # with default value
+    position: cm where range: -1000..1000, checked     # i11, debug-checked
+    velocity: mps:u8 where saturate                    # clamp to 0-255
+    torque: nm where range: 0..100, default: 0_nm      # with default value
 ```
 
 #### Constraint Options
@@ -585,9 +586,9 @@ bitfield MotorControl:
 | Constraint | Meaning | Example |
 |------------|---------|---------|
 | `range: A..B` | Auto-infer bits from range | `range: 0..1000` → u10 |
-| `checked` | Panic on overflow (debug+release) | `_cm:u8 where checked` |
-| `saturate` | Clamp to min/max on overflow | `_cm:u8 where saturate` |
-| `wrap` | Modular arithmetic | `_deg:u9 where wrap` |
+| `checked` | Panic on overflow (debug+release) | `cm:u8 where checked` |
+| `saturate` | Clamp to min/max on overflow | `cm:u8 where saturate` |
+| `wrap` | Modular arithmetic | `deg:u9 where wrap` |
 | `default: val` | Default value for field | `default: 0_cm` |
 
 #### Grammar
@@ -596,10 +597,13 @@ bitfield MotorControl:
 bitfield_field = IDENT ":" field_type
 
 field_type = INTEGER                                    # raw bit count
-           | unit_type ":" repr_type [ "where" constraints ]
-           | unit_type "where" constraints
+           | unit_suffix [ ":" repr_type ] [ "where" constraints ]
 
-repr_type = ("u" | "i" | "f") DIGITS
+# In type positions, use bare suffix (no underscore): cm, deg, pct
+# In literals, use underscore: 100_cm, 180_deg, 50_pct
+unit_suffix = IDENT                                     # lowercase: cm, km, deg
+
+repr_type = ("u" | "i" | "f") DIGITS                    # u8, i12, f32
 
 constraints = constraint ("," constraint)*
 constraint = "range" ":" range_expr
@@ -607,6 +611,10 @@ constraint = "range" ":" range_expr
            | "saturate"
            | "wrap"
            | "default" ":" expr
+
+# One-pass parsing (LL(2)):
+# After IDENT, if ":" followed by repr_type → unit_with_repr
+# Otherwise → simple unit type
 ```
 
 #### Type Safety
@@ -615,26 +623,26 @@ Unit-typed bitfield fields maintain full type safety:
 
 ```simple
 bitfield Position:
-    x: _cm:i12
-    y: _cm:i12
+    x: cm:i12
+    y: cm:i12
 
 let pos = Position(x: 100_cm, y: 200_cm)
-# pos.x = 50_m      # ERROR: cannot assign _m to _cm field
-# pos.x = 50        # ERROR: cannot assign bare integer to _cm field
+# pos.x = 50_m      # ERROR: cannot assign m to cm field
+# pos.x = 50        # ERROR: cannot assign bare integer to cm field
 pos.x = 50_cm       # OK: same unit type
 
 # Arithmetic preserves unit type
-let new_x = pos.x + 10_cm    # Result: _cm:i12
+let new_x = pos.x + 10_cm    # Result: cm:i12
 ```
 
 #### Conversion and Widening
 
 ```simple
 bitfield Compact:
-    dist: _cm:u8
+    dist: cm:u8
 
 bitfield Wide:
-    dist: _cm:u16
+    dist: cm:u16
 
 let c = Compact(dist: 100_cm)
 let w = Wide(dist: c.dist.widen())    # Explicit widening
@@ -650,19 +658,19 @@ In debug builds, assignments to bit-limited fields are checked:
 
 ```simple
 bitfield Test:
-    value: _cm:u8             # 0-255 range
+    value: cm:u8              # 0-255 range
 
 let t = Test(value: 255_cm)   # OK
 # t.value = 256_cm            # Debug: panic! Release: undefined behavior
 
 bitfield SafeTest:
-    value: _cm:u8 where checked   # Always checked
+    value: cm:u8 where checked    # Always checked
 
 let s = SafeTest(value: 255_cm)
 # s.value = 256_cm            # Always panic (debug and release)
 
 bitfield ClampTest:
-    value: _cm:u8 where saturate
+    value: cm:u8 where saturate
 
 let cl = ClampTest(value: 300_cm)
 print cl.value                # 255_cm (clamped)

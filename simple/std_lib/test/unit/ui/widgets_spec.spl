@@ -1,0 +1,283 @@
+# Widgets Spec - Tests for TUI Widgets
+#
+# Tests the high-level TUI widget components.
+
+use spec.*
+use ui.element.*
+use ui.tui.widgets.*
+
+describe "Menu":
+    it "creates empty menu":
+        let id = NodeId::new(1)
+        let menu = Menu::new(id)
+        expect(menu.items.len()).to(equal(0))
+        expect(menu.selected_index()).to(equal(0))
+
+    it "adds items":
+        let id = NodeId::new(1)
+        let menu = Menu::new(id)
+            .add_item("Option 1")
+            .add_item("Option 2")
+            .add_item("Option 3")
+
+        expect(menu.items.len()).to(equal(3))
+
+    it "adds items with keys":
+        let id = NodeId::new(1)
+        let menu = Menu::new(id)
+            .add_item_with_key("New", 'n')
+            .add_item_with_key("Open", 'o')
+            .add_item_with_key("Quit", 'q')
+
+        expect(menu.items[0].key).to(equal(Some('n')))
+        expect(menu.items[1].key).to(equal(Some('o')))
+        expect(menu.items[2].key).to(equal(Some('q')))
+
+    it "navigates selection":
+        let id = NodeId::new(1)
+        let menu = Menu::new(id)
+            .add_item("A")
+            .add_item("B")
+            .add_item("C")
+
+        expect(menu.selected_index()).to(equal(0))
+
+        menu.select_next()
+        expect(menu.selected_index()).to(equal(1))
+
+        menu.select_next()
+        expect(menu.selected_index()).to(equal(2))
+
+        menu.select_next()  # Should not go past end
+        expect(menu.selected_index()).to(equal(2))
+
+        menu.select_prev()
+        expect(menu.selected_index()).to(equal(1))
+
+    it "converts to element":
+        let id = NodeId::new(1)
+        let mut counter: u64 = 10
+        let alloc = || {
+            counter = counter + 1
+            NodeId::new(counter)
+        }
+
+        let menu = Menu::new(id)
+            .with_title("File")
+            .add_item("New")
+            .add_item("Open")
+
+        let elem = menu.to_element(alloc)
+        expect(elem.kind).to(equal(ElementKind::Box))
+        expect(elem.has_children()).to(be_true())
+
+describe "Dialog":
+    it "creates dialog with message":
+        let id = NodeId::new(1)
+        let dialog = Dialog::new(id, "Confirm")
+            .with_message("Are you sure?")
+            .add_button("Yes")
+            .add_button("No")
+
+        expect(dialog.title).to(equal("Confirm"))
+        expect(dialog.message).to(equal("Are you sure?"))
+        expect(dialog.buttons.len()).to(equal(2))
+
+    it "creates OK/Cancel dialog":
+        let id = NodeId::new(1)
+        let dialog = Dialog::ok_cancel(id, "Save", "Save changes?")
+
+        expect(dialog.buttons.len()).to(equal(2))
+        expect(dialog.buttons[0]).to(equal("OK"))
+        expect(dialog.buttons[1]).to(equal("Cancel"))
+
+    it "creates Yes/No dialog":
+        let id = NodeId::new(1)
+        let dialog = Dialog::yes_no(id, "Delete", "Delete file?")
+
+        expect(dialog.buttons.len()).to(equal(2))
+        expect(dialog.buttons[0]).to(equal("Yes"))
+        expect(dialog.buttons[1]).to(equal("No"))
+
+    it "navigates buttons":
+        let id = NodeId::new(1)
+        let dialog = Dialog::ok_cancel(id, "Test", "Test")
+
+        expect(dialog.selected_button_index()).to(equal(0))
+
+        dialog.select_next_button()
+        expect(dialog.selected_button_index()).to(equal(1))
+
+        dialog.select_next_button()  # Should not go past end
+        expect(dialog.selected_button_index()).to(equal(1))
+
+        dialog.select_prev_button()
+        expect(dialog.selected_button_index()).to(equal(0))
+
+describe "ProgressBar":
+    it "creates progress bar with defaults":
+        let id = NodeId::new(1)
+        let bar = ProgressBar::new(id)
+
+        expect(bar.progress).to(equal(0.0))
+        expect(bar.width).to(equal(40))
+
+    it "sets progress":
+        let id = NodeId::new(1)
+        let bar = ProgressBar::new(id)
+
+        bar.set_progress(0.5)
+        expect(bar.progress).to(equal(0.5))
+
+        bar.set_progress(1.5)  # Should clamp
+        expect(bar.progress).to(equal(1.0))
+
+        bar.set_progress(-0.5)  # Should clamp
+        expect(bar.progress).to(equal(0.0))
+
+    it "increments progress":
+        let id = NodeId::new(1)
+        let bar = ProgressBar::new(id)
+
+        bar.increment(0.25)
+        expect(bar.progress).to(equal(0.25))
+
+        bar.increment(0.25)
+        expect(bar.progress).to(equal(0.5))
+
+    it "converts to element":
+        let id = NodeId::new(1)
+        let bar = ProgressBar::new(id)
+            .with_width(20)
+            .with_label("Loading")
+
+        bar.set_progress(0.5)
+
+        let elem = bar.to_element(|| id)
+        expect(elem.kind).to(equal(ElementKind::Text))
+        expect(elem.classes.contains(&"progress-bar".to_string())).to(be_true())
+
+describe "TextInput":
+    it "creates empty input":
+        let id = NodeId::new(1)
+        let input = TextInput::new(id)
+
+        expect(input.value()).to(equal(""))
+        expect(input.cursor).to(equal(0))
+
+    it "inserts characters":
+        let id = NodeId::new(1)
+        let input = TextInput::new(id)
+
+        input.insert_char('H')
+        input.insert_char('i')
+
+        expect(input.value()).to(equal("Hi"))
+        expect(input.cursor).to(equal(2))
+
+    it "handles backspace":
+        let id = NodeId::new(1)
+        let input = TextInput::new(id)
+        input.set_value("Hello")
+
+        input.backspace()
+        expect(input.value()).to(equal("Hell"))
+
+        input.move_left()
+        input.move_left()
+        input.backspace()
+        expect(input.value()).to(equal("Hll"))
+
+    it "handles delete":
+        let id = NodeId::new(1)
+        let input = TextInput::new(id)
+        input.set_value("Hello")
+        input.move_home()
+
+        input.delete()
+        expect(input.value()).to(equal("ello"))
+
+    it "moves cursor":
+        let id = NodeId::new(1)
+        let input = TextInput::new(id)
+        input.set_value("Hello")
+
+        expect(input.cursor).to(equal(5))
+
+        input.move_home()
+        expect(input.cursor).to(equal(0))
+
+        input.move_end()
+        expect(input.cursor).to(equal(5))
+
+        input.move_left()
+        expect(input.cursor).to(equal(4))
+
+        input.move_right()
+        expect(input.cursor).to(equal(5))
+
+    it "respects max length":
+        let id = NodeId::new(1)
+        let input = TextInput::new(id)
+            .with_max_length(5)
+
+        input.insert_char('H')
+        input.insert_char('e')
+        input.insert_char('l')
+        input.insert_char('l')
+        input.insert_char('o')
+        input.insert_char('!')  # Should not be added
+
+        expect(input.value()).to(equal("Hello"))
+
+describe "ScrollList":
+    it "creates scrollable list":
+        let id = NodeId::new(1)
+        let list = ScrollList::new(id, 5)
+
+        expect(list.items.len()).to(equal(0))
+        expect(list.visible_count).to(equal(5))
+
+    it "adds and clears items":
+        let id = NodeId::new(1)
+        let list = ScrollList::new(id, 5)
+
+        list.add_item("Item 1")
+        list.add_item("Item 2")
+        list.add_item("Item 3")
+
+        expect(list.items.len()).to(equal(3))
+
+        list.clear()
+        expect(list.items.len()).to(equal(0))
+
+    it "navigates selection":
+        let id = NodeId::new(1)
+        let list = ScrollList::new(id, 3)
+
+        list.add_item("A")
+        list.add_item("B")
+        list.add_item("C")
+        list.add_item("D")
+        list.add_item("E")
+
+        expect(list.selected).to(equal(0))
+
+        list.select_next()
+        list.select_next()
+        expect(list.selected).to(equal(2))
+
+    it "scrolls to keep selection visible":
+        let id = NodeId::new(1)
+        let list = ScrollList::new(id, 3)
+
+        for i in 0..10:
+            list.add_item(&f"Item {i}")
+
+        # Select items beyond visible area
+        for _ in 0..5:
+            list.select_next()
+
+        expect(list.selected).to(equal(5))
+        # scroll_offset should have adjusted
+        expect(list.scroll_offset).to(be_greater_than(0))

@@ -37,6 +37,12 @@ This is the main specification index for the Simple programming language. The sp
 |----------|-------------|
 | [Import/Export](../import_export_and__init__.md) | Module system, imports, exports, visibility |
 
+### Data Formats
+
+| Document | Description |
+|----------|-------------|
+| [SDN](sdn.md) | Simple Data Notation - minimal config/data format |
+
 ---
 
 ## Quick Reference
@@ -108,7 +114,8 @@ doc/spec/
 ├── metaprogramming.md    # Macros and DSL features
 ├── stdlib.md             # Standard library
 ├── gpu_simd.md           # GPU and SIMD
-└── lexer_parser.md       # Parser specification
+├── lexer_parser.md       # Parser specification
+└── sdn.md                # Simple Data Notation format
 ```
 
 ## Project Directory Structure

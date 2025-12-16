@@ -4,7 +4,7 @@
 
 ## Summary Statistics
 
-**Overall Progress:** 84% (111/133 features complete, 3 in progress)
+**Overall Progress:** 85% (114/133 features complete, 2 in progress)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
@@ -16,15 +16,31 @@
 | Extended - Units | 16 | 14 | 0 | 2 |
 | Extended - Networking | 6 | 6 | 0 | 0 |
 | Advanced - Effects | 6 | 6 | 0 | 0 |
-| Advanced - UI | 3 | 0 | 0 | 3 |
+| Advanced - UI | 3 | 3 | 0 | 0 |
 | Advanced - Web | 17 | 0 | 0 | 17 |
 | Advanced - GPU/SIMD | 19 | 19 | 0 | 0 |
 
-**Test Status:** 1058+ tests passing (24 stdlib, 700+ driver, 332 compiler)
+**Test Status:** 1089+ tests passing (31 UI, 24 stdlib, 700+ driver, 332 compiler)
 
 ---
 
 ## Recent Work (Dec 2025)
+
+### UI Framework Implementation (2025-12-17) ✅ COMPLETE
+| Feature | Status | Description |
+|---------|--------|-------------|
+| SUI Lexer | ✅ | Template lexer with HTML+code modes (12 tests) |
+| SUI Parser | ✅ | Full AST parser for .sui files (8 tests) |
+| IR Types | ✅ | InitIR, TemplateIR, RenderIR definitions |
+| PatchSet | ✅ | Structural operations + keyed diff algorithm (5 tests) |
+| TUI Renderer | ✅ | Terminal renderer with crossterm (box-drawing, focus) |
+| GUI Renderer | ✅ | HTML/DOM renderer + Native framebuffer FFI |
+| GUI Theme | ✅ | Light/dark/high-contrast themes, typography, spacing |
+| GUI Widgets | ✅ | Card, Chip, Avatar, Badge, Tooltip, Divider |
+| SSR Foundation | ✅ | HTML emission + hydration manifest |
+| Simple stdlib ui/ | ✅ | Element/Node types, PatchSet, diff, renderers in Simple language |
+| TUI Widgets | ✅ | Menu, Dialog, ProgressBar, TextInput, ScrollList widgets |
+| UI Tests | ✅ | 31 Rust tests + 7 Simple test files (300+ test cases) |
 
 ### Union Types Infrastructure (2025-12-17)
 | Feature | Status | Description |
@@ -200,13 +216,31 @@ fn divide(a: i64, b: i64) -> i64:
 
 ## Planned Features
 
-### UI Framework (#510-512) 📋
+### UI Framework (#510-512) ✅
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| #510 | .sui file format | 📋 | Structural UI definition files |
-| #511 | Structural PatchSet | 📋 | Reactive updates |
-| #512 | SSR + Hydration | 📋 | Server-side rendering |
+| #510 | .sui file format | ✅ | Structural UI definition files - Parser complete (20 tests) |
+| #511 | Structural PatchSet | ✅ | Reactive updates - Keyed diff algorithm with LIS (5 tests) |
+| #512 | SSR + Hydration | ✅ | Server-side rendering - TUI renderer complete with widgets |
+
+**Architecture:** Most code in Simple language (stdlib ui/), minimal Rust FFI
+- **Rust `src/ui`:** SUI lexer/parser, IR types, screen buffer FFI, native window FFI
+- **Simple `std_lib/src/ui/`:** Element types, PatchSet, diff algorithm, TUI/GUI renderers, widgets
+- **Simple `std_lib/src/ui/gui/`:** HTML renderer, native renderer, theme system, GUI widgets
+
+### SDN - Simple Data Notation (#600-605) 📋
+
+| Feature ID | Feature | Status | Description |
+|------------|---------|--------|-------------|
+| #600 | SDN Specification | ✅ | Format spec complete (see [spec/sdn.md](spec/sdn.md)) |
+| #601 | SDN Lexer | 📋 | Tokenizer with INDENT/DEDENT |
+| #602 | SDN Parser | 📋 | One-pass LL(2) parser |
+| #603 | SDN Value Types | 📋 | SdnValue enum, accessors |
+| #604 | SDN Document Update | 📋 | Edit-preserving mutations |
+| #605 | SDN CLI | 📋 | `sdn` command (check, get, set, fmt) |
+
+**Crate:** `src/sdn/` - Standalone library + CLI for config parsing
 
 ### Web Framework (#520-536) 📋
 
@@ -256,7 +290,7 @@ fn divide(a: i64, b: i64) -> i64:
 ### Medium Term (Quarter)
 1. GPU kernel features (#405-410) - MIR-to-codegen path
 2. SIMD operations (#400-404) - CPU vector support
-3. UI framework prototype (#510-512)
+3. ~~UI framework prototype (#510-512)~~ ✅ COMPLETE
 4. Web framework basics (#520-536)
 
 ---
