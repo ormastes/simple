@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ffi::{c_char, CStr};
 use std::sync::RwLock;
 
-use simple_parser::ast::{ClassDef, Expr, FunctionDef, Node, Visibility};
+use simple_parser::ast::{ClassDef, Expr, FunctionDef, Node, Type, Visibility};
 use simple_parser::token::Span;
 
 use crate::error::CompileError;
@@ -150,8 +150,12 @@ pub fn init_interpreter_state(items: &[Node]) {
         impl_methods.clear();
         for item in items {
             if let Node::Impl(impl_block) = item {
-                // Extract type name from the target_type
-                let type_name = format!("{:?}", impl_block.target_type);
+                // Extract type name from the target_type (must match get_type_name in interpreter.rs)
+                let type_name = match &impl_block.target_type {
+                    Type::Simple(name) => name.clone(),
+                    Type::Generic { name, .. } => name.clone(),
+                    _ => "unknown".to_string(),
+                };
                 let methods = impl_methods.entry(type_name).or_insert_with(Vec::new);
                 methods.extend(impl_block.methods.clone());
             }
