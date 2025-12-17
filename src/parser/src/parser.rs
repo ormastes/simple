@@ -110,6 +110,7 @@ impl<'a> Parser<'a> {
             TokenKind::Let => self.parse_let(),
             TokenKind::Const => self.parse_const(),
             TokenKind::Static => self.parse_static(),
+            TokenKind::Shared => self.parse_shared_let(),
             TokenKind::Type => {
                 // Check if this is a type alias (type Name = ...) or expression (expect type to eq)
                 // Simple heuristic: type alias names are PascalCase (start with uppercase)
@@ -423,6 +424,19 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Colon)?;
         let body = self.parse_block()?;
 
+        // Check for trailing bounds: block (only valid for @simd decorated functions)
+        let has_simd = decorators.iter().any(|d| {
+            matches!(&d.name, Expr::Identifier(name) if name == "simd")
+        });
+
+        let bounds_block = if has_simd {
+            // Skip newlines after body to check for bounds:
+            self.skip_newlines();
+            self.parse_bounds_block()?
+        } else {
+            None
+        };
+
         Ok(Node::Function(FunctionDef {
             span: Span::new(
                 start_span.start,
@@ -443,6 +457,7 @@ impl<'a> Parser<'a> {
             doc_comment: None,
             contract,
             is_abstract: false,
+            bounds_block,
         }))
     }
 
@@ -812,21 +827,29 @@ impl<'a> Parser<'a> {
 
     /// Parse a single decorator: @name or @name(args)
     /// Also handles @async which uses a keyword instead of identifier.
+    /// Supports named arguments: @bounds(default="return", strict=true)
     fn parse_decorator(&mut self) -> Result<Decorator, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::At)?;
 
-        // Handle @async specially since 'async' is a keyword
+        // Handle keywords specially since they can be decorator names
         let name = if self.check(&TokenKind::Async) {
             self.advance();
             Expr::Identifier("async".to_string())
+        } else if self.check(&TokenKind::Bounds) {
+            self.advance();
+            Expr::Identifier("bounds".to_string())
         } else {
             // Parse the decorator name (can be dotted: @module.decorator)
             self.parse_primary()?
         };
 
-        // Check for arguments: @decorator(arg1, arg2)
-        let args = self.parse_optional_paren_args()?;
+        // Check for arguments: @decorator(arg1, arg2) or @decorator(name=value)
+        let args = if self.check(&TokenKind::LParen) {
+            Some(self.parse_arguments()?)
+        } else {
+            None
+        };
 
         Ok(Decorator {
             span: Span::new(
@@ -1123,6 +1146,8 @@ impl<'a> Parser<'a> {
             // Infix keywords can also be method names
             TokenKind::To => "to",
             TokenKind::NotTo => "not_to",
+            // Allow 'with' as method name for SIMD v.with(idx, val)
+            TokenKind::With => "with",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

@@ -113,14 +113,25 @@ impl<'a> Parser<'a> {
             return Ok(Type::Tuple(types));
         }
 
-        // Handle array type
+        // Handle array type: [T] or [T; N]
         if self.check(&TokenKind::LBracket) {
             self.advance();
             let element = self.parse_type()?;
+
+            // Check for fixed-size array: [T; N]
+            let size = if self.check(&TokenKind::Semicolon) {
+                self.advance();
+                // Parse the size expression
+                let size_expr = self.parse_expression()?;
+                Some(Box::new(size_expr))
+            } else {
+                None
+            };
+
             self.expect(&TokenKind::RBracket)?;
             return Ok(Type::Array {
                 element: Box::new(element),
-                size: None,
+                size,
             });
         }
 

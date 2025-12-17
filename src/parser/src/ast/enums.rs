@@ -52,6 +52,31 @@ impl Mutability {
     }
 }
 
+/// Storage class of a variable declaration.
+/// Controls where and how memory is allocated.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive StorageClass
+///   | auto    -- automatic/stack storage (default)
+///   | shared  -- GPU work-group shared memory
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StorageClass {
+    /// Automatic storage (stack-allocated, default)
+    #[default]
+    Auto,
+    /// GPU work-group shared memory (like __shared__ in CUDA)
+    Shared,
+}
+
+impl StorageClass {
+    /// Check if this is shared storage
+    pub fn is_shared(&self) -> bool {
+        matches!(self, StorageClass::Shared)
+    }
+}
+
 /// Range bound type - whether the end bound is inclusive or exclusive.
 ///
 /// Lean equivalent:

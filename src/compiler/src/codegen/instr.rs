@@ -257,6 +257,111 @@ pub fn compile_instruction<M: Module>(
             compile_vec_lit(ctx, builder, *dest, elements);
         }
 
+        MirInst::VecSum { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_sum");
+        }
+
+        MirInst::VecProduct { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_product");
+        }
+
+        MirInst::VecMin { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_min");
+        }
+
+        MirInst::VecMax { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_max");
+        }
+
+        MirInst::VecAll { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_all");
+        }
+
+        MirInst::VecAny { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_any");
+        }
+
+        MirInst::VecExtract {
+            dest,
+            vector,
+            index,
+        } => {
+            compile_vec_extract(ctx, builder, *dest, *vector, *index);
+        }
+
+        MirInst::VecWith {
+            dest,
+            vector,
+            index,
+            value,
+        } => {
+            compile_vec_with(ctx, builder, *dest, *vector, *index, *value);
+        }
+
+        MirInst::VecSqrt { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_sqrt");
+        }
+
+        MirInst::VecAbs { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_abs");
+        }
+
+        MirInst::VecFloor { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_floor");
+        }
+
+        MirInst::VecCeil { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_ceil");
+        }
+
+        MirInst::VecRound { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_round");
+        }
+
+        MirInst::VecShuffle {
+            dest,
+            source,
+            indices,
+        } => {
+            compile_vec_shuffle(ctx, builder, *dest, *source, *indices);
+        }
+
+        MirInst::VecBlend {
+            dest,
+            first,
+            second,
+            indices,
+        } => {
+            compile_vec_blend(ctx, builder, *dest, *first, *second, *indices);
+        }
+
+        MirInst::VecSelect {
+            dest,
+            mask,
+            if_true,
+            if_false,
+        } => {
+            compile_vec_select(ctx, builder, *dest, *mask, *if_true, *if_false);
+        }
+
+        MirInst::GpuAtomic {
+            dest,
+            op,
+            ptr,
+            value,
+        } => {
+            compile_gpu_atomic(ctx, builder, *dest, *op, *ptr, *value);
+        }
+
+        MirInst::GpuAtomicCmpXchg {
+            dest,
+            ptr,
+            expected,
+            desired,
+        } => {
+            compile_gpu_atomic_cmpxchg(ctx, builder, *dest, *ptr, *expected, *desired);
+        }
+
         MirInst::DictLit { dest, keys, values } => {
             compile_dict_lit(ctx, builder, *dest, keys, values);
         }
@@ -622,10 +727,6 @@ pub fn compile_instruction<M: Module>(
             super::instr_gpu::compile_gpu_mem_fence(ctx, builder, *scope)?;
         }
 
-        MirInst::GpuAtomic { dest, op, addr, value, expected } => {
-            super::instr_gpu::compile_gpu_atomic(ctx, builder, *dest, *op, *addr, *value, *expected)?;
-        }
-
         MirInst::GpuSharedAlloc { dest, element_type, size } => {
             super::instr_gpu::compile_gpu_shared_alloc(ctx, builder, *dest, *element_type, *size)?;
         }
@@ -634,6 +735,82 @@ pub fn compile_instruction<M: Module>(
             // Stub for SIMD neighbor load - in real GPU codegen this would
             // compute (this.index() +/- 1) and load from array at that index
             let _ = (array, direction);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        // SIMD load/store operations (stub implementations)
+        MirInst::VecLoad { dest, array, offset } => {
+            // Stub: load 4 f32s from array[offset..offset+4]
+            // In real implementation this would emit SIMD load instruction
+            let _ = (array, offset);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecStore { source, array, offset } => {
+            // Stub: store 4 f32s to array[offset..offset+4]
+            // In real implementation this would emit SIMD store instruction
+            let _ = (source, array, offset);
+        }
+
+        MirInst::VecGather { dest, array, indices } => {
+            // Stub: gather 4 f32s from array at 4 different indices
+            let _ = (array, indices);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecScatter { source, array, indices } => {
+            // Stub: scatter 4 f32s to array at 4 different indices
+            let _ = (source, array, indices);
+        }
+
+        MirInst::VecFma { dest, a, b, c } => {
+            // Stub: fused multiply-add: a * b + c
+            // In real implementation this would emit FMA SIMD instruction
+            let _ = (a, b, c);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecRecip { dest, source } => {
+            // Stub: reciprocal: 1.0 / source
+            // In real implementation this would emit reciprocal SIMD instruction
+            let _ = source;
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecMaskedLoad { dest, array, offset, mask, default } => {
+            // Stub: masked load - load where mask is true, use default for false
+            let _ = (array, offset, mask, default);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecMaskedStore { source, array, offset, mask } => {
+            // Stub: masked store - store only where mask is true
+            let _ = (source, array, offset, mask);
+        }
+
+        MirInst::VecMinVec { dest, a, b } => {
+            // Stub: element-wise minimum of two vectors
+            let _ = (a, b);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecMaxVec { dest, a, b } => {
+            // Stub: element-wise maximum of two vectors
+            let _ = (a, b);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecClamp { dest, source, lo, hi } => {
+            // Stub: element-wise clamp to range
+            let _ = (source, lo, hi);
             let zero = builder.ins().iconst(types::I64, 0);
             ctx.vreg_values.insert(*dest, zero);
         }

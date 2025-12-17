@@ -129,6 +129,7 @@ impl Lowerer {
         if let Some(hir_ty) = self.module.types.get(arr_ty) {
             match hir_ty {
                 HirType::Array { element, .. } => Ok(*element),
+                HirType::Simd { element, .. } => Ok(*element),
                 HirType::Tuple(types) => {
                     types
                         .first()

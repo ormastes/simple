@@ -7,6 +7,7 @@
 //! - Context and with statements
 //! - Contract blocks (requires/ensures/invariant) - LLM-friendly feature #400
 
+mod bounds;
 mod contract;
 
 use crate::ast::*;
@@ -48,7 +49,7 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mut)?;
         self.expect(&TokenKind::Let)?;
-        self.parse_let_impl(start_span, Mutability::Mutable)
+        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Auto)
     }
 
     pub(crate) fn parse_let(&mut self) -> Result<Node, ParseError> {
@@ -60,13 +61,24 @@ impl<'a> Parser<'a> {
         } else {
             Mutability::Immutable
         };
-        self.parse_let_impl(start_span, mutability)
+        self.parse_let_impl(start_span, mutability, StorageClass::Auto)
+    }
+
+    /// Parse shared let: `shared let name: [T; N]`
+    /// GPU work-group shared memory declaration
+    pub(crate) fn parse_shared_let(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Shared)?;
+        self.expect(&TokenKind::Let)?;
+        // Shared memory is always mutable (work-group accessible)
+        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Shared)
     }
 
     fn parse_let_impl(
         &mut self,
         start_span: Span,
         mutability: Mutability,
+        storage_class: StorageClass,
     ) -> Result<Node, ParseError> {
         let pattern = self.parse_pattern()?;
         let ty = self.parse_optional_type_annotation()?;
@@ -83,6 +95,7 @@ impl<'a> Parser<'a> {
             ty,
             value,
             mutability,
+            storage_class,
         }))
     }
 
