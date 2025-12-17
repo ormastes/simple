@@ -809,3 +809,320 @@ fn test_infix_to_strict_mode() {
         panic!("Expected MethodCall expression in strict mode");
     }
 }
+
+// === SIMD Bounds Block Tests ===
+
+#[test]
+fn test_simd_function_no_bounds() {
+    let src = r#"@simd
+fn add(data: f32[], dst: f32[]):
+    dst[0] = data[0]
+"#;
+    let module = parse(src).unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Function(func) = &module.items[0] {
+        assert_eq!(func.name, "add");
+        assert!(func.has_simd_decorator());
+        assert!(func.bounds_block.is_none());
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_simd_function_with_bounds_block() {
+    let src = r#"@simd
+fn vector_add(data: f32[], dst: f32[]):
+    dst[0] = data[0]
+
+bounds:
+    _.dst.over:
+        return
+    _.dst.under:
+        return
+"#;
+    let module = parse(src).unwrap();
+    assert_eq!(module.items.len(), 1);
+    if let Node::Function(func) = &module.items[0] {
+        assert_eq!(func.name, "vector_add");
+        assert!(func.has_simd_decorator());
+        let bounds = func.bounds_block.as_ref().expect("Expected bounds block");
+        assert_eq!(bounds.cases.len(), 2);
+
+        // First case: _.dst.over
+        if let BoundsPattern::Atom(atom) = &bounds.cases[0].pattern {
+            assert_eq!(atom.variable, "dst");
+            assert_eq!(atom.kind, BoundsKind::Over);
+        } else {
+            panic!("Expected atom pattern");
+        }
+
+        // Second case: _.dst.under
+        if let BoundsPattern::Atom(atom) = &bounds.cases[1].pattern {
+            assert_eq!(atom.variable, "dst");
+            assert_eq!(atom.kind, BoundsKind::Under);
+        } else {
+            panic!("Expected atom pattern");
+        }
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_bounds_boolean_or() {
+    let src = r#"@simd
+fn kernel(x: f32[], y: f32[], z: f32[]):
+    z[0] = x[0] + y[0]
+
+bounds:
+    _.x.under || _.y.under:
+        return
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        let bounds = func.bounds_block.as_ref().expect("Expected bounds block");
+        assert_eq!(bounds.cases.len(), 1);
+
+        // Pattern: _.x.under || _.y.under
+        if let BoundsPattern::Or(left, right) = &bounds.cases[0].pattern {
+            if let BoundsPattern::Atom(l) = &**left {
+                assert_eq!(l.variable, "x");
+                assert_eq!(l.kind, BoundsKind::Under);
+            } else {
+                panic!("Expected atom on left");
+            }
+            if let BoundsPattern::Atom(r) = &**right {
+                assert_eq!(r.variable, "y");
+                assert_eq!(r.kind, BoundsKind::Under);
+            } else {
+                panic!("Expected atom on right");
+            }
+        } else {
+            panic!("Expected Or pattern");
+        }
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_bounds_boolean_and() {
+    let src = r#"@simd
+fn kernel(src: f32[], dst: f32[]):
+    dst[0] = src[0]
+
+bounds:
+    _.src.under && _.dst.over:
+        return
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        let bounds = func.bounds_block.as_ref().expect("Expected bounds block");
+        assert_eq!(bounds.cases.len(), 1);
+
+        // Pattern: _.src.under && _.dst.over
+        if let BoundsPattern::And(left, right) = &bounds.cases[0].pattern {
+            if let BoundsPattern::Atom(l) = &**left {
+                assert_eq!(l.variable, "src");
+                assert_eq!(l.kind, BoundsKind::Under);
+            } else {
+                panic!("Expected atom on left");
+            }
+            if let BoundsPattern::Atom(r) = &**right {
+                assert_eq!(r.variable, "dst");
+                assert_eq!(r.kind, BoundsKind::Over);
+            } else {
+                panic!("Expected atom on right");
+            }
+        } else {
+            panic!("Expected And pattern");
+        }
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_bounds_default_catch_all() {
+    let src = r#"@simd
+fn kernel(data: f32[], dst: f32[]):
+    dst[0] = data[0]
+
+bounds:
+    _.dst.over:
+        return
+    _:
+        return
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        let bounds = func.bounds_block.as_ref().expect("Expected bounds block");
+        assert_eq!(bounds.cases.len(), 2);
+
+        // Second case: _ (default)
+        assert_eq!(bounds.cases[1].pattern, BoundsPattern::Default);
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_bounds_with_or_keyword() {
+    let src = r#"@simd
+fn kernel(src: f32[], dst: f32[]):
+    dst[0] = src[0]
+
+bounds:
+    _.src.under or _.dst.over:
+        return
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        let bounds = func.bounds_block.as_ref().expect("Expected bounds block");
+        assert_eq!(bounds.cases.len(), 1);
+
+        // Pattern: _.src.under or _.dst.over (using keyword instead of ||)
+        if let BoundsPattern::Or(left, right) = &bounds.cases[0].pattern {
+            if let BoundsPattern::Atom(l) = &**left {
+                assert_eq!(l.variable, "src");
+            } else {
+                panic!("Expected atom on left");
+            }
+            if let BoundsPattern::Atom(r) = &**right {
+                assert_eq!(r.variable, "dst");
+            } else {
+                panic!("Expected atom on right");
+            }
+        } else {
+            panic!("Expected Or pattern");
+        }
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_bounds_with_and_keyword() {
+    let src = r#"@simd
+fn kernel(src: f32[], dst: f32[]):
+    dst[0] = src[0]
+
+bounds:
+    _.src.under and _.dst.over:
+        return
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        let bounds = func.bounds_block.as_ref().expect("Expected bounds block");
+        assert_eq!(bounds.cases.len(), 1);
+
+        // Pattern: _.src.under and _.dst.over (using keyword instead of &&)
+        if let BoundsPattern::And(left, right) = &bounds.cases[0].pattern {
+            if let BoundsPattern::Atom(l) = &**left {
+                assert_eq!(l.variable, "src");
+            } else {
+                panic!("Expected atom on left");
+            }
+            if let BoundsPattern::Atom(r) = &**right {
+                assert_eq!(r.variable, "dst");
+            } else {
+                panic!("Expected atom on right");
+            }
+        } else {
+            panic!("Expected And pattern");
+        }
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_shared_let_basic() {
+    // GPU shared memory declaration with type annotation
+    let src = "shared let local_data: [f32; 256]\n";
+    let module = parse(src).unwrap();
+    if let Node::Let(let_stmt) = &module.items[0] {
+        assert!(let_stmt.storage_class.is_shared());
+        assert!(let_stmt.mutability.is_mutable());
+        // Type is in the pattern
+        if let Pattern::Typed { ty, .. } = &let_stmt.pattern {
+            if let Type::Array { element, size } = ty {
+                assert!(matches!(element.as_ref(), Type::Simple(name) if name == "f32"));
+                assert!(size.is_some()); // Fixed size
+            } else {
+                panic!("Expected array type");
+            }
+        } else {
+            panic!("Expected typed pattern");
+        }
+    } else {
+        panic!("Expected let statement");
+    }
+}
+
+#[test]
+fn test_shared_let_in_function() {
+    // Shared memory inside a function
+    let src = r#"fn reduce_sum():
+    shared let buffer: [i32; 512]
+    buffer[0] = 1
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert_eq!(func.name, "reduce_sum");
+        // Check first statement is shared let
+        if let Node::Let(let_stmt) = &func.body.statements[0] {
+            assert!(let_stmt.storage_class.is_shared());
+            assert!(let_stmt.mutability.is_mutable());
+        } else {
+            panic!("Expected let statement, got {:?}", func.body.statements[0]);
+        }
+    } else {
+        panic!("Expected function");
+    }
+}
+
+#[test]
+fn test_dynamic_array_type() {
+    // Test [T] array type syntax (dynamic size)
+    // Type annotation is in the pattern, not LetStmt.ty
+    let src = "let arr: [i32] = x\n";
+    let module = parse(src).unwrap();
+    if let Node::Let(let_stmt) = &module.items[0] {
+        if let Pattern::Typed { ty, .. } = &let_stmt.pattern {
+            if let Type::Array { element, size } = ty {
+                assert!(matches!(element.as_ref(), Type::Simple(name) if name == "i32"));
+                assert!(size.is_none()); // Dynamic array has no size
+            } else {
+                panic!("Expected array type, got {:?}", ty);
+            }
+        } else {
+            panic!("Expected typed pattern, got {:?}", let_stmt.pattern);
+        }
+    } else {
+        panic!("Expected let statement");
+    }
+}
+
+#[test]
+fn test_fixed_size_array_type() {
+    // Test [T; N] array type syntax (fixed size)
+    // Type annotation is in the pattern, not LetStmt.ty
+    let src = "let arr: [i32; 10] = x\n";
+    let module = parse(src).unwrap();
+    if let Node::Let(let_stmt) = &module.items[0] {
+        if let Pattern::Typed { ty, .. } = &let_stmt.pattern {
+            if let Type::Array { element, size } = ty {
+                assert!(matches!(element.as_ref(), Type::Simple(name) if name == "i32"));
+                assert!(size.is_some()); // Fixed size array
+            } else {
+                panic!("Expected array type, got {:?}", ty);
+            }
+        } else {
+            panic!("Expected typed pattern, got {:?}", let_stmt.pattern);
+        }
+    } else {
+        panic!("Expected let statement");
+    }
+}

@@ -190,6 +190,10 @@ impl TypeChecker {
                 }
             }
             AstType::DynTrait(trait_name) => Type::DynTrait(trait_name.clone()),
+            AstType::UnitWithRepr { name, .. } => {
+                // Unit with repr is treated as a named type (the unit name)
+                Type::Named(name.clone())
+            }
         }
     }
 

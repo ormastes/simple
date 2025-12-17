@@ -58,11 +58,12 @@ pub struct WithStmt {
 }
 
 /// Decorator applied to a function: @decorator or @decorator(args)
+/// Args support named arguments: @bounds(default="return", strict=true)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decorator {
     pub span: Span,
-    pub name: Expr,              // The decorator expression (e.g., Identifier or Call)
-    pub args: Option<Vec<Expr>>, // Arguments if @decorator(args)
+    pub name: Expr,                  // The decorator expression (e.g., Identifier or Call)
+    pub args: Option<Vec<Argument>>, // Arguments if @decorator(args), supports named args
 }
 
 /// Attribute applied to an item: #[name] or #[name = "value"] or #[name(args)]
@@ -141,6 +142,8 @@ pub struct FunctionDef {
     pub contract: Option<ContractBlock>,
     /// Whether this is an abstract method (trait method without body)
     pub is_abstract: bool,
+    /// Bounds block for @simd kernels (trailing bounds: clause)
+    pub bounds_block: Option<BoundsBlock>,
 }
 
 impl FunctionDef {
@@ -187,6 +190,70 @@ impl FunctionDef {
     pub fn has_effects(&self) -> bool {
         !self.effects.is_empty()
     }
+
+    /// Check if this function has the @simd decorator.
+    pub fn has_simd_decorator(&self) -> bool {
+        self.decorators.iter().any(|d| {
+            matches!(&d.name, Expr::Identifier(name) if name == "simd")
+        })
+    }
+}
+
+// =============================================================================
+// Bounds block types for @simd kernels
+// =============================================================================
+
+/// SIMD kernel bounds specification
+/// Trailing block after @simd function defining bounds handling
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundsBlock {
+    pub span: Span,
+    /// Bounds cases with patterns and handlers
+    pub cases: Vec<BoundsCase>,
+}
+
+/// Single case in a bounds: block
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundsCase {
+    pub span: Span,
+    /// Pattern condition (can be boolean composition)
+    pub pattern: BoundsPattern,
+    /// Handler body
+    pub body: Block,
+}
+
+/// Bounds pattern - boolean composition of bounds atoms
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundsPattern {
+    /// Single bounds atom: _.var.kind
+    Atom(BoundsAtom),
+    /// Boolean AND: pattern && pattern
+    And(Box<BoundsPattern>, Box<BoundsPattern>),
+    /// Boolean OR: pattern || pattern
+    Or(Box<BoundsPattern>, Box<BoundsPattern>),
+    /// Parenthesized: (pattern)
+    Paren(Box<BoundsPattern>),
+    /// Default catch-all: _
+    Default,
+}
+
+/// Bounds atom: _.<variable>.<kind>
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundsAtom {
+    pub span: Span,
+    /// Variable name being indexed (e.g., "out", "a")
+    pub variable: String,
+    /// Bounds kind: over or under
+    pub kind: BoundsKind,
+}
+
+/// Kind of bounds event
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundsKind {
+    /// index >= length (overflow)
+    Over,
+    /// index < 0 (underflow)
+    Under,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -478,6 +545,78 @@ pub struct UnitArithmetic {
     pub binary_rules: Vec<BinaryArithmeticRule>,
     pub unary_rules: Vec<UnaryArithmeticRule>,
     pub custom_fns: Vec<FunctionDef>,
+    /// Allowed representations: repr: u8, u12, i16, f32, ...
+    pub allowed_reprs: Vec<ReprType>,
+}
+
+/// Representation type for bit-limited units
+/// Examples: u8, u12, i16, i24, f32, f64
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReprType {
+    pub signed: bool,      // true for i/f, false for u
+    pub bits: u8,          // bit width (8, 12, 16, 24, 32, 64)
+    pub is_float: bool,    // true for f16, f32, f64
+}
+
+impl ReprType {
+    pub fn new(signed: bool, bits: u8, is_float: bool) -> Self {
+        Self { signed, bits, is_float }
+    }
+
+    /// Parse from string like "u8", "i12", "f32"
+    pub fn from_str(s: &str) -> Option<Self> {
+        if s.is_empty() {
+            return None;
+        }
+        let (prefix, rest) = s.split_at(1);
+        let bits: u8 = rest.parse().ok()?;
+        match prefix {
+            "u" => Some(Self::new(false, bits, false)),
+            "i" => Some(Self::new(true, bits, false)),
+            "f" => Some(Self::new(true, bits, true)),
+            _ => None,
+        }
+    }
+
+    /// Convert to string like "u8", "i12", "f32"
+    pub fn to_string(&self) -> String {
+        let prefix = if self.is_float {
+            "f"
+        } else if self.signed {
+            "i"
+        } else {
+            "u"
+        };
+        format!("{}{}", prefix, self.bits)
+    }
+}
+
+/// Overflow behavior for bit-limited units
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OverflowBehavior {
+    /// Default: panic in debug, undefined in release
+    #[default]
+    Default,
+    /// Always panic on overflow
+    Checked,
+    /// Clamp to min/max
+    Saturate,
+    /// Modular arithmetic (wrap around)
+    Wrap,
+}
+
+/// Constraints for unit type with representation
+/// Used in `where` clause: `_cm:u8 where checked` or `_cm where range: 0..100`
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct UnitReprConstraints {
+    /// Explicit representation type (from compact syntax `_cm:u12`)
+    pub repr: Option<ReprType>,
+    /// Range constraint for auto-inferring bit width
+    pub range: Option<(i64, i64)>,
+    /// Overflow behavior
+    pub overflow: OverflowBehavior,
+    /// Default value expression
+    pub default_value: Option<Box<Expr>>,
 }
 
 /// Binary arithmetic operation
@@ -710,6 +849,8 @@ pub struct LetStmt {
     pub ty: Option<Type>,
     pub value: Option<Expr>,
     pub mutability: Mutability,
+    /// Storage class (Auto for normal variables, Shared for GPU shared memory)
+    pub storage_class: StorageClass,
 }
 
 /// Compile-time constant declaration
@@ -869,6 +1010,13 @@ pub enum Type {
     Simd {
         lanes: u32,
         element: Box<Type>,
+    },
+    /// Unit type with representation constraint: `_cm:u12` or `_cm where range: 0..100`
+    /// Used in bitfields and for compact storage with type safety
+    UnitWithRepr {
+        name: String,
+        repr: Option<ReprType>,
+        constraints: UnitReprConstraints,
     },
 }
 
@@ -1100,6 +1248,8 @@ pub enum Expr {
     },
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
+    /// SIMD vector literal: vec[1.0, 2.0, 3.0, 4.0]
+    VecLiteral(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     /// List comprehension: [expr for pattern in iterable if condition]
     ListComprehension {

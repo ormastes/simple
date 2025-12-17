@@ -105,6 +105,206 @@ fn compile_tuple_lit<M: Module>(
     compile_collection_lit(ctx, builder, dest, elements, &TUPLE_SPEC);
 }
 
+/// Compile a SIMD vector literal
+/// For now, we represent vectors as arrays. A full implementation would use
+/// Cranelift's SIMD vector types for better performance.
+fn compile_vec_lit<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    elements: &[VReg],
+) {
+    // For now, use the same implementation as arrays
+    // In a full SIMD implementation, we would use Cranelift's vector types
+    compile_collection_lit(ctx, builder, dest, elements, &ARRAY_SPEC);
+}
+
+/// Compile a SIMD vector reduction operation (sum, product, min, max, all, any)
+/// Takes a vector and reduces it to a scalar value using the specified runtime function.
+fn compile_vec_reduction<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    source: VReg,
+    runtime_fn: &str,
+) {
+    let func_id = ctx.runtime_funcs[runtime_fn];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let source_val = ctx.vreg_values[&source];
+    let call = builder.ins().call(func_ref, &[source_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
+/// Compile SIMD lane extract: v[idx] -> element
+fn compile_vec_extract<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    vector: VReg,
+    index: VReg,
+) {
+    let func_id = ctx.runtime_funcs["rt_vec_extract"];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let vector_val = ctx.vreg_values[&vector];
+    let index_val = ctx.vreg_values[&index];
+    let call = builder.ins().call(func_ref, &[vector_val, index_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
+/// Compile SIMD lane insert: v.with(idx, val) -> new vector
+fn compile_vec_with<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    vector: VReg,
+    index: VReg,
+    value: VReg,
+) {
+    let func_id = ctx.runtime_funcs["rt_vec_with"];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let vector_val = ctx.vreg_values[&vector];
+    let index_val = ctx.vreg_values[&index];
+    let value_val = ctx.vreg_values[&value];
+    let call = builder
+        .ins()
+        .call(func_ref, &[vector_val, index_val, value_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
+/// Compile SIMD element-wise math operation (sqrt, abs, floor, ceil, round)
+/// Takes a vector and returns a vector with the operation applied to each element.
+fn compile_vec_math<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    source: VReg,
+    runtime_fn: &str,
+) {
+    let func_id = ctx.runtime_funcs[runtime_fn];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let source_val = ctx.vreg_values[&source];
+    let call = builder.ins().call(func_ref, &[source_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
+/// Compile SIMD shuffle: reorder lanes within a single vector
+/// v.shuffle([3, 2, 1, 0]) -> reordered vector
+pub(super) fn compile_vec_shuffle<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    source: VReg,
+    indices: VReg,
+) {
+    let func_id = ctx.runtime_funcs["rt_vec_shuffle"];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let source_val = ctx.vreg_values[&source];
+    let indices_val = ctx.vreg_values[&indices];
+    let call = builder.ins().call(func_ref, &[source_val, indices_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
+/// Compile SIMD blend: merge two vectors using an indices array
+/// a.blend(b, [0, 1, 4, 5]) -> merged vector (0-N from a, N-2N from b)
+pub(super) fn compile_vec_blend<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    first: VReg,
+    second: VReg,
+    indices: VReg,
+) {
+    let func_id = ctx.runtime_funcs["rt_vec_blend"];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let first_val = ctx.vreg_values[&first];
+    let second_val = ctx.vreg_values[&second];
+    let indices_val = ctx.vreg_values[&indices];
+    let call = builder
+        .ins()
+        .call(func_ref, &[first_val, second_val, indices_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
+/// Compile SIMD masked select: mask.select(a, b)
+/// Returns a where mask is true, b where mask is false
+pub(super) fn compile_vec_select<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    mask: VReg,
+    if_true: VReg,
+    if_false: VReg,
+) {
+    let func_id = ctx.runtime_funcs["rt_vec_select"];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let mask_val = ctx.vreg_values[&mask];
+    let if_true_val = ctx.vreg_values[&if_true];
+    let if_false_val = ctx.vreg_values[&if_false];
+    let call = builder
+        .ins()
+        .call(func_ref, &[mask_val, if_true_val, if_false_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
+/// Compile GPU atomic operation: add, sub, min, max, and, or, xor, exchange
+/// Returns the old value at the memory location
+pub(super) fn compile_gpu_atomic<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    op: crate::mir::GpuAtomicOp,
+    ptr: VReg,
+    value: VReg,
+) {
+    use crate::mir::GpuAtomicOp;
+    let func_name = match op {
+        GpuAtomicOp::Add => "rt_gpu_atomic_add",
+        GpuAtomicOp::Sub => "rt_gpu_atomic_sub",
+        GpuAtomicOp::Min => "rt_gpu_atomic_min",
+        GpuAtomicOp::Max => "rt_gpu_atomic_max",
+        GpuAtomicOp::And => "rt_gpu_atomic_and",
+        GpuAtomicOp::Or => "rt_gpu_atomic_or",
+        GpuAtomicOp::Xor => "rt_gpu_atomic_xor",
+        GpuAtomicOp::Xchg => "rt_gpu_atomic_exchange",
+    };
+    let func_id = ctx.runtime_funcs[func_name];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let ptr_val = ctx.vreg_values[&ptr];
+    let value_val = ctx.vreg_values[&value];
+    let call = builder.ins().call(func_ref, &[ptr_val, value_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
+/// Compile GPU atomic compare-exchange
+/// Returns the old value at the memory location
+pub(super) fn compile_gpu_atomic_cmpxchg<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    ptr: VReg,
+    expected: VReg,
+    desired: VReg,
+) {
+    let func_id = ctx.runtime_funcs["rt_gpu_atomic_cmpxchg"];
+    let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+    let ptr_val = ctx.vreg_values[&ptr];
+    let expected_val = ctx.vreg_values[&expected];
+    let desired_val = ctx.vreg_values[&desired];
+    let call = builder
+        .ins()
+        .call(func_ref, &[ptr_val, expected_val, desired_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+}
+
 fn compile_dict_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

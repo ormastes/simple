@@ -456,7 +456,7 @@ impl<'a> Parser<'a> {
                 let name = self.expect_identifier()?;
                 Ok(Expr::Identifier(format!("${}", name)))
             }
-            // Allow vec! macro invocation even though vec is now a keyword
+            // Handle vec keyword: vec! macro, vec[...] literal, or identifier
             TokenKind::Vec => {
                 self.advance();
                 // If followed by !, it's a macro invocation
@@ -467,10 +467,53 @@ impl<'a> Parser<'a> {
                         name: "vec".to_string(),
                         args,
                     })
+                } else if self.check(&TokenKind::LBracket) {
+                    // SIMD vector literal: vec[1.0, 2.0, 3.0, 4.0]
+                    self.advance(); // consume '['
+
+                    // Skip whitespace
+                    while self.check(&TokenKind::Newline)
+                        || self.check(&TokenKind::Indent)
+                        || self.check(&TokenKind::Dedent)
+                    {
+                        self.advance();
+                    }
+
+                    // Empty vector
+                    if self.check(&TokenKind::RBracket) {
+                        self.advance();
+                        return Ok(Expr::VecLiteral(Vec::new()));
+                    }
+
+                    // Parse elements
+                    let mut elements = Vec::new();
+                    elements.push(self.parse_expression()?);
+
+                    while self.check(&TokenKind::Comma) {
+                        self.advance();
+                        // Skip whitespace after comma
+                        while self.check(&TokenKind::Newline)
+                            || self.check(&TokenKind::Indent)
+                            || self.check(&TokenKind::Dedent)
+                        {
+                            self.advance();
+                        }
+                        if self.check(&TokenKind::RBracket) {
+                            break;
+                        }
+                        elements.push(self.parse_expression()?);
+                    }
+                    self.expect(&TokenKind::RBracket)?;
+                    Ok(Expr::VecLiteral(elements))
                 } else {
                     // Otherwise return as an identifier (for backward compatibility)
                     Ok(Expr::Identifier("vec".to_string()))
                 }
+            }
+            // Handle gpu keyword as an identifier for gpu.* intrinsic function calls
+            TokenKind::Gpu => {
+                self.advance();
+                Ok(Expr::Identifier("gpu".to_string()))
             }
             _ => Err(ParseError::unexpected_token(
                 "expression",

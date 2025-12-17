@@ -52,6 +52,9 @@ pub struct MirFunction {
     /// Generator lowering metadata (if this function represents a lowered generator dispatcher).
     pub generator_states: Option<Vec<crate::mir::generator::GeneratorState>>,
     pub generator_complete: Option<BlockId>,
+    /// Async state machine metadata (if this function represents a lowered async dispatcher).
+    pub async_states: Option<Vec<crate::mir::async_sm::AsyncState>>,
+    pub async_complete: Option<BlockId>,
     next_vreg: u32,
     next_block: u32,
 }
@@ -71,6 +74,8 @@ impl MirFunction {
             outlined_bodies: HashMap::new(),
             generator_states: None,
             generator_complete: None,
+            async_states: None,
+            async_complete: None,
             next_vreg: 0,
             next_block: 1,
         }

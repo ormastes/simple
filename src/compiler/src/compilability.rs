@@ -347,6 +347,13 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
             add_reason(reasons, FallbackReason::CollectionLiteral);
         }
 
+        Expr::VecLiteral(items) => {
+            for item in items {
+                analyze_expr(item, reasons);
+            }
+            add_reason(reasons, FallbackReason::CollectionLiteral);
+        }
+
         Expr::Dict(entries) => {
             for (key, value) in entries {
                 analyze_expr(key, reasons);

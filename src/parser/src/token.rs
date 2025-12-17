@@ -121,8 +121,11 @@ pub enum TokenKind {
     Vec,    // vec (for SIMD vector types)
     Shared, // shared (for GPU shared memory)
     Gpu,    // gpu (for GPU intrinsics namespace)
+    Bounds, // bounds (for @simd kernel bounds: clause)
     Dyn,    // dyn (for dynamic trait objects)
+    Repr,   // repr (for unit representation constraints)
     // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with #[allow(...)]
+    // Note: 'checked', 'saturate', 'wrap', 'range' are parsed as identifiers in where clauses
 
     // Contract keywords (LLM-friendly features)
     // New spec syntax (doc/spec/invariant.md)

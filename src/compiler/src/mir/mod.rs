@@ -1,3 +1,4 @@
+mod async_sm;
 mod blocks;
 mod effects;
 mod function;
@@ -6,6 +7,7 @@ pub mod hybrid;
 mod instructions;
 mod lower;
 
+pub use async_sm::*;
 pub use blocks::*;
 pub use effects::*;
 pub use function::*;

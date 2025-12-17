@@ -156,6 +156,10 @@ pub fn ast_type_to_concrete(
             // dyn Trait - represents a trait object (fat pointer)
             ConcreteType::Named(format!("dyn_{}", trait_name))
         }
+        AstType::UnitWithRepr { name, .. } => {
+            // Unit with repr - treat as a named unit type
+            ConcreteType::Named(name.clone())
+        }
     }
 }
 
@@ -211,6 +215,7 @@ mod tests {
             doc_comment: None,
             contract: None,
             is_abstract: false,
+            bounds_block: None,
         };
 
         let mangled = table.request_function("identity", vec![ConcreteType::Int], &func);

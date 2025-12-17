@@ -14,7 +14,7 @@ use cranelift_module::Module;
 use crate::hir::{BinOp, PointerKind, TypeId, UnaryOp};
 use crate::mir::{
     BindingStep, BlockId, ContractKind, FStringPart, MirFunction, MirInst, MirLiteral, MirPattern,
-    PatternBinding, Terminator, VReg,
+    ParallelBackend, PatternBinding, Terminator, UnitOverflowBehavior, VReg,
 };
 
 use super::shared::get_func_block_addr;
@@ -253,6 +253,115 @@ pub fn compile_instruction<M: Module>(
             compile_tuple_lit(ctx, builder, *dest, elements);
         }
 
+        MirInst::VecLit { dest, elements } => {
+            compile_vec_lit(ctx, builder, *dest, elements);
+        }
+
+        MirInst::VecSum { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_sum");
+        }
+
+        MirInst::VecProduct { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_product");
+        }
+
+        MirInst::VecMin { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_min");
+        }
+
+        MirInst::VecMax { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_max");
+        }
+
+        MirInst::VecAll { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_all");
+        }
+
+        MirInst::VecAny { dest, source } => {
+            compile_vec_reduction(ctx, builder, *dest, *source, "rt_vec_any");
+        }
+
+        MirInst::VecExtract {
+            dest,
+            vector,
+            index,
+        } => {
+            compile_vec_extract(ctx, builder, *dest, *vector, *index);
+        }
+
+        MirInst::VecWith {
+            dest,
+            vector,
+            index,
+            value,
+        } => {
+            compile_vec_with(ctx, builder, *dest, *vector, *index, *value);
+        }
+
+        MirInst::VecSqrt { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_sqrt");
+        }
+
+        MirInst::VecAbs { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_abs");
+        }
+
+        MirInst::VecFloor { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_floor");
+        }
+
+        MirInst::VecCeil { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_ceil");
+        }
+
+        MirInst::VecRound { dest, source } => {
+            compile_vec_math(ctx, builder, *dest, *source, "rt_vec_round");
+        }
+
+        MirInst::VecShuffle {
+            dest,
+            source,
+            indices,
+        } => {
+            compile_vec_shuffle(ctx, builder, *dest, *source, *indices);
+        }
+
+        MirInst::VecBlend {
+            dest,
+            first,
+            second,
+            indices,
+        } => {
+            compile_vec_blend(ctx, builder, *dest, *first, *second, *indices);
+        }
+
+        MirInst::VecSelect {
+            dest,
+            mask,
+            if_true,
+            if_false,
+        } => {
+            compile_vec_select(ctx, builder, *dest, *mask, *if_true, *if_false);
+        }
+
+        MirInst::GpuAtomic {
+            dest,
+            op,
+            ptr,
+            value,
+        } => {
+            compile_gpu_atomic(ctx, builder, *dest, *op, *ptr, *value);
+        }
+
+        MirInst::GpuAtomicCmpXchg {
+            dest,
+            ptr,
+            expected,
+            desired,
+        } => {
+            compile_gpu_atomic_cmpxchg(ctx, builder, *dest, *ptr, *expected, *desired);
+        }
+
         MirInst::DictLit { dest, keys, values } => {
             compile_dict_lit(ctx, builder, *dest, keys, values);
         }
@@ -471,6 +580,40 @@ pub fn compile_instruction<M: Module>(
             compile_enum_with(ctx, builder, *dest, variant_name, *payload);
         }
 
+        // Union type instructions - reuse enum runtime functions with type index
+        MirInst::UnionDiscriminant { dest, value } => {
+            // Unions use the same representation as enums
+            let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];
+            let disc_ref = ctx.module.declare_func_in_func(disc_id, builder.func);
+            let val = ctx.vreg_values[value];
+            let call = builder.ins().call(disc_ref, &[val]);
+            let result = builder.inst_results(call)[0];
+            ctx.vreg_values.insert(*dest, result);
+        }
+
+        MirInst::UnionPayload { dest, value, type_index: _ } => {
+            // Extract the payload value (type_index is for compile-time type safety)
+            let payload_id = ctx.runtime_funcs["rt_enum_payload"];
+            let payload_ref = ctx.module.declare_func_in_func(payload_id, builder.func);
+            let val = ctx.vreg_values[value];
+            let call = builder.ins().call(payload_ref, &[val]);
+            let result = builder.inst_results(call)[0];
+            ctx.vreg_values.insert(*dest, result);
+        }
+
+        MirInst::UnionWrap { dest, value, type_index } => {
+            // Wrap a value into a union - use enum new with type index as discriminant
+            let wrap_id = ctx.runtime_funcs["rt_enum_new"];
+            let wrap_ref = ctx.module.declare_func_in_func(wrap_id, builder.func);
+            let disc = builder.ins().iconst(cranelift_codegen::ir::types::I32, *type_index as i64);
+            // variant_count is not strictly needed for runtime, use 0
+            let variant_count = builder.ins().iconst(cranelift_codegen::ir::types::I32, 0);
+            let val = ctx.vreg_values[value];
+            let call = builder.ins().call(wrap_ref, &[disc, variant_count, val]);
+            let result = builder.inst_results(call)[0];
+            ctx.vreg_values.insert(*dest, result);
+        }
+
         MirInst::FutureCreate { dest, body_block } => {
             compile_future_create(ctx, builder, *dest, *body_block);
         }
@@ -568,6 +711,16 @@ pub fn compile_instruction<M: Module>(
             ctx.vreg_values.insert(*dest, val);
         }
 
+        MirInst::UnitBoundCheck {
+            value,
+            unit_name,
+            min,
+            max,
+            overflow,
+        } => {
+            compile_unit_bound_check(ctx, builder, *value, unit_name, *min, *max, *overflow)?;
+        }
+
         // =========================================================================
         // Pointer instructions
         // =========================================================================
@@ -618,12 +771,109 @@ pub fn compile_instruction<M: Module>(
             super::instr_gpu::compile_gpu_mem_fence(ctx, builder, *scope)?;
         }
 
-        MirInst::GpuAtomic { dest, op, addr, value, expected } => {
-            super::instr_gpu::compile_gpu_atomic(ctx, builder, *dest, *op, *addr, *value, *expected)?;
-        }
-
         MirInst::GpuSharedAlloc { dest, element_type, size } => {
             super::instr_gpu::compile_gpu_shared_alloc(ctx, builder, *dest, *element_type, *size)?;
+        }
+
+        MirInst::NeighborLoad { dest, array, direction } => {
+            // Stub for SIMD neighbor load - in real GPU codegen this would
+            // compute (this.index() +/- 1) and load from array at that index
+            let _ = (array, direction);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        // SIMD load/store operations (stub implementations)
+        MirInst::VecLoad { dest, array, offset } => {
+            // Stub: load 4 f32s from array[offset..offset+4]
+            // In real implementation this would emit SIMD load instruction
+            let _ = (array, offset);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecStore { source, array, offset } => {
+            // Stub: store 4 f32s to array[offset..offset+4]
+            // In real implementation this would emit SIMD store instruction
+            let _ = (source, array, offset);
+        }
+
+        MirInst::VecGather { dest, array, indices } => {
+            // Stub: gather 4 f32s from array at 4 different indices
+            let _ = (array, indices);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecScatter { source, array, indices } => {
+            // Stub: scatter 4 f32s to array at 4 different indices
+            let _ = (source, array, indices);
+        }
+
+        MirInst::VecFma { dest, a, b, c } => {
+            // Stub: fused multiply-add: a * b + c
+            // In real implementation this would emit FMA SIMD instruction
+            let _ = (a, b, c);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecRecip { dest, source } => {
+            // Stub: reciprocal: 1.0 / source
+            // In real implementation this would emit reciprocal SIMD instruction
+            let _ = source;
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecMaskedLoad { dest, array, offset, mask, default } => {
+            // Stub: masked load - load where mask is true, use default for false
+            let _ = (array, offset, mask, default);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecMaskedStore { source, array, offset, mask } => {
+            // Stub: masked store - store only where mask is true
+            let _ = (source, array, offset, mask);
+        }
+
+        MirInst::VecMinVec { dest, a, b } => {
+            // Stub: element-wise minimum of two vectors
+            let _ = (a, b);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecMaxVec { dest, a, b } => {
+            // Stub: element-wise maximum of two vectors
+            let _ = (a, b);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        MirInst::VecClamp { dest, source, lo, hi } => {
+            // Stub: element-wise clamp to range
+            let _ = (source, lo, hi);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
+
+        // Parallel iterator operations
+        MirInst::ParMap { dest, input, closure, backend } => {
+            compile_par_map(ctx, builder, *dest, *input, *closure, *backend)?;
+        }
+
+        MirInst::ParReduce { dest, input, initial, closure, backend } => {
+            compile_par_reduce(ctx, builder, *dest, *input, *initial, *closure, *backend)?;
+        }
+
+        MirInst::ParFilter { dest, input, predicate, backend } => {
+            compile_par_filter(ctx, builder, *dest, *input, *predicate, *backend)?;
+        }
+
+        MirInst::ParForEach { input, closure, backend } => {
+            compile_par_for_each(ctx, builder, *input, *closure, *backend)?;
         }
     }
     Ok(())
@@ -681,6 +931,81 @@ fn compile_contract_check<M: Module>(
         builder.switch_to_block(continue_block);
         builder.seal_block(continue_block);
     }
+    Ok(())
+}
+
+/// Compile a unit bound check instruction.
+/// This checks if a value is within the unit type's allowed range.
+fn compile_unit_bound_check<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    value: VReg,
+    unit_name: &str,
+    min: i64,
+    max: i64,
+    overflow: UnitOverflowBehavior,
+) -> InstrResult<()> {
+    let val = ctx.vreg_values[&value];
+
+    // Create constants for bounds
+    let min_val = builder.ins().iconst(types::I64, min);
+    let max_val = builder.ins().iconst(types::I64, max);
+
+    // Check if value is in range: min <= val && val <= max
+    let ge_min = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, val, min_val);
+    let le_max = builder.ins().icmp(IntCC::SignedLessThanOrEqual, val, max_val);
+    let in_range = builder.ins().band(ge_min, le_max);
+
+    match overflow {
+        UnitOverflowBehavior::Default | UnitOverflowBehavior::Checked => {
+            // Check if we have the runtime unit bound check function
+            if let Some(&func_id) = ctx.runtime_funcs.get("simple_unit_bound_check") {
+                // Call runtime: simple_unit_bound_check(in_range: bool, value: i64, min: i64, max: i64, name_ptr: *const u8, name_len: i64)
+                let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
+
+                // Create string data for unit name
+                let (name_ptr, name_len) = create_string_constant(ctx, builder, unit_name)?;
+
+                // Convert bool to i64 for the call
+                let in_range_i64 = builder.ins().uextend(types::I64, in_range);
+
+                builder.ins().call(func_ref, &[in_range_i64, val, min_val, max_val, name_ptr, name_len]);
+            } else {
+                // Fallback: generate inline check with trap on failure
+                let trap_block = builder.create_block();
+                let continue_block = builder.create_block();
+
+                builder.ins().brif(in_range, continue_block, &[], trap_block, &[]);
+
+                builder.switch_to_block(trap_block);
+                builder.seal_block(trap_block);
+                // Use a generic trap code for unit bound violations
+                builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(10));
+
+                builder.switch_to_block(continue_block);
+                builder.seal_block(continue_block);
+            }
+        }
+        UnitOverflowBehavior::Saturate => {
+            // Clamp value to [min, max]
+            // value = max(min, min(value, max))
+            let clamped_high = builder.ins().smin(val, max_val);
+            let clamped = builder.ins().smax(clamped_high, min_val);
+            ctx.vreg_values.insert(value, clamped);
+        }
+        UnitOverflowBehavior::Wrap => {
+            // Wrap value to [min, max] using modulo
+            // wrapped = ((value - min) % range) + min
+            // where range = max - min + 1
+            let range = builder.ins().isub(max_val, min_val);
+            let range_plus_one = builder.ins().iadd_imm(range, 1);
+            let offset = builder.ins().isub(val, min_val);
+            let wrapped_offset = builder.ins().srem(offset, range_plus_one);
+            let wrapped = builder.ins().iadd(wrapped_offset, min_val);
+            ctx.vreg_values.insert(value, wrapped);
+        }
+    }
+
     Ok(())
 }
 
@@ -794,3 +1119,117 @@ fn compile_pointer_deref<M: Module>(
     Ok(())
 }
 
+// =============================================================================
+// Parallel Iterator Operations (#415)
+// =============================================================================
+
+/// Helper to convert ParallelBackend to runtime constant
+fn backend_to_i32(backend: Option<ParallelBackend>) -> i32 {
+    match backend {
+        None => 0,           // Auto-select
+        Some(ParallelBackend::Cpu) => 1,
+        Some(ParallelBackend::Simd) => 2,
+        Some(ParallelBackend::Gpu) => 3,
+    }
+}
+
+/// Compile a parallel map operation
+fn compile_par_map<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    input: VReg,
+    closure: VReg,
+    backend: Option<ParallelBackend>,
+) -> InstrResult<()> {
+    let input_val = ctx.vreg_values[&input];
+    let closure_val = ctx.vreg_values[&closure];
+    let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
+
+    // For now, assume input is an array with length stored at offset 8
+    // In a real implementation, we'd get the length from the array header
+    let input_len = builder.ins().iconst(types::I64, 0); // Placeholder
+
+    let func_id = ctx.runtime_funcs.get("rt_par_map")
+        .ok_or_else(|| "rt_par_map not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+
+    let call = builder.ins().call(func_ref, &[input_val, input_len, closure_val, backend_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+    Ok(())
+}
+
+/// Compile a parallel reduce operation
+fn compile_par_reduce<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    input: VReg,
+    initial: VReg,
+    closure: VReg,
+    backend: Option<ParallelBackend>,
+) -> InstrResult<()> {
+    let input_val = ctx.vreg_values[&input];
+    let initial_val = ctx.vreg_values[&initial];
+    let closure_val = ctx.vreg_values[&closure];
+    let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
+
+    let input_len = builder.ins().iconst(types::I64, 0); // Placeholder
+
+    let func_id = ctx.runtime_funcs.get("rt_par_reduce")
+        .ok_or_else(|| "rt_par_reduce not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+
+    let call = builder.ins().call(func_ref, &[input_val, input_len, initial_val, closure_val, backend_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+    Ok(())
+}
+
+/// Compile a parallel filter operation
+fn compile_par_filter<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    input: VReg,
+    predicate: VReg,
+    backend: Option<ParallelBackend>,
+) -> InstrResult<()> {
+    let input_val = ctx.vreg_values[&input];
+    let predicate_val = ctx.vreg_values[&predicate];
+    let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
+
+    let input_len = builder.ins().iconst(types::I64, 0); // Placeholder
+
+    let func_id = ctx.runtime_funcs.get("rt_par_filter")
+        .ok_or_else(|| "rt_par_filter not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+
+    let call = builder.ins().call(func_ref, &[input_val, input_len, predicate_val, backend_val]);
+    let result = builder.inst_results(call)[0];
+    ctx.vreg_values.insert(dest, result);
+    Ok(())
+}
+
+/// Compile a parallel for_each operation
+fn compile_par_for_each<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    input: VReg,
+    closure: VReg,
+    backend: Option<ParallelBackend>,
+) -> InstrResult<()> {
+    let input_val = ctx.vreg_values[&input];
+    let closure_val = ctx.vreg_values[&closure];
+    let backend_val = builder.ins().iconst(types::I32, backend_to_i32(backend) as i64);
+
+    let input_len = builder.ins().iconst(types::I64, 0); // Placeholder
+
+    let func_id = ctx.runtime_funcs.get("rt_par_for_each")
+        .ok_or_else(|| "rt_par_for_each not found".to_string())?;
+    let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
+
+    builder.ins().call(func_ref, &[input_val, input_len, closure_val, backend_val]);
+    Ok(())
+}

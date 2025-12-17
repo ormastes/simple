@@ -85,6 +85,39 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_slice", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_contains", &[I64, I64], &[I8]),
     // =========================================================================
+    // Vector reduction operations (SIMD)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_vec_sum", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vec_product", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vec_min", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vec_max", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_vec_all", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_vec_any", &[I64], &[I8]),
+    // Lane access operations (SIMD)
+    RuntimeFuncSpec::new("rt_vec_extract", &[I64, I64], &[I64]),  // (vector, index) -> element
+    RuntimeFuncSpec::new("rt_vec_with", &[I64, I64, I64], &[I64]), // (vector, index, value) -> new_vector
+    // Element-wise math operations (SIMD)
+    RuntimeFuncSpec::new("rt_vec_sqrt", &[I64], &[I64]),  // (vector) -> vector with sqrt applied
+    RuntimeFuncSpec::new("rt_vec_abs", &[I64], &[I64]),   // (vector) -> vector with abs applied
+    RuntimeFuncSpec::new("rt_vec_floor", &[I64], &[I64]), // (vector) -> vector with floor applied
+    RuntimeFuncSpec::new("rt_vec_ceil", &[I64], &[I64]),  // (vector) -> vector with ceil applied
+    RuntimeFuncSpec::new("rt_vec_round", &[I64], &[I64]), // (vector) -> vector with round applied
+    RuntimeFuncSpec::new("rt_vec_shuffle", &[I64, I64], &[I64]), // (vector, indices) -> shuffled vector
+    RuntimeFuncSpec::new("rt_vec_blend", &[I64, I64, I64], &[I64]), // (vec1, vec2, indices) -> blended vector
+    RuntimeFuncSpec::new("rt_vec_select", &[I64, I64, I64], &[I64]), // (mask, if_true, if_false) -> selected vector
+    // =========================================================================
+    // GPU Atomic operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_gpu_atomic_add", &[I64, I64], &[I64]), // (ptr, val) -> old value
+    RuntimeFuncSpec::new("rt_gpu_atomic_sub", &[I64, I64], &[I64]), // (ptr, val) -> old value
+    RuntimeFuncSpec::new("rt_gpu_atomic_min", &[I64, I64], &[I64]), // (ptr, val) -> old value
+    RuntimeFuncSpec::new("rt_gpu_atomic_max", &[I64, I64], &[I64]), // (ptr, val) -> old value
+    RuntimeFuncSpec::new("rt_gpu_atomic_and", &[I64, I64], &[I64]), // (ptr, val) -> old value
+    RuntimeFuncSpec::new("rt_gpu_atomic_or", &[I64, I64], &[I64]),  // (ptr, val) -> old value
+    RuntimeFuncSpec::new("rt_gpu_atomic_xor", &[I64, I64], &[I64]), // (ptr, val) -> old value
+    RuntimeFuncSpec::new("rt_gpu_atomic_exchange", &[I64, I64], &[I64]), // (ptr, val) -> old value
+    RuntimeFuncSpec::new("rt_gpu_atomic_cmpxchg", &[I64, I64, I64], &[I64]), // (ptr, expected, desired) -> old value
+    // =========================================================================
     // String operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_string_new", &[I64, I64], &[I64]),
@@ -324,6 +357,17 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_gpu_launch", &[I64, I32, I32, I32, I32, I32, I32], &[I32]), // kernel, gx,gy,gz, lx,ly,lz -> status
     RuntimeFuncSpec::new("rt_gpu_launch_1d", &[I64, I32, I32], &[I32]), // kernel, global, local -> status
+    // =========================================================================
+    // Parallel iterator operations (#415)
+    // =========================================================================
+    // rt_par_map(input_ptr, input_len, closure_ptr, backend) -> result_ptr
+    RuntimeFuncSpec::new("rt_par_map", &[I64, I64, I64, I32], &[I64]),
+    // rt_par_reduce(input_ptr, input_len, initial, closure_ptr, backend) -> result
+    RuntimeFuncSpec::new("rt_par_reduce", &[I64, I64, I64, I64, I32], &[I64]),
+    // rt_par_filter(input_ptr, input_len, predicate_ptr, backend) -> result_ptr
+    RuntimeFuncSpec::new("rt_par_filter", &[I64, I64, I64, I32], &[I64]),
+    // rt_par_for_each(input_ptr, input_len, closure_ptr, backend) -> ()
+    RuntimeFuncSpec::new("rt_par_for_each", &[I64, I64, I64, I32], &[]),
     // =========================================================================
     // TCP networking operations
     // =========================================================================
