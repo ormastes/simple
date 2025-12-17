@@ -248,6 +248,117 @@ fn call_extern_function(
             native_term_poll(&evaluated)
         }
 
+        // =====================================================================
+        // Native TCP Operations (simple/std_lib/src/host/async_nogc_mut/net/tcp.spl)
+        // =====================================================================
+        "native_tcp_bind" => {
+            check_effect_violations("native_tcp_bind")?;
+            native_tcp_bind_interp(&evaluated)
+        }
+        "native_tcp_accept" => {
+            check_effect_violations("native_tcp_accept")?;
+            native_tcp_accept_interp(&evaluated)
+        }
+        "native_tcp_connect" => {
+            check_effect_violations("native_tcp_connect")?;
+            native_tcp_connect_interp(&evaluated)
+        }
+        "native_tcp_connect_timeout" => {
+            check_effect_violations("native_tcp_connect_timeout")?;
+            native_tcp_connect_timeout_interp(&evaluated)
+        }
+        "native_tcp_read" => {
+            check_effect_violations("native_tcp_read")?;
+            native_tcp_read_interp(&evaluated)
+        }
+        "native_tcp_write" => {
+            check_effect_violations("native_tcp_write")?;
+            native_tcp_write_interp(&evaluated)
+        }
+        "native_tcp_flush" => {
+            check_effect_violations("native_tcp_flush")?;
+            native_tcp_flush_interp(&evaluated)
+        }
+        "native_tcp_shutdown" => {
+            check_effect_violations("native_tcp_shutdown")?;
+            native_tcp_shutdown_interp(&evaluated)
+        }
+        "native_tcp_close" => {
+            check_effect_violations("native_tcp_close")?;
+            native_tcp_close_interp(&evaluated)
+        }
+        "native_tcp_set_nodelay" => native_tcp_set_nodelay_interp(&evaluated),
+        "native_tcp_set_keepalive" => Ok(Value::Nil), // Stub for now
+        "native_tcp_set_read_timeout" => native_tcp_set_read_timeout_interp(&evaluated),
+        "native_tcp_set_write_timeout" => native_tcp_set_write_timeout_interp(&evaluated),
+        "native_tcp_get_nodelay" => native_tcp_get_nodelay_interp(&evaluated),
+        "native_tcp_peek" => {
+            check_effect_violations("native_tcp_peek")?;
+            native_tcp_peek_interp(&evaluated)
+        }
+        "native_tcp_set_backlog" => Ok(Value::Nil), // No-op, backlog set at bind time
+
+        // =====================================================================
+        // Native UDP Operations (simple/std_lib/src/host/async_nogc_mut/net/udp.spl)
+        // =====================================================================
+        "native_udp_bind" => {
+            check_effect_violations("native_udp_bind")?;
+            native_udp_bind_interp(&evaluated)
+        }
+        "native_udp_connect" => {
+            check_effect_violations("native_udp_connect")?;
+            native_udp_connect_interp(&evaluated)
+        }
+        "native_udp_recv_from" => {
+            check_effect_violations("native_udp_recv_from")?;
+            native_udp_recv_from_interp(&evaluated)
+        }
+        "native_udp_recv" => {
+            check_effect_violations("native_udp_recv")?;
+            native_udp_recv_interp(&evaluated)
+        }
+        "native_udp_send_to" => {
+            check_effect_violations("native_udp_send_to")?;
+            native_udp_send_to_interp(&evaluated)
+        }
+        "native_udp_send" => {
+            check_effect_violations("native_udp_send")?;
+            native_udp_send_interp(&evaluated)
+        }
+        "native_udp_peek_from" => {
+            check_effect_violations("native_udp_peek_from")?;
+            native_udp_peek_from_interp(&evaluated)
+        }
+        "native_udp_peek" => {
+            check_effect_violations("native_udp_peek")?;
+            native_udp_peek_interp(&evaluated)
+        }
+        "native_udp_peer_addr" => native_udp_peer_addr_interp(&evaluated),
+        "native_udp_set_broadcast" => native_udp_set_broadcast_interp(&evaluated),
+        "native_udp_set_multicast_loop" => native_udp_set_multicast_loop_interp(&evaluated),
+        "native_udp_set_multicast_ttl" => native_udp_set_multicast_ttl_interp(&evaluated),
+        "native_udp_set_ttl" => native_udp_set_ttl_interp(&evaluated),
+        "native_udp_set_read_timeout" => native_udp_set_read_timeout_interp(&evaluated),
+        "native_udp_set_write_timeout" => native_udp_set_write_timeout_interp(&evaluated),
+        "native_udp_get_broadcast" => native_udp_get_broadcast_interp(&evaluated),
+        "native_udp_get_ttl" => native_udp_get_ttl_interp(&evaluated),
+        "native_udp_join_multicast_v4" => native_udp_join_multicast_v4_interp(&evaluated),
+        "native_udp_leave_multicast_v4" => native_udp_leave_multicast_v4_interp(&evaluated),
+        "native_udp_join_multicast_v6" => native_udp_join_multicast_v6_interp(&evaluated),
+        "native_udp_leave_multicast_v6" => native_udp_leave_multicast_v6_interp(&evaluated),
+        "native_udp_close" => {
+            check_effect_violations("native_udp_close")?;
+            native_udp_close_interp(&evaluated)
+        }
+
+        // =====================================================================
+        // Native HTTP Operations (simple/std_lib/src/host/async_nogc_mut/net/http.spl)
+        // =====================================================================
+        "native_http_send" => {
+            check_effect_violations("native_http_send")?;
+            native_http_send_interp(&evaluated)
+        }
+
         // Unknown extern function
         _ => Err(CompileError::Semantic(format!("unknown extern function: {}", name))),
     }

@@ -1067,6 +1067,22 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
         }
     }
 
+    // Check if main is defined as a function and call it
+    if let Some(main_func) = functions.get("main") {
+        let result = exec_function(
+            main_func,
+            &[],  // No arguments
+            &env,
+            &functions,
+            &classes,
+            &enums,
+            &impl_methods,
+            None,  // No self context
+        )?;
+        return result.as_int().map(|v| v as i32);
+    }
+
+    // Fall back to checking for `main = <value>` binding
     let main_val = env.get("main").cloned().unwrap_or(Value::Int(0)).as_int()? as i32;
     Ok(main_val)
 }
@@ -1528,4 +1544,5 @@ include!("interpreter_method.rs");
 include!("interpreter_macro.rs");
 include!("interpreter_extern.rs");
 include!("interpreter_native_io.rs");
+include!("interpreter_native_net.rs");
 include!("interpreter_context.rs");
