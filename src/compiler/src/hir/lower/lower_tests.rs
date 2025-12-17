@@ -499,3 +499,70 @@ fn test_thread_group_barrier() {
         panic!("Expected Expr statement");
     }
 }
+
+
+#[test]
+fn test_simd_vec_type() {
+    // Test vec[N, T] type annotation (without value to isolate type resolution)
+    let module = parse_and_lower(
+        "fn test(v: vec[4, f32]) -> i64:\n    return 0\n"
+    ).unwrap();
+
+    let func = &module.functions[0];
+    assert_eq!(func.params.len(), 1);
+    assert_eq!(func.params[0].name, "v");
+
+    // Check the type is Simd with 4 lanes and f32 element
+    if let Some(HirType::Simd { lanes, element }) = module.types.get(func.params[0].ty) {
+        assert_eq!(*lanes, 4);
+        // Check element type is f32 (32-bit float)
+        if let Some(HirType::Float { bits }) = module.types.get(*element) {
+            assert_eq!(*bits, 32);
+        } else {
+            panic!("Expected Float type for element, got {:?}", module.types.get(*element));
+        }
+    } else {
+        panic!("Expected Simd type, got {:?}", module.types.get(func.params[0].ty));
+    }
+}
+
+#[test]
+fn test_simd_vec_literal() {
+    // Test vec[...] literal expression
+    let module = parse_and_lower(
+        "fn test() -> i64:\n    let v = vec[1.0, 2.0, 3.0, 4.0]\n    return 0\n"
+    ).unwrap();
+
+    let func = &module.functions[0];
+    assert_eq!(func.locals.len(), 1);
+    assert_eq!(func.locals[0].name, "v");
+
+    // Check the let statement has VecLiteral
+    if let HirStmt::Let { value: Some(value), .. } = &func.body[0] {
+        if let HirExprKind::VecLiteral(elements) = &value.kind {
+            assert_eq!(elements.len(), 4);
+        } else {
+            panic!("Expected VecLiteral, got {:?}", value.kind);
+        }
+    } else {
+        panic!("Expected Let statement with value");
+    }
+}
+
+#[test]
+fn test_simd_vec_inferred_type() {
+    // Test that vec literal infers correct SIMD type
+    let module = parse_and_lower(
+        "fn test() -> i64:\n    let v = vec[1, 2, 3, 4, 5, 6, 7, 8]\n    return 0\n"
+    ).unwrap();
+
+    let func = &module.functions[0];
+    // Check the inferred type is Simd with 8 lanes
+    if let Some(HirType::Simd { lanes, element }) = module.types.get(func.locals[0].ty) {
+        assert_eq!(*lanes, 8);
+        assert_eq!(*element, TypeId::I64);
+    } else {
+        panic!("Expected Simd type, got {:?}", module.types.get(func.locals[0].ty));
+    }
+}
+

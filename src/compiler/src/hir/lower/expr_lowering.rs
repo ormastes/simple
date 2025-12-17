@@ -418,6 +418,30 @@ impl Lowerer {
                 })
             }
 
+            Expr::VecLiteral(exprs) => {
+                let mut hir_exprs = Vec::new();
+                let elem_ty = if let Some(first) = exprs.first() {
+                    self.infer_type(first, ctx)?
+                } else {
+                    // Empty vector needs explicit type annotation
+                    TypeId::VOID
+                };
+
+                for e in exprs {
+                    hir_exprs.push(self.lower_expr(e, ctx)?);
+                }
+
+                let vec_ty = self.module.types.register(HirType::Simd {
+                    lanes: exprs.len() as u32,
+                    element: elem_ty,
+                });
+
+                Ok(HirExpr {
+                    kind: HirExprKind::VecLiteral(hir_exprs),
+                    ty: vec_ty,
+                })
+            }
+
             Expr::If {
                 condition,
                 then_branch,
@@ -678,6 +702,18 @@ impl Lowerer {
                     Ok(self.module.types.register(HirType::Array {
                         element: elem_ty,
                         size: Some(exprs.len()),
+                    }))
+                } else {
+                    Ok(TypeId::VOID)
+                }
+            }
+            Expr::VecLiteral(exprs) => {
+                if let Some(first) = exprs.first() {
+                    // Infer SIMD vector type from first element
+                    let elem_ty = self.infer_type(first, ctx)?;
+                    Ok(self.module.types.register(HirType::Simd {
+                        lanes: exprs.len() as u32,
+                        element: elem_ty,
                     }))
                 } else {
                     Ok(TypeId::VOID)
