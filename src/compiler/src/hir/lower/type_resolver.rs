@@ -41,6 +41,13 @@ impl Lowerer {
                     size: size_val,
                 }))
             }
+            Type::Simd { lanes, element } => {
+                let elem_id = self.resolve_type(element)?;
+                Ok(self.module.types.register(HirType::Simd {
+                    lanes: *lanes,
+                    element: elem_id,
+                }))
+            }
             Type::Function { params, ret } => {
                 let mut param_ids = Vec::new();
                 for p in params {

@@ -109,6 +109,11 @@ pub enum HirType {
         element: TypeId,
         size: Option<usize>,
     },
+    /// SIMD vector type: vec[N, T] where N is lane count
+    Simd {
+        lanes: u32,
+        element: TypeId,
+    },
     Tuple(Vec<TypeId>),
     Function {
         params: Vec<TypeId>,
@@ -542,6 +547,9 @@ impl TypeRegistry {
             // Arrays are safe if elements are safe (assuming immutable array)
             Some(HirType::Array { element, .. }) => self.is_snapshot_safe(*element),
 
+            // SIMD vectors are safe if elements are safe (always primitive types)
+            Some(HirType::Simd { element, .. }) => self.is_snapshot_safe(*element),
+
             // CTR-061: Structs are snapshot-safe if all fields are snapshot-safe
             // CTR-062: Structs with #[snapshot] attribute have custom snapshot semantics
             Some(HirType::Struct { fields, has_snapshot, .. }) => {
@@ -654,6 +662,8 @@ pub enum HirExprKind {
     // Compound literals
     Tuple(Vec<HirExpr>),
     Array(Vec<HirExpr>),
+    /// SIMD vector literal: vec[1.0, 2.0, 3.0, 4.0]
+    VecLiteral(Vec<HirExpr>),
     StructInit {
         ty: TypeId,
         fields: Vec<HirExpr>,

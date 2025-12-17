@@ -253,6 +253,10 @@ pub fn compile_instruction<M: Module>(
             compile_tuple_lit(ctx, builder, *dest, elements);
         }
 
+        MirInst::VecLit { dest, elements } => {
+            compile_vec_lit(ctx, builder, *dest, elements);
+        }
+
         MirInst::DictLit { dest, keys, values } => {
             compile_dict_lit(ctx, builder, *dest, keys, values);
         }

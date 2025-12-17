@@ -105,6 +105,20 @@ fn compile_tuple_lit<M: Module>(
     compile_collection_lit(ctx, builder, dest, elements, &TUPLE_SPEC);
 }
 
+/// Compile a SIMD vector literal
+/// For now, we represent vectors as arrays. A full implementation would use
+/// Cranelift's SIMD vector types for better performance.
+fn compile_vec_lit<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    elements: &[VReg],
+) {
+    // For now, use the same implementation as arrays
+    // In a full SIMD implementation, we would use Cranelift's vector types
+    compile_collection_lit(ctx, builder, dest, elements, &ARRAY_SPEC);
+}
+
 fn compile_dict_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,

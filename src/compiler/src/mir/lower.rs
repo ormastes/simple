@@ -1181,6 +1181,54 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
+            HirExprKind::Tuple(elements) => {
+                let mut elem_regs = Vec::new();
+                for elem in elements {
+                    elem_regs.push(self.lower_expr(elem)?);
+                }
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::TupleLit {
+                        dest,
+                        elements: elem_regs,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::Array(elements) => {
+                let mut elem_regs = Vec::new();
+                for elem in elements {
+                    elem_regs.push(self.lower_expr(elem)?);
+                }
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ArrayLit {
+                        dest,
+                        elements: elem_regs,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::VecLiteral(elements) => {
+                let mut elem_regs = Vec::new();
+                for elem in elements {
+                    elem_regs.push(self.lower_expr(elem)?);
+                }
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecLit {
+                        dest,
+                        elements: elem_regs,
+                    });
+                    dest
+                })
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }

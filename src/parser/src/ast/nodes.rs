@@ -1084,6 +1084,8 @@ pub enum Expr {
     },
     Tuple(Vec<Expr>),
     Array(Vec<Expr>),
+    /// SIMD vector literal: vec[1.0, 2.0, 3.0, 4.0]
+    VecLiteral(Vec<Expr>),
     Dict(Vec<(Expr, Expr)>),
     /// List comprehension: [expr for pattern in iterable if condition]
     ListComprehension {

@@ -117,6 +117,9 @@ pub enum MirInst {
     /// Create a tuple literal from elements
     TupleLit { dest: VReg, elements: Vec<VReg> },
 
+    /// Create a SIMD vector literal from elements
+    VecLit { dest: VReg, elements: Vec<VReg> },
+
     /// Create a dictionary literal from key-value pairs
     DictLit {
         dest: VReg,
@@ -627,6 +630,7 @@ impl HasEffects for MirInst {
             // Collection allocation (GcAlloc effect)
             MirInst::ArrayLit { .. }
             | MirInst::TupleLit { .. }
+            | MirInst::VecLit { .. }
             | MirInst::DictLit { .. }
             | MirInst::Spread { .. }
             | MirInst::FStringFormat { .. }
@@ -720,6 +724,7 @@ impl MirInst {
             | MirInst::GcAlloc { dest, .. }
             | MirInst::ArrayLit { dest, .. }
             | MirInst::TupleLit { dest, .. }
+            | MirInst::VecLit { dest, .. }
             | MirInst::DictLit { dest, .. }
             | MirInst::IndexGet { dest, .. }
             | MirInst::SliceOp { dest, .. }
@@ -815,9 +820,9 @@ impl MirInst {
             MirInst::OptionNone { .. } => vec![],
             MirInst::ResultOk { value, .. } => vec![*value],
             MirInst::ResultErr { value, .. } => vec![*value],
-            MirInst::TupleLit { elements, .. } | MirInst::ArrayLit { elements, .. } => {
-                elements.clone()
-            }
+            MirInst::TupleLit { elements, .. }
+            | MirInst::ArrayLit { elements, .. }
+            | MirInst::VecLit { elements, .. } => elements.clone(),
             MirInst::DictLit { keys, values, .. } => {
                 let mut v = Vec::with_capacity(keys.len() + values.len());
                 v.extend(keys.iter().copied());
