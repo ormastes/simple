@@ -546,6 +546,21 @@ fn format_type(ty: &Type) -> String {
             None => format!("Constructor[{}]", format_type(target)),
         },
         Type::Simd { lanes, element } => format!("vec[{}, {}]", lanes, format_type(element)),
+        Type::UnitWithRepr {
+            name,
+            repr,
+            constraints,
+        } => {
+            let mut result = name.clone();
+            if let Some(r) = repr {
+                result.push(':');
+                result.push_str(&r.to_string());
+            }
+            if let Some((start, end)) = constraints.range {
+                result.push_str(&format!(" where range: {}..{}", start, end));
+            }
+            result
+        }
     }
 }
 

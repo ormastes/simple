@@ -513,6 +513,7 @@ impl<'a> Parser<'a> {
             doc_comment: None,
             contract: None,
             is_abstract,
+            bounds_block: None,
         })
     }
 

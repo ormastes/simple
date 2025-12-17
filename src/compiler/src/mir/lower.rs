@@ -2,9 +2,9 @@ use super::{
     blocks::Terminator,
     effects::{CallTarget, LocalKind},
     function::{MirFunction, MirLocal, MirModule},
-    instructions::{BlockId, ContractKind, GpuMemoryScope, MirInst, VReg},
+    instructions::{BlockId, ContractKind, GpuAtomicOp, GpuMemoryScope, MirInst, UnitOverflowBehavior, VReg},
 };
-use crate::hir::{GpuIntrinsicKind, HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, TypeId};
+use crate::hir::{GpuIntrinsicKind, HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, HirType, NeighborDirection, TypeId};
 use std::collections::HashMap;
 use thiserror::Error;
 
@@ -255,6 +255,8 @@ pub struct MirLowerer<'a> {
     contract_mode: ContractMode,
     /// Reference to refined types for emitting refinement checks (CTR-020)
     refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
+    /// Reference to type registry for looking up unit type constraints
+    type_registry: Option<&'a crate::hir::TypeRegistry>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -263,6 +265,7 @@ impl<'a> MirLowerer<'a> {
             state: LowererState::Idle,
             contract_mode: ContractMode::All,
             refined_types: None,
+            type_registry: None,
         }
     }
 
@@ -272,12 +275,19 @@ impl<'a> MirLowerer<'a> {
             state: LowererState::Idle,
             contract_mode,
             refined_types: None,
+            type_registry: None,
         }
     }
 
     /// Set refined types reference for emitting refinement checks (CTR-020)
     pub fn with_refined_types(mut self, refined_types: &'a std::collections::HashMap<String, crate::hir::HirRefinedType>) -> Self {
         self.refined_types = Some(refined_types);
+        self
+    }
+
+    /// Set type registry reference for looking up unit type constraints
+    pub fn with_type_registry(mut self, registry: &'a crate::hir::TypeRegistry) -> Self {
+        self.type_registry = Some(registry);
         self
     }
 
@@ -418,7 +428,41 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
-    pub fn lower_module(mut self, hir: &HirModule) -> MirLowerResult<MirModule> {
+    /// Emit UnitBoundCheck instruction if the type is a UnitType with constraints
+    fn emit_unit_bound_check(&mut self, ty: TypeId, value: VReg) -> MirLowerResult<()> {
+        // Look up type info from registry
+        if let Some(registry) = self.type_registry {
+            if let Some(hir_type) = registry.get(ty) {
+                if let HirType::UnitType {
+                    name,
+                    constraints,
+                    ..
+                } = hir_type
+                {
+                    // Only emit check if there's a range constraint
+                    if let Some((min, max)) = constraints.range {
+                        let overflow: UnitOverflowBehavior = constraints.overflow.into();
+                        self.with_func(|func, current_block| {
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::UnitBoundCheck {
+                                value,
+                                unit_name: name.clone(),
+                                min,
+                                max,
+                                overflow,
+                            });
+                        })?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn lower_module(mut self, hir: &'a HirModule) -> MirLowerResult<MirModule> {
+        // Store reference to type registry for unit type bound checks
+        self.type_registry = Some(&hir.types);
+
         let mut module = MirModule::new();
         module.name = hir.name.clone();
 
@@ -583,6 +627,10 @@ impl<'a> MirLowerer<'a> {
                     let vreg = self.lower_expr(val)?;
                     let local_idx = *local_index;
                     let ty = val.ty;
+
+                    // Emit unit bound check if assigning to a unit type with constraints
+                    self.emit_unit_bound_check(ty, vreg)?;
+
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -604,6 +652,9 @@ impl<'a> MirLowerer<'a> {
                 let val_reg = self.lower_expr(value)?;
                 let addr_reg = self.lower_lvalue(target)?;
                 let ty = value.ty;
+
+                // Emit unit bound check if assigning to a unit type with constraints
+                self.emit_unit_bound_check(ty, val_reg)?;
 
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
@@ -1167,6 +1218,68 @@ impl<'a> MirLowerer<'a> {
                 self.lower_gpu_intrinsic(*intrinsic, args)
             }
 
+            HirExprKind::NeighborAccess { array, direction } => {
+                let array_reg = self.lower_expr(array)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::NeighborLoad {
+                        dest,
+                        array: array_reg,
+                        direction: *direction,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::Tuple(elements) => {
+                let mut elem_regs = Vec::new();
+                for elem in elements {
+                    elem_regs.push(self.lower_expr(elem)?);
+                }
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::TupleLit {
+                        dest,
+                        elements: elem_regs,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::Array(elements) => {
+                let mut elem_regs = Vec::new();
+                for elem in elements {
+                    elem_regs.push(self.lower_expr(elem)?);
+                }
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ArrayLit {
+                        dest,
+                        elements: elem_regs,
+                    });
+                    dest
+                })
+            }
+
+            HirExprKind::VecLiteral(elements) => {
+                let mut elem_regs = Vec::new();
+                for elem in elements {
+                    elem_regs.push(self.lower_expr(elem)?);
+                }
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecLit {
+                        dest,
+                        elements: elem_regs,
+                    });
+                    dest
+                })
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }
@@ -1243,6 +1356,432 @@ impl<'a> MirLowerer<'a> {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::GpuMemFence { scope });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdIndex => {
+                // SIMD linear global index - use GlobalId with dim 0
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuGlobalId { dest, dim: 0 });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdThreadIndex => {
+                // SIMD thread index within group - use LocalId with dim 0
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuLocalId { dest, dim: 0 });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdGroupIndex => {
+                // SIMD group index - use GroupId with dim 0
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuGroupId { dest, dim: 0 });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdSum => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecSum { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdProduct => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecProduct { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdMin => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecMin { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdMax => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecMax { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdAll => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecAll { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdAny => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecAny { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdExtract => {
+                let vector = self.lower_expr(&args[0])?;
+                let index = self.lower_expr(&args[1])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block
+                        .instructions
+                        .push(MirInst::VecExtract { dest, vector, index });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdWith => {
+                let vector = self.lower_expr(&args[0])?;
+                let index = self.lower_expr(&args[1])?;
+                let value = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecWith {
+                        dest,
+                        vector,
+                        index,
+                        value,
+                    });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdSqrt => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecSqrt { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdAbs => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecAbs { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdFloor => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecFloor { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdCeil => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecCeil { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdRound => {
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecRound { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdShuffle => {
+                // v.shuffle([3, 2, 1, 0]) - reorder lanes by indices
+                let source = self.lower_expr(&args[0])?;
+                let indices = self.lower_expr(&args[1])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block
+                        .instructions
+                        .push(MirInst::VecShuffle { dest, source, indices });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdBlend => {
+                // a.blend(b, [0, 1, 4, 5]) - merge two vectors
+                let first = self.lower_expr(&args[0])?;
+                let second = self.lower_expr(&args[1])?;
+                let indices = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecBlend {
+                        dest,
+                        first,
+                        second,
+                        indices,
+                    });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdSelect => {
+                // mask.select(a, b) - select from a where true, b where false
+                let mask = self.lower_expr(&args[0])?;
+                let if_true = self.lower_expr(&args[1])?;
+                let if_false = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecSelect {
+                        dest,
+                        mask,
+                        if_true,
+                        if_false,
+                    });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdLoad => {
+                // vec.load(array, offset) - load vector from array
+                let array = self.lower_expr(&args[0])?;
+                let offset = self.lower_expr(&args[1])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecLoad {
+                        dest,
+                        array,
+                        offset,
+                    });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdStore => {
+                // v.store(array, offset) - store vector to array
+                let source = self.lower_expr(&args[0])?;
+                let array = self.lower_expr(&args[1])?;
+                let offset = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecStore {
+                        source,
+                        array,
+                        offset,
+                    });
+                    // VecStore has no return value, return a dummy vreg
+                    func.new_vreg()
+                })
+            }
+            GpuIntrinsicKind::SimdGather => {
+                // vec.gather(array, indices) - gather from array at indices
+                let array = self.lower_expr(&args[0])?;
+                let indices = self.lower_expr(&args[1])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecGather {
+                        dest,
+                        array,
+                        indices,
+                    });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdScatter => {
+                // v.scatter(array, indices) - scatter vector to array at indices
+                let source = self.lower_expr(&args[0])?;
+                let array = self.lower_expr(&args[1])?;
+                let indices = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecScatter {
+                        source,
+                        array,
+                        indices,
+                    });
+                    // VecScatter has no return value, return a dummy vreg
+                    func.new_vreg()
+                })
+            }
+            GpuIntrinsicKind::SimdFma => {
+                // v.fma(b, c) - fused multiply-add: v * b + c
+                let a = self.lower_expr(&args[0])?;
+                let b = self.lower_expr(&args[1])?;
+                let c = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecFma { dest, a, b, c });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdRecip => {
+                // v.recip() - reciprocal: 1.0 / v
+                let source = self.lower_expr(&args[0])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecRecip { dest, source });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdNeighborLeft | GpuIntrinsicKind::SimdNeighborRight => {
+                // x.left_neighbor / x.right_neighbor - neighbor access
+                let array = self.lower_expr(&args[0])?;
+                let direction = match intrinsic {
+                    GpuIntrinsicKind::SimdNeighborLeft => NeighborDirection::Left,
+                    GpuIntrinsicKind::SimdNeighborRight => NeighborDirection::Right,
+                    _ => unreachable!(),
+                };
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::NeighborLoad {
+                        dest,
+                        array,
+                        direction,
+                    });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdMaskedLoad => {
+                // f32x4.load_masked(arr, offset, mask, default) -> vec
+                let array = self.lower_expr(&args[0])?;
+                let offset = self.lower_expr(&args[1])?;
+                let mask = self.lower_expr(&args[2])?;
+                let default = self.lower_expr(&args[3])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecMaskedLoad {
+                        dest,
+                        array,
+                        offset,
+                        mask,
+                        default,
+                    });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdMaskedStore => {
+                // v.store_masked(arr, offset, mask) - store only where mask is true
+                let source = self.lower_expr(&args[0])?;
+                let array = self.lower_expr(&args[1])?;
+                let offset = self.lower_expr(&args[2])?;
+                let mask = self.lower_expr(&args[3])?;
+                self.with_func(|func, current_block| {
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecMaskedStore {
+                        source,
+                        array,
+                        offset,
+                        mask,
+                    });
+                    // Return dummy vreg since store has no result
+                    func.new_vreg()
+                })
+            }
+            GpuIntrinsicKind::SimdMinVec => {
+                // a.min(b) - element-wise minimum of two vectors
+                let a = self.lower_expr(&args[0])?;
+                let b = self.lower_expr(&args[1])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecMinVec { dest, a, b });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdMaxVec => {
+                // a.max(b) - element-wise maximum of two vectors
+                let a = self.lower_expr(&args[0])?;
+                let b = self.lower_expr(&args[1])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecMaxVec { dest, a, b });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdClamp => {
+                // v.clamp(lo, hi) - element-wise clamp to range
+                let source = self.lower_expr(&args[0])?;
+                let lo = self.lower_expr(&args[1])?;
+                let hi = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::VecClamp { dest, source, lo, hi });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::GpuAtomicAdd
+            | GpuIntrinsicKind::GpuAtomicSub
+            | GpuIntrinsicKind::GpuAtomicMin
+            | GpuIntrinsicKind::GpuAtomicMax
+            | GpuIntrinsicKind::GpuAtomicAnd
+            | GpuIntrinsicKind::GpuAtomicOr
+            | GpuIntrinsicKind::GpuAtomicXor
+            | GpuIntrinsicKind::GpuAtomicExchange => {
+                // gpu.atomic_*(ptr, val) -> old value
+                let ptr = self.lower_expr(&args[0])?;
+                let value = self.lower_expr(&args[1])?;
+                let op = match intrinsic {
+                    GpuIntrinsicKind::GpuAtomicAdd => GpuAtomicOp::Add,
+                    GpuIntrinsicKind::GpuAtomicSub => GpuAtomicOp::Sub,
+                    GpuIntrinsicKind::GpuAtomicMin => GpuAtomicOp::Min,
+                    GpuIntrinsicKind::GpuAtomicMax => GpuAtomicOp::Max,
+                    GpuIntrinsicKind::GpuAtomicAnd => GpuAtomicOp::And,
+                    GpuIntrinsicKind::GpuAtomicOr => GpuAtomicOp::Or,
+                    GpuIntrinsicKind::GpuAtomicXor => GpuAtomicOp::Xor,
+                    GpuIntrinsicKind::GpuAtomicExchange => GpuAtomicOp::Xchg,
+                    _ => unreachable!(),
+                };
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuAtomic {
+                        dest,
+                        op,
+                        ptr,
+                        value,
+                    });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::GpuAtomicCompareExchange => {
+                // gpu.atomic_compare_exchange(ptr, expected, desired) -> old value
+                let ptr = self.lower_expr(&args[0])?;
+                let expected = self.lower_expr(&args[1])?;
+                let desired = self.lower_expr(&args[2])?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuAtomicCmpXchg {
+                        dest,
+                        ptr,
+                        expected,
+                        desired,
+                    });
                     dest
                 })
             }

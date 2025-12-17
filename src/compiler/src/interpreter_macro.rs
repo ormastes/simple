@@ -324,6 +324,7 @@ fn substitute_macro_params_in_node(
                     .map(|e| substitute_macro_params(e, &empty_bindings, arg_exprs))
                     .transpose()?,
                 mutability: let_stmt.mutability,
+                storage_class: let_stmt.storage_class,
             }))
         }
         Node::Assignment(assign) => {

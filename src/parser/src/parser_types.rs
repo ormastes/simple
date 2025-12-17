@@ -113,14 +113,25 @@ impl<'a> Parser<'a> {
             return Ok(Type::Tuple(types));
         }
 
-        // Handle array type
+        // Handle array type: [T] or [T; N]
         if self.check(&TokenKind::LBracket) {
             self.advance();
             let element = self.parse_type()?;
+
+            // Check for fixed-size array: [T; N]
+            let size = if self.check(&TokenKind::Semicolon) {
+                self.advance();
+                // Parse the size expression
+                let size_expr = self.parse_expression()?;
+                Some(Box::new(size_expr))
+            } else {
+                None
+            };
+
             self.expect(&TokenKind::RBracket)?;
             return Ok(Type::Array {
                 element: Box::new(element),
-                size: None,
+                size,
             });
         }
 
@@ -213,6 +224,178 @@ impl<'a> Parser<'a> {
             return Ok(Type::Optional(Box::new(Type::Simple(name))));
         }
 
+        // Check for unit type with repr: `_cm:u12` or `_cm where ...`
+        // Only for unit types (identifiers starting with underscore)
+        if name.starts_with('_') {
+            // Check for compact repr syntax: `_cm:u12`
+            // The lexer produces Symbol("u12") for `:u12` so we need to check for Symbol
+            if let TokenKind::Symbol(repr_str) = &self.current.kind {
+                let repr_str = repr_str.clone();
+                if let Some(repr) = ReprType::from_str(&repr_str) {
+                    self.advance(); // consume the symbol
+
+                    // Check for where clause
+                    let constraints = if self.check(&TokenKind::Where) {
+                        self.parse_unit_where_clause()?
+                    } else {
+                        UnitReprConstraints::default()
+                    };
+
+                    return Ok(Type::UnitWithRepr {
+                        name,
+                        repr: Some(repr),
+                        constraints,
+                    });
+                }
+            }
+
+            // Check for where clause without repr: `_cm where range: 0..100`
+            if self.check(&TokenKind::Where) {
+                let constraints = self.parse_unit_where_clause()?;
+                return Ok(Type::UnitWithRepr {
+                    name,
+                    repr: None,
+                    constraints,
+                });
+            }
+        }
+
         Ok(Type::Simple(name))
+    }
+
+    /// Parse a repr type in type context (returns ReprType)
+    fn parse_repr_type_optional(&mut self) -> Result<ReprType, ParseError> {
+        match &self.current.kind {
+            TokenKind::Identifier(s) => {
+                let s = s.clone();
+                if let Some(repr) = ReprType::from_str(&s) {
+                    self.advance();
+                    Ok(repr)
+                } else {
+                    Err(ParseError::syntax_error_with_span(
+                        format!(
+                            "Invalid repr type '{}'. Expected format: u8, i12, f32, etc.",
+                            s
+                        ),
+                        self.current.span,
+                    ))
+                }
+            }
+            _ => Err(ParseError::syntax_error_with_span(
+                format!(
+                    "Expected repr type (u8, i12, f32, etc.), got {:?}",
+                    self.current.kind
+                ),
+                self.current.span,
+            )),
+        }
+    }
+
+    /// Parse where clause for unit types: `where range: 0..100, checked`
+    fn parse_unit_where_clause(&mut self) -> Result<UnitReprConstraints, ParseError> {
+        self.expect(&TokenKind::Where)?;
+
+        let mut constraints = UnitReprConstraints::default();
+
+        // Parse first constraint
+        self.parse_unit_constraint(&mut constraints)?;
+
+        // Parse additional constraints separated by commas
+        while self.check(&TokenKind::Comma) {
+            self.advance();
+            self.parse_unit_constraint(&mut constraints)?;
+        }
+
+        Ok(constraints)
+    }
+
+    /// Parse a single unit constraint: range, checked, saturate, wrap, default
+    fn parse_unit_constraint(&mut self, constraints: &mut UnitReprConstraints) -> Result<(), ParseError> {
+        match &self.current.kind {
+            TokenKind::Identifier(s) => {
+                let s = s.clone();
+                match s.as_str() {
+                    "range" => {
+                        self.advance();
+                        self.expect(&TokenKind::Colon)?;
+                        let (start, end) = self.parse_range_constraint()?;
+                        constraints.range = Some((start, end));
+                    }
+                    "checked" => {
+                        self.advance();
+                        constraints.overflow = OverflowBehavior::Checked;
+                    }
+                    "saturate" => {
+                        self.advance();
+                        constraints.overflow = OverflowBehavior::Saturate;
+                    }
+                    "wrap" => {
+                        self.advance();
+                        constraints.overflow = OverflowBehavior::Wrap;
+                    }
+                    "default" => {
+                        self.advance();
+                        self.expect(&TokenKind::Colon)?;
+                        let expr = self.parse_expression()?;
+                        constraints.default_value = Some(Box::new(expr));
+                    }
+                    _ => {
+                        return Err(ParseError::syntax_error_with_span(
+                            format!(
+                                "Unknown unit constraint '{}'. Expected: range, checked, saturate, wrap, default",
+                                s
+                            ),
+                            self.current.span,
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(ParseError::syntax_error_with_span(
+                    format!(
+                        "Expected unit constraint (range, checked, saturate, wrap, default), got {:?}",
+                        self.current.kind
+                    ),
+                    self.current.span,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Parse range constraint: 0..100 or -500..500
+    fn parse_range_constraint(&mut self) -> Result<(i64, i64), ParseError> {
+        // Parse start value (can be negative)
+        let start = self.parse_integer_literal()?;
+
+        // Expect ..
+        self.expect(&TokenKind::DoubleDot)?;
+
+        // Parse end value (can be negative)
+        let end = self.parse_integer_literal()?;
+
+        Ok((start, end))
+    }
+
+    /// Parse an integer literal (possibly negative)
+    fn parse_integer_literal(&mut self) -> Result<i64, ParseError> {
+        let negative = if self.check(&TokenKind::Minus) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        match &self.current.kind {
+            TokenKind::Integer(n) => {
+                let val = *n;
+                self.advance();
+                Ok(if negative { -val } else { val })
+            }
+            _ => Err(ParseError::syntax_error_with_span(
+                format!("Expected integer, got {:?}", self.current.kind),
+                self.current.span,
+            )),
+        }
     }
 }

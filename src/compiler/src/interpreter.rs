@@ -279,6 +279,128 @@ pub(crate) fn validate_unit_type(value: &Value, expected_type: &str) -> Result<(
     }
 }
 
+/// Validate unit type constraints (range bounds, overflow behavior)
+/// Returns Ok(value) with potentially modified value (for saturate/wrap), Err for checked mode violations
+pub(crate) fn validate_unit_constraints(
+    value: Value,
+    unit_name: &str,
+    constraints: &simple_parser::ast::UnitReprConstraints,
+) -> Result<Value, String> {
+    // Extract the numeric value from the Unit
+    let inner_value = match &value {
+        Value::Unit { value: inner, .. } => inner.as_ref(),
+        Value::Int(n) => return validate_int_constraints(*n, unit_name, constraints).map(Value::Int),
+        Value::Float(f) => return validate_float_constraints(*f, unit_name, constraints).map(Value::Float),
+        _ => return Ok(value), // Non-numeric types pass through unchanged
+    };
+
+    // Get the numeric value for range checking
+    let numeric = match inner_value {
+        Value::Int(n) => *n as f64,
+        Value::Float(f) => *f,
+        _ => return Ok(value), // Non-numeric inner types pass through
+    };
+
+    // Check range constraints if present
+    if let Some((min, max)) = constraints.range {
+        let min_f = min as f64;
+        let max_f = max as f64;
+
+        if numeric < min_f || numeric > max_f {
+            match constraints.overflow {
+                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
+                    return Err(format!(
+                        "unit '{}' value {} out of range [{}, {}]",
+                        unit_name, numeric, min, max
+                    ));
+                }
+                simple_parser::ast::OverflowBehavior::Saturate => {
+                    // Clamp to range bounds
+                    let clamped = if numeric < min_f { min_f } else { max_f };
+                    return Ok(clamp_unit_value(value, clamped));
+                }
+                simple_parser::ast::OverflowBehavior::Wrap => {
+                    // Wrap around using modulo
+                    let range = max_f - min_f + 1.0;
+                    let wrapped = min_f + ((numeric - min_f).rem_euclid(range));
+                    return Ok(clamp_unit_value(value, wrapped));
+                }
+            }
+        }
+    }
+
+    Ok(value)
+}
+
+/// Apply constraints to an integer value
+fn validate_int_constraints(value: i64, unit_name: &str, constraints: &simple_parser::ast::UnitReprConstraints) -> Result<i64, String> {
+    if let Some((min, max)) = constraints.range {
+        if value < min || value > max {
+            match constraints.overflow {
+                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
+                    return Err(format!(
+                        "unit '{}' value {} out of range [{}, {}]",
+                        unit_name, value, min, max
+                    ));
+                }
+                simple_parser::ast::OverflowBehavior::Saturate => {
+                    return Ok(value.clamp(min, max));
+                }
+                simple_parser::ast::OverflowBehavior::Wrap => {
+                    let range = max - min + 1;
+                    return Ok(min + ((value - min).rem_euclid(range)));
+                }
+            }
+        }
+    }
+    Ok(value)
+}
+
+/// Apply constraints to a float value
+fn validate_float_constraints(value: f64, unit_name: &str, constraints: &simple_parser::ast::UnitReprConstraints) -> Result<f64, String> {
+    if let Some((min, max)) = constraints.range {
+        let min_f = min as f64;
+        let max_f = max as f64;
+        if value < min_f || value > max_f {
+            match constraints.overflow {
+                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
+                    return Err(format!(
+                        "unit '{}' value {} out of range [{}, {}]",
+                        unit_name, value, min, max
+                    ));
+                }
+                simple_parser::ast::OverflowBehavior::Saturate => {
+                    return Ok(value.clamp(min_f, max_f));
+                }
+                simple_parser::ast::OverflowBehavior::Wrap => {
+                    let range = max_f - min_f + 1.0;
+                    return Ok(min_f + ((value - min_f).rem_euclid(range)));
+                }
+            }
+        }
+    }
+    Ok(value)
+}
+
+/// Helper to create a new Unit value with clamped inner value
+fn clamp_unit_value(original: Value, new_numeric: f64) -> Value {
+    match original {
+        Value::Unit { value: inner, suffix, family } => {
+            let new_inner = match inner.as_ref() {
+                Value::Int(_) => Value::Int(new_numeric as i64),
+                Value::Float(_) => Value::Float(new_numeric),
+                _ => *inner,
+            };
+            Value::Unit {
+                value: Box::new(new_inner),
+                suffix,
+                family,
+            }
+        }
+        _ => original,
+    }
+}
+
 /// Represents a physical dimension as exponents of base units
 /// e.g., velocity = length^1 * time^-1 is represented as {length: 1, time: -1}
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -745,7 +867,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                             let mut arg_values = vec![];
                             for arg in args {
                                 arg_values.push(evaluate_expr(
-                                    arg,
+                                    &arg.value,
                                     &env,
                                     &functions,
                                     &classes,
@@ -1168,26 +1290,43 @@ pub(crate) fn exec_node(
                     None
                 };
 
-                if let Some(Type::Simple(type_name)) = &type_annotation {
-                    if is_unit_type(type_name) {
-                        if let Err(e) = validate_unit_type(&value, type_name) {
-                            // Extract variable name for better error message
-                            let var_name = match &let_stmt.pattern {
+                // Helper to extract variable name for error messages
+                let get_var_name = |pattern: &simple_parser::ast::Pattern| -> String {
+                    match pattern {
+                        simple_parser::ast::Pattern::Identifier(name) => name.clone(),
+                        simple_parser::ast::Pattern::MutIdentifier(name) => name.clone(),
+                        simple_parser::ast::Pattern::Typed { pattern, .. } => {
+                            match pattern.as_ref() {
                                 simple_parser::ast::Pattern::Identifier(name) => name.clone(),
                                 simple_parser::ast::Pattern::MutIdentifier(name) => name.clone(),
-                                simple_parser::ast::Pattern::Typed { pattern, .. } => {
-                                    match pattern.as_ref() {
-                                        simple_parser::ast::Pattern::Identifier(name) => name.clone(),
-                                        simple_parser::ast::Pattern::MutIdentifier(name) => name.clone(),
-                                        _ => "<pattern>".to_string(),
-                                    }
-                                }
                                 _ => "<pattern>".to_string(),
-                            };
+                            }
+                        }
+                        _ => "<pattern>".to_string(),
+                    }
+                };
+
+                // Validate and constrain value based on type annotation
+                let value = match &type_annotation {
+                    Some(Type::Simple(type_name)) if is_unit_type(type_name) => {
+                        if let Err(e) = validate_unit_type(&value, type_name) {
+                            let var_name = get_var_name(&let_stmt.pattern);
                             return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
                         }
+                        value
                     }
-                }
+                    Some(Type::UnitWithRepr { name, constraints, .. }) => {
+                        // Validate and apply unit type constraints (range, overflow behavior)
+                        match validate_unit_constraints(value, name, constraints) {
+                            Ok(constrained_value) => constrained_value,
+                            Err(e) => {
+                                let var_name = get_var_name(&let_stmt.pattern);
+                                return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
+                            }
+                        }
+                    }
+                    _ => value,
+                };
 
                 // Coerce to TraitObject if type annotation is `dyn Trait`
                 let value = if let Some(Type::DynTrait(trait_name)) = &let_stmt.ty {

@@ -7,6 +7,7 @@
 //! - Context and with statements
 //! - Contract blocks (requires/ensures/invariant) - LLM-friendly feature #400
 
+mod bounds;
 mod contract;
 
 use crate::ast::*;
@@ -48,7 +49,7 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mut)?;
         self.expect(&TokenKind::Let)?;
-        self.parse_let_impl(start_span, Mutability::Mutable)
+        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Auto)
     }
 
     pub(crate) fn parse_let(&mut self) -> Result<Node, ParseError> {
@@ -60,13 +61,24 @@ impl<'a> Parser<'a> {
         } else {
             Mutability::Immutable
         };
-        self.parse_let_impl(start_span, mutability)
+        self.parse_let_impl(start_span, mutability, StorageClass::Auto)
+    }
+
+    /// Parse shared let: `shared let name: [T; N]`
+    /// GPU work-group shared memory declaration
+    pub(crate) fn parse_shared_let(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Shared)?;
+        self.expect(&TokenKind::Let)?;
+        // Shared memory is always mutable (work-group accessible)
+        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Shared)
     }
 
     fn parse_let_impl(
         &mut self,
         start_span: Span,
         mutability: Mutability,
+        storage_class: StorageClass,
     ) -> Result<Node, ParseError> {
         let pattern = self.parse_pattern()?;
         let ty = self.parse_optional_type_annotation()?;
@@ -83,6 +95,7 @@ impl<'a> Parser<'a> {
             ty,
             value,
             mutability,
+            storage_class,
         }))
     }
 
@@ -439,11 +452,12 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse unit arithmetic block: allow rules and custom functions
+    /// Parse unit arithmetic block: allow rules, repr constraints, and custom functions
     fn parse_unit_arithmetic_block(&mut self) -> Result<UnitArithmetic, ParseError> {
         let mut binary_rules = Vec::new();
         let mut unary_rules = Vec::new();
         let mut custom_fns = Vec::new();
+        let mut allowed_reprs = Vec::new();
 
         // Skip newline if present
         if self.check(&TokenKind::Newline) {
@@ -469,11 +483,16 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            // Parse rule: 'allow' or 'fn'
+            // Parse rule: 'allow', 'repr', or 'fn'
             // Note: 'allow' is parsed as identifier to avoid conflict with #[allow(...)] attributes
             if matches!(&self.current.kind, TokenKind::Identifier(s) if s == "allow") {
                 self.advance(); // consume 'allow'
                 self.parse_arithmetic_rule(&mut binary_rules, &mut unary_rules)?;
+            } else if self.check(&TokenKind::Repr) {
+                // Parse repr: u8, i12, f32, ...
+                self.advance(); // consume 'repr'
+                self.expect(&TokenKind::Colon)?;
+                allowed_reprs = self.parse_repr_list()?;
             } else if self.check(&TokenKind::Fn) {
                 // Parse custom function
                 let func = self.parse_function()?;
@@ -483,7 +502,7 @@ impl<'a> Parser<'a> {
             } else {
                 return Err(ParseError::syntax_error_with_span(
                     format!(
-                        "Expected 'allow' or 'fn' in unit arithmetic block, got {:?}",
+                        "Expected 'allow', 'repr', or 'fn' in unit arithmetic block, got {:?}",
                         self.current.kind
                     ),
                     self.current.span,
@@ -505,7 +524,52 @@ impl<'a> Parser<'a> {
             binary_rules,
             unary_rules,
             custom_fns,
+            allowed_reprs,
         })
+    }
+
+    /// Parse a list of repr types: u8, i12, f32, ...
+    fn parse_repr_list(&mut self) -> Result<Vec<ReprType>, ParseError> {
+        let mut reprs = Vec::new();
+
+        // Parse first repr type
+        reprs.push(self.parse_repr_type()?);
+
+        // Parse additional repr types separated by commas
+        while self.check(&TokenKind::Comma) {
+            self.advance(); // consume ','
+            reprs.push(self.parse_repr_type()?);
+        }
+
+        Ok(reprs)
+    }
+
+    /// Parse a single repr type: u8, i12, f32, etc.
+    fn parse_repr_type(&mut self) -> Result<ReprType, ParseError> {
+        match &self.current.kind {
+            TokenKind::Identifier(s) => {
+                let s = s.clone();
+                if let Some(repr) = ReprType::from_str(&s) {
+                    self.advance();
+                    Ok(repr)
+                } else {
+                    Err(ParseError::syntax_error_with_span(
+                        format!(
+                            "Invalid repr type '{}'. Expected format: u8, i12, f32, etc.",
+                            s
+                        ),
+                        self.current.span,
+                    ))
+                }
+            }
+            _ => Err(ParseError::syntax_error_with_span(
+                format!(
+                    "Expected repr type (u8, i12, f32, etc.), got {:?}",
+                    self.current.kind
+                ),
+                self.current.span,
+            )),
+        }
     }
 
     /// Parse an arithmetic rule: binary or unary

@@ -378,6 +378,16 @@ impl<'a> Monomorphizer<'a> {
             },
             // dyn Trait doesn't have type parameters to substitute
             AstType::DynTrait(trait_name) => AstType::DynTrait(trait_name.clone()),
+            // Unit with repr doesn't have type parameters to substitute
+            AstType::UnitWithRepr {
+                name,
+                repr,
+                constraints,
+            } => AstType::UnitWithRepr {
+                name: name.clone(),
+                repr: repr.clone(),
+                constraints: constraints.clone(),
+            },
         }
     }
 

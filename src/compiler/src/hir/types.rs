@@ -35,6 +35,44 @@ impl Signedness {
     }
 }
 
+//==============================================================================
+// Unit Type Constraints (for bit-limited units)
+//==============================================================================
+
+/// Overflow behavior for constrained unit types
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum HirOverflowBehavior {
+    /// Default behavior (depends on debug/release mode)
+    #[default]
+    Default,
+    /// Panic on overflow (debug mode)
+    Checked,
+    /// Clamp to range bounds
+    Saturate,
+    /// Wrap around (modulo)
+    Wrap,
+}
+
+impl From<simple_parser::ast::OverflowBehavior> for HirOverflowBehavior {
+    fn from(ob: simple_parser::ast::OverflowBehavior) -> Self {
+        match ob {
+            simple_parser::ast::OverflowBehavior::Default => HirOverflowBehavior::Default,
+            simple_parser::ast::OverflowBehavior::Checked => HirOverflowBehavior::Checked,
+            simple_parser::ast::OverflowBehavior::Saturate => HirOverflowBehavior::Saturate,
+            simple_parser::ast::OverflowBehavior::Wrap => HirOverflowBehavior::Wrap,
+        }
+    }
+}
+
+/// Constraints for unit types with bit-limited representations
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HirUnitConstraints {
+    /// Valid value range (min, max)
+    pub range: Option<(i64, i64)>,
+    /// Overflow behavior
+    pub overflow: HirOverflowBehavior,
+}
+
 /// Unique identifier for types in the HIR
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeId(pub u32);
@@ -109,6 +147,11 @@ pub enum HirType {
         element: TypeId,
         size: Option<usize>,
     },
+    /// SIMD vector type: vec[N, T] where N is lane count
+    Simd {
+        lanes: u32,
+        element: TypeId,
+    },
     Tuple(Vec<TypeId>),
     Function {
         params: Vec<TypeId>,
@@ -123,6 +166,28 @@ pub enum HirType {
     Enum {
         name: String,
         variants: Vec<(String, Option<Vec<TypeId>>)>,
+    },
+    /// Semantic unit type with optional repr constraints
+    /// e.g., `_cm:u12 where range: 0..4000, checked`
+    UnitType {
+        /// Unit name (e.g., "_cm", "_kg")
+        name: String,
+        /// Underlying representation type
+        repr: TypeId,
+        /// Bit width (e.g., 12 for u12)
+        bits: u8,
+        /// Whether the repr is signed
+        signedness: Signedness,
+        /// Whether the repr is floating point
+        is_float: bool,
+        /// Constraints (range, overflow behavior)
+        constraints: HirUnitConstraints,
+    },
+    /// Tagged union type: `A | B | C`
+    /// Compiles to an enum internally with variants for each type
+    Union {
+        /// Types that can be held in this union
+        variants: Vec<TypeId>,
     },
     Unknown,
 }
@@ -350,6 +415,88 @@ pub enum GpuIntrinsicKind {
     Barrier,
     /// Memory fence
     MemFence,
+    /// SIMD linear global index: this.index()
+    SimdIndex,
+    /// SIMD thread index within group: this.thread_index()
+    SimdThreadIndex,
+    /// SIMD group index: this.group_index()
+    SimdGroupIndex,
+    /// SIMD vector reduction: sum all lanes
+    SimdSum,
+    /// SIMD vector reduction: product of all lanes
+    SimdProduct,
+    /// SIMD vector reduction: minimum of all lanes
+    SimdMin,
+    /// SIMD vector reduction: maximum of all lanes
+    SimdMax,
+    /// SIMD vector reduction: all lanes are true (bool vector)
+    SimdAll,
+    /// SIMD vector reduction: any lane is true (bool vector)
+    SimdAny,
+    /// SIMD lane extract: v[idx] -> element
+    SimdExtract,
+    /// SIMD lane insert: v.with(idx, val) -> new vector with lane replaced
+    SimdWith,
+    /// SIMD element-wise sqrt: v.sqrt()
+    SimdSqrt,
+    /// SIMD element-wise abs: v.abs()
+    SimdAbs,
+    /// SIMD element-wise floor: v.floor()
+    SimdFloor,
+    /// SIMD element-wise ceil: v.ceil()
+    SimdCeil,
+    /// SIMD element-wise round: v.round()
+    SimdRound,
+    /// SIMD shuffle: v.shuffle([3, 2, 1, 0]) -> reordered vector
+    SimdShuffle,
+    /// SIMD blend: a.blend(b, [0, 1, 4, 5]) -> merged vector (0-N from a, N-2N from b)
+    SimdBlend,
+    /// SIMD masked select: mask.select(a, b) -> select from a where true, b where false
+    SimdSelect,
+    /// GPU atomic add: gpu.atomic_add(ptr, val) -> old value
+    GpuAtomicAdd,
+    /// GPU atomic subtract: gpu.atomic_sub(ptr, val) -> old value
+    GpuAtomicSub,
+    /// GPU atomic min: gpu.atomic_min(ptr, val) -> old value
+    GpuAtomicMin,
+    /// GPU atomic max: gpu.atomic_max(ptr, val) -> old value
+    GpuAtomicMax,
+    /// GPU atomic and: gpu.atomic_and(ptr, val) -> old value
+    GpuAtomicAnd,
+    /// GPU atomic or: gpu.atomic_or(ptr, val) -> old value
+    GpuAtomicOr,
+    /// GPU atomic xor: gpu.atomic_xor(ptr, val) -> old value
+    GpuAtomicXor,
+    /// GPU atomic exchange: gpu.atomic_exchange(ptr, val) -> old value
+    GpuAtomicExchange,
+    /// GPU atomic compare exchange: gpu.atomic_compare_exchange(ptr, expected, desired) -> (old_value, success)
+    GpuAtomicCompareExchange,
+    /// SIMD load from array: f32x4.load(arr, offset) -> vec
+    SimdLoad,
+    /// SIMD store to array: v.store(arr, offset)
+    SimdStore,
+    /// SIMD gather (indexed load): f32x4.gather(arr, indices) -> vec
+    SimdGather,
+    /// SIMD scatter (indexed store): v.scatter(arr, indices)
+    SimdScatter,
+    /// SIMD fused multiply-add: v.fma(b, c) -> v * b + c
+    SimdFma,
+    /// SIMD reciprocal: v.recip() -> 1.0 / v
+    SimdRecip,
+    /// SIMD neighbor access (left): x.left_neighbor -> element at index-1
+    SimdNeighborLeft,
+    /// SIMD neighbor access (right): x.right_neighbor -> element at index+1
+    SimdNeighborRight,
+    /// SIMD masked load: f32x4.load_masked(arr, offset, mask, default) -> vec
+    SimdMaskedLoad,
+    /// SIMD masked store: v.store_masked(arr, offset, mask)
+    SimdMaskedStore,
+    /// SIMD element-wise minimum: a.min(b) -> element-wise min of two vectors
+    SimdMinVec,
+    /// SIMD element-wise maximum: a.max(b) -> element-wise max of two vectors
+    SimdMaxVec,
+    /// SIMD clamp: v.clamp(lo, hi) -> element-wise clamp to range
+    SimdClamp,
 }
 
 /// Type ID allocator for formal verification.
@@ -486,6 +633,14 @@ impl TypeRegistry {
         self.types.get(&id)
     }
 
+    /// Get the element type of an array type
+    pub fn get_array_element(&self, id: TypeId) -> Option<TypeId> {
+        match self.types.get(&id) {
+            Some(HirType::Array { element, .. }) => Some(*element),
+            _ => None,
+        }
+    }
+
     pub fn lookup(&self, name: &str) -> Option<TypeId> {
         self.name_to_id.get(name).copied()
     }
@@ -527,6 +682,17 @@ impl TypeRegistry {
 
             // Arrays are safe if elements are safe (assuming immutable array)
             Some(HirType::Array { element, .. }) => self.is_snapshot_safe(*element),
+
+            // SIMD vectors are safe if elements are safe (always primitive types)
+            Some(HirType::Simd { element, .. }) => self.is_snapshot_safe(*element),
+
+            // Unit types are snapshot-safe (they're constrained primitives)
+            Some(HirType::UnitType { .. }) => true,
+
+            // Union types are snapshot-safe if all variants are snapshot-safe
+            Some(HirType::Union { variants }) => {
+                variants.iter().all(|v| self.is_snapshot_safe(*v))
+            }
 
             // CTR-061: Structs are snapshot-safe if all fields are snapshot-safe
             // CTR-062: Structs with #[snapshot] attribute have custom snapshot semantics
@@ -640,6 +806,8 @@ pub enum HirExprKind {
     // Compound literals
     Tuple(Vec<HirExpr>),
     Array(Vec<HirExpr>),
+    /// SIMD vector literal: vec[1.0, 2.0, 3.0, 4.0]
+    VecLiteral(Vec<HirExpr>),
     StructInit {
         ty: TypeId,
         fields: Vec<HirExpr>,
@@ -708,6 +876,22 @@ pub enum HirExprKind {
         intrinsic: GpuIntrinsicKind,
         args: Vec<HirExpr>,
     },
+
+    /// SIMD neighbor access: array.left_neighbor or array.right_neighbor
+    /// Accesses element at (this.index() - 1) or (this.index() + 1)
+    NeighborAccess {
+        array: Box<HirExpr>,
+        direction: NeighborDirection,
+    },
+}
+
+/// Direction for SIMD neighbor access
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeighborDirection {
+    /// Access element at (this.index() - 1)
+    Left,
+    /// Access element at (this.index() + 1)
+    Right,
 }
 
 impl HirExprKind {
@@ -772,6 +956,11 @@ impl HirExprKind {
             HirExprKind::GpuIntrinsic { intrinsic, args } => HirExprKind::GpuIntrinsic {
                 intrinsic: *intrinsic,
                 args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
+            },
+
+            HirExprKind::NeighborAccess { array, direction } => HirExprKind::NeighborAccess {
+                array: Box::new(array.substitute_local(from_idx, to_idx)),
+                direction: *direction,
             },
 
             // Literals and other non-local expressions are unchanged
@@ -840,6 +1029,11 @@ impl HirExprKind {
             HirExprKind::GpuIntrinsic { intrinsic, args } => HirExprKind::GpuIntrinsic {
                 intrinsic: *intrinsic,
                 args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
+            },
+
+            HirExprKind::NeighborAccess { array, direction } => HirExprKind::NeighborAccess {
+                array: Box::new(array.substitute_self_with_result()),
+                direction: *direction,
             },
 
             // Literals and other expressions are unchanged

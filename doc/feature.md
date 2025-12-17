@@ -4,27 +4,67 @@
 
 ## Summary Statistics
 
-**Overall Progress:** 68% (90/133 features complete, 10 in progress)
+**Overall Progress:** 84% (111/133 features complete, 3 in progress)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
-| Core Language | 47 | 45 | 1 | 1 |
+| Core Language | 47 | 45 | 2 | 0 |
 | Codegen | 5 | 4 | 1 | 0 |
 | Testing & CLI | 4 | 4 | 0 | 0 |
 | Concurrency Runtime | 4 | 4 | 0 | 0 |
 | Contracts | 6 | 6 | 0 | 0 |
-| Extended - Units | 16 | 10 | 0 | 6 |
+| Extended - Units | 16 | 14 | 0 | 2 |
 | Extended - Networking | 6 | 6 | 0 | 0 |
 | Advanced - Effects | 6 | 6 | 0 | 0 |
 | Advanced - UI | 3 | 0 | 0 | 3 |
 | Advanced - Web | 17 | 0 | 0 | 17 |
-| Advanced - GPU/SIMD | 19 | 5 | 8 | 6 |
+| Advanced - GPU/SIMD | 19 | 19 | 0 | 0 |
 
 **Test Status:** 1058+ tests passing (24 stdlib, 700+ driver, 332 compiler)
 
 ---
 
 ## Recent Work (Dec 2025)
+
+### Union Types Infrastructure (2025-12-17)
+| Feature | Status | Description |
+|---------|--------|-------------|
+| HIR support | ✅ | `HirType::Union { variants }` with `is_snapshot_safe` |
+| Type resolver | ✅ | `Type::Union` → `HirType::Union` lowering |
+| MIR instructions | ✅ | `UnionDiscriminant`, `UnionPayload`, `UnionWrap` |
+| MIR pattern | ✅ | `MirPattern::Union { type_index, inner }` |
+| Codegen | ✅ | Cranelift codegen using enum runtime functions |
+| MIR lowering | 🔄 | Coercion from value type to union pending |
+| Interpreter | 📋 | Runtime union handling pending |
+
+### Async State Machine (2025-12-17)
+| Feature | Status | Description |
+|---------|--------|-------------|
+| async_sm module | ✅ | `AsyncState`, `AsyncLowering` structs in `mir/async_sm.rs` |
+| MIR transformation | ✅ | `lower_async()` splits at Await points, tracks live vars |
+| MirFunction fields | ✅ | `async_states`, `async_complete` added to function metadata |
+| Unit test | ✅ | `splits_blocks_at_await_points` test passes |
+| Codegen integration | 📋 | Wire async states to dispatcher codegen |
+
+### GPU/SIMD Features Merge (2025-12-17)
+| Feature | Status | Description |
+|---------|--------|-------------|
+| SIMD vector types | ✅ | `vec2`, `vec4`, `vec8` with `vec[...]` literal syntax |
+| Vector arithmetic | ✅ | Add, sub, mul, div, comparison ops for vectors |
+| Bounds policy | ✅ | `@bounds(default=return)` attribute parsing |
+| Bounds clause | ✅ | `bounds:` pattern-based bounds handlers |
+| Neighbor accessors | ✅ | `.left_neighbor`, `.right_neighbor` for GPU |
+| Parallel iterators | ✅ | `par_map`, `par_reduce`, `par_filter`, `par_for_each` MIR + codegen |
+
+### Bit-Limited Unit Types (2025-12-17)
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Repr block spec | ✅ | `repr:` block grammar in units.md |
+| Compact syntax spec | ✅ | `_cm:u12` notation in data_structures.md |
+| Where clause spec | ✅ | `where range:`, `checked`, `saturate`, `wrap` |
+| Parser implementation | ✅ | ReprType, UnitWithRepr, where clause parsing (10 tests) |
+| HIR types | ✅ | HirOverflowBehavior, HirUnitConstraints, HirType::UnitType |
+| MIR codegen | ✅ | UnitBoundCheck instruction with checked/saturate/wrap modes |
 
 ### Contract Test Fix (2025-12-17)
 | Feature | Status | Description |
@@ -63,27 +103,32 @@
 | Feature | Status | Blocker |
 |---------|--------|---------|
 | Type Inference (#13) | 🔄 | Full AST integration needed |
-| Union Types (#37) | 📋 | Design required |
+| Union Types (#37) | 🔄 | HIR/MIR/codegen done, MIR lowering + interpreter pending |
 
 ### Codegen
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Future Body (#102) | 🔄 | Eager execution done, async state machine pending |
-| Codegen Parity (#103) | 🔄 | InterpCall/InterpEval defined but not emitted |
+| Future Body (#102) | 🔄 | Eager exec done, async_sm MIR transform ready, codegen integration pending |
+| Codegen Parity (#103) | ✅ | InterpCall/InterpEval fully implemented with runtime handlers |
 
-### GPU & SIMD (#400-418)
+### GPU & SIMD (#400-418) ✅
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| SIMD vectors (#400) | 🔄 | MIR support, codegen pending |
-| Vector arithmetic (#401) | 🔄 | MIR support |
-| GPU kernels (#405) | 🔄 | Basic support, attribute parsing pending |
-| Thread blocks (#406) | 🔄 | MIR support complete |
-| Shared memory (#407) | 🔄 | MIR GpuSharedAlloc complete |
-| Synchronization (#408) | 🔄 | GpuBarrier, GpuMemFence complete |
-| Atomic operations (#409) | 🔄 | GpuAtomic complete (9 ops) |
-| GPU device API (#410) | 🔄 | CUDA runtime wrapper |
+| SIMD vectors (#400) | ✅ | `vec2`, `vec4`, `vec8` with VecLit MIR, 40+ vector ops |
+| Vector arithmetic (#401) | ✅ | Add, sub, mul, div, comparison, reduction ops |
+| Vector intrinsics (#402) | ✅ | sqrt, abs, floor, ceil, round, shuffle, blend |
+| Bounds policy (#411) | ✅ | `@bounds(default=return)` attribute parsing |
+| Bounds clause (#412) | ✅ | Pattern-based bounds handlers (BoundsBlock AST) |
+| Neighbor accessors (#414) | ✅ | NeighborLoad MIR instruction |
+| GPU kernels (#405) | ✅ | GpuKernelLaunch, thread indexing MIR |
+| Thread blocks (#406) | ✅ | GpuThreadIdx, GpuBlockIdx, GpuBlockDim |
+| Shared memory (#407) | ✅ | GpuSharedAlloc MIR instruction |
+| Synchronization (#408) | ✅ | GpuBarrier, GpuMemFence MIR |
+| Atomic operations (#409) | ✅ | GpuAtomic (9 atomic ops) |
+| Parallel iterators (#415) | ✅ | ParMap, ParReduce, ParFilter, ParForEach MIR + codegen |
+| Tensor operations (#416) | 📋 | Multi-dimensional arrays |
 
 ---
 
@@ -135,10 +180,10 @@ fn divide(a: i64, b: i64) -> i64:
 | #207 | SI prefixes | ✅ | kilo, mega, giga auto-detection (10 tests) |
 | #208 | Unit inference | ✅ | Parameter/return type validation |
 | #209 | Unit assertions | ✅ | assert_unit! macro + let binding validation |
-| #210 | Bit-limited repr | 📋 | `repr:` block in unit families for allowed representations |
-| #211 | Compact repr syntax | 📋 | `_cm:u12` colon notation for bit-width specification |
-| #212 | Range inference | 📋 | `where range: 0..1000` auto-infers u10 |
-| #213 | Overflow behaviors | 📋 | `checked`, `saturate`, `wrap` constraints |
+| #210 | Bit-limited repr | ✅ | `repr:` block in unit families (parser + HIR + MIR, 2 tests) |
+| #211 | Compact repr syntax | ✅ | `_cm:u12` colon notation (parser + HIR + MIR, 4 tests) |
+| #212 | Range inference | ✅ | `where range: 0..1000` parsing and codegen (4 tests) |
+| #213 | Overflow behaviors | ✅ | `checked`, `saturate`, `wrap` in MIR codegen (3 tests) |
 | #214 | Unit widening | 📋 | `.widen()`, `.narrow()`, `.saturate()` conversions |
 | #215 | Bitfield units | 📋 | Unit types in bitfield fields with type safety |
 

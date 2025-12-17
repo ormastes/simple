@@ -41,6 +41,13 @@ impl Lowerer {
                     size: size_val,
                 }))
             }
+            Type::Simd { lanes, element } => {
+                let elem_id = self.resolve_type(element)?;
+                Ok(self.module.types.register(HirType::Simd {
+                    lanes: *lanes,
+                    element: elem_id,
+                }))
+            }
             Type::Function { params, ret } => {
                 let mut param_ids = Vec::new();
                 for p in params {
@@ -61,6 +68,56 @@ impl Lowerer {
                 Ok(self.module.types.register(HirType::Pointer {
                     kind: PointerKind::Shared,
                     inner: inner_id,
+                }))
+            }
+            Type::Union(types) => {
+                let mut variant_ids = Vec::new();
+                for t in types {
+                    variant_ids.push(self.resolve_type(t)?);
+                }
+                Ok(self.module.types.register(HirType::Union {
+                    variants: variant_ids,
+                }))
+            }
+            Type::UnitWithRepr {
+                name,
+                repr,
+                constraints,
+            } => {
+                // Determine the underlying repr type
+                let (bits, signedness, is_float, repr_id) = if let Some(r) = repr {
+                    let signedness = if r.signed {
+                        Signedness::Signed
+                    } else {
+                        Signedness::Unsigned
+                    };
+                    let repr_type = if r.is_float {
+                        HirType::Float { bits: r.bits }
+                    } else {
+                        HirType::Int {
+                            bits: r.bits,
+                            signedness,
+                        }
+                    };
+                    let repr_id = self.module.types.register(repr_type);
+                    (r.bits, signedness, r.is_float, repr_id)
+                } else {
+                    // Default to i64 if no repr specified
+                    (64, Signedness::Signed, false, TypeId::I64)
+                };
+
+                let hir_constraints = HirUnitConstraints {
+                    range: constraints.range,
+                    overflow: constraints.overflow.into(),
+                };
+
+                Ok(self.module.types.register(HirType::UnitType {
+                    name: name.clone(),
+                    repr: repr_id,
+                    bits,
+                    signedness,
+                    is_float,
+                    constraints: hir_constraints,
                 }))
             }
             _ => Err(LowerError::Unsupported(format!("{:?}", ty))),
@@ -122,6 +179,7 @@ impl Lowerer {
         if let Some(hir_ty) = self.module.types.get(arr_ty) {
             match hir_ty {
                 HirType::Array { element, .. } => Ok(*element),
+                HirType::Simd { element, .. } => Ok(*element),
                 HirType::Tuple(types) => {
                     types
                         .first()

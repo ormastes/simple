@@ -2,7 +2,7 @@
 //!
 //! This module defines all MIR instructions, patterns, and related types.
 
-use crate::hir::{BinOp, PointerKind, TypeId, UnaryOp};
+use crate::hir::{BinOp, NeighborDirection, PointerKind, TypeId, UnaryOp};
 
 use super::effects::{CallTarget, Effect, HasEffects};
 
@@ -116,6 +116,192 @@ pub enum MirInst {
 
     /// Create a tuple literal from elements
     TupleLit { dest: VReg, elements: Vec<VReg> },
+
+    /// Create a SIMD vector literal from elements
+    VecLit { dest: VReg, elements: Vec<VReg> },
+
+    /// SIMD vector reduction: sum all lanes
+    VecSum { dest: VReg, source: VReg },
+
+    /// SIMD vector reduction: product of all lanes
+    VecProduct { dest: VReg, source: VReg },
+
+    /// SIMD vector reduction: minimum of all lanes
+    VecMin { dest: VReg, source: VReg },
+
+    /// SIMD vector reduction: maximum of all lanes
+    VecMax { dest: VReg, source: VReg },
+
+    /// SIMD vector reduction: all lanes are true (bool vector)
+    VecAll { dest: VReg, source: VReg },
+
+    /// SIMD vector reduction: any lane is true (bool vector)
+    VecAny { dest: VReg, source: VReg },
+
+    /// SIMD lane extract: v[idx] -> element
+    VecExtract { dest: VReg, vector: VReg, index: VReg },
+
+    /// SIMD lane insert: v.with(idx, val) -> new vector with lane replaced
+    VecWith { dest: VReg, vector: VReg, index: VReg, value: VReg },
+
+    /// SIMD element-wise sqrt
+    VecSqrt { dest: VReg, source: VReg },
+
+    /// SIMD element-wise abs
+    VecAbs { dest: VReg, source: VReg },
+
+    /// SIMD element-wise floor
+    VecFloor { dest: VReg, source: VReg },
+
+    /// SIMD element-wise ceil
+    VecCeil { dest: VReg, source: VReg },
+
+    /// SIMD element-wise round
+    VecRound { dest: VReg, source: VReg },
+
+    /// SIMD shuffle: reorder lanes within a single vector
+    VecShuffle {
+        dest: VReg,
+        source: VReg,
+        /// Indices array register (contains lane indices)
+        indices: VReg,
+    },
+
+    /// SIMD blend: merge two vectors using an indices array
+    /// Indices 0..N select from first vector, N..2N from second
+    VecBlend {
+        dest: VReg,
+        first: VReg,
+        second: VReg,
+        /// Indices array register
+        indices: VReg,
+    },
+
+    /// SIMD masked select: mask.select(a, b) -> select from a where true, b where false
+    VecSelect {
+        dest: VReg,
+        /// Bool mask vector
+        mask: VReg,
+        /// Values to select where mask is true
+        if_true: VReg,
+        /// Values to select where mask is false
+        if_false: VReg,
+    },
+
+    /// SIMD load from array: f32x4.load(arr, offset) -> vec
+    VecLoad {
+        dest: VReg,
+        /// Array to load from
+        array: VReg,
+        /// Offset into array
+        offset: VReg,
+    },
+
+    /// SIMD store to array: v.store(arr, offset)
+    VecStore {
+        /// Vector to store
+        source: VReg,
+        /// Array to store into
+        array: VReg,
+        /// Offset into array
+        offset: VReg,
+    },
+
+    /// SIMD gather (indexed load): f32x4.gather(arr, indices) -> vec
+    VecGather {
+        dest: VReg,
+        /// Array to gather from
+        array: VReg,
+        /// Index vector
+        indices: VReg,
+    },
+
+    /// SIMD scatter (indexed store): v.scatter(arr, indices)
+    VecScatter {
+        /// Vector to scatter
+        source: VReg,
+        /// Array to scatter into
+        array: VReg,
+        /// Index vector
+        indices: VReg,
+    },
+
+    /// SIMD fused multiply-add: a.fma(b, c) -> a * b + c
+    VecFma {
+        dest: VReg,
+        a: VReg,
+        b: VReg,
+        c: VReg,
+    },
+
+    /// SIMD reciprocal: v.recip() -> 1.0 / v
+    VecRecip {
+        dest: VReg,
+        source: VReg,
+    },
+
+    /// SIMD masked load: f32x4.load_masked(arr, offset, mask, default) -> vec
+    VecMaskedLoad {
+        dest: VReg,
+        array: VReg,
+        offset: VReg,
+        mask: VReg,
+        default: VReg,
+    },
+
+    /// SIMD masked store: v.store_masked(arr, offset, mask)
+    VecMaskedStore {
+        source: VReg,
+        array: VReg,
+        offset: VReg,
+        mask: VReg,
+    },
+
+    /// SIMD element-wise minimum: a.min(b) -> element-wise min of two vectors
+    VecMinVec {
+        dest: VReg,
+        a: VReg,
+        b: VReg,
+    },
+
+    /// SIMD element-wise maximum: a.max(b) -> element-wise max of two vectors
+    VecMaxVec {
+        dest: VReg,
+        a: VReg,
+        b: VReg,
+    },
+
+    /// SIMD clamp: v.clamp(lo, hi) -> element-wise clamp to range
+    VecClamp {
+        dest: VReg,
+        source: VReg,
+        lo: VReg,
+        hi: VReg,
+    },
+
+    /// GPU atomic operation: add, sub, min, max, and, or, xor, exchange
+    /// Returns the old value at the location
+    GpuAtomic {
+        dest: VReg,
+        /// Operation type
+        op: GpuAtomicOp,
+        /// Pointer to atomic location
+        ptr: VReg,
+        /// Value to combine
+        value: VReg,
+    },
+
+    /// GPU atomic compare exchange: gpu.atomic_compare_exchange(ptr, expected, desired)
+    /// Returns (old_value, success_bool)
+    GpuAtomicCmpXchg {
+        dest: VReg,
+        /// Pointer to atomic location
+        ptr: VReg,
+        /// Expected value
+        expected: VReg,
+        /// Desired new value
+        desired: VReg,
+    },
 
     /// Create a dictionary literal from key-value pairs
     DictLit {
@@ -312,6 +498,29 @@ pub enum MirInst {
     },
 
     // =========================================================================
+    // Union type instructions
+    // =========================================================================
+    /// Get the discriminant (type index) of a union value
+    UnionDiscriminant { dest: VReg, value: VReg },
+
+    /// Extract the payload value from a union
+    UnionPayload {
+        dest: VReg,
+        value: VReg,
+        /// Expected type index (for type safety)
+        type_index: usize,
+    },
+
+    /// Wrap a value into a union type
+    UnionWrap {
+        dest: VReg,
+        /// The value to wrap
+        value: VReg,
+        /// Index of the type in the union's variant list
+        type_index: usize,
+    },
+
+    // =========================================================================
     // Async/Generator instructions (Phase 6)
     // =========================================================================
     /// Create a future
@@ -400,6 +609,22 @@ pub enum MirInst {
         value: VReg,
     },
 
+    /// Check that a value is within the bounds of a unit type.
+    /// In debug mode, panics if the value is out of range.
+    /// In release mode, applies the overflow behavior (wrap, saturate, or no-op).
+    UnitBoundCheck {
+        /// The value to check
+        value: VReg,
+        /// Unit type name for error messages
+        unit_name: String,
+        /// Lower bound (inclusive)
+        min: i64,
+        /// Upper bound (inclusive)
+        max: i64,
+        /// Overflow behavior (default=panic in debug, no-op in release)
+        overflow: UnitOverflowBehavior,
+    },
+
     // =========================================================================
     // GPU instructions (software backend + future hardware)
     // =========================================================================
@@ -427,14 +652,11 @@ pub enum MirInst {
     /// Memory fence (ensure memory ordering)
     GpuMemFence { scope: GpuMemoryScope },
 
-    /// Atomic operation on memory
-    GpuAtomic {
+    /// SIMD neighbor load: load from array at (this.index() +/- 1)
+    NeighborLoad {
         dest: VReg,
-        op: GpuAtomicOp,
-        addr: VReg,
-        value: VReg,
-        /// For compare-exchange: expected value
-        expected: Option<VReg>,
+        array: VReg,
+        direction: NeighborDirection,
     },
 
     /// Allocate shared memory (work group local)
@@ -443,6 +665,58 @@ pub enum MirInst {
         element_type: TypeId,
         size: u32,
     },
+
+    // =========================================================================
+    // Parallel Iterator Instructions (#415)
+    // =========================================================================
+
+    /// Parallel map: applies a closure to each element in parallel
+    /// `dest = par_map(input, closure)`
+    ParMap {
+        dest: VReg,
+        input: VReg,
+        closure: VReg,
+        /// Backend preference: None = auto, Some = force specific backend
+        backend: Option<ParallelBackend>,
+    },
+
+    /// Parallel reduce: combines elements using a binary operation
+    /// `dest = par_reduce(input, initial, closure)`
+    ParReduce {
+        dest: VReg,
+        input: VReg,
+        initial: VReg,
+        closure: VReg,
+        backend: Option<ParallelBackend>,
+    },
+
+    /// Parallel filter: keeps elements matching predicate
+    /// `dest = par_filter(input, predicate)`
+    ParFilter {
+        dest: VReg,
+        input: VReg,
+        predicate: VReg,
+        backend: Option<ParallelBackend>,
+    },
+
+    /// Parallel for_each: executes closure for side effects
+    /// `par_for_each(input, closure)`
+    ParForEach {
+        input: VReg,
+        closure: VReg,
+        backend: Option<ParallelBackend>,
+    },
+}
+
+/// Backend preference for parallel operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelBackend {
+    /// CPU parallel threads
+    Cpu,
+    /// CPU SIMD vectorization
+    Simd,
+    /// GPU compute
+    Gpu,
 }
 
 /// Kind of contract being checked
@@ -458,6 +732,31 @@ pub enum ContractKind {
     InvariantEntry,
     /// Invariant at function exit
     InvariantExit,
+}
+
+/// Overflow behavior for unit bound checks
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnitOverflowBehavior {
+    /// Default: panic in debug mode, no-op in release mode
+    #[default]
+    Default,
+    /// Always panic on overflow (checked arithmetic)
+    Checked,
+    /// Clamp to range bounds
+    Saturate,
+    /// Wrap around (modulo range)
+    Wrap,
+}
+
+impl From<crate::hir::HirOverflowBehavior> for UnitOverflowBehavior {
+    fn from(hob: crate::hir::HirOverflowBehavior) -> Self {
+        match hob {
+            crate::hir::HirOverflowBehavior::Default => UnitOverflowBehavior::Default,
+            crate::hir::HirOverflowBehavior::Checked => UnitOverflowBehavior::Checked,
+            crate::hir::HirOverflowBehavior::Saturate => UnitOverflowBehavior::Saturate,
+            crate::hir::HirOverflowBehavior::Wrap => UnitOverflowBehavior::Wrap,
+        }
+    }
 }
 
 /// GPU memory fence scope
@@ -478,10 +777,6 @@ pub enum GpuAtomicOp {
     Add,
     /// Atomic subtract
     Sub,
-    /// Atomic exchange
-    Xchg,
-    /// Atomic compare and exchange
-    CmpXchg,
     /// Atomic minimum
     Min,
     /// Atomic maximum
@@ -492,6 +787,8 @@ pub enum GpuAtomicOp {
     Or,
     /// Atomic bitwise XOR
     Xor,
+    /// Atomic exchange
+    Xchg,
 }
 
 /// Captured variable in a closure
@@ -542,6 +839,13 @@ pub enum MirPattern {
     Guard {
         pattern: Box<MirPattern>,
         condition: VReg,
+    },
+    /// Union type pattern (matches a specific type in the union)
+    Union {
+        /// Index of the type in the union's variant list
+        type_index: usize,
+        /// Optional nested pattern to match the value
+        inner: Option<Box<MirPattern>>,
     },
 }
 
@@ -609,17 +913,52 @@ impl HasEffects for MirInst {
             | MirInst::FieldSet { .. }
             | MirInst::EnumDiscriminant { .. }
             | MirInst::EnumPayload { .. }
+            | MirInst::UnionDiscriminant { .. }
+            | MirInst::UnionPayload { .. }
             | MirInst::PatternTest { .. }
             | MirInst::PatternBind { .. }
             | MirInst::ContractOldCapture { .. }
-            | MirInst::PointerDeref { .. } => Effect::Compute,
+            | MirInst::PointerDeref { .. }
+            | MirInst::VecSum { .. }
+            | MirInst::VecProduct { .. }
+            | MirInst::VecMin { .. }
+            | MirInst::VecMax { .. }
+            | MirInst::VecAll { .. }
+            | MirInst::VecAny { .. }
+            | MirInst::VecExtract { .. }
+            | MirInst::VecWith { .. }
+            | MirInst::VecSqrt { .. }
+            | MirInst::VecAbs { .. }
+            | MirInst::VecFloor { .. }
+            | MirInst::VecCeil { .. }
+            | MirInst::VecRound { .. }
+            | MirInst::VecShuffle { .. }
+            | MirInst::VecBlend { .. }
+            | MirInst::VecSelect { .. }
+            | MirInst::VecLoad { .. }
+            | MirInst::VecGather { .. }
+            | MirInst::VecFma { .. }
+            | MirInst::VecRecip { .. }
+            | MirInst::VecMaskedLoad { .. }
+            | MirInst::VecMinVec { .. }
+            | MirInst::VecMaxVec { .. }
+            | MirInst::VecClamp { .. } => Effect::Compute,
+
+            // SIMD store/scatter have memory write effects
+            MirInst::VecStore { .. }
+            | MirInst::VecScatter { .. }
+            | MirInst::VecMaskedStore { .. } => Effect::Io,
 
             // Contract checks may panic (Io effect due to potential panic)
             MirInst::ContractCheck { .. } => Effect::Io,
 
+            // Unit bound checks may panic in debug mode (Io effect due to potential panic)
+            MirInst::UnitBoundCheck { .. } => Effect::Io,
+
             // Collection allocation (GcAlloc effect)
             MirInst::ArrayLit { .. }
             | MirInst::TupleLit { .. }
+            | MirInst::VecLit { .. }
             | MirInst::DictLit { .. }
             | MirInst::Spread { .. }
             | MirInst::FStringFormat { .. }
@@ -627,6 +966,7 @@ impl HasEffects for MirInst {
             | MirInst::StructInit { .. }
             | MirInst::EnumUnit { .. }
             | MirInst::EnumWith { .. }
+            | MirInst::UnionWrap { .. }
             | MirInst::OptionSome { .. }
             | MirInst::OptionNone { .. }
             | MirInst::ResultOk { .. }
@@ -672,14 +1012,22 @@ impl HasEffects for MirInst {
             | MirInst::GpuGlobalSize { .. }
             | MirInst::GpuLocalSize { .. }
             | MirInst::GpuNumGroups { .. }
-            | MirInst::GpuMemFence { .. } => Effect::Compute,
+            | MirInst::GpuMemFence { .. }
+            | MirInst::NeighborLoad { .. } => Effect::Compute,
 
             // GPU barrier is a synchronization point (Wait effect)
             MirInst::GpuBarrier => Effect::Wait,
 
             // GPU atomics and shared memory allocation
-            MirInst::GpuAtomic { .. } => Effect::Io,
+            MirInst::GpuAtomic { .. }
+            | MirInst::GpuAtomicCmpXchg { .. } => Effect::Io,
             MirInst::GpuSharedAlloc { .. } => Effect::Compute,
+
+            // Parallel iterator operations - all have Compute effect (parallel execution)
+            MirInst::ParMap { .. }
+            | MirInst::ParReduce { .. }
+            | MirInst::ParFilter { .. }
+            | MirInst::ParForEach { .. } => Effect::Compute,
         }
     }
 }
@@ -712,6 +1060,33 @@ impl MirInst {
             | MirInst::GcAlloc { dest, .. }
             | MirInst::ArrayLit { dest, .. }
             | MirInst::TupleLit { dest, .. }
+            | MirInst::VecLit { dest, .. }
+            | MirInst::VecSum { dest, .. }
+            | MirInst::VecProduct { dest, .. }
+            | MirInst::VecMin { dest, .. }
+            | MirInst::VecMax { dest, .. }
+            | MirInst::VecAll { dest, .. }
+            | MirInst::VecAny { dest, .. }
+            | MirInst::VecExtract { dest, .. }
+            | MirInst::VecWith { dest, .. }
+            | MirInst::VecSqrt { dest, .. }
+            | MirInst::VecAbs { dest, .. }
+            | MirInst::VecFloor { dest, .. }
+            | MirInst::VecCeil { dest, .. }
+            | MirInst::VecRound { dest, .. }
+            | MirInst::VecShuffle { dest, .. }
+            | MirInst::VecBlend { dest, .. }
+            | MirInst::VecSelect { dest, .. }
+            | MirInst::VecLoad { dest, .. }
+            | MirInst::VecGather { dest, .. }
+            | MirInst::VecFma { dest, .. }
+            | MirInst::VecRecip { dest, .. }
+            | MirInst::VecMaskedLoad { dest, .. }
+            | MirInst::VecMinVec { dest, .. }
+            | MirInst::VecMaxVec { dest, .. }
+            | MirInst::VecClamp { dest, .. }
+            | MirInst::GpuAtomic { dest, .. }
+            | MirInst::GpuAtomicCmpXchg { dest, .. }
             | MirInst::DictLit { dest, .. }
             | MirInst::IndexGet { dest, .. }
             | MirInst::SliceOp { dest, .. }
@@ -726,6 +1101,9 @@ impl MirInst {
             | MirInst::EnumPayload { dest, .. }
             | MirInst::EnumUnit { dest, .. }
             | MirInst::EnumWith { dest, .. }
+            | MirInst::UnionDiscriminant { dest, .. }
+            | MirInst::UnionPayload { dest, .. }
+            | MirInst::UnionWrap { dest, .. }
             | MirInst::FutureCreate { dest, .. }
             | MirInst::Await { dest, .. }
             | MirInst::ActorSpawn { dest, .. }
@@ -748,8 +1126,12 @@ impl MirInst {
             | MirInst::GpuGlobalSize { dest, .. }
             | MirInst::GpuLocalSize { dest, .. }
             | MirInst::GpuNumGroups { dest, .. }
-            | MirInst::GpuAtomic { dest, .. }
-            | MirInst::GpuSharedAlloc { dest, .. } => Some(*dest),
+            | MirInst::GpuSharedAlloc { dest, .. }
+            | MirInst::NeighborLoad { dest, .. }
+            | MirInst::ParMap { dest, .. }
+            | MirInst::ParReduce { dest, .. }
+            | MirInst::ParFilter { dest, .. } => Some(*dest),
+            MirInst::ParForEach { .. } => None,
             MirInst::Call { dest, .. }
             | MirInst::IndirectCall { dest, .. }
             | MirInst::Wait { dest, .. }
@@ -791,6 +1173,9 @@ impl MirInst {
             MirInst::EnumPayload { value, .. } => vec![*value],
             MirInst::EnumUnit { .. } => vec![],
             MirInst::EnumWith { payload, .. } => vec![*payload],
+            MirInst::UnionDiscriminant { value, .. } => vec![*value],
+            MirInst::UnionPayload { value, .. } => vec![*value],
+            MirInst::UnionWrap { value, .. } => vec![*value],
             MirInst::FutureCreate { .. } => vec![],
             MirInst::Await { future, .. } => vec![*future],
             MirInst::ActorSpawn { .. } => vec![],
@@ -806,9 +1191,79 @@ impl MirInst {
             MirInst::OptionNone { .. } => vec![],
             MirInst::ResultOk { value, .. } => vec![*value],
             MirInst::ResultErr { value, .. } => vec![*value],
-            MirInst::TupleLit { elements, .. } | MirInst::ArrayLit { elements, .. } => {
-                elements.clone()
-            }
+            MirInst::TupleLit { elements, .. }
+            | MirInst::ArrayLit { elements, .. }
+            | MirInst::VecLit { elements, .. } => elements.clone(),
+            MirInst::VecSum { source, .. }
+            | MirInst::VecProduct { source, .. }
+            | MirInst::VecMin { source, .. }
+            | MirInst::VecMax { source, .. }
+            | MirInst::VecAll { source, .. }
+            | MirInst::VecAny { source, .. }
+            | MirInst::VecSqrt { source, .. }
+            | MirInst::VecAbs { source, .. }
+            | MirInst::VecFloor { source, .. }
+            | MirInst::VecCeil { source, .. }
+            | MirInst::VecRound { source, .. } => vec![*source],
+            MirInst::VecExtract { vector, index, .. } => vec![*vector, *index],
+            MirInst::VecWith {
+                vector,
+                index,
+                value,
+                ..
+            } => vec![*vector, *index, *value],
+            MirInst::VecShuffle {
+                source, indices, ..
+            } => vec![*source, *indices],
+            MirInst::VecBlend {
+                first,
+                second,
+                indices,
+                ..
+            } => vec![*first, *second, *indices],
+            MirInst::VecSelect {
+                mask,
+                if_true,
+                if_false,
+                ..
+            } => vec![*mask, *if_true, *if_false],
+            MirInst::VecLoad { array, offset, .. } => vec![*array, *offset],
+            MirInst::VecStore {
+                source,
+                array,
+                offset,
+            } => vec![*source, *array, *offset],
+            MirInst::VecGather { array, indices, .. } => vec![*array, *indices],
+            MirInst::VecScatter {
+                source,
+                array,
+                indices,
+            } => vec![*source, *array, *indices],
+            MirInst::VecFma { a, b, c, .. } => vec![*a, *b, *c],
+            MirInst::VecRecip { source, .. } => vec![*source],
+            MirInst::VecMaskedLoad {
+                array,
+                offset,
+                mask,
+                default,
+                ..
+            } => vec![*array, *offset, *mask, *default],
+            MirInst::VecMaskedStore {
+                source,
+                array,
+                offset,
+                mask,
+            } => vec![*source, *array, *offset, *mask],
+            MirInst::VecMinVec { a, b, .. } => vec![*a, *b],
+            MirInst::VecMaxVec { a, b, .. } => vec![*a, *b],
+            MirInst::VecClamp { source, lo, hi, .. } => vec![*source, *lo, *hi],
+            MirInst::GpuAtomic { ptr, value, .. } => vec![*ptr, *value],
+            MirInst::GpuAtomicCmpXchg {
+                ptr,
+                expected,
+                desired,
+                ..
+            } => vec![*ptr, *expected, *desired],
             MirInst::DictLit { keys, values, .. } => {
                 let mut v = Vec::with_capacity(keys.len() + values.len());
                 v.extend(keys.iter().copied());
@@ -874,6 +1329,7 @@ impl MirInst {
             MirInst::InterpEval { .. } => vec![],
             MirInst::ContractCheck { condition, .. } => vec![*condition],
             MirInst::ContractOldCapture { value, .. } => vec![*value],
+            MirInst::UnitBoundCheck { value, .. } => vec![*value],
             MirInst::PointerNew { value, .. } => vec![*value],
             MirInst::PointerRef { source, .. } => vec![*source],
             MirInst::PointerDeref { pointer, .. } => vec![*pointer],
@@ -887,18 +1343,12 @@ impl MirInst {
             | MirInst::GpuBarrier
             | MirInst::GpuMemFence { .. }
             | MirInst::GpuSharedAlloc { .. } => vec![],
-            MirInst::GpuAtomic {
-                addr,
-                value,
-                expected,
-                ..
-            } => {
-                let mut v = vec![*addr, *value];
-                if let Some(exp) = expected {
-                    v.push(*exp);
-                }
-                v
-            }
+            MirInst::NeighborLoad { array, .. } => vec![*array],
+            // Parallel iterator instructions
+            MirInst::ParMap { input, closure, .. } => vec![*input, *closure],
+            MirInst::ParReduce { input, initial, closure, .. } => vec![*input, *initial, *closure],
+            MirInst::ParFilter { input, predicate, .. } => vec![*input, *predicate],
+            MirInst::ParForEach { input, closure, .. } => vec![*input, *closure],
         }
     }
 }
