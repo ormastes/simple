@@ -566,3 +566,40 @@ fn test_simd_vec_inferred_type() {
     }
 }
 
+
+#[test]
+fn test_simd_vec_addition() {
+    // Test SIMD vector addition
+    let module = parse_and_lower(
+        "fn test() -> i64:\n    let a = vec[1.0, 2.0, 3.0, 4.0]\n    let b = vec[5.0, 6.0, 7.0, 8.0]\n    let c = a + b\n    return 0\n"
+    ).unwrap();
+
+    let func = &module.functions[0];
+    assert_eq!(func.locals.len(), 3);
+
+    // Check that c has a SIMD type (same as operands)
+    if let Some(HirType::Simd { lanes, .. }) = module.types.get(func.locals[2].ty) {
+        assert_eq!(*lanes, 4);
+    } else {
+        panic!("Expected Simd type for c, got {:?}", module.types.get(func.locals[2].ty));
+    }
+}
+
+#[test]
+fn test_simd_vec_comparison() {
+    // Test SIMD vector comparison returns SIMD bool vector
+    let module = parse_and_lower(
+        "fn test() -> i64:\n    let a = vec[1.0, 2.0, 3.0, 4.0]\n    let b = vec[5.0, 6.0, 7.0, 8.0]\n    let mask = a < b\n    return 0\n"
+    ).unwrap();
+
+    let func = &module.functions[0];
+    assert_eq!(func.locals.len(), 3);
+
+    // Check that mask has a SIMD bool type
+    if let Some(HirType::Simd { lanes, element }) = module.types.get(func.locals[2].ty) {
+        assert_eq!(*lanes, 4);
+        assert_eq!(*element, TypeId::BOOL);
+    } else {
+        panic!("Expected Simd bool type for mask, got {:?}", module.types.get(func.locals[2].ty));
+    }
+}
