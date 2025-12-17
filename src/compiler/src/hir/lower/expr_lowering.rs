@@ -120,18 +120,31 @@ impl Lowerer {
                 let left_hir = Box::new(self.lower_expr(left, ctx)?);
                 let right_hir = Box::new(self.lower_expr(right, ctx)?);
 
-                // Type is determined by operands (simplified)
+                // Type is determined by operands
+                // For SIMD vectors, comparison returns a SIMD bool vector
                 let ty = match op {
                     ast::BinOp::Eq
                     | ast::BinOp::NotEq
                     | ast::BinOp::Lt
                     | ast::BinOp::Gt
                     | ast::BinOp::LtEq
-                    | ast::BinOp::GtEq
-                    | ast::BinOp::And
-                    | ast::BinOp::Or
-                    | ast::BinOp::Is
-                    | ast::BinOp::In => TypeId::BOOL,
+                    | ast::BinOp::GtEq => {
+                        // For SIMD vectors, return a SIMD bool vector
+                        if let Some(HirType::Simd { lanes, .. }) =
+                            self.module.types.get(left_hir.ty)
+                        {
+                            let lanes = *lanes;
+                            self.module.types.register(HirType::Simd {
+                                lanes,
+                                element: TypeId::BOOL,
+                            })
+                        } else {
+                            TypeId::BOOL
+                        }
+                    }
+                    ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In => {
+                        TypeId::BOOL
+                    }
                     _ => left_hir.ty,
                 };
 
@@ -665,9 +678,20 @@ impl Lowerer {
                 | ast::BinOp::Lt
                 | ast::BinOp::Gt
                 | ast::BinOp::LtEq
-                | ast::BinOp::GtEq
-                | ast::BinOp::And
-                | ast::BinOp::Or => Ok(TypeId::BOOL),
+                | ast::BinOp::GtEq => {
+                    // For SIMD vectors, comparison returns a SIMD bool vector
+                    let left_ty = self.infer_type(left, ctx)?;
+                    if let Some(HirType::Simd { lanes, .. }) = self.module.types.get(left_ty) {
+                        let lanes = *lanes;
+                        Ok(self.module.types.register(HirType::Simd {
+                            lanes,
+                            element: TypeId::BOOL,
+                        }))
+                    } else {
+                        Ok(TypeId::BOOL)
+                    }
+                }
+                ast::BinOp::And | ast::BinOp::Or => Ok(TypeId::BOOL),
                 _ => self.infer_type(left, ctx),
             },
             Expr::Unary { op, operand } => match op {
