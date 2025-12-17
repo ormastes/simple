@@ -1167,6 +1167,20 @@ impl<'a> MirLowerer<'a> {
                 self.lower_gpu_intrinsic(*intrinsic, args)
             }
 
+            HirExprKind::NeighborAccess { array, direction } => {
+                let array_reg = self.lower_expr(array)?;
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::NeighborLoad {
+                        dest,
+                        array: array_reg,
+                        direction: *direction,
+                    });
+                    dest
+                })
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }
@@ -1243,6 +1257,33 @@ impl<'a> MirLowerer<'a> {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::GpuMemFence { scope });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdIndex => {
+                // SIMD linear global index - use GlobalId with dim 0
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuGlobalId { dest, dim: 0 });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdThreadIndex => {
+                // SIMD thread index within group - use LocalId with dim 0
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuLocalId { dest, dim: 0 });
+                    dest
+                })
+            }
+            GpuIntrinsicKind::SimdGroupIndex => {
+                // SIMD group index - use GroupId with dim 0
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::GpuGroupId { dest, dim: 0 });
                     dest
                 })
             }

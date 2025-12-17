@@ -21,18 +21,23 @@ impl Lowerer {
     fn lower_node(&mut self, node: &Node, ctx: &mut FunctionContext) -> LowerResult<Vec<HirStmt>> {
         match node {
             Node::Let(let_stmt) => {
-                let ty = if let Some(t) = &let_stmt.ty {
-                    self.resolve_type(t)?
-                } else if let Some(val) = &let_stmt.value {
-                    self.infer_type(val, ctx)?
-                } else {
-                    return Err(LowerError::CannotInferType);
-                };
-
+                // Lower the value first (if present) to get the actual TypeId
+                // This avoids the issue where infer_type and lower_expr create
+                // different TypeIds for the same type (e.g., array types)
                 let value = if let Some(v) = &let_stmt.value {
                     Some(self.lower_expr(v, ctx)?)
                 } else {
                     None
+                };
+
+                // Use explicit type annotation if provided, otherwise use the
+                // type from the lowered value to ensure TypeId consistency
+                let ty = if let Some(t) = &let_stmt.ty {
+                    self.resolve_type(t)?
+                } else if let Some(ref v) = value {
+                    v.ty
+                } else {
+                    return Err(LowerError::CannotInferType);
                 };
 
                 let name = Self::extract_pattern_name(&let_stmt.pattern)

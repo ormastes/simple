@@ -2,7 +2,7 @@
 //!
 //! This module defines all MIR instructions, patterns, and related types.
 
-use crate::hir::{BinOp, PointerKind, TypeId, UnaryOp};
+use crate::hir::{BinOp, NeighborDirection, PointerKind, TypeId, UnaryOp};
 
 use super::effects::{CallTarget, Effect, HasEffects};
 
@@ -427,6 +427,13 @@ pub enum MirInst {
     /// Memory fence (ensure memory ordering)
     GpuMemFence { scope: GpuMemoryScope },
 
+    /// SIMD neighbor load: load from array at (this.index() +/- 1)
+    NeighborLoad {
+        dest: VReg,
+        array: VReg,
+        direction: NeighborDirection,
+    },
+
     /// Atomic operation on memory
     GpuAtomic {
         dest: VReg,
@@ -672,7 +679,8 @@ impl HasEffects for MirInst {
             | MirInst::GpuGlobalSize { .. }
             | MirInst::GpuLocalSize { .. }
             | MirInst::GpuNumGroups { .. }
-            | MirInst::GpuMemFence { .. } => Effect::Compute,
+            | MirInst::GpuMemFence { .. }
+            | MirInst::NeighborLoad { .. } => Effect::Compute,
 
             // GPU barrier is a synchronization point (Wait effect)
             MirInst::GpuBarrier => Effect::Wait,
@@ -749,7 +757,8 @@ impl MirInst {
             | MirInst::GpuLocalSize { dest, .. }
             | MirInst::GpuNumGroups { dest, .. }
             | MirInst::GpuAtomic { dest, .. }
-            | MirInst::GpuSharedAlloc { dest, .. } => Some(*dest),
+            | MirInst::GpuSharedAlloc { dest, .. }
+            | MirInst::NeighborLoad { dest, .. } => Some(*dest),
             MirInst::Call { dest, .. }
             | MirInst::IndirectCall { dest, .. }
             | MirInst::Wait { dest, .. }
@@ -887,6 +896,7 @@ impl MirInst {
             | MirInst::GpuBarrier
             | MirInst::GpuMemFence { .. }
             | MirInst::GpuSharedAlloc { .. } => vec![],
+            MirInst::NeighborLoad { array, .. } => vec![*array],
             MirInst::GpuAtomic {
                 addr,
                 value,

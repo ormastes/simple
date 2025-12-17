@@ -343,6 +343,7 @@ fn test_hir_function_integration() {
         visibility: Visibility::Public,
         contract: None,
         is_pure: false,
+        bounds_block: None,
     };
 
     assert_eq!(func.name, "add");

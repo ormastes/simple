@@ -350,6 +350,12 @@ pub enum GpuIntrinsicKind {
     Barrier,
     /// Memory fence
     MemFence,
+    /// SIMD linear global index: this.index()
+    SimdIndex,
+    /// SIMD thread index within group: this.thread_index()
+    SimdThreadIndex,
+    /// SIMD group index: this.group_index()
+    SimdGroupIndex,
 }
 
 /// Type ID allocator for formal verification.
@@ -484,6 +490,14 @@ impl TypeRegistry {
 
     pub fn get(&self, id: TypeId) -> Option<&HirType> {
         self.types.get(&id)
+    }
+
+    /// Get the element type of an array type
+    pub fn get_array_element(&self, id: TypeId) -> Option<TypeId> {
+        match self.types.get(&id) {
+            Some(HirType::Array { element, .. }) => Some(*element),
+            _ => None,
+        }
     }
 
     pub fn lookup(&self, name: &str) -> Option<TypeId> {
@@ -708,6 +722,22 @@ pub enum HirExprKind {
         intrinsic: GpuIntrinsicKind,
         args: Vec<HirExpr>,
     },
+
+    /// SIMD neighbor access: array.left_neighbor or array.right_neighbor
+    /// Accesses element at (this.index() - 1) or (this.index() + 1)
+    NeighborAccess {
+        array: Box<HirExpr>,
+        direction: NeighborDirection,
+    },
+}
+
+/// Direction for SIMD neighbor access
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NeighborDirection {
+    /// Access element at (this.index() - 1)
+    Left,
+    /// Access element at (this.index() + 1)
+    Right,
 }
 
 impl HirExprKind {
@@ -772,6 +802,11 @@ impl HirExprKind {
             HirExprKind::GpuIntrinsic { intrinsic, args } => HirExprKind::GpuIntrinsic {
                 intrinsic: *intrinsic,
                 args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
+            },
+
+            HirExprKind::NeighborAccess { array, direction } => HirExprKind::NeighborAccess {
+                array: Box::new(array.substitute_local(from_idx, to_idx)),
+                direction: *direction,
             },
 
             // Literals and other non-local expressions are unchanged
@@ -840,6 +875,11 @@ impl HirExprKind {
             HirExprKind::GpuIntrinsic { intrinsic, args } => HirExprKind::GpuIntrinsic {
                 intrinsic: *intrinsic,
                 args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
+            },
+
+            HirExprKind::NeighborAccess { array, direction } => HirExprKind::NeighborAccess {
+                array: Box::new(array.substitute_self_with_result()),
+                direction: *direction,
             },
 
             // Literals and other expressions are unchanged

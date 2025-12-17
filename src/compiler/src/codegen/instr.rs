@@ -625,6 +625,14 @@ pub fn compile_instruction<M: Module>(
         MirInst::GpuSharedAlloc { dest, element_type, size } => {
             super::instr_gpu::compile_gpu_shared_alloc(ctx, builder, *dest, *element_type, *size)?;
         }
+
+        MirInst::NeighborLoad { dest, array, direction } => {
+            // Stub for SIMD neighbor load - in real GPU codegen this would
+            // compute (this.index() +/- 1) and load from array at that index
+            let _ = (array, direction);
+            let zero = builder.ins().iconst(types::I64, 0);
+            ctx.vreg_values.insert(*dest, zero);
+        }
     }
     Ok(())
 }

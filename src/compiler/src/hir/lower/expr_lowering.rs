@@ -295,7 +295,61 @@ impl Lowerer {
             }
 
             Expr::FieldAccess { receiver, field } => {
+                // Check for thread_group.id and thread_group.size before lowering receiver
+                if let Expr::Identifier(recv_name) = receiver.as_ref() {
+                    if recv_name == "thread_group" {
+                        match field.as_str() {
+                            "id" => {
+                                // thread_group.id → GroupId intrinsic (group index)
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::GroupId,
+                                        args: vec![],
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "size" => {
+                                // thread_group.size → LocalSize intrinsic (work group size)
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::LocalSize,
+                                        args: vec![],
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            _ => {
+                                return Err(LowerError::Unsupported(format!(
+                                    "unknown thread_group property: {}",
+                                    field
+                                )));
+                            }
+                        }
+                    }
+                }
+
                 let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
+
+                // Check for SIMD neighbor access: array.left_neighbor or array.right_neighbor
+                if field == "left_neighbor" || field == "right_neighbor" {
+                    // Check if receiver is an array type using helper method
+                    if let Some(element_ty) = self.module.types.get_array_element(recv_hir.ty) {
+                        let direction = if field == "left_neighbor" {
+                            NeighborDirection::Left
+                        } else {
+                            NeighborDirection::Right
+                        };
+                        return Ok(HirExpr {
+                            kind: HirExprKind::NeighborAccess {
+                                array: recv_hir,
+                                direction,
+                            },
+                            ty: element_ty,
+                        });
+                    }
+                }
+
                 // Look up struct field type and index
                 let (field_index, field_ty) = self.get_field_info(recv_hir.ty, field)?;
                 Ok(HirExpr {
@@ -475,6 +529,92 @@ impl Lowerer {
                 })
             }
 
+            // Method calls: receiver.method(args)
+            // Special handling for SIMD intrinsics: this.index(), this.thread_index(), this.group_index()
+            // and thread_group.barrier()
+            Expr::MethodCall { receiver, method, args } => {
+                // Check for intrinsic calls on `this` and `thread_group`
+                if let Expr::Identifier(recv_name) = receiver.as_ref() {
+                    if recv_name == "this" {
+                        match method.as_str() {
+                            "index" => {
+                                if !args.is_empty() {
+                                    return Err(LowerError::Unsupported(
+                                        "this.index() takes no arguments".into(),
+                                    ));
+                                }
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdIndex,
+                                        args: vec![],
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "thread_index" => {
+                                if !args.is_empty() {
+                                    return Err(LowerError::Unsupported(
+                                        "this.thread_index() takes no arguments".into(),
+                                    ));
+                                }
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdThreadIndex,
+                                        args: vec![],
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "group_index" => {
+                                if !args.is_empty() {
+                                    return Err(LowerError::Unsupported(
+                                        "this.group_index() takes no arguments".into(),
+                                    ));
+                                }
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdGroupIndex,
+                                        args: vec![],
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            _ => {} // Fall through to regular method call handling
+                        }
+                    } else if recv_name == "thread_group" {
+                        match method.as_str() {
+                            "barrier" => {
+                                if !args.is_empty() {
+                                    return Err(LowerError::Unsupported(
+                                        "thread_group.barrier() takes no arguments".into(),
+                                    ));
+                                }
+                                // thread_group.barrier() → Barrier intrinsic
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::Barrier,
+                                        args: vec![],
+                                    },
+                                    ty: TypeId::VOID,
+                                });
+                            }
+                            _ => {
+                                return Err(LowerError::Unsupported(format!(
+                                    "unknown thread_group method: {}",
+                                    method
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                // For now, regular method calls are unsupported in native compilation
+                Err(LowerError::Unsupported(format!(
+                    "Method call {:?}.{}() not supported in native compilation",
+                    receiver, method
+                )))
+            }
+
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }
@@ -549,10 +689,38 @@ impl Lowerer {
                 self.get_index_element_type(arr_ty)
             }
             Expr::FieldAccess { receiver, field } => {
+                // Handle thread_group.id and thread_group.size
+                if let Expr::Identifier(recv_name) = receiver.as_ref() {
+                    if recv_name == "thread_group" {
+                        match field.as_str() {
+                            "id" | "size" => return Ok(TypeId::I64),
+                            _ => {}
+                        }
+                    }
+                }
                 // Infer field type from struct type
                 let struct_ty = self.infer_type(receiver, ctx)?;
                 let (_idx, field_ty) = self.get_field_info(struct_ty, field)?;
                 Ok(field_ty)
+            }
+            Expr::MethodCall { receiver, method, .. } => {
+                // Handle SIMD intrinsics: this.index(), this.thread_index(), this.group_index()
+                // and thread_group.barrier()
+                if let Expr::Identifier(recv_name) = receiver.as_ref() {
+                    if recv_name == "this" {
+                        match method.as_str() {
+                            "index" | "thread_index" | "group_index" => return Ok(TypeId::I64),
+                            _ => {}
+                        }
+                    } else if recv_name == "thread_group" {
+                        match method.as_str() {
+                            "barrier" => return Ok(TypeId::VOID),
+                            _ => {}
+                        }
+                    }
+                }
+                // Cannot infer type for other method calls
+                Err(LowerError::CannotInferTypeFor(format!("{:?}", expr)))
             }
             // Cannot infer type for complex expressions - require annotation
             _ => Err(LowerError::CannotInferTypeFor(format!("{:?}", expr))),
