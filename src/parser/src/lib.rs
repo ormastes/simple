@@ -10,6 +10,7 @@ pub mod token;
 mod expressions;
 mod parser_patterns;
 mod parser_types;
+mod parser_helpers;
 mod statements;
 mod types_def;
 
