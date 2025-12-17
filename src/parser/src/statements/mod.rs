@@ -604,6 +604,91 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    /// Parse handle_pool declaration:
+    /// ```simple
+    /// handle_pool Enemy:
+    ///     capacity: 1024
+    /// ```
+    /// or inline: `handle_pool Enemy`
+    pub(crate) fn parse_handle_pool(&mut self) -> Result<Node, ParseError> {
+        use crate::ast::HandlePoolDef;
+
+        let start_span = self.current.span;
+        self.expect(&TokenKind::HandlePool)?;
+
+        // Expect a type name (PascalCase identifier)
+        let type_name = self.expect_identifier()?;
+
+        let mut capacity = None;
+
+        // Check for optional block with capacity
+        if self.check(&TokenKind::Colon) {
+            self.advance(); // consume ':'
+
+            // Skip newline and expect indented block
+            if self.check(&TokenKind::Newline) {
+                self.advance();
+                if self.check(&TokenKind::Indent) {
+                    self.advance();
+
+                    // Parse fields in block
+                    while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                        // Skip newlines
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                        if self.check(&TokenKind::Dedent) {
+                            break;
+                        }
+
+                        // Expect "capacity: N"
+                        let field_name = self.expect_identifier()?;
+                        self.expect(&TokenKind::Colon)?;
+
+                        if field_name == "capacity" {
+                            if let TokenKind::Integer(n) = &self.current.kind {
+                                capacity = Some(*n as u64);
+                                self.advance();
+                            } else {
+                                return Err(ParseError::syntax_error_with_span(
+                                    "Expected integer for capacity".to_string(),
+                                    self.current.span,
+                                ));
+                            }
+                        } else {
+                            return Err(ParseError::syntax_error_with_span(
+                                format!("Unknown handle_pool field '{}', expected 'capacity'", field_name),
+                                self.previous.span,
+                            ));
+                        }
+
+                        // Skip newline after field
+                        if self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+                    }
+
+                    // Consume dedent
+                    if self.check(&TokenKind::Dedent) {
+                        self.advance();
+                    }
+                }
+            }
+        }
+
+        Ok(Node::HandlePool(HandlePoolDef {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            type_name,
+            capacity,
+            visibility: Visibility::Private,
+        }))
+    }
+
     // === Control Flow ===
 
     pub(crate) fn parse_if(&mut self) -> Result<Node, ParseError> {

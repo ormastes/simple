@@ -2,7 +2,7 @@
 
 This document consolidates all feature implementation status from `doc/status/*.md` files.
 
-**Last Updated:** 2025-12-15
+**Last Updated:** 2025-12-17
 
 ## Status Legend
 - ✅ **COMPLETE** - Fully implemented and tested
@@ -137,23 +137,24 @@ This document consolidates all feature implementation status from `doc/status/*.
 - MIR: ClosureCreate, IndirectCall
 - FFI: `rt_closure_create`, `rt_closure_call`
 
-### #18: Named Arguments 🔄
-**Status:** PLANNED  
-**Implementation:** Parser design complete
+### #18: Named Arguments ✅
+**Status:** COMPLETE
+**Implementation:** `src/parser/src/expressions/mod.rs`
 - Syntax: `func(name: value)`
-- **Blocked:** Interpreter implementation
+- Parser: Named argument detection in call expressions
+- Interpreter: Named argument handling
 
-### #19: Trailing Blocks 🔄
-**Status:** PLANNED  
-**Implementation:** Parser design complete
+### #19: Trailing Blocks ✅
+**Status:** COMPLETE
+**Implementation:** `src/parser/src/expressions/mod.rs`
 - Ruby-style block passing
-- **Blocked:** Interpreter implementation
+- Parser: Block arguments after function calls
 
-### #20: Functional Update Operator 🔄
-**Status:** PLANNED  
-**Implementation:** Design complete
+### #20: Functional Update Operator ✅
+**Status:** COMPLETE
+**Implementation:** `src/parser/src/expressions/mod.rs`
 - Syntax: `new_struct = old_struct { field: new_value }`
-- **Blocked:** MIR lowering
+- Parser and interpreter support
 
 ### #21: String Interpolation ✅
 **Status:** COMPLETE  
@@ -181,32 +182,38 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Optional logging (`--gc-log`)
 - Default for all heap types
 
-### #25: Unique Pointers 🔄
-**Status:** PLANNED  
-**Implementation:** Design complete
-- Syntax: `&T`
-- RAII semantics
-- **Blocked:** Ownership tracking in MIR
+### #25: Unique Pointers ✅
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/value_pointers.rs`, `src/common/src/manual_mem.rs`
+- Syntax: `new & value` creates unique pointer
+- RAII semantics with automatic drop at scope exit
+- Move semantics enforcement (use-after-move detection)
+- Runtime FFI: `rt_unique_*` functions
+- **Tests:** `interpreter_memory.rs` (24 tests)
 
-### #26: Shared Pointers 🔄
-**Status:** PLANNED  
-**Implementation:** Design complete
-- Syntax: `*T`
-- Reference counting
-- **Blocked:** Runtime implementation
+### #26: Shared Pointers ✅
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/value_pointers.rs`, `src/common/src/manual_mem.rs`
+- Syntax: `new * value` creates shared pointer
+- Reference counting with automatic cleanup
+- Clone on assignment (refcount++)
+- Runtime FFI: `rt_shared_*` functions
 
-### #27: Weak Pointers 🔄
-**Status:** PLANNED  
-**Implementation:** Design complete
-- Syntax: `~T`
-- Weak reference semantics
-- **Blocked:** Runtime implementation
+### #27: Weak Pointers ✅
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/value_pointers.rs`, `src/common/src/manual_mem.rs`
+- Syntax: `new - value` creates weak pointer
+- Weak reference semantics (doesn't prevent drop)
+- Upgrade to shared pointer when accessed
+- Runtime FFI: `rt_weak_*` functions
 
-### #28: Handle Pointers 🔄
-**Status:** PLANNED  
-**Implementation:** Design complete
-- Opaque resource handles
-- **Blocked:** Runtime implementation
+### #28: Handle Pointers ✅
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/value_pointers.rs`, `src/common/src/manual_mem.rs`
+- Syntax: `new + value` creates handle pointer
+- `handle_pool T: capacity: N` declaration syntax
+- Pool-based allocation with generation tracking
+- Runtime FFI: `rt_handle_*` functions
 
 ### #29: Borrowing ✅
 **Status:** COMPLETE (effect tracking)  
@@ -223,11 +230,14 @@ This document consolidates all feature implementation status from `doc/status/*.
 - FFI: `rt_actor_spawn`, `rt_actor_send`, `rt_actor_recv`
 - **Note:** Body outlining uses stub (Feature #99 pending)
 
-### #31: Concurrency Primitives 🔄
-**Status:** PLANNED  
-**Implementation:** Design complete
-- Mutex, RwLock, Semaphore, Barrier
-- **Blocked:** Runtime implementation
+### #31: Concurrency Primitives ✅
+**Status:** COMPLETE
+**Implementation:** `src/runtime/src/value/sync.rs`
+- RuntimeMutex: `rt_mutex_new`, `rt_mutex_lock`, `rt_mutex_try_lock`, `rt_mutex_unlock`, `rt_mutex_free`
+- RuntimeRwLock: `rt_rwlock_new`, `rt_rwlock_read`, `rt_rwlock_write`, `rt_rwlock_set`, `rt_rwlock_free`
+- RuntimeSemaphore: `rt_semaphore_new`, `rt_semaphore_acquire`, `rt_semaphore_release`, `rt_semaphore_free`
+- RuntimeBarrier: `rt_barrier_new`, `rt_barrier_wait`, `rt_barrier_free`
+- HeapObjectType variants: Mutex, RwLock, Semaphore, Barrier
 
 ### #32: Async Effects ✅
 **Status:** COMPLETE  
@@ -252,17 +262,19 @@ This document consolidates all feature implementation status from `doc/status/*.
 - AST rewriting
 - Hygiene (basic)
 
-### #35: Context Blocks 📋
-**Status:** PLANNED  
-**Implementation:** Design complete
-- Resource management (with/using)
-- **Blocked:** Parser + interpreter
+### #35: Context Blocks ✅
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/interpreter.rs`
+- `context expr:` block syntax
+- Implicit method dispatch to context object
+- Thread-local `CONTEXT_OBJECT` for dispatch
 
-### #36: Method Missing 📋
-**Status:** PLANNED  
-**Implementation:** Design complete
-- Dynamic method dispatch fallback
-- **Blocked:** Runtime implementation
+### #36: Method Missing ✅
+**Status:** COMPLETE
+**Implementation:** `src/compiler/src/interpreter_method.rs`
+- `method_missing(self, name, args, block)` handler
+- Dynamic method dispatch when method not found
+- Works with context blocks
 
 ### #37: Union Types 📋
 **Status:** DESIGN REQUIRED
@@ -324,23 +336,28 @@ This document consolidates all feature implementation status from `doc/status/*.
 - MIR: DictLit
 - FFI: `rt_dict_*` functions
 
-### #43: Type Aliases 🔄
-**Status:** PLANNED  
-**Implementation:** Parser design complete
-- Syntax: `type Name = Type`
-- **Blocked:** Type system integration
+### #43: Type Aliases ✅
+**Status:** COMPLETE
+**Implementation:** `src/parser/src/statements/mod.rs`
+- Parser: `parse_type_alias()` → `Node::TypeAlias(TypeAliasDef)`
+- Syntax: `type Name = Type`, `pub type Name = Type`
+- Supports simple types, generic types, function types
+- Test: `interpreter_type_alias`
 
-### #44: Visibility Modifiers 🔄
-**Status:** PLANNED  
-**Implementation:** Parser design complete
-- `pub`, `pub(crate)`, `pub(super)`
-- **Blocked:** Module system integration
+### #44: Visibility Modifiers ✅
+**Status:** COMPLETE (Parser)
+**Implementation:** `src/parser/src/ast/enums.rs`
+- `pub`, `priv` keywords
+- `Visibility` enum on AST nodes
+- Note: Runtime enforcement pending (#99)
 
-### #45: Static/Const Declarations 🔄
-**Status:** PLANNED  
-**Implementation:** Parser design complete
-- Module-level constants
-- **Blocked:** Interpreter implementation
+### #45: Static/Const Declarations ✅
+**Status:** COMPLETE
+**Implementation:** `src/parser/src/statements/mod.rs`
+- `const NAME = value` (compile-time constants, immutable)
+- `static NAME = value` (global, immutable by default)
+- `static mut NAME = value` (global, mutable)
+- Type annotations optional, `pub` visibility supported
 
 ### #46: Extern Functions (FFI) ✅
 **Status:** COMPLETE  
@@ -349,11 +366,11 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Dynamic library loading
 - Type marshalling
 
-### #47: No-Parentheses Calls 🔄
-**Status:** PLANNED  
-**Implementation:** Parser design complete
-- Ruby-style syntax
-- **Blocked:** Ambiguity resolution
+### #47: No-Parentheses Calls ✅
+**Status:** COMPLETE
+**Implementation:** `src/parser/src/expressions/mod.rs`
+- Ruby-style syntax at statement level
+- Parser handles ambiguity resolution
 
 ### #48: Futures and Promises ✅
 **Status:** COMPLETE  
@@ -420,21 +437,24 @@ This document consolidates all feature implementation status from `doc/status/*.
 
 ## Extended Features (#200-220)
 
-### #200-209: Unit Types 📋
-**Status:** PLANNED  
-**Implementation:** Design in `doc/spec/units.md`
-- Physical units (length, time, velocity)
-- Network types (IpAddr, Port, Url)
-- File system types (FilePath)
-- String suffixes (`100ms`, `192.168.1.1`)
+### #200-209: Unit Types ✅
+**Status:** COMPLETE
+**Implementation:** `src/parser/src/statements/mod.rs`, `src/compiler/src/interpreter.rs`
+- Standalone units: `unit Bytes: i64 as bytes`
+- Unit families: `unit_family Time: ns, us, ms, s`
+- Compound units: `unit Speed = Distance / Time`
+- Type-safe unit arithmetic (#203)
+- Unit inference (#208), assertions (#209)
+- String suffixes: `100ms`, `1024bytes`
 
-### #210-215: Networking APIs 📋
-**Status:** PLANNED  
-**Implementation:** Design in `doc/plans/09_stdlib_units_and_networking.md`
-- TCP/UDP sockets
-- HTTP client/server
-- FTP client
-- Async I/O integration
+### #210-215: Networking APIs ✅
+**Status:** COMPLETE (Runtime FFI)
+**Implementation:** `src/runtime/src/value/net.rs`
+- TCP: bind, accept, connect, read, write, flush, shutdown, close
+- UDP: bind, connect, recv, send, recv_from, send_to
+- HTTP: basic client support
+- Socket options: nodelay, keepalive, timeouts, broadcast
+- ~50+ FFI functions implemented
 
 ### #220: LLVM Backend ✅
 **Status:** COMPLETE  
@@ -462,12 +482,13 @@ This document consolidates all feature implementation status from `doc/status/*.
 - Execute and verify output
 - **Coverage:** Sprint 2 complete
 
-### #302: Test CLI Integration 📋
-**Status:** PLANNED  
-**Implementation:** Design in `doc/plans/29_doctest.md`
-- `simple test` command
-- Coverage reporting
-- **Blocked:** CLI extension
+### #302: Test CLI Integration ✅
+**Status:** COMPLETE
+**Implementation:** `src/driver/src/cli/test_runner.rs`
+- `simple test [path]` command
+- Test levels: --unit, --integration, --system
+- Output formats: text, json, doc
+- Options: --tag, --fail-fast, --seed
 
 ### #303: JJ Version Control 🔄
 **Status:** IN PROGRESS (67%)  
@@ -480,21 +501,25 @@ This document consolidates all feature implementation status from `doc/status/*.
 
 ## Advanced Features (#400-536)
 
-### #400-405: Contract Blocks 📋
-**Status:** PLANNED  
-**Implementation:** `doc/features/contracts.md`
-- Preconditions: `requires`
-- Postconditions: `ensures`
-- Invariants: `invariant`
-- Refinement types
-- **Design:** Complete, awaiting implementation
+### #400-405: Contract Blocks 🔄
+**Status:** IN PROGRESS (MIR complete, parser incomplete)
+**Implementation:** `src/compiler/src/mir/lower.rs`, `src/parser/src/statements/contract.rs`
+- Preconditions: `in:` blocks
+- Postconditions: `out(ret):` and `out_err(err):` blocks
+- Invariants: `invariant:` blocks
+- Old value capture: `old()` expressions
+- MIR: ContractCheck, ContractOldCapture
+- Contract modes: Off, Boundary, All, Test
+- **Blocked:** Parser doesn't recognize contract syntax (10 tests failing)
 
-### #410-415: Capability-Based Imports 📋
-**Status:** PLANNED  
-**Implementation:** `doc/plans/llm_friendly.md`
-- Effect declaration at import
-- Capability granting
-- Static verification
+### #410-415: Capability-Based Imports ✅
+**Status:** COMPLETE
+**Implementation:** `src/parser/src/ast/nodes.rs`, `src/compiler/src/module_resolver.rs`
+- Capabilities: Pure, Io, Net, Fs, Unsafe, Gc
+- `requires [pure, io]` module declarations
+- Effect-to-capability validation
+- Capability inheritance enforcement
+- Tests in `effects_tests.rs`
 
 ### #510-512: UI Framework 📋
 **Status:** PLANNED  
@@ -613,38 +638,56 @@ This document consolidates all feature implementation status from `doc/status/*.
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
 | Core Language | 47 | 45 | 1 | 1 |
-| Codegen | 6 | 6 | 0 | 0 |
-| Testing & CLI | 39 | 39 | 0 | 0 |
-| Concurrency Runtime | 33 | 33 | 0 | 0 |
-| Contracts | 32 | 32 | 0 | 0 |
-| Extended - Units | 10 | 0 | 0 | 10 |
-| Extended - Networking | 6 | 0 | 0 | 6 |
+| Codegen | 5 | 4 | 1 | 0 |
+| Testing & CLI | 4 | 4 | 0 | 0 |
+| Concurrency Runtime | 4 | 4 | 0 | 0 |
+| Contracts | 6 | 0 | 6 | 0 |
+| Extended - Units | 10 | 10 | 0 | 0 |
+| Extended - Networking | 6 | 6 | 0 | 0 |
 | Advanced - Effects | 6 | 6 | 0 | 0 |
-| Advanced - UI | 6 | 0 | 0 | 6 |
+| Advanced - UI | 3 | 0 | 0 | 3 |
 | Advanced - Web | 17 | 0 | 0 | 17 |
-| Advanced - GPU/SIMD | 19 | 0 | 8 | 11 |
-| **TOTAL** | **219** | **161** | **9** | **49** |
+| Advanced - GPU/SIMD | 19 | 5 | 8 | 6 |
+| **TOTAL** | **127** | **84** | **16** | **27** |
 
-**Overall Progress:** 74% (161/219 complete, 9 in progress)
+**Overall Progress:** 66% (84/127 complete, 16 in progress)
+
+---
+
+## Recent Work (2025-12-17)
+
+### Interpreter Enhancements
+- **String methods added:** `find_str`, `trimmed`, `sorted`, `taken`, `dropped`, `appended`, `prepended`, `push`, `push_str`, `pop`, `clear`
+- **Option methods added:** `or`, `ok_or`
+- **Result method added:** `or`
+- **BDD framework:** Added `skip` builtin for skipped tests
+
+### Test Status
+- **Simple stdlib tests:** 24 passed, 0 failed
+- **Driver tests:** 700+ passed, 0 failed
+- **Compiler tests:** 322 passed, 10 failed (contract parser)
+- **Total:** ~1046+ tests passing
 
 ---
 
 ## Next Priorities
 
 ### Immediate (Sprint)
-1. Unique/Shared pointer RAII semantics
+1. **Contract parser support** - Add `in:`, `out:`, `invariant:` syntax to parser (10 tests blocked)
+2. **Collection mutation** - Array/List/Dict mutation doesn't persist changes
+3. **Type annotation scope bug** - Variables become inaccessible after type-annotated let
 
 ### Short Term (Month)
-1. Memory pointer types - Handle pointers
-2. Unit type basics (#200-204)
-3. GPU kernel `#[gpu]`/`@simd` attribute parsing (#405)
+1. Union types (#37) - Tagged union syntax and pattern matching
+2. Result type (#37b) - `Result[T, E]` with `?` operator
+3. Full type inference (#13) - AST integration
 
 ### Medium Term (Quarter)
 1. GPU kernel features (#405-410) - complete MIR-to-codegen path
-2. Kernel bounds policy (#411-412) - safety-by-default GPU
-3. SIMD operations (#400-404) - CPU vector support
-4. UI framework prototype (#500-505)
-5. Web framework basics (#520-528)
+2. SIMD operations (#400-404) - CPU vector support
+3. Doctest framework - List mutation and Set support needed
+4. UI framework prototype (#510-512)
+5. Web framework basics (#520-536)
 
 ---
 

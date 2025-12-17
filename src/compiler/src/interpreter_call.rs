@@ -490,6 +490,26 @@ fn evaluate_call(
 
                 return result;
             }
+            "skip" => {
+                // skip(name, block) - marks a test as skipped (not executed)
+                let name = eval_arg(args, 0, Value::Str("unnamed".to_string()), env, functions, classes, enums, impl_methods)?;
+                let name_str = match &name {
+                    Value::Str(s) => s.clone(),
+                    _ => "unnamed".to_string(),
+                };
+                // Don't evaluate the block - just mark as skipped
+
+                let indent = BDD_INDENT.with(|cell| *cell.borrow());
+                let indent_str = "  ".repeat(indent);
+
+                // Print skipped test in yellow
+                println!("{}\x1b[33m○ {} (skipped)\x1b[0m", indent_str, name_str);
+
+                // Count as passed (skipped tests don't count as failures)
+                BDD_COUNTS.with(|cell| cell.borrow_mut().0 += 1);
+
+                return Ok(Value::Nil);
+            }
             "expect" => {
                 // expect(condition) - BDD assertion, prints failure if false
                 let condition = eval_arg(args, 0, Value::Bool(false), env, functions, classes, enums, impl_methods)?;

@@ -40,11 +40,11 @@ fn assert_function_contract(items: &[Node], name: &str, requires_count: usize, e
 
 #[test]
 fn test_function_with_requires() {
+    // Contract syntax: contracts go INSIDE the function body (after colon)
     let source = r#"
-fn divide(a: i32, b: i32) -> i32
-requires:
-    b != 0
-:
+fn divide(a: i32, b: i32) -> i32:
+    requires:
+        b != 0
     a / b
 "#;
     let items = parse(source);
@@ -53,11 +53,11 @@ requires:
 
 #[test]
 fn test_function_with_ensures() {
+    // Contract syntax: contracts go INSIDE the function body (after colon)
     let source = r#"
-fn abs(x: i32) -> i32
-ensures:
-    result >= 0
-:
+fn abs(x: i32) -> i32:
+    ensures:
+        result >= 0
     return if x < 0: 0 - x else: x
 "#;
     let items = parse(source);
@@ -77,13 +77,13 @@ ensures:
 
 #[test]
 fn test_function_with_requires_and_ensures() {
+    // Contract syntax: contracts go INSIDE the function body (after colon)
     let source = r#"
-fn divide(a: i32, b: i32) -> i32
-requires:
-    b != 0
-ensures:
-    result * b == a
-:
+fn divide(a: i32, b: i32) -> i32:
+    requires:
+        b != 0
+    ensures:
+        result * b == a
     a / b
 "#;
     let items = parse(source);
@@ -92,13 +92,13 @@ ensures:
 
 #[test]
 fn test_function_with_multiple_requires() {
+    // Contract syntax: contracts go INSIDE the function body (after colon)
     let source = r#"
-fn transfer(sender: Account, recipient: Account, amount: i64) -> bool
-requires:
-    amount > 0
-    sender.balance >= amount
-    recipient.balance + amount <= MAX_BALANCE
-:
+fn transfer(sender: Account, recipient: Account, amount: i64) -> bool:
+    requires:
+        amount > 0
+        sender.balance >= amount
+        recipient.balance + amount <= MAX_BALANCE
     sender.balance -= amount
     recipient.balance += amount
     true
@@ -119,11 +119,11 @@ requires:
 
 #[test]
 fn test_function_with_old_expr() {
+    // Contract syntax: contracts go INSIDE the function body (after colon)
     let source = r#"
-fn increment(x: &mut i32)
-ensures:
-    *x == old(*x) + 1
-:
+fn increment(x: &mut i32):
+    ensures:
+        *x == old(*x) + 1
     *x += 1
 "#;
     let items = parse(source);
@@ -165,17 +165,18 @@ fn add(a: i32, b: i32) -> i32:
 
 #[test]
 fn test_class_with_invariant() {
+    // Contract syntax: class invariants go inside class body,
+    // method contracts go INSIDE method body (after colon)
     let source = r#"
 class BankAccount:
     balance: i64
-    
+
     invariant:
         balance >= 0
-    
-    fn deposit(amount: i64)
-    requires:
-        amount > 0
-    :
+
+    fn deposit(amount: i64):
+        requires:
+            amount > 0
         self.balance += amount
 "#;
     let items = parse(source);
@@ -244,14 +245,14 @@ class Point:
 
 #[test]
 fn test_class_method_with_contract() {
+    // Contract syntax: contracts go INSIDE the function body (after colon)
     let source = r#"
 class Stack:
     items: [i32]
-    
-    fn push(item: i32)
-    ensures:
-        self.items.len() == old(self.items.len()) + 1
-    :
+
+    fn push(item: i32):
+        ensures:
+            self.items.len() == old(self.items.len()) + 1
         self.items.push(item)
 "#;
     let items = parse(source);
@@ -293,15 +294,15 @@ class Bad:
 
 #[test]
 fn test_complex_contract_example() {
+    // Contract syntax: contracts go INSIDE the function body (after colon)
     let source = r#"
-fn withdraw(account: &mut Account, amount: i64) -> bool
-requires:
-    amount > 0
-    account.balance >= amount
-    account.active
-ensures:
-    account.balance <= old(account.balance)
-:
+fn withdraw(account: &mut Account, amount: i64) -> bool:
+    requires:
+        amount > 0
+        account.balance >= amount
+        account.active
+    ensures:
+        account.balance <= old(account.balance)
     if account.balance >= amount:
         account.balance -= amount
         return true

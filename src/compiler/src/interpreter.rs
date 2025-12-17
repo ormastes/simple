@@ -149,6 +149,33 @@ thread_local! {
     pub(crate) static BASE_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
     /// Maps base unit suffix -> family name for SI prefix detection (e.g., "m" -> "length")
     pub(crate) static SI_BASE_UNITS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    /// Tracks variables that have been moved (for unique pointer move semantics)
+    /// When a unique pointer is used (moved out), its name is added here.
+    /// Any subsequent access to a moved variable results in a compile error.
+    pub(crate) static MOVED_VARS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+}
+
+/// Mark a variable as moved (for unique pointer move semantics).
+/// Called when a unique pointer is assigned to another variable.
+pub(crate) fn mark_as_moved(name: &str) {
+    MOVED_VARS.with(|cell| {
+        cell.borrow_mut().insert(name.to_string());
+    });
+}
+
+/// Clear moved variables tracking (for new scopes/functions).
+pub(crate) fn clear_moved_vars() {
+    MOVED_VARS.with(|cell| {
+        cell.borrow_mut().clear();
+    });
+}
+
+/// Check if an expression is a simple identifier (for move tracking)
+fn get_identifier_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Identifier(name) => Some(name.as_str()),
+        _ => None,
+    }
 }
 
 /// SI prefix definitions: (prefix_char, multiplier)
@@ -645,8 +672,9 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
 /// Evaluate the module and return the `main` binding as an i32.
 #[instrument(skip(items))]
 pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
-    // Clear const names and extern functions from previous runs
+    // Clear const names, extern functions, and moved variables from previous runs
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
+    clear_moved_vars();
     EXTERN_FUNCTIONS.with(|cell| {
         let mut externs = cell.borrow_mut();
         externs.clear();
@@ -1060,8 +1088,10 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
             | Node::AutoImportStmt(_)
-            | Node::RequiresCapabilities(_) => {
+            | Node::RequiresCapabilities(_)
+            | Node::HandlePool(_) => {
                 // Module system is handled by the module resolver
+                // HandlePool is processed at compile time for allocation
                 // These are no-ops in the interpreter
             }
         }
@@ -1119,6 +1149,15 @@ pub(crate) fn exec_node(
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
                 }
+
+                // Move semantics for unique pointers:
+                // If binding a unique pointer from a simple identifier, mark source as moved
+                if matches!(value, Value::Unique(_)) {
+                    if let Some(source_name) = get_identifier_name(value_expr) {
+                        mark_as_moved(source_name);
+                    }
+                }
+
                 // Validate unit type annotation if present
                 // Type can come from either let_stmt.ty OR from a typed pattern (x: Type)
                 let type_annotation = if let_stmt.ty.is_some() {

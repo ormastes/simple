@@ -286,6 +286,14 @@ pub(crate) fn evaluate_expr(
             if name == OptionVariant::None.as_str() {
                 return Ok(Value::none());
             }
+            // Check if this variable has been moved (unique pointer move semantics)
+            let is_moved = MOVED_VARS.with(|cell| cell.borrow().contains(name));
+            if is_moved {
+                return Err(CompileError::Semantic(format!(
+                    "use of moved value: '{}'. Unique pointers can only be used once.",
+                    name
+                )));
+            }
             // First check env for local variables and closures
             if let Some(val) = env.get(name) {
                 return Ok(val.clone());

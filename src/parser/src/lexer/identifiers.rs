@@ -97,6 +97,8 @@ impl<'a> super::Lexer<'a> {
             // Infix keywords (for BDD spec framework)
             "to" => TokenKind::To,
             "not_to" => TokenKind::NotTo,
+            // Memory management keywords
+            "handle_pool" => TokenKind::HandlePool,
             "_" => TokenKind::Underscore,
             _ => TokenKind::Identifier(name),
         }

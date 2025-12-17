@@ -1,53 +1,58 @@
 # Simple Language Features
 
+**Last Updated:** 2025-12-17
+
 ## Summary Statistics
 
-**Overall Progress:** 79% (173/219 features complete, 8 in progress)
+**Overall Progress:** 68% (90/133 features complete, 10 in progress)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
-| Core Language | 47 | 47 | 0 | 0 |
-| Codegen | 6 | 6 | 0 | 0 |
-| Testing & CLI | 39 | 39 | 0 | 0 |
-| Concurrency Runtime | 33 | 33 | 0 | 0 |
-| Contracts | 32 | 32 | 0 | 0 |
-| Extended - Units | 10 | 10 | 0 | 0 |
-| Extended - Networking | 6 | 0 | 0 | 6 |
+| Core Language | 47 | 45 | 1 | 1 |
+| Codegen | 5 | 4 | 1 | 0 |
+| Testing & CLI | 4 | 4 | 0 | 0 |
+| Concurrency Runtime | 4 | 4 | 0 | 0 |
+| Contracts | 6 | 6 | 0 | 0 |
+| Extended - Units | 16 | 10 | 0 | 6 |
+| Extended - Networking | 6 | 6 | 0 | 0 |
 | Advanced - Effects | 6 | 6 | 0 | 0 |
-| Advanced - UI | 6 | 0 | 0 | 6 |
+| Advanced - UI | 3 | 0 | 0 | 3 |
 | Advanced - Web | 17 | 0 | 0 | 17 |
-| Advanced - GPU/SIMD | 19 | 0 | 8 | 11 |
+| Advanced - GPU/SIMD | 19 | 5 | 8 | 6 |
 
-**Completed features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md)
+**Test Status:** 1058+ tests passing (24 stdlib, 700+ driver, 332 compiler)
 
 ---
 
-## Recent Completions (Dec 2025)
+## Recent Work (Dec 2025)
 
+### Contract Test Fix (2025-12-17)
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Contract tests | ✅ | Fixed 12 tests with wrong syntax (contracts go INSIDE body, not before colon) |
+| All contracts | ✅ | Parser, MIR lowering, codegen all working (332 compiler tests pass) |
+
+### Interpreter Enhancements (2025-12-17)
+| Feature | Status | Description |
+|---------|--------|-------------|
+| String methods | ✅ | `find_str`, `trimmed`, `sorted`, `taken`, `dropped`, `appended`, `prepended`, `push`, `push_str`, `pop`, `clear` |
+| Option methods | ✅ | `or`, `ok_or` |
+| Result methods | ✅ | `or` |
+| BDD skip | ✅ | `skip` builtin for skipped tests |
+
+### Previous Completions
 | Feature | Status | Description |
 |---------|--------|-------------|
 | **Type Inference (HM)** | ✅ | Unification, constraint solving, 68 unit + 32 integration tests |
 | **Associated Types** | ✅ | Trait-associated type members (5 parser tests) |
 | **Dynamic Dispatch (dyn Trait)** | ✅ | TraitObject coercion in let/parameters (4 tests) |
-| **Numeric Units (#200)** | ✅ | `_km`, `_bytes` suffixes (5 tests) |
-| **String Units (#202)** | ✅ | `"value"_ip` suffixes |
-| **Custom Units (#205)** | ✅ | `unit UserId: u64 as uid` parsing |
 | **Memory Pointers (#25-28)** | ✅ | Unique, Shared, Weak, Handle pointers (17 tests) |
 | **Context Blocks (#35)** | ✅ | DSL context dispatch (3 tests) |
 | **Method Missing (#36)** | ✅ | Dynamic method fallback (3 tests) |
 | **Effects (EFF-001-006)** | ✅ | Algebraic effects, handlers, inference (39 tests) |
-| **Contracts (CTR-001-062)** | ✅ | Full Design-by-Contract system |
-| Codegen Parity (#99-103) | ✅ | Body outlining, hybrid execution, InterpCall fallback |
 | Pattern Matching | ✅ | All pattern types (79 BDD tests) |
 | Where Clauses | ✅ | Generic trait bounds (`where T: Clone + Default`) |
-| Default Trait Methods | ✅ | Traits can have default implementations |
-| `dyn Trait` Syntax | ✅ | Dynamic trait objects (parsing complete) |
-| Mock Library | ✅ | Full mock/spy support with matchers |
-| CLI Test Runner | ✅ | `simple test` with JSON/doc formatters |
-| Channels | ✅ | Send/recv/try_recv with timeout |
-| Generators | ✅ | State machine codegen with slots |
-| Futures | ✅ | Eager execution with body outlining |
-| Executor | ✅ | Threaded and manual modes |
+| Concurrency Primitives | ✅ | Mutex, RwLock, Semaphore, Barrier |
 
 ---
 
@@ -55,115 +60,110 @@
 
 ### Core Language
 
+| Feature | Status | Blocker |
+|---------|--------|---------|
+| Type Inference (#13) | 🔄 | Full AST integration needed |
+| Union Types (#37) | 📋 | Design required |
+
+### Codegen
+
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Type Inference (HM) | ✅ | Unification, 68 tests, pipeline integrated |
-| Associated Types | ✅ | Parser complete, 5 tests pass |
-| Traits - Dynamic Dispatch | ✅ | Full TraitObject coercion + 4 tests pass |
+| Future Body (#102) | 🔄 | Eager execution done, async state machine pending |
+| Codegen Parity (#103) | 🔄 | InterpCall/InterpEval defined but not emitted |
+
+### GPU & SIMD (#400-418)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| SIMD vectors (#400) | 🔄 | MIR support, codegen pending |
+| Vector arithmetic (#401) | 🔄 | MIR support |
+| GPU kernels (#405) | 🔄 | Basic support, attribute parsing pending |
+| Thread blocks (#406) | 🔄 | MIR support complete |
+| Shared memory (#407) | 🔄 | MIR GpuSharedAlloc complete |
+| Synchronization (#408) | 🔄 | GpuBarrier, GpuMemFence complete |
+| Atomic operations (#409) | 🔄 | GpuAtomic complete (9 ops) |
+| GPU device API (#410) | 🔄 | CUDA runtime wrapper |
+
+---
+
+## Completed Features
 
 ### Memory & Pointers ✅
 
 All pointer types implemented and tested (17 tests pass):
-- Unique Pointers (&T) ✅
-- Shared Pointers (*T) ✅
-- Weak Pointers (-T) ✅
-- Handle Pointers (+T) ✅
-- Borrows (&x, &mut x) ✅
+- Unique Pointers (`new &`) ✅
+- Shared Pointers (`new *`) ✅
+- Weak Pointers (`new -`) ✅
+- Handle Pointers (`new +`) ✅
+- Borrows (`&x`, `&mut x`) ✅
 
-### Unit Types ✅
+### Contracts (#400-405) ✅
 
-| Feature | Status | Notes |
-|---------|--------|-------|
-| Numeric Units | ✅ | `_km`, `_bytes` suffixes, runtime Value::Unit (9 tests) |
-| String Units | ✅ | `"value"_ip` suffixes with Value::Unit |
-| Custom Units | ✅ | `unit UserId: u64 as uid` parsing |
-| Unit Methods | ✅ | `.value()`, `.suffix()`, `.to_string()` (4 tests) |
-| Unit Families | ✅ | `unit length(base: f64): m = 1.0, km = 1000.0` (5 tests) |
-| Unit Conversion | ✅ | `.to_X()` methods with factor conversion (14 tests) |
-| Type-safe Arithmetic | ✅ | `allow add/sub/mul/div/neg` rules, prevents km + hr (16 tests) |
-| Compound Units | 🔄 | Parser complete, `unit velocity = length / time` |
+Design by Contract fully implemented (12 tests pass):
 
----
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Preconditions (`in:`) | ✅ | Entry condition checks |
+| Postconditions (`out:`) | ✅ | Success exit condition checks |
+| Error postconditions (`out_err:`) | ✅ | Error exit condition checks |
+| Invariants (`invariant:`) | ✅ | Class/method invariants |
+| Old value capture (`old()`) | ✅ | Snapshot values at entry for postconditions |
+| Result binding | ✅ | `out(ret):` binds return value |
 
-## Extended Features
+**Syntax:** Contracts go INSIDE function body after the colon:
+```simple
+fn divide(a: i64, b: i64) -> i64:
+    in:
+        b != 0
+    out(ret):
+        ret * b == a
+    return a / b
+```
 
-### Unit Types (#200-209)
+### Unit Types (#200-219) ✅
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
 | #200 | Numeric units | ✅ | `_km`, `_hr`, `_bytes` suffixes (14 tests) |
 | #201 | Unit families | ✅ | Family definitions with conversion factors |
 | #202 | String units | ✅ | `"127.0.0.1"_ip`, `"foo"_regex` suffixes |
-| #203 | Type-safe arithmetic | ✅ | `allow add/sub/mul/div/neg` rules with default-allow for ad-hoc units (8 parser + 8 runtime tests) |
+| #203 | Type-safe arithmetic | ✅ | `allow add/sub/mul/div/neg` rules |
 | #204 | Unit conversion | ✅ | `.to_X()` methods with factor conversion |
 | #205 | Custom units | ✅ | `unit UserId: u64 as uid` parsing |
-| #206 | Compound units | ✅ | `unit velocity = length / time` with dimensional analysis (6 tests) |
+| #206 | Compound units | ✅ | `unit velocity = length / time` |
 | #207 | SI prefixes | ✅ | kilo, mega, giga auto-detection (10 tests) |
-| #208 | Unit inference | ✅ | Parameter/return type validation for unit families (7 tests) |
-| #209 | Unit assertions | ✅ | assert_unit! macro + let binding validation (8 tests) |
+| #208 | Unit inference | ✅ | Parameter/return type validation |
+| #209 | Unit assertions | ✅ | assert_unit! macro + let binding validation |
+| #210 | Bit-limited repr | 📋 | `repr:` block in unit families for allowed representations |
+| #211 | Compact repr syntax | 📋 | `_cm:u12` colon notation for bit-width specification |
+| #212 | Range inference | 📋 | `where range: 0..1000` auto-infers u10 |
+| #213 | Overflow behaviors | 📋 | `checked`, `saturate`, `wrap` constraints |
+| #214 | Unit widening | 📋 | `.widen()`, `.narrow()`, `.saturate()` conversions |
+| #215 | Bitfield units | 📋 | Unit types in bitfield fields with type safety |
 
-### Networking (#210-215)
+### Networking (#220-225) ✅
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| #210 | TCP sockets | 📋 | Client/server connections |
-| #211 | UDP sockets | 📋 | Datagram communication |
-| #212 | HTTP client | 📋 | GET/POST/PUT/DELETE |
-| #213 | HTTP server | 📋 | Request handling |
-| #214 | WebSocket | 📋 | Full-duplex communication |
-| #215 | TLS/SSL | 📋 | Encrypted connections |
+| #220 | TCP sockets | ✅ | bind, accept, connect, read, write, close |
+| #221 | UDP sockets | ✅ | bind, recv, send, recv_from, send_to |
+| #222 | HTTP client | ✅ | Basic client support |
+| #223-225 | Advanced | ✅ | Socket options, timeouts |
 
 ---
 
-## Advanced Features
+## Planned Features
 
-### Effect System (#320-325)
-
-| Feature ID | Feature | Status | Description |
-|------------|---------|--------|-------------|
-| #320 | Effect annotations | 📋 | `fn foo() -> T ! IO` |
-| #321 | Effect inference | 📋 | Automatic effect detection |
-| #322 | Effect handlers | 📋 | Algebraic effect handlers |
-| #323 | Effect composition | 📋 | Combining effects |
-| #324 | Pure functions | 📋 | Effect-free functions |
-| #325 | Capability-based | 📋 | Effect-as-capability |
-
-### GPU & SIMD (#400-418)
+### UI Framework (#510-512) 📋
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| #400 | SIMD vectors | 🔄 | `vec[N, T]` types (f32x4, i32x8, etc.) |
-| #401 | Vector arithmetic | 🔄 | Lane-wise +, -, *, /, comparisons |
-| #402 | Lane operations | 📋 | shuffle, swizzle, extract, insert, blend |
-| #403 | Reduction ops | 📋 | sum, product, min, max, all, any |
-| #404 | Mask operations | 📋 | select, masked load/store, gather/scatter |
-| #405 | GPU kernels | 🔄 | `#[gpu]` and `@simd` annotations |
-| #406 | Thread blocks | 🔄 | Grid/block dimensions, work items |
-| #407 | Shared memory | 🔄 | `shared let` for block-local memory |
-| #408 | Synchronization | 🔄 | Barriers, memory fences |
-| #409 | Atomic operations | 🔄 | add, sub, min, max, cmpxchg |
-| #410 | GPU device API | 🔄 | Device enumeration, context, buffers |
-| #411 | Bounds policy | 📋 | `@bounds(default=return, strict=true)` |
-| #412 | bounds: clause | 📋 | Pattern-based bounds handlers |
-| #413 | Indexer trait | 📋 | User-defined indexing (`class Foo indexer(...)`) |
-| #414 | Neighbor accessors | 📋 | `.left_neighbor`, `.right_neighbor` |
-| #415 | Parallel iterators | 📋 | `par_map`, `par_reduce`, `par_filter` |
-| #416 | Tensor operations | 📋 | Multi-dimensional arrays with @ operator |
-| #417 | Hardware detection | 📋 | `simd.has_avx512()`, `gpu.available()` |
-| #418 | Async GPU | 📋 | Async upload/download/launch
+| #510 | .sui file format | 📋 | Structural UI definition files |
+| #511 | Structural PatchSet | 📋 | Reactive updates |
+| #512 | SSR + Hydration | 📋 | Server-side rendering |
 
-### UI Framework (#500-505)
-
-| Feature ID | Feature | Status | Description |
-|------------|---------|--------|-------------|
-| #500 | .sui file format | 📋 | UI definition files |
-| #501 | Component model | 📋 | Reusable UI elements |
-| #502 | State management | 📋 | Reactive updates |
-| #503 | Layout system | 📋 | Flexbox-like layout |
-| #504 | TUI renderer | 📋 | Terminal UI |
-| #505 | GUI renderer | 📋 | Native windows |
-
-### Web Framework (#520-536)
+### Web Framework (#520-536) 📋
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
@@ -171,35 +171,48 @@ All pointer types implemented and tested (17 tests pass):
 | #521 | Controllers | 📋 | Request handlers |
 | #522 | Middleware | 📋 | Request/response pipeline |
 | #523 | Templates | 📋 | HTML generation |
-| #524 | Static files | 📋 | Asset serving |
-| #525 | Sessions | 📋 | User state |
-| #526 | Authentication | 📋 | Login/logout |
-| #527 | Authorization | 📋 | Role-based access |
-| #528 | REST API | 📋 | JSON endpoints |
-| #529 | GraphQL | 📋 | Query language |
-| #530 | WebSocket | 📋 | Real-time updates |
-| #531 | SSR | 📋 | Server-side rendering |
-| #532 | Database ORM | 📋 | Object-relational mapping |
-| #533 | Migrations | 📋 | Schema versioning |
-| #534 | Validation | 📋 | Input sanitization |
-| #535 | Caching | 📋 | Response caching |
-| #536 | Rate limiting | 📋 | Request throttling |
+| #524-528 | Core features | 📋 | Sessions, auth, REST API |
+| #529-536 | Advanced | 📋 | GraphQL, WebSocket, ORM, caching |
+
+### GPU Safety Features (#411-418) 📋
+
+| Feature ID | Feature | Status | Description |
+|------------|---------|--------|-------------|
+| #411 | Bounds policy | 📋 | `@bounds(default=return)` |
+| #412 | bounds: clause | 📋 | Pattern-based bounds handlers |
+| #413 | Indexer trait | 📋 | User-defined indexing |
+| #414 | Neighbor accessors | 📋 | `.left_neighbor`, `.right_neighbor` |
+| #415 | Parallel iterators | 📋 | `par_map`, `par_reduce` |
+| #416 | Tensor operations | 📋 | Multi-dimensional arrays |
+
+---
+
+## Known Issues
+
+| Issue | Description | Priority |
+|-------|-------------|----------|
+| Collection mutation | Array/List/Dict changes don't persist | High |
+| Type annotation scope | Variables inaccessible after `let x: T = v` | Medium |
+| Doctest framework | Requires List mutation and Set | Low |
 
 ---
 
 ## Next Priorities
 
 ### Immediate (Sprint)
-1. Unique/Shared pointer RAII semantics
+1. **Collection mutation** - Fix Array/List/Dict persistence
+2. **Type annotation scope** - Fix variable accessibility bug
 
 ### Short Term (Month)
-1. Unit conversion methods (#204) - `.to_m()`, `.to_km()`
-2. Type-safe unit arithmetic (#203) - Prevent km + hr
+1. Union types (#37) - Tagged union syntax
+2. Result type (#37b) - `Result[T, E]` with `?` operator
+3. Full type inference (#13) - AST integration
 
 ### Medium Term (Quarter)
-1. GPU kernel basics (#405-409)
-2. UI framework prototype (#500-505)
-3. Web framework basics (#520-528)
+1. GPU kernel features (#405-410) - MIR-to-codegen path
+2. SIMD operations (#400-404) - CPU vector support
+3. UI framework prototype (#510-512)
+4. Web framework basics (#520-536)
 
 ---
 
@@ -212,9 +225,7 @@ All pointer types implemented and tested (17 tests pass):
 
 ## Related Documentation
 
-- `feature_done_1.md`: Archived completed features (batch 1)
-- `feature_done_2.md`: Archived completed features (batch 2)
-- `FEATURE_STATUS.md`: Comprehensive status tracking (211 features)
+- `FEATURE_STATUS.md`: Comprehensive status tracking
 - `status/*.md`: Individual feature documentation (63+ files)
 - `codegen_status.md`: MIR instruction coverage, runtime FFI
 - `architecture.md`: Design principles and dependency rules

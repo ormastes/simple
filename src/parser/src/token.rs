@@ -142,6 +142,9 @@ pub enum TokenKind {
     To,    // to (positive assertion: expect x to eq 5)
     NotTo, // not_to (negative assertion: expect x not_to eq 5)
 
+    // Memory management keywords
+    HandlePool, // handle_pool (declare a handle pool for a type)
+
     // Operators
     Plus,        // +
     Minus,       // -

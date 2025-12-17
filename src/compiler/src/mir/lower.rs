@@ -1407,8 +1407,8 @@ mod tests {
 
     #[test]
     fn test_lower_function_with_precondition() {
-        // Contract syntax: contracts go BEFORE the function body colon
-        let source = "fn divide(a: i64, b: i64) -> i64\nin:\n    b != 0\n:\n    return a / b\n";
+        // Contract syntax: contracts go INSIDE the function body (after colon)
+        let source = "fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
         let mir = compile_to_mir(source).unwrap();
 
         let func = &mir.functions[0];
@@ -1423,8 +1423,8 @@ mod tests {
 
     #[test]
     fn test_lower_function_with_postcondition() {
-        // Contract syntax: contracts go BEFORE the function body colon
-        let source = "fn abs_value(x: i64) -> i64\nout(ret):\n    ret >= 0\n:\n    return x\n";
+        // Contract syntax: contracts go INSIDE the function body (after colon)
+        let source = "fn abs_value(x: i64) -> i64:\n    out(ret):\n        ret >= 0\n    return x\n";
         let mir = compile_to_mir(source).unwrap();
 
         let func = &mir.functions[0];
@@ -1441,8 +1441,8 @@ mod tests {
 
     #[test]
     fn test_lower_function_with_invariant() {
-        // Contract syntax: contracts go BEFORE the function body colon
-        let source = "fn test_invariant(x: i64) -> i64\ninvariant:\n    x >= 0\n:\n    return x + 1\n";
+        // Contract syntax: contracts go INSIDE the function body (after colon)
+        let source = "fn test_invariant(x: i64) -> i64:\n    invariant:\n        x >= 0\n    return x + 1\n";
         let mir = compile_to_mir(source).unwrap();
 
         let func = &mir.functions[0];
@@ -1476,7 +1476,7 @@ mod tests {
     #[test]
     fn test_contract_mode_off_no_checks() {
         // With ContractMode::Off, no contract checks should be emitted
-        let source = "fn divide(a: i64, b: i64) -> i64\nin:\n    b != 0\n:\n    return a / b\n";
+        let source = "fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
         let mir = compile_to_mir_with_mode(source, ContractMode::Off).unwrap();
 
         let func = &mir.functions[0];
@@ -1493,7 +1493,7 @@ mod tests {
     #[test]
     fn test_contract_mode_boundary_public_function() {
         // With ContractMode::Boundary, public functions should have contract checks
-        let source = "pub fn divide(a: i64, b: i64) -> i64\nin:\n    b != 0\n:\n    return a / b\n";
+        let source = "pub fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
         let mir = compile_to_mir_with_mode(source, ContractMode::Boundary).unwrap();
 
         let func = &mir.functions[0];
@@ -1510,7 +1510,7 @@ mod tests {
     #[test]
     fn test_contract_mode_boundary_private_function() {
         // With ContractMode::Boundary, private functions should NOT have contract checks
-        let source = "fn divide(a: i64, b: i64) -> i64\nin:\n    b != 0\n:\n    return a / b\n";
+        let source = "fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
         let mir = compile_to_mir_with_mode(source, ContractMode::Boundary).unwrap();
 
         let func = &mir.functions[0];
@@ -1527,7 +1527,7 @@ mod tests {
     #[test]
     fn test_contract_mode_all_checks_all_functions() {
         // With ContractMode::All (default), all functions should have contract checks
-        let source = "fn divide(a: i64, b: i64) -> i64\nin:\n    b != 0\n:\n    return a / b\n";
+        let source = "fn divide(a: i64, b: i64) -> i64:\n    in:\n        b != 0\n    return a / b\n";
         let mir = compile_to_mir_with_mode(source, ContractMode::All).unwrap();
 
         let func = &mir.functions[0];
@@ -1642,8 +1642,8 @@ fn get_user(id: UserId) -> i64:
     #[test]
     fn test_pure_function_in_contract_allowed() {
         // Test that #[pure] functions can be called in contracts
-        // Contract syntax: contracts go BEFORE the function body colon
-        let source = "#[pure]\nfn is_valid(x: i64) -> bool:\n    return x > 0\n\nfn process(x: i64) -> i64\nin:\n    is_valid(x)\n:\n    return x * 2\n";
+        // Contract syntax: contracts go INSIDE the function body (after colon)
+        let source = "#[pure]\nfn is_valid(x: i64) -> bool:\n    return x > 0\n\nfn process(x: i64) -> i64:\n    in:\n        is_valid(x)\n    return x * 2\n";
         let mut parser = Parser::new(source);
         let ast = parser.parse().expect("parse failed");
         let hir_module = hir::lower(&ast).expect("hir lower failed");
@@ -1657,8 +1657,8 @@ fn get_user(id: UserId) -> i64:
     #[test]
     fn test_impure_function_in_contract_rejected() {
         // Test that non-pure functions cause an error in contracts
-        // Contract syntax: contracts go BEFORE the function body colon
-        let source = "fn impure_check(x: i64) -> bool:\n    return x > 0\n\nfn process(x: i64) -> i64\nin:\n    impure_check(x)\n:\n    return x * 2\n";
+        // Contract syntax: contracts go INSIDE the function body (after colon)
+        let source = "fn impure_check(x: i64) -> bool:\n    return x > 0\n\nfn process(x: i64) -> i64:\n    in:\n        impure_check(x)\n    return x * 2\n";
         let mut parser = Parser::new(source);
         let ast = parser.parse().expect("parse failed");
         let result = hir::lower(&ast);
@@ -1674,8 +1674,8 @@ fn get_user(id: UserId) -> i64:
     #[test]
     fn test_builtin_math_in_contract_allowed() {
         // Test that builtin math functions are implicitly pure
-        // Contract syntax: contracts go BEFORE the function body colon
-        let source = "fn safe_fn(x: i64) -> i64\nin:\n    x >= 0\n:\n    return abs(x)\n";
+        // Contract syntax: contracts go INSIDE the function body (after colon)
+        let source = "fn safe_fn(x: i64) -> i64:\n    in:\n        x >= 0\n    return abs(x)\n";
         let mut parser = Parser::new(source);
         let ast = parser.parse().expect("parse failed");
         let hir_module = hir::lower(&ast);
