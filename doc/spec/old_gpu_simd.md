@@ -1,8 +1,5 @@
 # GPU and SIMD Specification
 
-**Version:** 2025-12 Update
-**Scope:** Language + standard runtime contracts (portable semantics; backend-specific lowering is non-normative)
-
 This document specifies GPU compute and SIMD vector operations for the Simple language.
 
 ## Design Philosophy
@@ -13,8 +10,6 @@ Simple's GPU/SIMD support follows these principles:
 2. **Explicit Parallelism**: No hidden data races or undefined behavior
 3. **Portability**: Abstract over different hardware (CPU SIMD, GPU compute)
 4. **Integration**: Works seamlessly with existing type system and memory model
-5. **One-pass Parsable**: All constructs recognizable with bounded lookahead
-6. **No GPU GC**: Kernels are GC-free; device allocations must be explicit or value-only
 
 ---
 
@@ -178,16 +173,6 @@ fn process_array(data: &mut [f32]):
 
 ## Part 2: GPU Compute
 
-### Execution Model (SIMT)
-
-A GPU kernel executes across many GPU threads ("work-items"). Threads are grouped into **thread groups** (CUDA blocks / OpenCL work-groups). A kernel sees:
-
-- `this.index()` / `gpu.global_id()` - global linear index (or tuple for multi-d)
-- `this.thread_index()` / `gpu.local_id()` - index within the group
-- `this.group_index()` / `gpu.group_id()` - group id
-
-Host call semantics: Calling a GPU kernel from host code enqueues a kernel launch (async by default). Synchronization is via runtime APIs (`ctx.sync()`, `Device.wait()`).
-
 ### Device and Context
 
 ```simple
@@ -225,9 +210,7 @@ with buf.map() as mapped:
 
 ### Compute Kernels
 
-Kernels are functions that run on the GPU. Two annotation styles are supported:
-
-#### Style 1: `#[gpu]` Attribute
+Kernels are functions that run on the GPU. They use the `#[gpu]` attribute:
 
 ```simple
 #[gpu]
@@ -235,31 +218,21 @@ fn vector_add(a: &[f32], b: &[f32], out: &mut [f32]):
     let idx = gpu.global_id()
     if idx < out.len():
         out[idx] = a[idx] + b[idx]
+
+#[gpu]
+fn matrix_multiply(
+    a: &[f32], b: &[f32], out: &mut [f32],
+    m: u32, n: u32, k: u32
+):
+    let row = gpu.global_id(0)
+    let col = gpu.global_id(1)
+
+    if row < m and col < n:
+        let mut sum = 0.0
+        for i in 0..k:
+            sum += a[row * k + i] * b[i * n + col]
+        out[row * n + col] = sum
 ```
-
-#### Style 2: `@simd` Annotation (with bounds policy)
-
-```simple
-@simd
-fn vector_add(a: f32[], b: f32[], out: f32[]):
-    let i = this.index()
-    out[i] = a[i] + b[i]
-```
-
-**Key difference:** `@simd` implies a default bounds policy (`@bounds(default=return, strict=true)`) that automatically handles out-of-bounds accesses by returning from the thread. The `#[gpu]` style requires explicit bounds checks.
-
-#### `@simd` Parameters (optional)
-
-```simple
-@simd(grid_size=1024, group_size=256, stream=0, dim=1)
-fn my_kernel(...):
-    ...
-```
-
-- `grid_size` - total threads (scalar or tuple)
-- `group_size` - threads per group (scalar or tuple)
-- `stream` - queue/stream id
-- `dim` - explicit dimensionality (1, 2, or 3)
 
 ### Launching Kernels
 
@@ -286,7 +259,7 @@ let result = out_buf.download()
 
 ### Work Item Intrinsics
 
-Available inside GPU kernel functions:
+Available inside `#[gpu]` functions:
 
 ```simple
 gpu.global_id()           # 1D global index
@@ -298,11 +271,6 @@ gpu.group_id(dim)
 gpu.global_size()         # Total number of work items
 gpu.local_size()          # Work group size
 gpu.num_groups()          # Number of work groups
-
-# Alternative @simd style
-this.index()              # global linear index
-this.thread_index()       # index within group
-this.group_index()        # group id
 ```
 
 ### Shared Memory
@@ -337,15 +305,9 @@ fn reduce_sum(input: &[f32], output: &mut [f32], n: u32):
         output[gpu.group_id()] = local_data[0]
 ```
 
-### Thread Groups and Barriers
+### Synchronization
 
 ```simple
-# Within kernels, thread_group is an implicit object
-thread_group.id           # Group ID
-thread_group.size         # Group size
-thread_group.barrier()    # Synchronize threads in group
-
-# Or use gpu.* functions
 gpu.barrier()             # Synchronize all threads in work group
 gpu.mem_fence()           # Memory fence (ensure writes visible)
 gpu.barrier_and_fence()   # Both barrier and fence
@@ -373,165 +335,59 @@ gpu.atomic_exchange(ptr, val)
 gpu.atomic_compare_exchange(ptr, expected, desired)
 ```
 
----
-
-## Part 3: Kernel Bounds Policy
-
-This section defines the default and programmable behavior when indexing may underflow or overflow in GPU kernels using the `@simd` annotation.
-
-### 3.1 Terms
-
-- **Indexable variable**: any expression used as `base[index...]` (array, buffer, user indexer)
-- **Underflow**: `index < lower bound` (typically < 0)
-- **Overflow**: `index >= upper bound` (typically >= length)
-- **Bounds event**: a dynamic situation where an index operation would underflow/overflow
-
-### 3.2 Default Rule
-
-**`@simd` implies `@bounds(default=return, strict=true)`**
-
-Every `@simd` kernel has an implicit bounds policy unless explicitly overridden:
-
-- `default=return`: any bounds event causes the current GPU thread to return from the kernel
-- `strict=true`: the compiler performs static coverage analysis; uncovered possible bounds events must be diagnosed
-
-Override per kernel:
+### Async GPU Operations
 
 ```simple
-@simd @bounds(default=trap, strict=true)
-fn my_kernel(...):
-    ...
+async fn compute_async():
+    let ctx = gpu.Context.default()
+
+    # Async upload
+    let buf = await ctx.upload_async(host_data)
+
+    # Async kernel launch (returns immediately)
+    let event = ctx.launch_async(
+        kernel: my_kernel,
+        global_size: [1024],
+        args: [buf]
+    )
+
+    # Do other work while GPU computes...
+
+    # Wait for specific operation
+    await event
+
+    # Async download
+    let result = await buf.download_async()
 ```
 
-### 3.3 `@bounds(...)` Attribute
-
-Parameters:
-
-| Parameter | Values | Description |
-|-----------|--------|-------------|
-| `default` | `return`, `trap`, `panic`, `ignore` | What to do on uncovered bounds events |
-| `strict` | `true`, `false` | Whether to require coverage analysis |
-
-- `return`: early-exit the current GPU thread
-- `trap`: device trap/abort for the kernel (backend-defined)
-- `panic`: host-visible failure (requires runtime support)
-- `ignore`: proceed without intervention (unsafe; intended only with explicit `bounds:` cases)
-
-### 3.4 `bounds:` Clause (Pattern-Based Handlers)
-
-A `@simd` kernel may include a trailing `bounds:` block that defines handlers:
+### Multi-GPU
 
 ```simple
-@simd
-fn vector_add(a: f32[], b: f32[], out: f32[]):
-    let i = this.index()
-    out[i] = a[i] + b[i]
+let devices = gpu.devices()
+let contexts: [gpu.Context] = devices.map(\d: gpu.Context.new(device: d))
 
-bounds:
-    _.out.over:
-        return
-    _.out.under:
-        return
-```
+# Distribute work across GPUs
+let chunk_size = data.len() / contexts.len()
+let futures = []
 
-#### Pattern Keys
+for i, ctx in contexts.enumerate():
+    let start = i * chunk_size
+    let end = if i == contexts.len() - 1: data.len() else: start + chunk_size
 
-A bounds case label is a boolean condition composed of bounds atoms:
+    futures.push(async:
+        let buf = await ctx.upload_async(data[start:end])
+        ctx.launch(kernel: process, args: [buf])
+        ctx.sync()
+        return buf.download()
+    )
 
-- **Bounds atom**: `_.<var>.<kind>` where `<var>` is the base variable and `<kind>` is `over` or `under`
-- **Boolean composition**: `&&`, `||`, parentheses `(...)` are permitted
-
-Examples:
-- `_.out.over:`
-- `(_.a.over || _.b.over) && _.out.over:`
-- `_.out.under || _.out.over:`
-
-#### Default Handler
-
-```simple
-bounds:
-    _.x.over:
-        return
-    _:                    # Catch-all
-        return
-```
-
-#### Rules
-
-1. **Fallthrough is an error**: Each case body must end in a terminator (`return`, `trap`, `panic`)
-2. **Dead code diagnostics**: Unreachable/shadowed cases are errors under `strict=true`
-3. **Uncovered case diagnostics**: Under `strict=true`, all reachable bounds events must be covered
-
-### 3.5 Interaction with `@skip_index_range_check`
-
-`@skip_index_range_check` disables bounds checks at indexing operation sites. It is invalid to combine:
-- `@skip_index_range_check` with `@bounds(strict=true)` unless the compiler can prove no out-of-bounds
-
----
-
-## Part 4: Indexer Trait and Neighbor Accessors
-
-### 4.1 User-Defined Indexers
-
-A class may declare an indexer signature:
-
-```simple
-class Matrix indexer(i: i32, j: i32) -> f32:
-    data: f32[]
-    width: i32
-
-    fn get(self, i: i32, j: i32) -> f32:
-        return self.data[i * self.width + j]
-
-    fn set(self, i: i32, j: i32, v: f32):
-        self.data[i * self.width + j] = v
-```
-
-Compiler desugaring:
-- `m[i, j]` in rvalue context -> `m.get(i, j)`
-- `m[i, j] = v` -> `m.set(i, j, v)`
-
-### 4.2 Indexer Forwarding (`@indexer` field)
-
-A class may mark exactly one field as the default forwarded indexer:
-
-```simple
-class AudioBuffer:
-    @indexer samples: f32[]
-```
-
-Then `buf[i]` forwards to `buf.samples[i]`.
-
-### 4.3 Neighbor Accessors
-
-For indexables with 1D integer indexing, the following postfix properties are available in `@simd` contexts:
-
-- `.left_neighbor` -> element at `index - 1`
-- `.right_neighbor` -> element at `index + 1`
-
-Context rule: the "current index" is the kernel's `this.index()`.
-
-Bounds behavior: Neighbor access triggers bounds events and is governed by `@bounds` / `bounds:`.
-
-```simple
-@simd
-fn blur_1d(x: f32[], out: f32[]):
-    let i = this.index()
-    let left  = x.left_neighbor
-    let mid   = x[i]
-    let right = x.right_neighbor
-    out[i] = (left + mid + right) / 3.0
-
-bounds:
-    _.x.under || _.x.over:
-        return
-    _.out.under || _.out.over:
-        return
+# Gather results
+let results = await futures.all()
 ```
 
 ---
 
-## Part 5: Data Parallel Operations
+## Part 3: Data Parallel Operations
 
 Higher-level abstractions built on GPU/SIMD:
 
@@ -597,7 +453,7 @@ let g = a.sum(axis: 0)        # Reduce along axis
 
 ---
 
-## Part 6: Hardware Detection and Fallbacks
+## Part 4: Hardware Detection and Fallbacks
 
 ### Feature Detection
 
@@ -658,19 +514,7 @@ data.par_map(\x: x * 2.0)
 
 ---
 
-## Part 7: Feature Mapping
-
-| Simple | CUDA | OpenCL |
-|--------|------|--------|
-| `@simd` / `#[gpu]` kernel | `__global__` | `__kernel` |
-| `this.index()` / `gpu.global_id()` | global thread id | `get_global_id(0)` |
-| `thread_group.barrier()` / `gpu.barrier()` | `__syncthreads()` | `barrier()` |
-| `shared let` | `__shared__` | `__local` |
-| `bounds:` + `@bounds(...)` | Manual `if (i < n) return;` | Manual bounds check |
-
----
-
-## Part 8: Implementation Notes
+## Implementation Notes
 
 ### SIMD Codegen
 
@@ -690,7 +534,7 @@ The GPU backend supports multiple implementations:
 - **Metal** (planned): Apple GPUs
 - **Vulkan Compute** (planned): Cross-platform
 
-The `#[gpu]` / `@simd` attribute triggers special compilation:
+The `#[gpu]` attribute triggers special compilation:
 1. Function is lowered to GPU MIR instructions
 2. LLVM backend generates PTX code (NVIDIA) or software fallback
 3. Runtime loads and executes the kernel
@@ -723,7 +567,7 @@ The `#[gpu]` / `@simd` attribute triggers special compilation:
 
 ### Safety Guarantees
 
-1. **Bounds checking**: All buffer accesses are checked (default with `@simd`)
+1. **Bounds checking**: All buffer accesses are checked
 2. **Race freedom**: No shared mutable state between work items
 3. **Memory safety**: GPU buffers are managed, no dangling pointers
 4. **Type safety**: All operations are statically typed
@@ -734,19 +578,6 @@ The `#[gpu]` / `@simd` attribute triggers special compilation:
 2. **Occupancy**: Choose work group sizes for good GPU utilization
 3. **Memory coalescing**: Access patterns affect performance
 4. **Vectorization**: Compiler auto-vectorizes where possible
-
----
-
-## Part 9: Diagnostics Summary (Normative)
-
-In `@simd` kernels:
-
-| Condition | Diagnostic |
-|-----------|------------|
-| Fallthrough in `bounds:` | Error |
-| Unreachable/duplicate/shadowed case | Warning (error under `strict=true`) |
-| Uncovered reachable bounds event (with `strict=true`) | Error |
-| `@skip_index_range_check` + `@bounds(strict=true)` | Error (unless provably safe) |
 
 ---
 

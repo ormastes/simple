@@ -213,9 +213,17 @@ fn evaluate_method_call(
             other if other.starts_with("to_") => {
                 let target_suffix = &other[3..]; // Remove "to_" prefix
 
-                // Get the family name - either from the Unit value or look it up
+                // Get the family name - either from the Unit value or look it up (including SI prefix check)
                 let family_name = family.clone().or_else(|| {
-                    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned())
+                    // First try direct lookup
+                    if let Some(f) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
+                        return Some(f);
+                    }
+                    // Try SI prefix decomposition
+                    if let Some((_mult, _base, f)) = decompose_si_prefix(suffix) {
+                        return Some(f);
+                    }
+                    None
                 });
 
                 let Some(family_name) = family_name else {
@@ -225,7 +233,7 @@ fn evaluate_method_call(
                     )));
                 };
 
-                // Look up conversions for this family
+                // Look up conversions for this family, with SI prefix support
                 let conversion_result = UNIT_FAMILY_CONVERSIONS.with(|cell| {
                     let families = cell.borrow();
                     let Some(conversions) = families.get(&family_name) else {
@@ -234,20 +242,35 @@ fn evaluate_method_call(
                         )));
                     };
 
-                    // Get source and target conversion factors
-                    let Some(source_factor) = conversions.get(suffix) else {
+                    // Get source conversion factor (check SI prefix if not directly defined)
+                    // IMPORTANT: For SI-prefixed units, the value is already multiplied by the SI factor
+                    // when created. So we use factor 1.0 (base unit factor) since the value is in base units.
+                    let source_factor = if let Some(&f) = conversions.get(suffix) {
+                        f
+                    } else if decompose_si_prefix(suffix).is_some() {
+                        // SI prefixed: value is already in base units, so source factor is 1.0
+                        1.0
+                    } else {
                         return Err(CompileError::Semantic(format!(
                             "Unit '{}' not found in family '{}'", suffix, family_name
                         )));
                     };
-                    let Some(target_factor) = conversions.get(target_suffix) else {
+
+                    // Get target conversion factor (check SI prefix if not directly defined)
+                    let target_factor = if let Some(&f) = conversions.get(target_suffix) {
+                        f
+                    } else if let Some((si_mult, base, _)) = decompose_si_prefix(target_suffix) {
+                        // SI prefixed: multiply SI prefix by base unit factor
+                        let base_factor = conversions.get(&base).copied().unwrap_or(1.0);
+                        si_mult * base_factor
+                    } else {
                         return Err(CompileError::Semantic(format!(
                             "Target unit '{}' not found in family '{}'. Available: {:?}",
                             target_suffix, family_name, conversions.keys().collect::<Vec<_>>()
                         )));
                     };
 
-                    Ok((*source_factor, *target_factor))
+                    Ok((source_factor, target_factor))
                 })?;
 
                 let (source_factor, target_factor) = conversion_result;

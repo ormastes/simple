@@ -63,6 +63,44 @@ fn evaluate_macro_invocation(
             }
             Ok(Value::Nil)
         }
+        "assert_unit" => {
+            // assert_unit!(value, "unit_type") - validate value is of expected unit type
+            if macro_args.len() >= 2 {
+                if let (MacroArg::Expr(value_expr), MacroArg::Expr(type_expr)) = (&macro_args[0], &macro_args[1]) {
+                    let value = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                    let type_val = evaluate_expr(type_expr, env, functions, classes, enums, impl_methods)?;
+
+                    // Extract type name from string or symbol
+                    let type_name = match &type_val {
+                        Value::Str(s) => s.clone(),
+                        Value::Symbol(s) => s.clone(),
+                        _ => return Err(CompileError::Semantic(
+                            "assert_unit: second argument must be a string or symbol representing the unit type".into()
+                        )),
+                    };
+
+                    // Check if the type is a valid unit type
+                    if !is_unit_type(&type_name) {
+                        return Err(CompileError::Semantic(format!(
+                            "assert_unit: '{}' is not a registered unit type (family or compound unit)",
+                            type_name
+                        )));
+                    }
+
+                    // Validate the value against the unit type
+                    if let Err(e) = validate_unit_type(&value, &type_name) {
+                        return Err(CompileError::Semantic(format!(
+                            "unit assertion failed: {}", e
+                        )));
+                    }
+                }
+            } else {
+                return Err(CompileError::Semantic(
+                    "assert_unit requires two arguments: assert_unit!(value, \"unit_type\")".into()
+                ));
+            }
+            Ok(Value::Nil)
+        }
         "panic" => {
             let msg = macro_args.first()
                 .map(|arg| {

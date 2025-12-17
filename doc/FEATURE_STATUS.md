@@ -513,13 +513,50 @@ This document consolidates all feature implementation status from `doc/status/*.
 - WASM client build
 - Server-side rendering
 
-### #126: GPU Kernels 📋
-**Status:** PLANNED  
-**Implementation:** `doc/spec/gpu_simd.md`
-- `#[gpu]` attribute
-- Kernel compilation
-- Device memory management
-- **Blocked:** GPU backend integration
+### GPU & SIMD (#400-418) 🔄
+**Status:** IN PROGRESS (8/19 features in progress)
+**Spec:** `doc/spec/gpu_simd.md` (updated 2025-12)
+**Implementation:** `src/compiler/src/codegen/llvm/gpu.rs`, `src/runtime/src/value/gpu.rs`
+
+#### Core Infrastructure (Complete)
+- ✅ GPU MIR instructions (GpuGlobalId, GpuLocalId, GpuGroupId, GpuBarrier, GpuAtomic, etc.)
+- ✅ Software backend for CPU-based kernel execution
+- ✅ LLVM GPU backend for NVPTX/PTX generation (SM50-SM90)
+- ✅ CUDA runtime wrapper (device enum, context, module loading)
+- ✅ GPU FFI functions (30+ functions)
+
+#### SIMD Features (#400-404)
+| ID | Feature | Status |
+|----|---------|--------|
+| #400 | SIMD vectors (`vec[N, T]`) | 🔄 MIR support, codegen pending |
+| #401 | Vector arithmetic (lane-wise ops) | 🔄 MIR support |
+| #402 | Lane operations (shuffle, swizzle) | 📋 Planned |
+| #403 | Reduction ops (sum, min, max) | 📋 Planned |
+| #404 | Mask operations (select, gather/scatter) | 📋 Planned |
+
+#### GPU Kernel Features (#405-410)
+| ID | Feature | Status |
+|----|---------|--------|
+| #405 | GPU kernels (`#[gpu]`, `@simd`) | 🔄 Basic support, attribute parsing pending |
+| #406 | Thread blocks (grid/block dims) | 🔄 MIR support complete |
+| #407 | Shared memory (`shared let`) | 🔄 MIR GpuSharedAlloc complete |
+| #408 | Synchronization (barriers, fences) | 🔄 GpuBarrier, GpuMemFence complete |
+| #409 | Atomic operations | 🔄 GpuAtomic complete (9 ops) |
+| #410 | GPU device API (context, buffers) | 🔄 CUDA runtime wrapper |
+
+#### Safety & Convenience Features (#411-418)
+| ID | Feature | Status |
+|----|---------|--------|
+| #411 | Bounds policy (`@bounds(...)`) | 📋 Spec complete |
+| #412 | `bounds:` clause (pattern handlers) | 📋 Spec complete |
+| #413 | Indexer trait (user-defined `[]`) | 📋 Spec complete |
+| #414 | Neighbor accessors (`.left_neighbor`) | 📋 Spec complete |
+| #415 | Parallel iterators (`par_map`, etc.) | 📋 Spec complete |
+| #416 | Tensor operations (`@` operator) | 📋 Preview spec |
+| #417 | Hardware detection | 📋 Spec complete |
+| #418 | Async GPU operations | 📋 Spec complete |
+
+**See:** `doc/llvm_backend.md` for backend details, `doc/spec/gpu_simd.md` for full spec
 
 ---
 
@@ -585,10 +622,10 @@ This document consolidates all feature implementation status from `doc/status/*.
 | Advanced - Effects | 6 | 6 | 0 | 0 |
 | Advanced - UI | 6 | 0 | 0 | 6 |
 | Advanced - Web | 17 | 0 | 0 | 17 |
-| Advanced - GPU/SIMD | 11 | 0 | 0 | 11 |
-| **TOTAL** | **211** | **161** | **1** | **51** |
+| Advanced - GPU/SIMD | 19 | 0 | 8 | 11 |
+| **TOTAL** | **219** | **161** | **9** | **49** |
 
-**Overall Progress:** 76% (161/211 complete)
+**Overall Progress:** 74% (161/219 complete, 9 in progress)
 
 ---
 
@@ -600,12 +637,14 @@ This document consolidates all feature implementation status from `doc/status/*.
 ### Short Term (Month)
 1. Memory pointer types - Handle pointers
 2. Unit type basics (#200-204)
-3. Effect system foundation (#320-322)
+3. GPU kernel `#[gpu]`/`@simd` attribute parsing (#405)
 
 ### Medium Term (Quarter)
-1. GPU kernel basics (#405-409)
-2. UI framework prototype (#500-505)
-3. Web framework basics (#520-528)
+1. GPU kernel features (#405-410) - complete MIR-to-codegen path
+2. Kernel bounds policy (#411-412) - safety-by-default GPU
+3. SIMD operations (#400-404) - CPU vector support
+4. UI framework prototype (#500-505)
+5. Web framework basics (#520-528)
 
 ---
 

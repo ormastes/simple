@@ -85,17 +85,56 @@ let backend_kind = BackendKind::force_llvm();
 
 ## Implementation Status
 
-**Current**: Type mapping and backend trait implementation complete
+**Current**: Full function compilation with GPU instruction support complete
 
 **Phases**:
 1. ✅ Dependencies and scaffolding
 2. ✅ Type system (basic types)
 3. ✅ Backend trait interface
-4. ⏳ Function compilation (LLVM IR generation)
-5. ⏳ Object emission
-6. ⏳ Pipeline integration
+4. ✅ Function compilation (LLVM IR generation)
+5. ✅ Object emission
+6. ✅ Pipeline integration
+7. ✅ GPU instruction support (CUDA/PTX)
 
 See `doc/status/llvm_backend.md` for detailed progress.
+
+## GPU Support
+
+The LLVM backend includes native GPU support through CUDA:
+
+### Features
+- **PTX Code Generation**: Generate NVIDIA PTX assembly from Simple GPU kernels
+- **CUDA Runtime Integration**: Full CUDA Driver API wrapper
+- **Multiple Compute Capabilities**: Support for SM50 through SM90
+- **GPU Intrinsics**: Thread/block identification, barriers, atomics, shared memory
+
+### GPU-Specific Components
+
+```
+src/compiler/src/codegen/llvm/
+├── mod.rs          # Main LLVM backend with GPU instruction support
+├── gpu.rs          # LLVM GPU backend for PTX generation
+└── types.rs        # Type mappings
+
+src/runtime/src/
+├── cuda_runtime.rs # CUDA Driver API wrapper
+└── value/gpu.rs    # GPU runtime FFI functions
+```
+
+### GPU MIR Instructions Supported
+- `GpuGlobalId`, `GpuLocalId`, `GpuGroupId` - Thread identification
+- `GpuGlobalSize`, `GpuLocalSize`, `GpuNumGroups` - Grid dimensions
+- `GpuBarrier`, `GpuMemFence` - Synchronization
+- `GpuAtomic` - Atomic operations (add, sub, xchg, cmpxchg, min, max, and, or, xor)
+- `GpuSharedAlloc` - Shared memory allocation
+
+### CUDA Runtime Functions
+- `rt_cuda_init()` - Initialize CUDA driver
+- `rt_cuda_device_count()` - Query available GPUs
+- `rt_cuda_available()` - Check CUDA availability
+- `rt_gpu_global_id(dim)` - Get global thread ID
+- `rt_gpu_barrier()` - Workgroup barrier
+- `rt_gpu_atomic_*()` - Atomic operations
 
 ## Design Principles
 

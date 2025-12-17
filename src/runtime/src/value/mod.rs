@@ -25,6 +25,7 @@ mod contracts;
 mod core;
 mod doctest_io;
 mod ffi;
+pub mod gpu;
 mod heap;
 mod objects;
 pub mod tags;
@@ -125,6 +126,31 @@ pub use contracts::{
     ContractViolationKind, RuntimeContractViolation,
     rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
     rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation,
+};
+
+// Re-export GPU runtime FFI functions
+pub use gpu::{
+    // Work item identification
+    rt_gpu_global_id, rt_gpu_local_id, rt_gpu_group_id,
+    rt_gpu_global_size, rt_gpu_local_size, rt_gpu_num_groups,
+    // Synchronization
+    rt_gpu_barrier, rt_gpu_mem_fence,
+    // Atomic operations (i64)
+    rt_gpu_atomic_add_i64, rt_gpu_atomic_sub_i64, rt_gpu_atomic_xchg_i64,
+    rt_gpu_atomic_cmpxchg_i64, rt_gpu_atomic_min_i64, rt_gpu_atomic_max_i64,
+    rt_gpu_atomic_and_i64, rt_gpu_atomic_or_i64, rt_gpu_atomic_xor_i64,
+    // Atomic operations (u32)
+    rt_gpu_atomic_add_u32, rt_gpu_atomic_sub_u32, rt_gpu_atomic_xchg_u32,
+    rt_gpu_atomic_cmpxchg_u32, rt_gpu_atomic_min_u32, rt_gpu_atomic_max_u32,
+    rt_gpu_atomic_and_u32, rt_gpu_atomic_or_u32, rt_gpu_atomic_xor_u32,
+    // Shared memory
+    rt_gpu_shared_alloc, rt_gpu_shared_reset,
+    // Kernel launch
+    rt_gpu_launch, rt_gpu_launch_1d,
+    // Types and utilities
+    GpuWorkItemState, GpuKernelFn,
+    set_work_item_state, get_work_item_state,
+    execute_kernel_1d, execute_kernel_3d,
 };
 
 // ============================================================================

@@ -2,7 +2,7 @@
 
 ## Summary Statistics
 
-**Overall Progress:** 81% (170/211 features complete, 0 in progress)
+**Overall Progress:** 79% (173/219 features complete, 8 in progress)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
@@ -11,12 +11,12 @@
 | Testing & CLI | 39 | 39 | 0 | 0 |
 | Concurrency Runtime | 33 | 33 | 0 | 0 |
 | Contracts | 32 | 32 | 0 | 0 |
-| Extended - Units | 10 | 7 | 0 | 3 |
+| Extended - Units | 10 | 10 | 0 | 0 |
 | Extended - Networking | 6 | 0 | 0 | 6 |
 | Advanced - Effects | 6 | 6 | 0 | 0 |
 | Advanced - UI | 6 | 0 | 0 | 6 |
 | Advanced - Web | 17 | 0 | 0 | 17 |
-| Advanced - GPU/SIMD | 11 | 0 | 0 | 11 |
+| Advanced - GPU/SIMD | 19 | 0 | 8 | 11 |
 
 **Completed features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md)
 
@@ -98,9 +98,9 @@ All pointer types implemented and tested (17 tests pass):
 | #204 | Unit conversion | ✅ | `.to_X()` methods with factor conversion |
 | #205 | Custom units | ✅ | `unit UserId: u64 as uid` parsing |
 | #206 | Compound units | ✅ | `unit velocity = length / time` with dimensional analysis (6 tests) |
-| #207 | SI prefixes | 📋 | kilo, mega, giga auto-detection |
-| #208 | Unit inference | 📋 | Infer units from context |
-| #209 | Unit assertions | 📋 | Compile-time unit checking |
+| #207 | SI prefixes | ✅ | kilo, mega, giga auto-detection (10 tests) |
+| #208 | Unit inference | ✅ | Parameter/return type validation for unit families (7 tests) |
+| #209 | Unit assertions | ✅ | assert_unit! macro + let binding validation (8 tests) |
 
 ### Networking (#210-215)
 
@@ -128,21 +128,29 @@ All pointer types implemented and tested (17 tests pass):
 | #324 | Pure functions | 📋 | Effect-free functions |
 | #325 | Capability-based | 📋 | Effect-as-capability |
 
-### GPU & SIMD (#400-410)
+### GPU & SIMD (#400-418)
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
-| #400 | SIMD vectors | 📋 | `vec[4, f32]` types |
-| #401 | Vector operations | 📋 | add, mul, dot, cross |
-| #402 | Lane operations | 📋 | shuffle, extract, insert |
-| #403 | Horizontal ops | 📋 | sum, min, max across lanes |
-| #404 | Mask operations | 📋 | Conditional SIMD |
-| #405 | GPU kernels | 📋 | `#[gpu]` attribute |
-| #406 | Thread blocks | 📋 | Grid/block dimensions |
-| #407 | Shared memory | 📋 | Block-local memory |
-| #408 | Synchronization | 📋 | Barriers, atomics |
-| #409 | Memory coalescing | 📋 | Aligned access patterns |
-| #410 | Compute shaders | 📋 | General-purpose GPU |
+| #400 | SIMD vectors | 🔄 | `vec[N, T]` types (f32x4, i32x8, etc.) |
+| #401 | Vector arithmetic | 🔄 | Lane-wise +, -, *, /, comparisons |
+| #402 | Lane operations | 📋 | shuffle, swizzle, extract, insert, blend |
+| #403 | Reduction ops | 📋 | sum, product, min, max, all, any |
+| #404 | Mask operations | 📋 | select, masked load/store, gather/scatter |
+| #405 | GPU kernels | 🔄 | `#[gpu]` and `@simd` annotations |
+| #406 | Thread blocks | 🔄 | Grid/block dimensions, work items |
+| #407 | Shared memory | 🔄 | `shared let` for block-local memory |
+| #408 | Synchronization | 🔄 | Barriers, memory fences |
+| #409 | Atomic operations | 🔄 | add, sub, min, max, cmpxchg |
+| #410 | GPU device API | 🔄 | Device enumeration, context, buffers |
+| #411 | Bounds policy | 📋 | `@bounds(default=return, strict=true)` |
+| #412 | bounds: clause | 📋 | Pattern-based bounds handlers |
+| #413 | Indexer trait | 📋 | User-defined indexing (`class Foo indexer(...)`) |
+| #414 | Neighbor accessors | 📋 | `.left_neighbor`, `.right_neighbor` |
+| #415 | Parallel iterators | 📋 | `par_map`, `par_reduce`, `par_filter` |
+| #416 | Tensor operations | 📋 | Multi-dimensional arrays with @ operator |
+| #417 | Hardware detection | 📋 | `simd.has_avx512()`, `gpu.available()` |
+| #418 | Async GPU | 📋 | Async upload/download/launch
 
 ### UI Framework (#500-505)
 

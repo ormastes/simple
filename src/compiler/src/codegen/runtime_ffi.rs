@@ -276,6 +276,54 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("doctest_walk_directory", &[I64, I64, I64], &[I64]), // root, include, exclude -> array (RuntimeValue)
     RuntimeFuncSpec::new("doctest_path_has_extension", &[I64, I64], &[I64]), // path, ext -> bool (RuntimeValue)
     RuntimeFuncSpec::new("doctest_path_contains", &[I64, I64], &[I64]), // path, pattern -> bool (RuntimeValue)
+    // =========================================================================
+    // GPU work item identification
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_gpu_global_id", &[I32], &[I64]),   // dim -> id
+    RuntimeFuncSpec::new("rt_gpu_local_id", &[I32], &[I64]),    // dim -> id
+    RuntimeFuncSpec::new("rt_gpu_group_id", &[I32], &[I64]),    // dim -> id
+    RuntimeFuncSpec::new("rt_gpu_global_size", &[I32], &[I64]), // dim -> size
+    RuntimeFuncSpec::new("rt_gpu_local_size", &[I32], &[I64]),  // dim -> size
+    RuntimeFuncSpec::new("rt_gpu_num_groups", &[I32], &[I64]),  // dim -> count
+    // =========================================================================
+    // GPU synchronization
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_gpu_barrier", &[], &[]),           // () -> ()
+    RuntimeFuncSpec::new("rt_gpu_mem_fence", &[I32], &[]),      // scope -> ()
+    // =========================================================================
+    // GPU atomic operations (i64)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_gpu_atomic_add_i64", &[I64, I64], &[I64]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_sub_i64", &[I64, I64], &[I64]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_xchg_i64", &[I64, I64], &[I64]),     // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_cmpxchg_i64", &[I64, I64, I64], &[I64]), // ptr, expected, new -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_min_i64", &[I64, I64], &[I64]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_max_i64", &[I64, I64], &[I64]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_and_i64", &[I64, I64], &[I64]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_or_i64", &[I64, I64], &[I64]),       // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_xor_i64", &[I64, I64], &[I64]),      // ptr, value -> old
+    // =========================================================================
+    // GPU atomic operations (u32)
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_gpu_atomic_add_u32", &[I64, I32], &[I32]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_sub_u32", &[I64, I32], &[I32]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_xchg_u32", &[I64, I32], &[I32]),     // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_cmpxchg_u32", &[I64, I32, I32], &[I32]), // ptr, expected, new -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_min_u32", &[I64, I32], &[I32]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_max_u32", &[I64, I32], &[I32]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_and_u32", &[I64, I32], &[I32]),      // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_or_u32", &[I64, I32], &[I32]),       // ptr, value -> old
+    RuntimeFuncSpec::new("rt_gpu_atomic_xor_u32", &[I64, I32], &[I32]),      // ptr, value -> old
+    // =========================================================================
+    // GPU shared memory
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_gpu_shared_alloc", &[I64], &[I64]),  // size -> ptr
+    RuntimeFuncSpec::new("rt_gpu_shared_reset", &[], &[]),        // () -> ()
+    // =========================================================================
+    // GPU kernel launch
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_gpu_launch", &[I64, I32, I32, I32, I32, I32, I32], &[I32]), // kernel, gx,gy,gz, lx,ly,lz -> status
+    RuntimeFuncSpec::new("rt_gpu_launch_1d", &[I64, I32, I32], &[I32]), // kernel, global, local -> status
 ];
 
 #[cfg(test)]

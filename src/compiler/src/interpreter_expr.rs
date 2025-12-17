@@ -1,6 +1,28 @@
 /// Look up the family name for a unit suffix from the thread-local registry
 fn lookup_unit_family(suffix: &str) -> Option<String> {
-    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned())
+    // First try direct lookup
+    if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
+        return Some(family);
+    }
+    // Try SI prefix decomposition
+    if let Some((_multiplier, _base, family)) = decompose_si_prefix(suffix) {
+        return Some(family);
+    }
+    None
+}
+
+/// Look up unit family with SI prefix info
+/// Returns (family_name, si_multiplier, base_suffix) if SI prefix was used
+fn lookup_unit_family_with_si(suffix: &str) -> (Option<String>, Option<f64>, Option<String>) {
+    // First try direct lookup
+    if let Some(family) = UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned()) {
+        return (Some(family), None, None);
+    }
+    // Try SI prefix decomposition
+    if let Some((multiplier, base, family)) = decompose_si_prefix(suffix) {
+        return (Some(family), Some(multiplier), Some(base));
+    }
+    (None, None, None)
 }
 
 /// Perform a binary operation on the inner values of two units
@@ -187,10 +209,17 @@ pub(crate) fn evaluate_expr(
             match suffix {
                 NumericSuffix::Unit(unit_name) => {
                     // Create a Unit value for unit-suffixed integers
-                    // Look up family from thread-local registry
-                    let family = lookup_unit_family(unit_name);
+                    // Look up family from thread-local registry, with SI prefix support
+                    let (family, si_multiplier, _base_suffix) = lookup_unit_family_with_si(unit_name);
+                    // Apply SI prefix multiplier if present
+                    let final_value = if let Some(mult) = si_multiplier {
+                        // Convert to float and apply multiplier
+                        Value::Float(*value as f64 * mult)
+                    } else {
+                        Value::Int(*value)
+                    };
                     Ok(Value::Unit {
-                        value: Box::new(Value::Int(*value)),
+                        value: Box::new(final_value),
                         suffix: unit_name.clone(),
                         family,
                     })
@@ -206,10 +235,16 @@ pub(crate) fn evaluate_expr(
             use simple_parser::token::NumericSuffix;
             match suffix {
                 NumericSuffix::Unit(unit_name) => {
-                    // Create a Unit value for unit-suffixed floats
-                    let family = lookup_unit_family(unit_name);
+                    // Create a Unit value for unit-suffixed floats, with SI prefix support
+                    let (family, si_multiplier, _base_suffix) = lookup_unit_family_with_si(unit_name);
+                    // Apply SI prefix multiplier if present
+                    let final_value = if let Some(mult) = si_multiplier {
+                        *value * mult
+                    } else {
+                        *value
+                    };
                     Ok(Value::Unit {
-                        value: Box::new(Value::Float(*value)),
+                        value: Box::new(Value::Float(final_value)),
                         suffix: unit_name.clone(),
                         family,
                     })
@@ -373,49 +408,111 @@ pub(crate) fn evaluate_expr(
             }
 
             // Standard binary operation handling (for non-unit operations)
+            // Helper to determine if we should use float arithmetic
+            let use_float = matches!(&left_val, Value::Float(_)) || matches!(&right_val, Value::Float(_));
+
             match op {
-                BinOp::Add => match (left_val, right_val) {
+                BinOp::Add => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
                     (Value::Str(a), b) => Ok(Value::Str(format!("{a}{}", b.to_display_string()))),
                     (a, Value::Str(b)) => Ok(Value::Str(format!("{}{}", a.to_display_string(), b))),
-                    (l, r) => Ok(Value::Int(l.as_int()? + r.as_int()?)),
+                    _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
+                    _ => Ok(Value::Int(left_val.as_int()? + right_val.as_int()?)),
                 },
-                BinOp::Sub => Ok(Value::Int(left_val.as_int()? - right_val.as_int()?)),
-                BinOp::Mul => Ok(Value::Int(left_val.as_int()? * right_val.as_int()?)),
-                BinOp::Div => {
-                    let r = right_val.as_int()?;
-                    if r == 0 {
-                        Err(CompileError::Semantic("division by zero".into()))
+                BinOp::Sub => {
+                    if use_float {
+                        Ok(Value::Float(left_val.as_float()? - right_val.as_float()?))
                     } else {
-                        Ok(Value::Int(left_val.as_int()? / r))
+                        Ok(Value::Int(left_val.as_int()? - right_val.as_int()?))
+                    }
+                }
+                BinOp::Mul => {
+                    if use_float {
+                        Ok(Value::Float(left_val.as_float()? * right_val.as_float()?))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
+                    }
+                }
+                BinOp::Div => {
+                    if use_float {
+                        let r = right_val.as_float()?;
+                        if r == 0.0 {
+                            Err(CompileError::Semantic("division by zero".into()))
+                        } else {
+                            Ok(Value::Float(left_val.as_float()? / r))
+                        }
+                    } else {
+                        let r = right_val.as_int()?;
+                        if r == 0 {
+                            Err(CompileError::Semantic("division by zero".into()))
+                        } else {
+                            Ok(Value::Int(left_val.as_int()? / r))
+                        }
                     }
                 }
                 BinOp::Mod => {
-                    let r = right_val.as_int()?;
-                    if r == 0 {
-                        Err(CompileError::Semantic("modulo by zero".into()))
+                    if use_float {
+                        let r = right_val.as_float()?;
+                        if r == 0.0 {
+                            Err(CompileError::Semantic("modulo by zero".into()))
+                        } else {
+                            Ok(Value::Float(left_val.as_float()? % r))
+                        }
                     } else {
-                        Ok(Value::Int(left_val.as_int()? % r))
+                        let r = right_val.as_int()?;
+                        if r == 0 {
+                            Err(CompileError::Semantic("modulo by zero".into()))
+                        } else {
+                            Ok(Value::Int(left_val.as_int()? % r))
+                        }
                     }
                 }
                 BinOp::Eq => Ok(Value::Bool(left_val == right_val)),
                 BinOp::NotEq => Ok(Value::Bool(left_val != right_val)),
-                BinOp::Lt => Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?)),
-                BinOp::Gt => Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?)),
-                BinOp::LtEq => Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?)),
-                BinOp::GtEq => Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?)),
+                BinOp::Lt => {
+                    if use_float {
+                        Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?))
+                    } else {
+                        Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?))
+                    }
+                }
+                BinOp::Gt => {
+                    if use_float {
+                        Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?))
+                    } else {
+                        Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?))
+                    }
+                }
+                BinOp::LtEq => {
+                    if use_float {
+                        Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?))
+                    } else {
+                        Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?))
+                    }
+                }
+                BinOp::GtEq => {
+                    if use_float {
+                        Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?))
+                    } else {
+                        Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?))
+                    }
+                }
                 BinOp::Is => Ok(Value::Bool(left_val == right_val)),
                 BinOp::And => Ok(Value::Bool(left_val.truthy() && right_val.truthy())),
                 BinOp::Or => Ok(Value::Bool(left_val.truthy() || right_val.truthy())),
                 BinOp::Pow => {
-                    let base = left_val.as_int()?;
-                    let exp = right_val.as_int()?;
-                    if exp < 0 {
-                        Err(CompileError::Semantic(
-                            "negative exponent not supported for integers".into(),
-                        ))
+                    if use_float {
+                        Ok(Value::Float(left_val.as_float()?.powf(right_val.as_float()?)))
                     } else {
-                        Ok(Value::Int(base.pow(exp as u32)))
+                        let base = left_val.as_int()?;
+                        let exp = right_val.as_int()?;
+                        if exp < 0 {
+                            Err(CompileError::Semantic(
+                                "negative exponent not supported for integers".into(),
+                            ))
+                        } else {
+                            Ok(Value::Int(base.pow(exp as u32)))
+                        }
                     }
                 }
                 BinOp::FloorDiv => {

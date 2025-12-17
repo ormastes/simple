@@ -1,4 +1,5 @@
 pub mod concurrency;
+pub mod cuda_runtime;
 pub mod executor;
 pub mod memory;
 pub mod value;
@@ -178,4 +179,36 @@ pub use value::{
     ContractViolationKind, RuntimeContractViolation,
     rt_contract_violation_free, rt_contract_violation_func_name, rt_contract_violation_kind,
     rt_contract_violation_message, rt_contract_violation_new, rt_is_contract_violation,
+};
+
+// Re-export GPU runtime FFI functions
+pub use value::{
+    // GPU work item identification
+    rt_gpu_global_id, rt_gpu_local_id, rt_gpu_group_id,
+    rt_gpu_global_size, rt_gpu_local_size, rt_gpu_num_groups,
+    // GPU synchronization
+    rt_gpu_barrier, rt_gpu_mem_fence,
+    // GPU atomic operations (i64)
+    rt_gpu_atomic_add_i64, rt_gpu_atomic_sub_i64, rt_gpu_atomic_xchg_i64,
+    rt_gpu_atomic_cmpxchg_i64, rt_gpu_atomic_min_i64, rt_gpu_atomic_max_i64,
+    rt_gpu_atomic_and_i64, rt_gpu_atomic_or_i64, rt_gpu_atomic_xor_i64,
+    // GPU atomic operations (u32)
+    rt_gpu_atomic_add_u32, rt_gpu_atomic_sub_u32, rt_gpu_atomic_xchg_u32,
+    rt_gpu_atomic_cmpxchg_u32, rt_gpu_atomic_min_u32, rt_gpu_atomic_max_u32,
+    rt_gpu_atomic_and_u32, rt_gpu_atomic_or_u32, rt_gpu_atomic_xor_u32,
+    // GPU shared memory
+    rt_gpu_shared_alloc, rt_gpu_shared_reset,
+    // GPU kernel launch
+    rt_gpu_launch, rt_gpu_launch_1d,
+    // GPU types and utilities
+    GpuWorkItemState, GpuKernelFn,
+    set_work_item_state, get_work_item_state,
+    execute_kernel_1d, execute_kernel_3d,
+};
+
+// Re-export CUDA runtime types and FFI functions
+pub use cuda_runtime::{
+    CudaDevice, CudaDevicePtr, CudaError, CudaKernel, CudaModule, CudaResult,
+    get_device_count,
+    rt_cuda_init, rt_cuda_device_count, rt_cuda_available,
 };
