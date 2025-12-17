@@ -187,6 +187,46 @@ impl Interpreter {
         })
     }
 
+    /// Run a Simple source file from disk, with proper import resolution.
+    ///
+    /// This method is similar to `run()` but takes a file path instead of source code.
+    /// The file path is passed to the compiler for proper module resolution,
+    /// allowing imports relative to the source file location.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the .spl source file
+    /// * `config` - Execution configuration
+    ///
+    /// # Returns
+    /// * `Ok(RunResult)` - Execution result with exit code and captured output
+    /// * `Err(String)` - Error message if compilation or execution failed
+    pub fn run_file(
+        &self,
+        path: &std::path::Path,
+        config: RunConfig,
+    ) -> Result<RunResult, String> {
+        // Start capture if enabled
+        if config.capture_output {
+            rt_capture_stdout_start();
+            rt_capture_stderr_start();
+        }
+
+        let exit_code = self.runner.run_file_interpreted(path)?;
+
+        // Stop capture and collect output
+        let (stdout, stderr) = if config.capture_output {
+            (rt_capture_stdout_stop(), rt_capture_stderr_stop())
+        } else {
+            (String::new(), String::new())
+        };
+
+        Ok(RunResult {
+            exit_code,
+            stdout,
+            stderr,
+        })
+    }
+
     /// Run code via AOT compile → settlement → executable → run.
     ///
     /// This method:

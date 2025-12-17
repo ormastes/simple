@@ -528,6 +528,14 @@ pub enum Value {
         variant: String,
         payload: Option<Box<Value>>,
     },
+    /// Union type value - wraps a value with its type index
+    /// Represents values of union types like `str | i64`
+    Union {
+        /// Index of the actual type in the union's variant list
+        type_index: usize,
+        /// The actual value
+        inner: Box<Value>,
+    },
     /// Constructor reference - a class that can be used to create instances
     /// Used for constructor polymorphism: Constructor[T] type
     Constructor {

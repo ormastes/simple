@@ -238,18 +238,7 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
         };
     }
 
-    // Read the test file
-    let source = match std::fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(e) => {
-            return SimpleTestResult::CompileError {
-                file: file_name.to_string(),
-                error: format!("Failed to read file: {}", e),
-            };
-        }
-    };
-
-    // Run the test with output capture
+    // Run the test with output capture, using file path for proper import resolution
     let interpreter = Interpreter::new();
     let config = RunConfig {
         capture_output: true,
@@ -257,7 +246,7 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
     };
 
     let start = Instant::now();
-    let run_result = interpreter.run(&source, config);
+    let run_result = interpreter.run_file(path, config);
     let duration_ms = start.elapsed().as_millis() as u64;
 
     match run_result {

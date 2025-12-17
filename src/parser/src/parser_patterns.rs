@@ -39,6 +39,17 @@ impl<'a> Parser<'a> {
                 let name = self.expect_identifier()?;
                 Ok(Pattern::MutIdentifier(name))
             }
+            // Allow certain keywords as identifier patterns
+            TokenKind::New | TokenKind::Old | TokenKind::Type => {
+                let name = match &self.current.kind {
+                    TokenKind::New => "new".to_string(),
+                    TokenKind::Old => "old".to_string(),
+                    TokenKind::Type => "type".to_string(),
+                    _ => unreachable!(),
+                };
+                self.advance();
+                Ok(Pattern::Identifier(name))
+            }
             TokenKind::Identifier(name) => {
                 let name = name.clone();
                 self.advance();
@@ -210,10 +221,6 @@ impl<'a> Parser<'a> {
             TokenKind::OutErr => {
                 self.advance();
                 Ok(Pattern::Identifier("out_err".to_string()))
-            }
-            TokenKind::Type => {
-                self.advance();
-                Ok(Pattern::Identifier("type".to_string()))
             }
             TokenKind::Result => {
                 self.advance();

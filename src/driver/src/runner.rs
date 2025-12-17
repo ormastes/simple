@@ -58,6 +58,16 @@ impl Runner {
         self.core.run_file(path)
     }
 
+    /// Run a Simple source file using the interpreter.
+    ///
+    /// This method loads the file with proper import resolution and runs it
+    /// through the interpreter, which supports all language features including
+    /// associated function calls like `Type::method()`.
+    #[instrument(skip(self), fields(path = %path.display()))]
+    pub fn run_file_interpreted(&self, path: &Path) -> Result<i32, String> {
+        self.core.run_file_interpreted(path)
+    }
+
     /// Run a pre-compiled SMF file directly.
     #[instrument(skip(self), fields(path = %path.display()))]
     pub fn run_smf(&self, path: &Path) -> Result<i32, String> {

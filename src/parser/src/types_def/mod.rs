@@ -358,8 +358,16 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Type) {
                 associated_types.push(self.parse_associated_type_impl()?);
             } else {
+                // Handle optional `pub` visibility prefix for methods
+                let visibility = if self.check(&TokenKind::Pub) {
+                    self.advance();
+                    crate::ast::Visibility::Public
+                } else {
+                    crate::ast::Visibility::Private
+                };
                 let item = self.parse_function()?;
-                if let Node::Function(f) = item {
+                if let Node::Function(mut f) = item {
+                    f.visibility = visibility;
                     methods.push(f);
                 }
             }

@@ -160,15 +160,27 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         .cloned()
         .collect();
 
-    let target_name = match &use_stmt.target {
-        ImportTarget::Single(name) => Some(name.clone()),
-        ImportTarget::Aliased { name, .. } => Some(name.clone()),
-        _ => None,
-    }?;
+    // Handle different import targets
+    match &use_stmt.target {
+        ImportTarget::Single(name) => {
+            parts.push(name.clone());
+        }
+        ImportTarget::Aliased { name, .. } => {
+            parts.push(name.clone());
+        }
+        ImportTarget::Glob => {
+            // For glob imports like `use ui.element.*`, the path segments
+            // already contain the module path, we just resolve it as-is
+            // (the last segment is the module file)
+        }
+        ImportTarget::Group(_) => {
+            // Group imports need special handling - for now, skip them
+            return None;
+        }
+    }
 
-    parts.push(target_name);
     let mut resolved = base.to_path_buf();
-    for part in parts {
+    for part in &parts {
         resolved = resolved.join(part);
     }
     resolved.set_extension("spl");

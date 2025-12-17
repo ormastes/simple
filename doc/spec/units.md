@@ -996,8 +996,21 @@ repr_list = repr_type ("," repr_type)*
 repr_type = ("u" | "i" | "f") DIGITS
 
 # Type with repr constraint (app level)
-type_with_repr = unit_type [ ":" repr_type ] [ "where" constraints ]
-               | unit_type "where" constraints
+# In type position, use bare suffix (no underscore): cm, km, deg
+# In literal position, use underscore: 100_cm, 50_km, 360_deg
+type_with_repr = unit_suffix [ ":" repr_type ] [ "where" constraints ]
+               | unit_suffix "where" constraints
+
+unit_suffix    = IDENT    # lowercase unit suffix: cm, km, deg, uid
+
+# One-pass parsing (LL(2))
+# In type position after IDENT:
+#   1. Lookahead(1): is next token ":"?
+#      - No: simple type (cm, UserId)
+#      - Yes: check lookahead(2)
+#   2. Lookahead(2): is token after ":" a repr_type?
+#      - Yes: unit_with_repr (cm:u8)
+#      - No: end of type (":" belongs to outer construct)
 
 constraints = constraint ("," constraint)*
 constraint = "range" ":" range_expr
@@ -1043,22 +1056,31 @@ unit angle(base: f64): deg = 1.0, rad = 57.2958:
 
 ### 8.4 App-Level: Compact Syntax
 
-Use colon `:` for simple repr specification:
+Use colon `:` for simple repr specification. In type positions, use the **bare unit suffix** (no underscore prefix):
 
 ```simple
-# Type aliases
-type Cm8 = _cm:u8           # 8-bit unsigned centimeters
-type Cm12 = _cm:i12         # 12-bit signed centimeters
-type Deg9 = _deg:u9         # 9-bit unsigned degrees (0-511)
+# Type aliases - bare suffix in type position
+type Cm8 = cm:u8            # 8-bit unsigned centimeters
+type Cm12 = cm:i12          # 12-bit signed centimeters
+type Deg9 = deg:u9          # 9-bit unsigned degrees (0-511)
 
-# Variable declarations
-let width: _cm:u16 = 100_cm
-let height: _cm:u8 = 50_cm
-let angle: _deg:u9 = 360_deg
+# Variable declarations - bare suffix:repr
+let width: cm:u16 = 100_cm
+let height: cm:u8 = 50_cm
+let angle: deg:u9 = 360_deg
 
 # Default repr (uses family base type)
-let distance: _cm = 1000_cm    # f64 (base type)
+let distance: cm = 1000_cm     # f64 (base type)
+
+# Note: Literals still use underscore: 100_km, 50_cm
+# Types use bare suffix: km, cm:u8, deg:u9
 ```
+
+**Syntax distinction:**
+| Context | Syntax | Example |
+|---------|--------|---------|
+| Literal (value) | `number_suffix` | `100_km`, `50_cm` |
+| Type position | `suffix` or `suffix:repr` | `km`, `cm:u8` |
 
 ### 8.5 App-Level: Where Clause
 
@@ -1066,21 +1088,21 @@ Use `where` for complex constraints:
 
 ```simple
 # Range constraint (compiler infers bit width)
-let x: _cm where range: 0..1000 = 500_cm           # infers u10
+let x: cm where range: 0..1000 = 500_cm            # infers u10
 
 # Range with signed values
-let offset: _cm where range: -500..500 = 0_cm      # infers i10
+let offset: cm where range: -500..500 = 0_cm       # infers i10
 
 # Explicit repr + debug checking
-let y: _cm:u8 where checked = 50_cm                # panic on overflow in debug
+let y: cm:u8 where checked = 50_cm                 # panic on overflow in debug
 
 # Overflow behavior options
-let z: _cm:u8 where saturate = 200_cm              # clamp to 0-255
-let w: _deg:u9 where wrap = 400_deg                # wrap around (modular)
+let z: cm:u8 where saturate = 200_cm               # clamp to 0-255
+let w: deg:u9 where wrap = 400_deg                 # wrap around (modular)
 
 # Combined constraints
-let pos: _cm where range: 0..1000, checked = 500_cm
-let angle: _deg:u9 where wrap, default: 0_deg = get_angle()
+let pos: cm where range: 0..1000, checked = 500_cm
+let angle: deg:u9 where wrap, default: 0_deg = get_angle()
 ```
 
 ### 8.6 Overflow Behavior
@@ -1093,10 +1115,10 @@ let angle: _deg:u9 where wrap, default: 0_deg = get_angle()
 | Wrap | `wrap` | Modular | Modular |
 
 ```simple
-let a: _cm:u8 = 300_cm                    # Debug: panic, Release: undefined
-let b: _cm:u8 where checked = 300_cm      # Always panic
-let c: _cm:u8 where saturate = 300_cm     # Value becomes 255
-let d: _cm:u8 where wrap = 300_cm         # Value becomes 44 (300 mod 256)
+let a: cm:u8 = 300_cm                     # Debug: panic, Release: undefined
+let b: cm:u8 where checked = 300_cm       # Always panic
+let c: cm:u8 where saturate = 300_cm      # Value becomes 255
+let d: cm:u8 where wrap = 300_cm          # Value becomes 44 (300 mod 256)
 ```
 
 ### 8.7 Range Inference
@@ -1114,29 +1136,29 @@ When using `range:`, the compiler infers the minimum bit width:
 
 ```simple
 # Compiler calculates: ceil(log2(1001)) = 10 bits needed
-let room_size: _cm where range: 0..1000 = 500_cm   # u10
+let room_size: cm where range: 0..1000 = 500_cm    # u10
 
 # Compiler calculates: ceil(log2(1001)) + 1 sign bit = 11 bits
-let offset: _cm where range: -500..500 = 0_cm      # i11
+let offset: cm where range: -500..500 = 0_cm       # i11
 ```
 
 ### 8.8 Conversions Between Representations
 
 ```simple
-let a: _cm:u8 = 100_cm
-let b: _cm:u16 = a.widen()       # Explicit widening (always safe)
-let c: _cm:u8 = b.narrow()       # Explicit narrowing (checked in debug)
+let a: cm:u8 = 100_cm
+let b: cm:u16 = a.widen()        # Explicit widening (always safe)
+let c: cm:u8 = b.narrow()        # Explicit narrowing (checked in debug)
 
 # Implicit widening is allowed
-let d: _cm:u16 = a               # OK: u8 → u16 implicit
+let d: cm:u16 = a                # OK: u8 → u16 implicit
 
 # Implicit narrowing is NOT allowed
-# let e: _cm:u8 = b              # ERROR: use .narrow() or .saturate()
+# let e: cm:u8 = b               # ERROR: use .narrow() or .saturate()
 
 # Safe narrowing options
-let f: _cm:u8 = b.narrow()       # Panics if out of range
-let g: _cm:u8 = b.saturate()     # Clamps to 0-255
-let h: _cm:u8 = b.wrap()         # Modular arithmetic
+let f: cm:u8 = b.narrow()        # Panics if out of range
+let g: cm:u8 = b.saturate()      # Clamps to 0-255
+let h: cm:u8 = b.wrap()          # Modular arithmetic
 ```
 
 ### 8.9 Arithmetic with Different Representations
@@ -1144,13 +1166,13 @@ let h: _cm:u8 = b.wrap()         # Modular arithmetic
 When operating on units with different representations, the result uses the wider type:
 
 ```simple
-let a: _cm:u8 = 100_cm
-let b: _cm:u16 = 200_cm
-let c = a + b                    # Result type: _cm:u16
+let a: cm:u8 = 100_cm
+let b: cm:u16 = 200_cm
+let c = a + b                    # Result type: cm:u16
 
-let d: _cm:i8 = -50_cm
-let e: _cm:u8 = 100_cm
-let f = d + e                    # Result type: _cm:i16 (signed + unsigned → signed wider)
+let d: cm:i8 = -50_cm
+let e: cm:u8 = 100_cm
+let f = d + e                    # Result type: cm:i16 (signed + unsigned → signed wider)
 ```
 
 ### 8.10 Usage in Bitfields
@@ -1159,15 +1181,15 @@ See [Data Structures - Bitfields](data_structures.md#bitfields) for bitfield-spe
 
 ```simple
 bitfield RobotArm:
-    x: _cm:i12          # 12-bit signed
-    y: _cm:i12
-    z: _cm:u10          # 10-bit unsigned
-    angle: _deg:u9      # 9-bit unsigned
+    x: cm:i12           # 12-bit signed
+    y: cm:i12
+    z: cm:u10           # 10-bit unsigned
+    angle: deg:u9       # 9-bit unsigned
 
 bitfield SensorData:
-    temp: _celsius where range: -40..125      # infers i8
-    humidity: _pct where range: 0..100        # infers u7
-    pressure: _hpa:u16 where checked
+    temp: celsius where range: -40..125       # infers i8
+    humidity: pct where range: 0..100         # infers u7
+    pressure: hpa:u16 where checked
 ```
 
 ---

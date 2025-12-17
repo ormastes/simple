@@ -34,6 +34,12 @@ pub struct RuntimeFuture {
     pub result: RuntimeValue,
     /// Function pointer to the body (for resuming)
     pub body_func: u64,
+    /// Async state machine state (for multi-await futures)
+    pub async_state: u64,
+    /// Context value for captured variables
+    pub ctx: RuntimeValue,
+    /// Done flag for state machine completion
+    pub done: u64,
 }
 
 /// Create a new future. Eagerly executes the body and stores result.
@@ -52,6 +58,9 @@ pub extern "C" fn rt_future_new(body_func: u64, ctx: RuntimeValue) -> RuntimeVal
         (*ptr).state = 0; // pending
         (*ptr).result = RuntimeValue::NIL;
         (*ptr).body_func = body_func;
+        (*ptr).async_state = 0; // initial state
+        (*ptr).ctx = ctx;
+        (*ptr).done = 0;
 
         // Eagerly execute body if provided and capture return value
         if body_func != 0 {
@@ -61,6 +70,7 @@ pub extern "C" fn rt_future_new(body_func: u64, ctx: RuntimeValue) -> RuntimeVal
             let result = func(ctx);
             (*ptr).state = 1; // ready
             (*ptr).result = result;
+            (*ptr).done = 1;
         }
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
@@ -87,6 +97,43 @@ pub extern "C" fn rt_future_await(future: RuntimeValue) -> RuntimeValue {
         }
         // Stub: return NIL for pending futures
         RuntimeValue::NIL
+    }
+}
+
+// ============================================================================
+// Async state machine support (similar to generators)
+// ============================================================================
+
+/// Get the current async state from a future.
+#[no_mangle]
+pub extern "C" fn rt_async_get_state(future: RuntimeValue) -> i64 {
+    let f = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, 0);
+    unsafe { (*f).async_state as i64 }
+}
+
+/// Set the async state for a future (for resuming).
+#[no_mangle]
+pub extern "C" fn rt_async_set_state(future: RuntimeValue, state: i64) {
+    let f = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, ());
+    unsafe {
+        (*f).async_state = if state < 0 { 0 } else { state as u64 };
+    }
+}
+
+/// Get the context value from a future.
+#[no_mangle]
+pub extern "C" fn rt_async_get_ctx(future: RuntimeValue) -> RuntimeValue {
+    let f = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, RuntimeValue::NIL);
+    unsafe { (*f).ctx }
+}
+
+/// Mark a future as done (state machine completed).
+#[no_mangle]
+pub extern "C" fn rt_async_mark_done(future: RuntimeValue) {
+    let f = validate_heap_type!(future, HeapObjectType::Future, RuntimeFuture, ());
+    unsafe {
+        (*f).done = 1;
+        (*f).state = 1; // ready
     }
 }
 

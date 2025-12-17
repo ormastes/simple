@@ -428,6 +428,36 @@ impl<'a> MirLowerer<'a> {
         })
     }
 
+    /// Emit UnionWrap instruction if coercing a value to a Union type
+    /// Returns the wrapped value register (or original if no wrapping needed)
+    fn emit_union_wrap_if_needed(
+        &mut self,
+        target_ty: TypeId,
+        value_ty: TypeId,
+        value: VReg,
+    ) -> MirLowerResult<VReg> {
+        if let Some(registry) = self.type_registry {
+            if let Some(HirType::Union { variants }) = registry.get(target_ty) {
+                // Check if value_ty is one of the union variants
+                if let Some(type_index) = variants.iter().position(|&v| v == value_ty) {
+                    // Emit UnionWrap instruction
+                    let dest = self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::UnionWrap {
+                            dest,
+                            value,
+                            type_index,
+                        });
+                        dest
+                    })?;
+                    return Ok(dest);
+                }
+            }
+        }
+        Ok(value)
+    }
+
     /// Emit UnitBoundCheck instruction if the type is a UnitType with constraints
     fn emit_unit_bound_check(&mut self, ty: TypeId, value: VReg) -> MirLowerResult<()> {
         // Look up type info from registry
@@ -621,15 +651,20 @@ impl<'a> MirLowerer<'a> {
     fn lower_stmt(&mut self, stmt: &HirStmt, contract: Option<&HirContract>) -> MirLowerResult<()> {
         match stmt {
             HirStmt::Let {
-                local_index, value, ..
+                local_index,
+                ty: declared_ty,
+                value,
             } => {
                 if let Some(val) = value {
                     let vreg = self.lower_expr(val)?;
                     let local_idx = *local_index;
-                    let ty = val.ty;
+                    let value_ty = val.ty;
+
+                    // Wrap value in union if assigning to a union type
+                    let vreg = self.emit_union_wrap_if_needed(*declared_ty, value_ty, vreg)?;
 
                     // Emit unit bound check if assigning to a unit type with constraints
-                    self.emit_unit_bound_check(ty, vreg)?;
+                    self.emit_unit_bound_check(*declared_ty, vreg)?;
 
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
@@ -641,7 +676,7 @@ impl<'a> MirLowerer<'a> {
                         block.instructions.push(MirInst::Store {
                             addr: dest,
                             value: vreg,
-                            ty,
+                            ty: *declared_ty,
                         });
                     })?;
                 }

@@ -201,6 +201,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_future_race", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_future_resolve", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_future_reject", &[I64], &[I64]),
+    // Async state machine support (similar to generators)
+    RuntimeFuncSpec::new("rt_async_get_state", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_async_set_state", &[I64, I64], &[]),
+    RuntimeFuncSpec::new("rt_async_get_ctx", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_async_mark_done", &[I64], &[]),
     RuntimeFuncSpec::new("rt_actor_spawn", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_actor_send", &[I64, I64], &[]),
     RuntimeFuncSpec::new("rt_actor_recv", &[], &[I64]),

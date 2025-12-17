@@ -280,6 +280,24 @@ impl ExecCore {
             )),
         }
     }
+
+    /// Run a .spl file using the interpreter (not native compilation).
+    ///
+    /// This method loads the file with proper import resolution and runs it
+    /// through the interpreter, which supports all language features including
+    /// associated function calls like `Type::method()`.
+    pub fn run_file_interpreted(&self, path: &Path) -> Result<i32, String> {
+        use simple_compiler::pipeline::module_loader::load_module_with_imports;
+        use simple_compiler::interpreter::evaluate_module;
+        use std::collections::HashSet;
+
+        let module = load_module_with_imports(path, &mut HashSet::new())
+            .map_err(|e| format!("compile failed: {}", e))?;
+
+        let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
+        self.collect_gc();
+        Ok(exit_code)
+    }
 }
 
 impl Default for ExecCore {

@@ -412,6 +412,10 @@ impl From<&Value> for BridgeValue {
                 // Bridge the inner value - unit suffix is lost in FFI
                 BridgeValue::from(value.as_ref())
             }
+            Value::Union { inner, .. } => {
+                // Bridge the inner value - union type info is lost in FFI
+                BridgeValue::from(inner.as_ref())
+            }
         }
     }
 }

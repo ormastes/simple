@@ -1288,6 +1288,11 @@ pub enum Expr {
         kind: PointerKind,
         expr: Box<Expr>,
     },
+    /// Type cast expression: expr as Type
+    Cast {
+        expr: Box<Expr>,
+        target_type: Type,
+    },
     Range {
         start: Option<Box<Expr>>,
         end: Option<Box<Expr>>,

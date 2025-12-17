@@ -76,6 +76,7 @@ impl Value {
             Value::Handle(h) => h.resolve_inner().map_or(false, |v| v.truthy()),
             Value::Borrow(b) => b.inner().truthy(),
             Value::BorrowMut(b) => b.inner().truthy(),
+            Value::Union { inner, .. } => inner.truthy(),
             Value::Object { .. }
             | Value::Enum { .. }
             | Value::Lambda { .. }
@@ -171,6 +172,7 @@ impl Value {
             Value::Function { .. } => "function",
             Value::Object { .. } => "object",
             Value::Enum { .. } => "enum",
+            Value::Union { inner, .. } => inner.type_name(),
             Value::Constructor { .. } => "constructor",
             Value::TraitObject { .. } => "trait_object",
             Value::Unit { .. } => "unit",

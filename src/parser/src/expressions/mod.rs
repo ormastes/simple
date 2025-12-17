@@ -709,6 +709,15 @@ impl<'a> Parser<'a> {
                     self.advance();
                     expr = Expr::Try(Box::new(expr));
                 }
+                TokenKind::As => {
+                    // Type cast: expr as Type
+                    self.advance();
+                    let target_type = self.parse_type()?;
+                    expr = Expr::Cast {
+                        expr: Box::new(expr),
+                        target_type,
+                    };
+                }
                 _ => break,
             }
         }
