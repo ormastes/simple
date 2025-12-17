@@ -147,6 +147,109 @@ thread_local! {
     pub(crate) static COMPOUND_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
     /// Maps base_family_name -> Dimension (for base unit families like length, time)
     pub(crate) static BASE_UNIT_DIMENSIONS: RefCell<HashMap<String, Dimension>> = RefCell::new(HashMap::new());
+    /// Maps base unit suffix -> family name for SI prefix detection (e.g., "m" -> "length")
+    pub(crate) static SI_BASE_UNITS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
+
+/// SI prefix definitions: (prefix_char, multiplier)
+/// Standard SI prefixes from yotta (10^24) to yocto (10^-24)
+pub(crate) const SI_PREFIXES: &[(&str, f64)] = &[
+    ("Y", 1e24),   // yotta
+    ("Z", 1e21),   // zetta
+    ("E", 1e18),   // exa
+    ("P", 1e15),   // peta
+    ("T", 1e12),   // tera
+    ("G", 1e9),    // giga
+    ("M", 1e6),    // mega
+    ("k", 1e3),    // kilo
+    ("h", 1e2),    // hecto
+    ("da", 1e1),   // deca
+    ("d", 1e-1),   // deci
+    ("c", 1e-2),   // centi
+    ("m", 1e-3),   // milli (note: conflicts with meter, handled specially)
+    ("u", 1e-6),   // micro (ASCII u for µ)
+    ("μ", 1e-6),   // micro (Unicode)
+    ("n", 1e-9),   // nano
+    ("p", 1e-12),  // pico
+    ("f", 1e-15),  // femto
+    ("a", 1e-18),  // atto
+    ("z", 1e-21),  // zepto
+    ("y", 1e-24),  // yocto
+];
+
+/// Try to decompose a unit suffix into SI prefix + base unit
+/// Returns (prefix_multiplier, base_suffix, family_name) if successful
+pub(crate) fn decompose_si_prefix(suffix: &str) -> Option<(f64, String, String)> {
+    SI_BASE_UNITS.with(|cell| {
+        let base_units = cell.borrow();
+
+        // Try each SI prefix (longest first for "da")
+        for &(prefix, multiplier) in SI_PREFIXES {
+            if suffix.starts_with(prefix) && suffix.len() > prefix.len() {
+                let base = &suffix[prefix.len()..];
+
+                // Special case: avoid "m" + "m" = "mm" being parsed as milli-meter
+                // when "mm" might be a directly defined unit
+                // Check if the full suffix is directly registered first
+                if UNIT_SUFFIX_TO_FAMILY.with(|c| c.borrow().contains_key(suffix)) {
+                    return None;
+                }
+
+                // Check if base unit is registered for SI prefixes
+                if let Some(family) = base_units.get(base) {
+                    return Some((multiplier, base.to_string(), family.clone()));
+                }
+            }
+        }
+        None
+    })
+}
+
+/// Check if a type name is a registered unit family or compound unit
+/// Returns true if the type name refers to a unit type that can be used for type checking
+pub(crate) fn is_unit_type(type_name: &str) -> bool {
+    // Check if it's a unit family (like "length", "time")
+    let is_family = UNIT_FAMILY_CONVERSIONS.with(|cell| {
+        cell.borrow().contains_key(type_name)
+    });
+    if is_family {
+        return true;
+    }
+    // Check if it's a compound unit (like "velocity", "acceleration")
+    COMPOUND_UNIT_DIMENSIONS.with(|cell| {
+        cell.borrow().contains_key(type_name)
+    })
+}
+
+/// Validate that a value matches a unit type annotation
+/// Returns Ok(()) if valid, Err with message if invalid
+pub(crate) fn validate_unit_type(value: &Value, expected_type: &str) -> Result<(), String> {
+    match value {
+        Value::Unit { family, suffix, .. } => {
+            // Check if the unit's family matches the expected type
+            let actual_family = family.as_ref().map(|s| s.as_str()).unwrap_or(suffix.as_str());
+            if actual_family == expected_type {
+                Ok(())
+            } else {
+                // Check if the suffix itself indicates membership in the expected family
+                let suffix_family = UNIT_SUFFIX_TO_FAMILY.with(|cell| {
+                    cell.borrow().get(suffix).cloned()
+                });
+                if suffix_family.as_deref() == Some(expected_type) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "expected unit type '{}', got '{}' (family: {})",
+                        expected_type, suffix, actual_family
+                    ))
+                }
+            }
+        }
+        _ => Err(format!(
+            "expected unit type '{}', got non-unit value of type '{}'",
+            expected_type, value.type_name()
+        )),
+    }
 }
 
 /// Represents a physical dimension as exponents of base units
@@ -558,6 +661,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
     UNIT_FAMILY_ARITHMETIC.with(|cell| cell.borrow_mut().clear());
     COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
+    SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
 
     let mut env = Env::new();
     let mut functions: HashMap<String, FunctionDef> = HashMap::new();
@@ -849,6 +953,16 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 BASE_UNIT_DIMENSIONS.with(|cell| {
                     cell.borrow_mut().insert(uf.name.clone(), Dimension::base(&uf.name));
                 });
+                // Register the base unit (factor = 1.0) for SI prefix support
+                // e.g., for length: "m" -> "length", so "km" can be parsed as "k" + "m"
+                for variant in &uf.variants {
+                    if (variant.factor - 1.0).abs() < f64::EPSILON {
+                        SI_BASE_UNITS.with(|cell| {
+                            cell.borrow_mut().insert(variant.suffix.clone(), uf.name.clone());
+                        });
+                        break; // Only one base unit per family
+                    }
+                }
             }
             Node::CompoundUnit(cu) => {
                 // Compound unit defines a derived unit (e.g., velocity = length / time)
@@ -989,6 +1103,37 @@ pub(crate) fn exec_node(
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
                 }
+                // Validate unit type annotation if present
+                // Type can come from either let_stmt.ty OR from a typed pattern (x: Type)
+                let type_annotation = if let_stmt.ty.is_some() {
+                    let_stmt.ty.clone()
+                } else if let simple_parser::ast::Pattern::Typed { ty, .. } = &let_stmt.pattern {
+                    Some(ty.clone())
+                } else {
+                    None
+                };
+
+                if let Some(Type::Simple(type_name)) = &type_annotation {
+                    if is_unit_type(type_name) {
+                        if let Err(e) = validate_unit_type(&value, type_name) {
+                            // Extract variable name for better error message
+                            let var_name = match &let_stmt.pattern {
+                                simple_parser::ast::Pattern::Identifier(name) => name.clone(),
+                                simple_parser::ast::Pattern::MutIdentifier(name) => name.clone(),
+                                simple_parser::ast::Pattern::Typed { pattern, .. } => {
+                                    match pattern.as_ref() {
+                                        simple_parser::ast::Pattern::Identifier(name) => name.clone(),
+                                        simple_parser::ast::Pattern::MutIdentifier(name) => name.clone(),
+                                        _ => "<pattern>".to_string(),
+                                    }
+                                }
+                                _ => "<pattern>".to_string(),
+                            };
+                            return Err(CompileError::Semantic(format!("let binding '{}': {}", var_name, e)));
+                        }
+                    }
+                }
+
                 // Coerce to TraitObject if type annotation is `dyn Trait`
                 let value = if let Some(Type::DynTrait(trait_name)) = &let_stmt.ty {
                     Value::TraitObject {

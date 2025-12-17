@@ -1030,6 +1030,14 @@ fn bind_args(
             } else {
                 val
             };
+            // Validate unit type annotation if present
+            if let Some(Type::Simple(type_name)) = param.and_then(|p| p.ty.as_ref()) {
+                if is_unit_type(type_name) {
+                    if let Err(e) = validate_unit_type(&val, type_name) {
+                        bail_semantic!("parameter '{}': {}", name, e);
+                    }
+                }
+            }
             bound.insert(name.clone(), val);
         } else {
             if positional_idx >= params_to_bind.len() {
@@ -1045,6 +1053,14 @@ fn bind_args(
             } else {
                 val
             };
+            // Validate unit type annotation if present
+            if let Some(Type::Simple(type_name)) = &param.ty {
+                if is_unit_type(type_name) {
+                    if let Err(e) = validate_unit_type(&val, type_name) {
+                        bail_semantic!("parameter '{}': {}", param.name, e);
+                    }
+                }
+            }
             bound.insert(param.name.clone(), val);
             positional_idx += 1;
         }
@@ -1063,6 +1079,14 @@ fn bind_args(
                 } else {
                     v
                 };
+                // Validate unit type annotation if present
+                if let Some(Type::Simple(type_name)) = &param.ty {
+                    if is_unit_type(type_name) {
+                        if let Err(e) = validate_unit_type(&v, type_name) {
+                            bail_semantic!("parameter '{}' default value: {}", param.name, e);
+                        }
+                    }
+                }
                 bound.insert(param.name.clone(), v);
             } else {
                 bail_semantic!("missing argument {}", param.name);
@@ -1388,13 +1412,24 @@ fn exec_function_with_captured_env(
         }
 
         // Execute the function body with implicit return support
-        let result = exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods);
-        match result {
-            Ok((Control::Return(v), _)) => Ok(v),
-            Ok((_, Some(v))) => Ok(v), // Implicit return from last expression
-            Ok((_, None)) => Ok(Value::Nil),
-            Err(e) => Err(e),
+        let result_value = exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods);
+        let result = match result_value {
+            Ok((Control::Return(v), _)) => v,
+            Ok((_, Some(v))) => v, // Implicit return from last expression
+            Ok((_, None)) => Value::Nil,
+            Err(e) => return Err(e),
+        };
+
+        // Validate return type against unit type annotation if present
+        if let Some(Type::Simple(type_name)) = &func.return_type {
+            if is_unit_type(type_name) {
+                if let Err(e) = validate_unit_type(&result, type_name) {
+                    bail_semantic!("return type mismatch in '{}': {}", func.name, e);
+                }
+            }
         }
+
+        Ok(result)
     })
 }
 
@@ -1436,14 +1471,25 @@ fn exec_function_inner(
     for (name, val) in bound {
         local_env.insert(name, val);
     }
-    match exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
-        Ok((Control::Return(v), _)) => Ok(v),
-        Ok((_, Some(v))) => Ok(v), // Implicit return from last expression
-        Ok((_, None)) => Ok(Value::Nil),
+    let result = match exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
+        Ok((Control::Return(v), _)) => v,
+        Ok((_, Some(v))) => v, // Implicit return from last expression
+        Ok((_, None)) => Value::Nil,
         // TryError from ? operator - propagate as return value
-        Err(CompileError::TryError(val)) => Ok(val),
-        Err(e) => Err(e),
+        Err(CompileError::TryError(val)) => val,
+        Err(e) => return Err(e),
+    };
+
+    // Validate return type against unit type annotation if present
+    if let Some(Type::Simple(type_name)) = &func.return_type {
+        if is_unit_type(type_name) {
+            if let Err(e) = validate_unit_type(&result, type_name) {
+                bail_semantic!("return type mismatch in '{}': {}", func.name, e);
+            }
+        }
     }
+
+    Ok(result)
 }
 
 /// Instantiate a class by calling its constructor (the 'new' method if present)

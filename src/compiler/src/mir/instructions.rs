@@ -399,6 +399,50 @@ pub enum MirInst {
         /// The expression value to capture
         value: VReg,
     },
+
+    // =========================================================================
+    // GPU instructions (software backend + future hardware)
+    // =========================================================================
+    /// Get global work item ID for a dimension (0=x, 1=y, 2=z)
+    GpuGlobalId { dest: VReg, dim: u8 },
+
+    /// Get local work item ID within work group
+    GpuLocalId { dest: VReg, dim: u8 },
+
+    /// Get work group ID
+    GpuGroupId { dest: VReg, dim: u8 },
+
+    /// Get global work size (total work items)
+    GpuGlobalSize { dest: VReg, dim: u8 },
+
+    /// Get local work group size
+    GpuLocalSize { dest: VReg, dim: u8 },
+
+    /// Get number of work groups
+    GpuNumGroups { dest: VReg, dim: u8 },
+
+    /// Work group barrier (synchronize all work items in group)
+    GpuBarrier,
+
+    /// Memory fence (ensure memory ordering)
+    GpuMemFence { scope: GpuMemoryScope },
+
+    /// Atomic operation on memory
+    GpuAtomic {
+        dest: VReg,
+        op: GpuAtomicOp,
+        addr: VReg,
+        value: VReg,
+        /// For compare-exchange: expected value
+        expected: Option<VReg>,
+    },
+
+    /// Allocate shared memory (work group local)
+    GpuSharedAlloc {
+        dest: VReg,
+        element_type: TypeId,
+        size: u32,
+    },
 }
 
 /// Kind of contract being checked
@@ -414,6 +458,40 @@ pub enum ContractKind {
     InvariantEntry,
     /// Invariant at function exit
     InvariantExit,
+}
+
+/// GPU memory fence scope
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuMemoryScope {
+    /// Work group local memory only
+    WorkGroup,
+    /// Global device memory
+    Device,
+    /// All memory (work group + device)
+    All,
+}
+
+/// GPU atomic operation type
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuAtomicOp {
+    /// Atomic add
+    Add,
+    /// Atomic subtract
+    Sub,
+    /// Atomic exchange
+    Xchg,
+    /// Atomic compare and exchange
+    CmpXchg,
+    /// Atomic minimum
+    Min,
+    /// Atomic maximum
+    Max,
+    /// Atomic bitwise AND
+    And,
+    /// Atomic bitwise OR
+    Or,
+    /// Atomic bitwise XOR
+    Xor,
 }
 
 /// Captured variable in a closure
@@ -586,6 +664,22 @@ impl HasEffects for MirInst {
 
             // Interpreter fallback (temporary - will be removed)
             MirInst::InterpCall { .. } | MirInst::InterpEval { .. } => Effect::Io,
+
+            // GPU instructions - pure compute on GPU (no GC, synchronous from kernel perspective)
+            MirInst::GpuGlobalId { .. }
+            | MirInst::GpuLocalId { .. }
+            | MirInst::GpuGroupId { .. }
+            | MirInst::GpuGlobalSize { .. }
+            | MirInst::GpuLocalSize { .. }
+            | MirInst::GpuNumGroups { .. }
+            | MirInst::GpuMemFence { .. } => Effect::Compute,
+
+            // GPU barrier is a synchronization point (Wait effect)
+            MirInst::GpuBarrier => Effect::Wait,
+
+            // GPU atomics and shared memory allocation
+            MirInst::GpuAtomic { .. } => Effect::Io,
+            MirInst::GpuSharedAlloc { .. } => Effect::Compute,
         }
     }
 }
@@ -647,7 +741,15 @@ impl MirInst {
             | MirInst::ContractOldCapture { dest, .. }
             | MirInst::PointerNew { dest, .. }
             | MirInst::PointerRef { dest, .. }
-            | MirInst::PointerDeref { dest, .. } => Some(*dest),
+            | MirInst::PointerDeref { dest, .. }
+            | MirInst::GpuGlobalId { dest, .. }
+            | MirInst::GpuLocalId { dest, .. }
+            | MirInst::GpuGroupId { dest, .. }
+            | MirInst::GpuGlobalSize { dest, .. }
+            | MirInst::GpuLocalSize { dest, .. }
+            | MirInst::GpuNumGroups { dest, .. }
+            | MirInst::GpuAtomic { dest, .. }
+            | MirInst::GpuSharedAlloc { dest, .. } => Some(*dest),
             MirInst::Call { dest, .. }
             | MirInst::IndirectCall { dest, .. }
             | MirInst::Wait { dest, .. }
@@ -775,6 +877,28 @@ impl MirInst {
             MirInst::PointerNew { value, .. } => vec![*value],
             MirInst::PointerRef { source, .. } => vec![*source],
             MirInst::PointerDeref { pointer, .. } => vec![*pointer],
+            // GPU instructions
+            MirInst::GpuGlobalId { .. }
+            | MirInst::GpuLocalId { .. }
+            | MirInst::GpuGroupId { .. }
+            | MirInst::GpuGlobalSize { .. }
+            | MirInst::GpuLocalSize { .. }
+            | MirInst::GpuNumGroups { .. }
+            | MirInst::GpuBarrier
+            | MirInst::GpuMemFence { .. }
+            | MirInst::GpuSharedAlloc { .. } => vec![],
+            MirInst::GpuAtomic {
+                addr,
+                value,
+                expected,
+                ..
+            } => {
+                let mut v = vec![*addr, *value];
+                if let Some(exp) = expected {
+                    v.push(*exp);
+                }
+                v
+            }
         }
     }
 }

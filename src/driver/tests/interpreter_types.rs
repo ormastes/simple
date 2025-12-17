@@ -841,3 +841,373 @@ main = result.value()
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 1); // 10 / 2 / 3 = 1 (integer division)
 }
+
+// =============================================================================
+// SI Prefix Tests (#207)
+// =============================================================================
+
+#[test]
+fn interpreter_si_prefix_kilo() {
+    // k prefix = 1000x
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let dist = 5_km   # Should be 5 * 1000 = 5000 meters
+main = dist.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5000);
+}
+
+#[test]
+fn interpreter_si_prefix_mega() {
+    // M prefix = 1,000,000x
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let dist = 2_Mm   # 2 megameters = 2,000,000 meters
+main = dist.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2000000);
+}
+
+#[test]
+fn interpreter_si_prefix_giga() {
+    // G prefix = 1,000,000,000x (1e9)
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let dist = 1_Gm   # 1 gigameter = 1e9 meters
+main = if dist.value() > 999999999: 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_si_prefix_milli() {
+    // m prefix = 0.001x (but requires base unit that isn't 'm')
+    let code = r#"
+unit time(base: f64): s = 1.0
+
+let dur = 500_ms   # 500 milliseconds = 0.5 seconds
+# Check it's less than 1 second
+main = if dur.value() < 1.0: 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_si_prefix_micro() {
+    // u prefix = 0.000001x (micro)
+    let code = r#"
+unit time(base: f64): s = 1.0
+
+let dur = 1000_us   # 1000 microseconds = 0.001 seconds = 1 millisecond
+# Check it equals 0.001
+main = if dur.value() < 0.01 and dur.value() > 0.0: 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_si_prefix_nano() {
+    // n prefix = 1e-9
+    let code = r#"
+unit time(base: f64): s = 1.0
+
+let dur = 1000000000_ns   # 1 billion nanoseconds = 1 second
+main = dur.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_si_prefix_family_preserved() {
+    // SI-prefixed units should still belong to the same family
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let a = 1_km    # 1000 meters
+let b = 500_m   # 500 meters
+let total = a + b  # Should work - same family
+main = total.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1500);
+}
+
+#[test]
+fn interpreter_si_prefix_conversion() {
+    // SI-prefixed units should work with to_X() conversion
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let dist = 2_km   # 2000 meters
+let in_m = dist.to_m()
+main = in_m.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 2000);
+}
+
+#[test]
+fn interpreter_si_prefix_directly_defined_takes_precedence() {
+    // If km is directly defined, it takes precedence over k+m
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+let dist = 3_km   # Uses directly defined km, not SI prefix
+main = dist.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    // 3_km with factor 1000 should give 3.0 in base units
+    assert_eq!(result.exit_code, 3);
+}
+
+#[test]
+fn interpreter_si_prefix_tera() {
+    // T prefix = 1e12
+    let code = r#"
+unit data(base: f64): B = 1.0
+
+let size = 1_TB   # 1 terabyte = 1e12 bytes
+main = if size.value() > 999999999999.0: 1 else: 0
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+// Unit inference tests (#208)
+
+#[test]
+fn interpreter_unit_inference_parameter_correct() {
+    // Parameter with unit type annotation should accept correct unit
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+fn double_distance(d: length) -> length:
+    return d + d
+
+let dist = 5_km
+main = double_distance(dist).value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn interpreter_unit_inference_parameter_wrong_family() {
+    // Parameter with unit type should reject wrong unit family
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+
+fn measure_length(d: length) -> i64:
+    return d.value()
+
+let dur = 5_s
+main = measure_length(dur)
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err() || result.unwrap().exit_code != 5);
+}
+
+#[test]
+fn interpreter_unit_inference_return_correct() {
+    // Function returning unit type should work when correct
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+fn get_distance() -> length:
+    return 10_m
+
+main = get_distance().value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn interpreter_unit_inference_return_wrong_family() {
+    // Function returning unit type should reject wrong unit family
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+
+fn get_distance() -> length:
+    return 5_s
+
+main = get_distance().value()
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_unit_inference_compound_unit() {
+    // Should work with compound units too
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+unit time(base: f64): s = 1.0
+unit velocity = length / time
+
+fn get_speed(d: length, t: time) -> velocity:
+    return d / t
+
+let dist = 100_m
+let dur = 10_s
+main = get_speed(dist, dur).value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 10);
+}
+
+#[test]
+fn interpreter_unit_inference_non_unit_value() {
+    // Passing non-unit value to unit parameter should fail
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+fn measure(d: length) -> i64:
+    return d.value()
+
+main = measure(42)
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_unit_inference_return_non_unit() {
+    // Returning non-unit value when unit expected should fail
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+fn get_distance() -> length:
+    return 42
+
+main = get_distance().value()
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+// Unit assertion tests (#209)
+
+#[test]
+fn interpreter_assert_unit_correct_type() {
+    // assert_unit! with correct type should pass
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+let dist = 10_km
+assert_unit!(dist, "length")
+main = 1
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_assert_unit_wrong_type() {
+    // assert_unit! with wrong type should fail
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+
+let dist = 10_m
+assert_unit!(dist, "time")
+main = 1
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_assert_unit_non_unit_value() {
+    // assert_unit! on non-unit value should fail
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let x = 42
+assert_unit!(x, "length")
+main = 1
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_assert_unit_invalid_type_name() {
+    // assert_unit! with unregistered type name should fail
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let dist = 10_m
+assert_unit!(dist, "nonexistent_type")
+main = 1
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_assert_unit_compound_type() {
+    // assert_unit! with compound unit type should work
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+unit velocity = length / time
+
+let v = 10_m / 2_s
+assert_unit!(v, "velocity")
+main = 1
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 1);
+}
+
+#[test]
+fn interpreter_let_binding_unit_type_correct() {
+    // Let binding with correct unit type should pass
+    let code = r#"
+unit length(base: f64): m = 1.0, km = 1000.0
+
+let dist: length = 5_km
+main = dist.value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 5);
+}
+
+#[test]
+fn interpreter_let_binding_unit_type_wrong() {
+    // Let binding with wrong unit type should fail
+    let code = r#"
+unit length(base: f64): m = 1.0
+unit time(base: f64): s = 1.0
+
+let dist: length = 5_s
+main = 1
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
+
+#[test]
+fn interpreter_let_binding_unit_type_non_unit_value() {
+    // Let binding with unit type but non-unit value should fail
+    let code = r#"
+unit length(base: f64): m = 1.0
+
+let dist: length = 42
+main = 1
+"#;
+    let result = run_code(code, &[], "");
+    assert!(result.is_err());
+}
