@@ -103,10 +103,11 @@ pub use sync::{RuntimeBarrier, RuntimeMutex, RuntimeRwLock, RuntimeSemaphore};
 
 // Re-export async/generator FFI functions
 pub use async_gen::{
-    rt_future_all, rt_future_await, rt_future_get_result, rt_future_is_ready, rt_future_new,
-    rt_future_race, rt_future_reject, rt_future_resolve, rt_generator_get_ctx,
-    rt_generator_get_state, rt_generator_load_slot, rt_generator_mark_done, rt_generator_new,
-    rt_generator_next, rt_generator_set_state, rt_generator_store_slot,
+    rt_async_get_ctx, rt_async_get_state, rt_async_mark_done, rt_async_set_state, rt_future_all,
+    rt_future_await, rt_future_get_result, rt_future_is_ready, rt_future_new, rt_future_race,
+    rt_future_reject, rt_future_resolve, rt_generator_get_ctx, rt_generator_get_state,
+    rt_generator_load_slot, rt_generator_mark_done, rt_generator_new, rt_generator_next,
+    rt_generator_set_state, rt_generator_store_slot,
 };
 
 // Re-export core FFI functions

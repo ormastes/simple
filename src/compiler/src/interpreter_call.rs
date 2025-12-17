@@ -936,10 +936,12 @@ fn evaluate_call(
     }
     if let Expr::Path(segments) = callee.as_ref() {
         if segments.len() == 2 {
-            let enum_name = &segments[0];
-            let variant = &segments[1];
-            if let Some(enum_def) = enums.get(enum_name) {
-                if enum_def.variants.iter().any(|v| &v.name == variant) {
+            let type_name = &segments[0];
+            let method_name = &segments[1];
+
+            // Check if it's an enum variant constructor
+            if let Some(enum_def) = enums.get(type_name) {
+                if enum_def.variants.iter().any(|v| &v.name == method_name) {
                     let payload = if args.is_empty() {
                         None
                     } else if args.len() == 1 {
@@ -954,15 +956,35 @@ fn evaluate_call(
                         Some(Box::new(Value::Tuple(values)))
                     };
                     return Ok(Value::Enum {
-                        enum_name: enum_name.clone(),
-                        variant: variant.clone(),
+                        enum_name: type_name.clone(),
+                        variant: method_name.clone(),
                         payload,
                     });
                 }
-            } else if let Some(func) = functions.get(variant) {
+            }
+
+            // Check for associated function call: Type::method(args)
+            // Look up in impl_methods for the type
+            if let Some(methods) = impl_methods.get(type_name) {
+                if let Some(func) = methods.iter().find(|m| m.name == *method_name) {
+                    // Associated function - no self context
+                    return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                }
+            }
+
+            // Check for class associated function (static method in class)
+            if let Some(class_def) = classes.get(type_name) {
+                if let Some(func) = class_def.methods.iter().find(|m| m.name == *method_name) {
+                    // Static class method - no self context
+                    return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                }
+            }
+
+            // Legacy fallbacks
+            if let Some(func) = functions.get(method_name) {
                 return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
-            } else if classes.contains_key(variant) {
-                return instantiate_class(variant, args, env, functions, classes, enums, impl_methods);
+            } else if classes.contains_key(method_name) {
+                return instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);
             }
         }
         bail_semantic!("unsupported path call: {:?}", segments);

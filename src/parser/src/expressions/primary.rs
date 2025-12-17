@@ -107,7 +107,8 @@ impl<'a> Parser<'a> {
                     let mut segments = vec![name];
                     while self.check(&TokenKind::DoubleColon) {
                         self.advance(); // consume '::'
-                        let segment = self.expect_identifier()?;
+                        // Use expect_method_name to allow keywords like 'new', 'type', etc.
+                        let segment = self.expect_method_name()?;
                         segments.push(segment);
                     }
                     Ok(Expr::Path(segments))

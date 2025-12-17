@@ -530,6 +530,11 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
                 analyze_node(node, reasons);
             }
         }
+
+        // Cast expression: expr as Type
+        Expr::Cast { expr: inner, .. } => {
+            analyze_expr(inner, reasons);
+        }
     }
 }
 

@@ -388,7 +388,8 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Fn)?;
 
-        let name = self.expect_identifier()?;
+        // Allow keywords like 'new', 'type', etc. as function names
+        let name = self.expect_method_name()?;
         // Parse optional generic parameters: fn foo<T, U>(...)
         let generic_params = self.parse_generic_params()?;
         let params = self.parse_parameters()?;

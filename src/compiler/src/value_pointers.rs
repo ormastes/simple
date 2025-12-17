@@ -266,6 +266,10 @@ impl Clone for Value {
                 variant: variant.clone(),
                 payload: payload.clone(),
             },
+            Value::Union { type_index, inner } => Value::Union {
+                type_index: *type_index,
+                inner: inner.clone(),
+            },
             Value::Constructor { class_name } => Value::Constructor {
                 class_name: class_name.clone(),
             },
