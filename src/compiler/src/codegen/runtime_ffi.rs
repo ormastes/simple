@@ -324,6 +324,93 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_gpu_launch", &[I64, I32, I32, I32, I32, I32, I32], &[I32]), // kernel, gx,gy,gz, lx,ly,lz -> status
     RuntimeFuncSpec::new("rt_gpu_launch_1d", &[I64, I32, I32], &[I32]), // kernel, global, local -> status
+    // =========================================================================
+    // TCP networking operations
+    // =========================================================================
+    // native_tcp_bind(addr_ptr: i64, addr_len: i64) -> (handle: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_tcp_bind", &[I64, I64], &[I64, I64]),
+    // native_tcp_accept(handle: i64) -> (stream_handle: i64, peer_addr_ptr: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_tcp_accept", &[I64], &[I64, I64, I64]),
+    // native_tcp_connect(addr_ptr: i64, addr_len: i64) -> (handle: i64, local_addr_ptr: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_tcp_connect", &[I64, I64], &[I64, I64, I64]),
+    // native_tcp_connect_timeout(addr_ptr: i64, addr_len: i64, timeout_ns: i64) -> (handle: i64, local_addr_ptr: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_tcp_connect_timeout", &[I64, I64, I64], &[I64, I64, I64]),
+    // native_tcp_read(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_read: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_tcp_read", &[I64, I64, I64], &[I64, I64]),
+    // native_tcp_write(handle: i64, data_ptr: i64, data_len: i64) -> (bytes_written: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_tcp_write", &[I64, I64, I64], &[I64, I64]),
+    // native_tcp_flush(handle: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_tcp_flush", &[I64], &[I64]),
+    // native_tcp_shutdown(handle: i64, how: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_tcp_shutdown", &[I64, I64], &[I64]),
+    // native_tcp_close(handle: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_tcp_close", &[I64], &[I64]),
+    // native_tcp_set_backlog(handle: i64, backlog: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_tcp_set_backlog", &[I64, I64], &[I64]),
+    // native_tcp_set_nodelay(handle: i64, nodelay: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_tcp_set_nodelay", &[I64, I64], &[I64]),
+    // native_tcp_set_keepalive(handle: i64, keepalive_ns: i64) -> error_code: i64 (0 = disabled, >0 = enabled with timeout)
+    RuntimeFuncSpec::new("native_tcp_set_keepalive", &[I64, I64], &[I64]),
+    // native_tcp_set_read_timeout(handle: i64, timeout_ns: i64) -> error_code: i64 (0 = no timeout)
+    RuntimeFuncSpec::new("native_tcp_set_read_timeout", &[I64, I64], &[I64]),
+    // native_tcp_set_write_timeout(handle: i64, timeout_ns: i64) -> error_code: i64 (0 = no timeout)
+    RuntimeFuncSpec::new("native_tcp_set_write_timeout", &[I64, I64], &[I64]),
+    // native_tcp_get_nodelay(handle: i64) -> (nodelay: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_tcp_get_nodelay", &[I64], &[I64, I64]),
+    // native_tcp_peek(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_peeked: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_tcp_peek", &[I64, I64, I64], &[I64, I64]),
+    // =========================================================================
+    // UDP networking operations
+    // =========================================================================
+    // native_udp_bind(addr_ptr: i64, addr_len: i64) -> (handle: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_bind", &[I64, I64], &[I64, I64]),
+    // native_udp_connect(handle: i64, addr_ptr: i64, addr_len: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_connect", &[I64, I64, I64], &[I64]),
+    // native_udp_recv_from(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_recv: i64, peer_addr_ptr: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_recv_from", &[I64, I64, I64], &[I64, I64, I64]),
+    // native_udp_recv(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_recv: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_recv", &[I64, I64, I64], &[I64, I64]),
+    // native_udp_send_to(handle: i64, data_ptr: i64, data_len: i64, addr_ptr: i64, addr_len: i64) -> (bytes_sent: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_send_to", &[I64, I64, I64, I64, I64], &[I64, I64]),
+    // native_udp_send(handle: i64, data_ptr: i64, data_len: i64) -> (bytes_sent: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_send", &[I64, I64, I64], &[I64, I64]),
+    // native_udp_peek_from(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_peeked: i64, peer_addr_ptr: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_peek_from", &[I64, I64, I64], &[I64, I64, I64]),
+    // native_udp_peek(handle: i64, buf_ptr: i64, buf_len: i64) -> (bytes_peeked: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_peek", &[I64, I64, I64], &[I64, I64]),
+    // native_udp_peer_addr(handle: i64) -> (addr_ptr: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_peer_addr", &[I64], &[I64, I64]),
+    // native_udp_set_broadcast(handle: i64, broadcast: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_set_broadcast", &[I64, I64], &[I64]),
+    // native_udp_set_multicast_loop(handle: i64, on: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_set_multicast_loop", &[I64, I64], &[I64]),
+    // native_udp_set_multicast_ttl(handle: i64, ttl: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_set_multicast_ttl", &[I64, I64], &[I64]),
+    // native_udp_set_ttl(handle: i64, ttl: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_set_ttl", &[I64, I64], &[I64]),
+    // native_udp_set_read_timeout(handle: i64, timeout_ns: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_set_read_timeout", &[I64, I64], &[I64]),
+    // native_udp_set_write_timeout(handle: i64, timeout_ns: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_set_write_timeout", &[I64, I64], &[I64]),
+    // native_udp_get_broadcast(handle: i64) -> (broadcast: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_get_broadcast", &[I64], &[I64, I64]),
+    // native_udp_get_ttl(handle: i64) -> (ttl: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_udp_get_ttl", &[I64], &[I64, I64]),
+    // native_udp_join_multicast_v4(handle: i64, multiaddr: i64, interface: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_join_multicast_v4", &[I64, I64, I64], &[I64]),
+    // native_udp_leave_multicast_v4(handle: i64, multiaddr: i64, interface: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_leave_multicast_v4", &[I64, I64, I64], &[I64]),
+    // native_udp_join_multicast_v6(handle: i64, multiaddr_ptr: i64, interface: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_join_multicast_v6", &[I64, I64, I64], &[I64]),
+    // native_udp_leave_multicast_v6(handle: i64, multiaddr_ptr: i64, interface: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_leave_multicast_v6", &[I64, I64, I64], &[I64]),
+    // native_udp_close(handle: i64) -> error_code: i64
+    RuntimeFuncSpec::new("native_udp_close", &[I64], &[I64]),
+    // =========================================================================
+    // HTTP networking operations
+    // =========================================================================
+    // native_http_send(request_ptr: i64, timeout_ns: i64) -> (response_ptr: i64, error_code: i64)
+    RuntimeFuncSpec::new("native_http_send", &[I64, I64], &[I64, I64]),
 ];
 
 #[cfg(test)]
