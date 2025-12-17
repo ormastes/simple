@@ -1100,21 +1100,27 @@ impl LlvmBackend {
                     MirInst::GpuMemFence { scope } => {
                         self.compile_gpu_mem_fence(*scope, builder, module)?;
                     }
-                    MirInst::GpuAtomic { dest, op, addr, value, expected } => {
-                        let addr_val = vreg_map.get(addr).ok_or_else(|| {
-                            CompileError::Semantic(format!("Undefined vreg: {:?}", addr))
+                    MirInst::GpuAtomic { dest, op, ptr, value } => {
+                        let ptr_val = vreg_map.get(ptr).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", ptr))
                         })?;
                         let value_val = vreg_map.get(value).ok_or_else(|| {
                             CompileError::Semantic(format!("Undefined vreg: {:?}", value))
                         })?;
-                        let expected_val = if let Some(exp) = expected {
-                            Some(*vreg_map.get(exp).ok_or_else(|| {
-                                CompileError::Semantic(format!("Undefined vreg: {:?}", exp))
-                            })?)
-                        } else {
-                            None
-                        };
-                        let result = self.compile_gpu_atomic(*op, *addr_val, *value_val, expected_val, builder, module)?;
+                        let result = self.compile_gpu_atomic(*op, *ptr_val, *value_val, builder, module)?;
+                        vreg_map.insert(*dest, result);
+                    }
+                    MirInst::GpuAtomicCmpXchg { dest, ptr, expected, desired } => {
+                        let ptr_val = vreg_map.get(ptr).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", ptr))
+                        })?;
+                        let expected_val = vreg_map.get(expected).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", expected))
+                        })?;
+                        let desired_val = vreg_map.get(desired).ok_or_else(|| {
+                            CompileError::Semantic(format!("Undefined vreg: {:?}", desired))
+                        })?;
+                        let result = self.compile_gpu_atomic_cmpxchg(*ptr_val, *expected_val, *desired_val, builder, module)?;
                         vreg_map.insert(*dest, result);
                     }
                     MirInst::GpuSharedAlloc { dest, element_type: _, size } => {
@@ -1901,9 +1907,8 @@ impl LlvmBackend {
     fn compile_gpu_atomic(
         &self,
         op: crate::mir::instructions::GpuAtomicOp,
-        addr: inkwell::values::BasicValueEnum,
+        ptr: inkwell::values::BasicValueEnum,
         value: inkwell::values::BasicValueEnum,
-        expected: Option<inkwell::values::BasicValueEnum>,
         builder: &Builder,
         module: &Module,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
@@ -1913,56 +1918,63 @@ impl LlvmBackend {
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
         // Select the appropriate atomic function based on operation
-        let (func_name, needs_expected) = match op {
-            GpuAtomicOp::Add => ("rt_gpu_atomic_add_i64", false),
-            GpuAtomicOp::Sub => ("rt_gpu_atomic_sub_i64", false),
-            GpuAtomicOp::Xchg => ("rt_gpu_atomic_xchg_i64", false),
-            GpuAtomicOp::CmpXchg => ("rt_gpu_atomic_cmpxchg_i64", true),
-            GpuAtomicOp::Min => ("rt_gpu_atomic_min_i64", false),
-            GpuAtomicOp::Max => ("rt_gpu_atomic_max_i64", false),
-            GpuAtomicOp::And => ("rt_gpu_atomic_and_i64", false),
-            GpuAtomicOp::Or => ("rt_gpu_atomic_or_i64", false),
-            GpuAtomicOp::Xor => ("rt_gpu_atomic_xor_i64", false),
+        let func_name = match op {
+            GpuAtomicOp::Add => "rt_gpu_atomic_add_i64",
+            GpuAtomicOp::Sub => "rt_gpu_atomic_sub_i64",
+            GpuAtomicOp::Xchg => "rt_gpu_atomic_xchg_i64",
+            GpuAtomicOp::Min => "rt_gpu_atomic_min_i64",
+            GpuAtomicOp::Max => "rt_gpu_atomic_max_i64",
+            GpuAtomicOp::And => "rt_gpu_atomic_and_i64",
+            GpuAtomicOp::Or => "rt_gpu_atomic_or_i64",
+            GpuAtomicOp::Xor => "rt_gpu_atomic_xor_i64",
         };
 
-        let atomic_fn = if needs_expected {
-            // CmpXchg takes 3 arguments: addr, expected, value
-            module.get_function(func_name).unwrap_or_else(|| {
-                let fn_type = i64_type.fn_type(
-                    &[i8_ptr_type.into(), i64_type.into(), i64_type.into()],
-                    false,
-                );
-                module.add_function(func_name, fn_type, None)
-            })
-        } else {
-            // Other atomics take 2 arguments: addr, value
-            module.get_function(func_name).unwrap_or_else(|| {
-                let fn_type = i64_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
-                module.add_function(func_name, fn_type, None)
-            })
-        };
+        // All atomics take 2 arguments: ptr, value
+        let atomic_fn = module.get_function(func_name).unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(&[i8_ptr_type.into(), i64_type.into()], false);
+            module.add_function(func_name, fn_type, None)
+        });
 
-        let call_site = if needs_expected {
-            let expected_val = expected.ok_or_else(|| {
-                CompileError::Semantic("CmpXchg requires expected value".to_string())
-            })?;
-            builder
-                .build_call(
-                    atomic_fn,
-                    &[addr.into(), expected_val.into(), value.into()],
-                    "atomic",
-                )
-                .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?
-        } else {
-            builder
-                .build_call(atomic_fn, &[addr.into(), value.into()], "atomic")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?
-        };
+        let call_site = builder
+            .build_call(atomic_fn, &[ptr.into(), value.into()], "atomic")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
 
         call_site
             .try_as_basic_value()
             .left()
             .ok_or_else(|| CompileError::Semantic("Atomic operation returned void".to_string()))
+    }
+
+    /// Compile GPU atomic compare-exchange operation
+    #[cfg(feature = "llvm")]
+    fn compile_gpu_atomic_cmpxchg(
+        &self,
+        ptr: inkwell::values::BasicValueEnum,
+        expected: inkwell::values::BasicValueEnum,
+        desired: inkwell::values::BasicValueEnum,
+        builder: &Builder,
+        module: &Module,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        let i64_type = self.context.i64_type();
+        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+
+        // CmpXchg takes 3 arguments: ptr, expected, desired
+        let cmpxchg_fn = module.get_function("rt_gpu_atomic_cmpxchg_i64").unwrap_or_else(|| {
+            let fn_type = i64_type.fn_type(
+                &[i8_ptr_type.into(), i64_type.into(), i64_type.into()],
+                false,
+            );
+            module.add_function("rt_gpu_atomic_cmpxchg_i64", fn_type, None)
+        });
+
+        let call_site = builder
+            .build_call(cmpxchg_fn, &[ptr.into(), expected.into(), desired.into()], "cmpxchg")
+            .map_err(|e| CompileError::Semantic(format!("Failed to build call: {}", e)))?;
+
+        call_site
+            .try_as_basic_value()
+            .left()
+            .ok_or_else(|| CompileError::Semantic("CmpXchg operation returned void".to_string()))
     }
 
     /// Compile GPU shared memory allocation

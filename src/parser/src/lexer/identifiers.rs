@@ -80,6 +80,7 @@ impl<'a> super::Lexer<'a> {
             "vec" => TokenKind::Vec,
             "shared" => TokenKind::Shared,
             "gpu" => TokenKind::Gpu,
+            "bounds" => TokenKind::Bounds,
             "dyn" => TokenKind::Dyn,
             // Note: "allow" is NOT a keyword - it's parsed contextually in unit definitions
             // to avoid conflicts with #[allow(...)] attributes

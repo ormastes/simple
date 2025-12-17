@@ -363,6 +363,43 @@ impl Lowerer {
                     }
                 }
 
+                // Check for SIMD swizzle: v.xyzw, v.xxxx, v.rgba, v.rrrr, etc.
+                if let Some(HirType::Simd { lanes, element }) = self.module.types.get(recv_hir.ty) {
+                    let lanes = *lanes;
+                    let element = *element;
+                    if let Some(indices) = self.parse_swizzle_pattern(field, lanes) {
+                        // Create indices array literal
+                        let indices_hir: Vec<HirExpr> = indices
+                            .iter()
+                            .map(|&i| HirExpr {
+                                kind: HirExprKind::Integer(i as i64),
+                                ty: TypeId::I64,
+                            })
+                            .collect();
+                        let indices_len = indices_hir.len() as u32;
+                        let indices_array_ty = self.module.types.register(HirType::Array {
+                            element: TypeId::I64,
+                            size: Some(indices_len as usize),
+                        });
+                        let indices_expr = HirExpr {
+                            kind: HirExprKind::Array(indices_hir),
+                            ty: indices_array_ty,
+                        };
+                        // Result type: same element type, but with number of lanes from swizzle length
+                        let result_ty = self.module.types.register(HirType::Simd {
+                            lanes: indices_len,
+                            element,
+                        });
+                        return Ok(HirExpr {
+                            kind: HirExprKind::GpuIntrinsic {
+                                intrinsic: GpuIntrinsicKind::SimdShuffle,
+                                args: vec![*recv_hir, indices_expr],
+                            },
+                            ty: result_ty,
+                        });
+                    }
+                }
+
                 // Look up struct field type and index
                 let (field_index, field_ty) = self.get_field_info(recv_hir.ty, field)?;
                 Ok(HirExpr {
@@ -377,8 +414,19 @@ impl Lowerer {
             Expr::Index { receiver, index } => {
                 let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
                 let idx_hir = Box::new(self.lower_expr(index, ctx)?);
-                // Look up element type from array type
+                // Look up element type from array/simd type
                 let elem_ty = self.get_index_element_type(recv_hir.ty)?;
+
+                // Check if receiver is SIMD type - use SimdExtract intrinsic
+                if let Some(HirType::Simd { .. }) = self.module.types.get(recv_hir.ty) {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::GpuIntrinsic {
+                            intrinsic: GpuIntrinsicKind::SimdExtract,
+                            args: vec![*recv_hir, *idx_hir],
+                        },
+                        ty: elem_ty,
+                    });
+                }
 
                 Ok(HirExpr {
                     kind: HirExprKind::Index {
@@ -642,6 +690,597 @@ impl Lowerer {
                                 )));
                             }
                         }
+                    } else if recv_name == "gpu" {
+                        // gpu.* style intrinsic functions
+                        match method.as_str() {
+                            "global_id" => {
+                                // gpu.global_id() or gpu.global_id(dim)
+                                let dim_arg = self.lower_gpu_dim_arg(args, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::GlobalId,
+                                        args: dim_arg,
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "local_id" => {
+                                let dim_arg = self.lower_gpu_dim_arg(args, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::LocalId,
+                                        args: dim_arg,
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "group_id" => {
+                                let dim_arg = self.lower_gpu_dim_arg(args, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::GroupId,
+                                        args: dim_arg,
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "global_size" => {
+                                let dim_arg = self.lower_gpu_dim_arg(args, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::GlobalSize,
+                                        args: dim_arg,
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "local_size" => {
+                                let dim_arg = self.lower_gpu_dim_arg(args, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::LocalSize,
+                                        args: dim_arg,
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "num_groups" => {
+                                let dim_arg = self.lower_gpu_dim_arg(args, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::NumGroups,
+                                        args: dim_arg,
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "barrier" => {
+                                if !args.is_empty() {
+                                    return Err(LowerError::Unsupported(
+                                        "gpu.barrier() takes no arguments".into(),
+                                    ));
+                                }
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::Barrier,
+                                        args: vec![],
+                                    },
+                                    ty: TypeId::VOID,
+                                });
+                            }
+                            "mem_fence" => {
+                                if !args.is_empty() {
+                                    return Err(LowerError::Unsupported(
+                                        "gpu.mem_fence() takes no arguments".into(),
+                                    ));
+                                }
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::MemFence,
+                                        args: vec![],
+                                    },
+                                    ty: TypeId::VOID,
+                                });
+                            }
+                            "atomic_add" | "atomic_sub" | "atomic_min" | "atomic_max"
+                            | "atomic_and" | "atomic_or" | "atomic_xor" | "atomic_exchange" => {
+                                // gpu.atomic_*(ptr, val) -> old value
+                                if args.len() != 2 {
+                                    return Err(LowerError::Unsupported(format!(
+                                        "gpu.{}(ptr, val) requires exactly 2 arguments",
+                                        method
+                                    )));
+                                }
+                                let ptr_hir = self.lower_expr(&args[0].value, ctx)?;
+                                let val_hir = self.lower_expr(&args[1].value, ctx)?;
+                                let intrinsic = match method.as_str() {
+                                    "atomic_add" => GpuIntrinsicKind::GpuAtomicAdd,
+                                    "atomic_sub" => GpuIntrinsicKind::GpuAtomicSub,
+                                    "atomic_min" => GpuIntrinsicKind::GpuAtomicMin,
+                                    "atomic_max" => GpuIntrinsicKind::GpuAtomicMax,
+                                    "atomic_and" => GpuIntrinsicKind::GpuAtomicAnd,
+                                    "atomic_or" => GpuIntrinsicKind::GpuAtomicOr,
+                                    "atomic_xor" => GpuIntrinsicKind::GpuAtomicXor,
+                                    "atomic_exchange" => GpuIntrinsicKind::GpuAtomicExchange,
+                                    _ => unreachable!(),
+                                };
+                                // Return type is I64 (the old value)
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic,
+                                        args: vec![ptr_hir, val_hir],
+                                    },
+                                    ty: TypeId::I64,
+                                });
+                            }
+                            "atomic_compare_exchange" => {
+                                // gpu.atomic_compare_exchange(ptr, expected, desired) -> old value
+                                if args.len() != 3 {
+                                    return Err(LowerError::Unsupported(
+                                        "gpu.atomic_compare_exchange(ptr, expected, desired) requires exactly 3 arguments".into(),
+                                    ));
+                                }
+                                let ptr_hir = self.lower_expr(&args[0].value, ctx)?;
+                                let expected_hir = self.lower_expr(&args[1].value, ctx)?;
+                                let desired_hir = self.lower_expr(&args[2].value, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::GpuAtomicCompareExchange,
+                                        args: vec![ptr_hir, expected_hir, desired_hir],
+                                    },
+                                    ty: TypeId::I64, // Returns old value
+                                });
+                            }
+                            _ => {
+                                return Err(LowerError::Unsupported(format!(
+                                    "unknown gpu method: {}",
+                                    method
+                                )));
+                            }
+                        }
+                    } else if recv_name == "f32x4" || recv_name == "f64x4" || recv_name == "i32x4" || recv_name == "i64x4" {
+                        // SIMD type static methods: f32x4.load(arr, offset), f32x4.gather(arr, indices)
+                        let simd_ty = match recv_name.as_str() {
+                            "f32x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::F32 }),
+                            "f64x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::F64 }),
+                            "i32x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::I32 }),
+                            "i64x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::I64 }),
+                            _ => unreachable!(),
+                        };
+                        match method.as_str() {
+                            "load" => {
+                                // f32x4.load(arr, offset) - load 4 elements from array
+                                if args.len() != 2 {
+                                    return Err(LowerError::Unsupported(
+                                        format!("{}.load(array, offset) requires exactly 2 arguments", recv_name),
+                                    ));
+                                }
+                                let array_hir = self.lower_expr(&args[0].value, ctx)?;
+                                let offset_hir = self.lower_expr(&args[1].value, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdLoad,
+                                        args: vec![array_hir, offset_hir],
+                                    },
+                                    ty: simd_ty,
+                                });
+                            }
+                            "gather" => {
+                                // f32x4.gather(arr, indices) - gather 4 elements at arbitrary indices
+                                if args.len() != 2 {
+                                    return Err(LowerError::Unsupported(
+                                        format!("{}.gather(array, indices) requires exactly 2 arguments", recv_name),
+                                    ));
+                                }
+                                let array_hir = self.lower_expr(&args[0].value, ctx)?;
+                                let indices_hir = self.lower_expr(&args[1].value, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdGather,
+                                        args: vec![array_hir, indices_hir],
+                                    },
+                                    ty: simd_ty,
+                                });
+                            }
+                            "load_masked" => {
+                                // f32x4.load_masked(arr, offset, mask, default) - load with mask
+                                if args.len() != 4 {
+                                    return Err(LowerError::Unsupported(
+                                        format!("{}.load_masked(array, offset, mask, default) requires exactly 4 arguments", recv_name),
+                                    ));
+                                }
+                                let array_hir = self.lower_expr(&args[0].value, ctx)?;
+                                let offset_hir = self.lower_expr(&args[1].value, ctx)?;
+                                let mask_hir = self.lower_expr(&args[2].value, ctx)?;
+                                let default_hir = self.lower_expr(&args[3].value, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdMaskedLoad,
+                                        args: vec![array_hir, offset_hir, mask_hir, default_hir],
+                                    },
+                                    ty: simd_ty,
+                                });
+                            }
+                            _ => {
+                                return Err(LowerError::Unsupported(format!(
+                                    "unknown {} static method: {}",
+                                    recv_name, method
+                                )));
+                            }
+                        }
+                    }
+                }
+
+                // Check for SIMD vector reduction methods
+                let receiver_hir = self.lower_expr(receiver, ctx)?;
+                if let Some(HirType::Simd { element, .. }) = self.module.types.get(receiver_hir.ty) {
+                    let element = *element;
+                    let simd_ty = receiver_hir.ty; // Save the SIMD type before moving receiver_hir
+                    match method.as_str() {
+                        "sum" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.sum() takes no arguments".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdSum,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: element,
+                            });
+                        }
+                        "product" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.product() takes no arguments".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdProduct,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: element,
+                            });
+                        }
+                        "min" => {
+                            if args.is_empty() {
+                                // v.min() - horizontal reduction
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdMin,
+                                        args: vec![receiver_hir],
+                                    },
+                                    ty: element,
+                                });
+                            } else if args.len() == 1 {
+                                // v.min(b) - element-wise minimum
+                                let b_hir = self.lower_expr(&args[0].value, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdMinVec,
+                                        args: vec![receiver_hir, b_hir],
+                                    },
+                                    ty: simd_ty,
+                                });
+                            } else {
+                                return Err(LowerError::Unsupported(
+                                    "vec.min() or vec.min(b) expected".into(),
+                                ));
+                            }
+                        }
+                        "max" => {
+                            if args.is_empty() {
+                                // v.max() - horizontal reduction
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdMax,
+                                        args: vec![receiver_hir],
+                                    },
+                                    ty: element,
+                                });
+                            } else if args.len() == 1 {
+                                // v.max(b) - element-wise maximum
+                                let b_hir = self.lower_expr(&args[0].value, ctx)?;
+                                return Ok(HirExpr {
+                                    kind: HirExprKind::GpuIntrinsic {
+                                        intrinsic: GpuIntrinsicKind::SimdMaxVec,
+                                        args: vec![receiver_hir, b_hir],
+                                    },
+                                    ty: simd_ty,
+                                });
+                            } else {
+                                return Err(LowerError::Unsupported(
+                                    "vec.max() or vec.max(b) expected".into(),
+                                ));
+                            }
+                        }
+                        "all" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.all() takes no arguments".into(),
+                                ));
+                            }
+                            // all() only valid for bool vectors
+                            if element != TypeId::BOOL {
+                                return Err(LowerError::Unsupported(
+                                    "vec.all() only valid for bool vectors".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdAll,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: TypeId::BOOL,
+                            });
+                        }
+                        "any" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.any() takes no arguments".into(),
+                                ));
+                            }
+                            // any() only valid for bool vectors
+                            if element != TypeId::BOOL {
+                                return Err(LowerError::Unsupported(
+                                    "vec.any() only valid for bool vectors".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdAny,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: TypeId::BOOL,
+                            });
+                        }
+                        "with" => {
+                            // v.with(idx, val) -> new vector with lane replaced
+                            if args.len() != 2 {
+                                return Err(LowerError::Unsupported(
+                                    "vec.with(idx, val) takes exactly 2 arguments".into(),
+                                ));
+                            }
+                            let idx_hir = self.lower_expr(&args[0].value, ctx)?;
+                            let val_hir = self.lower_expr(&args[1].value, ctx)?;
+                            // Return the same SIMD type
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdWith,
+                                    args: vec![receiver_hir, idx_hir, val_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "sqrt" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.sqrt() takes no arguments".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdSqrt,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "abs" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.abs() takes no arguments".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdAbs,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "floor" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.floor() takes no arguments".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdFloor,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "ceil" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.ceil() takes no arguments".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdCeil,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "round" => {
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.round() takes no arguments".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdRound,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "shuffle" => {
+                            // v.shuffle([3, 2, 1, 0]) - reorder lanes
+                            if args.len() != 1 {
+                                return Err(LowerError::Unsupported(
+                                    "vec.shuffle() requires exactly one argument (indices array)"
+                                        .into(),
+                                ));
+                            }
+                            let indices_hir = self.lower_expr(&args[0].value, ctx)?;
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdShuffle,
+                                    args: vec![receiver_hir, indices_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "blend" => {
+                            // a.blend(b, [0, 1, 4, 5]) - merge two vectors
+                            if args.len() != 2 {
+                                return Err(LowerError::Unsupported(
+                                    "vec.blend() requires two arguments (other vector and indices array)".into(),
+                                ));
+                            }
+                            let other_hir = self.lower_expr(&args[0].value, ctx)?;
+                            let indices_hir = self.lower_expr(&args[1].value, ctx)?;
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdBlend,
+                                    args: vec![receiver_hir, other_hir, indices_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "select" => {
+                            // mask.select(a, b) - select from a where true, b where false
+                            if args.len() != 2 {
+                                return Err(LowerError::Unsupported(
+                                    "mask.select(if_true, if_false) requires exactly two arguments"
+                                        .into(),
+                                ));
+                            }
+                            let if_true_hir = self.lower_expr(&args[0].value, ctx)?;
+                            let if_false_hir = self.lower_expr(&args[1].value, ctx)?;
+                            // Result type is the same as the if_true argument type
+                            let result_ty = if_true_hir.ty;
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdSelect,
+                                    args: vec![receiver_hir, if_true_hir, if_false_hir],
+                                },
+                                ty: result_ty,
+                            });
+                        }
+                        "store" => {
+                            // v.store(arr, offset) - store vector to array
+                            if args.len() != 2 {
+                                return Err(LowerError::Unsupported(
+                                    "vec.store(array, offset) requires exactly two arguments".into(),
+                                ));
+                            }
+                            let array_hir = self.lower_expr(&args[0].value, ctx)?;
+                            let offset_hir = self.lower_expr(&args[1].value, ctx)?;
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdStore,
+                                    args: vec![receiver_hir, array_hir, offset_hir],
+                                },
+                                ty: TypeId::VOID,
+                            });
+                        }
+                        "scatter" => {
+                            // v.scatter(arr, indices) - scatter vector to array at indices
+                            if args.len() != 2 {
+                                return Err(LowerError::Unsupported(
+                                    "vec.scatter(array, indices) requires exactly two arguments".into(),
+                                ));
+                            }
+                            let array_hir = self.lower_expr(&args[0].value, ctx)?;
+                            let indices_hir = self.lower_expr(&args[1].value, ctx)?;
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdScatter,
+                                    args: vec![receiver_hir, array_hir, indices_hir],
+                                },
+                                ty: TypeId::VOID,
+                            });
+                        }
+                        "store_masked" => {
+                            // v.store_masked(arr, offset, mask) - store only where mask is true
+                            if args.len() != 3 {
+                                return Err(LowerError::Unsupported(
+                                    "vec.store_masked(array, offset, mask) requires exactly three arguments".into(),
+                                ));
+                            }
+                            let array_hir = self.lower_expr(&args[0].value, ctx)?;
+                            let offset_hir = self.lower_expr(&args[1].value, ctx)?;
+                            let mask_hir = self.lower_expr(&args[2].value, ctx)?;
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdMaskedStore,
+                                    args: vec![receiver_hir, array_hir, offset_hir, mask_hir],
+                                },
+                                ty: TypeId::VOID,
+                            });
+                        }
+                        "fma" => {
+                            // v.fma(b, c) - fused multiply-add: v * b + c
+                            if args.len() != 2 {
+                                return Err(LowerError::Unsupported(
+                                    "vec.fma(b, c) requires exactly two arguments".into(),
+                                ));
+                            }
+                            let b_hir = self.lower_expr(&args[0].value, ctx)?;
+                            let c_hir = self.lower_expr(&args[1].value, ctx)?;
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdFma,
+                                    args: vec![receiver_hir, b_hir, c_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "recip" => {
+                            // v.recip() - reciprocal: 1.0 / v
+                            if !args.is_empty() {
+                                return Err(LowerError::Unsupported(
+                                    "vec.recip() takes no arguments".into(),
+                                ));
+                            }
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdRecip,
+                                    args: vec![receiver_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        "clamp" => {
+                            // v.clamp(lo, hi) - element-wise clamp to range
+                            if args.len() != 2 {
+                                return Err(LowerError::Unsupported(
+                                    "vec.clamp(lo, hi) requires exactly two arguments".into(),
+                                ));
+                            }
+                            let lo_hir = self.lower_expr(&args[0].value, ctx)?;
+                            let hi_hir = self.lower_expr(&args[1].value, ctx)?;
+                            return Ok(HirExpr {
+                                kind: HirExprKind::GpuIntrinsic {
+                                    intrinsic: GpuIntrinsicKind::SimdClamp,
+                                    args: vec![receiver_hir, lo_hir, hi_hir],
+                                },
+                                ty: simd_ty,
+                            });
+                        }
+                        _ => {}
                     }
                 }
 
@@ -765,7 +1404,7 @@ impl Lowerer {
             }
             Expr::MethodCall { receiver, method, .. } => {
                 // Handle SIMD intrinsics: this.index(), this.thread_index(), this.group_index()
-                // and thread_group.barrier()
+                // and thread_group.barrier(), gpu.* functions
                 if let Expr::Identifier(recv_name) = receiver.as_ref() {
                     if recv_name == "this" {
                         match method.as_str() {
@@ -777,6 +1416,48 @@ impl Lowerer {
                             "barrier" => return Ok(TypeId::VOID),
                             _ => {}
                         }
+                    } else if recv_name == "gpu" {
+                        // gpu.* intrinsic functions
+                        match method.as_str() {
+                            // Size/index queries return i64
+                            "global_id" | "local_id" | "group_id" | "global_size" | "local_size" | "num_groups" => {
+                                return Ok(TypeId::I64);
+                            }
+                            // Synchronization returns void
+                            "barrier" | "mem_fence" => return Ok(TypeId::VOID),
+                            // Atomic operations return old value (i64)
+                            "atomic_add" | "atomic_sub" | "atomic_min" | "atomic_max"
+                            | "atomic_and" | "atomic_or" | "atomic_xor" | "atomic_exchange"
+                            | "atomic_compare_exchange" => return Ok(TypeId::I64),
+                            _ => {}
+                        }
+                    } else if recv_name == "f32x4" || recv_name == "f64x4" || recv_name == "i32x4" || recv_name == "i64x4" {
+                        // SIMD type static methods: f32x4.load(), f32x4.gather()
+                        match method.as_str() {
+                            "load" | "gather" | "load_masked" => {
+                                let simd_ty = match recv_name.as_str() {
+                                    "f32x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::F32 }),
+                                    "f64x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::F64 }),
+                                    "i32x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::I32 }),
+                                    "i64x4" => self.module.types.register(HirType::Simd { lanes: 4, element: TypeId::I64 }),
+                                    _ => unreachable!(),
+                                };
+                                return Ok(simd_ty);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                // Check for SIMD vector reduction methods
+                let recv_ty = self.infer_type(receiver, ctx)?;
+                if let Some(HirType::Simd { element, .. }) = self.module.types.get(recv_ty) {
+                    let element = *element;
+                    match method.as_str() {
+                        // Arithmetic reductions return element type
+                        "sum" | "product" | "min" | "max" => return Ok(element),
+                        // Boolean reductions return bool
+                        "all" | "any" => return Ok(TypeId::BOOL),
+                        _ => {}
                     }
                 }
                 // Cannot infer type for other method calls
@@ -785,6 +1466,80 @@ impl Lowerer {
             // Cannot infer type for complex expressions - require annotation
             _ => Err(LowerError::CannotInferTypeFor(format!("{:?}", expr))),
         }
+    }
+
+    /// Helper to lower optional dimension argument for gpu.* intrinsics
+    /// Returns Vec<HirExpr> with 0 or 1 elements (dimension literal)
+    fn lower_gpu_dim_arg(
+        &mut self,
+        args: &[ast::Argument],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Vec<HirExpr>> {
+        if args.is_empty() {
+            // No argument - return empty vec, MIR lowering will default to dim 0
+            return Ok(vec![]);
+        }
+        if args.len() > 1 {
+            return Err(LowerError::Unsupported(
+                "gpu.* functions take at most 1 dimension argument".into(),
+            ));
+        }
+        // Lower the single dimension argument
+        let dim_expr = self.lower_expr(&args[0].value, ctx)?;
+        Ok(vec![dim_expr])
+    }
+
+    /// Parse a swizzle pattern like "xyzw", "xxxx", "rgba", "wzyx" into indices.
+    /// Returns None if the pattern is invalid or uses out-of-bounds indices for the vector lanes.
+    ///
+    /// Swizzle mappings:
+    /// - Position: x=0, y=1, z=2, w=3
+    /// - Color: r=0, g=1, b=2, a=3
+    fn parse_swizzle_pattern(&self, pattern: &str, max_lanes: u32) -> Option<Vec<u32>> {
+        // Swizzle must be 1-4 characters
+        if pattern.is_empty() || pattern.len() > 4 {
+            return None;
+        }
+
+        let mut indices = Vec::with_capacity(pattern.len());
+        let mut seen_position = false;
+        let mut seen_color = false;
+
+        for c in pattern.chars() {
+            let idx = match c {
+                'x' | 'r' => {
+                    if c == 'x' { seen_position = true; } else { seen_color = true; }
+                    0
+                }
+                'y' | 'g' => {
+                    if c == 'y' { seen_position = true; } else { seen_color = true; }
+                    1
+                }
+                'z' | 'b' => {
+                    if c == 'z' { seen_position = true; } else { seen_color = true; }
+                    2
+                }
+                'w' | 'a' => {
+                    if c == 'w' { seen_position = true; } else { seen_color = true; }
+                    3
+                }
+                _ => return None, // Invalid character
+            };
+
+            // Check bounds
+            if idx >= max_lanes {
+                return None;
+            }
+
+            indices.push(idx);
+        }
+
+        // Disallow mixing position (xyzw) and color (rgba) in the same swizzle
+        if seen_position && seen_color {
+            return None;
+        }
+
+        Some(indices)
     }
 
 }

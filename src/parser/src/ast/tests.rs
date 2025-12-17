@@ -43,6 +43,7 @@ fn test_function_def() {
         doc_comment: None,
         contract: None,
         is_abstract: false,
+        bounds_block: None,
     };
     assert_eq!(func.name, "add");
     assert_eq!(func.params.len(), 1);
@@ -71,6 +72,7 @@ fn test_generic_function_def() {
         doc_comment: None,
         contract: None,
         is_abstract: false,
+        bounds_block: None,
     };
     assert_eq!(func.name, "identity");
     assert_eq!(func.generic_params, vec!["T"]);

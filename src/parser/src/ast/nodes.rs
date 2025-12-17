@@ -57,11 +57,12 @@ pub struct WithStmt {
 }
 
 /// Decorator applied to a function: @decorator or @decorator(args)
+/// Args support named arguments: @bounds(default="return", strict=true)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decorator {
     pub span: Span,
-    pub name: Expr,              // The decorator expression (e.g., Identifier or Call)
-    pub args: Option<Vec<Expr>>, // Arguments if @decorator(args)
+    pub name: Expr,                  // The decorator expression (e.g., Identifier or Call)
+    pub args: Option<Vec<Argument>>, // Arguments if @decorator(args), supports named args
 }
 
 /// Attribute applied to an item: #[name] or #[name = "value"] or #[name(args)]
@@ -140,6 +141,8 @@ pub struct FunctionDef {
     pub contract: Option<ContractBlock>,
     /// Whether this is an abstract method (trait method without body)
     pub is_abstract: bool,
+    /// Bounds block for @simd kernels (trailing bounds: clause)
+    pub bounds_block: Option<BoundsBlock>,
 }
 
 impl FunctionDef {
@@ -186,6 +189,70 @@ impl FunctionDef {
     pub fn has_effects(&self) -> bool {
         !self.effects.is_empty()
     }
+
+    /// Check if this function has the @simd decorator.
+    pub fn has_simd_decorator(&self) -> bool {
+        self.decorators.iter().any(|d| {
+            matches!(&d.name, Expr::Identifier(name) if name == "simd")
+        })
+    }
+}
+
+// =============================================================================
+// Bounds block types for @simd kernels
+// =============================================================================
+
+/// SIMD kernel bounds specification
+/// Trailing block after @simd function defining bounds handling
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundsBlock {
+    pub span: Span,
+    /// Bounds cases with patterns and handlers
+    pub cases: Vec<BoundsCase>,
+}
+
+/// Single case in a bounds: block
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundsCase {
+    pub span: Span,
+    /// Pattern condition (can be boolean composition)
+    pub pattern: BoundsPattern,
+    /// Handler body
+    pub body: Block,
+}
+
+/// Bounds pattern - boolean composition of bounds atoms
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundsPattern {
+    /// Single bounds atom: _.var.kind
+    Atom(BoundsAtom),
+    /// Boolean AND: pattern && pattern
+    And(Box<BoundsPattern>, Box<BoundsPattern>),
+    /// Boolean OR: pattern || pattern
+    Or(Box<BoundsPattern>, Box<BoundsPattern>),
+    /// Parenthesized: (pattern)
+    Paren(Box<BoundsPattern>),
+    /// Default catch-all: _
+    Default,
+}
+
+/// Bounds atom: _.<variable>.<kind>
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoundsAtom {
+    pub span: Span,
+    /// Variable name being indexed (e.g., "out", "a")
+    pub variable: String,
+    /// Bounds kind: over or under
+    pub kind: BoundsKind,
+}
+
+/// Kind of bounds event
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundsKind {
+    /// index >= length (overflow)
+    Over,
+    /// index < 0 (underflow)
+    Under,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -694,6 +761,8 @@ pub struct LetStmt {
     pub ty: Option<Type>,
     pub value: Option<Expr>,
     pub mutability: Mutability,
+    /// Storage class (Auto for normal variables, Shared for GPU shared memory)
+    pub storage_class: StorageClass,
 }
 
 /// Compile-time constant declaration

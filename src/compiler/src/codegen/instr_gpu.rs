@@ -157,12 +157,11 @@ pub fn compile_gpu_atomic<M: Module>(
     builder: &mut FunctionBuilder,
     dest: VReg,
     op: GpuAtomicOp,
-    addr: VReg,
+    ptr: VReg,
     value: VReg,
-    expected: Option<VReg>,
 ) -> InstrResult<()> {
-    let addr_val = ctx.vreg_values.get(&addr)
-        .ok_or_else(|| format!("addr vreg {:?} not found", addr))?;
+    let ptr_val = ctx.vreg_values.get(&ptr)
+        .ok_or_else(|| format!("ptr vreg {:?} not found", ptr))?;
     let value_val = ctx.vreg_values.get(&value)
         .ok_or_else(|| format!("value vreg {:?} not found", value))?;
 
@@ -172,7 +171,6 @@ pub fn compile_gpu_atomic<M: Module>(
         GpuAtomicOp::Add => "rt_gpu_atomic_add_i64",
         GpuAtomicOp::Sub => "rt_gpu_atomic_sub_i64",
         GpuAtomicOp::Xchg => "rt_gpu_atomic_xchg_i64",
-        GpuAtomicOp::CmpXchg => "rt_gpu_atomic_cmpxchg_i64",
         GpuAtomicOp::Min => "rt_gpu_atomic_min_i64",
         GpuAtomicOp::Max => "rt_gpu_atomic_max_i64",
         GpuAtomicOp::And => "rt_gpu_atomic_and_i64",
@@ -184,16 +182,8 @@ pub fn compile_gpu_atomic<M: Module>(
         .ok_or_else(|| format!("{} not found", func_name))?;
     let func_ref = ctx.module.declare_func_in_func(*func_id, builder.func);
 
-    let result = if op == GpuAtomicOp::CmpXchg {
-        let expected_vreg = expected.ok_or_else(|| "CmpXchg requires expected value".to_string())?;
-        let expected_val = ctx.vreg_values.get(&expected_vreg)
-            .ok_or_else(|| format!("expected vreg {:?} not found", expected_vreg))?;
-        let call = builder.ins().call(func_ref, &[*addr_val, *expected_val, *value_val]);
-        builder.inst_results(call)[0]
-    } else {
-        let call = builder.ins().call(func_ref, &[*addr_val, *value_val]);
-        builder.inst_results(call)[0]
-    };
+    let call = builder.ins().call(func_ref, &[*ptr_val, *value_val]);
+    let result = builder.inst_results(call)[0];
 
     ctx.vreg_values.insert(dest, result);
     Ok(())

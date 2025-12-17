@@ -510,6 +510,11 @@ impl<'a> Parser<'a> {
                     Ok(Expr::Identifier("vec".to_string()))
                 }
             }
+            // Handle gpu keyword as an identifier for gpu.* intrinsic function calls
+            TokenKind::Gpu => {
+                self.advance();
+                Ok(Expr::Identifier("gpu".to_string()))
+            }
             _ => Err(ParseError::unexpected_token(
                 "expression",
                 format!("{:?}", self.current.kind),

@@ -717,7 +717,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                             let mut arg_values = vec![];
                             for arg in args {
                                 arg_values.push(evaluate_expr(
-                                    arg,
+                                    &arg.value,
                                     &env,
                                     &functions,
                                     &classes,

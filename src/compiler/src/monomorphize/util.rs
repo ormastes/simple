@@ -211,6 +211,7 @@ mod tests {
             doc_comment: None,
             contract: None,
             is_abstract: false,
+            bounds_block: None,
         };
 
         let mangled = table.request_function("identity", vec![ConcreteType::Int], &func);
