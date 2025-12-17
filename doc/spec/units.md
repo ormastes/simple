@@ -967,9 +967,214 @@ error: multiplication not allowed for `user_id`
 
 ---
 
-## 8. Lint Attributes and Enforcement
+## 8. Bit-Limited Unit Representations
 
-### 8.1 The `primitive_api` Lint
+### 8.1 Overview
+
+Units can specify **storage representations** with explicit bit widths, enabling:
+- Compact storage in bitfields and packed structures
+- Debug-mode boundary checking for overflow detection
+- App-level customization of unit storage without modifying library definitions
+
+**Design Principles:**
+- Library defines allowed representations via `repr:` block
+- App chooses specific representation at use site
+- Compact `:` syntax for simple cases
+- Full `where` clause for complex constraints (range, overflow behavior)
+
+### 8.2 Grammar
+
+```ebnf
+# Unit family with repr block (lib level)
+unit_family_def = "unit" IDENT "(" "base" ":" type ")" ":" variant_list
+                  [ ":" NEWLINE INDENT unit_body DEDENT ]
+
+unit_body = (arithmetic_rule | repr_block | custom_fn)*
+
+repr_block = "repr" ":" repr_list
+repr_list = repr_type ("," repr_type)*
+repr_type = ("u" | "i" | "f") DIGITS
+
+# Type with repr constraint (app level)
+type_with_repr = unit_type [ ":" repr_type ] [ "where" constraints ]
+               | unit_type "where" constraints
+
+constraints = constraint ("," constraint)*
+constraint = "range" ":" range_expr
+           | "checked"                    # debug boundary check (panic on overflow)
+           | "saturate"                   # clamp to min/max on overflow
+           | "wrap"                       # modular arithmetic on overflow
+           | "default" ":" expr           # default value
+```
+
+### 8.3 Library-Level: Repr Block
+
+Unit families declare allowed representations in a `repr:` block:
+
+```simple
+unit length(base: f64): m = 1.0, cm = 0.01, km = 1000.0:
+    # Arithmetic rules
+    allow add(length) -> length
+    allow sub(length) -> length
+    allow mul(f64) -> length
+    allow div(f64) -> length
+
+    # Allowed representations
+    repr: f16, f32, f64, i8, i12, i16, i32, u8, u12, u16, u32
+
+unit time(base: f64): s = 1.0, ms = 0.001, us = 0.000001:
+    allow add(time) -> time
+    allow sub(time) -> time
+    repr: f32, f64, i16, i32, i64, u16, u32, u64
+
+unit angle(base: f64): deg = 1.0, rad = 57.2958:
+    allow add(angle) -> angle
+    allow sub(angle) -> angle
+    repr: f32, f64, i9, i16, u9, u16
+```
+
+**Repr Types:**
+
+| Prefix | Meaning | Examples |
+|--------|---------|----------|
+| `u` | Unsigned integer | `u8`, `u12`, `u16`, `u24`, `u32` |
+| `i` | Signed integer | `i8`, `i12`, `i16`, `i24`, `i32` |
+| `f` | Floating point | `f16`, `f32`, `f64` |
+
+### 8.4 App-Level: Compact Syntax
+
+Use colon `:` for simple repr specification:
+
+```simple
+# Type aliases
+type Cm8 = _cm:u8           # 8-bit unsigned centimeters
+type Cm12 = _cm:i12         # 12-bit signed centimeters
+type Deg9 = _deg:u9         # 9-bit unsigned degrees (0-511)
+
+# Variable declarations
+let width: _cm:u16 = 100_cm
+let height: _cm:u8 = 50_cm
+let angle: _deg:u9 = 360_deg
+
+# Default repr (uses family base type)
+let distance: _cm = 1000_cm    # f64 (base type)
+```
+
+### 8.5 App-Level: Where Clause
+
+Use `where` for complex constraints:
+
+```simple
+# Range constraint (compiler infers bit width)
+let x: _cm where range: 0..1000 = 500_cm           # infers u10
+
+# Range with signed values
+let offset: _cm where range: -500..500 = 0_cm      # infers i10
+
+# Explicit repr + debug checking
+let y: _cm:u8 where checked = 50_cm                # panic on overflow in debug
+
+# Overflow behavior options
+let z: _cm:u8 where saturate = 200_cm              # clamp to 0-255
+let w: _deg:u9 where wrap = 400_deg                # wrap around (modular)
+
+# Combined constraints
+let pos: _cm where range: 0..1000, checked = 500_cm
+let angle: _deg:u9 where wrap, default: 0_deg = get_angle()
+```
+
+### 8.6 Overflow Behavior
+
+| Behavior | Keyword | Debug Mode | Release Mode |
+|----------|---------|------------|--------------|
+| Default | (none) | Panic | Undefined |
+| Checked | `checked` | Panic | Panic |
+| Saturate | `saturate` | Clamp | Clamp |
+| Wrap | `wrap` | Modular | Modular |
+
+```simple
+let a: _cm:u8 = 300_cm                    # Debug: panic, Release: undefined
+let b: _cm:u8 where checked = 300_cm      # Always panic
+let c: _cm:u8 where saturate = 300_cm     # Value becomes 255
+let d: _cm:u8 where wrap = 300_cm         # Value becomes 44 (300 mod 256)
+```
+
+### 8.7 Range Inference
+
+When using `range:`, the compiler infers the minimum bit width:
+
+| Range | Inferred Type | Bits |
+|-------|---------------|------|
+| `0..255` | `u8` | 8 |
+| `0..1000` | `u10` | 10 |
+| `0..65535` | `u16` | 16 |
+| `-128..127` | `i8` | 8 |
+| `-500..500` | `i10` | 10 |
+| `-32768..32767` | `i16` | 16 |
+
+```simple
+# Compiler calculates: ceil(log2(1001)) = 10 bits needed
+let room_size: _cm where range: 0..1000 = 500_cm   # u10
+
+# Compiler calculates: ceil(log2(1001)) + 1 sign bit = 11 bits
+let offset: _cm where range: -500..500 = 0_cm      # i11
+```
+
+### 8.8 Conversions Between Representations
+
+```simple
+let a: _cm:u8 = 100_cm
+let b: _cm:u16 = a.widen()       # Explicit widening (always safe)
+let c: _cm:u8 = b.narrow()       # Explicit narrowing (checked in debug)
+
+# Implicit widening is allowed
+let d: _cm:u16 = a               # OK: u8 → u16 implicit
+
+# Implicit narrowing is NOT allowed
+# let e: _cm:u8 = b              # ERROR: use .narrow() or .saturate()
+
+# Safe narrowing options
+let f: _cm:u8 = b.narrow()       # Panics if out of range
+let g: _cm:u8 = b.saturate()     # Clamps to 0-255
+let h: _cm:u8 = b.wrap()         # Modular arithmetic
+```
+
+### 8.9 Arithmetic with Different Representations
+
+When operating on units with different representations, the result uses the wider type:
+
+```simple
+let a: _cm:u8 = 100_cm
+let b: _cm:u16 = 200_cm
+let c = a + b                    # Result type: _cm:u16
+
+let d: _cm:i8 = -50_cm
+let e: _cm:u8 = 100_cm
+let f = d + e                    # Result type: _cm:i16 (signed + unsigned → signed wider)
+```
+
+### 8.10 Usage in Bitfields
+
+See [Data Structures - Bitfields](data_structures.md#bitfields) for bitfield-specific syntax.
+
+```simple
+bitfield RobotArm:
+    x: _cm:i12          # 12-bit signed
+    y: _cm:i12
+    z: _cm:u10          # 10-bit unsigned
+    angle: _deg:u9      # 9-bit unsigned
+
+bitfield SensorData:
+    temp: _celsius where range: -40..125      # infers i8
+    humidity: _pct where range: 0..100        # infers u7
+    pressure: _hpa:u16 where checked
+```
+
+---
+
+## 9. Lint Attributes and Enforcement
+
+### 9.1 The `primitive_api` Lint
 
 The `primitive_api` lint controls warnings for bare primitives in public APIs.
 
@@ -978,7 +1183,7 @@ The `primitive_api` lint controls warnings for bare primitives in public APIs.
 - `deny` - Treat as compile error
 - `allow` - Suppress entirely
 
-### 8.2 The `bare_string` Lint
+### 9.2 The `bare_string` Lint
 
 The `bare_string` lint controls warnings for bare `str`/`String` types in public APIs. String values should use semantic unit types like `FilePath`, `Url`, `IpAddr`, etc.
 
@@ -1012,7 +1217,7 @@ pub fn log(message: str):
     ...
 ```
 
-### 8.3 Attribute Syntax
+### 9.3 Attribute Syntax
 
 ```simple
 # Directory-level (in __init__.spl, applies to entire directory tree)
@@ -1040,7 +1245,7 @@ When `#[deny(primitive_api)]` is placed in a directory's `__init__.spl`, it appl
 - All files directly in that directory
 - All child directories (recursively, unless overridden)
 
-### 8.4 Project Configuration (simple.toml)
+### 9.4 Project Configuration (simple.toml)
 
 ```toml
 [lint]
@@ -1054,7 +1259,7 @@ bare_bool = "warn"         # Warn on bool parameters
 # bare_bool = "deny"
 ```
 
-### 8.5 Standard Library Policy
+### 9.5 Standard Library Policy
 
 The standard library declares strict lints in its root `__init__.spl`:
 
@@ -1082,7 +1287,7 @@ All stdlib modules inherit these settings through `__init__.spl` attribute inher
 - User code: warnings by default (educational, non-blocking)
 - Standard library: errors (strict enforcement, zero tolerance)
 
-### 8.6 Recommended Project Settings
+### 9.6 Recommended Project Settings
 
 | Project Type | Setting | Rationale |
 |--------------|---------|-----------|
@@ -1092,7 +1297,7 @@ All stdlib modules inherit these settings through `__init__.spl` attribute inher
 | Legacy migration | `allow` | Gradual adoption |
 | Standard library | `deny` all | Exemplary code quality |
 
-### 8.7 Related Lints Summary
+### 9.7 Related Lints Summary
 
 | Lint | Default | Description |
 |------|---------|-------------|
@@ -1112,9 +1317,9 @@ bare_bool = "deny"
 
 ---
 
-## 9. Migration Guide
+## 10. Migration Guide
 
-### 9.1 From Bare Primitives
+### 10.1 From Bare Primitives
 
 ```simple
 # Before
@@ -1135,7 +1340,7 @@ enum UserStatus:
     Pending
 ```
 
-### 9.2 From Bare Strings
+### 10.2 From Bare Strings
 
 ```simple
 # Before
@@ -1164,7 +1369,7 @@ let conn = connect("example.com"_host, 443_port)
 let resp = fetch_url("https://api.example.com"_http)
 ```
 
-### 9.3 From Nullable Returns
+### 10.3 From Nullable Returns
 
 ```simple
 # Before
@@ -1178,7 +1383,7 @@ fn find_user(id: UserId) -> Option[User]:
         case _: None
 ```
 
-### 9.4 From Boolean Parameters
+### 10.4 From Boolean Parameters
 
 ```simple
 # Before

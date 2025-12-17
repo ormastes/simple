@@ -113,6 +113,12 @@ impl TypeChecker {
                     let ty = self.fresh_var();
                     self.env.insert(cu.name.clone(), ty);
                 }
+                Node::HandlePool(hp) => {
+                    // Register handle pool for type (no new type introduced)
+                    // The pool manages handles to the type specified in type_name
+                    let ty = self.fresh_var();
+                    self.env.insert(format!("__handle_pool_{}", hp.type_name), ty);
+                }
                 Node::Impl(_) => {
                     // Impl blocks don't introduce new names
                 }

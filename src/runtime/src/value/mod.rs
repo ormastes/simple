@@ -29,6 +29,7 @@ pub mod gpu;
 mod heap;
 pub mod net;
 mod objects;
+mod sync;
 pub mod tags;
 
 // Re-export core types
@@ -82,6 +83,23 @@ pub use channels::{
     rt_channel_close, rt_channel_free, rt_channel_id, rt_channel_is_closed, rt_channel_new,
     rt_channel_recv, rt_channel_recv_timeout, rt_channel_send, rt_channel_try_recv,
 };
+
+// Re-export synchronization primitives FFI functions
+pub use sync::{
+    // Mutex
+    rt_mutex_free, rt_mutex_id, rt_mutex_lock, rt_mutex_new, rt_mutex_try_lock, rt_mutex_unlock,
+    // RwLock
+    rt_rwlock_free, rt_rwlock_new, rt_rwlock_read, rt_rwlock_set, rt_rwlock_try_read,
+    rt_rwlock_try_write, rt_rwlock_write,
+    // Semaphore
+    rt_semaphore_acquire, rt_semaphore_acquire_timeout, rt_semaphore_count, rt_semaphore_free,
+    rt_semaphore_new, rt_semaphore_release, rt_semaphore_try_acquire,
+    // Barrier
+    rt_barrier_free, rt_barrier_new, rt_barrier_thread_count, rt_barrier_wait,
+};
+
+// Re-export synchronization types
+pub use sync::{RuntimeBarrier, RuntimeMutex, RuntimeRwLock, RuntimeSemaphore};
 
 // Re-export async/generator FFI functions
 pub use async_gen::{

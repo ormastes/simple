@@ -20,6 +20,11 @@ pub enum HeapObjectType {
     Channel = 0x0E,
     Weak = 0x0F,
     ContractViolation = 0x10,
+    // Synchronization primitives
+    Mutex = 0x11,
+    RwLock = 0x12,
+    Semaphore = 0x13,
+    Barrier = 0x14,
 }
 
 /// Header for all heap-allocated objects

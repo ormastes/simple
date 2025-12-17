@@ -135,6 +135,7 @@ impl<'a> Parser<'a> {
                 }
             }
             TokenKind::Unit => self.parse_unit(),
+            TokenKind::HandlePool => self.parse_handle_pool(),
             TokenKind::Extern => self.parse_extern(),
             TokenKind::Macro => self.parse_macro_def(),
             // Module system (Features #104-111)
@@ -401,10 +402,17 @@ impl<'a> Parser<'a> {
         // Parse optional where clause: where T: Clone + Default
         let where_clause = self.parse_where_clause()?;
 
-        // Skip newlines before checking for contract blocks
+        // Skip newlines before the function body colon
         self.skip_newlines();
 
-        // Parse optional contract block (new: in/out/out_err/invariant, legacy: requires/ensures)
+        self.expect(&TokenKind::Colon)?;
+
+        // After the colon, expect NEWLINE + INDENT to start the function body
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        // Parse optional contract block at the start of the function body
+        // (new: in/out/out_err/invariant, legacy: requires/ensures)
         let contract = if self.check(&TokenKind::In)
             || self.check(&TokenKind::Invariant)
             || self.check(&TokenKind::Out)
@@ -417,11 +425,8 @@ impl<'a> Parser<'a> {
             None
         };
 
-        // Skip newlines after contract block before expecting colon
-        self.skip_newlines();
-
-        self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
+        // Parse the rest of the function body statements
+        let body = self.parse_block_body()?;
 
         Ok(Node::Function(FunctionDef {
             span: Span::new(
@@ -894,11 +899,17 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_block(&mut self) -> Result<Block, ParseError> {
-        let start_span = self.current.span;
-
         // Expect NEWLINE then INDENT
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
+
+        self.parse_block_body()
+    }
+
+    /// Parse block body (assumes INDENT has already been consumed).
+    /// Used when we need to manually handle what comes before the block body.
+    pub(crate) fn parse_block_body(&mut self) -> Result<Block, ParseError> {
+        let start_span = self.current.span;
 
         let mut statements = Vec::new();
 

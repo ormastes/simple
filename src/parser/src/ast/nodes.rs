@@ -18,6 +18,7 @@ pub enum Node {
     Unit(UnitDef),
     UnitFamily(UnitFamilyDef),
     CompoundUnit(CompoundUnitDef),
+    HandlePool(HandlePoolDef),
 
     // Module system (Features #104-111)
     ModDecl(ModDecl),
@@ -431,6 +432,21 @@ pub struct UnitDef {
     pub name: String,          // e.g., "UserId" or "IpAddr"
     pub base_types: Vec<Type>, // e.g., [i64] or [str, u32] for multi-base units
     pub suffix: String,        // e.g., "uid" or "ip" (for literals like 42_uid or "127.0.0.1"_ip)
+    pub visibility: Visibility,
+}
+
+/// Handle pool declaration for a type
+/// ```simple
+/// handle_pool Enemy:
+///     capacity: 1024
+/// ```
+/// Declares a global handle pool for allocating handles to a specific type.
+/// Required before using `new+ T(...)` syntax.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandlePoolDef {
+    pub span: Span,
+    pub type_name: String,         // The type this pool manages (e.g., "Enemy")
+    pub capacity: Option<u64>,      // Optional initial capacity
     pub visibility: Visibility,
 }
 

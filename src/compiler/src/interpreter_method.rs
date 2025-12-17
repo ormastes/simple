@@ -836,11 +836,62 @@ fn evaluate_method_call(
                 let suffix = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
                 return Ok(Value::Bool(s.ends_with(&suffix)));
             }
+            "find_str" | "find" | "index_of" => {
+                let needle = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(match s.find(&needle) {
+                    Some(idx) => Value::some(Value::Int(idx as i64)),
+                    None => Value::none(),
+                });
+            }
             "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
             "to_lower" | "to_lowercase" => return Ok(Value::Str(s.to_lowercase())),
-            "trim" => return Ok(Value::Str(s.trim().to_string())),
+            "trim" | "trimmed" => return Ok(Value::Str(s.trim().to_string())),
             "trim_start" | "trim_left" => return Ok(Value::Str(s.trim_start().to_string())),
             "trim_end" | "trim_right" => return Ok(Value::Str(s.trim_end().to_string())),
+            "reversed" => return Ok(Value::Str(s.chars().rev().collect())),
+            "sorted" => {
+                let mut chars: Vec<char> = s.chars().collect();
+                chars.sort();
+                return Ok(Value::Str(chars.into_iter().collect()));
+            }
+            "taken" | "take" => {
+                let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Str(s.chars().take(n).collect()));
+            }
+            "dropped" | "drop" | "skip" => {
+                let n = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+                return Ok(Value::Str(s.chars().skip(n).collect()));
+            }
+            "appended" => {
+                let ch = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(Value::Str(format!("{}{}", s, ch)));
+            }
+            "prepended" => {
+                let ch = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(Value::Str(format!("{}{}", ch, s)));
+            }
+            "push" => {
+                // Note: Returns a new string with the character appended (strings are immutable)
+                let ch = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(Value::Str(format!("{}{}", s, ch)));
+            }
+            "push_str" => {
+                // Note: Returns a new string with the string appended (strings are immutable)
+                let other = eval_arg(args, 0, Value::Str(String::new()), env, functions, classes, enums, impl_methods)?.to_key_string();
+                return Ok(Value::Str(format!("{}{}", s, other)));
+            }
+            "pop" => {
+                // Note: Returns Some(last_char) but doesn't modify the string (immutable)
+                if s.is_empty() {
+                    return Ok(Value::none());
+                }
+                let last = s.chars().last().map(|c| Value::Str(c.to_string())).unwrap_or(Value::Nil);
+                return Ok(Value::some(last));
+            }
+            "clear" => {
+                // Note: Returns empty string (strings are immutable)
+                return Ok(Value::Str(String::new()));
+            }
             "split" => {
                 let sep = eval_arg(args, 0, Value::Str(" ".into()), env, functions, classes, enums, impl_methods)?.to_key_string();
                 let parts: Vec<Value> = s.split(&sep).map(|p| Value::Str(p.to_string())).collect();
@@ -1020,6 +1071,23 @@ fn evaluate_method_call(
                     }
                     return Ok(Value::Nil);
                 }
+                "or" => {
+                    // Returns self if Some, otherwise returns the other Option
+                    if opt_variant == Some(OptionVariant::Some) {
+                        return Ok(recv_val.clone());
+                    }
+                    return eval_arg(args, 0, Value::none(), env, functions, classes, enums, impl_methods);
+                }
+                "ok_or" => {
+                    // Converts Option to Result: Some(v) -> Ok(v), None -> Err(error)
+                    if opt_variant == Some(OptionVariant::Some) {
+                        if let Some(val) = payload {
+                            return Ok(Value::ok(val.as_ref().clone()));
+                        }
+                    }
+                    let error = eval_arg(args, 0, Value::Str("None".into()), env, functions, classes, enums, impl_methods)?;
+                    return Ok(Value::err(error));
+                }
                 "map" => {
                     return eval_option_map(variant, payload, args, env, functions, classes, enums, impl_methods);
                 }
@@ -1147,6 +1215,13 @@ fn evaluate_method_call(
                         return Ok(payload.as_ref().map(|p| Value::some(p.as_ref().clone())).unwrap_or_else(Value::none));
                     }
                     return Ok(Value::none());
+                }
+                "or" => {
+                    // Returns self if Ok, otherwise returns the other Result
+                    if res_variant == Some(ResultVariant::Ok) {
+                        return Ok(recv_val.clone());
+                    }
+                    return eval_arg(args, 0, Value::err(Value::Nil), env, functions, classes, enums, impl_methods);
                 }
                 "map" => {
                     return eval_result_map(variant, payload, args, env, functions, classes, enums, impl_methods);

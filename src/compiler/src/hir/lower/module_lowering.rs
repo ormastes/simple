@@ -79,7 +79,8 @@ impl Lowerer {
                 | Node::ExportUseStmt(_)
                 | Node::AutoImportStmt(_)
                 | Node::RequiresCapabilities(_)
-                | Node::CompoundUnit(_) => {}
+                | Node::CompoundUnit(_)
+                | Node::HandlePool(_) => {}
             }
         }
 

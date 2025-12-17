@@ -77,12 +77,23 @@ fn main() {
             let test_name = sanitize_test_name(&relative);
             let path_str = path.display().to_string().replace('\\', "/");
 
+            // Use a larger stack size (8MB) for Simple interpreter tests
+            // The interpreter uses recursive evaluation which can overflow the default 2MB stack
             generated.push_str(&format!(
                 r#"
 #[test]
 fn simple_stdlib_{test_name}() {{
-    let path = Path::new("{path_str}");
-    let result = run_test_file(path);
+    // Run in a thread with larger stack to handle deep recursion in interpreter
+    let result = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024) // 8MB stack
+        .spawn(|| {{
+            let path = Path::new("{path_str}");
+            run_test_file(path)
+        }})
+        .expect("Failed to spawn test thread")
+        .join()
+        .expect("Test thread panicked");
+
     match result {{
         SimpleTestResult::Pass {{ .. }} => (),
         SimpleTestResult::Skipped {{ .. }} => (),
