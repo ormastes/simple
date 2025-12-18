@@ -721,6 +721,36 @@ pub fn compile_instruction<M: Module>(
             compile_unit_bound_check(ctx, builder, *value, unit_name, *min, *max, *overflow)?;
         }
 
+        MirInst::UnitWiden {
+            dest,
+            value,
+            from_bits,
+            to_bits,
+            signed,
+        } => {
+            compile_unit_widen(ctx, builder, *dest, *value, *from_bits, *to_bits, *signed)?;
+        }
+
+        MirInst::UnitNarrow {
+            dest,
+            value,
+            from_bits,
+            to_bits,
+            signed,
+            overflow,
+        } => {
+            compile_unit_narrow(ctx, builder, *dest, *value, *from_bits, *to_bits, *signed, *overflow)?;
+        }
+
+        MirInst::UnitSaturate {
+            dest,
+            value,
+            min,
+            max,
+        } => {
+            compile_unit_saturate(ctx, builder, *dest, *value, *min, *max)?;
+        }
+
         // =========================================================================
         // Pointer instructions
         // =========================================================================
@@ -1006,6 +1036,134 @@ fn compile_unit_bound_check<M: Module>(
         }
     }
 
+    Ok(())
+}
+
+/// Compile a UnitWiden instruction - widen a unit value to a larger representation.
+/// This is a lossless conversion (e.g., u8 → u16, i8 → i32).
+fn compile_unit_widen<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    value: VReg,
+    from_bits: u8,
+    to_bits: u8,
+    signed: bool,
+) -> InstrResult<()> {
+    let val = ctx.vreg_values[&value];
+
+    // For widening, we just need to extend the value
+    let result = if signed {
+        // Sign-extend for signed types
+        match (from_bits, to_bits) {
+            (8, 16) | (8, 32) | (8, 64) | (16, 32) | (16, 64) | (32, 64) => {
+                builder.ins().sextend(types::I64, val)
+            }
+            _ => val, // Same size, just copy
+        }
+    } else {
+        // Zero-extend for unsigned types
+        match (from_bits, to_bits) {
+            (8, 16) | (8, 32) | (8, 64) | (16, 32) | (16, 64) | (32, 64) => {
+                builder.ins().uextend(types::I64, val)
+            }
+            _ => val, // Same size, just copy
+        }
+    };
+
+    ctx.vreg_values.insert(dest, result);
+    Ok(())
+}
+
+/// Compile a UnitNarrow instruction - narrow a unit value to a smaller representation.
+/// This may overflow and requires bounds checking.
+fn compile_unit_narrow<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    value: VReg,
+    from_bits: u8,
+    to_bits: u8,
+    signed: bool,
+    overflow: UnitOverflowBehavior,
+) -> InstrResult<()> {
+    let val = ctx.vreg_values[&value];
+
+    // Calculate the bounds for the target type
+    let (min, max) = if signed {
+        let max_val = (1i64 << (to_bits - 1)) - 1;
+        let min_val = -(1i64 << (to_bits - 1));
+        (min_val, max_val)
+    } else {
+        let max_val = (1i64 << to_bits) - 1;
+        (0i64, max_val)
+    };
+
+    let min_val = builder.ins().iconst(types::I64, min);
+    let max_val = builder.ins().iconst(types::I64, max);
+
+    match overflow {
+        UnitOverflowBehavior::Default | UnitOverflowBehavior::Checked => {
+            // Check if value is in range: min <= val && val <= max
+            let ge_min = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, val, min_val);
+            let le_max = builder.ins().icmp(IntCC::SignedLessThanOrEqual, val, max_val);
+            let in_range = builder.ins().band(ge_min, le_max);
+
+            // Trap if out of range
+            let trap_block = builder.create_block();
+            let continue_block = builder.create_block();
+
+            builder.ins().brif(in_range, continue_block, &[], trap_block, &[]);
+
+            builder.switch_to_block(trap_block);
+            builder.seal_block(trap_block);
+            builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(11));
+
+            builder.switch_to_block(continue_block);
+            builder.seal_block(continue_block);
+
+            // Value is in range, just truncate/keep as is
+            ctx.vreg_values.insert(dest, val);
+        }
+        UnitOverflowBehavior::Saturate => {
+            // Clamp value to [min, max]
+            let clamped_high = builder.ins().smin(val, max_val);
+            let clamped = builder.ins().smax(clamped_high, min_val);
+            ctx.vreg_values.insert(dest, clamped);
+        }
+        UnitOverflowBehavior::Wrap => {
+            // For wrapping, we can use a bitmask for power-of-2 sizes
+            let mask = (1i64 << to_bits) - 1;
+            let mask_val = builder.ins().iconst(types::I64, mask);
+            let wrapped = builder.ins().band(val, mask_val);
+            ctx.vreg_values.insert(dest, wrapped);
+        }
+    }
+
+    Ok(())
+}
+
+/// Compile a UnitSaturate instruction - clamp a value to unit bounds.
+fn compile_unit_saturate<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    value: VReg,
+    min: i64,
+    max: i64,
+) -> InstrResult<()> {
+    let val = ctx.vreg_values[&value];
+
+    // Create constants for bounds
+    let min_val = builder.ins().iconst(types::I64, min);
+    let max_val = builder.ins().iconst(types::I64, max);
+
+    // Clamp value to [min, max]
+    // value = max(min, min(value, max))
+    let clamped_high = builder.ins().smin(val, max_val);
+    let clamped = builder.ins().smax(clamped_high, min_val);
+
+    ctx.vreg_values.insert(dest, clamped);
     Ok(())
 }
 

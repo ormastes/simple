@@ -625,6 +625,51 @@ pub enum MirInst {
         overflow: UnitOverflowBehavior,
     },
 
+    /// Widen a unit value to a larger representation.
+    /// Example: u8 distance → u16 distance (lossless conversion)
+    UnitWiden {
+        /// Destination register (wider type)
+        dest: VReg,
+        /// Source value (narrow type)
+        value: VReg,
+        /// Source type bit width
+        from_bits: u8,
+        /// Destination type bit width
+        to_bits: u8,
+        /// Whether source is signed
+        signed: bool,
+    },
+
+    /// Narrow a unit value to a smaller representation with bounds checking.
+    /// Example: u16 distance → u8 distance (may overflow)
+    UnitNarrow {
+        /// Destination register (narrower type)
+        dest: VReg,
+        /// Source value (wide type)
+        value: VReg,
+        /// Source type bit width
+        from_bits: u8,
+        /// Destination type bit width
+        to_bits: u8,
+        /// Whether types are signed
+        signed: bool,
+        /// Overflow behavior
+        overflow: UnitOverflowBehavior,
+    },
+
+    /// Saturate a unit value to its type bounds.
+    /// Clamps the value to [min, max] without error.
+    UnitSaturate {
+        /// Destination register
+        dest: VReg,
+        /// Source value
+        value: VReg,
+        /// Minimum bound
+        min: i64,
+        /// Maximum bound
+        max: i64,
+    },
+
     // =========================================================================
     // GPU instructions (software backend + future hardware)
     // =========================================================================
@@ -954,6 +999,11 @@ impl HasEffects for MirInst {
 
             // Unit bound checks may panic in debug mode (Io effect due to potential panic)
             MirInst::UnitBoundCheck { .. } => Effect::Io,
+
+            // Unit conversions (widen is compute, narrow may panic, saturate is compute)
+            MirInst::UnitWiden { .. } => Effect::Compute,
+            MirInst::UnitNarrow { .. } => Effect::Io, // May panic on overflow
+            MirInst::UnitSaturate { .. } => Effect::Compute, // Clamping is pure compute
 
             // Collection allocation (GcAlloc effect)
             MirInst::ArrayLit { .. }
@@ -1330,6 +1380,9 @@ impl MirInst {
             MirInst::ContractCheck { condition, .. } => vec![*condition],
             MirInst::ContractOldCapture { value, .. } => vec![*value],
             MirInst::UnitBoundCheck { value, .. } => vec![*value],
+            MirInst::UnitWiden { value, .. } => vec![*value],
+            MirInst::UnitNarrow { value, .. } => vec![*value],
+            MirInst::UnitSaturate { value, .. } => vec![*value],
             MirInst::PointerNew { value, .. } => vec![*value],
             MirInst::PointerRef { source, .. } => vec![*source],
             MirInst::PointerDeref { pointer, .. } => vec![*pointer],
