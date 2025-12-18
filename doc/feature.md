@@ -40,6 +40,17 @@
 | Duplication docs | ✅ | Created DUPLICATION_ANALYSIS.md and DUPLICATION_REFACTORING_PLAN.md |
 | Findings | ✅ | ~2% structural (acceptable), ~0.8% architectural, ~0.5% refactorable |
 
+**Simple Language Test Integration:**
+| Test Suite | Status | Integration | Count |
+|------------|--------|-------------|-------|
+| simple/std_lib/test/ | ✅ | Auto-discovered via build.rs → simple_stdlib_tests.rs | 31 tests |
+| Unit tests | ✅ | core, concurrency, contracts, spec, ui, units | 20 files |
+| System tests | ✅ | doctest (parser, matcher, runner), spec (matchers, framework) | 5 files |
+| Integration tests | ✅ | doctest discovery, spec features | 6 files |
+| simple/test/system/ | ⚠️ | NOT auto-discovered (manual test files only) | 65+ files |
+| Test discovery | ✅ | `*_spec.spl` and `*_test.spl` patterns, skips `fixtures/` | Pattern-based |
+| Run command | ✅ | `cargo test -p simple-driver --test simple_stdlib_tests` | All integrated |
+
 **Cumulative File Splitting (Sessions 1-11):**
 - 14 source files split, 24 extract modules created
 - ~8,400 lines extracted total

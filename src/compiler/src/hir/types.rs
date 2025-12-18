@@ -397,7 +397,6 @@ impl From<simple_parser::PointerKind> for PointerKind {
 }
 
 /// GPU intrinsic function kind for kernel-side operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 include!("gpu_intrinsics.rs");
 
 include!("type_registry.rs");

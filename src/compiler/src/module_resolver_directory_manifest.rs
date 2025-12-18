@@ -1,4 +1,4 @@
-//! DirectoryManifest implementation - methods for visibility, capabilities, and effect validation
+// DirectoryManifest implementation - methods for visibility, capabilities, and effect validation
 
 use super::*;
 
