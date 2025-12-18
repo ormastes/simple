@@ -57,6 +57,20 @@
 | Run system tests | ✅ | `cargo test -p simple-driver --test simple_tests` | 65 tests |
 | Total Simple tests | ✅ | Both directories fully integrated with `cargo test` | 96 tests |
 
+**System Test Documentation & SDN Grammar:**
+| Component | Status | Description |
+|-----------|--------|-------------|
+| doc/system_test.md | ✅ | Comprehensive system test framework documentation (495 lines) |
+| SDN Grammar (EBNF) | ✅ | Complete formal grammar for Simple Data Notation |
+| SDN Syntax Examples | ✅ | Primitives, dicts, arrays, tables (short/long forms) |
+| BDD Spec Integration | ✅ | Given-When-Then pattern for system tests |
+| CLI Testing Patterns | ✅ | Compiler, interpreter, watcher testing examples |
+| Test Discovery Docs | ✅ | Pattern-based discovery (`*_spec.spl`, `*_test.spl`) |
+| Build Integration | ✅ | Rust test wrapper generation via build.rs documented |
+| Grammar Tokens | ✅ | ident, bare_string, quoted_string, number, bool, null |
+| Statement Types | ✅ | Simple values, inline assigns, blocks, typed/named tables |
+| Complete Examples | ✅ | Test configuration, CLI testing, file watcher testing |
+
 **Cumulative File Splitting (Sessions 1-11):**
 - 14 source files split, 24 extract modules created
 - ~8,400 lines extracted total
