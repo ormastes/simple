@@ -1,5 +1,6 @@
 // GPU and SIMD intrinsic kinds for HIR types module
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuIntrinsicKind {
     /// Get global work item ID for a dimension
     GlobalId,
