@@ -238,6 +238,10 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
         };
     }
 
+    // Initialize coverage if enabled (but don't initialize global singleton here,
+    // let the test runner handle that)
+    // Coverage will be collected via interpreter hooks
+
     // Run the test with output capture, using file path for proper import resolution
     let interpreter = Interpreter::new();
     let config = RunConfig {

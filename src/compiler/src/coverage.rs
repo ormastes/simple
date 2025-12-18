@@ -203,6 +203,100 @@ pub fn save_global_coverage() -> Result<(), String> {
     Ok(())
 }
 
+/// Coverage validation and checking functions
+impl CoverageCollector {
+    /// Check if any coverage data was collected
+    pub fn has_data(&self) -> bool {
+        !self.execution_map.is_empty()
+            || !self.function_calls.is_empty()
+            || !self.ffi_calls.is_empty()
+    }
+
+    /// Validate that minimum coverage was achieved
+    pub fn validate_minimum_coverage(
+        &self,
+        min_lines: usize,
+        min_functions: usize,
+    ) -> Result<(), String> {
+        let stats = self.stats();
+
+        if stats.total_lines < min_lines {
+            return Err(format!(
+                "Insufficient line coverage: {} < {} required",
+                stats.total_lines, min_lines
+            ));
+        }
+
+        if stats.total_functions < min_functions {
+            return Err(format!(
+                "Insufficient function coverage: {} < {} required",
+                stats.total_functions, min_functions
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Check if a specific function was called
+    pub fn was_function_called(&self, function_name: &str) -> bool {
+        self.function_calls.contains_key(function_name)
+    }
+
+    /// Check if a specific file was executed
+    pub fn was_file_executed(&self, file: &Path) -> bool {
+        self.execution_map.contains_key(file)
+    }
+
+    /// Get list of all executed files
+    pub fn executed_files(&self) -> Vec<PathBuf> {
+        self.execution_map.keys().cloned().collect()
+    }
+
+    /// Get list of all called functions
+    pub fn called_functions(&self) -> Vec<String> {
+        self.function_calls.keys().cloned().collect()
+    }
+
+    /// Get coverage percentage for a file (if we know total lines)
+    pub fn file_coverage_percentage(&self, file: &Path, total_lines: usize) -> f64 {
+        if let Some(executed_lines) = self.execution_map.get(file) {
+            (executed_lines.len() as f64 / total_lines as f64) * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    /// Generate a summary report
+    pub fn summary_report(&self) -> String {
+        let stats = self.stats();
+        let mut report = String::new();
+
+        report.push_str("=== Coverage Summary ===\n");
+        report.push_str(&format!("Lines executed: {}\n", stats.total_lines));
+        report.push_str(&format!("Files covered: {}\n", stats.total_files));
+        report.push_str(&format!("Functions called: {}\n", stats.total_functions));
+        report.push_str(&format!("FFI calls: {}\n", stats.total_ffi_calls));
+
+        if !self.function_calls.is_empty() {
+            report.push_str("\nTop Functions:\n");
+            let mut funcs: Vec<_> = self.function_calls.iter().collect();
+            funcs.sort_by(|a, b| b.1.cmp(a.1)); // Sort by call count descending
+            for (func, count) in funcs.iter().take(10) {
+                report.push_str(&format!("  {} : {} calls\n", func, count));
+            }
+        }
+
+        if !self.ffi_calls.is_empty() {
+            report.push_str("\nFFI Calls:\n");
+            for (ffi, count) in &self.ffi_calls {
+                report.push_str(&format!("  {} : {} calls\n", ffi, count));
+            }
+        }
+
+        report
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,5 +349,44 @@ mod tests {
         assert_eq!(cov1.stats().total_functions, 2); // foo, bar
         assert_eq!(cov1.function_call_count("foo"), 2);
         assert_eq!(cov1.function_call_count("bar"), 1);
+    }
+
+    #[test]
+    fn test_coverage_validation() {
+        let mut cov = CoverageCollector::new();
+
+        // Empty coverage
+        assert!(!cov.has_data());
+
+        // Add some data
+        cov.record_function_call("test_fn");
+        assert!(cov.has_data());
+
+        // Check function was called
+        assert!(cov.was_function_called("test_fn"));
+        assert!(!cov.was_function_called("other_fn"));
+
+        // Validate minimum coverage
+        assert!(cov.validate_minimum_coverage(0, 1).is_ok());
+        assert!(cov.validate_minimum_coverage(1, 1).is_err()); // Need at least 1 line
+        assert!(cov.validate_minimum_coverage(0, 2).is_err()); // Need at least 2 functions
+    }
+
+    #[test]
+    fn test_coverage_summary_report() {
+        let mut cov = CoverageCollector::new();
+        cov.record_function_call("main");
+        cov.record_function_call("helper");
+        cov.record_function_call("main"); // Called twice
+        cov.record_ffi_call("__builtin_print");
+
+        let report = cov.summary_report();
+
+        assert!(report.contains("=== Coverage Summary ==="));
+        assert!(report.contains("Functions called: 2"));
+        assert!(report.contains("FFI calls: 1"));
+        assert!(report.contains("main : 2 calls"));
+        assert!(report.contains("helper : 1 calls"));
+        assert!(report.contains("__builtin_print : 1 calls"));
     }
 }
