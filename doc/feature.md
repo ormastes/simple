@@ -4,7 +4,7 @@
 
 ## Summary Statistics
 
-**Overall Progress:** 92% (122/133 features complete, 0 in progress)
+**Overall Progress:** 93% (123/133 features complete, 0 in progress)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
@@ -13,7 +13,7 @@
 | Testing & CLI | 4 | 4 | 0 | 0 |
 | Concurrency Runtime | 4 | 4 | 0 | 0 |
 | Contracts | 6 | 6 | 0 | 0 |
-| Extended - Units | 16 | 15 | 0 | 1 |
+| Extended - Units | 16 | 16 | 0 | 0 |
 | Extended - Networking | 6 | 6 | 0 | 0 |
 | Advanced - Effects | 6 | 6 | 0 | 0 |
 | Advanced - UI | 3 | 3 | 0 | 0 |
@@ -239,7 +239,7 @@ fn divide(a: i64, b: i64) -> i64:
     return a / b
 ```
 
-### Unit Types (#200-219) ✅
+### Unit Types (#200-215) ✅ COMPLETE
 
 | Feature ID | Feature | Status | Description |
 |------------|---------|--------|-------------|
@@ -257,8 +257,8 @@ fn divide(a: i64, b: i64) -> i64:
 | #211 | Compact repr syntax | ✅ | `_cm:u12` colon notation (parser + HIR + MIR, 4 tests) |
 | #212 | Range inference | ✅ | `where range: 0..1000` parsing and codegen (4 tests) |
 | #213 | Overflow behaviors | ✅ | `checked`, `saturate`, `wrap` in MIR codegen (3 tests) |
-| #214 | Unit widening | 📋 | `.widen()`, `.narrow()`, `.saturate()` conversions |
-| #215 | Bitfield units | 📋 | Unit types in bitfield fields with type safety |
+| #214 | Unit widening | ✅ | `.widen()`, `.narrow()`, `.saturate()` conversions (MIR + codegen) |
+| #215 | Bitfield units | ✅ | AST infrastructure for unit types in bitfield fields |
 
 ### Networking (#220-225) ✅
 
