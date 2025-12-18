@@ -44,12 +44,18 @@
 | Test Suite | Status | Integration | Count |
 |------------|--------|-------------|-------|
 | simple/std_lib/test/ | ✅ | Auto-discovered via build.rs → simple_stdlib_tests.rs | 31 tests |
-| Unit tests | ✅ | core, concurrency, contracts, spec, ui, units | 20 files |
-| System tests | ✅ | doctest (parser, matcher, runner), spec (matchers, framework) | 5 files |
-| Integration tests | ✅ | doctest discovery, spec features | 6 files |
-| simple/test/system/ | ⚠️ | NOT auto-discovered (manual test files only) | 65+ files |
+| └─ Unit tests | ✅ | core, concurrency, contracts, spec, ui, units | 20 files |
+| └─ System tests | ✅ | doctest (parser, matcher, runner), spec (matchers, framework) | 5 files |
+| └─ Integration tests | ✅ | doctest discovery, spec features | 6 files |
+| simple/test/ | ✅ | Auto-discovered via build.rs → simple_tests.rs | 65 tests |
+| └─ system/compiler/ | ✅ | Compiler CLI system tests | 1 file |
+| └─ system/interpreter/ | ✅ | Interpreter CLI system tests | 1 file |
+| └─ system/watcher/ | ✅ | File watcher system tests | 1 file |
+| └─ system/features/ | ✅ | Language feature system tests | 62 files |
 | Test discovery | ✅ | `*_spec.spl` and `*_test.spl` patterns, skips `fixtures/` | Pattern-based |
-| Run command | ✅ | `cargo test -p simple-driver --test simple_stdlib_tests` | All integrated |
+| Run stdlib tests | ✅ | `cargo test -p simple-driver --test simple_stdlib_tests` | 31 tests |
+| Run system tests | ✅ | `cargo test -p simple-driver --test simple_tests` | 65 tests |
+| Total Simple tests | ✅ | Both directories fully integrated with `cargo test` | 96 tests |
 
 **Cumulative File Splitting (Sessions 1-11):**
 - 14 source files split, 24 extract modules created
