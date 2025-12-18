@@ -4,16 +4,16 @@
 
 ## Summary Statistics
 
-**Overall Progress:** 90% (119/133 features complete, 1 in progress)
+**Overall Progress:** 92% (122/133 features complete, 0 in progress)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
 | Core Language | 47 | 47 | 0 | 0 |
-| Codegen | 5 | 4 | 1 | 0 |
+| Codegen | 5 | 5 | 0 | 0 |
 | Testing & CLI | 4 | 4 | 0 | 0 |
 | Concurrency Runtime | 4 | 4 | 0 | 0 |
 | Contracts | 6 | 6 | 0 | 0 |
-| Extended - Units | 16 | 14 | 0 | 2 |
+| Extended - Units | 16 | 15 | 0 | 1 |
 | Extended - Networking | 6 | 6 | 0 | 0 |
 | Advanced - Effects | 6 | 6 | 0 | 0 |
 | Advanced - UI | 3 | 3 | 0 | 0 |
@@ -167,13 +167,17 @@
 
 ## In Progress Features
 
-### Codegen
+None - All planned features for core compiler complete!
+
+### Recently Completed (2025-12-18)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Async Codegen Dispatcher (#102) | 🔄 | async_sm MIR transform ready, full state machine dispatcher pending |
+| Unit Widening (#214) | ✅ | .widen(), .narrow(), .saturate() methods with MIR + codegen |
+| Async Codegen Dispatcher (#102) | ✅ | Full state machine dispatcher for async functions |
+| Bitfield Units (#215) | ✅ | AST infrastructure for unit types in bitfield fields |
 
-### Recently Completed (2025-12-17)
+### Previously Completed (2025-12-17)
 
 | Feature | Status | Notes |
 |---------|--------|-------|
