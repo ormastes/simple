@@ -13,6 +13,7 @@
 **Key Findings:**
 - ✅ **Recommended for:** Final executable generation (2-4x faster than lld)
 - ✅ **Suitable for:** Development builds with rapid iteration
+- ✅ **RISC-V 32-bit:** Full support for RV32LE/BE since v1.5.0 (Aug 2022) - suitable for embedded/IoT targets
 - ⚠️ **Limited for:** Symbol analysis and introspection (basic capabilities only)
 - ❌ **Not suitable for:** SMF binary format (mold produces ELF/Mach-O/PE)
 
@@ -69,7 +70,12 @@ On a 16-core system (from mold README):
 
 ### Supported Platforms
 
-**Architectures:** x86-64, i386, ARM64, ARM32, RISC-V, PowerPC (32/64), s390x, LoongArch, SPARC64, m68k, SH-4
+**Architectures:** x86-64, i386, ARM64, ARM32, RISC-V (RV32/RV64 LE/BE), PowerPC (32/64), s390x, LoongArch (32/64), SPARC64, m68k, SH-4
+
+**RISC-V Support:**
+- **RV64LE** (RISC-V 64-bit little-endian): Added in v1.1 (May 2022), full support for linking large programs
+- **RV32LE** (RISC-V 32-bit little-endian): Added in v1.5.0 (Aug 2022)
+- **RV64BE/RV32BE** (big-endian variants): Added in v1.5.0 (experimental, rare in practice)
 
 **Binary Formats:** ELF (Linux), Mach-O (macOS), PE/COFF (Windows - experimental)
 
@@ -260,6 +266,71 @@ LINKER ?= mold
 native_build:
 	$(LINKER) -o simple build/*.o
 ```
+
+#### Scenario 5: Cross-Compilation to RISC-V 32-bit
+
+**Status:** ✅ Supported (RV32LE/BE since v1.5.0)
+
+**Use Case:** Compile Simple programs for RISC-V 32-bit embedded systems or bare-metal targets
+
+**Pipeline:**
+```
+Simple (.spl) → LLVM Codegen → RISC-V Object Files → mold → RV32 ELF Binary
+```
+
+**Toolchain Setup:**
+```bash
+# Install RISC-V 32-bit cross-compiler
+sudo apt install gcc-riscv32-unknown-elf
+
+# Configure Simple to use mold for RISC-V target
+export SIMPLE_LINKER=mold
+export SIMPLE_TARGET=riscv32-unknown-elf
+```
+
+**Integration Code:**
+```rust
+// In src/compiler/src/codegen/llvm/backend.rs
+pub fn link_for_target(
+    object_files: &[PathBuf],
+    output: &Path,
+    target: &str,
+) -> Result<()> {
+    let mut cmd = Command::new("mold");
+    cmd.arg("-o").arg(output);
+
+    // Add target-specific flags for RISC-V 32-bit
+    if target.starts_with("riscv32") {
+        cmd.arg("-m").arg("elf32lriscv"); // 32-bit little-endian RISC-V
+        cmd.arg("--sysroot=/usr/riscv32-unknown-elf");
+    }
+
+    for obj in object_files {
+        cmd.arg(obj);
+    }
+
+    cmd.status()?.success().then_some(()).ok_or(...)
+}
+```
+
+**Benefits for Simple:**
+- **Embedded Systems**: Link Simple programs for RV32 microcontrollers (e.g., SiFive FE310, ESP32-C3)
+- **Bare-Metal**: Generate standalone binaries for RISC-V hardware without OS
+- **Fast Linking**: Same 4x speedup applies to cross-compilation builds
+- **IoT/Edge Devices**: Target 32-bit RISC-V processors common in IoT applications
+
+**Target Platforms:**
+- **RV32I**: Base 32-bit integer instruction set (minimal embedded systems)
+- **RV32IM**: With multiplication/division (general-purpose microcontrollers)
+- **RV32IMAC**: With atomics and compressed instructions (common IoT chips)
+- **RV32GC**: Full general-purpose ISA (Linux-capable embedded systems)
+
+**Limitations:**
+- Only for native binary output (not SMF format)
+- Requires RISC-V cross-toolchain installed
+- Big-endian RV32BE support is experimental (rarely used in practice)
+
+**Note:** As of mold v1.5.0 (August 2022), RV32 support has been stable for 3+ years with ongoing improvements for RISC-V-specific features like linker relaxation and `.riscv.attributes` handling.
 
 ---
 
