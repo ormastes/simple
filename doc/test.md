@@ -740,3 +740,11 @@ All coverage thresholds met!
 - Runtime GC (`simple_runtime::gc::GcRuntime`) wraps Abfall, emitting structured `GcLogEvent` markers
 - In system tests, use `Runner::with_gc(GcRuntime::with_logger(...))` for in-memory assertions
 - Use `Runner::new_with_gc_logging()` or CLI `--gc-log` to surface logs to stdout
+
+---
+
+## See Also
+
+- `doc/system_test.md` - System test framework guide (SDN config, BDD patterns)
+- `doc/spec/bdd_spec.md` - BDD spec framework specification (describe/context/it)
+- `doc/spec/sdn.md` - SDN (Simple Data Notation) format specification

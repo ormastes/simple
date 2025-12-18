@@ -78,6 +78,7 @@ simple/                            # Project root - Rust compiler implementation
 │   ├── formal_verification.md     # Lean 4 formal verification docs
 │   ├── import_export_and__init__.md  # Module system specification (v4)
 │   ├── test.md                    # Test policy (mock control, coverage, test levels)
+│   ├── system_test.md             # System test framework (SDN config, BDD patterns)
 │   ├── spec/                      # Language specifications
 │   │   ├── language.md            # Spec index with quick reference
 │   │   ├── syntax.md              # Lexical structure, literals, operators
@@ -91,6 +92,8 @@ simple/                            # Project root - Rust compiler implementation
 │   │   ├── metaprogramming.md     # Macros, DSL, decorators, comprehensions
 │   │   ├── stdlib.md              # Standard library spec (lib/, native_lib/)
 │   │   ├── gpu_simd.md            # GPU and SIMD specification
+│   │   ├── bdd_spec.md            # BDD spec framework (describe/context/it)
+│   │   ├── sdn.md                 # SDN - Simple Data Notation format
 │   │   └── lexer_parser.md        # Parser/lexer specification
 │   ├── design/                    # Design documents
 │   │   ├── memory.md              # Memory management design
