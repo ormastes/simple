@@ -4,11 +4,11 @@
 
 ## Summary Statistics
 
-**Overall Progress:** 85% (114/133 features complete, 2 in progress)
+**Overall Progress:** 90% (119/133 features complete, 1 in progress)
 
 | Category | Total | Complete | In Progress | Planned |
 |----------|-------|----------|-------------|---------|
-| Core Language | 47 | 45 | 2 | 0 |
+| Core Language | 47 | 47 | 0 | 0 |
 | Codegen | 5 | 4 | 1 | 0 |
 | Testing & CLI | 4 | 4 | 0 | 0 |
 | Concurrency Runtime | 4 | 4 | 0 | 0 |
@@ -167,18 +167,18 @@
 
 ## In Progress Features
 
-### Core Language
-
-| Feature | Status | Blocker |
-|---------|--------|---------|
-| Type Inference (#13) | 🔄 | Full AST integration needed |
-| Union Types (#37) | 🔄 | HIR/MIR/codegen done, MIR lowering + interpreter pending |
-
 ### Codegen
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| Future Body (#102) | 🔄 | Eager exec done, async_sm MIR transform ready, codegen integration pending |
+| Async Codegen Dispatcher (#102) | 🔄 | async_sm MIR transform ready, full state machine dispatcher pending |
+
+### Recently Completed (2025-12-17)
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Type Inference (#13) | ✅ | Full HM system with unification (100 tests) |
+| Union Types (#37) | ✅ | Complete HIR/MIR/codegen/interpreter support |
 | Codegen Parity (#103) | ✅ | InterpCall/InterpEval fully implemented with runtime handlers |
 
 ### GPU & SIMD (#400-418) ✅
