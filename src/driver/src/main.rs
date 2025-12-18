@@ -47,6 +47,7 @@ fn print_help() {
     eprintln!("  simple test --format <fmt>  Output format: text, json, doc");
     eprintln!("  simple test --json          Shorthand for --format json");
     eprintln!("  simple test --doc           Shorthand for --format doc");
+    eprintln!("  simple test --watch         Watch and auto-rerun on changes");
     eprintln!();
     eprintln!("Package Management:");
     eprintln!("  simple init [name]          Create a new project");
@@ -376,17 +377,30 @@ fn main() {
             options.gc_log = gc_log;
             options.gc_off = gc_off;
 
-            // Only print header for non-JSON output
-            if !matches!(options.format, test_runner::OutputFormat::Json) {
-                println!("Simple Test Runner v{}", VERSION);
-                println!();
+            // Check if watch mode is enabled
+            if options.watch {
+                // Watch mode: continuously monitor and re-run tests
+                match test_runner::watch_tests(options) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                // Normal mode: run tests once
+                // Only print header for non-JSON output
+                if !matches!(options.format, test_runner::OutputFormat::Json) {
+                    println!("Simple Test Runner v{}", VERSION);
+                    println!();
+                }
+
+                let format = options.format;
+                let result = test_runner::run_tests(options);
+                test_runner::print_summary(&result, format);
+
+                std::process::exit(if result.success() { 0 } else { 1 });
             }
-
-            let format = options.format;
-            let result = test_runner::run_tests(options);
-            test_runner::print_summary(&result, format);
-
-            std::process::exit(if result.success() { 0 } else { 1 });
         }
         "init" => {
             let name = args.get(1).map(|s| s.as_str());
