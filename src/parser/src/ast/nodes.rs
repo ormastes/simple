@@ -7,6 +7,7 @@ pub enum Node {
     // Definitions
     Function(FunctionDef),
     Struct(StructDef),
+    Bitfield(BitfieldDef),
     Class(ClassDef),
     Enum(EnumDef),
     Trait(TraitDef),
@@ -426,6 +427,58 @@ impl StructDef {
     pub fn is_snapshot(&self) -> bool {
         self.attributes.iter().any(|attr| attr.name == "snapshot")
     }
+}
+
+/// Bitfield definition: `bitfield Name(base_type): fields`
+/// Compact binary representation with bit-level field packing.
+/// Supports unit types with explicit bit widths (e.g., `x: cm:i12`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct BitfieldDef {
+    pub span: Span,
+    pub name: String,
+    /// Base storage type (u8, u16, u32, u64, i8, etc.)
+    pub base_type: Option<Type>,
+    /// Bitfield fields with bit widths
+    pub fields: Vec<BitfieldField>,
+    /// Named constants (const NAME = Value)
+    pub constants: Vec<BitfieldConstant>,
+    pub visibility: Visibility,
+    /// Attributes applied to the bitfield
+    pub attributes: Vec<Attribute>,
+    /// Documentation comment
+    pub doc_comment: Option<DocComment>,
+}
+
+/// A single field in a bitfield
+#[derive(Debug, Clone, PartialEq)]
+pub struct BitfieldField {
+    pub span: Span,
+    pub name: String,
+    /// Bit width (e.g., 1, 8, 12)
+    pub bits: u8,
+    /// Optional unit type with repr (e.g., cm:i12)
+    pub unit_type: Option<UnitWithRepr>,
+    /// Whether this is a reserved/padding field (_reserved)
+    pub is_reserved: bool,
+}
+
+/// Named constant in a bitfield
+#[derive(Debug, Clone, PartialEq)]
+pub struct BitfieldConstant {
+    pub span: Span,
+    pub name: String,
+    /// Constant value (literal or constructor expression)
+    pub value: Expr,
+}
+
+/// Unit type with representation constraint
+/// Used in bitfield fields: `cm:i12` (12-bit signed centimeters)
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnitWithRepr {
+    /// Unit suffix (e.g., "cm", "ms")
+    pub unit_suffix: String,
+    /// Representation type (e.g., i12, u8, f32)
+    pub repr: ReprType,
 }
 
 #[derive(Debug, Clone, PartialEq)]
