@@ -487,6 +487,167 @@ fn simple_test_system_compiler_compiler_sample_spec() {
 
 ---
 
+## Living Documentation Generation
+
+### Overview
+
+System tests written in BDD spec format can automatically generate human-readable documentation, similar to Cucumber's living documentation feature. This creates up-to-date manuals directly from executable specifications.
+
+### Concept
+
+```
+BDD Spec Tests (*.spl)
+        ↓
+    Test Runner
+        ↓
+Living Documentation Generator
+        ↓
+   HTML / Markdown
+```
+
+### Output Formats
+
+**HTML Documentation:**
+- Interactive navigation (collapsible sections)
+- Test status indicators (✅ passing, ❌ failing, ⏭️ skipped)
+- Syntax highlighting for code examples
+- Search and filter capabilities
+
+**Markdown Documentation:**
+- Flat file format for static sites
+- GitHub-compatible rendering
+- Version control friendly
+- Easy to diff and review
+
+### Generated Structure
+
+From this spec:
+
+```simple
+describe "User Authentication":
+    context "when user has valid credentials":
+        it "grants access":
+            user = create_user(email: "test@example.com", password: "secret123")
+            result = authenticate(user.email, "secret123")
+            expect result.success?
+
+    context "when user has invalid credentials":
+        it "denies access":
+            user = create_user(email: "test@example.com", password: "secret123")
+            result = authenticate(user.email, "wrong_password")
+            expect result.failure?
+```
+
+Generates this documentation:
+
+```markdown
+# User Authentication
+
+## When user has valid credentials
+
+✅ **grants access**
+
+Creates a user with valid credentials and verifies that authentication succeeds.
+
+## When user has invalid credentials
+
+✅ **denies access**
+
+Creates a user and verifies that authentication fails with incorrect password.
+```
+
+### CLI Usage
+
+```bash
+# Generate HTML documentation
+simple test --format html --output docs/specs/
+
+# Generate Markdown documentation
+simple test --format markdown --output docs/specs.md
+
+# Generate with test results
+simple test --doc --html-output docs/test-report.html
+
+# Watch mode - regenerate on file changes
+simple test --doc --watch --output docs/
+```
+
+### Configuration
+
+**simple.toml:**
+
+```toml
+[test.documentation]
+# Output format: html, markdown, json
+format = "html"
+
+# Output directory
+output = "docs/specs"
+
+# Include test status in documentation
+include_status = true
+
+# Include code examples
+include_examples = true
+
+# Template customization
+template = "docs/template.html"
+
+# Sections to include
+sections = ["description", "examples", "given-when-then"]
+```
+
+### Template Variables
+
+Custom HTML templates can use these variables:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+    <title>{{suite_name}} - Test Specifications</title>
+</head>
+<body>
+    {{#each describe_blocks}}
+    <section class="describe">
+        <h2>{{description}}</h2>
+        {{#each contexts}}
+        <div class="context">
+            <h3>{{description}}</h3>
+            {{#each examples}}
+            <div class="example {{status}}">
+                <h4>{{description}}</h4>
+                <pre><code>{{code}}</code></pre>
+                {{#if failure}}
+                <div class="failure">{{failure.message}}</div>
+                {{/if}}
+            </div>
+            {{/each}}
+        </div>
+        {{/each}}
+    </section>
+    {{/each}}
+</body>
+</html>
+```
+
+### Status: 📋 Planned
+
+| Component | Status | Description |
+|-----------|--------|-------------|
+| HTML Generator | 📋 | Convert spec AST to HTML with templates |
+| Markdown Generator | 📋 | Convert spec AST to Markdown |
+| Template Engine | 📋 | Mustache-style template rendering |
+| Test Status Integration | 📋 | Include pass/fail/skip indicators |
+| Code Example Extraction | 📋 | Extract and syntax-highlight code blocks |
+| CLI Integration | 📋 | `simple test --doc` command |
+| Watch Mode | 📋 | Auto-regenerate on file changes |
+| Custom Templates | 📋 | User-provided HTML/Markdown templates |
+
+**Tracking:** Feature request #650 - Living Documentation Generation
+
+---
+
 ## See Also
 
 - `doc/spec/bdd_spec.md` - Complete BDD framework specification
