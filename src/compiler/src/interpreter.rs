@@ -1211,9 +1211,11 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
             | Node::ExportUseStmt(_)
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
-            | Node::HandlePool(_) => {
+            | Node::HandlePool(_)
+            | Node::Bitfield(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
+                // Bitfield is processed at compile time for bit-level field access
                 // These are no-ops in the interpreter
             }
         }
