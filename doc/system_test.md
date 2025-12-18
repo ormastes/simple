@@ -631,20 +631,26 @@ Custom HTML templates can use these variables:
 </html>
 ```
 
-### Status: 📋 Planned
+### Status: 🔄 In Progress (Core Complete, CLI Pending)
 
 | Component | Status | Description |
 |-----------|--------|-------------|
-| HTML Generator | 📋 | Convert spec AST to HTML with templates |
-| Markdown Generator | 📋 | Convert spec AST to Markdown |
-| Template Engine | 📋 | Mustache-style template rendering |
-| Test Status Integration | 📋 | Include pass/fail/skip indicators |
-| Code Example Extraction | 📋 | Extract and syntax-highlight code blocks |
-| CLI Integration | 📋 | `simple test --doc` command |
-| Watch Mode | 📋 | Auto-regenerate on file changes |
-| Custom Templates | 📋 | User-provided HTML/Markdown templates |
+| HTML Generator | ✅ | Convert spec AST to HTML with templates (simple/std_lib/src/spec/formatter/html.spl) |
+| Markdown Generator | ✅ | Convert spec AST to Markdown (simple/std_lib/src/spec/formatter/markdown.spl) |
+| Template Engine | ✅ | Built-in HTML template with CSS (default_template() function) |
+| Test Status Integration | ✅ | Pass/fail/skip indicators (✅❌⏭️) in both formats |
+| Code Example Extraction | ✅ | Syntax-highlighted code blocks in HTML and Markdown |
+| CLI Integration | 📋 | `simple test --doc` command (pending driver implementation) |
+| Watch Mode | 📋 | Auto-regenerate on file changes (requires file watcher) |
+| Custom Templates | ✅ | Support via HtmlFormatter.new_with_template() |
 
-**Tracking:** Feature request #650 - Living Documentation Generation
+**Implementation Files:**
+- `simple/std_lib/src/spec/formatter/__init__.spl` - Module exports
+- `simple/std_lib/src/spec/formatter/html.spl` - HTML generator (240 lines)
+- `simple/std_lib/src/spec/formatter/markdown.spl` - Markdown generator (95 lines)
+- Exported from `simple/std_lib/src/spec/__init__.spl`
+
+**Tracking:** Feature request #650 - Living Documentation Generation ✅ CORE COMPLETE
 
 ---
 
