@@ -389,4 +389,64 @@ mod tests {
         assert!(report.contains("helper : 1 calls"));
         assert!(report.contains("__builtin_print : 1 calls"));
     }
+
+    #[test]
+    fn test_manual_coverage_collection() {
+        // Manually init
+        init_coverage();
+
+        // Record some data
+        if let Some(cov) = get_global_coverage() {
+            let mut cov = cov.lock().unwrap();
+            cov.record_function_call("test_fn");
+            cov.record_function_call("main");
+            cov.record_function_call("main");
+
+            // Check data was recorded
+            assert!(cov.has_data());
+            assert_eq!(cov.function_call_count("main"), 2);
+            assert_eq!(cov.function_call_count("test_fn"), 1);
+
+            // Print summary
+            eprintln!("{}", cov.summary_report());
+        }
+    }
+
+    #[test]
+    fn test_coverage_save_to_file() {
+        use std::fs;
+
+        // Clean any existing file
+        let path = get_coverage_output_path();
+        let _ = fs::remove_file(&path);
+
+        // Init and record data
+        init_coverage();
+        if let Some(cov) = get_global_coverage() {
+            let mut cov = cov.lock().unwrap();
+            cov.record_function_call("test_func");
+            cov.record_function_call("main");
+
+            // Save directly
+            match cov.save_to_file(&path) {
+                Ok(()) => {
+                    eprintln!("✅ Saved to: {}", path.display());
+
+                    // Check file exists
+                    assert!(path.exists(), "File should exist after save");
+
+                    let content = fs::read_to_string(&path).unwrap();
+                    eprintln!("Content length: {}", content.len());
+                    assert!(content.contains("test_func"), "Should contain function name");
+                    assert!(content.contains("main"), "Should contain main");
+
+                    // Clean up
+                    let _ = fs::remove_file(&path);
+                }
+                Err(e) => {
+                    panic!("Save failed: {}", e);
+                }
+            }
+        }
+    }
 }
