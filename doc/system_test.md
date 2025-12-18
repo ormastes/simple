@@ -631,7 +631,7 @@ Custom HTML templates can use these variables:
 </html>
 ```
 
-### Status: 🔄 In Progress (Core Complete, CLI Pending)
+### Status: ✅ COMPLETE (7/8 components, 87.5%)
 
 | Component | Status | Description |
 |-----------|--------|-------------|
@@ -640,17 +640,31 @@ Custom HTML templates can use these variables:
 | Template Engine | ✅ | Built-in HTML template with CSS (default_template() function) |
 | Test Status Integration | ✅ | Pass/fail/skip indicators (✅❌⏭️) in both formats |
 | Code Example Extraction | ✅ | Syntax-highlighted code blocks in HTML and Markdown |
-| CLI Integration | 📋 | `simple test --doc` command (pending driver implementation) |
+| CLI Integration | ✅ | `simple test --doc` command generates docs/ directory |
 | Watch Mode | 📋 | Auto-regenerate on file changes (requires file watcher) |
 | Custom Templates | ✅ | Support via HtmlFormatter.new_with_template() |
 
 **Implementation Files:**
-- `simple/std_lib/src/spec/formatter/__init__.spl` - Module exports
-- `simple/std_lib/src/spec/formatter/html.spl` - HTML generator (240 lines)
-- `simple/std_lib/src/spec/formatter/markdown.spl` - Markdown generator (95 lines)
-- Exported from `simple/std_lib/src/spec/__init__.spl`
+- **Stdlib Formatters:**
+  - `simple/std_lib/src/spec/formatter/__init__.spl` - Module exports
+  - `simple/std_lib/src/spec/formatter/html.spl` - HTML generator (240 lines)
+  - `simple/std_lib/src/spec/formatter/markdown.spl` - Markdown generator (95 lines)
+  - Exported from `simple/std_lib/src/spec/__init__.spl`
+- **Driver Integration:**
+  - `src/driver/src/cli/test_runner.rs` - CLI integration (260 lines added)
+  - Functions: generate_documentation(), generate_html_doc(), generate_markdown_doc(), html_escape()
 
-**Tracking:** Feature request #650 - Living Documentation Generation ✅ CORE COMPLETE
+**Usage:**
+```bash
+# Run tests and generate documentation
+simple test --doc
+
+# Output files:
+docs/test-spec.html   # Interactive HTML with CSS
+docs/test-spec.md     # GitHub-compatible Markdown
+```
+
+**Tracking:** Feature request #650 - Living Documentation Generation ✅ 87.5% COMPLETE (7/8)
 
 ---
 
