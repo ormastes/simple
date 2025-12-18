@@ -134,7 +134,7 @@ Current blockers:
 
 ## Architecture
 
-See `CLAUDE.md` and `doc/architecture.md` for design principles.
+See `CLAUDE.md` and `doc/architecture/overview.md` for design principles.
 
 ## Individual Feature Status Files
 

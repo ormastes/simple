@@ -353,6 +353,6 @@ simple test --coverage
 ## See Also
 
 - `doc/bdd_spec.md` - Complete specification
-- `doc/test.md` - Test policy and coverage rules
+- `doc/guides/test.md` - Test policy and coverage rules
 - `doc/plans/28_doctest.md` - Doctest implementation plan
 - `lib/std/spec/` - Current implementation

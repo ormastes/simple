@@ -112,7 +112,7 @@ test/fixtures/doctest/
 - **Verification:** Automated script validates all components
 
 ### Documentation
-- ✅ Updated `doc/feature.md` with features #300-302
+- ✅ Updated `doc/features/feature.md` with features #300-302
 - ✅ Created `doc/status/sdoctest_implementation.md`
 - ✅ Created `doc/status/sdoctest_sprint2_progress.md`
 - ✅ Created `doc/status/sdoctest_session_summary.md`
@@ -133,7 +133,7 @@ test/fixtures/doctest/
 - `src/compiler/src/codegen/runtime_ffi.rs` (FFI specs)
 - `src/runtime/src/lib.rs` (re-exports)
 - `src/runtime/src/value/mod.rs` (module registration)
-- `doc/feature.md` (features #300-302)
+- `doc/features/feature.md` (features #300-302)
 - `TODO.md` (progress tracking)
 - Plus 4 other documentation updates
 

@@ -89,4 +89,4 @@ Coverage is tracked separately for each test level:
 - **Integration**: Public function touch (100% required)
 - **System**: Public class/struct touch (100% required)
 
-See `doc/test.md` for detailed coverage policy.
+See `doc/guides/test.md` for detailed coverage policy.

@@ -205,4 +205,4 @@ cargo build --release --features llvm --target armv7-unknown-linux-gnueabihf
 - **Cranelift backend**: `src/compiler/src/codegen/cranelift.rs`
 - **LLVM backend**: `src/compiler/src/codegen/llvm.rs`
 - **LLVM guide**: `doc/llvm_backend.md`
-- **Feature list**: `doc/feature.md` (#220)
+- **Feature list**: `doc/features/feature.md` (#220)

@@ -52,7 +52,7 @@ If you're looking for archived content, check:
 | Doctest Status | `doc/status/sdoctest.md` |
 | Doctest Plan | `doc/plans/29_doctest.md` |
 | Doctest Spec | `doc/spec/sdoctest.md` |
-| 32-bit Support | `doc/feature.md` (#220, deferred) |
+| 32-bit Support | `doc/features/feature.md` (#220, deferred) |
 
 ## Archive Policy
 
@@ -70,6 +70,6 @@ Documents should **not** be deleted because:
 ## See Also
 
 - `doc/README.md` - Main documentation index
-- `doc/feature.md` - Current feature status
+- `doc/features/feature.md` - Current feature status
 - `doc/plans/` - Active implementation plans
 - `doc/status/` - Feature implementation tracking

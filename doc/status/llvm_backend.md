@@ -183,6 +183,6 @@ Download from https://releases.llvm.org/download.html
 ## Related Documentation
 
 - Plan: `doc/plans/23_llvm_backend_support.md`
-- Feature breakdown: `doc/feature.md` #220
+- Feature breakdown: `doc/features/feature.md` #220
 - Common target abstraction: `src/common/src/target.rs`
 - Backend trait: `src/compiler/src/codegen/backend_trait.rs`

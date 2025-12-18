@@ -408,7 +408,7 @@ This FFI bridge is temporary:
 ## See Also
 
 - `doc/spec/sdoctest.md` - Complete specification
-- `doc/test.md` - Test policy and coverage rules
+- `doc/guides/test.md` - Test policy and coverage rules
 - `doc/plans/28_bdd_spec.md` - BDD framework plan
 - `lib/std/doctest/` - Current implementation
 - `doc/status/sdoctest_implementation.md` - Detailed status

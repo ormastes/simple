@@ -558,5 +558,5 @@ class Users:
 ## 14. See Also
 
 - `doc/web_framework.md` - Routing, controllers, API endpoints
-- `doc/feature.md` - Feature list (#500-536)
+- `doc/features/feature.md` - Feature list (#500-536)
 - `doc/spec/language.md` - Simple language specification

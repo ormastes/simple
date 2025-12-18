@@ -344,7 +344,7 @@ All while maintaining excellent 64-bit performance!
 ## Documentation
 
 - **User Guide**: `doc/llvm_backend.md`
-- **Architecture Matrix**: `doc/architecture_support.md`
+- **Architecture Matrix**: `doc/architecture/support.md`
 - **32-bit Guide**: `doc/32bit_support.md`
 - **Status Tracking**: `doc/status/llvm_backend.md`
 - **This Summary**: `doc/llvm_implementation_complete.md`

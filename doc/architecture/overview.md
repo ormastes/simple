@@ -77,7 +77,7 @@ The `driver` module provides `RunningType` enum:
 
 ## Goals (grounded in feature list & language spec)
 - Feature work should stay locally scoped: each feature touches parser → compiler → runtime via narrow contracts in `src/common/`.
-- Minimize dependency fan-out: no "reach across" into unrelated modules to add a feature from `doc/feature.md`.
+- Minimize dependency fan-out: no "reach across" into unrelated modules to add a feature from `doc/features/feature.md`.
 - Standardise interfaces (GC, ABI, loader) in `src/common/` so new features don't create ad-hoc couplings.
 - Provide clear contracts for runtime/GC so memory management stays behind a stable boundary while implementing GC-managed default from the spec/feature list.
 - Keep watch/build/run predictable and isolated to driver+compiler+loader; adding a language feature should not require touching them.

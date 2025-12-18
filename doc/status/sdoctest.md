@@ -215,7 +215,7 @@ simple test --doctest    # Doctest only
 - `doc/plans/29_doctest.md` - Complete implementation plan
 - `doc/spec/sdoctest.md` - Specification
 - `doc/plans/28_bdd_spec.md` - BDD framework plan
-- `doc/test.md` - Test policy
+- `doc/guides/test.md` - Test policy
 
 ## Historical Progress
 

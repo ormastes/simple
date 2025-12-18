@@ -759,7 +759,7 @@ fn link_executable(object_path: &str, output_path: &str, runtime_lib: &str) {
 - `doc/status/future_body_execution.md` - Feature 102 status
 - `doc/status/capture_buffer_vreg_remapping.md` - Feature 100 status
 - `doc/status/codegen_parity_completion.md` - Feature 103 status
-- `doc/feature.md` - Complete feature list with ratings
+- `doc/features/feature.md` - Complete feature list with ratings
 - [Cranelift Documentation](https://cranelift.dev/)
 - [Cranelift IR Reference](https://github.com/bytecodealliance/wasmtime/blob/main/cranelift/docs/ir.md)
 

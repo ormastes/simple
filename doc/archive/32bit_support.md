@@ -229,7 +229,7 @@ cargo test -p simple-compiler --lib --features llvm
 
 ## See Also
 
-- `doc/architecture_support.md` - Complete architecture matrix
+- `doc/architecture/support.md` - Complete architecture matrix
 - `doc/llvm_backend.md` - LLVM backend user guide
 - `src/common/src/target.rs` - Target abstraction
 - `src/compiler/src/codegen/llvm.rs` - LLVM backend implementation
