@@ -6,6 +6,10 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use simple_compiler::{
+    get_coverage_output_path, get_global_coverage, init_coverage, is_coverage_enabled,
+    save_global_coverage,
+};
 use simple_driver::runner::Runner;
 
 /// Test level filter
@@ -296,6 +300,14 @@ fn run_test_file(runner: &Runner, path: &Path) -> TestFileResult {
 pub fn run_tests(options: TestOptions) -> TestRunResult {
     let quiet = matches!(options.format, OutputFormat::Json);
 
+    // Initialize coverage if enabled
+    if is_coverage_enabled() {
+        init_coverage();
+        if !quiet {
+            println!("Coverage tracking enabled");
+        }
+    }
+
     let runner = if options.gc_off {
         Runner::new_no_gc()
     } else if options.gc_log {
@@ -385,12 +397,36 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         }
     }
 
-    TestRunResult {
+    let result = TestRunResult {
         files: results,
         total_passed,
         total_failed,
         total_duration_ms: start.elapsed().as_millis() as u64,
+    };
+
+    // Save coverage if enabled
+    if is_coverage_enabled() {
+        if let Err(e) = save_global_coverage() {
+            if !quiet {
+                eprintln!("Warning: Failed to save coverage data: {}", e);
+            }
+        } else if !quiet {
+            let path = get_coverage_output_path();
+            println!("Coverage data saved to: {}", path.display());
+
+            // Print coverage stats
+            if let Some(cov) = get_global_coverage() {
+                let cov = cov.lock().unwrap();
+                let stats = cov.stats();
+                println!("  Lines executed: {}", stats.total_lines);
+                println!("  Files covered: {}", stats.total_files);
+                println!("  Functions called: {}", stats.total_functions);
+                println!("  FFI calls: {}", stats.total_ffi_calls);
+            }
+        }
     }
+
+    result
 }
 
 /// Print test summary (dispatches to format-specific output)

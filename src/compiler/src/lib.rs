@@ -5,6 +5,7 @@
 
 pub mod codegen;
 pub mod compilability;
+pub mod coverage;
 pub mod effects;
 pub mod elf_utils;
 pub mod error;
@@ -27,6 +28,10 @@ pub mod value_bridge;
 mod test_helpers;
 
 // Re-export main types
+pub use coverage::{
+    get_coverage_output_path, get_global_coverage, init_coverage, is_coverage_enabled,
+    save_global_coverage, CoverageCollector, CoverageStats,
+};
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
 pub use interpreter::evaluate_module;
 pub use lint::{LintChecker, LintConfig, LintDiagnostic, LintLevel, LintName};
