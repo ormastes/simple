@@ -631,7 +631,7 @@ Custom HTML templates can use these variables:
 </html>
 ```
 
-### Status: ✅ COMPLETE (7/8 components, 87.5%)
+### Status: ✅ 100% COMPLETE (8/8 components)
 
 | Component | Status | Description |
 |-----------|--------|-------------|
@@ -641,7 +641,7 @@ Custom HTML templates can use these variables:
 | Test Status Integration | ✅ | Pass/fail/skip indicators (✅❌⏭️) in both formats |
 | Code Example Extraction | ✅ | Syntax-highlighted code blocks in HTML and Markdown |
 | CLI Integration | ✅ | `simple test --doc` command generates docs/ directory |
-| Watch Mode | 📋 | Auto-regenerate on file changes (requires file watcher) |
+| Watch Mode | ✅ | Auto-regenerate on file changes with `simple test --watch --doc` |
 | Custom Templates | ✅ | Support via HtmlFormatter.new_with_template() |
 
 **Implementation Files:**
@@ -651,20 +651,28 @@ Custom HTML templates can use these variables:
   - `simple/std_lib/src/spec/formatter/markdown.spl` - Markdown generator (95 lines)
   - Exported from `simple/std_lib/src/spec/__init__.spl`
 - **Driver Integration:**
-  - `src/driver/src/cli/test_runner.rs` - CLI integration (260 lines added)
-  - Functions: generate_documentation(), generate_html_doc(), generate_markdown_doc(), html_escape()
+  - `src/driver/src/cli/test_runner.rs` - CLI integration (372 lines added)
+  - Functions: generate_documentation(), generate_html_doc(), generate_markdown_doc(), html_escape(), watch_tests()
+  - Watch mode: Filesystem monitoring with notify crate, auto-detect changes, re-run tests
 
 **Usage:**
 ```bash
-# Run tests and generate documentation
+# Run tests and generate documentation (one-time)
 simple test --doc
+
+# Watch mode: auto-rerun and regenerate on changes
+simple test --watch --doc
+
+# Watch specific test levels
+simple test --watch --unit
+simple test --watch --system
 
 # Output files:
 docs/test-spec.html   # Interactive HTML with CSS
 docs/test-spec.md     # GitHub-compatible Markdown
 ```
 
-**Tracking:** Feature request #650 - Living Documentation Generation ✅ 87.5% COMPLETE (7/8)
+**Tracking:** Feature request #650 - Living Documentation Generation ✅ 100% COMPLETE
 
 ---
 
