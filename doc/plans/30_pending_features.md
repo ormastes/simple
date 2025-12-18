@@ -319,4 +319,4 @@ app = Gui():
 - `doc/plans/llm_friendly.md` - LLM features (in progress)
 - `doc/plans/28_bdd_spec.md` - BDD framework
 - `doc/plans/29_doctest.md` - Doctest framework
-- `doc/feature.md` - Complete feature list
+- `doc/features/feature.md` - Complete feature list

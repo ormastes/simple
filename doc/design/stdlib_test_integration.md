@@ -385,6 +385,6 @@ thread 'simple_stdlib_unit_doctest_parser_spec' panicked at 'Simple test failed:
 
 ## Related Documents
 
-- `doc/test.md` - Test policy and levels
+- `doc/guides/test.md` - Test policy and levels
 - `doc/spec/stdlib.md` - Standard library specification
 - `simple/std_lib/README.md` - Stdlib structure

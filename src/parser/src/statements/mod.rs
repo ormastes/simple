@@ -172,14 +172,31 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::With)?;
 
-        let resource = self.parse_expression()?;
+        let mut resource = self.parse_expression()?;
+        let mut alias_from_cast: Option<String> = None;
+        // Handle "with expr as name:" where "as name" was parsed as a type cast
+        // We detect this by checking if target_type is a simple lowercase identifier (variable name)
+        // rather than an actual type (which would be capitalized or a primitive like i64, str, etc.)
+        if let Expr::Cast { expr, target_type } = resource.clone() {
+            if let Type::Simple(type_name) = target_type {
+                // Check if it looks like a variable name (lowercase first char) rather than a type
+                let first_char = type_name.chars().next().unwrap_or('A');
+                let is_primitive = matches!(type_name.as_str(),
+                    "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" |
+                    "f32" | "f64" | "bool" | "str" | "nil" | "char");
+                if first_char.is_lowercase() && !is_primitive {
+                    alias_from_cast = Some(type_name);
+                    resource = *expr;
+                }
+            }
+        }
 
         // Optional "as name"
         let name = if self.check(&TokenKind::As) {
             self.advance();
             Some(self.expect_identifier()?)
         } else {
-            None
+            alias_from_cast
         };
 
         self.expect(&TokenKind::Colon)?;

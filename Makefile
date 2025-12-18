@@ -132,6 +132,8 @@ test-full-check: test-full
 # ============================================================================
 
 COVERAGE_DIR := target/coverage
+STACK_ENV := RUST_MIN_STACK=33554432
+REAL_SIMPLE_BIN := $(shell pwd)/target/debug/simple
 
 coverage: coverage-html
 	@echo "Coverage report: $(COVERAGE_DIR)/html/index.html"
@@ -180,18 +182,19 @@ coverage-integration:
 
 # System: Public class/struct touch
 coverage-system:
+	@cargo build -p simple-driver --bin simple
 	@mkdir -p $(COVERAGE_DIR)/system
 	@echo "=== SYSTEM TEST COVERAGE (Public Class/Struct Touch) ==="
-	cargo llvm-cov -p simple-tests --test system \
+	$(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system \
 		--json --output-path=$(COVERAGE_DIR)/system/coverage.json
 	@echo "Analyzing public class/struct touch..."
 	@if [ -f public_api.yml ]; then \
-		cargo run -p simple_mock_helper --bin smh_coverage -- \
+		$(STACK_ENV) cargo run -p simple_mock_helper --bin smh_coverage -- \
 			--coverage $(COVERAGE_DIR)/system/coverage.json \
 			--api public_api.yml --type class-struct-touch 2>/dev/null || \
-			cargo llvm-cov -p simple-tests --test system; \
+			$(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system; \
 	else \
-		cargo llvm-cov -p simple-tests --test system; \
+		$(STACK_ENV) CARGO_BIN_EXE_simple=$(REAL_SIMPLE_BIN) cargo llvm-cov -p simple-tests --test system; \
 	fi
 
 # Environment: Branch/Condition coverage (merged with unit)

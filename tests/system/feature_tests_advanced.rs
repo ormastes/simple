@@ -771,47 +771,40 @@ main = int(distance.to_m())
 }
 
 /// Feature #87: Unit Types - conversion
-/// NOTE: Auto-conversion and .to_m() methods not yet implemented
 #[test]
-fn test_feature_87_unit_types_conversion_not_yet_implemented() {
-    // This test documents unit auto-conversion which isn't implemented yet
-    // Uses simpler code to test just the .to_m() method error
-    run_expect_compile_error(
-        r#"
+fn test_feature_87_unit_types_conversion() {
+    let runner = Runner::new_no_gc();
+    let source = r#"
 unit length(base: f64):
     m = 1.0
     km = 1000.0
 
 a = 2_km
 main = a.to_m()
-"#,
-        "to_m", // Expects error for .to_m() method not found
-    );
+"#;
+    let result = runner.run_source(source).expect("unit conversion");
+    assert_eq!(result, 2000);
 }
 
 /// Feature #88: Literal Suffixes
-/// NOTE: .to_m() conversion method not yet implemented
 #[test]
-fn test_feature_88_literal_suffix_not_yet_implemented() {
-    // Literal suffixes work, but .to_m() conversion is not implemented
-    run_expect_compile_error(
-        r#"
+fn test_feature_88_literal_suffix_to_m() {
+    let runner = Runner::new_no_gc();
+    let source = r#"
 unit length(base: f64): m = 1.0, km = 1000.0
 
 distance = 100_km
 main = distance.to_m()
-"#,
-        "to_m", // Expects error for .to_m() method not found
-    );
+"#;
+    let result = runner.run_source(source).expect("literal suffix conversion");
+    assert_eq!(result, 100000);
 }
 
 /// Feature #89: Composite Units
-/// NOTE: Composite unit syntax `unit velocity = length / time` not yet implemented
 #[test]
-fn test_feature_89_composite_units_not_yet_implemented() {
-    // Composite unit definitions are not yet supported
-    run_expect_compile_error(
-        r#"
+fn test_feature_89_composite_units() {
+    let runner = Runner::new_no_gc();
+    let source = r#"
 unit length(base: f64): m = 1.0, km = 1000.0
 unit time(base: f64): s = 1.0, hr = 3600.0
 
@@ -819,18 +812,16 @@ unit velocity = length / time
 
 speed = 100_km / 1_hr
 main = 1
-"#,
-        "parse", // Expects parse error for `unit velocity = ...` syntax
-    );
+"#;
+    let result = runner.run_source(source).expect("composite units");
+    assert_eq!(result, 1);
 }
 
 /// Feature #90: Composite Type Inference
-/// NOTE: Composite unit syntax not yet implemented
 #[test]
-fn test_feature_90_composite_type_inference_not_yet_implemented() {
-    // Composite unit definitions are not yet supported
-    run_expect_compile_error(
-        r#"
+fn test_feature_90_composite_type_inference() {
+    let runner = Runner::new_no_gc();
+    let source = r#"
 unit length(base: f64): m = 1.0
 unit time(base: f64): s = 1.0
 unit velocity = length / time
@@ -839,9 +830,9 @@ distance = 100_m
 duration = 10_s
 speed = distance / duration
 main = 1
-"#,
-        "parse", // Expects parse error for `unit velocity = ...` syntax
-    );
+"#;
+    let result = runner.run_source(source).expect("composite type inference");
+    assert_eq!(result, 1);
 }
 
 /// Feature #91: Standalone Units

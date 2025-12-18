@@ -680,5 +680,5 @@ docs/test-spec.md     # GitHub-compatible Markdown
 
 - `doc/spec/bdd_spec.md` - Complete BDD framework specification
 - `doc/spec/sdn.md` - Full SDN format specification
-- `doc/test.md` - Overall test policy and coverage metrics
+- `doc/guides/test.md` - Overall test policy and coverage metrics
 - `simple/std_lib/test/` - Standard library test examples

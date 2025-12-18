@@ -161,5 +161,5 @@ src/runtime/src/
 ## See Also
 
 - `doc/plans/23_llvm_backend_support.md` - Implementation plan
-- `doc/feature.md` - Feature #220 breakdown
+- `doc/features/feature.md` - Feature #220 breakdown
 - `src/compiler/src/codegen/backend_trait.rs` - Backend abstraction

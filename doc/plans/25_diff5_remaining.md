@@ -1,6 +1,6 @@
 # Plan 25: Remaining Difficulty-5 Features
 
-The following features in `doc/feature.md` have difficulty level **5** and are not yet marked complete. This plan tracks ownership and next actions to start each one.
+The following features in `doc/features/feature.md` have difficulty level **5** and are not yet marked complete. This plan tracks ownership and next actions to start each one.
 
 | # | Feature | Notes / First Step |
 |---|---------|--------------------|

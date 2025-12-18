@@ -322,7 +322,7 @@ bitfield Color(u32):
 - `doc/spec/traits.md` - Trait specification
 - `doc/spec/types.md` - Type system specification
 - `doc/spec/data_structures.md` - Struct/class/enum specification
-- `doc/feature.md` - Feature overview
+- `doc/features/feature.md` - Feature overview
 - `doc/FEATURE_STATUS.md` - Implementation status
 
 ---

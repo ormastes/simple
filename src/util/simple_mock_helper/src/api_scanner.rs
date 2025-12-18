@@ -125,17 +125,56 @@ fn scan_rust_file(path: &Path, api: &mut ScannedApi) -> anyhow::Result<()> {
 }
 
 /// Extract crate name from file path.
+/// Handles paths like "src/driver/src/runner.rs" -> "simple_driver"
+/// or "src/compiler/src/codegen/mod.rs" -> "simple_compiler"
 fn extract_crate_name(path: &Path) -> String {
-    // Look for src/<crate>/src pattern
-    let path_str = path.to_string_lossy();
+    // Use path components to find src/X/src pattern
+    let components: Vec<_> = path.components().collect();
 
-    // Try to find crate name from path like "src/driver/src/runner.rs"
-    if let Some(caps) = path_str.find("/src/") {
-        let after = &path_str[caps + 5..];
-        if let Some(next_slash) = after.find('/') {
-            let crate_dir = &after[..next_slash];
-            return format!("simple_{}", crate_dir);
+    for i in 0..components.len().saturating_sub(2) {
+        if let (
+            std::path::Component::Normal(first),
+            std::path::Component::Normal(crate_dir),
+            std::path::Component::Normal(second),
+        ) = (&components[i], &components[i + 1], &components[i + 2])
+        {
+            if first.to_str() == Some("src") && second.to_str() == Some("src") {
+                if let Some(name) = crate_dir.to_str() {
+                    // Handle special cases for compound names
+                    return match name {
+                        "dependency_tracker" => "simple_dependency_tracker".to_string(),
+                        "native_loader" => "simple_native_loader".to_string(),
+                        "util" => {
+                            // Check for nested crate like util/simple_mock_helper/src
+                            if i + 4 < components.len() {
+                                if let std::path::Component::Normal(nested) = &components[i + 2] {
+                                    if nested.to_str() == Some("src") {
+                                        // Check the directory between util and inner src
+                                        if let std::path::Component::Normal(nested_crate) =
+                                            &components[i + 3]
+                                        {
+                                            if let Some(nested_name) = nested_crate.to_str() {
+                                                if nested_name.starts_with("simple_") {
+                                                    return nested_name.to_string();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            format!("simple_{}", name)
+                        }
+                        _ => format!("simple_{}", name),
+                    };
+                }
+            }
         }
+    }
+
+    // Check for util/simple_mock_helper pattern specifically
+    let path_str = path.to_string_lossy();
+    if path_str.contains("util/simple_mock_helper") {
+        return "simple_mock_helper".to_string();
     }
 
     // Fallback: use parent directory name
@@ -286,6 +325,33 @@ pub fn merge_with_existing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_extract_crate_name() {
+        // Standard crate paths
+        assert_eq!(
+            extract_crate_name(&PathBuf::from("src/driver/src/runner.rs")),
+            "simple_driver"
+        );
+        assert_eq!(
+            extract_crate_name(&PathBuf::from("src/compiler/src/codegen/mod.rs")),
+            "simple_compiler"
+        );
+        assert_eq!(
+            extract_crate_name(&PathBuf::from("src/parser/src/lexer/mod.rs")),
+            "simple_parser"
+        );
+        assert_eq!(
+            extract_crate_name(&PathBuf::from("src/loader/src/module.rs")),
+            "simple_loader"
+        );
+        // Special cases
+        assert_eq!(
+            extract_crate_name(&PathBuf::from("src/dependency_tracker/src/graph.rs")),
+            "simple_dependency_tracker"
+        );
+    }
 
     #[test]
     fn test_extract_impl_type() {

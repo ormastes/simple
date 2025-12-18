@@ -19,6 +19,7 @@ simple/                            # Project root - Rust compiler implementation
 ├── Makefile                       # Build automation (test, coverage, lint, etc.)
 ├── .jscpd.json                    # Code duplication detection config
 ├── CLAUDE.md                      # This file - development guide
+├── AGENTS.md                      # AI agent guidelines (was agent.md)
 ├── public_api.yml                 # Public API definitions for coverage
 │
 ├── simple/                        # Simple language development workspace
@@ -408,6 +409,63 @@ class Account:
 - Generators: Yield/Next wired to runtime eager collector; generator bodies also use the stub pointer (no state machine yet).
 - Futures: FutureCreate uses the same stubbed body pointer; Await calls runtime stub.
 
+## Feature Documentation
+
+Features are tracked in `doc/features/feature.md` and archived in `doc/features/feature_done_*.md` files.
+
+### Feature Table Format
+
+All feature tables use this standardized format:
+
+```markdown
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #100 | Feature Name | ✅/📋 | R/S/S+R | [doc.md](doc.md) | `path/` | `path/` |
+```
+
+**Column Definitions:**
+
+| Column | Description | Values |
+|--------|-------------|--------|
+| **Feature ID** | Unique identifier | `#NNN` format |
+| **Feature** | Feature name/description | Short text |
+| **Status** | Implementation status | `✅` Complete, `📋` Planned |
+| **Impl** | Implementation location | `R` Rust, `S` Simple, `S+R` Both |
+| **Doc** | Specification/design doc | Link to `doc/spec/*.md` or `-` if none |
+| **S-Test** | Simple system test path | `std_lib/test/...` or `-` if none |
+| **R-Test** | Rust test path | `src/*/tests/` or `-` if none |
+
+**Feature ID Ranges:**
+
+| Range | Category |
+|-------|----------|
+| #1-#8 | Infrastructure (Lexer, Parser, AST, HIR, MIR, GC, Pkg) |
+| #10-#49 | Core Language |
+| #50-#99 | Extended Language (Union, Async SM, Interpreter) |
+| #100-#199 | Codegen & Runtime |
+| #200-#299 | Extended Features (Units, Networking) |
+| #300-#399 | GPU/SIMD |
+| #400-#499 | Contracts |
+| #500-#599 | UI Framework & Web |
+| #600-#699 | SDN |
+| #700-#799 | Database & Persistence |
+| #800-#899 | Build Optimization & Infrastructure |
+| #900-#999 | Verification & Code Quality |
+
+**Adding New Features:**
+
+1. Choose appropriate ID range for category
+2. Add row to `doc/features/feature.md` (planned) or `doc/features/feature_done_*.md` (complete)
+3. Fill all columns - use `-` for non-applicable fields
+4. Link to specification doc in `doc/spec/` or design doc in `doc/design/`
+5. Specify test paths where tests exist
+
+**Example Entry:**
+
+```markdown
+| #220 | TCP sockets | ✅ | S+R | [spec/stdlib.md](spec/stdlib.md) | `std_lib/test/unit/net/` | `src/runtime/tests/` |
+```
+
 ## Logging Strategy
 - Use `tracing` for structured, span-based logging. Initialize once via `simple_log::init()` (respects `SIMPLE_LOG`/`RUST_LOG`).
 - For cross-cutting “AOP-like” logging, prefer `#[tracing::instrument]` on functions to capture args/latency without manual boilerplate.
@@ -415,7 +473,7 @@ class Account:
 
 ## Test Strategy
 
-See `doc/test.md` for the complete test policy. Tests use `simple_mock_helper` for mock control and coverage tracking.
+See `doc/guides/test.md` for the complete test policy. Tests use `simple_mock_helper` for mock control and coverage tracking.
 
 **Current Test Count: 631+ tests**
 
@@ -740,7 +798,7 @@ Optional (requires npm): `npm install -g jscpd`
 
 ## How to Write System Tests (CLI/TUI)
 - Add `shadow-terminal` to the crate hosting the CLI tests (likely `src/driver`) so tests can spawn the binary in a fake PTY, send keys, and assert the screen/output without a real terminal.
-- Follow the flow in `doc/test.md`:
+- Follow the flow in `doc/guides/test.md`:
   - Create a temp dir and write a `main.spl` (and any imports) to exercise dependency analysis and SMF emission.
   - Spawn the CLI via `shadow_terminal::Command::new([...])` with `rows/cols` set; wait for banners or diagnostics with `wait_for_stdout`.
   - Assert exit code (`wait_for_exit_success`), artifact existence (`.with_extension("smf")` non-empty), and readable buffers (no ANSI errors or wrapped lines).
@@ -783,7 +841,7 @@ Optional (requires npm): `npm install -g jscpd`
 
 ### Documentation
 - `doc/feature_index.md` - Complete feature catalog (131+ features with status/difficulty)
-- `doc/feature.md` - Feature overview (links to feature_index.md)
+- `doc/features/feature.md` - Feature overview (links to feature_index.md)
 - `doc/codegen_status.md` - MIR instruction coverage, runtime FFI functions
 - `doc/codegen_technical.md` - Codegen implementation details
 - `doc/import_export_and__init__.md` - Module system specification
@@ -848,4 +906,3 @@ These files are already reasonably organized. Further splitting would require si
 2. Run full test suite to ensure no regressions
 3. Consider duplication detection and removal
 4. Update documentation as needed
-

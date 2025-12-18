@@ -299,5 +299,5 @@ Driver (main.rs)
 ## See Also
 
 - `doc/llm_friendly.md` - LLM-friendly features overview
-- `doc/test.md` - Test policy and coverage rules
+- `doc/guides/test.md` - Test policy and coverage rules
 - JJ Documentation: https://github.com/martinvonz/jj

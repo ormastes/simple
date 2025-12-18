@@ -266,18 +266,26 @@ simple/
 │   ├── runtime/     # GC and runtime support
 │   └── driver/      # CLI and execution
 ├── doc/             # Documentation
-│   ├── spec/        # Language specification
-│   ├── design/      # Design documents
-│   └── status/      # Feature status
+│   ├── architecture/         # High-level system architecture notes
+│   ├── codegen/              # Backend implementation details
+│   ├── design/               # Design explorations
+│   ├── examples/             # Sample code
+│   ├── features/             # Feature roadmap and history
+│   ├── formal_verification/  # Lean 4 formalization work
+│   ├── guides/               # Operational and process guidance
+│   ├── plans/                # Detailed implementation plans
+│   ├── research/             # Research notes
+│   ├── spec/                 # Language and compiler specs
+│   └── status/               # Feature implementation tracking
 └── tests/           # Test suites
 ```
 
 ## Documentation
 
 - [Language Specification](doc/spec/language.md)
-- [Architecture](doc/architecture.md)
-- [Feature Roadmap](doc/feature.md)
-- [Test Policy](doc/test.md)
+- [Architecture Overview](doc/architecture/overview.md)
+- [Feature Roadmap](doc/features/feature.md)
+- [Test Policy](doc/guides/test.md)
 
 ## License
 

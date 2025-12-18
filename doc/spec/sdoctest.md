@@ -684,7 +684,7 @@ Error: EmptyStackError
 ## 10. Related Documents
 
 - `doc/spec/bdd_spec.md` - BDD spec framework (parent framework)
-- `doc/test.md` - Test policy and coverage rules
+- `doc/guides/test.md` - Test policy and coverage rules
 - `doc/spec/language.md` - Simple language spec (REPL semantics)
 
 ---

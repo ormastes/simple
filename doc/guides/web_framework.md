@@ -556,5 +556,5 @@ class PostsController:
 ## 13. See Also
 
 - `doc/ui.md` - UI templates, SSR, client components (`.sui` syntax)
-- `doc/feature.md` - Feature list (#520-536)
+- `doc/features/feature.md` - Feature list (#520-536)
 - `doc/spec/language.md` - Simple language specification

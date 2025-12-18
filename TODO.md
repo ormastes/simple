@@ -30,7 +30,7 @@ simple/doc/ < link to doc/
 - Implement type checking for contracts
 - Generate runtime assertions
 
-**See:** `doc/feature.md` #400-410 for all LLM-friendly features
+**See:** `doc/features/feature.md` #400-410 for all LLM-friendly features
 
 ---
 
@@ -115,7 +115,7 @@ simple/doc/ < link to doc/
 
 ## Completed
 
-All completed features are tracked in `doc/feature.md` with ✅ status.
+All completed features are tracked in `doc/features/feature.md` with ✅ status.
 
 Major completed systems:
 - ✅ Parser, Lexer, AST
@@ -130,7 +130,7 @@ Major completed systems:
 - ✅ Doctest Sprint 1 & 2
 - ✅ BDD Spec Sprint 1
 
-**See:** `doc/feature.md` for complete status
+**See:** `doc/features/feature.md` for complete status
 
 ---
 
@@ -151,7 +151,7 @@ Major completed systems:
 ## Quick Reference
 
 **Documentation:**
-- `doc/feature.md` - Complete feature list with status
+- `doc/features/feature.md` - Complete feature list with status
 - `doc/plans/` - Detailed implementation plans (30+ files)
 - `doc/spec/` - Language specifications
 - `doc/status/` - Feature implementation status (79+ files)

@@ -50,7 +50,7 @@ This plan unifies coverage reporting to show **end-to-end coverage** from Rust i
 - Reports: HTML, JSON, LCOV
 - Location: `target/coverage/`
 
-**Test Categories (per doc/test.md):**
+**Test Categories (per doc/guides/test.md):**
 
 | Level | Tests | Coverage Metric | Command |
 |-------|-------|-----------------|---------|
