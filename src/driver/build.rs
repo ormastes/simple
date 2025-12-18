@@ -44,6 +44,31 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
     generated.push_str("\n");
     generated.push_str("use std::path::Path;\n");
     generated.push_str("use simple_driver::simple_test::{run_test_file, SimpleTestResult};\n");
+    generated.push_str("use simple_compiler::{init_coverage, is_coverage_enabled, save_global_coverage, get_coverage_output_path};\n");
+    generated.push_str("\n");
+    generated.push_str("// Initialize coverage once at module load if enabled\n");
+    generated.push_str("#[cfg(test)]\n");
+    generated.push_str("#[ctor::ctor]\n");
+    generated.push_str("fn init_test_coverage() {\n");
+    generated.push_str("    if is_coverage_enabled() {\n");
+    generated.push_str("        init_coverage();\n");
+    generated.push_str("        eprintln!(\"Coverage tracking initialized for Simple tests\");\n");
+    generated.push_str("    }\n");
+    generated.push_str("}\n");
+    generated.push_str("\n");
+    generated.push_str("// Save coverage at module unload if enabled\n");
+    generated.push_str("#[cfg(test)]\n");
+    generated.push_str("#[ctor::dtor]\n");
+    generated.push_str("fn save_test_coverage() {\n");
+    generated.push_str("    if is_coverage_enabled() {\n");
+    generated.push_str("        if let Err(e) = save_global_coverage() {\n");
+    generated.push_str("            eprintln!(\"Warning: Failed to save coverage: {}\", e);\n");
+    generated.push_str("        } else {\n");
+    generated.push_str("            let path = get_coverage_output_path();\n");
+    generated.push_str("            eprintln!(\"Coverage data saved to: {}\", path.display());\n");
+    generated.push_str("        }\n");
+    generated.push_str("    }\n");
+    generated.push_str("}\n");
     generated.push_str("\n");
 
     if !test_root.exists() {

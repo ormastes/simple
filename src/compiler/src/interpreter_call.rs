@@ -1253,6 +1253,11 @@ fn exec_function_inner(
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
+    // Record function call for coverage tracking
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        cov.lock().unwrap().record_function_call(&func.name);
+    }
+
     let mut local_env = Env::new();
     if let Some((class_name, fields)) = self_ctx {
         local_env.insert(
