@@ -95,6 +95,26 @@ pub fn compile_function_body<M: Module>(
         }
         map
     });
+
+    // Async state machine dispatcher (similar to generator but for futures)
+    let async_states = func.async_states.clone();
+    let async_state_len = async_states.as_ref().map(|s| s.len()).unwrap_or(0);
+    let async_done_state = async_state_len + 1;
+    let async_state_map = async_states.as_ref().map(|states| {
+        let mut map = HashMap::new();
+        for s in states {
+            map.insert(s.await_block, s.clone());
+        }
+        map
+    });
+    let async_resume_map = async_states.as_ref().map(|states| {
+        let mut map = HashMap::new();
+        for s in states {
+            map.insert(s.resume_block, s.clone());
+        }
+        map
+    });
+
     let mut skip_entry_terminator = false;
     if let Some(states) = &generator_states {
         let generator_param = builder.block_params(entry_block)[0];
@@ -154,11 +174,80 @@ pub fn compile_function_body<M: Module>(
         }
     }
 
+    // Async state machine dispatcher (for async functions with multiple await points)
+    if let Some(states) = &async_states {
+        if !skip_entry_terminator {
+            let async_param = builder.block_params(entry_block)[0];
+            let get_state_id = runtime_funcs.get("rt_async_get_state")
+                .or_else(|| runtime_funcs.get("rt_future_get_state"))
+                .copied();
+
+            if let Some(get_state_id) = get_state_id {
+                let get_state_ref = module.declare_func_in_func(get_state_id, builder.func);
+                let call = builder.ins().call(get_state_ref, &[async_param]);
+                let state_val = builder.inst_results(call)[0];
+
+                let mut dispatch_blocks = Vec::new();
+                if let Some(entry_target) = func
+                    .block(func.entry_block)
+                    .and_then(|b| match b.terminator {
+                        Terminator::Jump(t) => Some(t),
+                        _ => None,
+                    })
+                {
+                    let target_block = *blocks.get(&entry_target).unwrap();
+                    let mut targets = Vec::new();
+                    targets.push(target_block); // State 0: initial entry
+                    for st in states {
+                        targets.push(*blocks.get(&st.resume_block).unwrap());
+                    }
+                    let default_block = func
+                        .async_complete
+                        .and_then(|b| blocks.get(&b).copied())
+                        .unwrap_or(target_block);
+                    targets.push(default_block); // Done state
+
+                    let mut current_block = entry_block;
+                    let mut is_first = true;
+                    for (idx, tgt) in targets.iter().enumerate() {
+                        if !is_first {
+                            builder.switch_to_block(current_block);
+                        } else {
+                            is_first = false;
+                        }
+                        let is_last = idx == targets.len() - 1;
+                        let next_block = if is_last {
+                            default_block
+                        } else {
+                            let nb = builder.create_block();
+                            dispatch_blocks.push(nb);
+                            nb
+                        };
+                        let cmp = builder.ins().icmp_imm(IntCC::Equal, state_val, idx as i64);
+                        builder.ins().brif(cmp, *tgt, &[], next_block, &[]);
+                        if !is_last {
+                            current_block = next_block;
+                        }
+                    }
+                    builder.switch_to_block(default_block);
+                    skip_entry_terminator = true;
+
+                    for b in dispatch_blocks {
+                        builder.seal_block(b);
+                    }
+                }
+            }
+        }
+    }
+
     // Compile each block
     let mut local_addr_map: HashMap<VReg, usize> = HashMap::new();
 
     for mir_block in &func.blocks {
         if generator_states.is_some() && mir_block.id == func.entry_block {
+            continue;
+        }
+        if async_states.is_some() && mir_block.id == func.entry_block {
             continue;
         }
         let cl_block = *blocks.get(&mir_block.id).unwrap();
@@ -181,6 +270,30 @@ pub fn compile_function_body<M: Module>(
             }
         }
 
+        // Async resume block: restore live variables from future context
+        if let Some(resume_map) = async_resume_map.as_ref() {
+            if let Some(state) = resume_map.get(&mir_block.id) {
+                let async_param = builder.block_params(entry_block)[0];
+                let get_ctx_id = runtime_funcs.get("rt_async_get_ctx")
+                    .or_else(|| runtime_funcs.get("rt_future_get_ctx"))
+                    .copied();
+                if let Some(get_ctx_id) = get_ctx_id {
+                    let get_ctx_ref = module.declare_func_in_func(get_ctx_id, builder.func);
+                    let call = builder.ins().call(get_ctx_ref, &[async_param]);
+                    let ctx_val = builder.inst_results(call)[0];
+
+                    let get_id = runtime_funcs["rt_array_get"];
+                    let get_ref = module.declare_func_in_func(get_id, builder.func);
+                    for (idx, reg) in state.live_after_await.iter().enumerate() {
+                        let idx_val = builder.ins().iconst(types::I64, idx as i64);
+                        let call = builder.ins().call(get_ref, &[ctx_val, idx_val]);
+                        let val = builder.inst_results(call)[0];
+                        vreg_values.insert(*reg, val);
+                    }
+                }
+            }
+        }
+
         // Compile instructions; if we hit a Yield, it already emits a return, so skip the terminator.
         let mut returned_via_yield = false;
         for inst in &mir_block.instructions {
@@ -197,6 +310,7 @@ pub fn compile_function_body<M: Module>(
                     blocks: &blocks,
                     mir_block_id: mir_block.id,
                     generator_state_map: &generator_state_map,
+                    async_state_map: &async_state_map,
                 };
                 compile_yield(&mut instr_ctx, &mut builder, *value)?;
                 returned_via_yield = true;
@@ -214,6 +328,7 @@ pub fn compile_function_body<M: Module>(
                     blocks: &blocks,
                     mir_block_id: mir_block.id,
                     generator_state_map: &generator_state_map,
+                    async_state_map: &async_state_map,
                 };
                 compile_instruction(&mut instr_ctx, &mut builder, inst)?;
             }

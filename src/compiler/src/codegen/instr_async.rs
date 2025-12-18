@@ -115,3 +115,80 @@ fn compile_yield<M: Module>(
     builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(2));
     Ok(())
 }
+
+/// Compile an Await instruction with state machine support.
+/// Similar to Yield but for async functions: saves state, returns suspended future.
+fn compile_await<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+    dest: VReg,
+    future: VReg,
+    mir_block_id: BlockId,
+    entry_block: cranelift_codegen::ir::Block,
+) -> InstrResult<()> {
+    // Check if we have async state map for this block
+    if let Some(async_state_map) = ctx.async_state_map.as_ref() {
+        if let Some(state) = async_state_map.get(&mir_block_id) {
+            let async_param = builder.block_params(entry_block)[0];
+
+            // Save live variables to async context
+            let get_ctx_id = ctx.runtime_funcs.get("rt_async_get_ctx")
+                .or_else(|| ctx.runtime_funcs.get("rt_future_get_ctx"))
+                .copied();
+            if let Some(get_ctx_id) = get_ctx_id {
+                let get_ctx_ref = ctx.module.declare_func_in_func(get_ctx_id, builder.func);
+                let call = builder.ins().call(get_ctx_ref, &[async_param]);
+                let ctx_val = builder.inst_results(call)[0];
+
+                let push_id = ctx.runtime_funcs["rt_array_push"];
+                let push_ref = ctx.module.declare_func_in_func(push_id, builder.func);
+                for reg in &state.live_after_await {
+                    if let Some(val) = ctx.vreg_values.get(reg) {
+                        let _ = builder.ins().call(push_ref, &[ctx_val, *val]);
+                    }
+                }
+            }
+
+            // Set next state (resume at next block)
+            let set_state_id = ctx.runtime_funcs.get("rt_async_set_state")
+                .or_else(|| ctx.runtime_funcs.get("rt_future_set_state"))
+                .copied();
+            if let Some(set_state_id) = set_state_id {
+                let set_state_ref = ctx.module.declare_func_in_func(set_state_id, builder.func);
+                let next_state = builder.ins().iconst(types::I64, (state.state_id + 1) as i64);
+                let _ = builder.ins().call(set_state_ref, &[async_param, next_state]);
+            }
+
+            // Return the future itself (suspended state)
+            // Wrap as RuntimeValue for ABI compatibility
+            let future_val = ctx.vreg_values[&future];
+            let wrap_id = ctx.runtime_funcs.get("rt_value_future")
+                .or_else(|| ctx.runtime_funcs.get("rt_value_int")) // Fallback
+                .copied();
+            if let Some(wrap_id) = wrap_id {
+                let wrap_ref = ctx.module.declare_func_in_func(wrap_id, builder.func);
+                let wrap_call = builder.ins().call(wrap_ref, &[future_val]);
+                let wrapped = builder.inst_results(wrap_call)[0];
+                builder.ins().return_(&[wrapped]);
+            } else {
+                builder.ins().return_(&[future_val]);
+            }
+            return Ok(());
+        }
+    }
+
+    // Fallback: no state machine, just call await directly (eager mode)
+    let await_id = ctx.runtime_funcs.get("rt_future_await")
+        .or_else(|| ctx.runtime_funcs.get("rt_await"))
+        .copied();
+    if let Some(await_id) = await_id {
+        let await_ref = ctx.module.declare_func_in_func(await_id, builder.func);
+        let future_val = ctx.vreg_values[&future];
+        let call = builder.ins().call(await_ref, &[future_val]);
+        let result = builder.inst_results(call)[0];
+        ctx.vreg_values.insert(dest, result);
+    } else {
+        builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(3));
+    }
+    Ok(())
+}

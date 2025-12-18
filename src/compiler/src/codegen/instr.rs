@@ -43,6 +43,7 @@ pub struct InstrContext<'a, M: Module> {
     pub blocks: &'a HashMap<BlockId, cranelift_codegen::ir::Block>,
     pub mir_block_id: BlockId,
     pub generator_state_map: &'a Option<HashMap<BlockId, crate::mir::GeneratorState>>,
+    pub async_state_map: &'a Option<HashMap<BlockId, crate::mir::AsyncState>>,
 }
 
 /// Result type for instruction compilation - uses String errors for genericity
