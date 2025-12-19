@@ -45,6 +45,8 @@ mod low_coverage_tests19;
 mod low_coverage_tests20;
 mod low_coverage_tests21;
 mod low_coverage_tests22;
+mod low_coverage_tests23;
+mod low_coverage_tests24;
 mod memory_tests;
 mod pkg_tests;
 mod public_api_coverage_tests;
