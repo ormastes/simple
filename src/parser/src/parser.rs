@@ -157,6 +157,13 @@ impl<'a> Parser<'a> {
             TokenKind::Continue => self.parse_continue(),
             TokenKind::Context => self.parse_context(),
             TokenKind::With => self.parse_with(),
+            // Gherkin-style system test DSL (Features #606-610)
+            TokenKind::Feature => self.parse_feature(),
+            TokenKind::Scenario => self.parse_scenario(),
+            TokenKind::Examples => self.parse_examples(),
+            TokenKind::Given | TokenKind::When | TokenKind::Then | TokenKind::AndThen => {
+                self.parse_step_ref_as_node()
+            }
             _ => self.parse_expression_or_assignment(),
         }
     }

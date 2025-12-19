@@ -48,7 +48,7 @@ All feature tables use this standardized 7-column format:
 | #300-#311 | GPU/SIMD | ✅ Complete |
 | #400-#406 | Contracts | ✅ Complete |
 | #510-#524 | UI Framework | ✅ Complete |
-| #600-#605 | SDN | 📋 Planned |
+| #600-#610 | SDN + Gherkin DSL | 📋 Planned |
 | #700-#713 | Database & Persistence (DB + SQP) | 📋 Planned |
 | #800-#824 | Build & Linker Optimization | 📋 Planned |
 | #825-#849 | Infrastructure & Dependencies | 📋 Planned |
@@ -75,7 +75,7 @@ All feature tables use this standardized 7-column format:
 | Advanced - Effects | 6 | 6 | 0 |
 | Advanced - UI | 3 | 3 | 0 |
 | Advanced - GPU/SIMD | 19 | 19 | 0 |
-| **SDN** | 6 | 1 | 5 |
+| **SDN + Gherkin DSL** | 11 | 1 | 10 |
 | **Database & Persistence** | 14 | 0 | 14 |
 | **Web Framework** | 17 | 0 | 17 |
 | **Build & Linker Optimization** | 25 | 0 | 25 |
@@ -91,18 +91,33 @@ All feature tables use this standardized 7-column format:
 
 ## Planned Features
 
-### SDN - Simple Data Notation (#600-605) 📋
+### SDN - Simple Data Notation (#600-610) 📋
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #600 | SDN Specification | ✅ | - | [spec/sdn.md](spec/sdn.md) | - | - |
-| #601 | SDN Lexer | 📋 | R | [spec/sdn.md](spec/sdn.md) | - | `src/sdn/tests/` |
-| #602 | SDN Parser | 📋 | R | [spec/sdn.md](spec/sdn.md) | - | `src/sdn/tests/` |
-| #603 | SDN Value Types | 📋 | R | [spec/sdn.md](spec/sdn.md) | - | `src/sdn/tests/` |
-| #604 | SDN Document Update | 📋 | R | [spec/sdn.md](spec/sdn.md) | - | `src/sdn/tests/` |
-| #605 | SDN CLI | 📋 | R | [spec/sdn.md](spec/sdn.md) | `system/sdn/` | `src/sdn/tests/` |
+| #600 | SDN Specification | ✅ | - | [spec/sdn.md](../spec/sdn.md) | - | - |
+| #601 | SDN Lexer | 📋 | R | [spec/sdn.md](../spec/sdn.md) | - | `src/sdn/tests/` |
+| #602 | SDN Parser | 📋 | R | [spec/sdn.md](../spec/sdn.md) | - | `src/sdn/tests/` |
+| #603 | SDN Value Types | 📋 | R | [spec/sdn.md](../spec/sdn.md) | - | `src/sdn/tests/` |
+| #604 | SDN Document Update | 📋 | R | [spec/sdn.md](../spec/sdn.md) | - | `src/sdn/tests/` |
+| #605 | SDN CLI | 📋 | R | [spec/sdn.md](../spec/sdn.md) | `system/sdn/` | `src/sdn/tests/` |
+| #606 | Gherkin-Style System Test DSL | 📋 | R | [spec/gherkin_dsl.md](../spec/gherkin_dsl.md) | `system/gherkin/` | `src/parser/tests/` |
+| #607 | `examples` keyword (two-space delimiter) | 📋 | R | [spec/gherkin_dsl.md](../spec/gherkin_dsl.md) | `system/gherkin/` | `src/parser/tests/` |
+| #608 | `feature`/`scenario`/`scenario outline` | 📋 | R | [spec/gherkin_dsl.md](../spec/gherkin_dsl.md) | `system/gherkin/` | `src/parser/tests/` |
+| #609 | Step pattern `<placeholder>` syntax | 📋 | R | [spec/gherkin_dsl.md](../spec/gherkin_dsl.md) | `system/gherkin/` | `src/parser/tests/` |
+| #610 | Doc interpolation `${examples name}` | 📋 | R | [spec/gherkin_dsl.md](../spec/gherkin_dsl.md) | `system/gherkin/` | `src/parser/tests/` |
 
 **Crate:** `src/sdn/` - Standalone library + CLI for config parsing
+
+#### Table Kind Types
+
+| Kind | Syntax | Colon | Delimiter | Use Case |
+|------|--------|-------|-----------|----------|
+| Typed table | `name: table{i32, i32}` | ✅ | Comma | Strongly-typed SDN data |
+| Named table | `name \|f1, f2\|` | ❌ | Comma | SDN configuration |
+| Examples table | `examples name:` | ✅ | Two-space | BDD test data (natural language) |
+
+**Grammar:** One-pass LL(2) parseable - see [spec/gherkin_dsl.md](../spec/gherkin_dsl.md)
 
 ---
 
