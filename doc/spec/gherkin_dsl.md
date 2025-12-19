@@ -265,14 +265,193 @@ feature Inline Examples:
             0      100     0
 ```
 
-**Syntax:**
+---
+
+## Syntax Reference
+
+### Keywords
 
 | Form | Meaning |
 |------|---------|
-| `examples name:` + block | Named examples with data |
-| `context name:` + block | Named context definition |
-| `feature name:` + block | Feature grouping |
-| `scenario name:` + block | Single test case |
-| `scenario outline name:` + block | Parameterized test |
+| `examples name:` | Named examples table (two-space delimiter) |
+| `context pattern:` | Step definition with `<placeholder>` support |
+| `feature name:` | Feature grouping |
+| `scenario name:` | Single test case |
+| `scenario outline name:` | Parameterized test with examples |
+| `given/when/then/and_then pattern:` | Step references |
 | `"""..."""` | Doc comment (any level) |
-| `${examples name}` | Embed table in doc |
+| `${examples name}` | Embed table in documentation |
+
+### Table Kind Types (SDN Integration)
+
+| Kind | Syntax | Colon | Delimiter | Use Case |
+|------|--------|-------|-----------|----------|
+| **Typed table** | `name: table{i32, i32}` | ✅ | Comma | Strongly-typed data |
+| **Named table** | `name \|f1, f2\|` | ❌ | Comma | SDN configuration |
+| **Examples table** | `examples name:` | ✅ | Two-space | BDD test data |
+
+### Two-Space Delimiter
+
+Examples tables use **two or more spaces** as column delimiter:
+
+```
+start  operation       result    # header row
+10     add 5           15        # "add 5" is single value (one space)
+10     multiply by 2   20        # "multiply by 2" is single value
+```
+
+- Single space → part of value
+- Two+ spaces → column boundary
+
+---
+
+## Grammar (EBNF)
+
+### One-Pass LL(2) Parser
+
+All constructs can be parsed with maximum 2-token lookahead.
+
+```ebnf
+(* === TOP LEVEL === *)
+document      = statement* ;
+
+statement     = examples_stmt
+              | context_stmt
+              | feature_stmt
+              | named_table       (* SDN: name |fields| *)
+              | typed_table       (* SDN: name: table{...} *)
+              | value_stmt        (* SDN: name: value *)
+              ;
+
+(* === BDD CONSTRUCTS === *)
+
+examples_stmt = 'examples' IDENT ':' NEWLINE INDENT
+                doc_comment?
+                header_row
+                data_row+
+                DEDENT ;
+
+context_stmt  = 'context' step_pattern ':' NEWLINE INDENT
+                doc_comment?
+                (statement | expr)+
+                DEDENT ;
+
+feature_stmt  = 'feature' description ':' NEWLINE INDENT
+                doc_comment?
+                scenario_stmt+
+                DEDENT ;
+
+scenario_stmt = 'scenario' 'outline'? description ':' NEWLINE INDENT
+                doc_comment?
+                step_ref+
+                examples_ref?
+                DEDENT ;
+
+step_ref      = ('given' | 'when' | 'then' | 'and_then') step_pattern ':'
+                (NEWLINE | INDENT block DEDENT) ;
+
+examples_ref  = 'examples' IDENT? ':'
+                (NEWLINE | INDENT inline_examples DEDENT) ;
+
+inline_examples = header_row data_row+ ;
+
+(* === STEP PATTERNS === *)
+
+step_pattern  = pattern_part+ ;
+pattern_part  = IDENT | NUMBER | '<' IDENT '>' ;   (* <n> = placeholder *)
+
+description   = (IDENT | NUMBER | SYMBOL)+ ;
+
+(* === TWO-SPACE DELIMITED ROWS === *)
+
+header_row    = value (TWO_SPACES value)* NEWLINE ;
+data_row      = value (TWO_SPACES value)* NEWLINE ;
+
+TWO_SPACES    = '  ' ' '* ;   (* 2+ consecutive spaces *)
+
+(* === SDN TABLES (unchanged) === *)
+
+named_table   = IDENT '|' field_list '|'
+                (row | NEWLINE INDENT rows DEDENT) ;
+
+typed_table   = IDENT ':' 'table' '{' type_list '}'
+                ('=' '[' tuple_list ']' | NEWLINE INDENT rows DEDENT) ;
+
+field_list    = IDENT (',' IDENT)* ;
+type_list     = IDENT (',' IDENT)* ;
+rows          = row+ ;
+row           = value (',' value)* NEWLINE ;
+
+(* === DOC COMMENTS === *)
+
+doc_comment   = '"""' doc_content '"""' NEWLINE ;
+doc_content   = (CHAR | interpolation)* ;
+interpolation = '${' 'examples' IDENT '}' ;
+
+(* === TOKENS === *)
+
+IDENT         = [A-Za-z_][A-Za-z0-9_]* ;
+NUMBER        = '-'? [0-9]+ ('.' [0-9]+)? ;
+NEWLINE       = '\n' | '\r\n' ;
+INDENT        = <increase in indentation> ;
+DEDENT        = <decrease in indentation> ;
+```
+
+### Parse Decision Tree (LL(2))
+
+```
+parse_statement():
+    tok = peek()
+    next = peek(2)
+
+    switch tok:
+        case 'examples':       → parse_examples_stmt()
+        case 'context':        → parse_context_stmt()
+        case 'feature':        → parse_feature_stmt()
+        case 'scenario':       → parse_scenario_stmt()
+        case 'given'|'when'|'then'|'and_then':
+                               → parse_step_ref()
+        case IDENT:
+            switch next:
+                case '|':      → parse_named_table()   # no colon!
+                case ':':
+                    if peek(3) == 'table':
+                               → parse_typed_table()
+                    else:      → parse_value_stmt()
+```
+
+### Lookahead Requirements
+
+| Context | Lookahead | Decision |
+|---------|-----------|----------|
+| `examples` | 1 | Examples statement |
+| `context` | 1 | Context definition |
+| `feature` | 1 | Feature block |
+| `scenario` | 1-2 | Scenario or scenario outline |
+| `IDENT \|` | 2 | Named table (no colon) |
+| `IDENT : table` | 3 | Typed table |
+| `IDENT :` | 2 | Value or block |
+
+---
+
+## Relationship to Other Specs
+
+| Spec | Purpose | Integration |
+|------|---------|-------------|
+| [SDN](spec/sdn.md) | Data notation | Table syntax (`\|fields\|`, `table{types}`) |
+| [BDD Spec](spec/bdd_spec.md) | Test framework | `describe`, `context`, `it`, matchers |
+| [Test Policy](guides/test.md) | Coverage & mocks | Test levels, coverage metrics |
+| This doc | System test DSL | Gherkin-style `feature`/`scenario`/`examples` |
+
+---
+
+## Implementation Status
+
+| Component | Status | Notes |
+|-----------|--------|-------|
+| Grammar spec | ✅ | This document |
+| Parser keywords | 📋 | `examples`, `feature`, `scenario`, `given`, `when`, `then` |
+| Two-space lexer mode | 📋 | Context-aware delimiter detection |
+| Step pattern matching | 📋 | `<placeholder>` extraction |
+| Examples interpolation | 📋 | `${examples name}` in doc comments |
+| Living doc generation | ✅ | HTML/Markdown from BDD specs |

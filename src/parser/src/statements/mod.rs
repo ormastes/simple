@@ -6,9 +6,11 @@
 //! - Jump statements (return, break, continue)
 //! - Context and with statements
 //! - Contract blocks (requires/ensures/invariant) - LLM-friendly feature #400
+//! - Gherkin-style system test DSL (feature/scenario/examples) - Features #606-610
 
 mod bounds;
 mod contract;
+mod gherkin;
 mod var_decl;
 
 use crate::ast::*;

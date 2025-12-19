@@ -145,6 +145,16 @@ pub enum TokenKind {
     To,    // to (positive assertion: expect x to eq 5)
     NotTo, // not_to (negative assertion: expect x not_to eq 5)
 
+    // Gherkin-style system test DSL keywords (doc/spec/gherkin_dsl.md)
+    Feature,   // feature Name: (test grouping)
+    Scenario,  // scenario Name: or scenario outline Name:
+    Outline,   // outline (modifier for scenario)
+    Examples,  // examples name: (data table with two-space delimiter)
+    Given,     // given step_pattern: (setup step)
+    When,      // when step_pattern: (action step)
+    Then,      // then step_pattern: (assertion step)
+    AndThen,   // and_then step_pattern: (chained assertion)
+
     // Memory management keywords
     HandlePool, // handle_pool (declare a handle pool for a type)
 

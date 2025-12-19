@@ -99,6 +99,15 @@ impl<'a> super::Lexer<'a> {
             // Infix keywords (for BDD spec framework)
             "to" => TokenKind::To,
             "not_to" => TokenKind::NotTo,
+            // Gherkin-style system test DSL keywords
+            "feature" => TokenKind::Feature,
+            "scenario" => TokenKind::Scenario,
+            "outline" => TokenKind::Outline,
+            "examples" => TokenKind::Examples,
+            "given" => TokenKind::Given,
+            "when" => TokenKind::When,
+            "then" => TokenKind::Then,
+            "and_then" => TokenKind::AndThen,
             // Memory management keywords
             "handle_pool" => TokenKind::HandlePool,
             "_" => TokenKind::Underscore,

@@ -29,6 +29,12 @@ pub enum Node {
     AutoImportStmt(AutoImportStmt),
     RequiresCapabilities(RequiresCapabilitiesStmt),
 
+    // Gherkin-style system test DSL (#606-610)
+    Feature(FeatureDef),
+    Scenario(ScenarioDef),
+    Examples(ExamplesTable),
+    StepDef(StepDef),
+
     // Statements
     Let(LetStmt),
     Const(ConstStmt),
@@ -1381,6 +1387,123 @@ pub struct AutoImportStmt {
     pub span: Span,
     pub path: ModulePath,
     pub macro_name: String,
+}
+
+// ============================================================================
+// Gherkin-Style System Test DSL (doc/spec/gherkin_dsl.md)
+// ============================================================================
+
+/// Examples table with two-space delimited data rows
+/// ```simple
+/// examples addition:
+///     a    b    result
+///     1    2    3
+///     10   20   30
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExamplesTable {
+    pub span: Span,
+    pub name: String,
+    pub doc_comment: Option<DocComment>,
+    pub fields: Vec<String>,        // Column names from header row
+    pub rows: Vec<Vec<Expr>>,       // Data rows (each row is a vec of expressions)
+}
+
+/// Step pattern with optional placeholders: `calculator at <n>`
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepPattern {
+    pub span: Span,
+    pub parts: Vec<StepPatternPart>,
+}
+
+/// Part of a step pattern - either literal text or placeholder
+#[derive(Debug, Clone, PartialEq)]
+pub enum StepPatternPart {
+    /// Literal text (identifier or number)
+    Literal(String),
+    /// Placeholder like `<n>` - stores just the name without angle brackets
+    Placeholder(String),
+}
+
+/// Step kind for Gherkin-style tests
+#[derive(Debug, Clone, PartialEq, Copy)]
+pub enum StepKind {
+    Given,
+    When,
+    Then,
+    AndThen,
+}
+
+/// Context/step definition block
+/// ```simple
+/// context calculator at <n>:
+///     calc = Calculator.new().set(n)
+/// given fresh calculator:
+///     Calculator.new()
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepDef {
+    pub span: Span,
+    /// Optional step kind (when defined via given/when/then/and_then)
+    /// None when defined via `context pattern:`
+    pub kind: Option<StepKind>,
+    pub pattern: StepPattern,
+    pub doc_comment: Option<DocComment>,
+    pub body: Block,
+}
+
+/// Step reference within a scenario
+/// ```simple
+/// given fresh calculator:
+/// when add 5:
+/// then value is 5:
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct StepRef {
+    pub span: Span,
+    pub kind: StepKind,
+    pub pattern: StepPattern,
+    pub body: Option<Block>,  // Optional inline body (for assertions with code)
+}
+
+/// Scenario definition (single test case or outline)
+/// ```simple
+/// scenario Adding numbers:
+///     given fresh calculator:
+///     when add 5:
+///     then value is 5:
+///
+/// scenario outline Adding two numbers:
+///     given fresh calculator:
+///     when add <a>:
+///     when add <b>:
+///     then value is <result>:
+///     examples addition:
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScenarioDef {
+    pub span: Span,
+    pub name: String,
+    pub is_outline: bool,
+    pub doc_comment: Option<DocComment>,
+    pub steps: Vec<StepRef>,
+    pub examples_ref: Option<String>,       // Reference to named examples table
+    pub inline_examples: Option<ExamplesTable>,  // Inline examples table
+}
+
+/// Feature definition (grouping of scenarios)
+/// ```simple
+/// feature Basic Calculator Operations:
+///     scenario New calculator starts at zero:
+///         given fresh calculator:
+///         then value is 0:
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct FeatureDef {
+    pub span: Span,
+    pub name: String,
+    pub doc_comment: Option<DocComment>,
+    pub scenarios: Vec<ScenarioDef>,
 }
 
 #[cfg(test)]
