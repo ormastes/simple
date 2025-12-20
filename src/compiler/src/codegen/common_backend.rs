@@ -56,6 +56,7 @@ pub struct CodegenBackend<M: Module> {
 }
 
 /// Settings for creating a codegen backend
+#[derive(Debug, Clone)]
 pub struct BackendSettings {
     pub opt_level: &'static str,
     pub is_pic: bool,

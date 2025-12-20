@@ -625,9 +625,11 @@ config.save()
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Specification | ✅ | This document |
-| Lexer | 📋 | Planned |
-| Parser | 📋 | Planned |
-| Value types | 📋 | Planned |
-| Document update | 📋 | Planned |
-| CLI | 📋 | Planned |
+| Lexer | ✅ | `src/sdn/src/lexer.rs` - INDENT/DEDENT tracking |
+| Parser | ✅ | `src/sdn/src/parser.rs` - One-pass LL(2) |
+| Value types | ✅ | `src/sdn/src/value.rs` - Full type system |
+| Document update | ✅ | `src/sdn/src/document.rs` - Path-based get/set |
+| CLI | ✅ | `src/sdn/src/bin/sdn.rs` - check/fmt/get/set/to-json |
 | Simple embedding | 📋 | Planned |
+
+**Test Coverage:** 37 tests across all modules

@@ -712,6 +712,26 @@ pub fn compile_instruction<M: Module>(
             ctx.vreg_values.insert(*dest, val);
         }
 
+        // Coverage instrumentation probes - currently no-ops
+        // Will be implemented when runtime coverage collection is added
+        MirInst::DecisionProbe { result, decision_id, file, line, column } => {
+            // TODO: Call rt_decision_probe(decision_id, result)
+            // For now, just ensure the result is used to prevent DCE
+            let _ = ctx.vreg_values.get(result);
+            let _ = (decision_id, file, line, column);
+        }
+
+        MirInst::ConditionProbe { decision_id, condition_id, result, file, line, column } => {
+            // TODO: Call rt_condition_probe(decision_id, condition_id, result)
+            let _ = ctx.vreg_values.get(result);
+            let _ = (decision_id, condition_id, file, line, column);
+        }
+
+        MirInst::PathProbe { path_id, block_id } => {
+            // TODO: Call rt_path_probe(path_id, block_id)
+            let _ = (path_id, block_id);
+        }
+
         MirInst::UnitBoundCheck {
             value,
             unit_name,

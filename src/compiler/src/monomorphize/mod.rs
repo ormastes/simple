@@ -19,14 +19,24 @@
 //! ```
 
 mod analyzer;
+pub mod cache;
 mod engine;
+pub mod parallel;
 mod rewriter;
 mod table;
 mod types;
 mod util;
 
 pub use analyzer::CallSiteAnalyzer;
+pub use cache::{
+    CacheEntryMeta, CachedClass, CachedFunction, CachedStruct, LocalMonoCache, MonoCache,
+    MonoCacheConfig, MonoCacheStats,
+};
 pub use engine::Monomorphizer;
+pub use parallel::{
+    monomorphize_modules_parallel, MonoStats, ParallelMonoConfig, ParallelMonomorphizer,
+    ParallelMonoTable,
+};
 pub use rewriter::monomorphize_module;
 pub use table::MonomorphizationTable;
 pub use types::{ConcreteType, PointerKind, SpecializationKey, TypeBindings};

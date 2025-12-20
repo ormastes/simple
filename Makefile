@@ -11,12 +11,13 @@
 .PHONY: all test test-verbose test-unit test-integration test-system test-environment \
         test-full test-full-quick test-full-coverage test-full-extended test-full-check \
         coverage coverage-html coverage-lcov coverage-json coverage-summary \
-        coverage-unit coverage-integration coverage-system coverage-environment coverage-merged coverage-all \
-        coverage-check coverage-check-unit coverage-check-integration coverage-check-system \
-        coverage-extended coverage-extended-system coverage-extended-integration coverage-extended-all coverage-extended-check \
+        coverage-unit coverage-integration coverage-system coverage-environment coverage-service coverage-merged coverage-all \
+        coverage-check coverage-check-unit coverage-check-integration coverage-check-system coverage-check-service \
+        coverage-extended coverage-extended-system coverage-extended-integration coverage-extended-service coverage-extended-all coverage-extended-check \
         duplication duplication-simple lint lint-fix fmt fmt-check \
         check check-full unused-deps outdated audit build build-release \
-        clean clean-coverage clean-duplication install-tools help
+        clean clean-coverage clean-duplication install-tools help \
+        arch-test arch-test-visualize
 
 # Default target
 all: check
@@ -205,6 +206,23 @@ coverage-environment:
 		--json --output-path=$(COVERAGE_DIR)/environment/coverage.json
 	cargo llvm-cov -p simple-tests --test environment --branch
 
+# Service: Interface class + External library touch
+coverage-service:
+	@mkdir -p $(COVERAGE_DIR)/service
+	@echo "=== SERVICE TEST COVERAGE (Interface + External Lib Touch) ==="
+	cargo llvm-cov --workspace \
+		--json --output-path=$(COVERAGE_DIR)/service/coverage.json
+	@echo "Analyzing interface and external library touch..."
+	@if [ -f public_api.yml ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
+			--llvm-cov $(COVERAGE_DIR)/service/coverage.json \
+			--api public_api.yml \
+			--output-dir $(COVERAGE_DIR)/service \
+			--report-type service; \
+	else \
+		echo "Warning: public_api.yml not found, skipping service coverage analysis"; \
+	fi
+
 # Merged coverage: Unit + Environment (Branch/Condition)
 coverage-merged:
 	@mkdir -p $(COVERAGE_DIR)/merged
@@ -215,13 +233,14 @@ coverage-merged:
 		--html --output-dir=$(COVERAGE_DIR)/merged/html
 	@echo "Merged coverage report: $(COVERAGE_DIR)/merged/html/index.html"
 
-coverage-all: coverage-unit coverage-integration coverage-system coverage-environment
+coverage-all: coverage-unit coverage-integration coverage-system coverage-service coverage-environment
 	@echo ""
 	@echo "All coverage reports generated:"
-	@echo "  Unit (branch/condition):         $(COVERAGE_DIR)/unit/"
-	@echo "  Integration (public func touch): $(COVERAGE_DIR)/integration/"
-	@echo "  System (class/struct touch):     $(COVERAGE_DIR)/system/"
-	@echo "  Environment (branch/cond):       $(COVERAGE_DIR)/environment/"
+	@echo "  Unit (branch/condition):          $(COVERAGE_DIR)/unit/"
+	@echo "  Integration (public func touch):  $(COVERAGE_DIR)/integration/"
+	@echo "  System (class/struct touch):      $(COVERAGE_DIR)/system/"
+	@echo "  Service (interface + ext lib):    $(COVERAGE_DIR)/service/"
+	@echo "  Environment (branch/cond):        $(COVERAGE_DIR)/environment/"
 
 # Extended coverage reports (per coverage_json_format.md spec)
 # Generates: coverage_system.json, coverage_integration.json, coverage_merged.json
@@ -264,12 +283,26 @@ coverage-extended-integration:
 			--report-type integration; \
 	fi
 
-coverage-extended-all: coverage-extended-system coverage-extended-integration coverage-extended
+coverage-extended-service:
+	@mkdir -p $(COVERAGE_DIR)/extended
+	@echo "=== EXTENDED SERVICE COVERAGE ==="
+	cargo llvm-cov --workspace \
+		--json --output-path=$(COVERAGE_DIR)/service_raw.json
+	@if [ -f public_api.yml ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- generate \
+			--llvm-cov $(COVERAGE_DIR)/service_raw.json \
+			--api public_api.yml \
+			--output-dir $(COVERAGE_DIR)/extended \
+			--report-type service; \
+	fi
+
+coverage-extended-all: coverage-extended-system coverage-extended-service coverage-extended-integration coverage-extended
 	@echo ""
 	@echo "Extended coverage reports generated:"
-	@echo "  System (class/struct methods): $(COVERAGE_DIR)/extended/coverage_system.json"
-	@echo "  Integration (public functions): $(COVERAGE_DIR)/extended/coverage_integration.json"
-	@echo "  Merged (all metrics): $(COVERAGE_DIR)/extended/coverage_merged.json"
+	@echo "  System (class/struct methods):   $(COVERAGE_DIR)/extended/coverage_system.json"
+	@echo "  Service (interface + ext lib):   $(COVERAGE_DIR)/extended/coverage_service.json"
+	@echo "  Integration (public functions):  $(COVERAGE_DIR)/extended/coverage_integration.json"
+	@echo "  Merged (all metrics):            $(COVERAGE_DIR)/extended/coverage_merged.json"
 
 # Check extended coverage thresholds
 coverage-extended-check:
@@ -279,6 +312,11 @@ coverage-extended-check:
 			--coverage $(COVERAGE_DIR)/extended/coverage_system.json \
 			--threshold 80; \
 	fi
+	@if [ -f $(COVERAGE_DIR)/extended/coverage_service.json ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- check \
+			--coverage $(COVERAGE_DIR)/extended/coverage_service.json \
+			--threshold 80; \
+	fi
 	@if [ -f $(COVERAGE_DIR)/extended/coverage_integration.json ]; then \
 		cargo run -p simple_mock_helper --bin coverage_gen -- check \
 			--coverage $(COVERAGE_DIR)/extended/coverage_integration.json \
@@ -286,7 +324,7 @@ coverage-extended-check:
 	fi
 
 # Coverage threshold checks (per test.md: 100% for all)
-coverage-check: coverage-check-unit coverage-check-integration coverage-check-system
+coverage-check: coverage-check-unit coverage-check-integration coverage-check-system coverage-check-service
 	@echo "All coverage thresholds passed!"
 
 coverage-check-unit:
@@ -312,6 +350,16 @@ coverage-check-system:
 			--api public_api.yml --type class-struct-touch --threshold 100; \
 	else \
 		echo "Warning: public_api.yml not found, skipping system coverage check"; \
+	fi
+
+coverage-check-service:
+	@echo "Checking service interface + external lib touch..."
+	@if [ -f $(COVERAGE_DIR)/extended/coverage_service.json ]; then \
+		cargo run -p simple_mock_helper --bin coverage_gen -- check \
+			--coverage $(COVERAGE_DIR)/extended/coverage_service.json \
+			--threshold 100; \
+	else \
+		echo "Warning: coverage_service.json not found, run 'make coverage-service' first"; \
 	fi
 
 # ============================================================================
@@ -434,6 +482,31 @@ install-tools:
 	@echo "  cargo install cargo-udeps"
 
 # ============================================================================
+# Architecture Testing (#944-#945)
+# ============================================================================
+
+# Run architecture tests (validates layer dependencies)
+arch-test:
+	@echo "=== ARCHITECTURE TESTS ==="
+	cargo test -p arch_test --all-targets
+	@echo ""
+	@echo "Architecture tests passed!"
+
+# Generate dependency graph visualization (DOT format)
+arch-test-visualize:
+	@echo "=== ARCHITECTURE VISUALIZATION ==="
+	@mkdir -p target/arch
+	@echo "Generating DOT graph..."
+	@if cargo run -p arch_test --example visualize 2>/dev/null; then \
+		echo "DOT graph: target/arch/layers.dot"; \
+		echo "Mermaid graph: target/arch/layers.mmd"; \
+		echo ""; \
+		echo "To render DOT: dot -Tpng target/arch/layers.dot -o target/arch/layers.png"; \
+	else \
+		echo "Note: Run 'cargo test -p arch_test' to verify architecture"; \
+	fi
+
+# ============================================================================
 # Help
 # ============================================================================
 
@@ -461,6 +534,7 @@ help:
 	@echo "  make coverage-unit         - Unit tests (branch/condition)"
 	@echo "  make coverage-integration  - Integration (public function touch)"
 	@echo "  make coverage-system       - System (public class/struct touch)"
+	@echo "  make coverage-service      - Service (interface + external lib touch)"
 	@echo "  make coverage-environment  - Environment (branch/condition)"
 	@echo "  make coverage-merged       - Merged unit + environment (branch/condition)"
 	@echo "  make coverage-all          - Generate all coverage reports"
@@ -468,8 +542,9 @@ help:
 	@echo "  make coverage-summary      - Print coverage summary"
 	@echo ""
 	@echo "Extended Coverage (public API):"
-	@echo "  make coverage-extended     - Generate extended reports from existing data"
-	@echo "  make coverage-extended-all - Generate all extended report types"
+	@echo "  make coverage-extended         - Generate extended reports from existing data"
+	@echo "  make coverage-extended-service - Generate service coverage report"
+	@echo "  make coverage-extended-all     - Generate all extended report types"
 	@echo ""
 	@echo "Duplication:"
 	@echo "  make duplication   - Check for code duplication"
@@ -483,6 +558,10 @@ help:
 	@echo "Combined:"
 	@echo "  make check         - Run fmt, lint, test"
 	@echo "  make check-full    - Run all checks + coverage + duplication"
+	@echo ""
+	@echo "Architecture Testing:"
+	@echo "  make arch-test           - Run architecture tests"
+	@echo "  make arch-test-visualize - Generate dependency graph (DOT/Mermaid)"
 	@echo ""
 	@echo "Other:"
 	@echo "  make install-tools - Install required tools"

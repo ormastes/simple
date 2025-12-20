@@ -19,6 +19,12 @@ pub struct MirLowerer<'a> {
     refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     type_registry: Option<&'a crate::hir::TypeRegistry>,
+    /// Coverage instrumentation mode
+    coverage_enabled: bool,
+    /// Counter for generating unique decision IDs
+    decision_counter: u32,
+    /// Current file being lowered (for coverage source locations)
+    current_file: Option<String>,
 }
 
 impl<'a> MirLowerer<'a> {
@@ -28,6 +34,9 @@ impl<'a> MirLowerer<'a> {
             contract_mode: ContractMode::All,
             refined_types: None,
             type_registry: None,
+            coverage_enabled: false,
+            decision_counter: 0,
+            current_file: None,
         }
     }
 
@@ -38,7 +47,67 @@ impl<'a> MirLowerer<'a> {
             contract_mode,
             refined_types: None,
             type_registry: None,
+            coverage_enabled: false,
+            decision_counter: 0,
+            current_file: None,
         }
+    }
+
+    /// Enable coverage instrumentation
+    pub fn with_coverage(mut self, enabled: bool) -> Self {
+        self.coverage_enabled = enabled;
+        self
+    }
+
+    /// Set the current file for coverage source locations
+    pub fn with_file(mut self, file: String) -> Self {
+        self.current_file = Some(file);
+        self
+    }
+
+    /// Generate a unique decision ID
+    fn next_decision_id(&mut self) -> u32 {
+        let id = self.decision_counter;
+        self.decision_counter += 1;
+        id
+    }
+
+    /// Emit a decision probe instruction if coverage is enabled
+    fn emit_decision_probe(&mut self, cond_reg: VReg, line: u32, column: u32) -> MirLowerResult<()> {
+        if !self.coverage_enabled {
+            return Ok(());
+        }
+
+        let decision_id = self.next_decision_id();
+        let file = self.current_file.clone().unwrap_or_default();
+
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::DecisionProbe {
+                decision_id,
+                result: cond_reg,
+                file,
+                line,
+                column,
+            });
+        })?;
+
+        Ok(())
+    }
+
+    /// Emit a path probe instruction if coverage is enabled
+    #[allow(dead_code)]
+    fn emit_path_probe(&mut self, path_id: u32, block_id: u32) -> MirLowerResult<()> {
+        if !self.coverage_enabled {
+            return Ok(());
+        }
+
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::PathProbe { path_id, block_id });
+        })?;
+
+        Ok(())
     }
 
     /// Set refined types reference for emitting refinement checks (CTR-020)
@@ -498,6 +567,10 @@ impl<'a> MirLowerer<'a> {
             } => {
                 let cond_reg = self.lower_expr(condition)?;
 
+                // Emit decision probe for coverage (before branch)
+                // TODO: Get actual line/column from condition span
+                self.emit_decision_probe(cond_reg, 0, 0)?;
+
                 // Create blocks
                 let (then_id, else_id, merge_id) = self.with_func(|func, current_block| {
                     let then_id = func.new_block();
@@ -556,6 +629,11 @@ impl<'a> MirLowerer<'a> {
                 // Check condition
                 self.set_current_block(cond_id)?;
                 let cond_reg = self.lower_expr(condition)?;
+
+                // Emit decision probe for while condition coverage
+                // TODO: Get actual line/column from condition span
+                self.emit_decision_probe(cond_reg, 0, 0)?;
+
                 self.with_func(|func, current_block| {
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Branch {

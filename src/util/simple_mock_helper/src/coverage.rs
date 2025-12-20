@@ -45,6 +45,7 @@ pub struct LlvmFunction {
 /// Example YAML:
 ///
 /// ```yaml
+/// # System Test: Types with methods
 /// types:
 ///   MyNamespace::Foo:
 ///     methods: [do_stuff, reset]
@@ -52,15 +53,74 @@ pub struct LlvmFunction {
 ///     methods:
 ///       - run
 ///       - stop
+///
+/// # System Test: Public interface classes
+/// public_classes:
+///   simple_compiler:
+///     - CompilerPipeline
+///     - Codegen
+///
+/// # Service Test: Interface classes (trait implementors)
+/// interfaces:
+///   simple_common:
+///     - DynLoader
+///     - DynModule
+///
+/// # Service Test: External library touch points
+/// external_libs:
+///   cranelift: [codegen, frontend, module]
+///   abfall: [GcRuntime]
+///
+/// # Integration Test: Neighbor package touch
+/// neighbors:
+///   simple_compiler:
+///     depends_on: [simple_parser, simple_runtime]
+///
+/// # Integration Test: Public functions
+/// public_functions:
+///   simple_compiler:
+///     - CompilerPipeline::new
+///     - CompilerPipeline::compile
 /// ```
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct PublicApiSpec {
+    /// Types with methods (System test)
+    #[serde(default)]
     pub types: HashMap<String, PublicTypeSpec>,
+
+    /// Public interface classes by crate (System test)
+    #[serde(default)]
+    pub public_classes: HashMap<String, Vec<String>>,
+
+    /// Interface classes (trait implementors) by crate (Service test)
+    #[serde(default)]
+    pub interfaces: HashMap<String, Vec<String>>,
+
+    /// External library touch points by library name (Service test)
+    #[serde(default)]
+    pub external_libs: HashMap<String, Vec<String>>,
+
+    /// Neighbor package dependencies by crate (Integration test)
+    #[serde(default)]
+    pub neighbors: HashMap<String, NeighborSpec>,
+
+    /// Public functions by crate (Integration test)
+    #[serde(default)]
+    pub public_functions: HashMap<String, Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct PublicTypeSpec {
+    #[serde(default)]
     pub methods: Vec<String>,
+}
+
+/// Neighbor package specification
+#[derive(Debug, Deserialize, Default)]
+pub struct NeighborSpec {
+    /// List of crates this crate depends on
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 /// Per-method coverage result.

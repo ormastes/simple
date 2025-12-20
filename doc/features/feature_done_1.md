@@ -4,7 +4,7 @@ This document archives all completed features as of December 2025.
 
 ---
 
-## Completed Infrastructure Components (#1-#8)
+## Completed Infrastructure Components (#1-#9)
 
 | Feature ID | Component | Status | Impl | Doc | S-Test | R-Test |
 |------------|-----------|--------|------|-----|--------|--------|
@@ -16,6 +16,20 @@ This document archives all completed features as of December 2025.
 | #6 | **RuntimeValue** | ✅ | R | [spec/stdlib.md](spec/stdlib.md) | [`struct_coverage_tests.rs`](../tests/system/struct_coverage_tests.rs) | `src/runtime/tests/` |
 | #7 | **GC** | ✅ | R | [spec/memory.md](spec/memory.md) | [`struct_coverage_tests.rs:test_gc_*`](../tests/system/struct_coverage_tests.rs) | `src/runtime/tests/` |
 | #8 | **Package Manager** | ✅ | R | [spec/stdlib.md](spec/stdlib.md) | [`pkg_tests.rs`](../tests/system/pkg_tests.rs) | `src/pkg/tests/` |
+| #9 | **SMF (Simple Module Format)** | ✅ | R | [architecture.md](architecture.md) | - | `src/compiler/src/linker/smf_writer.rs`, `src/loader/` |
+
+### Feature #9 - SMF (Simple Module Format)
+
+SMF is the binary format for compiled Simple programs. It enables:
+- **Compilation**: `simple compile src.spl -o out.smf` generates portable binary modules
+- **Execution**: `simple out.smf` runs compiled binaries directly
+- **Cross-compilation**: `simple compile src.spl --target aarch64` for different architectures
+
+**Implementation:**
+- `SmfWriter` in `src/compiler/src/linker/smf_writer.rs` - Writes SMF files from compiled code
+- `ModuleLoader` in `src/loader/` - Loads and executes SMF binaries
+- Supports code sections, data sections (mutable/readonly), symbol tables, and relocations
+- Magic: `SMF\0`, versioned format with section headers
 
 ---
 

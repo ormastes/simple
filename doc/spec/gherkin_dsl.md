@@ -450,8 +450,21 @@ parse_statement():
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Grammar spec | ✅ | This document |
-| Parser keywords | 📋 | `examples`, `feature`, `scenario`, `given`, `when`, `then` |
-| Two-space lexer mode | 📋 | Context-aware delimiter detection |
-| Step pattern matching | 📋 | `<placeholder>` extraction |
+| Parser keywords | ✅ | `examples`, `feature`, `scenario`, `given`, `when`, `then` (src/parser/src/statements/gherkin.rs) |
+| Runtime functions | ✅ | `feature()`, `scenario()`, `given()`, `when()`, `then()`, `and_then()` (std_lib/src/spec/gherkin.spl) |
+| Step pattern matching | ✅ | `<placeholder>` extraction and value capture |
+| Examples tables | ✅ | Registration and parameterized scenario support |
+| Scenario outline | ✅ | Parameterized test execution with examples |
+| Two-space lexer mode | 📋 | Context-aware delimiter detection (SDN layer) |
 | Examples interpolation | 📋 | `${examples name}` in doc comments |
 | Living doc generation | ✅ | HTML/Markdown from BDD specs |
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `src/parser/src/statements/gherkin.rs` | Parser: AST transformation |
+| `src/parser/src/token.rs` | Token definitions (Feature, Scenario, Given, etc.) |
+| `simple/std_lib/src/spec/gherkin.spl` | Runtime: step execution, examples registry |
+| `simple/std_lib/src/spec/__init__.spl` | Exports gherkin functions |
+| `simple/std_lib/test/system/gherkin/gherkin_spec.spl` | System tests |

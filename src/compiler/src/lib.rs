@@ -7,10 +7,12 @@ pub mod codegen;
 pub mod compilability;
 pub mod coverage;
 pub mod effects;
+pub mod effects_cache;
 pub mod elf_utils;
 pub mod error;
 pub mod hir;
 pub mod import_loader;
+pub mod incremental;
 pub mod interpreter;
 pub mod interpreter_ffi;
 pub mod linker;
@@ -18,7 +20,9 @@ pub mod lint;
 pub mod mir;
 pub mod module_resolver;
 pub mod monomorphize;
+pub mod parallel;
 pub mod pipeline;
+pub mod pipeline_parallel;
 pub mod project;
 pub mod smf_builder;
 pub mod value;
@@ -30,7 +34,8 @@ mod test_helpers;
 // Re-export main types
 pub use coverage::{
     get_coverage_output_path, get_global_coverage, init_coverage, is_coverage_enabled,
-    save_global_coverage, CoverageCollector, CoverageStats,
+    save_global_coverage, Condition, CoverageCollector, CoverageReport, CoverageStats,
+    CoverageSummary, Decision, ExecutionPath, FunctionCoverage, ModuleCoverage, SourceLoc,
 };
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
 pub use interpreter::evaluate_module;
@@ -41,6 +46,10 @@ pub use monomorphize::{
     PointerKind, SpecializationKey, TypeBindings,
 };
 pub use mir::ContractMode;
+pub use parallel::{
+    load_module_parallel, parse_all_parallel, parse_files_parallel, ParallelConfig,
+    ParallelParseCache, ParsedFile,
+};
 pub use pipeline::CompilerPipeline;
 pub use project::ProjectContext;
 pub use value::{

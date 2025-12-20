@@ -5,6 +5,9 @@ use std::sync::{Arc, RwLock};
 pub mod config_env;
 pub use config_env::ConfigEnv;
 
+pub mod file_reader;
+pub use file_reader::{FileReader, MappedFile, ReadStrategy};
+
 pub mod manual;
 pub mod manual_mem;
 pub use manual_mem::{Handle, HandlePool, ManualGc, Shared, Unique, WeakPtr};
