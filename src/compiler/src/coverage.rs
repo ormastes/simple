@@ -7,7 +7,7 @@
 //! - FFI call tracking (FFI function → call count)
 //!
 //! Usage:
-//! ```
+//! ```text
 //! // Enable coverage via environment variable
 //! SIMPLE_COVERAGE=1 cargo test simple_stdlib
 //!
