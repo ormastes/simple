@@ -721,6 +721,28 @@ The `#[gpu]` / `@simd` attribute triggers special compilation:
 - 1D and 3D kernel execution on CPU
 - Useful for testing and systems without GPU
 
+**CPU Parallel Backend** (`src/runtime/src/parallel.rs`):
+- Rayon-based work-stealing parallel execution
+- High-performance CPU parallel execution
+- Same programming model as GPU kernels
+- Pure Rust implementation (no C++ FFI required)
+- See [cpu_simd_scheduling.md](../research/cpu_simd_scheduling.md) for details
+
+The CPU parallel backend uses Rayon's work-stealing scheduler:
+
+```simple
+@simd(backend=:cpu)
+fn vector_add(a: f32[], b: f32[], out: f32[]):
+    let i = this.index()
+    out[i] = a[i] + b[i]
+```
+
+Runtime execution:
+1. `this.index()` → thread-local `THREAD_INDEX` via `rt_par_global_id()`
+2. `thread_group.barrier()` → `std::sync::Barrier::wait()`
+3. `shared let` → per-group stack allocation
+4. Kernel launch → `(0..n).into_par_iter().for_each(|i| kernel())`
+
 ### Safety Guarantees
 
 1. **Bounds checking**: All buffer accesses are checked (default with `@simd`)
@@ -756,3 +778,5 @@ In `@simd` kernels:
 - [Memory and Ownership](memory.md)
 - [Standard Library](stdlib.md)
 - [Concurrency](concurrency.md)
+- [cpu_simd_scheduling.md](../research/cpu_simd_scheduling.md) - CPU parallel backend with Rayon
+- [cuda_tbb_entry_compare.md](../research/cuda_tbb_entry_compare.md) - CUDA vs TBB comparison

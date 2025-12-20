@@ -104,12 +104,23 @@ fn main() -> anyhow::Result<()> {
                     println!("Merged report written to {:?}", path);
                     print_coverage_summary(&report);
                 }
+                "service" => {
+                    let report = analyzer.generate_service_report();
+                    let path = output_dir.join("coverage_service.json");
+                    report.write_json(&path)?;
+                    println!("Service report written to {:?}", path);
+                    print_coverage_summary(&report);
+                }
                 "all" => {
-                    let (system, integration, merged) = analyzer.generate_all_reports();
+                    let (system, service, integration, merged) = analyzer.generate_all_reports();
 
                     let system_path = output_dir.join("coverage_system.json");
                     system.write_json(&system_path)?;
                     println!("System report written to {:?}", system_path);
+
+                    let service_path = output_dir.join("coverage_service.json");
+                    service.write_json(&service_path)?;
+                    println!("Service report written to {:?}", service_path);
 
                     let integration_path = output_dir.join("coverage_integration.json");
                     integration.write_json(&integration_path)?;
@@ -123,6 +134,9 @@ fn main() -> anyhow::Result<()> {
                     println!("=== System Coverage ===");
                     print_coverage_summary(&system);
                     println!();
+                    println!("=== Service Coverage ===");
+                    print_coverage_summary(&service);
+                    println!();
                     println!("=== Integration Coverage ===");
                     print_coverage_summary(&integration);
                     println!();
@@ -130,7 +144,7 @@ fn main() -> anyhow::Result<()> {
                     print_coverage_summary(&merged);
                 }
                 _ => {
-                    anyhow::bail!("Unknown report type: {}. Use: system, integration, merged, all", report_type);
+                    anyhow::bail!("Unknown report type: {}. Use: system, service, integration, merged, all", report_type);
                 }
             }
 
@@ -148,7 +162,14 @@ fn main() -> anyhow::Result<()> {
 
             let percent = match report.coverage_type {
                 CoverageType::System => report.summary.method_coverage_percent,
-                CoverageType::Integration => report.summary.function_coverage_percent,
+                CoverageType::Service => {
+                    report.summary.interface_coverage_percent
+                        .min(report.summary.external_lib_coverage_percent)
+                }
+                CoverageType::Integration => {
+                    report.summary.function_coverage_percent
+                        .min(report.summary.neighbor_coverage_percent)
+                }
                 CoverageType::Merged => report.summary.line_coverage_percent,
             };
 

@@ -1,0 +1,178 @@
+# SSR - Server-Side Rendering
+#
+# Integration between UI framework and HTTP responses.
+
+use ui.element.*
+use ui.gui.html.HtmlRenderer
+use ui.gui.theme.*
+use web.http.response.*
+
+# Render options for SSR
+pub struct RenderOptions:
+    title: str
+    theme: Option[Theme]
+    head_extra: str
+    minify: bool
+
+impl RenderOptions:
+    # Create with title
+    pub fn new(title: &str) -> RenderOptions:
+        return RenderOptions {
+            title: title.to_string(),
+            theme: None,
+            head_extra: String::new(),
+            minify: false
+        }
+
+    # Set theme
+    pub fn with_theme(self, theme: Theme) -> RenderOptions:
+        self.theme = Some(theme)
+        return self
+
+    # Set light theme
+    pub fn light_theme(self) -> RenderOptions:
+        return self.with_theme(Theme::light())
+
+    # Set dark theme
+    pub fn dark_theme(self) -> RenderOptions:
+        return self.with_theme(Theme::dark())
+
+    # Add extra head content
+    pub fn with_head(self, html: &str) -> RenderOptions:
+        self.head_extra.push_str(html)
+        return self
+
+    # Add stylesheet link
+    pub fn with_stylesheet(self, href: &str) -> RenderOptions:
+        return self.with_head(&f"<link rel=\"stylesheet\" href=\"{href}\">")
+
+    # Add script
+    pub fn with_script(self, src: &str) -> RenderOptions:
+        return self.with_head(&f"<script src=\"{src}\"></script>")
+
+    # Enable minification
+    pub fn minified(self) -> RenderOptions:
+        self.minify = true
+        return self
+
+# SSR Renderer
+pub struct SsrRenderer:
+    options: RenderOptions
+    html_renderer: HtmlRenderer
+
+impl SsrRenderer:
+    # Create with options
+    pub fn new(options: RenderOptions) -> SsrRenderer:
+        let mut html_renderer = HtmlRenderer::new()
+        if options.minify:
+            html_renderer = html_renderer.minified()
+        return SsrRenderer {
+            options: options,
+            html_renderer: html_renderer
+        }
+
+    # Create with title only
+    pub fn with_title(title: &str) -> SsrRenderer:
+        return SsrRenderer::new(RenderOptions::new(title))
+
+    # Render element tree to full HTML page
+    pub fn render_page(self, tree: &ElementTree) -> str:
+        # Use the existing HtmlRenderer
+        let html = self.html_renderer.render_document(tree, &self.options.title)
+
+        # If we have extra head content, inject it
+        if not self.options.head_extra.is_empty():
+            # Find </head> and insert before it
+            if let Some(idx) = html.find("</head>"):
+                let before = html.slice(0, idx)
+                let after = html.slice(idx, html.len())
+                return f"{before}{self.options.head_extra}{after}"
+
+        return html
+
+    # Render to HTTP response
+    pub fn render_response(self, tree: &ElementTree) -> HttpResponse:
+        let html = self.render_page(tree)
+        return HttpResponse::ok().html(&html)
+
+# Convenience functions
+
+# Render element tree to HTML string
+pub fn render_to_html(tree: &ElementTree, title: &str) -> str:
+    let renderer = SsrRenderer::with_title(title)
+    return renderer.render_page(tree)
+
+# Render element tree to HTTP response
+pub fn render_to_response(tree: &ElementTree, title: &str) -> HttpResponse:
+    let renderer = SsrRenderer::with_title(title)
+    return renderer.render_response(tree)
+
+# Render with options
+pub fn render_with_options(tree: &ElementTree, options: RenderOptions) -> HttpResponse:
+    let renderer = SsrRenderer::new(options)
+    return renderer.render_response(tree)
+
+# HTML page builder for more control
+pub struct HtmlPage:
+    title: str
+    head: String
+    body: String
+    scripts: Array[str]
+
+impl HtmlPage:
+    pub fn new(title: &str) -> HtmlPage:
+        return HtmlPage {
+            title: title.to_string(),
+            head: String::new(),
+            body: String::new(),
+            scripts: []
+        }
+
+    pub fn with_meta(self, name: &str, content: &str) -> HtmlPage:
+        self.head.push_str(&f"<meta name=\"{name}\" content=\"{content}\">\n")
+        return self
+
+    pub fn with_stylesheet(self, href: &str) -> HtmlPage:
+        self.head.push_str(&f"<link rel=\"stylesheet\" href=\"{href}\">\n")
+        return self
+
+    pub fn with_script(self, src: &str) -> HtmlPage:
+        self.scripts.push(src.to_string())
+        return self
+
+    pub fn with_inline_style(self, css: &str) -> HtmlPage:
+        self.head.push_str(&f"<style>{css}</style>\n")
+        return self
+
+    pub fn with_body(self, html: &str) -> HtmlPage:
+        self.body = html.to_string()
+        return self
+
+    pub fn with_tree(self, tree: &ElementTree) -> HtmlPage:
+        let renderer = HtmlRenderer::new()
+        renderer.render_tree(tree)
+        self.body = renderer.html().to_string()
+        self.head.push_str(&f"<style>{renderer.css()}</style>\n")
+        return self
+
+    pub fn to_html(self) -> str:
+        let mut scripts_html = String::new()
+        for src in &self.scripts:
+            scripts_html.push_str(&f"<script src=\"{src}\"></script>\n")
+
+        return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{self.title}</title>
+{self.head}
+</head>
+<body>
+{self.body}
+{scripts_html}
+</body>
+</html>"""
+
+    pub fn to_response(self) -> HttpResponse:
+        return HttpResponse::ok().html(&self.to_html())

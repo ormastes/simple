@@ -1,7 +1,9 @@
 pub mod concurrency;
+pub mod coverage;
 pub mod cuda_runtime;
 pub mod executor;
 pub mod memory;
+pub mod parallel;
 pub mod value;
 
 // Re-export executor types and functions
@@ -211,4 +213,31 @@ pub use cuda_runtime::{
     CudaDevice, CudaDevicePtr, CudaError, CudaKernel, CudaModule, CudaResult,
     get_device_count,
     rt_cuda_init, rt_cuda_device_count, rt_cuda_available,
+};
+
+// Re-export CPU parallel runtime FFI functions (Rayon backend)
+pub use parallel::{
+    // Kernel context
+    KernelContext, KernelFn,
+    // Work item identification
+    rt_par_global_id, rt_par_local_id, rt_par_group_id,
+    rt_par_global_size, rt_par_local_size, rt_par_num_groups,
+    // Synchronization
+    rt_par_barrier, rt_par_mem_fence,
+    // Shared memory
+    rt_par_shared_alloc, rt_par_shared_reset,
+    // Kernel launch
+    rt_par_launch_1d, rt_par_launch,
+    // Atomic operations
+    rt_par_atomic_add_i64, rt_par_atomic_sub_i64, rt_par_atomic_xchg_i64,
+    rt_par_atomic_cmpxchg_i64, rt_par_atomic_min_i64, rt_par_atomic_max_i64,
+};
+
+// Re-export coverage instrumentation types and FFI functions
+pub use coverage::{
+    CoverageData,
+    rt_coverage_decision_probe, rt_coverage_condition_probe,
+    rt_coverage_path_probe, rt_coverage_path_finalize,
+    rt_coverage_dump_sdn, rt_coverage_free_sdn,
+    rt_coverage_clear, rt_coverage_enabled,
 };

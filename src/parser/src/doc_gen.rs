@@ -20,6 +20,7 @@
 //! ```
 
 use crate::ast::*;
+use std::collections::HashMap;
 
 /// A documented item extracted from the AST
 #[derive(Debug, Clone)]
@@ -269,6 +270,99 @@ fn html_escape(s: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+/// Registry for examples tables used in doc interpolation.
+/// Maps examples name to formatted table content.
+#[derive(Debug, Default, Clone)]
+pub struct ExamplesRegistry {
+    tables: HashMap<String, String>,
+}
+
+impl ExamplesRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register an examples table with its formatted content.
+    pub fn register(&mut self, name: impl Into<String>, content: impl Into<String>) {
+        self.tables.insert(name.into(), content.into());
+    }
+
+    /// Get the content for an examples table.
+    pub fn get(&self, name: &str) -> Option<&String> {
+        self.tables.get(name)
+    }
+
+    /// Expand all `${examples name}` interpolations in a doc string.
+    pub fn expand(&self, doc: &str) -> String {
+        let doc_comment = DocComment::new(doc.to_string());
+        doc_comment.expand(|name| self.tables.get(name).cloned())
+    }
+
+    /// Expand interpolations in a DocComment.
+    pub fn expand_doc_comment(&self, doc: &DocComment) -> String {
+        doc.expand(|name| self.tables.get(name).cloned())
+    }
+}
+
+/// Format an examples table as a Markdown table.
+/// Takes headers and rows, returns formatted Markdown.
+pub fn format_examples_as_markdown(headers: &[String], rows: &[Vec<String>]) -> String {
+    if headers.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::new();
+
+    // Header row
+    result.push_str("| ");
+    result.push_str(&headers.join(" | "));
+    result.push_str(" |\n");
+
+    // Separator row
+    result.push_str("|");
+    for _ in headers {
+        result.push_str(" --- |");
+    }
+    result.push('\n');
+
+    // Data rows
+    for row in rows {
+        result.push_str("| ");
+        result.push_str(&row.join(" | "));
+        result.push_str(" |\n");
+    }
+
+    result
+}
+
+/// Format an examples table as an HTML table.
+pub fn format_examples_as_html(headers: &[String], rows: &[Vec<String>]) -> String {
+    if headers.is_empty() {
+        return String::new();
+    }
+
+    let mut result = String::from("<table>\n<thead>\n<tr>\n");
+
+    // Header row
+    for header in headers {
+        result.push_str(&format!("<th>{}</th>\n", html_escape(header)));
+    }
+    result.push_str("</tr>\n</thead>\n<tbody>\n");
+
+    // Data rows
+    for row in rows {
+        result.push_str("<tr>\n");
+        for cell in row {
+            result.push_str(&format!("<td>{}</td>\n", html_escape(cell)));
+        }
+        result.push_str("</tr>\n");
+    }
+
+    result.push_str("</tbody>\n</table>\n");
+    result
 }
 
 /// Generate documentation from a parsed module

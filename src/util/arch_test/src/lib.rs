@@ -30,11 +30,13 @@ mod rules;
 mod layer;
 mod analyzer;
 mod error;
+mod visualize;
 
 pub use rules::*;
 pub use layer::*;
 pub use analyzer::*;
 pub use error::*;
+pub use visualize::*;
 
 use simple_dependency_tracker::graph::ImportGraph;
 use std::collections::HashMap;

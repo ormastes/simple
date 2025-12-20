@@ -118,3 +118,76 @@ fn test_doc_comment_trimming() {
     let doc = DocComment::new("  \n  Description with whitespace  \n  ".to_string());
     assert_eq!(doc.content, "Description with whitespace");
 }
+
+#[test]
+fn test_doc_comment_interpolation_parse() {
+    let doc = DocComment::new("Before ${examples addition} After".to_string());
+    let parts = doc.parse_parts();
+
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0], DocPart::Text("Before ".to_string()));
+    assert_eq!(parts[1], DocPart::ExamplesRef("addition".to_string()));
+    assert_eq!(parts[2], DocPart::Text(" After".to_string()));
+}
+
+#[test]
+fn test_doc_comment_multiple_interpolations() {
+    let doc = DocComment::new("${examples a} middle ${examples b}".to_string());
+    let parts = doc.parse_parts();
+
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0], DocPart::ExamplesRef("a".to_string()));
+    assert_eq!(parts[1], DocPart::Text(" middle ".to_string()));
+    assert_eq!(parts[2], DocPart::ExamplesRef("b".to_string()));
+}
+
+#[test]
+fn test_doc_comment_has_interpolations() {
+    let with_interp = DocComment::new("Has ${examples table} here".to_string());
+    let without_interp = DocComment::new("No interpolations".to_string());
+
+    assert!(with_interp.has_interpolations());
+    assert!(!without_interp.has_interpolations());
+}
+
+#[test]
+fn test_doc_comment_examples_refs() {
+    let doc = DocComment::new("See ${examples addition} and ${examples operation}".to_string());
+    let refs = doc.examples_refs();
+
+    assert_eq!(refs, vec!["addition", "operation"]);
+}
+
+#[test]
+fn test_doc_comment_expand() {
+    let doc = DocComment::new("Table:\n${examples data}\nEnd".to_string());
+
+    let expanded = doc.expand(|name| {
+        if name == "data" {
+            Some("| a | b |\n| 1 | 2 |".to_string())
+        } else {
+            None
+        }
+    });
+
+    assert_eq!(expanded, "Table:\n| a | b |\n| 1 | 2 |\nEnd");
+}
+
+#[test]
+fn test_doc_comment_expand_unknown_ref() {
+    let doc = DocComment::new("${examples unknown}".to_string());
+
+    let expanded = doc.expand(|_| None);
+
+    // Unknown refs are kept as-is
+    assert_eq!(expanded, "${examples unknown}");
+}
+
+#[test]
+fn test_doc_comment_no_interpolations() {
+    let doc = DocComment::new("Plain text without any interpolations".to_string());
+    let parts = doc.parse_parts();
+
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0], DocPart::Text("Plain text without any interpolations".to_string()));
+}

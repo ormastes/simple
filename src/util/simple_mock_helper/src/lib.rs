@@ -11,11 +11,12 @@ pub use api_scanner::{
 pub use coverage::{
     compute_class_coverage, load_llvm_cov_export, load_public_api_spec, parse_llvm_cov_export,
     parse_public_api_spec, print_class_coverage_table, ClassCoverage, CoverageSummary,
-    LlvmCovExport, MethodCoverage, PublicApiSpec,
+    LlvmCovExport, MethodCoverage, NeighborSpec, PublicApiSpec, PublicTypeSpec,
 };
 pub use coverage_extended::{
     print_coverage_summary, CoverageAnalyzer, CoverageType, ExtendedCoverageReport,
-    ExtendedCoverageSummary, FunctionCoverage, TypeCoverage,
+    ExtendedCoverageSummary, ExternalLibCoverage, FunctionCoverage, InterfaceCoverage,
+    NeighborCoverage, TypeCoverage,
 };
 pub use mock_policy::{
     are_mocks_enabled, check_mock_use_from, get_allowed_patterns, init_mocks_for_only,

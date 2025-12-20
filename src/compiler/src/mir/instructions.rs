@@ -609,6 +609,46 @@ pub enum MirInst {
         value: VReg,
     },
 
+    // =========================================================================
+    // Coverage instrumentation instructions
+    // =========================================================================
+    /// Record a decision evaluation for decision coverage.
+    /// Tracks both true and false outcomes of boolean decisions (if/while/match guards).
+    DecisionProbe {
+        /// Unique ID of this decision within the function
+        decision_id: u32,
+        /// The decision result (boolean value)
+        result: VReg,
+        /// Source location for mapping back to source
+        file: String,
+        line: u32,
+        column: u32,
+    },
+
+    /// Record a condition evaluation for condition/MC-DC coverage.
+    /// Tracks individual conditions within compound boolean expressions.
+    ConditionProbe {
+        /// ID of the parent decision
+        decision_id: u32,
+        /// Unique ID of this condition within the decision
+        condition_id: u32,
+        /// The condition result (boolean value)
+        result: VReg,
+        /// Source location
+        file: String,
+        line: u32,
+        column: u32,
+    },
+
+    /// Record block entry for path coverage.
+    /// Tracks which execution paths are taken through functions.
+    PathProbe {
+        /// Unique ID of the execution path
+        path_id: u32,
+        /// ID of the current block in the path
+        block_id: u32,
+    },
+
     /// Check that a value is within the bounds of a unit type.
     /// In debug mode, panics if the value is out of range.
     /// In release mode, applies the overflow behavior (wrap, saturate, or no-op).
@@ -997,6 +1037,11 @@ impl HasEffects for MirInst {
             // Contract checks may panic (Io effect due to potential panic)
             MirInst::ContractCheck { .. } => Effect::Io,
 
+            // Coverage probes (Io effect since they write to coverage collector)
+            MirInst::DecisionProbe { .. }
+            | MirInst::ConditionProbe { .. }
+            | MirInst::PathProbe { .. } => Effect::Io,
+
             // Unit bound checks may panic in debug mode (Io effect due to potential panic)
             MirInst::UnitBoundCheck { .. } => Effect::Io,
 
@@ -1379,6 +1424,10 @@ impl MirInst {
             MirInst::InterpEval { .. } => vec![],
             MirInst::ContractCheck { condition, .. } => vec![*condition],
             MirInst::ContractOldCapture { value, .. } => vec![*value],
+            // Coverage probes
+            MirInst::DecisionProbe { result, .. } => vec![*result],
+            MirInst::ConditionProbe { result, .. } => vec![*result],
+            MirInst::PathProbe { .. } => vec![], // No register uses
             MirInst::UnitBoundCheck { value, .. } => vec![*value],
             MirInst::UnitWiden { value, .. } => vec![*value],
             MirInst::UnitNarrow { value, .. } => vec![*value],

@@ -90,8 +90,13 @@ pub const COVERAGE_VERSION: &str = "1.0";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CoverageType {
+    /// System test: Public interface class touch
     System,
+    /// Service test: Interface class + External lib touch
+    Service,
+    /// Integration test: Public function + Neighbor package touch
     Integration,
+    /// Merged coverage: All metrics combined
     Merged,
 }
 
@@ -234,18 +239,83 @@ pub struct CoverageSource {
     pub public_api_file: String,
 }
 
+/// Interface coverage (for Service tests)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InterfaceCoverage {
+    /// Interface/trait name
+    pub name: String,
+    /// Crate where the interface is defined
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crate_name: Option<String>,
+    /// Whether the interface was touched (instantiated/called)
+    pub touched: bool,
+    /// Execution count
+    pub execution_count: u64,
+}
+
+/// External library coverage (for Service tests)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalLibCoverage {
+    /// Library name (e.g., "cranelift")
+    pub library: String,
+    /// Module within the library (e.g., "codegen")
+    pub module: String,
+    /// Whether this module was called
+    pub touched: bool,
+    /// Execution count
+    pub execution_count: u64,
+}
+
+/// Neighbor package coverage (for Integration tests)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeighborCoverage {
+    /// Source crate
+    pub crate_name: String,
+    /// Neighbor crate that was accessed
+    pub neighbor: String,
+    /// Whether the neighbor was touched
+    pub touched: bool,
+    /// Number of cross-crate calls
+    pub call_count: u64,
+}
+
 /// Overall coverage summary
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ExtendedCoverageSummary {
+    // System test metrics
     pub total_types: usize,
     pub covered_types: usize,
     pub type_coverage_percent: f64,
     pub total_methods: usize,
     pub covered_methods: usize,
     pub method_coverage_percent: f64,
+
+    // Service test metrics
+    #[serde(default)]
+    pub total_interfaces: usize,
+    #[serde(default)]
+    pub covered_interfaces: usize,
+    #[serde(default)]
+    pub interface_coverage_percent: f64,
+    #[serde(default)]
+    pub total_external_libs: usize,
+    #[serde(default)]
+    pub covered_external_libs: usize,
+    #[serde(default)]
+    pub external_lib_coverage_percent: f64,
+
+    // Integration test metrics
     pub total_functions: usize,
     pub covered_functions: usize,
     pub function_coverage_percent: f64,
+    #[serde(default)]
+    pub total_neighbors: usize,
+    #[serde(default)]
+    pub covered_neighbors: usize,
+    #[serde(default)]
+    pub neighbor_coverage_percent: f64,
+
+    // Line/branch coverage
     pub total_lines: usize,
     pub covered_lines: usize,
     pub line_coverage_percent: f64,
@@ -268,6 +338,15 @@ pub struct ExtendedCoverageReport {
     pub functions: Vec<FunctionCoverage>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub files: Vec<FileCoverage>,
+    /// Interface coverage (Service tests)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<InterfaceCoverage>,
+    /// External library coverage (Service tests)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_libs: Vec<ExternalLibCoverage>,
+    /// Neighbor package coverage (Integration tests)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub neighbors: Vec<NeighborCoverage>,
     pub uncovered: UncoveredSummary,
 }
 
@@ -286,6 +365,9 @@ impl ExtendedCoverageReport {
             types: Vec::new(),
             functions: Vec::new(),
             files: Vec::new(),
+            interfaces: Vec::new(),
+            external_libs: Vec::new(),
+            neighbors: Vec::new(),
             uncovered: UncoveredSummary::default(),
         }
     }
@@ -294,7 +376,18 @@ impl ExtendedCoverageReport {
     pub fn meets_threshold(&self, threshold: f64) -> bool {
         match self.coverage_type {
             CoverageType::System => self.summary.method_coverage_percent >= threshold,
-            CoverageType::Integration => self.summary.function_coverage_percent >= threshold,
+            CoverageType::Service => {
+                // Service coverage = min(interface coverage, external lib coverage)
+                let interface_pct = self.summary.interface_coverage_percent;
+                let ext_lib_pct = self.summary.external_lib_coverage_percent;
+                interface_pct.min(ext_lib_pct) >= threshold
+            }
+            CoverageType::Integration => {
+                // Integration coverage = min(function coverage, neighbor coverage)
+                let func_pct = self.summary.function_coverage_percent;
+                let neighbor_pct = self.summary.neighbor_coverage_percent;
+                func_pct.min(neighbor_pct) >= threshold
+            }
             CoverageType::Merged => self.summary.line_coverage_percent >= threshold,
         }
     }
@@ -606,16 +699,104 @@ impl CoverageAnalyzer {
         report
     }
 
-    /// Generate all reports
+    /// Generate service test coverage report (interface + external lib coverage)
+    pub fn generate_service_report(&self) -> ExtendedCoverageReport {
+        let mut report =
+            ExtendedCoverageReport::new(CoverageType::Service, &self.llvm_file, &self.api_file);
+
+        let fn_counts = self.build_function_counts();
+
+        // Process interfaces from API spec
+        for (crate_name, interfaces) in &self.api_spec.interfaces {
+            for interface_name in interfaces {
+                // Look for any function that matches the interface pattern
+                let count = fn_counts
+                    .iter()
+                    .filter(|(k, _)| {
+                        k.contains(interface_name)
+                            || k.contains(&format!("{}::", interface_name))
+                            || k.contains(&format!("<{}", interface_name))
+                    })
+                    .map(|(_, v)| *v)
+                    .max()
+                    .unwrap_or(0);
+
+                let touched = count > 0;
+
+                report.interfaces.push(InterfaceCoverage {
+                    name: interface_name.clone(),
+                    crate_name: Some(crate_name.clone()),
+                    touched,
+                    execution_count: count,
+                });
+
+                report.summary.total_interfaces += 1;
+                if touched {
+                    report.summary.covered_interfaces += 1;
+                }
+            }
+        }
+
+        // Process external libraries from API spec
+        for (lib_name, modules) in &self.api_spec.external_libs {
+            for module_name in modules {
+                // Look for any function that mentions the library module
+                let count = fn_counts
+                    .iter()
+                    .filter(|(k, _)| {
+                        k.contains(&format!("{}::{}", lib_name, module_name))
+                            || k.contains(&format!("{}::{}::", lib_name, module_name))
+                    })
+                    .map(|(_, v)| *v)
+                    .max()
+                    .unwrap_or(0);
+
+                let touched = count > 0;
+
+                report.external_libs.push(ExternalLibCoverage {
+                    library: lib_name.clone(),
+                    module: module_name.clone(),
+                    touched,
+                    execution_count: count,
+                });
+
+                report.summary.total_external_libs += 1;
+                if touched {
+                    report.summary.covered_external_libs += 1;
+                }
+            }
+        }
+
+        // Finalize summary
+        report.summary.interface_coverage_percent = if report.summary.total_interfaces == 0 {
+            100.0
+        } else {
+            (report.summary.covered_interfaces as f64 / report.summary.total_interfaces as f64)
+                * 100.0
+        };
+
+        report.summary.external_lib_coverage_percent = if report.summary.total_external_libs == 0 {
+            100.0
+        } else {
+            (report.summary.covered_external_libs as f64 / report.summary.total_external_libs as f64)
+                * 100.0
+        };
+
+        report
+    }
+
+    /// Generate all reports (System, Service, Integration, Merged)
     pub fn generate_all_reports(
         &self,
     ) -> (
         ExtendedCoverageReport,
         ExtendedCoverageReport,
         ExtendedCoverageReport,
+        ExtendedCoverageReport,
     ) {
         (
             self.generate_system_report(),
+            self.generate_service_report(),
             self.generate_integration_report(),
             self.generate_merged_report(),
         )
@@ -645,6 +826,20 @@ pub fn print_coverage_summary(report: &ExtendedCoverageReport) {
                 report.summary.method_coverage_percent
             );
         }
+        CoverageType::Service => {
+            println!(
+                "Interfaces:    {:>4}/{:<4} ({:.1}%)",
+                report.summary.covered_interfaces,
+                report.summary.total_interfaces,
+                report.summary.interface_coverage_percent
+            );
+            println!(
+                "External Libs: {:>4}/{:<4} ({:.1}%)",
+                report.summary.covered_external_libs,
+                report.summary.total_external_libs,
+                report.summary.external_lib_coverage_percent
+            );
+        }
         CoverageType::Integration => {
             println!(
                 "Functions: {:>4}/{:<4} ({:.1}%)",
@@ -652,28 +847,52 @@ pub fn print_coverage_summary(report: &ExtendedCoverageReport) {
                 report.summary.total_functions,
                 report.summary.function_coverage_percent
             );
+            println!(
+                "Neighbors: {:>4}/{:<4} ({:.1}%)",
+                report.summary.covered_neighbors,
+                report.summary.total_neighbors,
+                report.summary.neighbor_coverage_percent
+            );
         }
         CoverageType::Merged => {
             println!(
-                "Types:     {:>4}/{:<4} ({:.1}%)",
+                "Types:         {:>4}/{:<4} ({:.1}%)",
                 report.summary.covered_types,
                 report.summary.total_types,
                 report.summary.type_coverage_percent
             );
             println!(
-                "Methods:   {:>4}/{:<4} ({:.1}%)",
+                "Methods:       {:>4}/{:<4} ({:.1}%)",
                 report.summary.covered_methods,
                 report.summary.total_methods,
                 report.summary.method_coverage_percent
             );
             println!(
-                "Functions: {:>4}/{:<4} ({:.1}%)",
+                "Interfaces:    {:>4}/{:<4} ({:.1}%)",
+                report.summary.covered_interfaces,
+                report.summary.total_interfaces,
+                report.summary.interface_coverage_percent
+            );
+            println!(
+                "External Libs: {:>4}/{:<4} ({:.1}%)",
+                report.summary.covered_external_libs,
+                report.summary.total_external_libs,
+                report.summary.external_lib_coverage_percent
+            );
+            println!(
+                "Functions:     {:>4}/{:<4} ({:.1}%)",
                 report.summary.covered_functions,
                 report.summary.total_functions,
                 report.summary.function_coverage_percent
             );
             println!(
-                "Lines:     {:>4}/{:<4} ({:.1}%)",
+                "Neighbors:     {:>4}/{:<4} ({:.1}%)",
+                report.summary.covered_neighbors,
+                report.summary.total_neighbors,
+                report.summary.neighbor_coverage_percent
+            );
+            println!(
+                "Lines:         {:>4}/{:<4} ({:.1}%)",
                 report.summary.covered_lines,
                 report.summary.total_lines,
                 report.summary.line_coverage_percent

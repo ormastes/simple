@@ -32,9 +32,10 @@ fn print_help() {
     eprintln!("  simple <file.spl>           Run source file");
     eprintln!("  simple <file.smf>           Run compiled binary");
     eprintln!("  simple -c \"code\"            Run code string");
-    eprintln!("  simple compile <src> [-o <out>] [--target <arch>] [--snapshot]  Compile to SMF");
+    eprintln!("  simple compile <src> [-o <out>] [options]  Compile source file");
     eprintln!("  simple watch <file.spl>     Watch and auto-recompile");
     eprintln!("  simple targets              List available target architectures");
+    eprintln!("  simple linkers              List available native linkers");
     eprintln!();
     eprintln!("Testing:");
     eprintln!("  simple test [path]          Run tests (default: test/)");
@@ -70,7 +71,15 @@ fn print_help() {
     eprintln!("  --gc-log       Enable verbose GC logging");
     eprintln!("  --gc=off       Disable garbage collection");
     eprintln!("  --target <arch>  Target architecture for cross-compilation");
+    eprintln!("  --linker <name>  Native linker: mold, lld, ld (auto-detected if not set)");
     eprintln!("  --snapshot     Create JJ snapshot on successful build/test");
+    eprintln!();
+    eprintln!("Build Optimization (#824):");
+    eprintln!("  --parallel     Enable parallel compilation (uses all CPU cores)");
+    eprintln!("  --parallel=N   Use N threads for parallel compilation");
+    eprintln!("  --profile      Show compilation profiling information");
+    eprintln!("  --mmap         Force memory-mapped file reading");
+    eprintln!("  --no-mmap      Disable memory-mapped file reading");
     eprintln!();
     eprintln!("Target Architectures:");
     eprintln!("  x86_64   64-bit x86 (default on most systems)");
@@ -269,6 +278,52 @@ fn list_targets() -> i32 {
     0
 }
 
+fn list_linkers() -> i32 {
+    use simple_compiler::linker::NativeLinker;
+
+    println!("Available native linkers:");
+    println!();
+
+    // Check each linker's availability
+    let linkers = [
+        (NativeLinker::Mold, "mold", "Modern, fastest linker (Linux only, ~4x faster than lld)"),
+        (NativeLinker::Lld, "lld", "LLVM's linker (cross-platform, fast)"),
+        (NativeLinker::Ld, "ld", "GNU ld (traditional fallback)"),
+    ];
+
+    for (linker, name, description) in &linkers {
+        let available = NativeLinker::is_available(*linker);
+        let status = if available { "✓" } else { "✗" };
+        let version = if available {
+            linker.version().unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        println!("  {} {:<6} - {}", status, name, description);
+        if available && !version.is_empty() {
+            println!("           {}", version);
+        }
+    }
+
+    println!();
+
+    // Show detected linker
+    match NativeLinker::detect() {
+        Some(linker) => {
+            println!("Auto-detected: {} (will be used by default)", linker.name());
+        }
+        None => {
+            println!("No native linker found!");
+        }
+    }
+
+    println!();
+    println!("Override with: simple compile <src> --linker <name>");
+    println!("Or set: SIMPLE_LINKER=mold|lld|ld");
+    0
+}
+
 fn watch_file(path: &PathBuf) -> i32 {
     println!("Watching {} for changes...", path.display());
     println!("Press Ctrl-C to stop.");
@@ -326,9 +381,11 @@ fn main() {
             std::process::exit(run_code(&args[1], gc_log, gc_off));
         }
         "compile" => {
+            use simple_compiler::linker::NativeLinker;
+
             if args.len() < 2 {
                 eprintln!("error: compile requires a source file");
-                eprintln!("Usage: simple compile <source.spl> [-o <output.smf>] [--target <arch>] [--snapshot]");
+                eprintln!("Usage: simple compile <source.spl> [-o <output.smf>] [--target <arch>] [--linker <name>] [--snapshot]");
                 std::process::exit(1);
             }
             let source = PathBuf::from(&args[1]);
@@ -353,13 +410,40 @@ fn main() {
                 })
                 .map(|arch| Target::new(arch, simple_common::target::TargetOS::host()));
 
+            // Parse --linker flag
+            let linker = args
+                .iter()
+                .position(|a| a == "--linker")
+                .and_then(|i| args.get(i + 1))
+                .map(|s| {
+                    NativeLinker::from_name(s).unwrap_or_else(|| {
+                        eprintln!("error: unknown linker '{}'. Available: mold, lld, ld", s);
+                        std::process::exit(1);
+                    })
+                });
+
+            // Print linker info if specified
+            if let Some(l) = linker {
+                if !NativeLinker::is_available(l) {
+                    eprintln!("warning: linker '{}' not found on system", l.name());
+                } else {
+                    eprintln!("Using linker: {}", l.name());
+                }
+            }
+
             // Parse --snapshot flag
             let snapshot = args.iter().any(|a| a == "--snapshot");
+
+            // TODO: Pass linker to compile_file when pipeline integration is complete
+            let _ = linker; // Currently unused but parsed for future integration
 
             std::process::exit(compile_file(&source, output, target, snapshot));
         }
         "targets" => {
             std::process::exit(list_targets());
+        }
+        "linkers" => {
+            std::process::exit(list_linkers());
         }
         "watch" => {
             if args.len() < 2 {

@@ -90,10 +90,21 @@ pub struct Attribute {
 /// Doc comments are used directly as API descriptions. Parameters should have
 /// descriptive names (self-documenting). Inline comments can be added to params
 /// and return types in the code itself.
+///
+/// Supports interpolation syntax: `${examples name}` embeds an examples table.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DocComment {
     /// The documentation text (used directly as API description)
     pub content: String,
+}
+
+/// Part of a doc comment - either literal text or an interpolation reference.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocPart {
+    /// Literal text
+    Text(String),
+    /// Interpolation: `${examples name}` -> ExamplesRef(name)
+    ExamplesRef(String),
 }
 
 impl DocComment {
@@ -103,6 +114,84 @@ impl DocComment {
         DocComment {
             content: content.trim().to_string(),
         }
+    }
+
+    /// Parse doc comment content into parts, extracting `${examples name}` interpolations.
+    /// Returns a list of DocPart (text and examples references).
+    pub fn parse_parts(&self) -> Vec<DocPart> {
+        let mut parts = Vec::new();
+        let mut remaining = self.content.as_str();
+
+        while let Some(start) = remaining.find("${examples ") {
+            // Add text before the interpolation
+            if start > 0 {
+                parts.push(DocPart::Text(remaining[..start].to_string()));
+            }
+
+            // Find the end of the interpolation
+            let after_start = &remaining[start + 11..]; // Skip "${examples "
+            if let Some(end) = after_start.find('}') {
+                let name = after_start[..end].trim().to_string();
+                parts.push(DocPart::ExamplesRef(name));
+                remaining = &after_start[end + 1..];
+            } else {
+                // Unclosed interpolation - treat as text
+                parts.push(DocPart::Text(remaining[start..].to_string()));
+                remaining = "";
+            }
+        }
+
+        // Add remaining text
+        if !remaining.is_empty() {
+            parts.push(DocPart::Text(remaining.to_string()));
+        }
+
+        parts
+    }
+
+    /// Check if this doc comment contains any interpolations.
+    pub fn has_interpolations(&self) -> bool {
+        self.content.contains("${examples ")
+    }
+
+    /// Get all examples names referenced in this doc comment.
+    pub fn examples_refs(&self) -> Vec<String> {
+        self.parse_parts()
+            .into_iter()
+            .filter_map(|part| {
+                if let DocPart::ExamplesRef(name) = part {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Expand interpolations using a resolver function.
+    /// The resolver takes an examples name and returns the table content as a string.
+    pub fn expand<F>(&self, resolver: F) -> String
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let parts = self.parse_parts();
+        let mut result = String::new();
+
+        for part in parts {
+            match part {
+                DocPart::Text(text) => result.push_str(&text),
+                DocPart::ExamplesRef(name) => {
+                    if let Some(table) = resolver(&name) {
+                        result.push_str(&table);
+                    } else {
+                        // Keep original if not found
+                        result.push_str(&format!("${{examples {}}}", name));
+                    }
+                }
+            }
+        }
+
+        result
     }
 }
 
