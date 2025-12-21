@@ -35,7 +35,7 @@ This is the main specification index for the Simple programming language. The sp
 
 | Document | Description |
 |----------|-------------|
-| [Import/Export](../import_export_and__init__.md) | Module system, imports, exports, visibility |
+| [Import/Export](modules.md) | Module system, imports, exports, visibility |
 
 ### Data Formats
 

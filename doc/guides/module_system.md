@@ -556,7 +556,7 @@ pub fn read_file(path: FilePath) -> Result[Bytes, IoError]:
     return native_read_file(path.as_str())
 ```
 
-See [Standard Library Specification](spec/stdlib.md) for complete details.
+See [Standard Library Specification](../spec/stdlib.md) for complete details.
 
 ---
 

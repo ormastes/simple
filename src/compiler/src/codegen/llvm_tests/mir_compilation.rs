@@ -171,15 +171,13 @@ fn test_mir_control_flow_compilation() {
 #[test]
 #[cfg(feature = "llvm")]
 fn test_mir_float_const() {
+    use super::helpers::create_test_backend;
     use crate::hir::TypeId as T;
     use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
     use simple_parser::ast::Visibility;
 
-    let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-    let backend = LlvmBackend::new(target).unwrap();
-
-    backend.create_module("float_test").unwrap();
+    let backend = create_test_backend("float_test");
 
     // fn test() -> f64 { return 3.14; }
     let mut func = MirFunction::new("test".to_string(), T::F64, Visibility::Public);
@@ -204,15 +202,14 @@ fn test_mir_float_const() {
 #[test]
 #[cfg(feature = "llvm")]
 fn test_mir_unaryop() {
+    use super::helpers::create_test_backend_with_arch;
     use crate::hir::{TypeId as T, UnaryOp};
     use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
     use simple_parser::ast::Visibility;
+    use simple_common::target::TargetArch;
 
-    let target = Target::new(TargetArch::Aarch64, TargetOS::Linux);
-    let backend = LlvmBackend::new(target).unwrap();
-
-    backend.create_module("unary_test").unwrap();
+    let backend = create_test_backend_with_arch("unary_test", TargetArch::Aarch64);
 
     // fn neg(x: i32) -> i32 { return -x; }
     let mut func = MirFunction::new("neg".to_string(), T::I32, Visibility::Public);
@@ -247,15 +244,14 @@ fn test_mir_unaryop() {
 #[test]
 #[cfg(feature = "llvm")]
 fn test_mir_memory_ops() {
+    use super::helpers::create_test_backend_with_arch;
     use crate::hir::TypeId as T;
     use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
     use simple_parser::ast::Visibility;
+    use simple_common::target::TargetArch;
 
-    let target = Target::new(TargetArch::RiscV64, TargetOS::Linux);
-    let backend = LlvmBackend::new(target).unwrap();
-
-    backend.create_module("mem_test").unwrap();
+    let backend = create_test_backend_with_arch("mem_test", TargetArch::RiscV64);
 
     // fn test() -> i32 { let x = 42; return x; }
     let mut func = MirFunction::new("test".to_string(), T::I32, Visibility::Public);

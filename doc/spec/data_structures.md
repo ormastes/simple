@@ -676,7 +676,7 @@ let cl = ClampTest(value: 300_cm)
 print cl.value                # 255_cm (clamped)
 ```
 
-See [Unit Types - Bit-Limited Representations](units.md#8-bit-limited-unit-representations) for more details on the `repr:` block and type system integration.
+See [Unit Types - Bit-Limited Representations](units_part2.md#8-bit-limited-unit-representations) for more details on the `repr:` block and type system integration.
 
 ---
 

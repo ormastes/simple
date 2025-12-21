@@ -804,5 +804,5 @@ pub extern "C" fn native_async_tcp_write(stream: i64, buf: *const u8, len: usize
 
 - [Unit Types Specification](../spec/units.md)
 - [Standard Library Specification](../spec/stdlib.md)
-- [Import/Export and __init__](../import_export_and__init__.md)
+- [Import/Export and __init__](../spec/modules.md)
 - [Concurrency Specification](../spec/concurrency.md)

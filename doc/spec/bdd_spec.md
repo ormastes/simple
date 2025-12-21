@@ -437,5 +437,5 @@ describe "AuthService":
 
 ## See Also
 
-- [Spec Framework Guide](../spec_framework_guide.md)
-- [Matchers Reference](../spec_matchers_reference.md)
+- [Spec Framework Guide](spec_framework_guide.md)
+- [Matchers Reference](spec_matchers_reference.md)

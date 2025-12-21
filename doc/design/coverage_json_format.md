@@ -403,5 +403,5 @@ coverage-integration:
 ## See Also
 
 - [LLVM Coverage Design](llvm_coverage.md)
-- [Test Policy](../test.md)
+- [Test Policy](../guides/test.md)
 - [BDD Spec Framework](../spec/bdd_spec.md)

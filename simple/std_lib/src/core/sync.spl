@@ -1,0 +1,339 @@
+# Synchronization Primitives Module
+# Provides thread-safe wrappers for concurrent programming
+#
+# Features:
+# - #1101: Atomic[T] - Lock-free atomic operations
+# - #1102: Mutex[T] - Mutual exclusion lock
+# - #1103: RwLock[T] - Read-write lock
+#
+# Note: These require #[concurrency_mode(lock_base)] or #[unsafe]
+
+# Atomic[T] - Lock-free atomic operations (#1101)
+
+class Atomic[T]:
+    """
+    Lock-free atomic wrapper for thread-safe operations.
+
+    Supports atomic load, store, compare-and-swap, and arithmetic operations.
+
+    Example:
+        counter = Atomic(0)
+        counter.fetch_add(1)  # Atomically increment
+        value = counter.load()  # Atomically read
+
+    Requires: #[concurrency_mode(lock_base)] or #[unsafe]
+    """
+
+    fn __init__(self, initial_value: T):
+        # TODO: Use actual atomic primitive from runtime
+        self._value = initial_value
+
+    fn load(self) -> T:
+        """
+        Atomically load the current value.
+
+        Ordering: Acquire (ensures operations after this see effects before the store)
+        """
+        # TODO: Call rt_atomic_load
+        return self._value
+
+    fn store(self, value: T):
+        """
+        Atomically store a new value.
+
+        Ordering: Release (ensures operations before this are visible after the load)
+        """
+        # TODO: Call rt_atomic_store
+        self._value = value
+
+    fn swap(self, value: T) -> T:
+        """
+        Atomically swap the stored value with a new value.
+
+        Returns: The previous value
+
+        Ordering: AcqRel (both acquire and release)
+        """
+        # TODO: Call rt_atomic_swap
+        old = self._value
+        self._value = value
+        return old
+
+    fn compare_and_swap(self, expected: T, new_value: T) -> (bool, T):
+        """
+        Atomically compare and swap (CAS).
+
+        If current value equals expected, store new_value and return (true, expected).
+        Otherwise, return (false, current_value).
+
+        This is the fundamental operation for lock-free algorithms.
+        """
+        # TODO: Call rt_atomic_compare_exchange
+        current = self._value
+        if current == expected:
+            self._value = new_value
+            return (true, expected)
+        else:
+            return (false, current)
+
+    fn fetch_add(self, delta: T) -> T:
+        """
+        Atomically add delta and return the previous value.
+
+        Only valid for numeric types (i8, i16, i32, i64, u8, u16, u32, u64).
+        """
+        # TODO: Call rt_atomic_fetch_add
+        old = self._value
+        self._value = self._value + delta
+        return old
+
+    fn fetch_sub(self, delta: T) -> T:
+        """Atomically subtract delta and return the previous value."""
+        # TODO: Call rt_atomic_fetch_sub
+        old = self._value
+        self._value = self._value - delta
+        return old
+
+    fn fetch_and(self, mask: T) -> T:
+        """Atomically perform bitwise AND and return the previous value."""
+        # TODO: Call rt_atomic_fetch_and
+        old = self._value
+        self._value = self._value & mask
+        return old
+
+    fn fetch_or(self, mask: T) -> T:
+        """Atomically perform bitwise OR and return the previous value."""
+        # TODO: Call rt_atomic_fetch_or
+        old = self._value
+        self._value = self._value | mask
+        return old
+
+
+# Mutex[T] - Mutual exclusion lock (#1102)
+
+class Mutex[T]:
+    """
+    Mutual exclusion lock for protecting shared data.
+
+    Only one thread can hold the lock at a time. Provides interior mutability.
+
+    Example:
+        shared_data = Mutex(0)
+
+        # Acquire lock, modify data, release lock
+        with shared_data.lock() as data:
+            data.value = data.value + 1
+        # Lock automatically released
+
+    Requires: #[concurrency_mode(lock_base)]
+    """
+
+    fn __init__(self, initial_value: T):
+        # TODO: Use actual mutex primitive from runtime
+        self._value = initial_value
+        self._locked = false
+
+    fn lock(self) -> MutexGuard[T]:
+        """
+        Acquire the lock, blocking if necessary.
+
+        Returns: A MutexGuard that provides access to the protected data
+                 and automatically releases the lock when dropped.
+        """
+        # TODO: Call rt_mutex_lock
+        while self._locked:
+            # Spin wait (should use proper blocking)
+            pass
+        self._locked = true
+        return MutexGuard(self)
+
+    fn try_lock(self) -> Option[MutexGuard[T]]:
+        """
+        Attempt to acquire the lock without blocking.
+
+        Returns: Some(guard) if successful, None if already locked
+        """
+        # TODO: Call rt_mutex_try_lock
+        if self._locked:
+            return None
+        self._locked = true
+        return Some(MutexGuard(self))
+
+    fn unlock(self):
+        """Internal: Release the lock."""
+        # TODO: Call rt_mutex_unlock
+        self._locked = false
+
+    fn into_inner(self) -> T:
+        """
+        Consume the mutex and return the inner value.
+
+        This is safe because consuming the mutex ensures no other references exist.
+        """
+        return self._value
+
+
+class MutexGuard[T]:
+    """
+    RAII guard for Mutex. Automatically releases the lock when dropped.
+
+    Provides access to the protected data through the `value` field.
+    """
+
+    fn __init__(self, mutex: Mutex[T]):
+        self.mutex = mutex
+        self.value = mutex._value
+
+    fn __exit__(self, exc_type, exc_value, traceback):
+        """Automatically release lock when guard goes out of scope."""
+        self.mutex.unlock()
+        return false
+
+
+# RwLock[T] - Read-write lock (#1103)
+
+class RwLock[T]:
+    """
+    Read-write lock allowing multiple readers or one writer.
+
+    Multiple threads can hold read locks simultaneously, but write locks are exclusive.
+
+    Example:
+        shared_data = RwLock(vec![1, 2, 3])
+
+        # Multiple readers can access concurrently
+        with shared_data.read() as data:
+            print(data.value)
+
+        # Writers get exclusive access
+        with shared_data.write() as data:
+            data.value.push(4)
+
+    Requires: #[concurrency_mode(lock_base)]
+    """
+
+    fn __init__(self, initial_value: T):
+        # TODO: Use actual rwlock primitive from runtime
+        self._value = initial_value
+        self._readers = 0
+        self._writer = false
+
+    fn read(self) -> RwLockReadGuard[T]:
+        """
+        Acquire a read lock, blocking if a writer holds the lock.
+
+        Multiple readers can hold locks simultaneously.
+        """
+        # TODO: Call rt_rwlock_read
+        while self._writer:
+            pass  # Wait for writer
+        self._readers = self._readers + 1
+        return RwLockReadGuard(self)
+
+    fn try_read(self) -> Option[RwLockReadGuard[T]]:
+        """
+        Attempt to acquire a read lock without blocking.
+
+        Returns: Some(guard) if successful, None if a writer holds the lock
+        """
+        # TODO: Call rt_rwlock_try_read
+        if self._writer:
+            return None
+        self._readers = self._readers + 1
+        return Some(RwLockReadGuard(self))
+
+    fn write(self) -> RwLockWriteGuard[T]:
+        """
+        Acquire a write lock, blocking if any readers or writer hold locks.
+
+        Write locks are exclusive - only one writer, no readers.
+        """
+        # TODO: Call rt_rwlock_write
+        while self._writer or self._readers > 0:
+            pass  # Wait for all readers/writers
+        self._writer = true
+        return RwLockWriteGuard(self)
+
+    fn try_write(self) -> Option[RwLockWriteGuard[T]]:
+        """
+        Attempt to acquire a write lock without blocking.
+
+        Returns: Some(guard) if successful, None if locked
+        """
+        # TODO: Call rt_rwlock_try_write
+        if self._writer or self._readers > 0:
+            return None
+        self._writer = true
+        return Some(RwLockWriteGuard(self))
+
+    fn release_read(self):
+        """Internal: Release a read lock."""
+        self._readers = self._readers - 1
+
+    fn release_write(self):
+        """Internal: Release a write lock."""
+        self._writer = false
+
+
+class RwLockReadGuard[T]:
+    """RAII guard for read lock. Auto-releases when dropped."""
+
+    fn __init__(self, rwlock: RwLock[T]):
+        self.rwlock = rwlock
+        self.value = rwlock._value
+
+    fn __exit__(self, exc_type, exc_value, traceback):
+        self.rwlock.release_read()
+        return false
+
+
+class RwLockWriteGuard[T]:
+    """RAII guard for write lock. Auto-releases when dropped."""
+
+    fn __init__(self, rwlock: RwLock[T]):
+        self.rwlock = rwlock
+        self.value = rwlock._value
+
+    fn __exit__(self, exc_type, exc_value, traceback):
+        self.rwlock.release_write()
+        return false
+
+
+# Additional synchronization primitives
+
+class Semaphore:
+    """
+    Counting semaphore for limiting concurrent access.
+
+    Example:
+        # Allow up to 3 concurrent operations
+        sem = Semaphore(3)
+
+        with sem:
+            # Critical section - at most 3 threads here
+            pass
+    """
+
+    fn __init__(self, permits: i64):
+        self.permits = Atomic(permits)
+
+    fn acquire(self):
+        """Acquire a permit, blocking if none available."""
+        while true:
+            current = self.permits.load()
+            if current > 0:
+                success, _ = self.permits.compare_and_swap(current, current - 1)
+                if success:
+                    break
+
+    fn release(self):
+        """Release a permit."""
+        self.permits.fetch_add(1)
+
+    fn __enter__(self):
+        self.acquire()
+        return self
+
+    fn __exit__(self, exc_type, exc_value, traceback):
+        self.release()
+        return false

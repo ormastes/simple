@@ -13,6 +13,27 @@ fn message_to_value(msg: Message) -> Value {
     }
 }
 
+/// Helper: Apply a lambda to a value with the given environment and contexts
+/// Returns the result of evaluating the lambda body
+fn apply_lambda_to_value(
+    val: &Value,
+    lambda_arg: Value,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    if let Value::Lambda { params, body, env: captured } = lambda_arg {
+        let mut local_env = captured.clone();
+        if let Some(param) = params.first() {
+            local_env.insert(param.clone(), val.clone());
+        }
+        evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)
+    } else {
+        Ok(Value::Nil)
+    }
+}
+
 /// Option map: apply lambda to Some value
 fn eval_option_map(
     variant: &str,
@@ -24,18 +45,11 @@ fn eval_option_map(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    // Use type-safe variant matching
     if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
         if let Some(val) = payload {
-            let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            if let Value::Lambda { params, body, env: captured } = func_arg {
-                let mut local_env = captured.clone();
-                if let Some(param) = params.first() {
-                    local_env.insert(param.clone(), val.as_ref().clone());
-                }
-                let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-                return Ok(Value::some(result));
-            }
+            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let result = apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods)?;
+            return Ok(Value::some(result));
         }
     }
     Ok(Value::none())
@@ -54,16 +68,9 @@ fn eval_option_and_then(
 ) -> Result<Value, CompileError> {
     if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
         if let Some(val) = payload {
-            let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            if let Value::Lambda { params, body, env: captured } = func_arg {
-                let mut local_env = captured.clone();
-                if let Some(param) = params.first() {
-                    local_env.insert(param.clone(), val.as_ref().clone());
-                }
-                let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-                // The result should be Option, return as-is
-                return Ok(result);
-            }
+            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            // Return result as-is (should be Option)
+            return apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods);
         }
     }
     Ok(Value::none())
@@ -138,15 +145,9 @@ fn eval_result_map(
 ) -> Result<Value, CompileError> {
     if ResultVariant::from_name(variant) == Some(ResultVariant::Ok) {
         if let Some(val) = payload {
-            let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            if let Value::Lambda { params, body, env: captured } = func_arg {
-                let mut local_env = captured.clone();
-                if let Some(param) = params.first() {
-                    local_env.insert(param.clone(), val.as_ref().clone());
-                }
-                let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-                return Ok(Value::ok(result));
-            }
+            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let result = apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods)?;
+            return Ok(Value::ok(result));
         }
     }
     // Return Err as-is
@@ -170,15 +171,9 @@ fn eval_result_map_err(
 ) -> Result<Value, CompileError> {
     if ResultVariant::from_name(variant) == Some(ResultVariant::Err) {
         if let Some(val) = payload {
-            let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            if let Value::Lambda { params, body, env: captured } = func_arg {
-                let mut local_env = captured.clone();
-                if let Some(param) = params.first() {
-                    local_env.insert(param.clone(), val.as_ref().clone());
-                }
-                let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
-                return Ok(Value::err(result));
-            }
+            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let result = apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods)?;
+            return Ok(Value::err(result));
         }
     }
     // Return Ok as-is
@@ -202,15 +197,9 @@ fn eval_result_and_then(
 ) -> Result<Value, CompileError> {
     if ResultVariant::from_name(variant) == Some(ResultVariant::Ok) {
         if let Some(val) = payload {
-            let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            if let Value::Lambda { params, body, env: captured } = func_arg {
-                let mut local_env = captured.clone();
-                if let Some(param) = params.first() {
-                    local_env.insert(param.clone(), val.as_ref().clone());
-                }
-                // The result should be Result, return as-is
-                return evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods);
-            }
+            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            // Return result as-is (should be Result)
+            return apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods);
         }
     }
     // Return Err as-is

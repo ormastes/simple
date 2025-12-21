@@ -331,4 +331,4 @@ All matchers support negation with `not_to`.
 ## See Also
 
 - [Spec Framework Guide](spec_framework_guide.md)
-- [BDD Specification](spec/bdd_spec.md)
+- [BDD Specification](bdd_spec.md)

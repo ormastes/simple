@@ -304,5 +304,5 @@ migrate "create_users":
 ## Related Documentation
 
 - [db.md](./db.md) - Database Abstraction Layer (backend-agnostic interface)
-- [spec/data_structures.md](./spec/data_structures.md) - Data type specifications
-- [feature.md](./feature.md) - Feature status and roadmap
+- [spec/data_structures.md](../spec/data_structures.md) - Data type specifications
+- [feature.md](../features/feature.md) - Feature status and roadmap

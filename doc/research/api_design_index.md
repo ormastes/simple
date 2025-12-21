@@ -35,4 +35,4 @@ Comprehensive API design guidelines based on lessons learned from Rust, Python, 
 - **Construction**: Builder pattern for complex types
 - **Testing**: BDD `describe/it` and doctest `>>>` examples
 
-See [Architecture](../architecture.md) for module organization.
+See [Architecture](../architecture/overview.md) for module organization.

@@ -7,7 +7,7 @@
 
 use memmap2::Mmap;
 use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
 /// Threshold for using memory-mapped reading (files larger than this use mmap).
