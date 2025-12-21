@@ -1,11 +1,147 @@
-Below are two “drop-in” spec sections you can add to Simple’s language documentation. They are written as missing-feature documentation (what other languages formalize, what Simple should formalize), and then a proposed Simple specification (minimal but complete enough to implement).
+Below are two "drop-in" spec sections you can add to Simple's language documentation. They are written as missing-feature documentation (what other languages formalize, what Simple should formalize), and then a proposed Simple specification (minimal but complete enough to implement).
 
-I am basing the “what’s missing” on the fact that Simple’s README shows enums + match, plus GC/runtime concepts, but does not expose a formal aliasing model, concurrency memory model, or full match semantics/exhaustiveness rules in the publicly visible material.
+I am basing the "what's missing" on the fact that Simple's README shows enums + match, plus GC/runtime concepts, but does not expose a formal aliasing model, concurrency memory model, or full match semantics/exhaustiveness rules in the publicly visible material.
 
 
 ---
 
+4. Concurrency Modes
+
+Simple supports multiple concurrency modes with different safety/performance tradeoffs.
+
+4.1 Mode Overview
+
+| Mode | Safety | Performance | Use Case |
+|------|--------|-------------|----------|
+| `actor` (default) | High (Erlang-style) | Good | General concurrency |
+| `lock_base` | Medium (Rust-style) | High | Performance-critical |
+| `unsafe` | Low (manual) | Maximum | FFI, low-level |
+
+4.2 Actor Mode (Default) - Erlang-style
+
+The default mode. No shared mutable state, only message passing.
+
+```simple
+# Default: actor mode (safe, no shared state)
+actor Counter:
+    count: i64 = 0
+
+    fn increment(self):
+        self.count += 1
+
+    fn get(self) -> i64:
+        return self.count
+
+fn main():
+    let counter = spawn Counter()
+    counter.send(:increment)
+    counter.send(:increment)
+    let value = counter.ask(:get)  # 2
+```
+
+**Rules:**
+- All data is immutable or actor-local
+- Communication via message passing only
+- No `mut T`, `Mutex`, `Atomic` - not needed
+- Data races impossible by design
+
+4.3 Lock-Base Mode - Rust-style
+
+Opt-in mode for shared mutable state with lock protection.
+
+```simple
+#[concurrency_mode(lock_base)]
+mod shared_state
+
+use infra.sync.{Mutex, RwLock, Atomic}
+
+# Now mut T, Mutex, etc. are available
+fn shared_counter() -> Mutex[i64]:
+    return Mutex.new(0)
+
+fn increment(counter: Mutex[i64]):
+    let guard = counter.lock()
+    guard.set(guard.get() + 1)
+    # guard dropped, lock released
+```
+
+**Available in lock_base mode:**
+- `mut T` - exclusive mutable capability
+- `iso T` - isolated transferable capability
+- `Mutex[T]` - mutex-protected value
+- `RwLock[T]` - read-write lock
+- `Atomic[T]` - lock-free atomic operations
+- Concurrent collections with GC support
+
+4.4 Unsafe Mode - Manual Control
+
+For FFI and low-level code. No safety guarantees.
+
+```simple
+#[unsafe]
+fn raw_pointer_ops(ptr: *mut i64):
+    *ptr = 42  # Direct memory write
+```
+
+4.5 GC Object Support in Concurrent Collections
+
+Native concurrent libraries (TBB, crossbeam) work with GC-managed objects:
+
+```simple
+#[concurrency_mode(lock_base)]
+mod concurrent_gc
+
+use infra.concurrent.{ConcurrentMap, ConcurrentQueue}
+
+# GC objects work in concurrent collections
+struct User:
+    name: str
+    age: i64
+
+fn main():
+    let users = ConcurrentMap[str, User].new()
+
+    # GC-managed User objects stored in concurrent map
+    users.insert("alice", User(name: "Alice", age: 30))
+    users.insert("bob", User(name: "Bob", age: 25))
+
+    # Safe concurrent access with GC
+    spawn \:
+        let user = users.get("alice")
+        print(user.name)  # GC keeps object alive
+```
+
+**Implementation:**
+- Concurrent collections use write barriers for GC
+- Objects are traced through collection handles
+- No manual memory management needed
+
+4.6 Mode Attribute Syntax
+
+```simple
+# Module-level mode
+#[concurrency_mode(actor)]      # Default
+#[concurrency_mode(lock_base)]  # Enable shared state
+#[concurrency_mode(unsafe)]     # Full manual control
+
+# Function-level override
+#[unsafe]
+fn low_level_op():
+    # Unsafe code here
+
+# Block-level unsafe
+fn mixed():
+    let safe_value = 42
+    unsafe:
+        # Unsafe block
+        raw_memory_access()
+```
+
+---
+
 5. Memory, Aliasing, and Concurrency Model
+
+**Note:** Features in this section (5.2.1 - 5.2.8) require `#[concurrency_mode(lock_base)]` or `#[unsafe]`.
 
 5.1 What’s typically present in other languages (and likely missing in Simple today)
 

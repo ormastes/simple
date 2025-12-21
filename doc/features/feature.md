@@ -62,12 +62,13 @@ All feature tables use this standardized 7-column format:
 | #1000-#1050 | AOP & Unified Predicates | 📋 Planned |
 | #1051-#1060 | SDN Self-Hosting | 📋 Planned |
 | #1061-#1103 | Missing Language Features | 📋 Planned |
+| #1104-#1115 | Concurrency Modes | 📋 Planned |
 
 ---
 
 ## Summary Statistics
 
-**Overall Progress:** 70% (268/382 features complete)
+**Overall Progress:** 68% (268/394 features complete)
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -94,6 +95,7 @@ All feature tables use this standardized 7-column format:
 | **AOP & Unified Predicates** | 51 | 0 | 51 |
 | **SDN Self-Hosting** | 10 | 0 | 10 |
 | **Missing Language Features** | 43 | 0 | 43 |
+| **Concurrency Modes** | 12 | 0 | 12 |
 
 **Test Status:** 1089+ tests passing
 
@@ -1470,6 +1472,77 @@ Features documented in `doc/spec/` but not yet tracked.
 | #1101 | `Atomic[T]` wrapper | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
 | #1102 | `Mutex[T]` wrapper | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
 | #1103 | `RwLock[T]` wrapper | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+
+**Note:** Memory Model features (#1096-1103) require `#[concurrency_mode(lock_base)]` or `#[unsafe]`.
+
+---
+
+### Concurrency Modes (#1104-1115) 📋
+
+Safety modes for concurrency: actor (Erlang-style), lock_base (Rust-style), unsafe.
+
+**Documentation:**
+- [spec/language_enhancement.md](../spec/language_enhancement.md) - Section 4: Concurrency Modes
+
+#### Mode System (#1104-1107)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1104 | `#[concurrency_mode(actor)]` (default) | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1105 | `#[concurrency_mode(lock_base)]` | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1106 | `#[concurrency_mode(unsafe)]` | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1107 | `unsafe:` block syntax | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/parser/tests/` |
+
+**Mode Comparison:**
+```
++------------------------------------------------------------------+
+| Mode       | Shared State | mut T | Mutex | Atomic | Data Races  |
++------------------------------------------------------------------+
+| actor      | ❌ No        | ❌    | ❌    | ❌     | Impossible  |
+| lock_base  | ✅ Yes       | ✅    | ✅    | ✅     | Runtime trap|
+| unsafe     | ✅ Yes       | ✅    | ✅    | ✅     | Undefined   |
++------------------------------------------------------------------+
+```
+
+#### GC Support for Concurrent Collections (#1108-1112)
+
+Native concurrent libraries (TBB, crossbeam) with GC-managed objects.
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1108 | GC write barriers in concurrent collections | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
+| #1109 | `ConcurrentMap[K, V]` with GC objects | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| #1110 | `ConcurrentQueue[T]` with GC objects | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| #1111 | `ConcurrentStack[T]` with GC objects | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| #1112 | Object tracing through collection handles | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
+
+**Example:**
+```simple
+#[concurrency_mode(lock_base)]
+mod gc_concurrent
+
+use infra.concurrent.ConcurrentMap
+
+struct User:
+    name: str
+    age: i64
+
+fn main():
+    let users = ConcurrentMap[str, User].new()
+    users.insert("alice", User(name: "Alice", age: 30))
+
+    spawn \:
+        let user = users.get("alice")
+        print(user.name)  # GC keeps object alive across threads
+```
+
+#### Mode Enforcement (#1113-1115)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1113 | Compile error for `mut T` in actor mode | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1114 | Compile error for `Mutex` in actor mode | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1115 | Warning for unsafe in release build | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 
 ---
 
