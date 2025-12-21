@@ -438,9 +438,9 @@ parse_statement():
 
 | Spec | Purpose | Integration |
 |------|---------|-------------|
-| [SDN](spec/sdn.md) | Data notation | Table syntax (`\|fields\|`, `table{types}`) |
-| [BDD Spec](spec/bdd_spec.md) | Test framework | `describe`, `context`, `it`, matchers |
-| [Test Policy](guides/test.md) | Coverage & mocks | Test levels, coverage metrics |
+| [SDN](sdn.md) | Data notation | Table syntax (`\|fields\|`, `table{types}`) |
+| [BDD Spec](bdd_spec.md) | Test framework | `describe`, `context`, `it`, matchers |
+| [Test Policy](../guides/test.md) | Coverage & mocks | Test levels, coverage metrics |
 | This doc | System test DSL | Gherkin-style `feature`/`scenario`/`examples` |
 
 ---

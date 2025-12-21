@@ -51,7 +51,7 @@ All feature tables use this standardized 7-column format:
 | #520-#536 | Web Framework | ✅ Complete (17/17) |
 | #600-#610 | SDN + Gherkin DSL | ✅ Complete (11/11) |
 | #700-#713 | Database & Persistence (DB + SQP) | ✅ Complete (14/14) |
-| #800-#824 | Build & Linker Optimization | 🔄 In Progress (23/25) |
+| #800-#824 | Build & Linker Optimization | 📋 Planned (23/25) |
 | #825-#849 | Infrastructure & Dependencies | ✅ Complete |
 | #850-#879 | Simple Stdlib - Infra APIs | ✅ Complete (30/30) |
 | #880-#919 | LLM-Friendly Features | 📋 Planned |
@@ -61,9 +61,9 @@ All feature tables use this standardized 7-column format:
 | #980-#999 | Code Quality & Documentation | ✅ Complete |
 | #1000-#1050 | AOP & Unified Predicates | 📋 Planned |
 | #1051-#1060 | SDN Self-Hosting | 📋 Planned |
-| #1061-#1103 | Missing Language Features | 📋 Planned |
+| #1061-#1103 | Missing Language Features | 🔄 In Progress (5/43) |
 | #1104-#1115 | Concurrency Modes | 📋 Planned |
-| #1116-#1130 | FFI/ABI Interface | 📋 Planned |
+| #1116-#1130 | FFI/ABI Interface | ✅ Complete |
 | #1131-#1145 | Formatting & Lints | 📋 Planned |
 | #1146-#1155 | Trait Coherence | 📋 Planned |
 
@@ -71,7 +71,7 @@ All feature tables use this standardized 7-column format:
 
 ## Summary Statistics
 
-**Overall Progress:** 63% (268/434 features complete)
+**Overall Progress:** 66% (288/434 features complete)
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -97,15 +97,15 @@ All feature tables use this standardized 7-column format:
 | **Module Privacy** | 2 | 2 | 0 |
 | **AOP & Unified Predicates** | 51 | 0 | 51 |
 | **SDN Self-Hosting** | 10 | 0 | 10 |
-| **Missing Language Features** | 43 | 0 | 43 |
+| **Missing Language Features** | 43 | 5 | 38 |
 | **Concurrency Modes** | 12 | 0 | 12 |
-| **FFI/ABI Interface** | 15 | 0 | 15 |
+| **FFI/ABI Interface** | 15 | 15 | 0 |
 | **Formatting & Lints** | 15 | 0 | 15 |
 | **Trait Coherence** | 10 | 0 | 10 |
 
 **Test Status:** 1089+ tests passing
 
-**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md)
+**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md)
 
 ---
 
@@ -898,6 +898,13 @@ Coverage tools and metrics for different test levels (System, Service, Integrati
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
 | #927 | `public_api.yml` interface section | ✅ | R | [test.md](../guides/test.md) | - | `src/util/simple_mock_helper/src/coverage.rs` |
+
+---
+
+---
+
+## Part 2: Issues & Priorities
+
 | #928 | `public_api.yml` external_libs section | ✅ | R | [test.md](../guides/test.md) | - | `src/util/simple_mock_helper/src/coverage.rs` |
 | #929 | `public_api.yml` neighbors section | ✅ | R | [test.md](../guides/test.md) | - | `src/util/simple_mock_helper/src/coverage.rs` |
 | #930 | `coverage_gen service` report type | ✅ | R | [test.md](../guides/test.md) | - | `src/util/simple_mock_helper/src/bin/coverage_gen.rs` |
@@ -1387,7 +1394,7 @@ features |name, deps|
 
 ---
 
-### Missing Language Features (#1061-1103) 📋
+### Missing Language Features (#1061-1103) 🔄
 
 Features documented in `doc/spec/` but not yet tracked.
 
@@ -1400,7 +1407,7 @@ Features documented in `doc/spec/` but not yet tracked.
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #1061 | `macro` keyword | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1061 | `macro` keyword | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 | #1062 | `gen_code` block | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
 | #1063 | Hygienic macro expansion | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
 | #1064 | AST manipulation in macros | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
@@ -1410,8 +1417,8 @@ Features documented in `doc/spec/` but not yet tracked.
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #1066 | `context obj:` block | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
-| #1067 | `method_missing` handler | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
+| #1066 | `context obj:` block | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
+| #1067 | `method_missing` handler | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
 | #1068 | Fluent interface support | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
 
 #### Built-in Decorators (#1069-1072)
@@ -1447,8 +1454,8 @@ Features documented in `doc/spec/` but not yet tracked.
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #1083 | Match guards `case x if x > 0:` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1084 | Or patterns `case "a" \| "b":` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1083 | Match guards `case x if x > 0:` | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1084 | Or patterns `case "a" \| "b":` | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 | #1085 | Range patterns `case 1..10:` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 | #1086 | `if let Some(x) = ...` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 | #1087 | `while let Some(x) = ...` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
@@ -1552,7 +1559,7 @@ fn main():
 
 ---
 
-### FFI/ABI Interface (#1116-1130) 📋
+### FFI/ABI Interface (#1116-1130) ✅
 
 Stable, explicit foreign function interface for C and Rust interoperability.
 
@@ -1563,36 +1570,36 @@ Stable, explicit foreign function interface for C and Rust interoperability.
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #1116 | `extern "C"` function import | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1117 | `extern "Rust"` function import | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1118 | `#[export("C")]` function export | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1116 | `extern "C"` function import | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1117 | `extern "Rust"` function import | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1118 | `#[export("C")]` function export | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
 
 #### Data Layout (#1119-1121)
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #1119 | `#[repr(C)]` struct layout | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1120 | `#[repr(packed)]` layout | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1121 | `#[repr(align(N))]` layout | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1119 | `#[repr(C)]` struct layout | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1120 | `#[repr(packed)]` layout | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1121 | `#[repr(align(N))]` layout | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
 
 #### FFI Types (#1122-1126)
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #1122 | C string types (CStr, CString) | 📋 | S+R | [ffi_abi.md](../spec/ffi_abi.md) | `std_lib/src/ffi/` | `src/runtime/tests/` |
-| #1123 | Raw pointer types (*const, *mut) | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1124 | Ownership annotations (#[borrow], #[owned]) | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1125 | Function pointer types | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1126 | Callback trampolines | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/runtime/tests/` |
+| #1122 | C string types (CStr, CString) | ✅ | S+R | [ffi_abi.md](../spec/ffi_abi.md) | `std_lib/src/ffi/` | `src/runtime/tests/` |
+| #1123 | Raw pointer types (*const, *mut) | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1124 | Ownership annotations (#[borrow], #[owned]) | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1125 | Function pointer types | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1126 | Callback trampolines | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/runtime/tests/` |
 
 #### FFI Infrastructure (#1127-1130)
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #1127 | `#[link]` library specification | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1128 | Platform-specific ABIs | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1129 | FFI safety lints | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
-| #1130 | `#[catch_panic]` for exports | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/runtime/tests/` |
+| #1127 | `#[link]` library specification | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1128 | Platform-specific ABIs | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1129 | FFI safety lints | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1130 | `#[catch_panic]` for exports | ✅ | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/runtime/tests/` |
 
 ---
 
@@ -1718,4 +1725,4 @@ Trait implementation rules for unambiguous dispatch and type safety.
 - [architecture.md](architecture.md) - Design principles
 - [research/aop.md](../research/aop.md) - AOP & Unified Predicates specification
 - [research/sdn_self_hosting.md](../research/sdn_self_hosting.md) - SDN self-hosting and missing features
-- [CLAUDE.md](../CLAUDE.md) - Development guide
+- [CLAUDE.md](../../CLAUDE.md) - Development guide

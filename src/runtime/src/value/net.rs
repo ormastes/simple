@@ -177,6 +177,66 @@ fn addr_to_string_ptr(addr: &SocketAddr) -> i64 {
 }
 
 // ============================================================================
+// Helper macros for reducing FFI boilerplate
+// ============================================================================
+
+/// Macro to get registry and socket entry with error handling
+/// Usage: with_socket!(handle, UdpSocket, error_fn, socket => { use socket here })
+macro_rules! with_socket {
+    ($handle:expr, $variant:ident, $error_ret:expr, $socket:ident => $body:expr) => {{
+        let registry = SOCKET_REGISTRY.lock().unwrap();
+        let entry = match registry.get(&$handle) {
+            Some(e) => e,
+            None => return $error_ret(NetError::InvalidHandle),
+        };
+        let $socket = match entry {
+            SocketEntry::$variant(s) => s,
+            _ => return $error_ret(NetError::InvalidHandle),
+        };
+        $body
+    }};
+}
+
+/// Macro to validate buffer pointer and length
+/// Returns early with InvalidInput error if validation fails
+macro_rules! validate_buffer {
+    ($buf_ptr:expr, $buf_len:expr, $error_ret:expr) => {
+        if $buf_ptr == 0 || $buf_len <= 0 {
+            return $error_ret(NetError::InvalidInput);
+        }
+    };
+}
+
+/// Macro to parse socket address from FFI parameters
+/// Returns early with error if parsing fails
+macro_rules! parse_addr {
+    ($addr_ptr:expr, $addr_len:expr, $error_ret:expr) => {{
+        match parse_socket_addr($addr_ptr, $addr_len) {
+            Ok(a) => a,
+            Err(e) => return $error_ret(e),
+        }
+    }};
+}
+
+/// Convert error code to i64
+#[inline]
+fn err_to_i64(e: NetError) -> i64 {
+    e as i64
+}
+
+/// Convert error code to (0, error_code) tuple
+#[inline]
+fn err_to_tuple2(e: NetError) -> (i64, i64) {
+    (0, e as i64)
+}
+
+/// Convert error code to (0, 0, error_code) tuple  
+#[inline]
+fn err_to_tuple3(e: NetError) -> (i64, i64, i64) {
+    (0, 0, e as i64)
+}
+
+// ============================================================================
 // TCP FFI functions (extracted to net_tcp.rs)
 // ============================================================================
 include!("net_tcp.rs");

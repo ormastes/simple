@@ -1,7 +1,5 @@
 // Helper functions for expression parsing - lambdas, colon blocks, if expressions, and arguments
 
-use super::*;
-
 impl<'a> Parser<'a> {
     fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>) -> Result<(), ParseError> {
         while self.check(&TokenKind::Comma) {

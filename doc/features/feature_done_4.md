@@ -149,7 +149,7 @@ Design by Contract fully implemented (12 tests pass):
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #30 | Type Inference (HM) | ✅ | R | [design/type_inference.md](design/type_inference.md) | [`public_api_coverage_tests.rs:test_type_registry_*`](../tests/system/public_api_coverage_tests.rs) | `src/type/tests/` |
+| #30 | Type Inference (HM) | ✅ | R | [design/type_inference.md](../design/type_inference.md) | [`public_api_coverage_tests.rs:test_type_registry_*`](../tests/system/public_api_coverage_tests.rs) | `src/type/tests/` |
 | #31 | Associated Types | ✅ | R | [spec/traits.md](spec/traits.md) | [`public_api_coverage_tests.rs:test_type_registry_*`](../tests/system/public_api_coverage_tests.rs) | `src/parser/tests/` |
 | #32 | Dynamic Dispatch (dyn Trait) | ✅ | R | [spec/traits.md](spec/traits.md) | [`execution_tests.rs`](../tests/system/execution_tests.rs) | `src/compiler/tests/` |
 | #33 | Memory Pointers | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |

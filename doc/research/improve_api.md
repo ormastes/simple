@@ -195,9 +195,9 @@ When designing new stdlib APIs:
 - **[API Design Index](api_design_index.md)** - Detailed guidelines by topic
 - **[Standard Library Spec](../spec/stdlib.md)** - Complete stdlib specification
 - **[Unit Types Spec](../spec/units.md)** - Semantic type system
-- **[Testing Guide](../test.md)** - How to test stdlib APIs
-- **[Architecture](../architecture.md)** - Module organization
+- **[Testing Guide](../guides/test.md)** - How to test stdlib APIs
+- **[Architecture](../architecture/overview.md)** - Module organization
 
 ---
 
-**Full detailed guidelines available in: [doc/research/improve_api.md.backup](improve_api.md.backup)**
+**Full detailed guidelines available in: [API Design Index](api_design_index.md)**

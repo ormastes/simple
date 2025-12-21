@@ -342,6 +342,22 @@ fn eval_array_all(
     })
 }
 
+/// Helper for dict operations with lambda
+fn with_dict_lambda<F>(
+    func: Value,
+    operation: &str,
+    process: F,
+) -> Result<Value, CompileError>
+where
+    F: FnOnce(&[String], &Expr, &Env) -> Result<Value, CompileError>,
+{
+    if let Value::Lambda { params, body, env: captured } = func {
+        process(&params, &body, &captured)
+    } else {
+        Err(CompileError::Semantic(format!("{operation} expects lambda argument")))
+    }
+}
+
 /// Dict map_values: apply lambda to each value
 fn eval_dict_map_values(
     map: &HashMap<String, Value>,
@@ -351,17 +367,15 @@ fn eval_dict_map_values(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = func {
+    with_dict_lambda(func, "map_values", |params, body, captured| {
         let mut new_map = HashMap::new();
         for (k, v) in map {
-            let local_env = bind_lambda_param(&captured, &params, v);
-            let new_val = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+            let local_env = bind_lambda_param(captured, params, v);
+            let new_val = evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?;
             new_map.insert(k.clone(), new_val);
         }
         Ok(Value::Dict(new_map))
-    } else {
-        Err(CompileError::Semantic("map_values expects lambda argument".into()))
-    }
+    })
 }
 
 /// Dict filter: keep entries where lambda returns truthy
@@ -373,7 +387,7 @@ fn eval_dict_filter(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = func {
+    with_dict_lambda(func, "filter", |params, body, captured| {
         let mut new_map = HashMap::new();
         for (k, v) in map {
             let mut local_env = captured.clone();
@@ -383,14 +397,12 @@ fn eval_dict_filter(
             } else if let Some(param) = params.first() {
                 local_env.insert(param.clone(), v.clone());
             }
-            if evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
+            if evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?.truthy() {
                 new_map.insert(k.clone(), v.clone());
             }
         }
         Ok(Value::Dict(new_map))
-    } else {
-        Err(CompileError::Semantic("filter expects lambda argument".into()))
-    }
+    })
 }
 
 // === Helper functions for comprehensions and slicing ===

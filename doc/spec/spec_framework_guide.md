@@ -482,5 +482,5 @@ context "test":
 
 ## See Also
 
-- [BDD Specification](spec/bdd_spec.md)
+- [BDD Specification](bdd_spec.md)
 - [Matchers Reference](spec_matchers_reference.md)

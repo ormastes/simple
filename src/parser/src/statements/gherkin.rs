@@ -165,6 +165,24 @@ impl<'a> Parser<'a> {
             let n = s.clone();
             self.advance();
             Ok(n)
+        } else if let TokenKind::FString(tokens) = &self.current.kind {
+            // Handle f-strings (double-quoted strings)
+            // For names, we only support literal f-strings (no interpolation)
+            let mut s = String::new();
+            for token in tokens {
+                match token {
+                    crate::token::FStringToken::Literal(lit) => s.push_str(lit),
+                    crate::token::FStringToken::Expr(_) => {
+                        return Err(ParseError::unexpected_token(
+                            "plain string",
+                            "string with interpolation",
+                            self.current.span,
+                        ));
+                    }
+                }
+            }
+            self.advance();
+            Ok(s)
         } else {
             Err(ParseError::unexpected_token(
                 "name",
@@ -191,6 +209,27 @@ impl<'a> Parser<'a> {
                 self.advance();
             } else if let TokenKind::Integer(n) = &self.current.kind {
                 parts.push(n.to_string());
+                self.advance();
+            } else if let TokenKind::String(s) = &self.current.kind {
+                parts.push(s.clone());
+                self.advance();
+            } else if let TokenKind::FString(tokens) = &self.current.kind {
+                // Handle f-strings (double-quoted strings)
+                // For step patterns, we only support literal f-strings (no interpolation)
+                let mut s = String::new();
+                for token in tokens {
+                    match token {
+                        crate::token::FStringToken::Literal(lit) => s.push_str(lit),
+                        crate::token::FStringToken::Expr(_) => {
+                            return Err(ParseError::unexpected_token(
+                                "plain string",
+                                "string with interpolation",
+                                self.current.span,
+                            ));
+                        }
+                    }
+                }
+                parts.push(s);
                 self.advance();
             } else if self.is_keyword_for_pattern() {
                 parts.push(self.current.lexeme.clone());
@@ -242,6 +281,24 @@ impl<'a> Parser<'a> {
                 self.advance();
             } else if let TokenKind::String(s) = &self.current.kind {
                 parts.push(s.clone());
+                self.advance();
+            } else if let TokenKind::FString(tokens) = &self.current.kind {
+                // Handle f-strings (double-quoted strings)
+                // For gherkin descriptions, we only support literal f-strings (no interpolation)
+                let mut s = String::new();
+                for token in tokens {
+                    match token {
+                        crate::token::FStringToken::Literal(lit) => s.push_str(lit),
+                        crate::token::FStringToken::Expr(_) => {
+                            return Err(ParseError::unexpected_token(
+                                "plain string",
+                                "string with interpolation",
+                                self.current.span,
+                            ));
+                        }
+                    }
+                }
+                parts.push(s);
                 self.advance();
             } else if self.is_keyword_for_pattern() {
                 parts.push(self.current.lexeme.clone());

@@ -2,14 +2,28 @@
 
 ## 🚧 Current Status
 
-**Test Status:** ✅ All tests passing (807 tests across all crates)  
-**Recent Fixes:**
-- Fixed syntax error in llvm_tests/mir_compilation.rs
-- Fixed backend selection logic to respect llvm feature flag
+**Test Status:** ✅ Build passing - compilation warnings fixed  
+**Recent Work (2025-12-22):**
+- Fixed gherkin DSL parsing to handle f-strings (double-quoted strings)
+- Split 8 large markdown documentation files into 18 manageable parts
+- Analyzed and documented Rust source files over 1000 lines
+- All documentation and rationale in `doc/report/`
 
 **Pending Work:**
-- 4 files exceed 1000 lines and need splitting (see FILE_SPLITTING_STATUS.md)
-- Code duplication detected in multiple files (see DUPLICATION_REPORT.md)
+- Review test failures in gherkin/attributes tests (indentation issues)
+- Consider extracting test helpers in large test files if needed
+
+## Documentation Organization
+
+### Report Directory (`doc/report/`)
+
+Job completion reports and maintenance documentation (see `doc/report/README.md` for details).
+
+**Key Decisions:**
+- ✅ Markdown files: Split for navigation (8 files → 18 parts, all <1000 lines)
+- ⚠️ Rust source: Intentionally NOT split (maintains code cohesion)
+- ⚠️ Test files: NOT split (would break compilation)
+- ⚠️ Generated files: Do not modify (auto-generated)
 
 ## Current File Structure
 
@@ -71,6 +85,11 @@ simple/                            # Project root - Rust compiler implementation
 │   └── src/lib.rs                 # simple_log::init() entry point
 │
 ├── doc/                           # Documentation
+│   ├── report/                    # Job completion reports
+│   │   ├── README.md              # Report directory guide
+│   │   ├── FILE_SPLITTING_SUMMARY.md  # File organization analysis (2025-12-22)
+│   │   ├── SPLIT_FILES_INDEX.md   # Index of split documentation files
+│   │   └── RUST_LONG_FILES.md     # Analysis of long Rust source files
 │   ├── architecture.md            # Design principles and dependency rules
 │   ├── codegen_technical.md       # Codegen implementation details
 │   ├── feature.md                 # Feature overview (→ feature_index.md for details)
