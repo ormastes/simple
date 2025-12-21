@@ -63,12 +63,15 @@ All feature tables use this standardized 7-column format:
 | #1051-#1060 | SDN Self-Hosting | 📋 Planned |
 | #1061-#1103 | Missing Language Features | 📋 Planned |
 | #1104-#1115 | Concurrency Modes | 📋 Planned |
+| #1116-#1130 | FFI/ABI Interface | 📋 Planned |
+| #1131-#1145 | Formatting & Lints | 📋 Planned |
+| #1146-#1155 | Trait Coherence | 📋 Planned |
 
 ---
 
 ## Summary Statistics
 
-**Overall Progress:** 68% (268/394 features complete)
+**Overall Progress:** 63% (268/434 features complete)
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -96,6 +99,9 @@ All feature tables use this standardized 7-column format:
 | **SDN Self-Hosting** | 10 | 0 | 10 |
 | **Missing Language Features** | 43 | 0 | 43 |
 | **Concurrency Modes** | 12 | 0 | 12 |
+| **FFI/ABI Interface** | 15 | 0 | 15 |
+| **Formatting & Lints** | 15 | 0 | 15 |
+| **Trait Coherence** | 10 | 0 | 10 |
 
 **Test Status:** 1089+ tests passing
 
@@ -1543,6 +1549,123 @@ fn main():
 | #1113 | Compile error for `mut T` in actor mode | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 | #1114 | Compile error for `Mutex` in actor mode | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 | #1115 | Warning for unsafe in release build | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+
+---
+
+### FFI/ABI Interface (#1116-1130) 📋
+
+Stable, explicit foreign function interface for C and Rust interoperability.
+
+**Documentation:**
+- [spec/ffi_abi.md](../spec/ffi_abi.md) - FFI/ABI Specification
+
+#### Extern Functions (#1116-1118)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1116 | `extern "C"` function import | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1117 | `extern "Rust"` function import | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1118 | `#[export("C")]` function export | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+
+#### Data Layout (#1119-1121)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1119 | `#[repr(C)]` struct layout | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1120 | `#[repr(packed)]` layout | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1121 | `#[repr(align(N))]` layout | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+
+#### FFI Types (#1122-1126)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1122 | C string types (CStr, CString) | 📋 | S+R | [ffi_abi.md](../spec/ffi_abi.md) | `std_lib/src/ffi/` | `src/runtime/tests/` |
+| #1123 | Raw pointer types (*const, *mut) | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1124 | Ownership annotations (#[borrow], #[owned]) | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1125 | Function pointer types | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1126 | Callback trampolines | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/runtime/tests/` |
+
+#### FFI Infrastructure (#1127-1130)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1127 | `#[link]` library specification | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1128 | Platform-specific ABIs | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1129 | FFI safety lints | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/compiler/tests/` |
+| #1130 | `#[catch_panic]` for exports | 📋 | R | [ffi_abi.md](../spec/ffi_abi.md) | - | `src/runtime/tests/` |
+
+---
+
+### Formatting and Lints (#1131-1145) 📋
+
+Deterministic formatting and semantic lint set for code quality.
+
+**Documentation:**
+- [spec/formatting_lints.md](../spec/formatting_lints.md) - Formatting and Lints Specification
+
+#### Canonical Formatter (#1131-1133)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1131 | Canonical formatter (no config) | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| #1132 | Formatter CLI (`simple fmt`) | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| #1133 | Format-on-save IDE integration | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | - |
+
+#### Semantic Lints (#1134-1138)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1134 | Safety lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1135 | Correctness lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1136 | Warning lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1137 | Style lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1138 | Concurrency lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+
+#### Lint Control (#1139-1145)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1139 | `#[allow]`/`#[deny]`/`#[warn]` attributes | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/parser/tests/` |
+| #1140 | Lint groups | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1141 | Fix-it hints in diagnostics | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1142 | Auto-fix CLI (`simple fix`) | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| #1143 | Error code stability | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1144 | Lint configuration in simple.sdn | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| #1145 | `--explain` for error codes | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+
+---
+
+### Trait Coherence (#1146-1155) 📋
+
+Trait implementation rules for unambiguous dispatch and type safety.
+
+**Documentation:**
+- [spec/traits.md](../spec/traits.md) - Trait Coherence Rules section
+
+#### Core Coherence (#1146-1149)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1146 | Orphan rule enforcement | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1147 | Overlap detection | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1148 | Associated type coherence | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1149 | Blanket impl conflict detection | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+
+#### Advanced Coherence (#1150-1153)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1150 | Specialization (`#[default]` impl) | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1151 | Negative trait bounds (`!Trait`) | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1152 | Coherence error messages | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1153 | Newtype pattern support | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+
+#### Extension Methods (#1154-1155)
+
+| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|--------|------|-----|--------|--------|
+| #1154 | Extension traits | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1155 | Delegation pattern | 📋 | S | [traits.md](../spec/traits.md) | `std_lib/test/` | - |
 
 ---
 
