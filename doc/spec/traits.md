@@ -391,6 +391,197 @@ let title = "hello world".to_title_case()  # "Hello World"
 
 ---
 
+## Trait Coherence Rules
+
+Coherence ensures that trait implementations are unambiguous and predictable across the entire program. Without coherence rules, different parts of a program could define conflicting implementations.
+
+### The Orphan Rule
+
+The **orphan rule** prevents defining trait implementations in "orphan" modules:
+
+```simple
+# ALLOWED: Implementing your trait for any type
+# (trait is local)
+trait MyTrait:
+    fn my_method()
+
+impl MyTrait for String:  # OK - MyTrait is local
+    fn my_method():
+        pass
+
+# ALLOWED: Implementing any trait for your type
+# (type is local)
+struct MyType:
+    value: i32
+
+impl Display for MyType:  # OK - MyType is local
+    fn fmt() -> str:
+        return "{self.value}"
+
+# FORBIDDEN: Implementing foreign trait for foreign type
+impl Display for String:  # ERROR - both Display and String are foreign
+    fn fmt() -> str:
+        return self
+```
+
+**The Orphan Rule (Formal):**
+
+An `impl Trait for Type` is allowed only if:
+- `Trait` is defined in the current crate, OR
+- `Type` is defined in the current crate
+
+### Overlap and Ambiguity
+
+Two trait implementations **overlap** if there exists a type that could match both:
+
+```simple
+# Overlapping implementations - ERROR
+trait Process:
+    fn process()
+
+impl Process for i32:
+    fn process():
+        print("i32")
+
+impl[T: Clone] Process for T:  # ERROR: overlaps with impl for i32
+    fn process():
+        print("generic")
+```
+
+**Resolution:** The compiler rejects overlapping implementations. Use more specific bounds or separate traits.
+
+### Specialization (Planned)
+
+Specialization allows a more specific implementation to override a general one:
+
+```simple
+# With specialization enabled
+trait Process:
+    fn process()
+
+#[default]
+impl[T] Process for T:
+    fn process():
+        print("default")
+
+impl Process for i32:  # OK - specializes the default
+    fn process():
+        print("specialized for i32")
+```
+
+**Note:** Specialization is planned but not yet implemented. Currently, all overlaps are errors.
+
+### Blanket Implementations
+
+Blanket implementations apply to all types matching a bound:
+
+```simple
+# Blanket impl: all types implementing Debug also get Printable
+impl[T: Debug] Printable for T:
+    fn stringify() -> String:
+        return self.debug_fmt()
+```
+
+**Coherence interaction:** Blanket implementations can create overlap issues. The orphan rule still applies.
+
+### Associated Type Coherence
+
+Associated types in trait implementations must be consistent:
+
+```simple
+trait Container:
+    type Item
+
+# Each implementation fixes the associated type
+impl Container for IntList:
+    type Item = i32
+
+impl Container for StringList:
+    type Item = String
+
+# Cannot have multiple impls with different Item for same type
+impl Container for IntList:  # ERROR: conflicting impl
+    type Item = i64
+```
+
+### Negative Trait Bounds (Planned)
+
+Negative bounds exclude types from a blanket impl:
+
+```simple
+# Not yet implemented
+impl[T: !Copy] Clone for T:
+    fn clone() -> T:
+        # deep clone for non-Copy types
+```
+
+### Coherence Error Messages
+
+```
+error[E0119]: conflicting implementations of trait `Display` for type `String`
+  --> src/my_impl.spl:5:1
+   |
+ 5 | impl Display for String:
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: conflicting implementation in `std`
+   = help: consider defining a newtype wrapper
+
+error[E0117]: only traits defined in the current crate can be implemented for arbitrary types
+  --> src/orphan.spl:3:1
+   |
+ 3 | impl Debug for Vec[i32]:
+   | ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `Debug` is defined in `std`, not the current crate
+   = note: `Vec` is defined in `std`, not the current crate
+   = help: wrap `Vec[i32]` in a newtype: `struct MyVec(Vec[i32])`
+```
+
+### Coherence Summary
+
+| Rule | Purpose | Error Code |
+|------|---------|------------|
+| **Orphan rule** | Prevent external conflicts | E0117 |
+| **No overlap** | Unambiguous dispatch | E0119 |
+| **Consistent associated types** | Type safety | E0120 |
+
+### Workarounds for Coherence Restrictions
+
+When coherence rules prevent desired implementations:
+
+**1. Newtype Pattern:**
+```simple
+# Wrap foreign type in local newtype
+struct MyString(String)
+
+impl ForeignTrait for MyString:
+    # Now allowed - MyString is local
+```
+
+**2. Extension Traits:**
+```simple
+# Define local trait with desired methods
+trait StringExt:
+    fn my_extension(self) -> String
+
+impl StringExt for String:
+    fn my_extension(self) -> String:
+        # implementation
+```
+
+**3. Delegation:**
+```simple
+struct MyWrapper:
+    inner: ForeignType
+
+impl MyWrapper:
+    fn delegate_method(self):
+        self.inner.original_method()
+```
+
+---
+
 ## Related Specifications
 
 - [Data Structures](data_structures.md)
