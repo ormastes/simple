@@ -148,6 +148,10 @@ All 79 BDD tests passing.
 
 ### Mock Library (#230-#241)
 
+Fluent mock API for unit tests (stub methods, verify calls, argument matchers).
+
+**Extended by:** AOP Mocking (#1020-1025) - adds trait-boundary mocking via DI predicates (`mock Name implements Trait:` syntax)
+
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
 | #230 | `mock <Type>` | ✅ | S+R | [test.md](test.md) | [`std_lib/test/system/spec/spec_framework_spec.spl`](../simple/std_lib/test/system/spec/spec_framework_spec.spl) | `src/compiler/tests/` |
