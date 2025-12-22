@@ -78,11 +78,11 @@ mod parser_contract_tests {
 // Parser Macro Extended Types
 // ============================================================================
 mod parser_macro_extended_tests {
-    use simple_parser::{MacroBody, MacroParam, MacroPattern, MacroToken};
+    use simple_parser::{MacroContractItem, MacroInject, MacroIntro, MacroParam, MacroReturns, MacroStmt};
 
     #[test]
-    fn test_macro_body_size() {
-        let _ = std::mem::size_of::<MacroBody>();
+    fn test_macro_stmt_size() {
+        let _ = std::mem::size_of::<MacroStmt>();
     }
 
     #[test]
@@ -91,13 +91,15 @@ mod parser_macro_extended_tests {
     }
 
     #[test]
-    fn test_macro_pattern_size() {
-        let _ = std::mem::size_of::<MacroPattern>();
+    fn test_macro_contract_item_size() {
+        let _ = std::mem::size_of::<MacroContractItem>();
     }
 
     #[test]
-    fn test_macro_token_size() {
-        let _ = std::mem::size_of::<MacroToken>();
+    fn test_macro_contract_types_size() {
+        let _ = std::mem::size_of::<MacroReturns>();
+        let _ = std::mem::size_of::<MacroIntro>();
+        let _ = std::mem::size_of::<MacroInject>();
     }
 }
 

@@ -289,9 +289,15 @@ main = 0
 #[test]
 fn test_analyze_source_str_macros_extended() {
     let content = r#"
-macro debug(msg) = print(msg)
-macro assert(cond) = if not cond: panic()
-macro trace(x) = log(x)
+macro debug(msg: Str) -> ():
+    emit result:
+        return nil
+macro assert(cond: Bool) -> ():
+    emit result:
+        return nil
+macro trace(x: Str) -> ():
+    emit result:
+        return nil
 
 main = 0
 "#;

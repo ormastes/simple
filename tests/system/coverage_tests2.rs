@@ -513,8 +513,12 @@ fn test_analyze_source_str_macros() {
     use std::path::Path;
 
     let content = r#"
-macro debug_print(x) = print("DEBUG: ", x)
-macro assert(cond) = if not cond: panic("assertion failed")
+macro debug_print(x: Str) -> ():
+    emit result:
+        return nil
+macro assert(cond: Bool) -> ():
+    emit result:
+        return nil
 
 main = 0
 "#;

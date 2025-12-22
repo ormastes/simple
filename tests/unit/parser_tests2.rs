@@ -632,8 +632,7 @@ fn test_parse_macro_invocation() {
 
 #[test]
 fn test_parse_macro_def() {
-    // Macro syntax may vary - use simpler form
-    let source = "macro debug!(x):\n    print(x)";
+    let source = "macro debug(x: Str) -> (returns result: Str):\n    emit result:\n        x";
     let module = parse(source).unwrap();
     if let Node::Macro(m) = &module.items[0] {
         assert_eq!(m.name, "debug");
