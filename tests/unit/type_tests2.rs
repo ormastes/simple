@@ -436,8 +436,7 @@ fn test_check_extern() {
 
 #[test]
 fn test_check_macro() {
-    // Use simpler macro syntax
-    let source = "macro debug!(x):\n    print(x)";
+    let source = "macro debug(x: Str) -> (returns result: Str):\n    emit result:\n        x";
     let mut parser = Parser::new(source);
     let module = parser.parse().unwrap();
     let result = check(&module.items);
