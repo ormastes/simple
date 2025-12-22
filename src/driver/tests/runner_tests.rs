@@ -162,8 +162,12 @@ fn dependency_analysis_finds_imports_and_macros() {
     let source = r#"
         import foo/bar
         import baz.spl
-        macro MY_MACRO(x) = x
-        macro other = 1
+        macro MY_MACRO(x: Int) -> (returns result: Int):
+            emit result:
+                x
+        macro other() -> (returns result: Int):
+            emit result:
+                1
     "#;
 
     let (deps, macros) = analyze_source_str(std::path::Path::new("main.spl"), source);

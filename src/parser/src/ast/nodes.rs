@@ -730,69 +730,166 @@ pub struct ExternDef {
     pub visibility: Visibility,
 }
 
-/// Macro definition: macro name!(pattern) = body
+/// Macro definition: macro name(params) -> (contract): body
 #[derive(Debug, Clone, PartialEq)]
 pub struct MacroDef {
     pub span: Span,
     pub name: String,
-    /// Macro patterns for matching invocations
-    pub patterns: Vec<MacroPattern>,
+    pub params: Vec<MacroParam>,
+    pub contract: Vec<MacroContractItem>,
+    pub body: Vec<MacroStmt>,
     pub visibility: Visibility,
 }
 
-/// A single macro pattern and its expansion
+/// A parameter in a macro definition
 #[derive(Debug, Clone, PartialEq)]
-pub struct MacroPattern {
-    pub span: Span,
-    /// Pattern to match (e.g., parameter names, variadic patterns)
-    pub params: Vec<MacroParam>,
-    /// The body to expand to
-    pub body: MacroBody,
+pub struct MacroParam {
+    pub name: String,
+    pub ty: Type,
+    pub is_const: bool,
 }
 
-/// A parameter in a macro pattern
+/// Macro contract items (header-only declarations for symbol table)
 #[derive(Debug, Clone, PartialEq)]
-pub enum MacroParam {
-    /// Simple identifier: $x
-    Ident(String),
-    /// Expression capture: $e:expr
-    Expr(String),
-    /// Type capture: $t:ty
-    Type(String),
-    /// Variadic capture: $(...)*
-    Variadic {
+pub enum MacroContractItem {
+    Returns(MacroReturns),
+    Intro(MacroIntro),
+    Inject(MacroInject),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroReturns {
+    pub label: Option<String>,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroIntro {
+    pub label: String,
+    pub spec: MacroIntroSpec,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroInject {
+    pub label: String,
+    pub spec: MacroInjectSpec,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum EnclosingTarget {
+    Module,
+    Class,
+    Struct,
+    Trait,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroAnchor {
+    Head,
+    Tail,
+    Here,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroTarget {
+    Enclosing(EnclosingTarget),
+    CallsiteBlock(MacroAnchor),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroIntroKind {
+    Fn,
+    Field,
+    Type,
+    Let,
+    Const,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroParamSig {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroFnStub {
+    pub name: String,
+    pub params: Vec<MacroParamSig>,
+    pub ret: Option<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroFieldStub {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroVarStub {
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroTypeStub {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroDeclStub {
+    Fn(MacroFnStub),
+    Field(MacroFieldStub),
+    Var(MacroVarStub),
+    Type(MacroTypeStub),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroIntroDecl {
+    pub target: MacroTarget,
+    pub kind: MacroIntroKind,
+    pub stub: MacroDeclStub,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MacroConstRange {
+    pub start: Expr,
+    pub end: Expr,
+    pub inclusive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroIntroSpec {
+    Decl(MacroIntroDecl),
+    For {
         name: String,
-        separator: Option<String>,
+        range: MacroConstRange,
+        body: Vec<MacroIntroSpec>,
     },
-    /// Literal token (must match exactly)
-    Literal(String),
+    If {
+        condition: Expr,
+        then_body: Vec<MacroIntroSpec>,
+        else_body: Vec<MacroIntroSpec>,
+    },
 }
 
-/// The body of a macro expansion
 #[derive(Debug, Clone, PartialEq)]
-pub enum MacroBody {
-    /// Simple expression
-    Expr(Box<Expr>),
-    /// Block of statements
-    Block(Block),
-    /// Token sequence (for more complex macros)
-    Tokens(Vec<MacroToken>),
+pub enum MacroCodeKind {
+    Stmt,
+    Block,
 }
 
-/// A token in a macro body (for token-based expansion)
 #[derive(Debug, Clone, PartialEq)]
-pub enum MacroToken {
-    /// Reference to captured parameter: $x
-    Param(String),
-    /// Stringify a captured expression: stringify!($e)
-    Stringify(String),
-    /// Literal token
-    Literal(String),
-    /// Variadic expansion: $(...)*
-    Variadic {
-        body: Vec<MacroToken>,
-        separator: Option<String>,
-    },
+pub struct MacroInjectSpec {
+    pub anchor: MacroAnchor,
+    pub code_kind: MacroCodeKind,
+}
+
+/// Macro body statements
+#[derive(Debug, Clone, PartialEq)]
+pub enum MacroStmt {
+    ConstEval(Block),
+    Emit { label: String, block: Block },
+    Stmt(Node),
 }
 
 /// Macro invocation: name!(args)
@@ -807,8 +904,6 @@ pub struct MacroInvocation {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MacroArg {
     Expr(Expr),
-    Type(Type),
-    Tokens(String), // Raw token string
 }
 
 // Statements
