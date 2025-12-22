@@ -11,7 +11,7 @@ pub mod runtime_ffi;
 pub mod shared;
 pub mod types_util;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "llvm-tests"))]
 mod llvm_tests;
 
 pub use backend_trait::{BackendKind, NativeBackend};

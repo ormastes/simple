@@ -8,8 +8,10 @@
 /// Requires the `llvm` feature flag and LLVM 18 toolchain to be enabled.
 
 mod types;
+#[cfg(feature = "llvm-gpu")]
 pub mod gpu;
 
+#[cfg(feature = "llvm-gpu")]
 pub use gpu::{GpuComputeCapability, LlvmGpuBackend};
 pub use types::{BinOp, LlvmType};
 
@@ -30,7 +32,7 @@ use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target as LlvmTarget, TargetMachine,
 };
 #[cfg(feature = "llvm")]
-use inkwell::types::{BasicTypeEnum, FloatType, IntType};
+use inkwell::types::{BasicType, BasicTypeEnum, FloatType, IntType};
 #[cfg(feature = "llvm")]
 use inkwell::values::FunctionValue;
 #[cfg(feature = "llvm")]
@@ -46,7 +48,7 @@ pub struct LlvmBackend {
     /// Enable coverage instrumentation
     coverage_enabled: bool,
     #[cfg(feature = "llvm")]
-    context: Context,
+    context: &'static Context,
     #[cfg(feature = "llvm")]
     module: RefCell<Option<Module<'static>>>,
     #[cfg(feature = "llvm")]
@@ -85,10 +87,11 @@ impl LlvmBackend {
 
         #[cfg(feature = "llvm")]
         {
+            let context = Box::leak(Box::new(Context::create()));
             Ok(Self {
                 target,
                 coverage_enabled: false,
-                context: Context::create(),
+                context,
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
                 coverage_counter: RefCell::new(0),
@@ -155,15 +158,11 @@ impl LlvmBackend {
         let triple = self.get_target_triple();
         module.set_triple(&inkwell::targets::TargetTriple::create(&triple));
 
-        // Store module (using unsafe to extend lifetime - this is safe because
-        // the module is owned by the backend and won't outlive the context)
-        let module_static: Module<'static> = unsafe { std::mem::transmute(module) };
-        *self.module.borrow_mut() = Some(module_static);
+        *self.module.borrow_mut() = Some(module);
 
         // Create builder
         let builder = self.context.create_builder();
-        let builder_static: Builder<'static> = unsafe { std::mem::transmute(builder) };
-        *self.builder.borrow_mut() = Some(builder_static);
+        *self.builder.borrow_mut() = Some(builder);
 
         Ok(())
     }
@@ -266,7 +265,7 @@ impl LlvmBackend {
     /// Compile a MIR function to LLVM IR (feature-gated)
     #[cfg(feature = "llvm")]
     pub fn compile_function(&self, func: &MirFunction) -> Result<(), CompileError> {
-        use crate::mir::instructions::MirInst;
+        use crate::mir::MirInst;
         use std::collections::HashMap;
 
         let module = self.module.borrow();
@@ -287,18 +286,20 @@ impl LlvmBackend {
             .collect();
         let param_types = param_types?;
 
-        // Map return type
-        let ret_llvm = self.llvm_type(&func.return_type)?;
-
         // Create function type
-        let fn_type = match ret_llvm {
-            BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
-            BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
-            BasicTypeEnum::PointerType(t) => t.fn_type(&param_types, false),
-            _ => {
-                return Err(CompileError::Semantic(
-                    "Unsupported return type".to_string(),
-                ))
+        let fn_type = if func.return_type == TypeId::VOID {
+            self.context.void_type().fn_type(&param_types, false)
+        } else {
+            let ret_llvm = self.llvm_type(&func.return_type)?;
+            match ret_llvm {
+                BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
+                BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
+                BasicTypeEnum::PointerType(t) => t.fn_type(&param_types, false),
+                _ => {
+                    return Err(CompileError::Semantic(
+                        "Unsupported return type".to_string(),
+                    ))
+                }
             }
         };
 
@@ -315,14 +316,14 @@ impl LlvmBackend {
         }
 
         // Map virtual registers to LLVM values
-        let mut vreg_map: HashMap<crate::mir::instructions::VReg, inkwell::values::BasicValueEnum> =
+        let mut vreg_map: HashMap<crate::mir::VReg, inkwell::values::BasicValueEnum<'static>> =
             HashMap::new();
 
         // Map function parameters to virtual registers
         for (i, param) in func.params.iter().enumerate() {
             if let Some(llvm_param) = function.get_nth_param(i as u32) {
                 // Params are mapped to vregs starting from VReg(0)
-                vreg_map.insert(crate::mir::instructions::VReg(i as u32), llvm_param.into());
+                vreg_map.insert(crate::mir::VReg(i as u32), llvm_param.into());
             }
         }
 
@@ -439,7 +440,7 @@ impl LlvmBackend {
                             // Function not found, try to declare it
                             // For now, assume all functions return i64 and take i64 params
                             let i64_type = self.context.i64_type();
-                            let param_types: Vec<BasicTypeEnum> =
+                            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
                                 args.iter().map(|_| i64_type.into()).collect();
                             let fn_type = i64_type.fn_type(&param_types, false);
                             module.add_function(func_name, fn_type, None)
@@ -725,67 +726,101 @@ impl LlvmBackend {
 
                         vreg_map.insert(*dest, dict_ptr);
                     }
-                    MirInst::StructInit { dest, fields, ty: _ } => {
-                        // Structs are represented as LLVM struct types
-                        let i64_type = self.context.i64_type();
-                        let field_types: Vec<BasicTypeEnum> =
-                            fields.iter().map(|_| i64_type.into()).collect();
-                        let struct_type = self.context.struct_type(&field_types, false);
-                        let alloc = builder.build_alloca(struct_type, "struct").map_err(|e| {
+                    MirInst::StructInit {
+                        dest,
+                        struct_size,
+                        field_offsets,
+                        field_types,
+                        field_values,
+                        ..
+                    } => {
+                        let i8_type = self.context.i8_type();
+                        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
+                        let array_type = i8_type.array_type(*struct_size);
+                        let alloc = builder.build_alloca(array_type, "struct").map_err(|e| {
                             CompileError::Semantic(format!("Failed to build alloca: {}", e))
                         })?;
+                        let struct_ptr = builder
+                            .build_pointer_cast(alloc, i8_ptr_type, "struct_ptr")
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to cast struct ptr: {}", e))
+                            })?;
 
-                        // Store each field
-                        for (i, (_name, value)) in fields.iter().enumerate() {
+                        for ((offset, field_type), value) in field_offsets
+                            .iter()
+                            .zip(field_types.iter())
+                            .zip(field_values.iter())
+                        {
                             let field_val = vreg_map.get(value).ok_or_else(|| {
                                 CompileError::Semantic(format!("Undefined vreg: {:?}", value))
                             })?;
-
-                            let gep = builder
-                                .build_struct_gep(struct_type, alloc, i as u32, "field")
+                            let offset_val =
+                                self.context.i32_type().const_int(*offset as u64, false);
+                            let field_ptr = unsafe {
+                                builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr")
+                            }
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build gep: {}", e))
+                            })?;
+                            let llvm_field_ty = self.llvm_type(field_type)?;
+                            let typed_ptr = builder
+                                .build_pointer_cast(
+                                    field_ptr,
+                                    llvm_field_ty.ptr_type(inkwell::AddressSpace::default()),
+                                    "field_typed_ptr",
+                                )
                                 .map_err(|e| {
-                                    CompileError::Semantic(format!(
-                                        "Failed to build struct gep: {}",
-                                        e
-                                    ))
+                                    CompileError::Semantic(format!("Failed to cast field ptr: {}", e))
                                 })?;
-
-                            builder.build_store(gep, *field_val).map_err(|e| {
+                            builder.build_store(typed_ptr, *field_val).map_err(|e| {
                                 CompileError::Semantic(format!("Failed to build store: {}", e))
                             })?;
                         }
 
-                        vreg_map.insert(*dest, alloc.into());
+                        vreg_map.insert(*dest, struct_ptr.into());
                     }
                     MirInst::FieldGet {
                         dest,
                         object,
-                        field_index,
-                        ty: _,
+                        byte_offset,
+                        field_type,
                     } => {
                         let obj_val = vreg_map.get(object).ok_or_else(|| {
                             CompileError::Semantic(format!("Undefined vreg: {:?}", object))
                         })?;
 
                         if let inkwell::values::BasicValueEnum::PointerValue(ptr) = obj_val {
-                            let i64_type = self.context.i64_type();
-                            // Create a struct type with enough fields for the index
-                            let field_types: Vec<BasicTypeEnum> =
-                                (0..=*field_index).map(|_| i64_type.into()).collect();
-                            let struct_type = self.context.struct_type(&field_types, false);
-
-                            let gep = builder
-                                .build_struct_gep(struct_type, *ptr, *field_index as u32, "field_ptr")
+                            let i8_type = self.context.i8_type();
+                            let i8_ptr_type =
+                                self.context.ptr_type(inkwell::AddressSpace::default());
+                            let base_ptr = builder
+                                .build_pointer_cast(*ptr, i8_ptr_type, "struct_ptr")
                                 .map_err(|e| {
-                                    CompileError::Semantic(format!(
-                                        "Failed to build struct gep: {}",
-                                        e
-                                    ))
+                                    CompileError::Semantic(format!("Failed to cast struct ptr: {}", e))
                                 })?;
-
-                            let loaded = builder.build_load(i64_type, gep, "field").map_err(|e| {
-                                CompileError::Semantic(format!("Failed to build load: {}", e))
+                            let offset_val =
+                                self.context.i32_type().const_int(*byte_offset as u64, false);
+                            let field_ptr = unsafe {
+                                builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr")
+                            }
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build gep: {}", e))
                             })?;
+                            let llvm_field_ty = self.llvm_type(field_type)?;
+                            let typed_ptr = builder
+                                .build_pointer_cast(
+                                    field_ptr,
+                                    llvm_field_ty.ptr_type(inkwell::AddressSpace::default()),
+                                    "field_typed_ptr",
+                                )
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!("Failed to cast field ptr: {}", e))
+                                })?;
+                            let loaded = builder
+                                .build_load(llvm_field_ty, typed_ptr, "field")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!("Failed to build load: {}", e))
+                                })?;
 
                             vreg_map.insert(*dest, loaded);
                         } else {
@@ -796,9 +831,9 @@ impl LlvmBackend {
                     }
                     MirInst::FieldSet {
                         object,
-                        field_index,
+                        byte_offset,
+                        field_type,
                         value,
-                        ty: _,
                     } => {
                         let obj_val = vreg_map.get(object).ok_or_else(|| {
                             CompileError::Semantic(format!("Undefined vreg: {:?}", object))
@@ -808,21 +843,33 @@ impl LlvmBackend {
                         })?;
 
                         if let inkwell::values::BasicValueEnum::PointerValue(ptr) = obj_val {
-                            let i64_type = self.context.i64_type();
-                            let field_types: Vec<BasicTypeEnum> =
-                                (0..=*field_index).map(|_| i64_type.into()).collect();
-                            let struct_type = self.context.struct_type(&field_types, false);
-
-                            let gep = builder
-                                .build_struct_gep(struct_type, *ptr, *field_index as u32, "field_ptr")
+                            let i8_type = self.context.i8_type();
+                            let i8_ptr_type =
+                                self.context.ptr_type(inkwell::AddressSpace::default());
+                            let base_ptr = builder
+                                .build_pointer_cast(*ptr, i8_ptr_type, "struct_ptr")
                                 .map_err(|e| {
-                                    CompileError::Semantic(format!(
-                                        "Failed to build struct gep: {}",
-                                        e
-                                    ))
+                                    CompileError::Semantic(format!("Failed to cast struct ptr: {}", e))
                                 })?;
-
-                            builder.build_store(gep, *val).map_err(|e| {
+                            let offset_val =
+                                self.context.i32_type().const_int(*byte_offset as u64, false);
+                            let field_ptr = unsafe {
+                                builder.build_gep(i8_type, base_ptr, &[offset_val], "field_ptr")
+                            }
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build gep: {}", e))
+                            })?;
+                            let llvm_field_ty = self.llvm_type(field_type)?;
+                            let typed_ptr = builder
+                                .build_pointer_cast(
+                                    field_ptr,
+                                    llvm_field_ty.ptr_type(inkwell::AddressSpace::default()),
+                                    "field_typed_ptr",
+                                )
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!("Failed to cast field ptr: {}", e))
+                                })?;
+                            builder.build_store(typed_ptr, *val).map_err(|e| {
                                 CompileError::Semantic(format!("Failed to build store: {}", e))
                             })?;
                         } else {
@@ -834,105 +881,127 @@ impl LlvmBackend {
                     MirInst::ClosureCreate {
                         dest,
                         func_name,
+                        closure_size,
+                        capture_offsets,
+                        capture_types,
                         captures,
                     } => {
-                        // Closures are represented as a struct with function pointer + captures
-                        let i64_type = self.context.i64_type();
+                        let i8_type = self.context.i8_type();
                         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
-
-                        // Closure struct: [func_ptr, capture_count, capture0, capture1, ...]
-                        let mut field_types: Vec<BasicTypeEnum> =
-                            vec![i8_ptr_type.into(), i64_type.into()];
-                        for _ in captures {
-                            field_types.push(i64_type.into());
-                        }
-                        let closure_type = self.context.struct_type(&field_types, false);
-                        let alloc = builder.build_alloca(closure_type, "closure").map_err(|e| {
+                        let array_type = i8_type.array_type(*closure_size);
+                        let alloc = builder.build_alloca(array_type, "closure").map_err(|e| {
                             CompileError::Semantic(format!("Failed to build alloca: {}", e))
                         })?;
+                        let closure_ptr = builder
+                            .build_pointer_cast(alloc, i8_ptr_type, "closure_ptr")
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to cast closure ptr: {}", e))
+                            })?;
 
-                        // Get or declare the function
                         let func_ptr = module
                             .get_function(func_name)
                             .map(|f| f.as_global_value().as_pointer_value())
                             .unwrap_or_else(|| i8_ptr_type.const_null());
-
-                        // Store function pointer
-                        let func_ptr_gep = builder
-                            .build_struct_gep(closure_type, alloc, 0, "func_ptr")
+                        let func_ptr_cast = builder
+                            .build_pointer_cast(func_ptr, i8_ptr_type, "fn_ptr_cast")
                             .map_err(|e| {
-                                CompileError::Semantic(format!("Failed to build struct gep: {}", e))
+                                CompileError::Semantic(format!("Failed to cast fn ptr: {}", e))
                             })?;
-                        builder.build_store(func_ptr_gep, func_ptr).map_err(|e| {
+                        let fn_slot = builder
+                            .build_pointer_cast(
+                                closure_ptr,
+                                i8_ptr_type.ptr_type(inkwell::AddressSpace::default()),
+                                "fn_slot",
+                            )
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to cast fn slot: {}", e))
+                            })?;
+                        builder.build_store(fn_slot, func_ptr_cast).map_err(|e| {
                             CompileError::Semantic(format!("Failed to build store: {}", e))
                         })?;
 
-                        // Store capture count
-                        let capture_count = i64_type.const_int(captures.len() as u64, false);
-                        let count_gep = builder
-                            .build_struct_gep(closure_type, alloc, 1, "capture_count")
+                        for ((offset, field_type), value) in capture_offsets
+                            .iter()
+                            .zip(capture_types.iter())
+                            .zip(captures.iter())
+                        {
+                            let capture_val = vreg_map.get(value).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", value))
+                            })?;
+                            let offset_val =
+                                self.context.i32_type().const_int(*offset as u64, false);
+                            let field_ptr = unsafe {
+                                builder.build_gep(i8_type, closure_ptr, &[offset_val], "cap_ptr")
+                            }
                             .map_err(|e| {
-                                CompileError::Semantic(format!("Failed to build struct gep: {}", e))
+                                CompileError::Semantic(format!("Failed to build gep: {}", e))
                             })?;
-                        builder.build_store(count_gep, capture_count).map_err(|e| {
-                            CompileError::Semantic(format!("Failed to build store: {}", e))
-                        })?;
-
-                        // Store each capture
-                        for (i, capture) in captures.iter().enumerate() {
-                            let capture_val = vreg_map.get(capture).ok_or_else(|| {
-                                CompileError::Semantic(format!("Undefined vreg: {:?}", capture))
-                            })?;
-
-                            let capture_gep = builder
-                                .build_struct_gep(closure_type, alloc, (i + 2) as u32, "capture")
+                            let llvm_field_ty = self.llvm_type(field_type)?;
+                            let typed_ptr = builder
+                                .build_pointer_cast(
+                                    field_ptr,
+                                    llvm_field_ty.ptr_type(inkwell::AddressSpace::default()),
+                                    "cap_typed_ptr",
+                                )
                                 .map_err(|e| {
-                                    CompileError::Semantic(format!(
-                                        "Failed to build struct gep: {}",
-                                        e
-                                    ))
+                                    CompileError::Semantic(format!("Failed to cast cap ptr: {}", e))
                                 })?;
-
-                            builder.build_store(capture_gep, *capture_val).map_err(|e| {
+                            builder.build_store(typed_ptr, *capture_val).map_err(|e| {
                                 CompileError::Semantic(format!("Failed to build store: {}", e))
                             })?;
                         }
 
-                        vreg_map.insert(*dest, alloc.into());
+                        vreg_map.insert(*dest, closure_ptr.into());
                     }
-                    MirInst::IndirectCall { dest, callee, args } => {
-                        let i64_type = self.context.i64_type();
+                    MirInst::IndirectCall {
+                        dest,
+                        callee,
+                        param_types,
+                        return_type,
+                        args,
+                        ..
+                    } => {
+                        let i8_type = self.context.i8_type();
                         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
                         let callee_val = vreg_map.get(callee).ok_or_else(|| {
                             CompileError::Semantic(format!("Undefined vreg: {:?}", callee))
                         })?;
 
-                        // Get the function pointer from closure (first field)
-                        if let inkwell::values::BasicValueEnum::PointerValue(closure_ptr) = callee_val
+                        if let inkwell::values::BasicValueEnum::PointerValue(closure_ptr) =
+                            callee_val
                         {
-                            // Extract function pointer (index 0)
-                            let closure_type = self.context.struct_type(
-                                &[i8_ptr_type.into(), i64_type.into()],
-                                false,
-                            );
-                            let func_ptr_gep = builder
-                                .build_struct_gep(closure_type, *closure_ptr, 0, "func_ptr")
+                            let base_ptr = builder
+                                .build_pointer_cast(*closure_ptr, i8_ptr_type, "closure_ptr")
+                                .map_err(|e| {
+                                    CompileError::Semantic(format!("Failed to cast closure ptr: {}", e))
+                                })?;
+                            let offset_val = self.context.i32_type().const_int(0, false);
+                            let fn_ptr_slot = unsafe {
+                                builder.build_gep(i8_type, base_ptr, &[offset_val], "fn_ptr_slot")
+                            }
+                            .map_err(|e| {
+                                CompileError::Semantic(format!("Failed to build gep: {}", e))
+                            })?;
+                            let fn_ptr_slot = builder
+                                .build_pointer_cast(
+                                    fn_ptr_slot,
+                                    i8_ptr_type.ptr_type(inkwell::AddressSpace::default()),
+                                    "fn_ptr_slot_cast",
+                                )
                                 .map_err(|e| {
                                     CompileError::Semantic(format!(
-                                        "Failed to build struct gep: {}",
+                                        "Failed to cast fn slot ptr: {}",
                                         e
                                     ))
                                 })?;
-
                             let func_ptr = builder
-                                .build_load(i8_ptr_type, func_ptr_gep, "loaded_func")
+                                .build_load(i8_ptr_type, fn_ptr_slot, "loaded_func")
                                 .map_err(|e| {
                                     CompileError::Semantic(format!("Failed to build load: {}", e))
                                 })?;
 
                             if let inkwell::values::BasicValueEnum::PointerValue(fn_ptr) = func_ptr {
-                                // Collect arguments
                                 let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> =
                                     Vec::new();
                                 for arg in args {
@@ -942,10 +1011,38 @@ impl LlvmBackend {
                                     arg_vals.push((*val).into());
                                 }
 
-                                // Create function type for indirect call
-                                let param_types: Vec<BasicTypeEnum> =
-                                    args.iter().map(|_| i64_type.into()).collect();
-                                let fn_type = i64_type.fn_type(&param_types, false);
+                                let llvm_param_types: Result<
+                                    Vec<inkwell::types::BasicMetadataTypeEnum>,
+                                    CompileError,
+                                > = param_types
+                                    .iter()
+                                    .map(|ty| self.llvm_type(ty).map(|t| t.into()))
+                                    .collect();
+                                let llvm_param_types = llvm_param_types?;
+
+                                let fn_type = if *return_type == TypeId::VOID {
+                                    self.context
+                                        .void_type()
+                                        .fn_type(&llvm_param_types, false)
+                                } else {
+                                    let ret_llvm = self.llvm_type(return_type)?;
+                                    match ret_llvm {
+                                        BasicTypeEnum::IntType(t) => {
+                                            t.fn_type(&llvm_param_types, false)
+                                        }
+                                        BasicTypeEnum::FloatType(t) => {
+                                            t.fn_type(&llvm_param_types, false)
+                                        }
+                                        BasicTypeEnum::PointerType(t) => {
+                                            t.fn_type(&llvm_param_types, false)
+                                        }
+                                        _ => {
+                                            return Err(CompileError::Semantic(
+                                                "Unsupported return type".to_string(),
+                                            ))
+                                        }
+                                    }
+                                };
 
                                 let call_site = builder
                                     .build_indirect_call(fn_type, fn_ptr, &arg_vals, "indirect_call")
@@ -968,19 +1065,21 @@ impl LlvmBackend {
                             ));
                         }
                     }
-                    MirInst::ConstSymbol { dest, name } => {
+                    MirInst::ConstSymbol { dest, value } => {
                         // Symbols are represented as interned string pointers
-                        let str_val = self.context.const_string(name.as_bytes(), false);
-                        let global = module.add_global(str_val.get_type(), None, &format!("sym_{}", name));
+                        let str_val = self.context.const_string(value.as_bytes(), false);
+                        let global =
+                            module.add_global(str_val.get_type(), None, &format!("sym_{}", value));
                         global.set_initializer(&str_val);
                         global.set_constant(true);
                         vreg_map.insert(*dest, global.as_pointer_value().into());
                     }
-                    MirInst::Slice {
+                    MirInst::SliceOp {
                         dest,
                         collection,
                         start,
                         end,
+                        step,
                     } => {
                         let i64_type = self.context.i64_type();
                         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -988,7 +1087,12 @@ impl LlvmBackend {
                         // Declare rt_slice if not exists
                         let slice_fn = module.get_function("rt_slice").unwrap_or_else(|| {
                             let fn_type = i8_ptr_type.fn_type(
-                                &[i8_ptr_type.into(), i64_type.into(), i64_type.into()],
+                                &[
+                                    i8_ptr_type.into(),
+                                    i64_type.into(),
+                                    i64_type.into(),
+                                    i64_type.into(),
+                                ],
                                 false,
                             );
                             module.add_function("rt_slice", fn_type, None)
@@ -1016,14 +1120,30 @@ impl LlvmBackend {
                             })?
                         } else {
                             &inkwell::values::BasicValueEnum::IntValue(
-                                i64_type.const_int(u64::MAX, false),
+                                i64_type.const_int(i64::MAX as u64, false),
+                            )
+                        };
+
+                        // Get step (default to 1)
+                        let step_val = if let Some(s) = step {
+                            vreg_map.get(s).ok_or_else(|| {
+                                CompileError::Semantic(format!("Undefined vreg: {:?}", s))
+                            })?
+                        } else {
+                            &inkwell::values::BasicValueEnum::IntValue(
+                                i64_type.const_int(1, false),
                             )
                         };
 
                         let call_site = builder
                             .build_call(
                                 slice_fn,
-                                &[(*coll_val).into(), (*start_val).into(), (*end_val).into()],
+                                &[
+                                    (*coll_val).into(),
+                                    (*start_val).into(),
+                                    (*end_val).into(),
+                                    (*step_val).into(),
+                                ],
                                 "slice",
                             )
                             .map_err(|e| {
@@ -1034,39 +1154,26 @@ impl LlvmBackend {
                             vreg_map.insert(*dest, ret_val);
                         }
                     }
-                    MirInst::InterpEval { dest, code } => {
-                        // Call interpreter to evaluate code string
+                    MirInst::InterpEval { dest, expr_index } => {
+                        // Call interpreter to evaluate expression by index
                         let i64_type = self.context.i64_type();
-                        let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
 
                         // Declare rt_interp_eval if not exists
                         let interp_eval = module.get_function("rt_interp_eval").unwrap_or_else(|| {
-                            let fn_type = i64_type.fn_type(
-                                &[i8_ptr_type.into(), i64_type.into()],
-                                false,
-                            );
+                            let fn_type = i64_type.fn_type(&[i64_type.into()], false);
                             module.add_function("rt_interp_eval", fn_type, None)
                         });
 
-                        // Create string constant for code
-                        let code_bytes = code.as_bytes();
-                        let code_const = self.context.const_string(code_bytes, false);
-                        let code_global = module.add_global(code_const.get_type(), None, "eval_code");
-                        code_global.set_initializer(&code_const);
-                        code_global.set_constant(true);
-                        let code_ptr = code_global.as_pointer_value();
-                        let code_len = i64_type.const_int(code_bytes.len() as u64, false);
-
+                        let expr_index_val =
+                            i64_type.const_int(*expr_index as u64, true);
                         let call_site = builder
-                            .build_call(interp_eval, &[code_ptr.into(), code_len.into()], "eval")
+                            .build_call(interp_eval, &[expr_index_val.into()], "eval")
                             .map_err(|e| {
                                 CompileError::Semantic(format!("Failed to build call: {}", e))
                             })?;
 
-                        if let Some(d) = dest {
-                            if let Some(ret_val) = call_site.try_as_basic_value().left() {
-                                vreg_map.insert(*d, ret_val);
-                            }
+                        if let Some(ret_val) = call_site.try_as_basic_value().left() {
+                            vreg_map.insert(*dest, ret_val);
                         }
                     }
                     // GPU instructions - call runtime FFI functions
@@ -1134,9 +1241,7 @@ impl LlvmBackend {
             }
 
             // Compile terminator
-            if let Some(term) = &block.terminator {
-                self.compile_terminator(term, &llvm_blocks, &vreg_map, builder)?;
-            }
+            self.compile_terminator(&block.terminator, &llvm_blocks, &vreg_map, builder)?;
         }
 
         Ok(())
@@ -1153,12 +1258,12 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_binop(
         &self,
-        op: crate::mir::instructions::BinOpKind,
-        left: inkwell::values::BasicValueEnum,
-        right: inkwell::values::BasicValueEnum,
-        builder: &Builder,
-    ) -> Result<inkwell::values::BasicValueEnum, CompileError> {
-        use crate::mir::instructions::BinOpKind;
+        op: crate::hir::BinOp,
+        left: inkwell::values::BasicValueEnum<'static>,
+        right: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        use crate::hir::BinOp;
 
         // Both operands must be the same type
         match (left, right) {
@@ -1167,36 +1272,36 @@ impl LlvmBackend {
                 inkwell::values::BasicValueEnum::IntValue(r),
             ) => {
                 let result = match op {
-                    BinOpKind::Add => builder
+                    BinOp::Add => builder
                         .build_int_add(l, r, "add")
                         .map_err(|e| CompileError::Semantic(format!("build_int_add: {}", e)))?,
-                    BinOpKind::Sub => builder
+                    BinOp::Sub => builder
                         .build_int_sub(l, r, "sub")
                         .map_err(|e| CompileError::Semantic(format!("build_int_sub: {}", e)))?,
-                    BinOpKind::Mul => builder
+                    BinOp::Mul => builder
                         .build_int_mul(l, r, "mul")
                         .map_err(|e| CompileError::Semantic(format!("build_int_mul: {}", e)))?,
-                    BinOpKind::Div => builder
+                    BinOp::Div => builder
                         .build_int_signed_div(l, r, "div")
                         .map_err(|e| {
                             CompileError::Semantic(format!("build_int_signed_div: {}", e))
                         })?,
-                    BinOpKind::Eq => builder
+                    BinOp::Eq => builder
                         .build_int_compare(IntPredicate::EQ, l, r, "eq")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
-                    BinOpKind::Ne => builder
+                    BinOp::NotEq => builder
                         .build_int_compare(IntPredicate::NE, l, r, "ne")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
-                    BinOpKind::Lt => builder
+                    BinOp::Lt => builder
                         .build_int_compare(IntPredicate::SLT, l, r, "lt")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
-                    BinOpKind::Le => builder
+                    BinOp::LtEq => builder
                         .build_int_compare(IntPredicate::SLE, l, r, "le")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
-                    BinOpKind::Gt => builder
+                    BinOp::Gt => builder
                         .build_int_compare(IntPredicate::SGT, l, r, "gt")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
-                    BinOpKind::Ge => builder
+                    BinOp::GtEq => builder
                         .build_int_compare(IntPredicate::SGE, l, r, "ge")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
                     _ => {
@@ -1213,16 +1318,16 @@ impl LlvmBackend {
                 inkwell::values::BasicValueEnum::FloatValue(r),
             ) => {
                 let result = match op {
-                    BinOpKind::Add => builder
+                    BinOp::Add => builder
                         .build_float_add(l, r, "fadd")
                         .map_err(|e| CompileError::Semantic(format!("build_float_add: {}", e)))?,
-                    BinOpKind::Sub => builder
+                    BinOp::Sub => builder
                         .build_float_sub(l, r, "fsub")
                         .map_err(|e| CompileError::Semantic(format!("build_float_sub: {}", e)))?,
-                    BinOpKind::Mul => builder
+                    BinOp::Mul => builder
                         .build_float_mul(l, r, "fmul")
                         .map_err(|e| CompileError::Semantic(format!("build_float_mul: {}", e)))?,
-                    BinOpKind::Div => builder
+                    BinOp::Div => builder
                         .build_float_div(l, r, "fdiv")
                         .map_err(|e| CompileError::Semantic(format!("build_float_div: {}", e)))?,
                     _ => {
@@ -1244,19 +1349,19 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_unaryop(
         &self,
-        op: crate::mir::instructions::UnaryOpKind,
-        operand: inkwell::values::BasicValueEnum,
-        builder: &Builder,
-    ) -> Result<inkwell::values::BasicValueEnum, CompileError> {
-        use crate::mir::instructions::UnaryOpKind;
+        op: crate::hir::UnaryOp,
+        operand: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        use crate::hir::UnaryOp;
 
         match operand {
             inkwell::values::BasicValueEnum::IntValue(val) => {
                 let result = match op {
-                    UnaryOpKind::Neg => builder
+                    UnaryOp::Neg => builder
                         .build_int_neg(val, "neg")
                         .map_err(|e| CompileError::Semantic(format!("build_int_neg: {}", e)))?,
-                    UnaryOpKind::Not => builder
+                    UnaryOp::Not => builder
                         .build_not(val, "not")
                         .map_err(|e| CompileError::Semantic(format!("build_not: {}", e)))?,
                     _ => {
@@ -1270,7 +1375,7 @@ impl LlvmBackend {
             }
             inkwell::values::BasicValueEnum::FloatValue(val) => {
                 let result = match op {
-                    UnaryOpKind::Neg => builder
+                    UnaryOp::Neg => builder
                         .build_float_neg(val, "fneg")
                         .map_err(|e| CompileError::Semantic(format!("build_float_neg: {}", e)))?,
                     _ => {
@@ -1292,21 +1397,21 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_terminator(
         &self,
-        term: &crate::mir::instructions::Terminator,
+        term: &crate::mir::Terminator,
         llvm_blocks: &std::collections::HashMap<
-            crate::mir::instructions::BlockId,
+            crate::mir::BlockId,
             inkwell::basic_block::BasicBlock,
         >,
         vreg_map: &std::collections::HashMap<
-            crate::mir::instructions::VReg,
-            inkwell::values::BasicValueEnum,
+            crate::mir::VReg,
+            inkwell::values::BasicValueEnum<'static>,
         >,
-        builder: &Builder,
+        builder: &Builder<'static>,
     ) -> Result<(), CompileError> {
-        use crate::mir::instructions::Terminator;
+        use crate::mir::Terminator;
 
         match term {
-            Terminator::Return(vreg) => {
+            Terminator::Return(Some(vreg)) => {
                 if let Some(val) = vreg_map.get(vreg) {
                     builder
                         .build_return(Some(val))
@@ -1318,7 +1423,7 @@ impl LlvmBackend {
                     )));
                 }
             }
-            Terminator::ReturnVoid => {
+            Terminator::Return(None) => {
                 builder
                     .build_return(None)
                     .map_err(|e| CompileError::Semantic(format!("build_return: {}", e)))?;
@@ -1361,11 +1466,10 @@ impl LlvmBackend {
                     ));
                 }
             }
-            _ => {
-                return Err(CompileError::Semantic(format!(
-                    "Unsupported terminator: {:?}",
-                    term
-                )))
+            Terminator::Unreachable => {
+                builder
+                    .build_unreachable()
+                    .map_err(|e| CompileError::Semantic(format!("build_unreachable: {}", e)))?;
             }
         }
 
@@ -1479,13 +1583,6 @@ impl LlvmBackend {
         ))
     }
 
-    /// Helper for creating test functions with binary operations on constants
-    /// 
-    /// Sets up a function with signature `i64 fn()`, creates two i64 constants,
-    /// applies an operation via the provided closure, and returns the result.
-    #[cfg(feature = "llvm")]
-    include!("../llvm_test_utils.rs");
-
     // ========================
     // GPU instruction helpers
     // ========================
@@ -1495,8 +1592,8 @@ impl LlvmBackend {
     fn compile_gpu_global_id(
         &self,
         dim: u8,
-        builder: &Builder,
-        module: &Module,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
@@ -1523,8 +1620,8 @@ impl LlvmBackend {
     fn compile_gpu_local_id(
         &self,
         dim: u8,
-        builder: &Builder,
-        module: &Module,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
@@ -1550,8 +1647,8 @@ impl LlvmBackend {
     fn compile_gpu_group_id(
         &self,
         dim: u8,
-        builder: &Builder,
-        module: &Module,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
@@ -1577,8 +1674,8 @@ impl LlvmBackend {
     fn compile_gpu_global_size(
         &self,
         dim: u8,
-        builder: &Builder,
-        module: &Module,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
@@ -1604,8 +1701,8 @@ impl LlvmBackend {
     fn compile_gpu_local_size(
         &self,
         dim: u8,
-        builder: &Builder,
-        module: &Module,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
@@ -1631,8 +1728,8 @@ impl LlvmBackend {
     fn compile_gpu_num_groups(
         &self,
         dim: u8,
-        builder: &Builder,
-        module: &Module,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         let i64_type = self.context.i64_type();
         let i32_type = self.context.i32_type();
@@ -1657,8 +1754,8 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_gpu_barrier(
         &self,
-        builder: &Builder,
-        module: &Module,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<(), CompileError> {
         let void_type = self.context.void_type();
 
@@ -1678,11 +1775,11 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_gpu_mem_fence(
         &self,
-        scope: crate::mir::instructions::GpuMemoryScope,
-        builder: &Builder,
-        module: &Module,
+        scope: crate::mir::GpuMemoryScope,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<(), CompileError> {
-        use crate::mir::instructions::GpuMemoryScope;
+        use crate::mir::GpuMemoryScope;
 
         let void_type = self.context.void_type();
         let i32_type = self.context.i32_type();
@@ -1709,13 +1806,13 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_gpu_atomic(
         &self,
-        op: crate::mir::instructions::GpuAtomicOp,
-        ptr: inkwell::values::BasicValueEnum,
-        value: inkwell::values::BasicValueEnum,
-        builder: &Builder,
-        module: &Module,
+        op: crate::mir::GpuAtomicOp,
+        ptr: inkwell::values::BasicValueEnum<'static>,
+        value: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
-        use crate::mir::instructions::GpuAtomicOp;
+        use crate::mir::GpuAtomicOp;
 
         let i64_type = self.context.i64_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -1752,11 +1849,11 @@ impl LlvmBackend {
     #[cfg(feature = "llvm")]
     fn compile_gpu_atomic_cmpxchg(
         &self,
-        ptr: inkwell::values::BasicValueEnum,
-        expected: inkwell::values::BasicValueEnum,
-        desired: inkwell::values::BasicValueEnum,
-        builder: &Builder,
-        module: &Module,
+        ptr: inkwell::values::BasicValueEnum<'static>,
+        expected: inkwell::values::BasicValueEnum<'static>,
+        desired: inkwell::values::BasicValueEnum<'static>,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         let i64_type = self.context.i64_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -1785,8 +1882,8 @@ impl LlvmBackend {
     fn compile_gpu_shared_alloc(
         &self,
         size: u32,
-        builder: &Builder,
-        module: &Module,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
     ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
         let i64_type = self.context.i64_type();
         let i8_ptr_type = self.context.ptr_type(inkwell::AddressSpace::default());
@@ -1841,3 +1938,7 @@ impl NativeBackend for LlvmBackend {
         )
     }
 }
+
+// Test helper methods for LLVM backend.
+#[cfg(feature = "llvm-tests")]
+include!("../llvm_test_utils.rs");

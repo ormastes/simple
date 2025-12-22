@@ -11,7 +11,7 @@
 //!    evaluate the program, then wraps the result in a minimal SMF binary.
 //!    This mode supports all language features.
 //!
-//! 2. **Native mode**: Compiles through HIR → MIR → Cranelift to generate
+//! 2. **Native mode**: Compiles through HIR → MIR → native backend to generate
 //!    actual machine code. This mode is faster but supports fewer features.
 //!    Use `compile_native()` or `compile_source_to_memory_native()` for this mode.
 
@@ -30,7 +30,8 @@ use tracing::instrument;
 
 use simple_parser::ast::{Capability, Node};
 
-use crate::codegen::Codegen;
+use crate::codegen::{backend_trait::NativeBackend, BackendKind, Codegen};
+use crate::codegen::llvm::LlvmBackend;
 use crate::compilability::analyze_module;
 use crate::hir;
 use crate::import_loader::{has_script_statements, load_module_with_imports};
@@ -329,9 +330,41 @@ impl CompilerPipeline {
             .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))
     }
 
+    fn compile_mir_to_object(
+        &self,
+        mir_module: &mir::MirModule,
+        target: Target,
+    ) -> Result<Vec<u8>, CompileError> {
+        if target.arch.is_32bit() && cfg!(not(feature = "llvm")) {
+            return Err(CompileError::Codegen(
+                "32-bit targets require the LLVM backend; build with --features llvm".to_string(),
+            ));
+        }
+
+        let coverage_enabled = crate::coverage::is_coverage_enabled();
+
+        match BackendKind::for_target(&target) {
+            BackendKind::Cranelift => {
+                let codegen =
+                    Codegen::for_target(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                codegen
+                    .compile_module(mir_module)
+                    .map_err(|e| CompileError::Codegen(format!("{e}")))
+            }
+            BackendKind::Llvm => {
+                let backend = LlvmBackend::new(target)
+                    .map_err(|e| CompileError::Codegen(format!("{e}")))?;
+                backend
+                    .with_coverage(coverage_enabled)
+                    .compile(mir_module)
+                    .map_err(|e| CompileError::Codegen(format!("{e}")))
+            }
+        }
+    }
+
     /// Compile a Simple source file to an SMF at `out` using native codegen.
     ///
-    /// This uses the native compilation pipeline: HIR → MIR → Cranelift.
+    /// This uses the native compilation pipeline: HIR → MIR → native backend.
     /// Faster execution but supports fewer language features than interpreter mode.
     #[instrument(skip(self, source_path, out))]
     pub fn compile_native(&mut self, source_path: &Path, out: &Path) -> Result<(), CompileError> {
@@ -340,7 +373,7 @@ impl CompilerPipeline {
         fs::write(out, smf_bytes).map_err(|e| CompileError::Io(format!("{e}")))
     }
 
-    /// Compile source string to SMF bytes using native codegen (HIR → MIR → Cranelift).
+    /// Compile source string to SMF bytes using native codegen (HIR → MIR → backend).
     ///
     /// This generates actual machine code rather than using the interpreter.
     /// The resulting SMF can be executed directly.
@@ -407,11 +440,8 @@ impl CompilerPipeline {
             );
         }
 
-        // 9. Generate machine code via Cranelift
-        let codegen = Codegen::new().map_err(|e| CompileError::Codegen(format!("{e}")))?;
-        let object_code = codegen
-            .compile_module(&mir_module)
-            .map_err(|e| CompileError::Codegen(format!("{e}")))?;
+        // 9. Generate machine code via selected backend
+        let object_code = self.compile_mir_to_object(&mir_module, Target::host())?;
 
         // 10. Wrap object code in SMF format
         Ok(generate_smf_from_object(&object_code, self.gc.as_ref()))
@@ -420,7 +450,7 @@ impl CompilerPipeline {
     /// Compile source code to SMF bytes for a specific target architecture.
     ///
     /// This enables cross-compilation to different architectures (x86_64, aarch64, etc.).
-    /// Uses native codegen (HIR → MIR → Cranelift) with the specified target.
+    /// Uses native codegen (HIR → MIR → backend) with the specified target.
     #[instrument(skip(self, source))]
     pub fn compile_source_to_memory_for_target(
         &mut self,
@@ -487,12 +517,8 @@ impl CompilerPipeline {
             );
         }
 
-        // 9. Generate machine code via Cranelift for the target architecture
-        let codegen =
-            Codegen::for_target(target).map_err(|e| CompileError::Codegen(format!("{e}")))?;
-        let object_code = codegen
-            .compile_module(&mir_module)
-            .map_err(|e| CompileError::Codegen(format!("{e}")))?;
+        // 9. Generate machine code via selected backend for the target architecture
+        let object_code = self.compile_mir_to_object(&mir_module, target)?;
 
         // 10. Wrap object code in SMF format for the target
         Ok(generate_smf_from_object_for_target(
@@ -515,6 +541,7 @@ pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAlloca
 mod tests {
     use super::*;
     use crate::elf_utils::{extract_elf_text_section, get_section_name};
+    use simple_common::target::{TargetArch, TargetOS};
 
     /// Debug helper to list ELF sections
     fn list_elf_sections(elf_data: &[u8]) -> Vec<String> {
@@ -660,6 +687,34 @@ mod tests {
         assert!(!text.is_empty(), "Extracted .text section is empty");
         eprintln!("Extracted .text section size: {} bytes", text.len());
         eprintln!("First 16 bytes: {:02x?}", &text[0..16.min(text.len())]);
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    #[test]
+    fn test_pipeline_32bit_target_requires_llvm() {
+        let source = "fn main() -> i64:\n    return 42";
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        let target = Target::new(TargetArch::X86, TargetOS::Linux);
+        let result = pipeline.compile_source_to_memory_for_target(source, target);
+
+        assert!(result.is_err());
+        match result {
+            Err(CompileError::Codegen(msg)) => {
+                assert!(msg.contains("LLVM backend"));
+            }
+            other => panic!("Expected codegen error, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "llvm")]
+    #[test]
+    fn test_pipeline_32bit_target_with_llvm() {
+        let source = "fn main() -> i64:\n    return 42";
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+        let target = Target::new(TargetArch::X86, TargetOS::Linux);
+        let result = pipeline.compile_source_to_memory_for_target(source, target);
+
+        assert!(result.is_ok());
     }
 
     // ============== Lint Integration Tests ==============
