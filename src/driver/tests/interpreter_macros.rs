@@ -170,8 +170,9 @@ main = if s == "hello world": 1 else: 0
 fn interpreter_user_defined_macro_simple() {
     // Simple user-defined macro that returns a constant
     let code = r#"
-macro answer!():
-    return 42
+macro answer() -> (returns result: Int):
+    emit result:
+        42
 
 main = answer!()
 "#;
@@ -183,8 +184,9 @@ main = answer!()
 fn interpreter_user_defined_macro_with_param() {
     // User-defined macro with a parameter
     let code = r#"
-macro double!($x):
-    return $x * 2
+macro double(x: Int) -> (returns result: Int):
+    emit result:
+        x * 2
 
 main = double!(21)
 "#;
@@ -196,8 +198,9 @@ main = double!(21)
 fn interpreter_user_defined_macro_two_params() {
     // User-defined macro with two parameters
     let code = r#"
-macro add!($a, $b):
-    return $a + $b
+macro add(a: Int, b: Int) -> (returns result: Int):
+    emit result:
+        a + b
 
 main = add!(30, 12)
 "#;
@@ -209,11 +212,12 @@ main = add!(30, 12)
 fn interpreter_user_defined_macro_max() {
     // MAX macro implementation
     let code = r#"
-macro max!($a, $b):
-    if $a > $b:
-        return $a
-    else:
-        return $b
+macro max(a: Int, b: Int) -> (returns result: Int):
+    emit result:
+        if a > b:
+            return a
+        else:
+            return b
 
 main = max!(10, 50)
 "#;

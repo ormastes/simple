@@ -31,6 +31,7 @@ macro vec![...items]:
 - [x] Built-in macros: `println!`, `print!`, `vec!`, `assert!`, `assert_eq!`, `format!`, `dbg!`, `panic!`
 - [x] User-defined macros with block bodies
 - [x] Macro parameter substitution in expressions and statements
+- [x] Parser-friendly surface: macro defs and invocations are explicit AST nodes; macro names are tracked for dependency analysis
 - [ ] Hygiene (avoid name collisions) - future enhancement
 - [ ] `stringify!` for expression text - future enhancement
 - [ ] Variadic patterns (`...`) - partially supported
