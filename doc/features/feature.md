@@ -61,7 +61,7 @@ All feature tables use this standardized 7-column format:
 | #980-#999 | Code Quality & Documentation | ✅ Complete |
 | #1000-#1050 | AOP & Unified Predicates | 📋 Planned |
 | #1051-#1060 | SDN Self-Hosting | 📋 Planned |
-| #1061-#1103 | Missing Language Features | 🔄 In Progress (5/43) |
+| #1061-#1103 | Missing Language Features | 🔄 In Progress (4/43) |
 | #1104-#1115 | Concurrency Modes | 📋 Planned |
 | #1116-#1130 | FFI/ABI Interface | ✅ Complete |
 | #1131-#1145 | Formatting & Lints | 📋 Planned |
@@ -71,7 +71,7 @@ All feature tables use this standardized 7-column format:
 
 ## Summary Statistics
 
-**Overall Progress:** 67% (290/434 features complete)
+**Overall Progress:** 67% (289/434 features complete)
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -97,7 +97,7 @@ All feature tables use this standardized 7-column format:
 | **Module Privacy** | 2 | 2 | 0 |
 | **AOP & Unified Predicates** | 51 | 0 | 51 |
 | **SDN Self-Hosting** | 10 | 0 | 10 |
-| **Missing Language Features** | 43 | 5 | 38 |
+| **Missing Language Features** | 43 | 4 | 39 |
 | **Concurrency Modes** | 12 | 0 | 12 |
 | **FFI/ABI Interface** | 15 | 15 | 0 |
 | **Formatting & Lints** | 15 | 0 | 15 |
@@ -571,18 +571,22 @@ Features documented in `doc/spec/` but not yet tracked.
 
 **Documentation:**
 - [research/sdn_self_hosting.md](../research/sdn_self_hosting.md) - Full feature list
-- [spec/metaprogramming.md](../spec/metaprogramming.md) - Macro/DSL spec
+- [spec/macro.md](../spec/macro.md) - Contract-first macro spec
+- [spec/metaprogramming.md](../spec/metaprogramming.md) - DSL/decorators/attributes
 - [spec/language_enhancement.md](../spec/language_enhancement.md) - Memory model
 
 #### Macros (#1061-1065)
 
 | Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|--------|------|-----|--------|--------|
-| #1061 | `macro` keyword | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1062 | `gen_code` block | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1063 | Hygienic macro expansion | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1064 | AST manipulation in macros | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1065 | Macro-as-decorator | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1061 | Revert legacy macro implementation (non-contract macros) | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1062 | Contract-first macro headers (`returns`/`intro`/`inject`) | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1063 | Parser-friendly symbol introductions and callsite anchors | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1064 | Const-eval contract inputs + `emit` blocks | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1065 | One-pass LL(1) macro invocation constraints | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1065b | Macro intros must not shadow existing symbols | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+
+Notes: type checker enforces macro definition order and const-evaluates `intro` for/if blocks.
 
 #### DSL Features (#1066-1068)
 

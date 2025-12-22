@@ -4,14 +4,22 @@
 
 **Test Status:** ✅ Build passing - compilation warnings fixed  
 **Recent Work (2025-12-22):**
-- Fixed gherkin DSL parsing to handle f-strings (double-quoted strings)
-- Split 8 large markdown documentation files into 18 manageable parts
-- Analyzed and documented Rust source files over 1000 lines
-- All documentation and rationale in `doc/report/`
+- ✅ Implemented formatter and linter in Simple language (`simple/app/`)
+- ✅ Created build infrastructure for Simple-based tools
+- ✅ Analyzed orphaned commits (AOP specs present, no implementation)
+- ✅ Code duplication reduction: 4.49% → 4.45% (Phase 2 & 3 complete)
+- ✅ Fixed gherkin DSL parsing to handle f-strings
+- ✅ Split 8 large markdown documentation files into 18 parts
+
+**New Tools:**
+- `simple/app/formatter/` - Canonical formatter (zero-config)
+- `simple/app/lint/` - Semantic linter with fix-it hints
+- Build outputs to `simple/bin_simple/` with intermediate files in `simple/build/`
 
 **Pending Work:**
-- Review test failures in gherkin/attributes tests (indentation issues)
-- Consider extracting test helpers in large test files if needed
+- Build and test formatter/linter tools
+- Integrate formatter/linter with compiler
+- Review test failures in gherkin/attributes tests
 
 ## Documentation Organization
 
@@ -39,6 +47,17 @@ simple/                            # Project root - Rust compiler implementation
 ├── simple/                        # Simple language development workspace
 │   ├── bin -> ../target/debug/    # Symlink to compiled binaries
 │   ├── doc -> ../doc/             # Symlink to documentation
+│   ├── app/                       # Simple-language applications
+│   │   ├── formatter/             # Canonical formatter (main.spl)
+│   │   ├── lint/                  # Semantic linter (main.spl)
+│   │   └── README.md              # Application documentation
+│   ├── bin_simple/                # Compiled Simple executables
+│   │   ├── simple_fmt             # Formatter binary
+│   │   └── simple_lint            # Linter binary
+│   ├── build/                     # Intermediate build files
+│   │   ├── formatter/             # Formatter .smf files
+│   │   └── lint/                  # Linter .smf files
+│   ├── build_tools.sh             # Build script for Simple tools
 │   └── std_lib/                   # Simple standard library (written in Simple)
 │       ├── README.md              # Standard library documentation
 │       ├── src/                   # .spl library files
