@@ -782,8 +782,9 @@ mod tests {
                 Ok
                 Error
 
-            macro debug!(msg):
-                println(msg)
+            macro debug(msg: Str) -> ():
+                emit result:
+                    println(msg)
 
             fn helper[T](x: T) -> T:
                 return x
@@ -905,8 +906,9 @@ mod tests {
             fn my_function():
                 pass
 
-            macro my_macro!(x):
-                x
+            macro my_macro(x: Int) -> (returns result: Int):
+                emit result:
+                    x
             "#,
         );
 

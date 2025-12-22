@@ -14,9 +14,10 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use simple_common::actor::{ActorSpawner, Message, ThreadSpawner};
 use simple_parser::ast::{
-    AssignOp, BinOp, BinaryArithmeticOp, Block, ClassDef, ContextStmt, EnumDef, Expr, ExternDef,
-    FStringPart, FunctionDef, IfStmt, LambdaParam, MacroArg, MacroBody, MacroDef, MacroParam,
-    MatchStmt, Node, Pattern, PointerKind, RangeBound, Type, UnaryArithmeticOp, UnaryOp, UnitDef,
+    AssignOp, AssignmentStmt, BinOp, BinaryArithmeticOp, Block, ClassDef, ContextStmt, EnumDef,
+    Expr, ExternDef, FStringPart, ForStmt, FunctionDef, IfStmt, LambdaParam, LetStmt, LoopStmt,
+    MacroArg, MacroContractItem, MacroDef, MacroStmt, MatchArm, MatchStmt, Node, Pattern,
+    PointerKind, RangeBound, ReturnStmt, Type, UnaryArithmeticOp, UnaryOp, UnitDef, WhileStmt,
     WithStmt,
 };
 use tracing::instrument;

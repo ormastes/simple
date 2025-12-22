@@ -107,6 +107,23 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub(crate) fn check_ident(&self, name: &str) -> bool {
+        matches!(&self.current.kind, TokenKind::Identifier(current) if current == name)
+    }
+
+    pub(crate) fn expect_ident_value(&mut self, name: &str) -> Result<(), ParseError> {
+        if self.check_ident(name) {
+            self.advance();
+            Ok(())
+        } else {
+            Err(ParseError::unexpected_token(
+                name,
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ))
+        }
+    }
+
     /// Expect an identifier or a keyword that can be used as a path segment.
     /// This allows using reserved words like 'unit', 'test', etc. in module paths.
     pub(crate) fn expect_path_segment(&mut self) -> Result<String, ParseError> {
