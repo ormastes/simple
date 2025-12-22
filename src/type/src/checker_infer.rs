@@ -20,6 +20,26 @@ impl TypeChecker {
                 .get(name)
                 .cloned()
                 .ok_or_else(|| TypeError::Undefined(format!("undefined identifier: {}", name))),
+            Expr::MacroInvocation { name, args } => {
+                for arg in args {
+                    let simple_parser::ast::MacroArg::Expr(expr) = arg;
+                    let _ = self.infer_expr(expr)?;
+                }
+                if !self.available_macros.contains(name) {
+                    return Err(TypeError::Other(format!(
+                        "macro '{}' must be defined before use",
+                        name
+                    )));
+                }
+                let macro_def = self
+                    .macros
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| TypeError::Undefined(format!("undefined macro: {}", name)))?;
+                let const_bindings = self.build_macro_const_bindings(&macro_def, args);
+                self.apply_macro_intros(&macro_def, &const_bindings)?;
+                Ok(self.macro_return_type(&macro_def))
+            }
             Expr::Binary { left, right, op } => {
                 let left_ty = self.infer_expr(left)?;
                 let right_ty = self.infer_expr(right)?;

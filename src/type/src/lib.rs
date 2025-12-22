@@ -1,5 +1,8 @@
-use simple_parser::ast::{BinOp, Expr, Node, Pattern, PointerKind, Type as AstType};
-use std::collections::HashMap;
+use simple_parser::ast::{
+    BinOp, Expr, MacroConstRange, MacroDef, MacroIntroDecl, MacroIntroSpec, MacroTarget, Node,
+    Pattern, PointerKind, Type as AstType, UnaryOp,
+};
+use std::collections::{HashMap, HashSet};
 
 //==============================================================================
 // Pure Type Inference (for formal verification)
@@ -442,6 +445,10 @@ pub struct TypeChecker {
     type_params: HashMap<String, Type>,
     /// Substitution map for type inference
     subst: Substitution,
+    /// Macro definitions for contract-first macros
+    macros: HashMap<String, MacroDef>,
+    /// Macros available at the current point in the module (enforce definition order)
+    available_macros: HashSet<String>,
 }
 
 // TypeChecker implementation (split for maintainability)

@@ -315,8 +315,56 @@ fn infers_static_declaration() {
 
 #[test]
 fn infers_macro_definition() {
-    let items = parse_items("macro double!($x):\n    $x + $x\nmain = 0");
+    let items = parse_items("macro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\nmain = 0");
     check(&items).expect("type check ok");
+}
+
+#[test]
+fn infers_macro_invocation_return_type() {
+    let items = parse_items(
+        "macro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\nfn main():\n    let y = double!(2)\n    return y\nmain = 0",
+    );
+    check(&items).expect("type check ok");
+}
+
+#[test]
+fn infers_macro_intro_in_block() {
+    let items = parse_items(
+        "macro add_counter() -> (intro counter: callsite.block.head.let counter: Int):\n    emit result:\n        0\nfn main():\n    add_counter!()\n    let x = counter\n    return x\nmain = 0",
+    );
+    check(&items).expect("type check ok");
+}
+
+#[test]
+fn infers_macro_intro_with_const_template() {
+    let items = parse_items(
+        "macro add_named(NAME: Str const) -> (intro named: callsite.block.head.let \"{NAME}\": Int):\n    emit result:\n        0\nfn main():\n    add_named!(\"value\")\n    let x = value\n    return x\nmain = 0",
+    );
+    check(&items).expect("type check ok");
+}
+
+#[test]
+fn infers_macro_intro_for_loop() {
+    let items = parse_items(
+        "macro add_axes(BASE: Str const, N: Int const) -> (\n    intro axes: for i in 0 .. N: callsite.block.head.let \"{BASE}{i}\": Int\n):\n    emit result:\n        0\nfn main():\n    add_axes!(\"axis\", 2)\n    let x = axis0 + axis1\n    return x\nmain = 0",
+    );
+    check(&items).expect("type check ok");
+}
+
+#[test]
+fn rejects_macro_use_before_definition() {
+    let items = parse_items("fn main():\n    let x = later!()\n    return x\nmacro later() -> (returns result: Int):\n    emit result:\n        1\nmain = 0");
+    let err = check(&items).expect_err("should fail");
+    assert!(format!("{err:?}").contains("must be defined before use"));
+}
+
+#[test]
+fn rejects_macro_intro_shadowing_param() {
+    let items = parse_items(
+        "macro add_x() -> (intro x: callsite.block.head.let x: Int):\n    emit result:\n        0\nfn main(x: Int):\n    add_x!()\n    return x\nmain = 0",
+    );
+    let err = check(&items).expect_err("should fail");
+    assert!(format!("{err:?}").contains("conflicts with existing symbol"));
 }
 
 #[test]
