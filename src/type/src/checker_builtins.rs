@@ -5,6 +5,8 @@ impl TypeChecker {
             next_var: 0,
             type_params: HashMap::new(),
             subst: Substitution::new(),
+            macros: HashMap::new(),
+            available_macros: HashSet::new(),
         };
         // Add built-in functions to environment
         tc.add_builtins();
