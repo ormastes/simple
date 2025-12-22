@@ -128,7 +128,7 @@ pub struct LlvmGpuBackend {
     /// Enable debug info in PTX
     debug_info: bool,
     #[cfg(feature = "llvm")]
-    context: Context,
+    context: &'static Context,
     #[cfg(feature = "llvm")]
     module: RefCell<Option<Module<'static>>>,
     #[cfg(feature = "llvm")]
@@ -168,10 +168,11 @@ impl LlvmGpuBackend {
             LlvmTarget::initialize_native(&InitializationConfig::default())
                 .map_err(|e| CompileError::Semantic(format!("Failed to initialize LLVM: {}", e)))?;
 
+            let context = Box::leak(Box::new(Context::create()));
             Ok(Self {
                 compute_capability: cc,
                 debug_info: false,
-                context: Context::create(),
+                context,
                 module: RefCell::new(None),
                 builder: RefCell::new(None),
                 kernel_functions: RefCell::new(Vec::new()),
@@ -200,22 +201,11 @@ impl LlvmGpuBackend {
         let triple = self.get_target_triple();
         module.set_triple(&TargetTriple::create(&triple));
 
-        // Set data layout for NVPTX64
-        // e = little endian, m:e = ELF mangling, i64:64 = i64 aligned to 64 bits
-        // f80:128 = long double aligned to 128, n8:16:32:64 = native integer widths
-        // S128 = stack natural alignment 128 bits
-        module.set_data_layout(&inkwell::data_layout::DataLayout::create(
-            "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v32:32:32-v64:64:64-v128:128:128-n16:32:64",
-        ).unwrap());
-
-        // Store module
-        let module_static: Module<'static> = unsafe { std::mem::transmute(module) };
-        *self.module.borrow_mut() = Some(module_static);
+        *self.module.borrow_mut() = Some(module);
 
         // Create builder
         let builder = self.context.create_builder();
-        let builder_static: Builder<'static> = unsafe { std::mem::transmute(builder) };
-        *self.builder.borrow_mut() = Some(builder_static);
+        *self.builder.borrow_mut() = Some(builder);
 
         Ok(())
     }
@@ -683,7 +673,7 @@ mod tests {
             compute_capability: GpuComputeCapability::default(),
             debug_info: false,
             #[cfg(feature = "llvm")]
-            context: Context::create(),
+            context: Box::leak(Box::new(Context::create())),
             #[cfg(feature = "llvm")]
             module: RefCell::new(None),
             #[cfg(feature = "llvm")]

@@ -59,7 +59,7 @@ impl super::LlvmBackend {
             T::F32 => Ok(self.context.f32_type().into()),
             T::F64 => Ok(self.context.f64_type().into()),
             T::BOOL => Ok(self.context.bool_type().into()),
-            T::Pointer => Ok(self
+            T::STRING => Ok(self
                 .context
                 .ptr_type(inkwell::AddressSpace::default())
                 .into()),
