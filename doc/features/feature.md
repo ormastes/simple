@@ -4,12 +4,12 @@
 
 ## Feature Table Format
 
-All feature tables use this standardized 7-column format:
+All feature tables use this standardized 8-column format:
 
 ```markdown
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #NNN | Name | ✅/📋 | R/S/S+R | [doc](path) | `path/` | `path/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #NNN | Name | 3 | ✅/📋 | R/S/S+R | [doc](path) | `path/` | `path/` |
 ```
 
 **Column Reference:**
@@ -18,6 +18,7 @@ All feature tables use this standardized 7-column format:
 |--------|-------------|----------------|
 | **Feature ID** | Unique identifier (`#NNN`) | `#100`, `#700` |
 | **Feature** | Short feature name | `TCP sockets`, `PostgreSQL driver` |
+| **Difficulty** | Implementation complexity (1-5) | `1` Trivial, `2` Easy, `3` Medium, `4` Hard, `5` Very Hard |
 | **Status** | `✅` Complete, `📋` Planned | |
 | **Impl** | Implementation: `R` Rust, `S` Simple, `S+R` Both | |
 | **Doc** | Link to spec/design doc, or `-` | `[spec/types.md](spec/types.md)` |
@@ -121,13 +122,13 @@ Features to make Simple optimized for LLM-assisted development, verification, an
 
 #### Capability-Based Effects (#880-884)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #880 | `module requires[cap]` | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #881 | `@pure` / `@io` / `@net` | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #882 | Capability propagation | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #883 | Forbidden effect errors | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #884 | Stdlib effect annotations | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/effects/` | - |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #880 | `module requires[cap]` | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
+| #881 | `@pure` / `@io` / `@net` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
+| #882 | Capability propagation | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
+| #883 | Forbidden effect errors | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
+| #884 | Stdlib effect annotations | 2 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/effects/` | - |
 
 **Example:**
 ```simple
@@ -144,13 +145,13 @@ fn fetch_and_save(url: str, path: str):
 
 #### AST/IR Export (#885-889)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #885 | `--emit-ast` | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #886 | `--emit-hir` | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #887 | `--emit-mir` | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #888 | `--error-format=json` | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #889 | Semantic diff tool | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #885 | `--emit-ast` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #886 | `--emit-hir` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #887 | `--emit-mir` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #888 | `--error-format=json` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #889 | Semantic diff tool | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
 
 **Example:**
 ```bash
@@ -161,12 +162,12 @@ simple diff --semantic old.spl new.spl
 
 #### Context Pack Generator (#890-893)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #890 | `simple context` command | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #891 | Dependency symbol extraction | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #892 | Markdown context format | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #893 | JSON context format | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #890 | `simple context` command | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #891 | Dependency symbol extraction | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
+| #892 | Markdown context format | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #893 | JSON context format | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
 
 **Example:**
 ```bash
@@ -179,13 +180,13 @@ simple context app.service --format=json > context.json
 
 #### Property-Based Testing (#894-898)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #894 | `@property_test` decorator | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | `src/compiler/tests/` |
-| #895 | Input generators | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
-| #896 | Shrinking on failure | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | `src/runtime/tests/` |
-| #897 | Configurable iterations | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
-| #898 | Generator combinators | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #894 | `@property_test` decorator | 3 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | `src/compiler/tests/` |
+| #895 | Input generators | 3 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
+| #896 | Shrinking on failure | 4 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | `src/runtime/tests/` |
+| #897 | Configurable iterations | 2 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
+| #898 | Generator combinators | 3 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
 
 **Example:**
 ```simple
@@ -202,12 +203,12 @@ fn test_reverse_reverse(input: [i64]):
 
 #### Snapshot/Golden Tests (#899-902)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #899 | `@snapshot_test` decorator | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/snapshot/` | `src/compiler/tests/` |
-| #900 | Snapshot storage | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
-| #901 | `--snapshot-update` flag | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #902 | Multi-format snapshots | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/snapshot/` | `src/driver/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #899 | `@snapshot_test` decorator | 3 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/snapshot/` | `src/compiler/tests/` |
+| #900 | Snapshot storage | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
+| #901 | `--snapshot-update` flag | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #902 | Multi-format snapshots | 3 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/snapshot/` | `src/driver/tests/` |
 
 **Example:**
 ```simple
@@ -220,13 +221,13 @@ fn test_render_user_json():
 
 #### Lint Framework (#903-907)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #903 | Lint rule trait | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/lint/` | - |
-| #904 | Built-in rules | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #905 | Configurable severity | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
-| #906 | `simple lint` command | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #907 | Auto-fix suggestions | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #903 | Lint rule trait | 3 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/lint/` | - |
+| #904 | Built-in rules | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
+| #905 | Configurable severity | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
+| #906 | `simple lint` command | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #907 | Auto-fix suggestions | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
 
 **Configuration (`simple.toml`):**
 ```toml
@@ -242,23 +243,23 @@ max_nesting_depth = 4
 
 #### Canonical Formatter (#908-910)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #908 | `simple fmt` command | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #909 | Single correct style | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/parser/tests/` |
-| #910 | Format-on-save integration | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #908 | `simple fmt` command | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #909 | Single correct style | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/parser/tests/` |
+| #910 | Format-on-save integration | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
 
 **Impact:** Eliminates stylistic variance; LLM output is predictable
 
 #### Build & Audit Infrastructure (#911-915)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #911 | Deterministic build mode | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #912 | Replay logs | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
-| #913 | `@generated_by` provenance | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/audit/` | `src/compiler/tests/` |
-| #914 | API surface lock file | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
-| #915 | Spec coverage metric | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #911 | Deterministic build mode | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
+| #912 | Replay logs | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
+| #913 | `@generated_by` provenance | 2 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/audit/` | `src/compiler/tests/` |
+| #914 | API surface lock file | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
+| #915 | Spec coverage metric | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
 
 **Example:**
 ```simple
@@ -270,12 +271,12 @@ fn calculate_tax(amount: i64) -> i64:
 
 #### Sandboxed Execution (#916-919)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #916 | Resource limits | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
-| #917 | Network isolation | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
-| #918 | Filesystem isolation | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
-| #919 | `simple run --sandbox` | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #916 | Resource limits | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
+| #917 | Network isolation | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
+| #918 | Filesystem isolation | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
+| #919 | `simple run --sandbox` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
 
 **Impact:** Safely verify LLM-generated code without risk
 
@@ -300,14 +301,14 @@ Unified predicate grammar for AOP weaving, hybrid DI, mocking, and architecture 
 
 #### Phase 1: Predicate Grammar (#1000-1005)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1000 | `pc{...}` syntactic island (lexer mode) | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
-| #1001 | Predicate operators (!, &, \|, grouping) | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
-| #1002 | Pattern wildcards (*, **, prefix*, *suffix) | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
-| #1003 | Signature pattern `ret_pat qname_pat(arg_pats)` | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
-| #1004 | `..` argument wildcard | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
-| #1005 | Allowed introducer validation (`on`, `bind on`, `forbid`, `allow`) | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1000 | `pc{...}` syntactic island (lexer mode) | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
+| #1001 | Predicate operators (!, &, \|, grouping) | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
+| #1002 | Pattern wildcards (*, **, prefix*, *suffix) | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
+| #1003 | Signature pattern `ret_pat qname_pat(arg_pats)` | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
+| #1004 | `..` argument wildcard | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
+| #1005 | Allowed introducer validation (`on`, `bind on`, `forbid`, `allow`) | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
 
 **Grammar (EBNF):**
 ```
@@ -324,11 +325,11 @@ signature   ::= ret_pat ' ' qname_pat '(' arg_pats ')'
 
 #### Phase 2: Context Validation (#1006-1008)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1006 | Weaving selector set (execution/within/attr/effect/test/decision/condition) | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1007 | DI/Mock selector set (type/within/attr only) | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1008 | Illegal selector in context diagnostic | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1006 | Weaving selector set (execution/within/attr/effect/test/decision/condition) | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1007 | DI/Mock selector set (type/within/attr only) | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1008 | Illegal selector in context diagnostic | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 
 **Selector Sets by Context:**
 ```
@@ -344,16 +345,16 @@ signature   ::= ret_pat ' ' qname_pat '(' arg_pats ')'
 
 #### Phase 3: Hybrid DI (#1009-1016)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1009 | Typed dependency graph (compiler-built) | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1010 | SDN `di:` section with profiles | 📋 | R | [aop.md](../research/aop.md) | - | `src/sdn/tests/` |
-| #1011 | `bind on pc{...} -> Impl scope priority` syntax | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1012 | `@sys.inject` constructor injection | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/di/` | `src/compiler/tests/` |
-| #1013 | Per-parameter `@sys.inject` | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/di/` | `src/compiler/tests/` |
-| #1014 | Priority/specificity/stable-order resolution | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1015 | Ambiguous binding diagnostic | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1016 | Release profile freeze (direct wiring) | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1009 | Typed dependency graph (compiler-built) | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1010 | SDN `di:` section with profiles | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/sdn/tests/` |
+| #1011 | `bind on pc{...} -> Impl scope priority` syntax | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1012 | `@sys.inject` constructor injection | 3 | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/di/` | `src/compiler/tests/` |
+| #1013 | Per-parameter `@sys.inject` | 3 | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/di/` | `src/compiler/tests/` |
+| #1014 | Priority/specificity/stable-order resolution | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1015 | Ambiguous binding diagnostic | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1016 | Release profile freeze (direct wiring) | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 
 **SDN Schema:**
 ```sdn
@@ -377,11 +378,11 @@ negation (!):        -1
 
 #### Phase 4: Constructor Injection (#1017-1019)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1017 | All-params-injectable rule for constructor `@sys.inject` | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1018 | Parameter-level diagnostic for unresolvable deps | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1019 | No mixing constructor vs per-param injection | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1017 | All-params-injectable rule for constructor `@sys.inject` | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1018 | Parameter-level diagnostic for unresolvable deps | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1019 | No mixing constructor vs per-param injection | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 
 **Example:**
 ```simple
@@ -398,14 +399,14 @@ class OrderService:
 
 **Note:** Complements existing Mock Library (#230-241). AOP mocking uses trait-boundary + DI binding selection.
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1020 | `mock Name implements Trait:` syntax | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/mock/` | `src/parser/tests/` |
-| #1021 | `expect method() -> Type:` syntax | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/mock/` | `src/parser/tests/` |
-| #1022 | `@sys.test_only` decorator enforcement | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1023 | Mock binding via DI predicates (test profile) | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1024 | Illegal mock in non-test diagnostic | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1025 | Illegal Mock* binding outside test profile | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1020 | `mock Name implements Trait:` syntax | 3 | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/mock/` | `src/parser/tests/` |
+| #1021 | `expect method() -> Type:` syntax | 2 | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/mock/` | `src/parser/tests/` |
+| #1022 | `@sys.test_only` decorator enforcement | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1023 | Mock binding via DI predicates (test profile) | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1024 | Illegal mock in non-test diagnostic | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1025 | Illegal Mock* binding outside test profile | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 
 **Example:**
 ```simple
@@ -428,22 +429,22 @@ profiles:
 
 **Note:** Extends existing Architecture Test Library (#936-945) with in-source predicates.
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1026 | `arch_rules:` block syntax | 📋 | S+R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
-| #1027 | `forbid pc{...}` rule | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1028 | `allow pc{...}` rule | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1029 | `import(from_pattern, to_pattern)` selector | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1030 | `depend(from_pattern, to_pattern)` selector | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1031 | `use(pattern)` selector | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1032 | `export(pattern)` selector | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1033 | `config(STRING)` selector | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1026 | `arch_rules:` block syntax | 2 | 📋 | S+R | [aop.md](../research/aop.md) | - | `src/parser/tests/` |
+| #1027 | `forbid pc{...}` rule | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1028 | `allow pc{...}` rule | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1029 | `import(from_pattern, to_pattern)` selector | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1030 | `depend(from_pattern, to_pattern)` selector | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1031 | `use(pattern)` selector | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1032 | `export(pattern)` selector | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1033 | `config(STRING)` selector | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 
 **SDN Validation Hooks:**
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1034 | Release build MUST NOT select test profile | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1035 | Release MUST NOT enable runtime interceptors | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1034 | Release build MUST NOT select test profile | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1035 | Release MUST NOT enable runtime interceptors | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 
 **Example:**
 ```simple
@@ -456,34 +457,34 @@ arch_rules:
 
 #### Phase 7: Compile-Time Weaving (#1036-1042)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1036 | `execution(signature)` join point | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1037 | `within(pattern)` join point | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1038 | `attr(IDENT)` join point | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1039 | `effect(effect_set)` join point | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1040 | `test(IDENT)` join point | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1041 | `decision()`/`condition()` join points (coverage) | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1042 | Zero-overhead when aspects.enabled = [] | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1036 | `execution(signature)` join point | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1037 | `within(pattern)` join point | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1038 | `attr(IDENT)` join point | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1039 | `effect(effect_set)` join point | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1040 | `test(IDENT)` join point | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1041 | `decision()`/`condition()` join points (coverage) | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1042 | Zero-overhead when aspects.enabled = [] | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 
 **Advice Forms:**
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1043 | `before` advice | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1044 | `after_success` advice | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1045 | `after_error` advice | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1046 | Advice priority ordering | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1043 | `before` advice | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1044 | `after_success` advice | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1045 | `after_error` advice | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1046 | Advice priority ordering | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 
 **Ordering:** Higher priority → earlier for `before`, later for `after_*`, outermost for `around`.
 
 #### Phase 8: Link-Time & Runtime Backends (Optional) (#1047-1050)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1047 | `call(signature)` link-time selector | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1048 | `init(pattern)` runtime selector (DI-controlled) | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
-| #1049 | `around` advice with `proceed()` (runtime only) | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
-| #1050 | Proceed exactly-once enforcement | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1047 | `call(signature)` link-time selector | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1048 | `init(pattern)` runtime selector (DI-controlled) | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
+| #1049 | `around` advice with `proceed()` (runtime only) | 5 | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
+| #1050 | Proceed exactly-once enforcement | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
 
 **Backend Comparison:**
 ```
@@ -522,28 +523,28 @@ Replace `simple.toml` with `simple.sdn` - use Simple's native data format for it
 
 #### Phase 1: Dual Support (#1051-1053)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1051 | `simple.sdn` manifest parsing | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
-| #1052 | Manifest format auto-detection | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
-| #1053 | `simple pkg migrate` command | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1051 | `simple.sdn` manifest parsing | 3 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
+| #1052 | Manifest format auto-detection | 2 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
+| #1053 | `simple pkg migrate` command | 2 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
 
 #### Phase 2: SDN Default (#1054-1056)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1054 | `simple init` generates `.sdn` | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
-| #1055 | TOML deprecation warning | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
-| #1056 | Lock file as SDN (`simple-lock.sdn`) | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1054 | `simple init` generates `.sdn` | 2 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
+| #1055 | TOML deprecation warning | 1 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
+| #1056 | Lock file as SDN (`simple-lock.sdn`) | 2 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/pkg/tests/` |
 
 #### Phase 3: Full SDN (#1057-1060)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1057 | Remove TOML dependency | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | - |
-| #1058 | SDN for all config files | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/driver/tests/` |
-| #1059 | SDN for AOP/DI config | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/compiler/tests/` |
-| #1060 | SDN CLI improvements | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/sdn/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1057 | Remove TOML dependency | 2 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | - |
+| #1058 | SDN for all config files | 3 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/driver/tests/` |
+| #1059 | SDN for AOP/DI config | 3 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/compiler/tests/` |
+| #1060 | SDN CLI improvements | 2 | 📋 | R | [sdn_self_hosting.md](../research/sdn_self_hosting.md) | - | `src/sdn/tests/` |
 
 **SDN Manifest Example:**
 ```sdn
@@ -577,89 +578,89 @@ Features documented in `doc/spec/` but not yet tracked.
 
 #### Macros (#1061-1065)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1061 | Revert legacy macro implementation (non-contract macros) | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1062 | Contract-first macro headers (`returns`/`intro`/`inject`) | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1063 | Parser-friendly symbol introductions and callsite anchors | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1064 | Const-eval contract inputs + `emit` blocks | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1065 | One-pass LL(1) macro invocation constraints | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1065b | Macro intros must not shadow existing symbols | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1061 | Revert legacy macro implementation (non-contract macros) | 3 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1062 | Contract-first macro headers (`returns`/`intro`/`inject`) | 4 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1063 | Parser-friendly symbol introductions and callsite anchors | 4 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1064 | Const-eval contract inputs + `emit` blocks | 4 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1065 | One-pass LL(1) macro invocation constraints | 3 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
+| #1065b | Macro intros must not shadow existing symbols | 3 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
 
 Notes: type checker enforces macro definition order and const-evaluates `intro` for/if blocks.
 
 #### DSL Features (#1066-1068)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1066 | `context obj:` block | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
-| #1067 | `method_missing` handler | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
-| #1068 | Fluent interface support | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1066 | `context obj:` block | 3 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
+| #1067 | `method_missing` handler | 4 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
+| #1068 | Fluent interface support | 2 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
 
 #### Built-in Decorators (#1069-1072)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1069 | `@cached` decorator | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
-| #1070 | `@logged` decorator | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
-| #1071 | `@deprecated(message)` | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
-| #1072 | `@timeout(seconds)` | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1069 | `@cached` decorator | 3 | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
+| #1070 | `@logged` decorator | 2 | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
+| #1071 | `@deprecated(message)` | 2 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
+| #1072 | `@timeout(seconds)` | 3 | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
 
 #### Attributes (#1073-1077)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1073 | `#[inline]` hint | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1074 | `#[derive(...)]` auto-impl | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1075 | `#[cfg(...)]` conditional | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1076 | `#[allow(...)]`/`#[deny(...)]` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1077 | `#[test]` marker | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1073 | `#[inline]` hint | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1074 | `#[derive(...)]` auto-impl | 4 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1075 | `#[cfg(...)]` conditional | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1076 | `#[allow(...)]`/`#[deny(...)]` | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1077 | `#[test]` marker | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
 
 #### Comprehensions (#1078-1082)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1078 | List comprehension | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
-| #1079 | Dict comprehension | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
-| #1080 | Negative indexing `arr[-1]` | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/runtime/tests/` |
-| #1081 | Slicing `arr[2:5]`, `arr[::2]` | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/runtime/tests/` |
-| #1082 | Spread `[*a, *b]`, `{**d1, **d2}` | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1078 | List comprehension | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
+| #1079 | Dict comprehension | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
+| #1080 | Negative indexing `arr[-1]` | 2 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/runtime/tests/` |
+| #1081 | Slicing `arr[2:5]`, `arr[::2]` | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/runtime/tests/` |
+| #1082 | Spread `[*a, *b]`, `{**d1, **d2}` | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
 
 #### Pattern Matching Enhancements (#1083-1090)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1083 | Match guards `case x if x > 0:` | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1084 | Or patterns `case "a" \| "b":` | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1085 | Range patterns `case 1..10:` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1086 | `if let Some(x) = ...` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1087 | `while let Some(x) = ...` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1088 | Chained comparisons `0 < x < 10` | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1089 | Exhaustiveness checking | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1090 | Unreachable arm detection | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1083 | Match guards `case x if x > 0:` | 3 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1084 | Or patterns `case "a" \| "b":` | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1085 | Range patterns `case 1..10:` | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1086 | `if let Some(x) = ...` | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1087 | `while let Some(x) = ...` | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1088 | Chained comparisons `0 < x < 10` | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1089 | Exhaustiveness checking | 4 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1090 | Unreachable arm detection | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 
 #### Context & Error Handling (#1091-1095)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1091 | `with open(...) as f:` | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
-| #1092 | `ContextManager` trait | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
-| #1093 | `move \:` closures | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1094 | `?` operator for Result | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1095 | `?` operator for Option | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1091 | `with open(...) as f:` | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
+| #1092 | `ContextManager` trait | 2 | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
+| #1093 | `move \:` closures | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1094 | `?` operator for Result | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1095 | `?` operator for Option | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 
 #### Memory Model (#1096-1103)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1096 | `mut T` exclusive writer capability | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1097 | `iso T` isolated capability | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1098 | Capability conversions | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1099 | Happens-before memory model | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
-| #1100 | Data-race-free guarantee | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
-| #1101 | `Atomic[T]` wrapper | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1102 | `Mutex[T]` wrapper | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1103 | `RwLock[T]` wrapper | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1096 | `mut T` exclusive writer capability | 4 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1097 | `iso T` isolated capability | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1098 | Capability conversions | 4 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1099 | Happens-before memory model | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
+| #1100 | Data-race-free guarantee | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
+| #1101 | `Atomic[T]` wrapper | 3 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| #1102 | `Mutex[T]` wrapper | 3 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| #1103 | `RwLock[T]` wrapper | 3 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
 
 **Note:** Memory Model features (#1096-1103) require `#[concurrency_mode(lock_base)]` or `#[unsafe]`.
 
@@ -674,12 +675,12 @@ Safety modes for concurrency: actor (Erlang-style), lock_base (Rust-style), unsa
 
 #### Mode System (#1104-1107)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1104 | `#[concurrency_mode(actor)]` (default) | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1105 | `#[concurrency_mode(lock_base)]` | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1106 | `#[concurrency_mode(unsafe)]` | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1107 | `unsafe:` block syntax | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/parser/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1104 | `#[concurrency_mode(actor)]` (default) | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1105 | `#[concurrency_mode(lock_base)]` | 4 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1106 | `#[concurrency_mode(unsafe)]` | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1107 | `unsafe:` block syntax | 2 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/parser/tests/` |
 
 **Mode Comparison:**
 ```
@@ -696,13 +697,13 @@ Safety modes for concurrency: actor (Erlang-style), lock_base (Rust-style), unsa
 
 Native concurrent libraries (TBB, crossbeam) with GC-managed objects.
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1108 | GC write barriers in concurrent collections | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
-| #1109 | `ConcurrentMap[K, V]` with GC objects | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1110 | `ConcurrentQueue[T]` with GC objects | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1111 | `ConcurrentStack[T]` with GC objects | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1112 | Object tracing through collection handles | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1108 | GC write barriers in concurrent collections | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
+| #1109 | `ConcurrentMap[K, V]` with GC objects | 4 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| #1110 | `ConcurrentQueue[T]` with GC objects | 4 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| #1111 | `ConcurrentStack[T]` with GC objects | 4 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
+| #1112 | Object tracing through collection handles | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
 
 **Example:**
 ```simple
@@ -726,11 +727,11 @@ fn main():
 
 #### Mode Enforcement (#1113-1115)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1113 | Compile error for `mut T` in actor mode | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1114 | Compile error for `Mutex` in actor mode | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1115 | Warning for unsafe in release build | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1113 | Compile error for `mut T` in actor mode | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1114 | Compile error for `Mutex` in actor mode | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
+| #1115 | Warning for unsafe in release build | 2 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 
 ---
 
@@ -743,33 +744,33 @@ Deterministic formatting and semantic lint set for code quality.
 
 #### Canonical Formatter (#1131-1133)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1131 | Canonical formatter (no config) | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
-| #1132 | Formatter CLI (`simple fmt`) | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
-| #1133 | Format-on-save IDE integration | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | - |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1131 | Canonical formatter (no config) | 3 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| #1132 | Formatter CLI (`simple fmt`) | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| #1133 | Format-on-save IDE integration | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | - |
 
 #### Semantic Lints (#1134-1138)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1134 | Safety lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1135 | Correctness lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1136 | Warning lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1137 | Style lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1138 | Concurrency lint set | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1134 | Safety lint set | 3 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1135 | Correctness lint set | 3 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1136 | Warning lint set | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1137 | Style lint set | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1138 | Concurrency lint set | 4 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
 
 #### Lint Control (#1139-1145)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1139 | `#[allow]`/`#[deny]`/`#[warn]` attributes | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/parser/tests/` |
-| #1140 | Lint groups | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1141 | Fix-it hints in diagnostics | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1142 | Auto-fix CLI (`simple fix`) | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
-| #1143 | Error code stability | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1144 | Lint configuration in simple.sdn | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
-| #1145 | `--explain` for error codes | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1139 | `#[allow]`/`#[deny]`/`#[warn]` attributes | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/parser/tests/` |
+| #1140 | Lint groups | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1141 | Fix-it hints in diagnostics | 3 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1142 | Auto-fix CLI (`simple fix`) | 4 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| #1143 | Error code stability | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+| #1144 | Lint configuration in simple.sdn | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+| #1145 | `--explain` for error codes | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
 
 ---
 
@@ -782,28 +783,28 @@ Trait implementation rules for unambiguous dispatch and type safety.
 
 #### Core Coherence (#1146-1149)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1146 | Orphan rule enforcement | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
-| #1147 | Overlap detection | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
-| #1148 | Associated type coherence | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
-| #1149 | Blanket impl conflict detection | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1146 | Orphan rule enforcement | 3 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1147 | Overlap detection | 4 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1148 | Associated type coherence | 4 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1149 | Blanket impl conflict detection | 4 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
 
 #### Advanced Coherence (#1150-1153)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1150 | Specialization (`#[default]` impl) | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
-| #1151 | Negative trait bounds (`!Trait`) | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
-| #1152 | Coherence error messages | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
-| #1153 | Newtype pattern support | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1150 | Specialization (`#[default]` impl) | 5 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1151 | Negative trait bounds (`!Trait`) | 4 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1152 | Coherence error messages | 3 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1153 | Newtype pattern support | 2 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
 
 #### Extension Methods (#1154-1155)
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #1154 | Extension traits | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
-| #1155 | Delegation pattern | 📋 | S | [traits.md](../spec/traits.md) | `std_lib/test/` | - |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1154 | Extension traits | 3 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
+| #1155 | Delegation pattern | 3 | 📋 | S | [traits.md](../spec/traits.md) | `std_lib/test/` | - |
 
 ---
 
