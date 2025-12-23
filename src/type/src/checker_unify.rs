@@ -194,6 +194,11 @@ impl TypeChecker {
                 // Unit with repr is treated as a named type (the unit name)
                 Type::Named(name.clone())
             }
+            AstType::Capability { inner, .. } => {
+                // For now, just unwrap the capability and convert the inner type
+                // Full capability tracking will be added in Phase 2
+                self.ast_type_to_type(inner)
+            }
         }
     }
 

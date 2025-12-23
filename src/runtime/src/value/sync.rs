@@ -1,12 +1,13 @@
 //! Synchronization primitives and FFI functions.
 //!
 //! This module provides runtime implementations for:
-//! - Mutex: Mutual exclusion lock
-//! - RwLock: Read-write lock (multiple readers, single writer)
+//! - Atomic: Lock-free atomic operations (#1101)
+//! - Mutex: Mutual exclusion lock (#1102)
+//! - RwLock: Read-write lock (multiple readers, single writer) (#1103)
 //! - Semaphore: Counting semaphore
 //! - Barrier: Synchronization barrier
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier, Condvar, Mutex, RwLock};
 use std::time::Duration;
 
@@ -14,7 +15,163 @@ use super::core::RuntimeValue;
 use super::heap::{HeapHeader, HeapObjectType};
 
 // ============================================================================
-// Mutex Implementation
+// Atomic Implementation (#1101)
+// ============================================================================
+
+/// Runtime atomic wrapper for i64 values.
+#[repr(C)]
+pub struct RuntimeAtomic {
+    pub header: HeapHeader,
+    /// The atomic value
+    pub value: AtomicI64,
+    /// Atomic ID for debugging
+    pub atomic_id: u64,
+}
+
+static NEXT_ATOMIC_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Create a new atomic value.
+#[no_mangle]
+pub extern "C" fn rt_atomic_new(initial: i64) -> RuntimeValue {
+    let atomic_id = NEXT_ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+
+    let size = std::mem::size_of::<RuntimeAtomic>();
+    let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+
+    unsafe {
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut RuntimeAtomic;
+        if ptr.is_null() {
+            return RuntimeValue::NIL;
+        }
+
+        (*ptr).header = HeapHeader::new(HeapObjectType::Atomic, size as u32);
+        (*ptr).value = AtomicI64::new(initial);
+        (*ptr).atomic_id = atomic_id;
+
+        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+    }
+}
+
+fn as_atomic_ptr(value: RuntimeValue) -> Option<*mut RuntimeAtomic> {
+    if !value.is_heap() {
+        return None;
+    }
+    Some(value.as_heap_ptr() as *mut RuntimeAtomic)
+}
+
+/// Atomically load value with Acquire ordering.
+#[no_mangle]
+pub extern "C" fn rt_atomic_load(atomic: RuntimeValue) -> i64 {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return 0;
+    };
+    unsafe { (*atomic_ptr).value.load(Ordering::Acquire) }
+}
+
+/// Atomically store value with Release ordering.
+#[no_mangle]
+pub extern "C" fn rt_atomic_store(atomic: RuntimeValue, value: i64) {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return;
+    };
+    unsafe { (*atomic_ptr).value.store(value, Ordering::Release) }
+}
+
+/// Atomically swap value with AcqRel ordering.
+#[no_mangle]
+pub extern "C" fn rt_atomic_swap(atomic: RuntimeValue, value: i64) -> i64 {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return 0;
+    };
+    unsafe { (*atomic_ptr).value.swap(value, Ordering::AcqRel) }
+}
+
+/// Atomically compare and exchange.
+/// Returns 1 if successful, 0 otherwise. Stores old value in result_ptr.
+#[no_mangle]
+pub extern "C" fn rt_atomic_compare_exchange(
+    atomic: RuntimeValue,
+    expected: i64,
+    new_value: i64,
+    result_ptr: *mut i64,
+) -> i64 {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return 0;
+    };
+
+    unsafe {
+        match (*atomic_ptr)
+            .value
+            .compare_exchange(expected, new_value, Ordering::AcqRel, Ordering::Acquire)
+        {
+            Ok(old) => {
+                if !result_ptr.is_null() {
+                    *result_ptr = old;
+                }
+                1 // Success
+            }
+            Err(current) => {
+                if !result_ptr.is_null() {
+                    *result_ptr = current;
+                }
+                0 // Failure
+            }
+        }
+    }
+}
+
+/// Atomically add and return previous value.
+#[no_mangle]
+pub extern "C" fn rt_atomic_fetch_add(atomic: RuntimeValue, delta: i64) -> i64 {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return 0;
+    };
+    unsafe { (*atomic_ptr).value.fetch_add(delta, Ordering::AcqRel) }
+}
+
+/// Atomically subtract and return previous value.
+#[no_mangle]
+pub extern "C" fn rt_atomic_fetch_sub(atomic: RuntimeValue, delta: i64) -> i64 {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return 0;
+    };
+    unsafe { (*atomic_ptr).value.fetch_sub(delta, Ordering::AcqRel) }
+}
+
+/// Atomically AND and return previous value.
+#[no_mangle]
+pub extern "C" fn rt_atomic_fetch_and(atomic: RuntimeValue, mask: i64) -> i64 {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return 0;
+    };
+    unsafe { (*atomic_ptr).value.fetch_and(mask, Ordering::AcqRel) }
+}
+
+/// Atomically OR and return previous value.
+#[no_mangle]
+pub extern "C" fn rt_atomic_fetch_or(atomic: RuntimeValue, mask: i64) -> i64 {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return 0;
+    };
+    unsafe { (*atomic_ptr).value.fetch_or(mask, Ordering::AcqRel) }
+}
+
+/// Free atomic.
+#[no_mangle]
+pub extern "C" fn rt_atomic_free(atomic: RuntimeValue) {
+    let Some(atomic_ptr) = as_atomic_ptr(atomic) else {
+        return;
+    };
+
+    unsafe {
+        let size = std::mem::size_of::<RuntimeAtomic>();
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        std::alloc::dealloc(atomic_ptr as *mut u8, layout);
+    }
+}
+
+// ============================================================================
+// Mutex Implementation (#1102)
 // ============================================================================
 
 /// Runtime mutex wrapping a value with mutual exclusion.
@@ -160,6 +317,60 @@ include!("sync_barrier.rs");
 mod tests {
     use super::*;
     use std::thread;
+
+    #[test]
+    fn test_atomic_basic() {
+        let atomic = rt_atomic_new(42);
+        assert!(atomic.is_heap());
+
+        // Load
+        assert_eq!(rt_atomic_load(atomic), 42);
+
+        // Store
+        rt_atomic_store(atomic, 100);
+        assert_eq!(rt_atomic_load(atomic), 100);
+
+        // Swap
+        let old = rt_atomic_swap(atomic, 200);
+        assert_eq!(old, 100);
+        assert_eq!(rt_atomic_load(atomic), 200);
+
+        // Compare exchange (success)
+        let mut result = 0i64;
+        let success = rt_atomic_compare_exchange(atomic, 200, 300, &mut result as *mut i64);
+        assert_eq!(success, 1);
+        assert_eq!(result, 200);
+        assert_eq!(rt_atomic_load(atomic), 300);
+
+        // Compare exchange (failure)
+        let success2 = rt_atomic_compare_exchange(atomic, 999, 400, &mut result as *mut i64);
+        assert_eq!(success2, 0);
+        assert_eq!(result, 300); // Current value
+        assert_eq!(rt_atomic_load(atomic), 300); // Unchanged
+
+        // Fetch add
+        let old = rt_atomic_fetch_add(atomic, 50);
+        assert_eq!(old, 300);
+        assert_eq!(rt_atomic_load(atomic), 350);
+
+        // Fetch sub
+        let old = rt_atomic_fetch_sub(atomic, 50);
+        assert_eq!(old, 350);
+        assert_eq!(rt_atomic_load(atomic), 300);
+
+        // Fetch and
+        let old = rt_atomic_fetch_and(atomic, 0xFF);
+        assert_eq!(old, 300);
+        assert_eq!(rt_atomic_load(atomic), 300 & 0xFF);
+
+        // Fetch or
+        rt_atomic_store(atomic, 0x0F);
+        let old = rt_atomic_fetch_or(atomic, 0xF0);
+        assert_eq!(old, 0x0F);
+        assert_eq!(rt_atomic_load(atomic), 0xFF);
+
+        rt_atomic_free(atomic);
+    }
 
     #[test]
     fn test_mutex_basic() {

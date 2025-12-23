@@ -313,6 +313,21 @@ fn parse_trait_impl() {
     parse_ok("impl Show for Point:\n    fn show(self):\n        return 0");
 }
 
+#[test]
+fn parse_default_trait_impl_attribute() {
+    let items = parse(
+        "#[default]\nimpl[T] Process for T:\n    fn process(self):\n        return 0",
+    );
+    if let Node::Impl(impl_block) = &items[0] {
+        assert!(impl_block
+            .attributes
+            .iter()
+            .any(|attr| attr.name == "default"));
+    } else {
+        panic!("Expected impl block");
+    }
+}
+
 // Default trait implementation tests
 #[test]
 fn parse_trait_abstract_method() {
@@ -1019,6 +1034,93 @@ fn parse_type_unit_where_negative_range() {
             assert_eq!(constraints.range, Some((-500, 500)));
         } else {
             panic!("expected UnitWithRepr");
+        }
+    } else {
+        panic!("expected function");
+    }
+}
+
+// Capability tests
+#[test]
+fn test_capability_mut_type() {
+    // Parse mut T syntax
+    let code = "fn update(x: mut Counter) -> i64:\n    return 0";
+    let items = parse(code);
+    if let Node::Function(f) = &items[0] {
+        if let Type::Capability { capability, inner } = &f.params[0].ty.as_ref().unwrap() {
+            assert_eq!(*capability, ReferenceCapability::Exclusive);
+            assert!(matches!(&**inner, Type::Simple(name) if name == "Counter"));
+        } else {
+            panic!("expected Capability type, got {:?}", f.params[0].ty);
+        }
+    } else {
+        panic!("expected function");
+    }
+}
+
+#[test]
+fn test_capability_iso_type() {
+    // Parse iso T syntax
+    let code = "fn transfer(data: iso Data) -> i64:\n    return 0";
+    let items = parse(code);
+    if let Node::Function(f) = &items[0] {
+        if let Type::Capability { capability, inner } = &f.params[0].ty.as_ref().unwrap() {
+            assert_eq!(*capability, ReferenceCapability::Isolated);
+            assert!(matches!(&**inner, Type::Simple(name) if name == "Data"));
+        } else {
+            panic!("expected Capability type, got {:?}", f.params[0].ty);
+        }
+    } else {
+        panic!("expected function");
+    }
+}
+
+#[test]
+fn test_capability_default_shared() {
+    // No prefix = default (Shared) capability
+    let code = "fn read(x: Counter) -> i64:\n    return 0";
+    let items = parse(code);
+    if let Node::Function(f) = &items[0] {
+        // Default capability should just be a Simple type (no Capability wrapper)
+        assert!(matches!(&f.params[0].ty, Some(Type::Simple(name)) if name == "Counter"));
+    } else {
+        panic!("expected function");
+    }
+}
+
+#[test]
+fn test_capability_with_generic() {
+    // mut with generic type
+    let code = "fn modify(x: mut List[i64]) -> i64:\n    return 0";
+    let items = parse(code);
+    if let Node::Function(f) = &items[0] {
+        if let Type::Capability { capability, inner } = &f.params[0].ty.as_ref().unwrap() {
+            assert_eq!(*capability, ReferenceCapability::Exclusive);
+            assert!(matches!(&**inner, Type::Generic { name, .. } if name == "List"));
+        } else {
+            panic!("expected Capability type");
+        }
+    } else {
+        panic!("expected function");
+    }
+}
+
+#[test]
+fn test_capability_nested() {
+    // Nested capability types (should parse but semantically invalid)
+    let code = "fn weird(x: mut mut Counter) -> i64:\n    return 0";
+    let items = parse(code);
+    if let Node::Function(f) = &items[0] {
+        // Should parse as Capability(Exclusive, Capability(Exclusive, Counter))
+        if let Type::Capability { capability: cap1, inner: inner1 } = &f.params[0].ty.as_ref().unwrap() {
+            assert_eq!(*cap1, ReferenceCapability::Exclusive);
+            if let Type::Capability { capability: cap2, .. } = &**inner1 {
+                assert_eq!(*cap2, ReferenceCapability::Exclusive);
+            } else {
+                panic!("expected nested Capability");
+            }
+        } else {
+            panic!("expected Capability type");
         }
     } else {
         panic!("expected function");

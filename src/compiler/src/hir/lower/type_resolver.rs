@@ -1,4 +1,4 @@
-use simple_parser::{Expr, Type};
+use simple_parser::{ast::ReferenceCapability, Expr, Type};
 
 use super::super::types::*;
 use super::error::{LowerError, LowerResult};
@@ -16,6 +16,7 @@ impl Lowerer {
                 let inner_id = self.resolve_type(inner)?;
                 let ptr_type = HirType::Pointer {
                     kind: (*kind).into(),
+                    capability: ReferenceCapability::Shared, // Default capability
                     inner: inner_id,
                 };
                 Ok(self.module.types.register(ptr_type))
@@ -67,6 +68,7 @@ impl Lowerer {
                 let inner_id = self.resolve_type(inner)?;
                 Ok(self.module.types.register(HirType::Pointer {
                     kind: PointerKind::Shared,
+                    capability: ReferenceCapability::Shared, // Default capability
                     inner: inner_id,
                 }))
             }
@@ -119,6 +121,43 @@ impl Lowerer {
                     is_float,
                     constraints: hir_constraints,
                 }))
+            }
+            Type::Capability { capability, inner } => {
+                // Resolve the inner type first
+                let inner_id = self.resolve_type(inner)?;
+
+                // Get the inner HIR type to check if it's already a pointer
+                if let Some(inner_hir) = self.module.types.get(inner_id) {
+                    match inner_hir {
+                        HirType::Pointer { kind, capability: _, inner: ptr_inner } => {
+                            // Inner is already a pointer, update its capability
+                            let ptr_type = HirType::Pointer {
+                                kind: *kind,
+                                capability: *capability,
+                                inner: *ptr_inner,
+                            };
+                            Ok(self.module.types.register(ptr_type))
+                        }
+                        _ => {
+                            // Inner is not a pointer, wrap it in a reference with the capability
+                            // Use Borrow for shared, BorrowMut for exclusive/isolated
+                            let kind = if capability.allows_mutation() {
+                                PointerKind::BorrowMut
+                            } else {
+                                PointerKind::Borrow
+                            };
+                            let ptr_type = HirType::Pointer {
+                                kind,
+                                capability: *capability,
+                                inner: inner_id,
+                            };
+                            Ok(self.module.types.register(ptr_type))
+                        }
+                    }
+                } else {
+                    // Cannot get inner type, error
+                    Err(LowerError::UnknownType(format!("capability inner type {:?}", inner)))
+                }
             }
             _ => Err(LowerError::Unsupported(format!("{:?}", ty))),
         }

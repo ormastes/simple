@@ -9,7 +9,8 @@
 //! - Actor/future/generator support
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 
 use simple_common::actor::{ActorSpawner, Message, ThreadSpawner};
@@ -18,10 +19,12 @@ use simple_parser::ast::{
     Expr, ExternDef, FStringPart, ForStmt, FunctionDef, IfStmt, LambdaParam, LetStmt, LoopStmt,
     MacroArg, MacroContractItem, MacroDef, MacroStmt, MatchArm, MatchStmt, Node, Pattern,
     PointerKind, RangeBound, ReturnStmt, Type, UnaryArithmeticOp, UnaryOp, UnitDef, WhileStmt,
-    WithStmt,
+    WithStmt, ImplBlock,
 };
 use tracing::instrument;
 
+use crate::aop_config::AopConfig;
+use crate::di::DiConfig;
 use crate::effects::check_effect_violations;
 use crate::error::CompileError;
 use crate::value::{
@@ -30,6 +33,33 @@ use crate::value::{
     SpecialEnumType, ThreadPoolValue, Value, ATTR_STRONG, BUILTIN_ARRAY, BUILTIN_CHANNEL,
     BUILTIN_RANGE, METHOD_MISSING, METHOD_NEW, METHOD_SELF,
 };
+
+thread_local! {
+    pub(crate) static DI_CONFIG: RefCell<Option<Arc<DiConfig>>> = RefCell::new(None);
+    pub(crate) static DI_SINGLETONS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
+    pub(crate) static AOP_CONFIG: RefCell<Option<Arc<AopConfig>>> = RefCell::new(None);
+}
+
+pub(crate) fn set_di_config(di: Option<DiConfig>) {
+    DI_CONFIG.with(|cell| {
+        *cell.borrow_mut() = di.map(Arc::new);
+    });
+    DI_SINGLETONS.with(|cell| cell.borrow_mut().clear());
+}
+
+pub(crate) fn get_di_config() -> Option<Arc<DiConfig>> {
+    DI_CONFIG.with(|cell| cell.borrow().clone())
+}
+
+pub(crate) fn set_aop_config(config: Option<AopConfig>) {
+    AOP_CONFIG.with(|cell| {
+        *cell.borrow_mut() = config.map(Arc::new);
+    });
+}
+
+pub(crate) fn get_aop_config() -> Option<Arc<AopConfig>> {
+    AOP_CONFIG.with(|cell| cell.borrow().clone())
+}
 
 //==============================================================================
 // Execution Context (for formal verification)
@@ -705,6 +735,13 @@ pub(crate) type Traits = HashMap<String, simple_parser::ast::TraitDef>;
 /// Used to track which types implement which traits
 pub(crate) type TraitImpls = HashMap<(String, String), Vec<FunctionDef>>;
 
+#[derive(Default)]
+struct TraitImplRegistry {
+    blanket_impl: bool,
+    default_blanket_impl: bool,
+    specific_impls: HashSet<String>,
+}
+
 /// Control flow for statement execution.
 pub(crate) enum Control {
     Next,
@@ -795,6 +832,30 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
 /// Evaluate the module and return the `main` binding as an i32.
 #[instrument(skip(items))]
 pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
+    evaluate_module_with_di_and_aop(items, None, None)
+}
+
+pub fn evaluate_module_with_di(
+    items: &[Node],
+    di_config: Option<&DiConfig>,
+) -> Result<i32, CompileError> {
+    evaluate_module_with_di_and_aop(items, di_config, None)
+}
+
+pub fn evaluate_module_with_di_and_aop(
+    items: &[Node],
+    di_config: Option<&DiConfig>,
+    aop_config: Option<&AopConfig>,
+) -> Result<i32, CompileError> {
+    set_di_config(di_config.cloned());
+    set_aop_config(aop_config.cloned());
+    let result = evaluate_module_impl(items);
+    set_di_config(None);
+    set_aop_config(None);
+    result
+}
+
+fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
     // Clear const names, extern functions, and moved variables from previous runs
     CONST_NAMES.with(|cell| cell.borrow_mut().clear());
     clear_moved_vars();
@@ -825,6 +886,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
     let mut unit_families: UnitFamilies = HashMap::new();
     let mut traits: Traits = HashMap::new();
     let mut trait_impls: TraitImpls = HashMap::new();
+    let mut trait_impl_registry: HashMap<String, TraitImplRegistry> = HashMap::new();
 
     // First pass: register all functions (needed for decorator lookup)
     for item in items {
@@ -946,6 +1008,7 @@ pub fn evaluate_module(items: &[Node]) -> Result<i32, CompileError> {
                 );
             }
             Node::Impl(impl_block) => {
+                register_trait_impl(&mut trait_impl_registry, impl_block)?;
                 let type_name = get_type_name(&impl_block.target_type);
                 let methods = impl_methods.entry(type_name.clone()).or_insert_with(Vec::new);
                 for method in &impl_block.methods {
@@ -1249,6 +1312,75 @@ fn get_type_name(ty: &Type) -> String {
         Type::Generic { name, .. } => name.clone(),
         _ => "unknown".to_string(),
     }
+}
+
+fn register_trait_impl(
+    registry: &mut HashMap<String, TraitImplRegistry>,
+    impl_block: &ImplBlock,
+) -> Result<(), CompileError> {
+    let is_default = impl_block
+        .attributes
+        .iter()
+        .any(|attr| attr.name == "default");
+
+    let Some(trait_name) = &impl_block.trait_name else {
+        if is_default {
+            return Err(CompileError::Semantic(
+                "#[default] is only valid on trait impls".to_string(),
+            ));
+        }
+        return Ok(());
+    };
+
+    let is_blanket = match &impl_block.target_type {
+        Type::Simple(name) => impl_block.generic_params.iter().any(|p| p == name),
+        _ => false,
+    };
+
+    if is_default && !is_blanket {
+        return Err(CompileError::Semantic(format!(
+            "#[default] impl for trait `{}` must be a blanket impl (impl[T] Trait for T)",
+            trait_name
+        )));
+    }
+
+    let target_key = get_type_name(&impl_block.target_type);
+    let entry = registry.entry(trait_name.clone()).or_default();
+
+    if is_blanket {
+        if entry.blanket_impl {
+            return Err(CompileError::Semantic(format!(
+                "duplicate blanket impl for trait `{}`",
+                trait_name
+            )));
+        }
+        if !is_default && (!entry.specific_impls.is_empty() || entry.default_blanket_impl) {
+            return Err(CompileError::Semantic(format!(
+                "overlapping impls for trait `{}`: blanket impl conflicts with existing impls",
+                trait_name
+            )));
+        }
+        entry.blanket_impl = true;
+        entry.default_blanket_impl = is_default;
+        return Ok(());
+    }
+
+    if entry.specific_impls.contains(&target_key) {
+        return Err(CompileError::Semantic(format!(
+            "duplicate impl for trait `{}` and type `{}`",
+            trait_name, target_key
+        )));
+    }
+
+    if entry.blanket_impl && !entry.default_blanket_impl {
+        return Err(CompileError::Semantic(format!(
+            "overlapping impls for trait `{}`: specific impl for `{}` conflicts with blanket impl",
+            trait_name, target_key
+        )));
+    }
+
+    entry.specific_impls.insert(target_key);
+    Ok(())
 }
 
 pub(crate) fn exec_node(

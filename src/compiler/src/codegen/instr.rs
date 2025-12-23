@@ -194,6 +194,17 @@ pub fn compile_instruction<M: Module>(
                         ctx.vreg_values.insert(*d, results[0]);
                     }
                 }
+            } else if let Some(&runtime_id) = ctx.runtime_funcs.get(func_name) {
+                // Runtime FFI function
+                let runtime_ref = ctx.module.declare_func_in_func(runtime_id, builder.func);
+                let arg_vals: Vec<_> = args.iter().map(|a| ctx.vreg_values[a]).collect();
+                let call = builder.ins().call(runtime_ref, &arg_vals);
+                if let Some(d) = dest {
+                    let results = builder.inst_results(call);
+                    if !results.is_empty() {
+                        ctx.vreg_values.insert(*d, results[0]);
+                    }
+                }
             }
         }
 

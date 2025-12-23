@@ -208,7 +208,7 @@ impl TypeRegistry {
             }
 
             // Pointers are only safe if they're immutable borrows
-            Some(HirType::Pointer { kind, inner }) => {
+            Some(HirType::Pointer { kind, capability: _, inner }) => {
                 matches!(kind, PointerKind::Borrow) && self.is_snapshot_safe(*inner)
             }
 

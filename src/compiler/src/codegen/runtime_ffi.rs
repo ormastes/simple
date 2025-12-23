@@ -52,6 +52,11 @@ const F64: types::Type = types::F64;
 /// All runtime FFI function specifications.
 pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
+    // AOP runtime operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_aop_invoke_around", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_aop_proceed", &[I64], &[I64]),
+    // =========================================================================
     // Array operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_array_new", &[I64], &[I64]),

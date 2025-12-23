@@ -569,7 +569,29 @@ pub enum Value {
     Mock(MockValue),
     /// Argument matcher for mock verification
     Matcher(MatcherValue),
+    /// Native callable for interpreter intrinsics (internal use only).
+    NativeFunction(NativeFunction),
     Nil,
+}
+
+pub struct NativeFunction {
+    pub name: String,
+    pub func: Arc<dyn Fn(&[Value]) -> Result<Value, CompileError> + Send + Sync>,
+}
+
+impl fmt::Debug for NativeFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "NativeFunction({})", self.name)
+    }
+}
+
+impl Clone for NativeFunction {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            func: Arc::clone(&self.func),
+        }
+    }
 }
 
 // Value implementation methods

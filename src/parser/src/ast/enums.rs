@@ -52,6 +52,74 @@ impl Mutability {
     }
 }
 
+/// Reference capability for aliasing control.
+///
+/// Controls what operations are permitted on a reference and whether
+/// it can be aliased. This enables compile-time prevention of data races
+/// and provides safe shared mutable state in lock_base concurrency mode.
+///
+/// Note: This is distinct from `nodes::Capability` which is for module-level
+/// capability requirements (Pure, Io, Net, etc.). This enum is for reference
+/// capabilities at the type level (shared/exclusive/isolated).
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive ReferenceCapability
+///   | shared     -- T (read-only, aliasable)
+///   | exclusive  -- mut T (single writer, no aliasing)
+///   | isolated   -- iso T (unique + transferable across threads)
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReferenceCapability {
+    /// Shared immutable reference (default)
+    /// - Read-only access
+    /// - Multiple references allowed
+    /// - Cannot be modified
+    #[default]
+    Shared,
+
+    /// Exclusive mutable capability (mut T)
+    /// - Read-write access
+    /// - Only one reference at a time
+    /// - Cannot coexist with other references
+    /// - Not transferable across thread boundaries
+    Exclusive,
+
+    /// Isolated transferable capability (iso T)
+    /// - Unique mutable reference
+    /// - Only one reference at a time
+    /// - Can be transferred across thread/actor boundaries
+    /// - Can be downgraded to mut T (consuming isolation)
+    Isolated,
+}
+
+impl ReferenceCapability {
+    /// Check if this is a shared capability
+    pub fn is_shared(&self) -> bool {
+        matches!(self, ReferenceCapability::Shared)
+    }
+
+    /// Check if this is an exclusive capability
+    pub fn is_exclusive(&self) -> bool {
+        matches!(self, ReferenceCapability::Exclusive)
+    }
+
+    /// Check if this is an isolated capability
+    pub fn is_isolated(&self) -> bool {
+        matches!(self, ReferenceCapability::Isolated)
+    }
+
+    /// Check if this capability allows mutation
+    pub fn allows_mutation(&self) -> bool {
+        !self.is_shared()
+    }
+
+    /// Check if this capability can be transferred across threads/actors
+    pub fn is_transferable(&self) -> bool {
+        self.is_isolated()
+    }
+}
+
 /// Storage class of a variable declaration.
 /// Controls where and how memory is allocated.
 ///

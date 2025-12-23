@@ -640,6 +640,15 @@ fn format_type(ty: &Type) -> String {
             None => format!("Constructor[{}]", format_type(target)),
         },
         Type::Simd { lanes, element } => format!("vec[{}, {}]", lanes, format_type(element)),
+        Type::Capability { capability, inner } => {
+            use crate::ast::ReferenceCapability;
+            let prefix = match capability {
+                ReferenceCapability::Shared => "",
+                ReferenceCapability::Exclusive => "mut ",
+                ReferenceCapability::Isolated => "iso ",
+            };
+            format!("{}{}", prefix, format_type(inner))
+        }
         Type::UnitWithRepr {
             name,
             repr,

@@ -371,6 +371,7 @@ impl RuntimeValue {
                 Some(HeapObjectType::RwLock) => "rwlock",
                 Some(HeapObjectType::Semaphore) => "semaphore",
                 Some(HeapObjectType::Barrier) => "barrier",
+                Some(HeapObjectType::Atomic) => "atomic",
                 None => "null",
             },
             _ => "unknown",

@@ -1,4 +1,4 @@
-use simple_parser::ast::{Mutability, Visibility};
+use simple_parser::ast::{Mutability, ReferenceCapability, Visibility};
 use std::collections::HashMap;
 
 //==============================================================================
@@ -141,6 +141,7 @@ pub enum HirType {
     Nil,
     Pointer {
         kind: PointerKind,
+        capability: ReferenceCapability,
         inner: TypeId,
     },
     Array {
@@ -392,6 +393,82 @@ impl From<simple_parser::PointerKind> for PointerKind {
             simple_parser::PointerKind::Handle => PointerKind::Handle,
             simple_parser::PointerKind::Borrow => PointerKind::Borrow,
             simple_parser::PointerKind::BorrowMut => PointerKind::BorrowMut,
+        }
+    }
+}
+
+//==============================================================================
+// Concurrency Modes (for capability restrictions)
+//==============================================================================
+// Controls what capabilities are allowed in functions based on their
+// concurrency model. This enables safe shared mutable state in lock_base mode
+// while preventing it in actor mode (message passing only).
+
+/// Concurrency mode for a function
+///
+/// Determines what capabilities are allowed and what synchronization
+/// primitives are available.
+///
+/// Lean equivalent:
+/// ```lean
+/// inductive ConcurrencyMode
+///   | actor      -- Message passing only (default)
+///   | lock_base  -- Shared mutable state with locks
+///   | unsafe     -- Manual control, no guarantees
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ConcurrencyMode {
+    /// Actor mode (default): Message passing only
+    /// - Only iso T allowed for transfers
+    /// - No mut T (no shared mutable state)
+    /// - Safe by construction
+    #[default]
+    Actor,
+
+    /// Lock-based mode: Shared mutable state with locks
+    /// - mut T allowed with proper synchronization
+    /// - iso T allowed for transfers
+    /// - Requires lock acquisition for mut access
+    LockBase,
+
+    /// Unsafe mode: Manual control
+    /// - All capabilities allowed
+    /// - No compiler-enforced safety
+    /// - Used for low-level code
+    Unsafe,
+}
+
+impl ConcurrencyMode {
+    /// Parse from attribute argument string
+    pub fn from_attr_arg(arg: &str) -> Option<Self> {
+        match arg {
+            "actor" => Some(ConcurrencyMode::Actor),
+            "lock_base" => Some(ConcurrencyMode::LockBase),
+            "unsafe" => Some(ConcurrencyMode::Unsafe),
+            _ => None,
+        }
+    }
+
+    /// Check if mut T is allowed in this mode
+    pub fn allows_mut(&self) -> bool {
+        match self {
+            ConcurrencyMode::Actor => false,
+            ConcurrencyMode::LockBase => true,
+            ConcurrencyMode::Unsafe => true,
+        }
+    }
+
+    /// Check if iso T is allowed in this mode (always true)
+    pub fn allows_iso(&self) -> bool {
+        true // iso T can be transferred in all modes
+    }
+
+    /// Get human-readable name
+    pub fn name(&self) -> &'static str {
+        match self {
+            ConcurrencyMode::Actor => "actor",
+            ConcurrencyMode::LockBase => "lock_base",
+            ConcurrencyMode::Unsafe => "unsafe",
         }
     }
 }
@@ -892,6 +969,10 @@ pub struct HirFunction {
     /// Whether this function is marked as pure (no side effects)
     /// Pure functions can be called from contract expressions (CTR-030-032)
     pub is_pure: bool,
+    /// Whether this function uses DI constructor injection
+    pub inject: bool,
+    /// Concurrency mode for this function (actor, lock_base, unsafe)
+    pub concurrency_mode: ConcurrencyMode,
 }
 
 impl HirFunction {
@@ -1238,6 +1319,8 @@ mod tests {
             visibility: Visibility::Public,
             contract: None,
             is_pure: false,
+            inject: false,
+            concurrency_mode: ConcurrencyMode::Actor,
         };
 
         assert_eq!(func.name, "add");

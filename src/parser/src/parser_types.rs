@@ -42,6 +42,24 @@ impl<'a> Parser<'a> {
             return Ok(Type::Function { params, ret });
         }
 
+        // Handle capability prefixes: mut T, iso T
+        if self.check(&TokenKind::Mut) {
+            self.advance();
+            let inner = self.parse_single_type()?;
+            return Ok(Type::Capability {
+                capability: ReferenceCapability::Exclusive,
+                inner: Box::new(inner),
+            });
+        }
+        if self.check_ident("iso") {
+            self.advance();
+            let inner = self.parse_single_type()?;
+            return Ok(Type::Capability {
+                capability: ReferenceCapability::Isolated,
+                inner: Box::new(inner),
+            });
+        }
+
         // Handle pointer types
         match &self.current.kind {
             TokenKind::Ampersand => {
