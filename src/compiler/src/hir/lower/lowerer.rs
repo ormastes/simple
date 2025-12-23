@@ -10,6 +10,8 @@ pub struct Lowerer {
     /// Set of function names that are marked with #[pure] (CTR-031)
     /// These functions can be called from contract expressions
     pub(super) pure_functions: HashSet<String>,
+    /// Current class/struct type being lowered (for Self resolution)
+    pub(super) current_class_type: Option<TypeId>,
 }
 
 impl Lowerer {
@@ -18,6 +20,7 @@ impl Lowerer {
             module: HirModule::new(),
             globals: HashMap::new(),
             pure_functions: HashSet::new(),
+            current_class_type: None,
         }
     }
 

@@ -907,6 +907,8 @@ pub struct LocalVar {
     pub name: String,
     pub ty: TypeId,
     pub mutability: Mutability,
+    /// Per-parameter DI injection flag (#1013)
+    pub inject: bool,
 }
 
 impl LocalVar {
@@ -973,6 +975,12 @@ pub struct HirFunction {
     pub inject: bool,
     /// Concurrency mode for this function (actor, lock_base, unsafe)
     pub concurrency_mode: ConcurrencyMode,
+    /// Module path where this function is defined (for AOP predicate matching)
+    pub module_path: String,
+    /// Compile-time attributes (e.g., "inline", "deprecated") for AOP matching
+    pub attributes: Vec<String>,
+    /// Effect decorators (e.g., "async", "pure", "io") for AOP effect() selector
+    pub effects: Vec<String>,
 }
 
 impl HirFunction {
@@ -1059,6 +1067,54 @@ impl HirRefinedType {
     }
 }
 
+// === AOP & Unified Predicates (#1000-1050) ===
+
+/// HIR representation of an AOP advice declaration.
+#[derive(Debug, Clone)]
+pub struct HirAopAdvice {
+    pub predicate_text: String,
+    pub advice_function: String,
+    pub form: String, // "before", "after_success", "after_error", "around"
+    pub priority: i64,
+}
+
+/// HIR representation of a DI binding.
+#[derive(Debug, Clone)]
+pub struct HirDiBinding {
+    pub predicate_text: String,
+    pub implementation: String,
+    pub scope: Option<String>, // "singleton", "transient", "scoped"
+    pub priority: i64,
+}
+
+/// HIR representation of an architecture rule.
+#[derive(Debug, Clone)]
+pub struct HirArchRule {
+    pub rule_type: String, // "forbid" or "allow"
+    pub predicate_text: String,
+    pub message: Option<String>,
+    pub priority: i64,
+}
+
+/// HIR representation of a mock declaration.
+#[derive(Debug, Clone)]
+pub struct HirMockDecl {
+    pub name: String,
+    pub trait_name: String,
+    pub expectations: Vec<String>,
+}
+
+/// HIR representation of an import statement.
+#[derive(Debug, Clone)]
+pub struct HirImport {
+    /// The module path being imported from (e.g., ["crate", "core", "Option"])
+    pub from_path: Vec<String>,
+    /// The items being imported (name -> optional alias)
+    pub items: Vec<(String, Option<String>)>,
+    /// Whether this is a glob import (import *)
+    pub is_glob: bool,
+}
+
 /// HIR module
 #[derive(Debug)]
 pub struct HirModule {
@@ -1070,6 +1126,16 @@ pub struct HirModule {
     pub type_invariants: std::collections::HashMap<String, HirTypeInvariant>,
     /// Refined types: maps refined type name to its definition (CTR-020)
     pub refined_types: std::collections::HashMap<String, HirRefinedType>,
+    /// AOP advice declarations (#1000-1050)
+    pub aop_advices: Vec<HirAopAdvice>,
+    /// DI bindings (#1009-1019)
+    pub di_bindings: Vec<HirDiBinding>,
+    /// Architecture rules (#1026-1035)
+    pub arch_rules: Vec<HirArchRule>,
+    /// Mock declarations (#1020-1025)
+    pub mock_decls: Vec<HirMockDecl>,
+    /// Import statements for dependency tracking
+    pub imports: Vec<HirImport>,
 }
 
 impl HirModule {
@@ -1081,6 +1147,11 @@ impl HirModule {
             globals: Vec::new(),
             type_invariants: std::collections::HashMap::new(),
             refined_types: std::collections::HashMap::new(),
+            aop_advices: Vec::new(),
+            di_bindings: Vec::new(),
+            arch_rules: Vec::new(),
+            mock_decls: Vec::new(),
+            imports: Vec::new(),
         }
     }
 
@@ -1293,11 +1364,13 @@ mod tests {
                     name: "a".to_string(),
                     ty: TypeId::I64,
                     mutability: Mutability::Immutable,
+                    inject: false,
                 },
                 LocalVar {
                     name: "b".to_string(),
                     ty: TypeId::I64,
                     mutability: Mutability::Immutable,
+                    inject: false,
                 },
             ],
             locals: vec![],
@@ -1321,6 +1394,9 @@ mod tests {
             is_pure: false,
             inject: false,
             concurrency_mode: ConcurrencyMode::Actor,
+            module_path: String::new(),
+            attributes: vec![],
+            effects: vec![],
         };
 
         assert_eq!(func.name, "add");

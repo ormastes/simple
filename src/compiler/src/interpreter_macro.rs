@@ -1,5 +1,19 @@
 // Macro invocation and expansion (part of interpreter module)
 
+use crate::macro_contracts::{process_macro_contract, MacroContractResult};
+use crate::macro_validation::validate_macro_defined_before_use;
+
+thread_local! {
+    /// Accumulates symbols introduced by macro expansion
+    /// These need to be registered by the caller after macro invocation
+    static MACRO_INTRODUCED_SYMBOLS: RefCell<Option<MacroContractResult>> = RefCell::new(None);
+}
+
+/// Get and clear introduced symbols from last macro expansion
+pub fn take_macro_introduced_symbols() -> Option<MacroContractResult> {
+    MACRO_INTRODUCED_SYMBOLS.with(|cell| cell.borrow_mut().take())
+}
+
 fn evaluate_macro_invocation(
     name: &str,
     macro_args: &[MacroArg],
@@ -154,9 +168,23 @@ fn expand_user_macro(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Validate ordering: macro must be defined before use (#1304)
+    let definition_order = MACRO_DEFINITION_ORDER.with(|cell| cell.borrow().clone());
+    validate_macro_defined_before_use(&macro_def.name, 0, &definition_order)?;
+
     let mut local_env = env.clone();
     let const_bindings = build_macro_const_bindings(macro_def, args, env, functions, classes, enums, impl_methods)?;
     let mut hygiene_ctx = MacroHygieneContext::new();
+
+    // Process macro contracts to determine introduced symbols (#1303)
+    // Also performs shadowing validation (#1304)
+    let contract_result = process_macro_contract(macro_def, &const_bindings, env, functions, classes)?;
+
+    // Store introduced symbols in thread-local for caller to register
+    // This is necessary because symbol tables are immutable during evaluation
+    MACRO_INTRODUCED_SYMBOLS.with(|cell| {
+        *cell.borrow_mut() = Some(contract_result);
+    });
 
     for (idx, param) in macro_def.params.iter().enumerate() {
         if let Some(MacroArg::Expr(e)) = args.get(idx) {

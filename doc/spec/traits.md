@@ -391,6 +391,109 @@ let title = "hello world".to_title_case()  # "Hello World"
 
 ---
 
+### Extension Traits (#1154)
+
+Extension traits provide a way to add methods to foreign types while following coherence rules. By defining a local trait, you can implement it for any type (foreign or local) since the trait is local.
+
+**Pattern:**
+
+```simple
+# Define a local extension trait
+trait StringExt:
+    fn to_title_case(self) -> String
+    fn word_count(self) -> i32
+
+# Implement for foreign type - ALLOWED because trait is local
+impl StringExt for String:
+    fn to_title_case(self) -> String:
+        # implementation
+        return self  # simplified
+    
+    fn word_count(self) -> i32:
+        return self.split(" ").len()
+
+# Usage
+fn main():
+    let text = "hello world"
+    print(text.to_title_case())  # Works!
+    print(text.word_count())      # Works!
+```
+
+**Coherence Rules:**
+
+Extension traits follow the standard orphan rule:
+- ✅ Local trait + Foreign type: **ALLOWED** (trait is local)
+- ✅ Local trait + Local type: **ALLOWED** (both local)
+- ❌ Foreign trait + Foreign type: **NOT ALLOWED** (neither local)
+
+**Benefits:**
+
+1. **Type Safety:** Methods are only available when trait is in scope
+2. **No Conflicts:** Each crate defines its own extension traits
+3. **Explicit:** `use my_extensions::StringExt` makes it clear
+4. **Testable:** Can mock implementations for testing
+
+**Example - Extending Standard Types:**
+
+```simple
+# In your crate
+trait SliceExt[T]:
+    fn sum(self) -> T where T: Add
+
+impl[T: Add] SliceExt[T] for [T]:
+    fn sum(self) -> T:
+        let result = T::default()
+        for item in self:
+            result = result + item
+        return result
+
+# Usage
+use my_extensions::SliceExt
+
+fn main():
+    let numbers = [1, 2, 3, 4, 5]
+    print(numbers.sum())  # 15
+```
+
+**Example - Multiple Extension Traits:**
+
+```simple
+trait JsonExt:
+    fn to_json(self) -> String
+
+trait XmlExt:
+    fn to_xml(self) -> String
+
+struct User:
+    name: String
+    age: i32
+
+impl JsonExt for User:
+    fn to_json(self) -> String:
+        return "{\"name\":\"" + self.name + "\"}"
+
+impl XmlExt for User:
+    fn to_xml(self) -> String:
+        return "<user><name>" + self.name + "</name></user>"
+
+# Different contexts can use different extensions
+use json::JsonExt
+let user = User(name: "Alice", age: 30)
+print(user.to_json())  # JSON output
+
+use xml::XmlExt
+print(user.to_xml())   # XML output
+```
+
+**Coherence Validation:**
+
+The coherence checker automatically enforces extension trait rules:
+- Extension trait implementations must have local trait
+- No special syntax or attributes needed
+- Works with all existing coherence features (specialization, etc.)
+
+**Status:** ✅ Implemented (uses existing coherence rules)
+
 ## Trait Coherence Rules
 
 Coherence ensures that trait implementations are unambiguous and predictable across the entire program. Without coherence rules, different parts of a program could define conflicting implementations.
@@ -590,3 +693,99 @@ impl MyWrapper:
 - [Unit Types](units.md)
 - [Primitive as Object](primitive_as_obj.md)
 - [Design TODOs](../design/type_system_features.md)
+
+### Negative Trait Bounds (#1151)
+
+Negative trait bounds allow excluding types that implement certain traits. This is useful for conditional implementations and avoiding conflicts.
+
+**Syntax:**
+
+```simple
+# Negative bound: T must NOT implement Clone
+impl[T: !Clone] Copy for T:
+    fn copy() -> T:
+        # implementation
+        ...
+
+# Multiple bounds: T must be Send but NOT Sync
+impl[T: Send + !Sync] SafeWrapper for T:
+    # implementation
+    ...
+```
+
+**Use Cases:**
+
+1. **Conditional Blanket Impls:**
+```simple
+# Default implementation for non-Copy types
+#[default]
+impl[T: !Copy] Clone for T:
+    fn clone() -> T:
+        return self.deep_clone()
+
+# Specialized for Copy types (more efficient)
+impl[T: Copy] Clone for T:
+    fn clone() -> T:
+        return self  # Simple copy
+```
+
+2. **Avoiding Conflicts:**
+```simple
+trait Serialize:
+    fn to_bytes() -> [u8]
+
+# For types that don't have Display
+impl[T: !Display] Serialize for T:
+    fn to_bytes() -> [u8]:
+        return binary_serialize(self)
+
+# For types with Display (use text format)
+impl[T: Display] Serialize for T:
+    fn to_bytes() -> [u8]:
+        return self.to_string().as_bytes()
+```
+
+3. **Marker Trait Exclusion:**
+```simple
+trait UnsafePointer: ...
+
+# Only for types that are NOT UnsafePointer
+impl[T: !UnsafePointer] Safe for T:
+    # Safe operations only
+    ...
+```
+
+**Coherence Rules:**
+
+Negative bounds interact with specialization and overlap detection:
+
+- Two impls can coexist if one has negative bound: `T: Clone` vs `T: !Clone`
+- Negative bounds create disjoint sets (no overlap possible)
+- Specialization with #[default] still needed for same bounds
+
+**Example - Complete Pattern:**
+
+```simple
+trait Process:
+    fn process()
+
+# Default for all types except Clone
+#[default]
+impl[T: !Clone] Process for T:
+    fn process():
+        print("processing non-cloneable")
+
+# Specific for Clone types
+impl[T: Clone] Process for T:
+    fn process():
+        print("processing cloneable") 
+```
+
+**Status:** 🔄 Partial
+- AST support: ✅ Complete (`negative_bounds` field in `WhereBound`)
+- Parser support: 📋 Planned (`!Trait` syntax parsing)
+- Coherence checking: ✅ Infrastructure ready
+- Type checking: 📋 Planned (enforce exclusion at compile time)
+
+**Note:** Currently, the AST supports negative bounds but parser and full validation are pending. The coherence checker has infrastructure ready for when parser support is added.
+

@@ -544,13 +544,49 @@ You can paste this into simple_mock_helper/README.md or a doc in your main repo.
 `simple_mock_helper` provides:
 
 1. A **mock policy** library to control where mocks are allowed (unit / integration / system).
-2. A **coverage tool** to derive class/struct public-method coverage from LLVM coverage (`llvm-cov export -format=json`) and a simple `public_api.yml`.
+2. A **fluent API** for chainable mock setup and verification.
+3. A **coverage tool** to derive class/struct public-method coverage from LLVM coverage (`llvm-cov export -format=json`) and a simple `public_api.yml`.
 
 ---
 
-## 1. Mock policy
+## 1. Fluent API
 
-### 1.1 API
+The fluent API provides a modern, chainable interface for mock setup and verification, inspired by RSpec, Mockito, and Jest.
+
+### Quick Start
+
+```rust
+use simple_mock_helper::fluent::{MockSetup, MockVerify, Spy};
+
+// Setup mock behavior
+let mut setup = MockSetup::new("UserDao");
+setup.when("findById")
+    .with_args(&[123])
+    .returns("User(id: 123)")
+    .times(1);
+
+// Verify mock calls
+let mut verify = MockVerify::new("UserDao");
+verify.method("findById")
+    .was_called()
+    .with_args(&[123])
+    .once();
+
+assert!(verify.verify_all().is_ok());
+
+// Use spies to record calls
+let mut spy = Spy::new("Notifier");
+spy.record("notify", vec!["user.created", "123"]);
+assert_eq!(spy.call_count("notify"), 1);
+```
+
+**See [FLUENT_API.md](FLUENT_API.md) for complete documentation.**
+
+---
+
+## 2. Mock policy
+
+### 2.1 API
 
 ```rust
 use simple_mock_helper::mock_policy;
@@ -569,7 +605,7 @@ Patterns are checked against module_path!().
 Default policy (init_mocks_for_only_default) allows only modules containing ::hal:: or ::sub_hal::.
 
 
-1.2 Typical structure
+### 2.2 Typical structure
 
 We usually split tests into three binaries:
 
@@ -674,11 +710,11 @@ impl Gpio for GpioMock {
 
 ---
 
-2. Class/struct public-method coverage
+## 3. Class/struct public-method coverage
 
 simple_mock_helper::coverage turns LLVM coverage JSON into per-class public-method coverage.
 
-2.1 Data inputs
+### 3.1 Data inputs
 
 1. LLVM coverage JSON from llvm-cov export:
 
@@ -706,7 +742,7 @@ types:
 
 
 
-2.2 Library API
+### 3.2 Library API
 
 use simple_mock_helper::coverage::{
     load_llvm_cov_export,
@@ -723,7 +759,7 @@ let api = load_public_api_spec("public_api.yml")?;
 let results = compute_class_coverage(&cov, &api);
 print_class_coverage_table(&results, None);
 
-2.3 CLI tool: smh_coverage
+### 3.3 CLI tool: smh_coverage
 
 Build and run:
 
@@ -746,7 +782,7 @@ Bar                                                1 / 2      50.00%
 
 TOTAL: 3/5 public methods covered (60.00%)
 
-2.4 Matching logic
+### 3.4 Matching logic
 
 LLVM coverage functions are taken from data[*].functions[*].name.
 
@@ -767,7 +803,7 @@ A public method (type_name, method_name) is considered covered if any function w
 
 ---
 
-3. Integration with existing coverage
+## 4. Integration with existing coverage
 
 simple_mock_helper does not replace your existing coverage reports:
 

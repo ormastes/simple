@@ -166,6 +166,8 @@ thread_local! {
     pub(crate) static GENERATOR_YIELDS: RefCell<Option<Vec<Value>>> = RefCell::new(None);
     /// User-defined macros
     pub(crate) static USER_MACROS: RefCell<HashMap<String, MacroDef>> = RefCell::new(HashMap::new());
+    /// Order in which macros are defined (for validating defined-before-use)
+    pub(crate) static MACRO_DEFINITION_ORDER: RefCell<Vec<String>> = RefCell::new(Vec::new());
     /// Type-safe execution mode (new, replaces Option fields above)
     pub(crate) static EXECUTION_MODE: RefCell<ExecutionMode> = RefCell::new(ExecutionMode::Normal);
     /// Maps unit suffix -> family name (for looking up which family a unit belongs to)
@@ -867,6 +869,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
             externs.insert(name.to_string());
         }
     });
+    // Clear macro definition order from previous runs
+    MACRO_DEFINITION_ORDER.with(|cell| cell.borrow_mut().clear());
     // Clear unit family info from previous runs
     UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow_mut().clear());
     UNIT_FAMILY_CONVERSIONS.with(|cell| cell.borrow_mut().clear());
@@ -1068,6 +1072,14 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
             Node::Macro(m) => {
                 macros.insert(m.name.clone(), m.clone());
                 USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
+
+                // Track macro definition order for one-pass LL(1) validation (#1304)
+                MACRO_DEFINITION_ORDER.with(|cell| cell.borrow_mut().push(m.name.clone()));
+
+                // Process macro contracts to register introduced symbols (#1303)
+                // Note: For now, contracts with const params need invocation-time processing
+                // But we can process non-parameterized contracts at definition time
+                // TODO: Full integration requires invocation-time symbol registration
             }
             Node::Trait(t) => {
                 // Register trait definition for use in impl checking
@@ -1260,6 +1272,48 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
                 }
+
+                // Register macro-introduced symbols (#1303)
+                // After macro invocation, check if any symbols were introduced
+                if let Some(contract_result) = take_macro_introduced_symbols() {
+                    // Register introduced functions
+                    for (name, func_def) in contract_result.introduced_functions {
+                        functions.insert(name.clone(), func_def);
+                        // Also add to env as a callable
+                        env.insert(
+                            name.clone(),
+                            Value::Function {
+                                name: name.clone(),
+                                def: Box::new(functions.get(&name).unwrap().clone()),
+                                captured_env: Env::new(),
+                            },
+                        );
+                    }
+
+                    // Register introduced classes
+                    for (name, class_def) in contract_result.introduced_classes {
+                        classes.insert(name.clone(), class_def);
+                        // Add to env as a constructor
+                        env.insert(
+                            name.clone(),
+                            Value::Constructor {
+                                class_name: name,
+                            },
+                        );
+                    }
+
+                    // Register introduced types (stored as Nil for now)
+                    for (name, _ty) in contract_result.introduced_types {
+                        env.insert(name, Value::Nil);
+                    }
+
+                    // Register introduced variables
+                    for (name, _ty, _is_const) in contract_result.introduced_vars {
+                        // Initialize with Nil placeholder
+                        // The macro's emit block should assign the actual value
+                        env.insert(name, Value::Nil);
+                    }
+                }
             }
             Node::Break(_) => {
                 return Err(CompileError::Semantic("break outside of loop".into()));
@@ -1276,10 +1330,15 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
             | Node::AutoImportStmt(_)
             | Node::RequiresCapabilities(_)
             | Node::HandlePool(_)
-            | Node::Bitfield(_) => {
+            | Node::Bitfield(_)
+            | Node::AopAdvice(_)
+            | Node::DiBinding(_)
+            | Node::ArchitectureRule(_)
+            | Node::MockDecl(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access
+                // AOP nodes are declarative configuration handled at compile time
                 // These are no-ops in the interpreter
             }
         }

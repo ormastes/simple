@@ -81,7 +81,11 @@ impl Lowerer {
                 | Node::AutoImportStmt(_)
                 | Node::RequiresCapabilities(_)
                 | Node::CompoundUnit(_)
-                | Node::HandlePool(_) => {}
+                | Node::HandlePool(_)
+                | Node::AopAdvice(_)
+                | Node::DiBinding(_)
+                | Node::ArchitectureRule(_)
+                | Node::MockDecl(_) => {}
             }
         }
 
@@ -110,7 +114,137 @@ impl Lowerer {
             }
         }
 
+        // Third pass: lower AOP constructs (#1000-1050)
+        for item in &ast_module.items {
+            match item {
+                Node::AopAdvice(advice) => {
+                    self.module.aop_advices.push(HirAopAdvice {
+                        predicate_text: self.predicate_to_string(&advice.pointcut),
+                        advice_function: advice.interceptor.clone(),
+                        form: advice.advice_type.as_str().to_string(),
+                        priority: advice.priority.unwrap_or(0),
+                    });
+                }
+                Node::DiBinding(binding) => {
+                    self.module.di_bindings.push(HirDiBinding {
+                        predicate_text: self.predicate_to_string(&binding.pointcut),
+                        implementation: binding.implementation.clone(),
+                        scope: binding.scope.map(|s| s.as_str().to_string()),
+                        priority: binding.priority.unwrap_or(0),
+                    });
+                }
+                Node::ArchitectureRule(rule) => {
+                    self.module.arch_rules.push(HirArchRule {
+                        rule_type: match rule.rule_type {
+                            ast::ArchRuleType::Forbid => "forbid".to_string(),
+                            ast::ArchRuleType::Allow => "allow".to_string(),
+                        },
+                        predicate_text: self.predicate_to_string(&rule.pointcut),
+                        message: rule.message.clone(),
+                        priority: 0, // Architecture rules don't have priority in AST
+                    });
+                }
+                Node::MockDecl(mock) => {
+                    self.module.mock_decls.push(HirMockDecl {
+                        name: mock.name.clone(),
+                        trait_name: mock.trait_name.clone(),
+                        expectations: mock.expectations.clone(),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Fourth pass: lower import statements for dependency tracking
+        for item in &ast_module.items {
+            if let Node::UseStmt(use_stmt) = item {
+                let import = self.lower_import(&use_stmt.path, &use_stmt.target);
+                self.module.imports.push(import);
+            }
+        }
+
         Ok(self.module)
+    }
+
+    /// Convert a PredicateExpr AST node back to its string representation.
+    /// This preserves the predicate text for later evaluation by the weaving engine.
+    ///
+    /// Note: The AST parser uses a placeholder that stores the entire predicate string
+    /// in the selector name field (with empty args). We detect this and return the
+    /// name as-is, rather than adding extra parentheses.
+    fn predicate_to_string(&self, pred: &ast::PredicateExpr) -> String {
+        match &pred.kind {
+            ast::PredicateKind::Selector { name, args } => {
+                if args.is_empty() {
+                    // Check if this is a placeholder from the AST parser
+                    // (entire predicate stored in name, like "import(*, crate.test.*)")
+                    // If the name already contains parentheses, it's the full predicate
+                    if name.contains('(') && name.contains(')') {
+                        name.clone()
+                    } else {
+                        // Otherwise it's a simple selector without args
+                        format!("{}()", name)
+                    }
+                } else {
+                    format!("{}({})", name, args.join(", "))
+                }
+            }
+            ast::PredicateKind::Not(inner) => {
+                format!("!{}", self.predicate_to_string(inner))
+            }
+            ast::PredicateKind::And(left, right) => {
+                format!(
+                    "({} & {})",
+                    self.predicate_to_string(left),
+                    self.predicate_to_string(right)
+                )
+            }
+            ast::PredicateKind::Or(left, right) => {
+                format!(
+                    "({} | {})",
+                    self.predicate_to_string(left),
+                    self.predicate_to_string(right)
+                )
+            }
+        }
+    }
+
+    /// Convert an import statement to HIR representation.
+    fn lower_import(
+        &self,
+        path: &ast::ModulePath,
+        target: &ast::ImportTarget,
+    ) -> crate::hir::HirImport {
+        let from_path = path.segments.clone();
+        let (items, is_glob) = self.flatten_import_target(target);
+
+        crate::hir::HirImport {
+            from_path,
+            items,
+            is_glob,
+        }
+    }
+
+    /// Flatten an ImportTarget into a list of (name, alias) pairs.
+    fn flatten_import_target(
+        &self,
+        target: &ast::ImportTarget,
+    ) -> (Vec<(String, Option<String>)>, bool) {
+        match target {
+            ast::ImportTarget::Single(name) => (vec![(name.clone(), None)], false),
+            ast::ImportTarget::Aliased { name, alias } => {
+                (vec![(name.clone(), Some(alias.clone()))], false)
+            }
+            ast::ImportTarget::Group(targets) => {
+                let mut items = Vec::new();
+                for t in targets {
+                    let (mut nested_items, _) = self.flatten_import_target(t);
+                    items.append(&mut nested_items);
+                }
+                (items, false)
+            }
+            ast::ImportTarget::Glob => (Vec::new(), true),
+        }
     }
 
     /// Register a class type and its invariant
@@ -249,10 +383,22 @@ impl Lowerer {
         f: &ast::FunctionDef,
         owner_type: Option<&str>,
     ) -> LowerResult<HirFunction> {
+        // Set current class type for Self resolution
+        let previous_class_type = self.current_class_type;
+        if let Some(type_name) = owner_type {
+            self.current_class_type = self.module.types.lookup(type_name);
+        }
+
         let inject = f
-            .attributes
+            .decorators
             .iter()
-            .any(|attr| attr.name == "inject" || attr.name == "sys_inject");
+            .any(|dec| {
+                if let ast::Expr::Identifier(name) = &dec.name {
+                    name == "inject" || name == "sys_inject"
+                } else {
+                    false
+                }
+            });
         // Parse concurrency mode from attributes
         let concurrency_mode = Self::parse_concurrency_mode(&f.attributes);
 
@@ -275,7 +421,7 @@ impl Lowerer {
             } else {
                 return Err(LowerError::MissingParameterType(param.name.clone()));
             };
-            ctx.add_local(param.name.clone(), ty, param.mutability);
+            ctx.add_local_with_inject(param.name.clone(), ty, param.mutability, param.inject);
         }
 
         let params: Vec<LocalVar> = ctx.locals.clone();
@@ -343,8 +489,47 @@ impl Lowerer {
             }
         }
 
+        // Extract attributes for AOP predicate matching
+        let attributes: Vec<String> = f
+            .attributes
+            .iter()
+            .map(|attr| attr.name.clone())
+            .collect();
+
+        // Extract effects from decorators for AOP effect() selector
+        let effects: Vec<String> = f
+            .decorators
+            .iter()
+            .filter_map(|dec| {
+                // Extract identifier from decorator expression
+                if let ast::Expr::Identifier(name) = &dec.name {
+                    // Check if it's an effect decorator
+                    if ast::Effect::from_decorator_name(name).is_some() {
+                        Some(name.clone())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // Get module path (currently use module name, will be enhanced later)
+        let module_path = self.module.name.clone().unwrap_or_default();
+
+        // Restore previous class type
+        self.current_class_type = previous_class_type;
+
+        // Use qualified name for methods (ClassName.method) for DI compatibility
+        let name = if let Some(owner) = owner_type {
+            format!("{}.{}", owner, f.name)
+        } else {
+            f.name.clone()
+        };
+
         Ok(HirFunction {
-            name: f.name.clone(),
+            name,
             params,
             locals: ctx.locals[params_len..].to_vec(),
             return_type,
@@ -354,6 +539,9 @@ impl Lowerer {
             is_pure: f.is_pure(),
             inject,
             concurrency_mode,
+            module_path,
+            attributes,
+            effects,
         })
     }
 

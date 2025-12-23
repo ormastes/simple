@@ -42,6 +42,14 @@ pub mod codes {
     pub const BORROW_VIOLATION: &str = "E1303";
     pub const USE_AFTER_FREE: &str = "E1304";
 
+    // Macro errors (E14xx)
+    pub const MACRO_UNDEFINED: &str = "E1401";
+    pub const MACRO_USED_BEFORE_DEFINITION: &str = "E1402";
+    pub const MACRO_SHADOWING: &str = "E1403";
+    pub const MACRO_INVALID_BLOCK_POSITION: &str = "E1404";
+    pub const MACRO_MISSING_TYPE_ANNOTATION: &str = "E1405";
+    pub const MACRO_INVALID_QIDENT: &str = "E1406";
+
     // Codegen errors (E20xx)
     pub const UNSUPPORTED_FEATURE: &str = "E2001";
     pub const FFI_ERROR: &str = "E2002";
@@ -487,12 +495,12 @@ impl CompileError {
 
             // Add primary label
             if let Some(span) = &ctx.span {
-                diag = diag.with_label(*span, self.message());
+                diag = diag.with_label((*span).into(), self.message());
             }
 
             // Add secondary labels
             for (span, label) in &ctx.secondary_spans {
-                diag = diag.with_secondary_label(*span, label.clone());
+                diag = diag.with_secondary_label((*span).into(), label.clone());
             }
 
             // Add notes

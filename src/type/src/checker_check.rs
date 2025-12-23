@@ -233,6 +233,13 @@ impl TypeChecker {
                 | Node::RequiresCapabilities(_) => {
                     // Module system nodes don't introduce type bindings directly
                 }
+                // AOP nodes (declarative configuration, not type bindings)
+                Node::AopAdvice(_)
+                | Node::DiBinding(_)
+                | Node::ArchitectureRule(_)
+                | Node::MockDecl(_) => {
+                    // AOP nodes are declarative and don't introduce type bindings
+                }
             }
         }
         // Second pass: check all nodes in order, enforcing macro definition order

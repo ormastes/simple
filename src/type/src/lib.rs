@@ -4,6 +4,18 @@ use simple_parser::ast::{
 };
 use std::collections::{HashMap, HashSet};
 
+pub mod tagged_union;
+pub mod bitfield;
+pub mod http_status;
+pub mod response_builder;
+pub mod route_params;
+
+pub use tagged_union::{TaggedUnion, UnionVariant};
+pub use bitfield::{Bitfield, BitfieldField, BackingType};
+pub use http_status::{StatusCode, StatusCodeCategory};
+pub use response_builder::{Response, ResponseBuilder};
+pub use route_params::{RouteParams, RouteParamError, ParamValue};
+
 //==============================================================================
 // Pure Type Inference (for formal verification)
 //==============================================================================
@@ -269,6 +281,10 @@ pub enum Type {
     Array(Box<Type>),
     /// Union type: A | B | C - value can be any of the member types
     Union(Vec<Type>),
+    /// Tagged union (algebraic data type) - variant with associated data
+    TaggedUnion(String), // References a TaggedUnion by name
+    /// Bitfield type - compact bit-level data structure
+    Bitfield(String), // References a Bitfield by name
     /// Generic type: Type<A, B> - parameterized type
     Generic {
         name: String,

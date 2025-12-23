@@ -11,6 +11,8 @@ pub mod effects_cache;
 pub mod aop_config;
 pub mod arch_rules;
 pub mod di;
+pub mod mock;
+pub mod pattern_analysis;
 pub mod predicate;
 pub mod predicate_parser;
 pub mod weaving;
@@ -20,9 +22,12 @@ pub mod hir;
 pub mod import_loader;
 pub mod incremental;
 pub mod interpreter;
+pub mod interpreter_contract;
 pub mod interpreter_ffi;
 pub mod linker;
 pub mod lint;
+pub mod macro_contracts;
+pub mod macro_validation;
 pub mod mir;
 pub mod module_resolver;
 pub mod monomorphize;
@@ -31,6 +36,7 @@ pub mod pipeline;
 pub mod pipeline_parallel;
 pub mod project;
 pub mod smf_builder;
+pub mod trait_coherence;
 pub mod value;
 pub mod value_bridge;
 
@@ -58,6 +64,11 @@ pub use parallel::{
 };
 pub use pipeline::CompilerPipeline;
 pub use project::ProjectContext;
+pub use trait_coherence::{CoherenceChecker, CoherenceError};
+pub use di::{
+    create_di_match_context, parse_di_config, DependencyGraph, DiBindingRule, DiConfig,
+    DiContainer, DiMode, DiProfile, DiResolveError, DiScope,
+};
 pub use value::{
     BorrowMutValue,
     BorrowValue,

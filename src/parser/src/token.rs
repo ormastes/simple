@@ -127,6 +127,14 @@ pub enum TokenKind {
     // Note: 'allow' is parsed as identifier (not a keyword) to avoid conflict with #[allow(...)]
     // Note: 'checked', 'saturate', 'wrap', 'range' are parsed as identifiers in where clauses
 
+    // AOP & Unified Predicates (#1000-1050)
+    Pointcut(String), // pc{...} predicate expression (stores the inner content)
+    On,               // on (for AOP advice: `on pc{...} use Interceptor`)
+    Bind,             // bind (for DI: `bind on pc{...} -> Impl`)
+    Forbid,           // forbid (for architecture rules: `forbid pc{...}`)
+    Allow,            // allow (keyword for architecture rules: `allow pc{...}`)
+    Mock,             // mock (for mock declarations: `mock Name implements Trait:`)
+
     // Contract keywords (LLM-friendly features)
     // New spec syntax (doc/spec/invariant.md)
     Out,       // out (postcondition block)

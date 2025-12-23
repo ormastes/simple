@@ -689,3 +689,142 @@ fn test_file_path_unit_suffix() {
         ]
     );
 }
+
+// === AOP & Unified Predicates Tests (#1000-1050) ===
+
+#[test]
+fn test_aop_keywords() {
+    assert_eq!(
+        tokenize("on bind forbid allow mock"),
+        vec![
+            TokenKind::On,
+            TokenKind::Bind,
+            TokenKind::Forbid,
+            TokenKind::Allow,
+            TokenKind::Mock,
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_pointcut_simple() {
+    assert_eq!(
+        tokenize("pc{ type(Foo) }"),
+        vec![
+            TokenKind::Pointcut(" type(Foo) ".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_pointcut_with_operators() {
+    assert_eq!(
+        tokenize("pc{ type(Foo) & attr(inject) }"),
+        vec![
+            TokenKind::Pointcut(" type(Foo) & attr(inject) ".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_pointcut_with_negation() {
+    assert_eq!(
+        tokenize("pc{ !attr(test) }"),
+        vec![
+            TokenKind::Pointcut(" !attr(test) ".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_pointcut_nested_braces() {
+    // Test that nested braces are handled correctly
+    assert_eq!(
+        tokenize("pc{ execution({ foo }) }"),
+        vec![
+            TokenKind::Pointcut(" execution({ foo }) ".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_pointcut_unclosed() {
+    // Test unclosed pointcut
+    let result = tokenize("pc{ type(Foo)");
+    assert!(matches!(
+        result[0],
+        TokenKind::Error(ref msg) if msg.contains("Unclosed pointcut")
+    ));
+}
+
+#[test]
+fn test_aop_advice_statement() {
+    assert_eq!(
+        tokenize("on pc{ execution(* foo(..)) } use LogInterceptor"),
+        vec![
+            TokenKind::On,
+            TokenKind::Pointcut(" execution(* foo(..)) ".to_string()),
+            TokenKind::Use,
+            TokenKind::Identifier("LogInterceptor".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_di_binding_statement() {
+    assert_eq!(
+        tokenize("bind on pc{ type(UserService) } -> MockUserService"),
+        vec![
+            TokenKind::Bind,
+            TokenKind::On,
+            TokenKind::Pointcut(" type(UserService) ".to_string()),
+            TokenKind::Arrow,
+            TokenKind::Identifier("MockUserService".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_architecture_rule_forbid() {
+    assert_eq!(
+        tokenize("forbid pc{ import(domain.**, infrastructure.**) }"),
+        vec![
+            TokenKind::Forbid,
+            TokenKind::Pointcut(" import(domain.**, infrastructure.**) ".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_architecture_rule_allow() {
+    assert_eq!(
+        tokenize("allow pc{ use(utils.**) }"),
+        vec![
+            TokenKind::Allow,
+            TokenKind::Pointcut(" use(utils.**) ".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_mock_declaration() {
+    assert_eq!(
+        tokenize("mock MockUser implements UserTrait"),
+        vec![
+            TokenKind::Mock,
+            TokenKind::Identifier("MockUser".to_string()),
+            TokenKind::Identifier("implements".to_string()),
+            TokenKind::Identifier("UserTrait".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}

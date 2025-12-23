@@ -911,6 +911,34 @@ impl Lowerer {
                             }
                         }
                     }
+
+                    // Check if receiver is a type name (for static method calls like ClassName.method())
+                    // This must be inside the `if let Expr::Identifier(recv_name)` block
+                    if self.module.types.lookup(recv_name).is_some() {
+                        // This is a static method call on a class/struct
+                        // Convert to a regular function call with qualified name
+                        let qualified_name = format!("{}.{}", recv_name, method);
+
+                        // Lower arguments
+                        let mut args_hir = Vec::new();
+                        for arg in args {
+                            args_hir.push(self.lower_expr(&arg.value, ctx)?);
+                        }
+
+                        // Create a regular Call (not BuiltinCall) so DI injection works
+                        let func_expr = HirExpr {
+                            kind: HirExprKind::Global(qualified_name),
+                            ty: TypeId::VOID, // Function type, will be resolved
+                        };
+
+                        return Ok(HirExpr {
+                            kind: HirExprKind::Call {
+                                func: Box::new(func_expr),
+                                args: args_hir,
+                            },
+                            ty: TypeId::VOID, // Return type will be inferred
+                        });
+                    }
                 }
 
                 // Check for SIMD vector reduction methods
@@ -1291,6 +1319,39 @@ impl Lowerer {
                     "Method call {:?}.{}() not supported in native compilation",
                     receiver, method
                 )))
+            }
+
+            Expr::StructInit { name, fields } => {
+                // Resolve struct type (handle "Self" keyword)
+                let struct_ty = if name == "Self" {
+                    if let Some(class_ty) = self.current_class_type {
+                        class_ty
+                    } else {
+                        return Err(LowerError::UnknownType(
+                            "Self used outside of class/struct context".to_string()
+                        ));
+                    }
+                } else {
+                    self.module
+                        .types
+                        .lookup(name)
+                        .ok_or_else(|| LowerError::UnknownType(name.clone()))?
+                };
+
+                // Lower field initializers (in order)
+                let mut fields_hir = Vec::new();
+                for (_field_name, field_expr) in fields {
+                    let field_hir = self.lower_expr(field_expr, ctx)?;
+                    fields_hir.push(field_hir);
+                }
+
+                Ok(HirExpr {
+                    kind: HirExprKind::StructInit {
+                        ty: struct_ty,
+                        fields: fields_hir,
+                    },
+                    ty: struct_ty,
+                })
             }
 
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),

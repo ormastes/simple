@@ -7,6 +7,7 @@
 #   - simple_lint : Linter
 #   - simple_lsp  : Language Server
 #   - simple_dap  : Debug Adapter
+#   - simple_sdn  : SDN (Simple Data Notation) CLI
 
 set -e
 
@@ -19,15 +20,20 @@ mkdir -p simple/build/formatter
 mkdir -p simple/build/lint
 mkdir -p simple/build/lsp
 mkdir -p simple/build/dap
+mkdir -p simple/build/sdn
 
 # Check if simple compiler is available
-if ! command -v ./simple/bin/simple &> /dev/null; then
-    echo "Error: Simple compiler not found at ./simple/bin/simple"
+if [ -f "./target/debug/simple" ]; then
+    SIMPLE_COMPILER="./target/debug/simple"
+elif [ -f "./simple/bin/simple" ]; then
+    SIMPLE_COMPILER="./simple/bin/simple"
+else
+    echo "Error: Simple compiler not found"
     echo "Please build the compiler first: cargo build"
     exit 1
 fi
 
-SIMPLE_COMPILER="./simple/bin/simple"
+echo "Using compiler: $SIMPLE_COMPILER"
 
 # Build formatter
 echo "Building formatter..."
@@ -65,6 +71,15 @@ $SIMPLE_COMPILER compile simple/app/dap/main.spl \
 
 echo "✓ DAP server built: simple/bin_simple/simple_dap"
 
+# Build SDN CLI
+echo "Building SDN CLI..."
+$SIMPLE_COMPILER compile simple/app/sdn/main.spl \
+    --output simple/bin_simple/simple_sdn \
+    --build-dir simple/build/sdn \
+    || { echo "Failed to build SDN CLI"; exit 1; }
+
+echo "✓ SDN CLI built: simple/bin_simple/simple_sdn"
+
 echo ""
 echo "=== Build Complete ==="
 echo ""
@@ -73,6 +88,7 @@ echo "  simple/bin_simple/simple_fmt  - Formatter"
 echo "  simple/bin_simple/simple_lint - Linter"
 echo "  simple/bin_simple/simple_lsp  - Language Server Protocol server"
 echo "  simple/bin_simple/simple_dap  - Debug Adapter Protocol server"
+echo "  simple/bin_simple/simple_sdn  - SDN (Simple Data Notation) CLI"
 echo ""
 echo "Usage:"
 echo "  Formatter:"
@@ -90,6 +106,13 @@ echo "  DAP Server:"
 echo "    ./simple/bin_simple/simple_dap"
 echo "    (Communicates via stdin/stdout, typically started by debugger)"
 echo "    Set SIMPLE_DAP_DEBUG=1 for debug logging"
+echo ""
+echo "  SDN CLI:"
+echo "    ./simple/bin_simple/simple_sdn check <file.sdn>"
+echo "    ./simple/bin_simple/simple_sdn to-json <file.sdn>"
+echo "    ./simple/bin_simple/simple_sdn get <file.sdn> <path>"
+echo "    ./simple/bin_simple/simple_sdn set <file.sdn> <path> <value>"
+echo "    ./simple/bin_simple/simple_sdn fmt <file.sdn> [--write]"
 echo ""
 echo "Documentation:"
 echo "  simple/app/README.md           - All tools overview"

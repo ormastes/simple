@@ -91,6 +91,8 @@ pub struct LoopContext {
 pub struct ContractContext {
     /// Captured old() values: maps index to VReg holding the captured value
     pub old_captures: HashMap<usize, VReg>,
+    /// Maps index to the HirExpr that was captured (for reverse lookup during lowering)
+    pub old_expr_map: HashMap<usize, HirExpr>,
     /// VReg holding the return value (set before postcondition checks)
     pub return_value: Option<VReg>,
     /// Function name for error messages
@@ -237,6 +239,10 @@ pub enum MirLowerError {
     BreakOutsideLoop,
     #[error("Continue outside loop")]
     ContinueOutsideLoop,
+    #[error("AOP weaving failed: {0}")]
+    AopWeavingFailed(String),
+    #[error("Circular dependency detected in DI: {0}")]
+    CircularDependency(String),
 }
 
 pub type MirLowerResult<T> = Result<T, MirLowerError>;

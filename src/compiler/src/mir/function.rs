@@ -55,6 +55,12 @@ pub struct MirFunction {
     /// Async state machine metadata (if this function represents a lowered async dispatcher).
     pub async_states: Option<Vec<crate::mir::async_sm::AsyncState>>,
     pub async_complete: Option<BlockId>,
+    /// Module path for this function (e.g., "app.domain.user")
+    pub module_path: String,
+    /// Attributes applied to this function (e.g., ["inject", "test"])
+    pub attributes: Vec<String>,
+    /// Effects declared for this function (e.g., ["io", "async"])
+    pub effects: Vec<String>,
     next_vreg: u32,
     next_block: u32,
 }
@@ -76,6 +82,9 @@ impl MirFunction {
             generator_complete: None,
             async_states: None,
             async_complete: None,
+            module_path: String::new(),
+            attributes: Vec::new(),
+            effects: Vec::new(),
             next_vreg: 0,
             next_block: 1,
         }

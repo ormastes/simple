@@ -1,5 +1,6 @@
 use crate::token::{NumericSuffix, Span};
 use super::enums::*;
+use super::aop::*;
 
 /// All AST node types
 #[derive(Debug, Clone, PartialEq)]
@@ -36,6 +37,12 @@ pub enum Node {
     // - given/when/then("pattern", do_block) - function calls
     // - examples("name", [...]) - function call with array
     // No special AST nodes needed - uses existing Expr::Call and Expr::DoBlock
+
+    // AOP & Unified Predicates (#1000-1050)
+    AopAdvice(AopAdvice),
+    DiBinding(DiBinding),
+    ArchitectureRule(ArchitectureRule),
+    MockDecl(MockDecl),
 
     // Statements
     Let(LetStmt),
@@ -209,6 +216,9 @@ pub struct WhereBound {
     pub type_param: String,
     /// The trait bounds (e.g., ["Clone", "Default"])
     pub bounds: Vec<String>,
+    /// Negative bounds: bounds that must NOT be implemented (#1151)
+    /// Example: T: !Clone means T must NOT implement Clone
+    pub negative_bounds: Vec<String>,
 }
 
 /// A where clause containing multiple bounds
@@ -361,6 +371,8 @@ pub struct Parameter {
     pub ty: Option<Type>,
     pub default: Option<Expr>,
     pub mutability: Mutability,
+    /// Per-parameter DI injection flag (#1013)
+    pub inject: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -341,7 +341,14 @@ impl Selector {
                 matches!(self, Selector::Type(_) | Selector::Within(_) | Selector::Attr(_))
             }
             PredicateContext::Mock => {
-                matches!(self, Selector::Type(_) | Selector::Within(_) | Selector::Attr(_))
+                matches!(
+                    self,
+                    Selector::Type(_)
+                        | Selector::Within(_)
+                        | Selector::Attr(_)
+                        | Selector::Init(_)
+                        | Selector::Execution { .. }
+                )
             }
             PredicateContext::Architecture => matches!(
                 self,

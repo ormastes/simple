@@ -648,10 +648,12 @@ pub(crate) fn evaluate_expr(
         Expr::Match { subject, arms } => {
             let subject_val = evaluate_expr(subject, env, functions, classes, enums, impl_methods)?;
 
-            // Check for strong enum - disallow wildcard/catch-all patterns
+            // Check pattern exhaustiveness for enums
             if let Value::Enum { enum_name, .. } = &subject_val {
                 if let Some(enum_def) = enums.get(enum_name) {
                     let is_strong = enum_def.attributes.iter().any(|attr| attr.name == ATTR_STRONG);
+                    
+                    // For strong enums, disallow wildcard/catch-all patterns
                     if is_strong {
                         for arm in arms {
                             if is_catch_all_pattern(&arm.pattern) {
@@ -661,6 +663,22 @@ pub(crate) fn evaluate_expr(
                                 )));
                             }
                         }
+                    }
+                    
+                    // Check exhaustiveness for all enums
+                    let variants: Vec<String> = enum_def.variants.iter().map(|v| v.name.clone()).collect();
+                    let (is_exhaustive, missing) = crate::pattern_analysis::check_enum_exhaustiveness(
+                        enum_name,
+                        &variants,
+                        arms,
+                    );
+                    
+                    if !is_exhaustive {
+                        tracing::warn!(
+                            "Non-exhaustive pattern match for enum '{}': missing variants: {}",
+                            enum_name,
+                            missing.join(", ")
+                        );
                     }
                 }
             }

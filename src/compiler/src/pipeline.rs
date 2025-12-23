@@ -40,6 +40,7 @@ use crate::lint::{LintChecker, LintConfig, LintDiagnostic};
 use crate::mir::{self, ContractMode};
 use crate::monomorphize::monomorphize_module;
 use crate::project::ProjectContext;
+use crate::trait_coherence::CoherenceChecker;
 use crate::value::FUNC_MAIN;
 use crate::CompileError;
 
@@ -219,6 +220,9 @@ impl CompilerPipeline {
         // Validate function effects against module capabilities
         self.validate_capabilities(&module.items)?;
 
+        // Check trait coherence (orphan rule, overlap, associated types, blanket conflicts)
+        self.check_trait_coherence(&module.items)?;
+
         // If the module has script-style statements, skip type_check and interpret directly.
         if !has_script_statements(&module.items) {
             // Type inference/checking (features #13/#14 scaffolding)
@@ -254,6 +258,31 @@ impl CompilerPipeline {
                 .map(|d| d.format())
                 .collect();
             return Err(CompileError::Lint(errors.join("\n")));
+        }
+
+        Ok(())
+    }
+
+    /// Check trait coherence rules (orphan rule, overlap, associated types, blanket conflicts).
+    ///
+    /// This validates trait implementations to ensure:
+    /// - Orphan rule: At least one of trait or type is local
+    /// - No overlap: Implementations don't conflict
+    /// - Associated type coherence: Consistent associated types
+    /// - Blanket impl conflicts: Blanket impls don't conflict with specific ones
+    fn check_trait_coherence(&self, items: &[Node]) -> Result<(), CompileError> {
+        let mut checker = CoherenceChecker::new();
+        let errors = checker.check_module(items);
+
+        if !errors.is_empty() {
+            let error_messages: Vec<String> = errors
+                .iter()
+                .map(|e| format!("{:?}", e))
+                .collect();
+            return Err(CompileError::Semantic(format!(
+                "Trait coherence errors:\n{}",
+                error_messages.join("\n")
+            )));
         }
 
         Ok(())
@@ -334,6 +363,22 @@ impl CompilerPipeline {
         let hir_module = hir::lower(ast_module)
             .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
 
+        // Check architecture rules if any are defined (#1026-1035)
+        if !hir_module.arch_rules.is_empty() {
+            let arch_config = crate::arch_rules::ArchRulesConfig::from_hir_rules(&hir_module.arch_rules);
+            let checker = crate::arch_rules::ArchRulesChecker::new(arch_config);
+            let violations = checker.check_module(&hir_module);
+
+            if !violations.is_empty() {
+                let msg = violations
+                    .iter()
+                    .map(|v| format!("Architecture violation: {}", v.message))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(CompileError::Semantic(msg));
+            }
+        }
+
         // Lower HIR to MIR with contract mode (and DI config if available)
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
         mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
@@ -413,6 +458,12 @@ impl CompilerPipeline {
         // 3. Run lint checks
         self.run_lint_checks(&ast_module.items)?;
 
+        // 4. Validate capabilities
+        self.validate_capabilities(&ast_module.items)?;
+
+        // 5. Check trait coherence
+        self.check_trait_coherence(&ast_module.items)?;
+
         // If script-style statements exist, interpret directly and wrap result.
         if has_script_statements(&ast_module.items) {
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
@@ -481,6 +532,12 @@ impl CompilerPipeline {
 
         // 3. Run lint checks
         self.run_lint_checks(&ast_module.items)?;
+
+        // 4. Validate capabilities
+        self.validate_capabilities(&ast_module.items)?;
+
+        // 5. Check trait coherence
+        self.check_trait_coherence(&ast_module.items)?;
 
         // If script-style statements exist, interpret directly and wrap result.
         if has_script_statements(&ast_module.items) {
@@ -926,3 +983,30 @@ main = 0
         assert_eq!(pipeline.contract_mode(), ContractMode::All);
     }
 }
+
+    #[test]
+    fn test_pipeline_coherence_detects_errors_in_ast() {
+        // Verify that coherence checker catches errors when manually constructed AST is invalid
+        use simple_parser::ast::*;
+        
+        let impl_block = ImplBlock {
+            span: simple_parser::token::Span::new(0, 0, 0, 0),
+            attributes: vec![],
+            generic_params: vec![],
+            where_clause: vec![],
+            target_type: Type::Simple("String".to_string()),
+            trait_name: Some("Display".to_string()),
+            associated_types: vec![],
+            methods: vec![],
+        };
+        
+        let nodes = vec![Node::Impl(impl_block)];
+        
+        let checker = crate::trait_coherence::CoherenceChecker::new();
+        let mut checker_mut = checker;
+        let errors = checker_mut.check_module(&nodes);
+        
+        // Should detect orphan rule violation
+        assert!(!errors.is_empty(), "Should detect orphan rule violation");
+        assert!(matches!(errors[0], crate::trait_coherence::CoherenceError::OrphanImpl { .. }));
+    }

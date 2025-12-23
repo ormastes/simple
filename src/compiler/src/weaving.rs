@@ -41,6 +41,11 @@ pub enum JoinPointKind {
     Condition {
         location: String,
     },
+    /// Error handling point (Result::Err, TryUnwrap)
+    Error {
+        location: String,
+        error_type: String,
+    },
 }
 
 /// A detected join point in the MIR.
@@ -153,6 +158,39 @@ impl WeavingConfig {
         }
     }
 
+    /// Load from HIR AOP advices (parsed from Simple source code).
+    pub fn from_hir_advices(advices: &[crate::hir::HirAopAdvice]) -> Self {
+        let mut before_advices = Vec::new();
+        let mut after_success_advices = Vec::new();
+        let mut after_error_advices = Vec::new();
+        let mut around_advices = Vec::new();
+
+        for advice in advices {
+            let form = AdviceForm::from_str(&advice.form).unwrap_or(AdviceForm::Before);
+            let rule = WeavingRule {
+                predicate_text: advice.predicate_text.clone(),
+                advice_function: advice.advice_function.clone(),
+                form,
+                priority: advice.priority,
+            };
+
+            match form {
+                AdviceForm::Before => before_advices.push(rule),
+                AdviceForm::AfterSuccess => after_success_advices.push(rule),
+                AdviceForm::AfterError => after_error_advices.push(rule),
+                AdviceForm::Around => around_advices.push(rule),
+            }
+        }
+
+        Self {
+            enabled: !advices.is_empty(),
+            before_advices,
+            after_success_advices,
+            after_error_advices,
+            around_advices,
+        }
+    }
+
     /// Get all advice rules.
     fn all_advices(&self) -> impl Iterator<Item = &WeavingRule> {
         self.before_advices
@@ -185,10 +223,10 @@ impl Weaver {
         // Detect function execution join point (at entry)
         let context = JoinPointContext {
             function_name: function.name.clone(),
-            module_path: String::new(), // TODO: Get from function metadata
+            module_path: function.module_path.clone(),
             signature: self.build_signature(function),
-            attributes: Vec::new(), // TODO: Get from function metadata
-            effects: Vec::new(),    // TODO: Get from function effects
+            attributes: function.attributes.clone(),
+            effects: function.effects.clone(),
         };
 
         join_points.push(JoinPoint {
@@ -235,6 +273,20 @@ impl Weaver {
                                 context: context.clone(),
                             });
                         }
+
+                        // Check for error handling points
+                        if self.is_error_instruction(inst) {
+                            join_points.push(JoinPoint {
+                                kind: JoinPointKind::Error {
+                                    location: format!("{}:block{:?}:inst{}",
+                                        function.name, block.id, idx),
+                                    error_type: "Result".to_string(),
+                                },
+                                block_id: block.id,
+                                instruction_index: idx,
+                                context: context.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -252,31 +304,107 @@ impl Weaver {
         )
     }
 
+    /// Check if an instruction represents an error handling point.
+    fn is_error_instruction(&self, inst: &MirInst) -> bool {
+        matches!(inst,
+            MirInst::ResultErr { .. } |  // Creating Result::Err
+            MirInst::TryUnwrap { .. }     // ? operator (unwrap or propagate error)
+        )
+    }
+
     /// Match advice to join points.
-    pub fn match_advice(&self, join_point: &JoinPoint) -> Vec<MatchedAdvice> {
+    /// Returns (matched advices, diagnostics).
+    pub fn match_advice(&self, join_point: &JoinPoint) -> (Vec<MatchedAdvice>, Vec<WeavingDiagnostic>) {
         if !self.config.enabled {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
 
         let match_ctx = join_point.context.to_match_context();
         let mut matched = Vec::new();
+        let mut diagnostics = Vec::new();
 
         for rule in self.config.all_advices() {
             // Parse predicate and check if it matches
-            if let Ok(predicate) = crate::predicate_parser::parse_predicate(&rule.predicate_text) {
-                // Validate for weaving context
-                if predicate
-                    .validate(PredicateContext::Weaving)
-                    .is_ok()
-                {
-                    if predicate.matches(&match_ctx) {
-                        matched.push(MatchedAdvice {
-                            advice_function: rule.advice_function.clone(),
-                            form: rule.form,
-                            priority: rule.priority,
-                            specificity: predicate.specificity(),
-                        });
+            match crate::predicate_parser::parse_predicate(&rule.predicate_text) {
+                Ok(predicate) => {
+                    // Validate for weaving context
+                    match predicate.validate(PredicateContext::Weaving) {
+                        Ok(()) => {
+                            if predicate.matches(&match_ctx) {
+                                matched.push(MatchedAdvice {
+                                    advice_function: rule.advice_function.clone(),
+                                    form: rule.form,
+                                    priority: rule.priority,
+                                    specificity: predicate.specificity(),
+                                });
+                            }
+                        }
+                        Err(invalid_selector) => {
+                            // Invalid selector for weaving context
+                            diagnostics.push(
+                                WeavingDiagnostic::error(format!(
+                                    "Invalid selector '{}' for weaving context in advice '{}'",
+                                    invalid_selector, rule.advice_function
+                                ))
+                                .with_predicate(rule.predicate_text.clone())
+                                .with_location(join_point.context.function_name.clone()),
+                            );
+                        }
                     }
+                }
+                Err(err) => {
+                    // Predicate parsing failed
+                    diagnostics.push(
+                        WeavingDiagnostic::error(format!(
+                            "Failed to parse predicate for advice '{}': {}",
+                            rule.advice_function, err
+                        ))
+                        .with_predicate(rule.predicate_text.clone())
+                        .with_location(join_point.context.function_name.clone()),
+                    );
+                }
+            }
+        }
+
+        // Check for ambiguous ordering (same priority, different advice)
+        if matched.len() > 1 {
+            let same_priority_groups: Vec<Vec<&MatchedAdvice>> = {
+                let mut groups = Vec::new();
+                let mut current_group = Vec::new();
+                let mut last_priority = None;
+
+                for advice in &matched {
+                    if last_priority == Some(advice.priority) {
+                        current_group.push(advice);
+                    } else {
+                        if current_group.len() > 1 {
+                            groups.push(current_group.clone());
+                        }
+                        current_group.clear();
+                        current_group.push(advice);
+                        last_priority = Some(advice.priority);
+                    }
+                }
+                if current_group.len() > 1 {
+                    groups.push(current_group);
+                }
+                groups
+            };
+
+            for group in same_priority_groups {
+                if group.len() > 1 && group.iter().any(|a| a.specificity == group[0].specificity) {
+                    let advice_names: Vec<String> = group
+                        .iter()
+                        .map(|a| a.advice_function.clone())
+                        .collect();
+                    diagnostics.push(
+                        WeavingDiagnostic::warning(format!(
+                            "Ambiguous advice ordering at priority {}: [{}]. Consider adjusting priorities.",
+                            group[0].priority,
+                            advice_names.join(", ")
+                        ))
+                        .with_location(join_point.context.function_name.clone()),
+                    );
                 }
             }
         }
@@ -288,7 +416,7 @@ impl Weaver {
                 .then_with(|| b.specificity.cmp(&a.specificity))
         });
 
-        matched
+        (matched, diagnostics)
     }
 
     /// Weave advice into a MIR function.
@@ -300,11 +428,20 @@ impl Weaver {
         let join_points = self.detect_join_points(function);
         let mut result = WeavingResult::default();
 
+        // Track which advice rules were used
+        let mut used_advice_rules: std::collections::HashSet<String> = std::collections::HashSet::new();
+
         // Group join points by block for efficient insertion
         let mut insertions: HashMap<BlockId, Vec<(usize, Vec<MatchedAdvice>)>> = HashMap::new();
 
         for join_point in join_points {
-            let advices = self.match_advice(&join_point);
+            let (advices, diagnostics) = self.match_advice(&join_point);
+
+            // Collect diagnostics
+            for diagnostic in diagnostics {
+                result.add_diagnostic(diagnostic);
+            }
+
             if !advices.is_empty() {
                 result.join_points_woven += 1;
                 result.advices_inserted += advices.len();
@@ -314,6 +451,9 @@ impl Weaver {
                     result
                         .advice_calls
                         .push((join_point.kind.clone(), advice.advice_function.clone()));
+
+                    // Track used advice rules
+                    used_advice_rules.insert(advice.advice_function.clone());
                 }
 
                 // Group by block
@@ -322,6 +462,31 @@ impl Weaver {
                     .or_insert_with(Vec::new)
                     .push((join_point.instruction_index, advices));
             }
+        }
+
+        // Check for unused advice rules
+        for rule in self.config.all_advices() {
+            if !used_advice_rules.contains(&rule.advice_function) {
+                result.add_diagnostic(
+                    WeavingDiagnostic::warning(format!(
+                        "Advice '{}' was never applied (predicate may be too specific or never matches)",
+                        rule.advice_function
+                    ))
+                    .with_predicate(rule.predicate_text.clone())
+                    .with_location(function.name.clone()),
+                );
+            }
+        }
+
+        // Add informational diagnostic about weaving summary
+        if result.join_points_woven > 0 {
+            result.add_diagnostic(
+                WeavingDiagnostic::info(format!(
+                    "Woven {} advice calls at {} join points",
+                    result.advices_inserted, result.join_points_woven
+                ))
+                .with_location(function.name.clone()),
+            );
         }
 
         // Insert advice calls into blocks
@@ -384,6 +549,10 @@ impl Weaver {
             .iter()
             .filter(|a| a.form == AdviceForm::AfterSuccess)
             .collect();
+        let after_error_advices: Vec<_> = advices
+            .iter()
+            .filter(|a| a.form == AdviceForm::AfterError)
+            .collect();
 
         // Insert Before advices before the join point instruction
         for (i, advice) in before_advices.iter().enumerate() {
@@ -413,10 +582,121 @@ impl Weaver {
             inserted += 1;
         }
 
-        // TODO: Implement AfterError advices (requires error handling infrastructure)
-        // TODO: Implement Around advices (requires wrapping the join point)
+        // Insert AfterError advices at error handling points
+        // For error join points (ResultErr, TryUnwrap), insert immediately after
+        if !after_error_advices.is_empty() {
+            let error_index = if instruction_index == 0 && block.instructions.len() <= inserted {
+                // Execution join point - append after all other advices
+                instruction_index + inserted
+            } else {
+                // Error join point - insert after the error instruction
+                instruction_index + inserted + 1
+            };
+
+            for (i, advice) in after_error_advices.iter().enumerate() {
+                let call_inst = self.create_advice_call(&advice.advice_function, Vec::new());
+                block
+                    .instructions
+                    .insert(error_index + i, call_inst);
+                inserted += 1;
+            }
+        }
+
+        // Handle Around advices
+        // Note: Around advice uses the runtime proceed mechanism (rt_aop_invoke_around)
+        // True compile-time around would require extracting the join point into a continuation,
+        // which needs complex MIR transformations. For now, we document this limitation.
+        let around_advices: Vec<_> = advices
+            .iter()
+            .filter(|a| a.form == AdviceForm::Around)
+            .collect();
+
+        if !around_advices.is_empty() {
+            // Around advice requires wrapping the join point in a continuation
+            // This is complex and requires MIR function extraction/closure creation
+            // For now, around advice only works via the interpreter's runtime support
+            //
+            // Future implementation would:
+            // 1. Extract instructions from join point to a new internal function (continuation)
+            // 2. Insert call to rt_aop_invoke_around with:
+            //    - target: pointer to continuation function
+            //    - advices: array of advice function pointers
+            //    - advice_len: number of advices
+            //    - argc/argv: original function arguments
+            // 3. Replace join point with the invoke_around call
+            //
+            // Limitation documented in doc/status/aop_implementation_status.md
+        }
 
         inserted
+    }
+}
+
+/// Diagnostic severity levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticLevel {
+    /// Informational message
+    Info,
+    /// Warning that doesn't prevent weaving
+    Warning,
+    /// Error that prevents correct weaving
+    Error,
+}
+
+/// Weaving diagnostic message.
+#[derive(Debug, Clone)]
+pub struct WeavingDiagnostic {
+    /// Severity level
+    pub level: DiagnosticLevel,
+    /// Diagnostic message
+    pub message: String,
+    /// Optional location (function name, block, instruction)
+    pub location: Option<String>,
+    /// Related predicate text
+    pub predicate: Option<String>,
+}
+
+impl WeavingDiagnostic {
+    /// Create an info diagnostic.
+    pub fn info(message: String) -> Self {
+        Self {
+            level: DiagnosticLevel::Info,
+            message,
+            location: None,
+            predicate: None,
+        }
+    }
+
+    /// Create a warning diagnostic.
+    pub fn warning(message: String) -> Self {
+        Self {
+            level: DiagnosticLevel::Warning,
+            message,
+            location: None,
+            predicate: None,
+        }
+    }
+
+    /// Create an error diagnostic.
+    pub fn error(message: String) -> Self {
+        Self {
+            level: DiagnosticLevel::Error,
+            message,
+            location: None,
+            predicate: None,
+        }
+    }
+
+    /// Add location information.
+    pub fn with_location(mut self, location: String) -> Self {
+        self.location = Some(location);
+        self
+    }
+
+    /// Add predicate information.
+    pub fn with_predicate(mut self, predicate: String) -> Self {
+        self.predicate = Some(predicate);
+        self
     }
 }
 
@@ -429,6 +709,43 @@ pub struct WeavingResult {
     pub advices_inserted: usize,
     /// List of (join point, advice) pairs for debugging
     pub advice_calls: Vec<(JoinPointKind, String)>,
+    /// Diagnostic messages generated during weaving
+    pub diagnostics: Vec<WeavingDiagnostic>,
+}
+
+impl WeavingResult {
+    /// Add a diagnostic message.
+    pub fn add_diagnostic(&mut self, diagnostic: WeavingDiagnostic) {
+        self.diagnostics.push(diagnostic);
+    }
+
+    /// Check if there are any errors.
+    pub fn has_errors(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.level == DiagnosticLevel::Error)
+    }
+
+    /// Check if there are any warnings.
+    pub fn has_warnings(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.level == DiagnosticLevel::Warning)
+    }
+
+    /// Get all errors.
+    pub fn errors(&self) -> impl Iterator<Item = &WeavingDiagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Error)
+    }
+
+    /// Get all warnings.
+    pub fn warnings(&self) -> impl Iterator<Item = &WeavingDiagnostic> {
+        self.diagnostics
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Warning)
+    }
 }
 
 #[cfg(test)]
@@ -497,10 +814,11 @@ mod tests {
 
         let func = create_test_function("my_function");
         let join_points = weaver.detect_join_points(&func);
-        let advices = weaver.match_advice(&join_points[0]);
+        let (advices, diagnostics) = weaver.match_advice(&join_points[0]);
 
         assert_eq!(advices.len(), 1);
         assert_eq!(advices[0].advice_function, "log_advice");
+        assert!(diagnostics.is_empty(), "Should not have diagnostics for valid advice");
     }
 
     #[test]
@@ -529,7 +847,7 @@ mod tests {
         // Debug: print the signature
         eprintln!("Signature: {}", join_points[0].context.signature);
 
-        let advices = weaver.match_advice(&join_points[0]);
+        let (advices, _diagnostics) = weaver.match_advice(&join_points[0]);
 
         // For now, since signature format might be complex, just check that matching works
         // We'll fix the signature format issue separately
@@ -583,7 +901,7 @@ mod tests {
 
         let func = create_test_function("test_fn");
         let join_points = weaver.detect_join_points(&func);
-        let advices = weaver.match_advice(&join_points[0]);
+        let (advices, _diagnostics) = weaver.match_advice(&join_points[0]);
 
         // Should be sorted by priority: high (20), medium (10), low (5)
         assert_eq!(advices.len(), 3);
@@ -754,19 +1072,315 @@ mod tests {
         // Should match test_fn
         let func1 = create_test_function("test_fn");
         let jp1 = weaver.detect_join_points(&func1);
-        let advices1 = weaver.match_advice(&jp1[0]);
+        let (advices1, _) = weaver.match_advice(&jp1[0]);
         assert_eq!(advices1.len(), 1);
 
         // Should match test_something
         let func2 = create_test_function("test_something");
         let jp2 = weaver.detect_join_points(&func2);
-        let advices2 = weaver.match_advice(&jp2[0]);
+        let (advices2, _) = weaver.match_advice(&jp2[0]);
         assert_eq!(advices2.len(), 1);
 
         // Should not match other_fn
         let func3 = create_test_function("other_fn");
         let jp3 = weaver.detect_join_points(&func3);
-        let advices3 = weaver.match_advice(&jp3[0]);
+        let (advices3, _) = weaver.match_advice(&jp3[0]);
         assert_eq!(advices3.len(), 0);
     }
+
+    #[test]
+    fn test_error_join_point_detection() {
+        // Create a function with error handling
+        let mut func = MirFunction::new("test_fn".to_string(), TypeId::I64, Visibility::Public);
+        func.entry_block = BlockId(0);
+        let mut block = MirBlock::new(BlockId(0));
+
+        // Add a ResultErr instruction (error join point)
+        block.instructions.push(MirInst::ResultErr {
+            dest: VReg(0),
+            value: VReg(1),
+        });
+
+        func.blocks.push(block);
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: Vec::new(),
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+        let join_points = weaver.detect_join_points(&func);
+
+        // Should detect execution join point + error join point
+        assert_eq!(join_points.len(), 2);
+
+        // Check that one is an error join point
+        let has_error = join_points.iter().any(|jp| {
+            matches!(jp.kind, JoinPointKind::Error { .. })
+        });
+        assert!(has_error, "Should detect error join point");
+    }
+
+    #[test]
+    fn test_after_error_advice() {
+        let error_rule = WeavingRule {
+            predicate_text: "pc{ init(test_fn) }".to_string(),
+            advice_function: "error_handler".to_string(),
+            form: AdviceForm::AfterError,
+            priority: 10,
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: Vec::new(),
+            after_success_advices: Vec::new(),
+            after_error_advices: vec![error_rule],
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+
+        // Create function with error handling
+        let mut func = MirFunction::new("test_fn".to_string(), TypeId::I64, Visibility::Public);
+        func.entry_block = BlockId(0);
+        let mut block = MirBlock::new(BlockId(0));
+
+        block.instructions.push(MirInst::ResultErr {
+            dest: VReg(0),
+            value: VReg(1),
+        });
+
+        func.blocks.push(block);
+
+        let original_count = func.blocks[0].instructions.len();
+        let result = weaver.weave_function(&mut func);
+
+        // Should have woven 2 join points (execution + error)
+        assert_eq!(result.join_points_woven, 2);
+
+        // Should have inserted 2 advices (one per join point)
+        assert_eq!(result.advices_inserted, 2);
+
+        // Should have inserted 2 instructions
+        assert_eq!(func.blocks[0].instructions.len(), original_count + 2);
+    }
+
+    #[test]
+    fn test_combined_after_success_and_after_error() {
+        let success_rule = WeavingRule {
+            predicate_text: "pc{ init(test_fn) }".to_string(),
+            advice_function: "success_handler".to_string(),
+            form: AdviceForm::AfterSuccess,
+            priority: 10,
+        };
+
+        let error_rule = WeavingRule {
+            predicate_text: "pc{ init(test_fn) }".to_string(),
+            advice_function: "error_handler".to_string(),
+            form: AdviceForm::AfterError,
+            priority: 10,
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: Vec::new(),
+            after_success_advices: vec![success_rule],
+            after_error_advices: vec![error_rule],
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+        let mut func = create_test_function("test_fn");
+
+        let result = weaver.weave_function(&mut func);
+
+        // Both success and error handlers should be inserted
+        assert_eq!(result.advices_inserted, 2);
+    }
+
+    #[test]
+    fn test_diagnostic_predicate_parse_error() {
+        // Create an advice with invalid predicate syntax
+        let rule = WeavingRule {
+            predicate_text: "pc{ invalid syntax here }".to_string(),
+            advice_function: "bad_advice".to_string(),
+            form: AdviceForm::Before,
+            priority: 10,
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: vec![rule],
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+        let mut func = create_test_function("test_fn");
+        let result = weaver.weave_function(&mut func);
+
+        // Should have error diagnostic
+        assert!(result.has_errors(), "Should have parsing error");
+        let errors: Vec<_> = result.errors().collect();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("Failed to parse predicate"));
+    }
+
+    #[test]
+    fn test_diagnostic_invalid_selector() {
+        // Create an advice with invalid selector for weaving context
+        // Use 'type()' selector which is not valid for weaving
+        let rule = WeavingRule {
+            predicate_text: "pc{ type(SomeClass) }".to_string(),
+            advice_function: "invalid_advice".to_string(),
+            form: AdviceForm::Before,
+            priority: 10,
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: vec![rule],
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+        let mut func = create_test_function("test_fn");
+        let result = weaver.weave_function(&mut func);
+
+        // Should have error diagnostic for invalid selector
+        assert!(result.has_errors(), "Should have invalid selector error");
+        let errors: Vec<_> = result.errors().collect();
+        assert!(errors.iter().any(|e| e.message.contains("Invalid selector")));
+    }
+
+    #[test]
+    fn test_diagnostic_unused_advice() {
+        // Create an advice that will never match
+        let rule = WeavingRule {
+            predicate_text: "pc{ init(nonexistent_function) }".to_string(),
+            advice_function: "unused_advice".to_string(),
+            form: AdviceForm::Before,
+            priority: 10,
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: vec![rule],
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+        let mut func = create_test_function("test_fn");
+        let result = weaver.weave_function(&mut func);
+
+        // Should have warning about unused advice
+        assert!(result.has_warnings(), "Should have unused advice warning");
+        let warnings: Vec<_> = result.warnings().collect();
+        assert!(warnings.iter().any(|w| w.message.contains("never applied")));
+    }
+
+    #[test]
+    fn test_diagnostic_ambiguous_ordering() {
+        // Create multiple advices with same priority
+        let rule1 = WeavingRule {
+            predicate_text: "pc{ init(test_fn) }".to_string(),
+            advice_function: "advice_a".to_string(),
+            form: AdviceForm::Before,
+            priority: 10,
+        };
+
+        let rule2 = WeavingRule {
+            predicate_text: "pc{ init(test_fn) }".to_string(),
+            advice_function: "advice_b".to_string(),
+            form: AdviceForm::Before,
+            priority: 10,
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: vec![rule1, rule2],
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+        let mut func = create_test_function("test_fn");
+        let result = weaver.weave_function(&mut func);
+
+        // Should have warning about ambiguous ordering
+        assert!(result.has_warnings(), "Should have ambiguous ordering warning");
+        let warnings: Vec<_> = result.warnings().collect();
+        assert!(warnings.iter().any(|w| w.message.contains("Ambiguous advice ordering")));
+    }
+
+    #[test]
+    fn test_diagnostic_info_messages() {
+        // Create a valid advice that matches
+        let rule = WeavingRule {
+            predicate_text: "pc{ init(test_fn) }".to_string(),
+            advice_function: "good_advice".to_string(),
+            form: AdviceForm::Before,
+            priority: 10,
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: vec![rule],
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+        let mut func = create_test_function("test_fn");
+        let result = weaver.weave_function(&mut func);
+
+        // Should have info diagnostic about weaving summary
+        let info_diags: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == DiagnosticLevel::Info)
+            .collect();
+        assert!(!info_diags.is_empty(), "Should have info diagnostics");
+        assert!(info_diags.iter().any(|d| d.message.contains("Woven")));
+    }
+
+    #[test]
+    fn test_diagnostic_has_predicates_and_locations() {
+        // Test that diagnostics have predicate and location information
+        let rule = WeavingRule {
+            predicate_text: "pc{ invalid }".to_string(),
+            advice_function: "test_advice".to_string(),
+            form: AdviceForm::Before,
+            priority: 10,
+        };
+
+        let config = WeavingConfig {
+            enabled: true,
+            before_advices: vec![rule],
+            after_success_advices: Vec::new(),
+            after_error_advices: Vec::new(),
+            around_advices: Vec::new(),
+        };
+
+        let weaver = Weaver::new(config);
+        let mut func = create_test_function("test_fn");
+        let result = weaver.weave_function(&mut func);
+
+        let errors: Vec<_> = result.errors().collect();
+        if !errors.is_empty() {
+            assert!(errors[0].predicate.is_some(), "Should have predicate");
+            assert!(errors[0].location.is_some(), "Should have location");
+        }
+    }
 }
+
