@@ -456,9 +456,9 @@ Features are tracked in `doc/features/feature.md` and archived in `doc/features/
 All feature tables use this standardized format:
 
 ```markdown
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #100 | Feature Name | ✅/📋 | R/S/S+R | [doc.md](doc.md) | `path/` | `path/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #100 | Feature Name | 3 | ✅/📋 | R/S/S+R | [doc.md](doc.md) | `path/` | `path/` |
 ```
 
 **Column Definitions:**
@@ -467,6 +467,7 @@ All feature tables use this standardized format:
 |--------|-------------|--------|
 | **Feature ID** | Unique identifier | `#NNN` format |
 | **Feature** | Feature name/description | Short text |
+| **Difficulty** | Implementation complexity | `1` Trivial, `2` Easy, `3` Medium, `4` Hard, `5` Very Hard |
 | **Status** | Implementation status | `✅` Complete, `📋` Planned |
 | **Impl** | Implementation location | `R` Rust, `S` Simple, `S+R` Both |
 | **Doc** | Specification/design doc | Link to `doc/spec/*.md` or `-` if none |
@@ -501,7 +502,7 @@ All feature tables use this standardized format:
 **Example Entry:**
 
 ```markdown
-| #220 | TCP sockets | ✅ | S+R | [spec/stdlib.md](spec/stdlib.md) | `std_lib/test/unit/net/` | `src/runtime/tests/` |
+| #220 | TCP sockets | 3 | ✅ | S+R | [spec/stdlib.md](spec/stdlib.md) | `std_lib/test/unit/net/` | `src/runtime/tests/` |
 ```
 
 ## Logging Strategy
