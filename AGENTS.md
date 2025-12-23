@@ -2,6 +2,30 @@
 
 This file documents guidance for AI agents working on the Simple compiler repository.
 
+## Version Control
+
+**This project uses Jujutsu (jj), not Git.**
+
+- **DO NOT** use `git commit`, `git push`, `git pull`
+- **USE** `jj commit`, `jj git push`, `jj git fetch`
+- **Snapshots:** jj automatically creates snapshots on file changes
+- **Branches:** Use `jj branch set <name>` instead of `git checkout -b`
+- **Push:** Use `jj git push` to push to origin
+
+**Basic Workflow:**
+```bash
+# Check status
+jj status
+
+# Create snapshot with message
+jj commit -m "message"
+
+# Push to remote
+jj git push
+```
+
+**Learn more:** See `doc/plans/27_jj_integration.md` for full JJ integration details.
+
 ## Recent Completions (2025-12-23)
 
 ### Type System Enhancements (#1330-1339)
