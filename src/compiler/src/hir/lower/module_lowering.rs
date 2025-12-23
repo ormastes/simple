@@ -145,10 +145,24 @@ impl Lowerer {
                     });
                 }
                 Node::MockDecl(mock) => {
+                    // Convert MockExpectation to string representation for HIR
+                    // TODO: Update HIR to handle structured expectations
+                    let expectations = mock
+                        .expectations
+                        .iter()
+                        .map(|exp| {
+                            format!(
+                                "expect {}(...) -> {:?}",
+                                exp.method_name,
+                                exp.return_type.as_ref().map(|t| format!("{:?}", t)).unwrap_or_else(|| "()".to_string())
+                            )
+                        })
+                        .collect();
+
                     self.module.mock_decls.push(HirMockDecl {
                         name: mock.name.clone(),
                         trait_name: mock.trait_name.clone(),
-                        expectations: mock.expectations.clone(),
+                        expectations,
                     });
                 }
                 _ => {}
@@ -376,6 +390,46 @@ impl Lowerer {
         ConcurrencyMode::Actor  // Default
     }
 
+    /// Detect if a function is a constructor
+    /// Constructors should always check class invariants, even if private
+    ///
+    /// A function is considered a constructor if:
+    /// - It's a method of a class/struct (owner_type is Some)
+    /// - It returns an instance of the owner type
+    /// - It doesn't take `self` as first parameter (static factory method)
+    fn is_constructor(
+        &self,
+        f: &ast::FunctionDef,
+        owner_type: Option<&str>,
+        return_type: TypeId,
+    ) -> bool {
+        // Must be a method of a class/struct
+        let Some(type_name) = owner_type else {
+            return false;
+        };
+
+        // Must not take self (static method)
+        let takes_self = f.params.first()
+            .map(|p| p.name == "self")
+            .unwrap_or(false);
+        if takes_self {
+            return false;
+        }
+
+        // Must return the owner type
+        if let Some(owner_type_id) = self.module.types.lookup(type_name) {
+            if return_type == owner_type_id {
+                return true;
+            }
+        }
+
+        // Also check common constructor names as a heuristic
+        matches!(
+            f.name.as_str(),
+            "new" | "create" | "default" | "init"
+        ) || f.name.starts_with("from_") || f.name.starts_with("with_")
+    }
+
     /// Lower a function, optionally injecting type invariants for methods
     /// `owner_type`: If this function is a method, the name of the owning type
     fn lower_function(
@@ -399,6 +453,7 @@ impl Lowerer {
                     false
                 }
             });
+
         // Parse concurrency mode from attributes
         let concurrency_mode = Self::parse_concurrency_mode(&f.attributes);
 
@@ -436,9 +491,13 @@ impl Lowerer {
             None
         };
 
-        // Inject type invariants for public methods (CTR-011)
+        // Inject type invariants for public methods and constructors (CTR-011)
+        // Constructors always check invariants (they establish the invariant)
+        // Public methods check invariants (they maintain the invariant)
+        // Private methods skip invariants (they're internal helpers)
+        let is_ctor = self.is_constructor(f, owner_type, return_type);
         if let Some(type_name) = owner_type {
-            if f.visibility.is_public() {
+            if is_ctor || f.visibility.is_public() {
                 if let Some(type_invariant) = self.module.type_invariants.get(type_name).cloned() {
                     // Add type invariants to function invariants
                     let contract = contract.get_or_insert_with(HirContract::default);

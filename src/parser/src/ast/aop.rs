@@ -119,6 +119,20 @@ pub enum ArchRuleType {
     Allow,
 }
 
+/// Mock expectation: `expect method() -> Type:`
+#[derive(Debug, Clone, PartialEq)]
+pub struct MockExpectation {
+    /// Method name
+    pub method_name: String,
+    /// Method parameters
+    pub params: Vec<crate::ast::Parameter>,
+    /// Return type
+    pub return_type: Option<crate::ast::Type>,
+    /// Method body statements
+    pub body: Vec<crate::ast::Node>,
+    pub span: Span,
+}
+
 /// Mock declaration: `mock Name implements Trait:`
 #[derive(Debug, Clone, PartialEq)]
 pub struct MockDecl {
@@ -126,8 +140,8 @@ pub struct MockDecl {
     pub name: String,
     /// Trait being mocked (qualified name like "MyTrait")
     pub trait_name: String,
-    /// Method expectations (stored as strings, parsed later)
-    pub expectations: Vec<String>,
+    /// Method expectations
+    pub expectations: Vec<MockExpectation>,
     pub span: Span,
 }
 
