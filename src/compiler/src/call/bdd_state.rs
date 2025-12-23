@@ -2,11 +2,9 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use crate::value::Value;
-use simple_parser::ast::Expr;
-use crate::{ClassDef, Enums, FunctionDef, ImplMethods};
-use crate::interpreter::env::Env;
-use crate::interpreter::expressions::evaluate_expr;
+use crate::value::{Value, Env};
+use simple_parser::ast::{Expr, ClassDef, FunctionDef, EnumDef};
+use crate::interpreter::{Enums, ImplMethods, evaluate_expr};
 
 // BDD testing state (thread-local for test isolation)
 // Made pub(super) so other interpreter modules can access for context statement handling
