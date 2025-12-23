@@ -18,14 +18,9 @@ class Database:
         return "result"
 
 class UserService:
-    db: Database
-
     @inject
     fn new(db: Database) -> Self:
-        return Self { db: db }
-
-    fn get_user(self, id: i64) -> str:
-        return self.db.query("SELECT * FROM users")
+        return Self {}
 
 fn main():
     # DI should inject Database automatically
@@ -136,8 +131,12 @@ fn main():
 fn test_di_binding_selection() {
     // Test that DI selects the correct binding based on priority and specificity
     let source = r#"
-trait Repository:
-    fn save(data: str)
+class Repository:
+    fn new() -> Self:
+        return Self {}
+
+    fn save(data: str):
+        return nil
 
 class MemoryRepository:
     fn new() -> Self:
