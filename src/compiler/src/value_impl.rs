@@ -53,6 +53,7 @@ impl Value {
             Value::Handle(h) => h.resolve_inner().unwrap_or(Value::Nil).to_key_string(),
             Value::Borrow(b) => b.inner().to_key_string(),
             Value::BorrowMut(b) => b.inner().to_key_string(),
+            Value::NativeFunction(native) => format!("<native:{}>", native.name),
             Value::Nil => "nil".to_string(),
             other => format!("{other:?}"),
         }
@@ -90,7 +91,8 @@ impl Value {
             | Value::Channel(_)
             | Value::ThreadPool(_)
             | Value::Mock(_)
-            | Value::Matcher(_) => true,
+            | Value::Matcher(_)
+            | Value::NativeFunction(_) => true,
         }
     }
 
@@ -138,6 +140,7 @@ impl Value {
             }
             Value::Borrow(b) => format!("&{}", b.inner().to_display_string()),
             Value::BorrowMut(b) => format!("&mut {}", b.inner().to_display_string()),
+            Value::NativeFunction(native) => format!("<native:{}>", native.name),
             other => format!("{other:?}"),
         }
     }
@@ -170,6 +173,7 @@ impl Value {
             Value::Lambda { .. } => "function",
             Value::BlockClosure { .. } => "function",
             Value::Function { .. } => "function",
+            Value::NativeFunction(_) => "function",
             Value::Object { .. } => "object",
             Value::Enum { .. } => "enum",
             Value::Union { inner, .. } => inner.type_name(),
@@ -224,6 +228,8 @@ impl Value {
                     class == type_name
                 } else if let Value::Enum { enum_name, .. } = self {
                     enum_name == type_name
+                } else if matches!(self, Value::NativeFunction(_)) {
+                    type_name == "function" || type_name == "Function"
                 } else if let Value::Unit { suffix, .. } = self {
                     suffix == type_name
                 } else {

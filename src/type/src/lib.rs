@@ -1,6 +1,6 @@
 use simple_parser::ast::{
-    BinOp, Expr, MacroConstRange, MacroDef, MacroIntroDecl, MacroIntroSpec, MacroTarget, Node,
-    Pattern, PointerKind, Type as AstType, UnaryOp,
+    BinOp, Expr, ImplBlock, MacroConstRange, MacroDef, MacroIntroDecl, MacroIntroSpec, MacroTarget,
+    Node, Pattern, PointerKind, Type as AstType, UnaryOp,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -438,6 +438,13 @@ pub enum TypeError {
     Other(String),
 }
 
+#[derive(Default, Debug)]
+struct TraitImplRegistry {
+    blanket_impl: bool,
+    default_blanket_impl: bool,
+    specific_impls: HashSet<String>,
+}
+
 pub struct TypeChecker {
     env: HashMap<String, Type>,
     next_var: usize,
@@ -449,6 +456,10 @@ pub struct TypeChecker {
     macros: HashMap<String, MacroDef>,
     /// Macros available at the current point in the module (enforce definition order)
     available_macros: HashSet<String>,
+    /// Reference ID counter for capability tracking
+    next_ref_id: usize,
+    /// Trait implementation registry for coherence checks
+    trait_impls: HashMap<String, TraitImplRegistry>,
 }
 
 // TypeChecker implementation (split for maintainability)

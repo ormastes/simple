@@ -7,6 +7,81 @@ enum ConstValue {
 }
 
 impl TypeChecker {
+    fn register_trait_impl(&mut self, impl_block: &ImplBlock) -> Result<(), TypeError> {
+        let is_default = impl_block
+            .attributes
+            .iter()
+            .any(|attr| attr.name == "default");
+
+        let Some(trait_name) = &impl_block.trait_name else {
+            if is_default {
+                return Err(TypeError::Other(
+                    "#[default] is only valid on trait impls".to_string(),
+                ));
+            }
+            return Ok(());
+        };
+
+        let is_blanket = match &impl_block.target_type {
+            AstType::Simple(name) => impl_block.generic_params.iter().any(|p| p == name),
+            _ => false,
+        };
+
+        if is_default && !is_blanket {
+            return Err(TypeError::Other(format!(
+                "#[default] impl for trait `{}` must be a blanket impl (impl[T] Trait for T)",
+                trait_name
+            )));
+        }
+
+        let target_key = match &impl_block.target_type {
+            AstType::Simple(name) => name.clone(),
+            AstType::Generic { name, .. } => name.clone(),
+            _ => "unknown".to_string(),
+        };
+
+        let registry = self
+            .trait_impls
+            .entry(trait_name.clone())
+            .or_default();
+
+        if is_blanket {
+            if registry.blanket_impl {
+                return Err(TypeError::Other(format!(
+                    "duplicate blanket impl for trait `{}`",
+                    trait_name
+                )));
+            }
+            if !is_default && (!registry.specific_impls.is_empty() || registry.default_blanket_impl)
+            {
+                return Err(TypeError::Other(format!(
+                    "overlapping impls for trait `{}`: blanket impl conflicts with existing impls",
+                    trait_name
+                )));
+            }
+            registry.blanket_impl = true;
+            registry.default_blanket_impl = is_default;
+            return Ok(());
+        }
+
+        if registry.specific_impls.contains(&target_key) {
+            return Err(TypeError::Other(format!(
+                "duplicate impl for trait `{}` and type `{}`",
+                trait_name, target_key
+            )));
+        }
+
+        if registry.blanket_impl && !registry.default_blanket_impl {
+            return Err(TypeError::Other(format!(
+                "overlapping impls for trait `{}`: specific impl for `{}` conflicts with blanket impl",
+                trait_name, target_key
+            )));
+        }
+
+        registry.specific_impls.insert(target_key);
+        Ok(())
+    }
+
     /// Helper to check match arms (pattern binding, guard, and body statements)
     fn check_match_arms(&mut self, arms: &[simple_parser::ast::MatchArm]) -> Result<(), TypeError> {
         for arm in arms {
@@ -297,6 +372,7 @@ impl TypeChecker {
                 Ok(())
             }
             Node::Impl(impl_block) => {
+                self.register_trait_impl(impl_block)?;
                 // Check all impl methods
                 for method in &impl_block.methods {
                     let old_env = self.env.clone();

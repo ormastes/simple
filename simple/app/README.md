@@ -1,6 +1,20 @@
-# Simple Formatter & Linter
+# Simple Self-Hosted Development Tools
 
-Implementation of canonical formatting and semantic linting for Simple language, written in Simple itself.
+Implementation of development tools for Simple language, written in Simple itself (dogfooding).
+
+## Overview
+
+All tools in this directory are:
+- ✅ Written in Simple language (`.spl` files)
+- ✅ Self-hosted (the language builds its own tools)
+- ✅ Compiled to native binaries via `build_tools.sh`
+- ✅ Zero external dependencies (except Simple stdlib)
+
+**Tools:**
+1. **Formatter** (`simple_fmt`) - ✅ Implemented
+2. **Linter** (`simple_lint`) - ✅ Implemented
+3. **Language Server** (`simple_lsp`) - 🔄 In Progress
+4. **Debug Adapter** (`simple_dap`) - 🔄 In Progress
 
 ## Structure
 
@@ -8,16 +22,31 @@ Implementation of canonical formatting and semantic linting for Simple language,
 simple/
 ├── app/
 │   ├── formatter/
-│   │   └── main.spl          # Formatter implementation
-│   └── lint/
-│       └── main.spl          # Linter implementation
+│   │   └── main.spl          # Formatter implementation ✅
+│   ├── lint/
+│   │   └── main.spl          # Linter implementation ✅
+│   ├── lsp/
+│   │   ├── main.spl          # LSP server 🔄
+│   │   ├── protocol.spl      # LSP protocol types 🔄
+│   │   ├── transport.spl     # JSON-RPC transport 🔄
+│   │   └── server.spl        # Server handlers 🔄
+│   └── dap/
+│       ├── main.spl          # DAP server 🔄
+│       ├── protocol.spl      # DAP protocol types 🔄
+│       ├── transport.spl     # JSON-RPC transport 🔄
+│       ├── server.spl        # Server handlers 🔄
+│       └── breakpoints.spl   # Breakpoint management 🔄
 ├── bin_simple/               # Compiled executables
-│   ├── simple_fmt           # Formatter binary
-│   └── simple_lint          # Linter binary
+│   ├── simple_fmt           # Formatter binary ✅
+│   ├── simple_lint          # Linter binary ✅
+│   ├── simple_lsp           # LSP server binary 🔄
+│   └── simple_dap           # DAP server binary 🔄
 ├── build/                    # Intermediate build files
 │   ├── formatter/           # Formatter .smf files
-│   └── lint/                # Linter .smf files
-└── build_tools.sh           # Build script
+│   ├── lint/                # Linter .smf files
+│   ├── lsp/                 # LSP .smf files 🔄
+│   └── dap/                 # DAP .smf files 🔄
+└── build_tools.sh           # Build script for all tools
 ```
 
 ## Features
@@ -104,10 +133,12 @@ Run the build script:
 ./simple/build_tools.sh
 ```
 
-This will:
-1. Compile `formatter/main.spl` → `bin_simple/simple_fmt`
-2. Compile `lint/main.spl` → `bin_simple/simple_lint`
-3. Place intermediate files in `build/`
+This will compile all implemented tools:
+1. Compile `formatter/main.spl` → `bin_simple/simple_fmt` ✅
+2. Compile `lint/main.spl` → `bin_simple/simple_lint` ✅
+3. Compile `lsp/main.spl` → `bin_simple/simple_lsp` 🔄 (when ready)
+4. Compile `dap/main.spl` → `bin_simple/simple_dap` 🔄 (when ready)
+5. Place intermediate files in `build/`
 
 ### Manual Build
 
@@ -151,23 +182,89 @@ If you need to build manually:
 | AST-based analysis | ⚠️ TODO | Requires compiler integration |
 | Control flow analysis | ⚠️ TODO | Requires compiler integration |
 
+## Language Server (`simple_lsp`) - 🔄 In Progress
+
+**Status:** Reimplementing in Simple (was Rust prototype at `src/lsp/`)
+
+Self-hosted LSP server for editor integration (VS Code, Neovim, etc.).
+
+**Planned Features:**
+- ⏳ JSON-RPC 2.0 transport over stdio
+- ⏳ Document synchronization (didOpen, didChange)
+- ⏳ Real-time diagnostics (parse errors, type errors)
+- ⏳ Code completion (context-aware)
+- ⏳ Go to definition
+- ⏳ Hover documentation
+- ⏳ Find references
+- ⏳ Syntax highlighting (semantic tokens)
+
+**Usage (when complete):**
+```bash
+# Start LSP server (communicates via stdin/stdout)
+./simple/bin_simple/simple_lsp
+
+# VS Code: Configure in settings.json
+# Neovim: Configure with nvim-lspconfig
+```
+
+**See:** `doc/status/lsp_implementation.md` for detailed status
+
+---
+
+## Debug Adapter (`simple_dap`) - 🔄 In Progress
+
+**Status:** Reimplementing in Simple (was Rust prototype at `src/dap/`)
+
+Self-hosted DAP server for debugging Simple programs.
+
+**Planned Features:**
+- ⏳ DAP protocol over stdio
+- ⏳ Breakpoint management (line, conditional, function)
+- ⏳ Execution control (continue, step over, step in, step out)
+- ⏳ Stack trace inspection
+- ⏳ Variable viewing and evaluation
+- ⏳ Watch expressions
+- ⏳ Exception breakpoints
+- ⏳ Interpreter integration (actual debugging)
+
+**Usage (when complete):**
+```bash
+# Start DAP server
+./simple/bin_simple/simple_dap
+
+# VS Code: Configure launch.json
+# Neovim: Use nvim-dap
+```
+
+**See:** `doc/status/dap_implementation.md` for detailed status
+
+---
+
 ## Roadmap
 
-### Phase 1: Basic Implementation (Current)
+### Phase 1: Formatter & Linter (Current)
 - ✅ Line-by-line formatter
 - ✅ Pattern-based linter
 - ✅ Command-line interface
 - ✅ Build infrastructure
 
-### Phase 2: AST Integration
+### Phase 2: LSP & DAP Implementation (In Progress)
+- 🔄 LSP: JSON-RPC transport
+- 🔄 LSP: Document sync and diagnostics
+- 🔄 DAP: Protocol handling
+- 🔄 DAP: Breakpoint management
+- ⏳ LSP: Completion and navigation
+- ⏳ DAP: Interpreter integration
+
+### Phase 3: AST Integration
 - ⏳ Parse .spl files to AST
 - ⏳ AST-based formatting
 - ⏳ Semantic analysis for lints
 - ⏳ Control flow analysis
 
-### Phase 3: Advanced Features
+### Phase 4: Advanced Features
 - ⏳ Auto-fix (`simple fix`)
-- ⏳ IDE integration (LSP)
+- ⏳ LSP/DAP feature completion
 - ⏳ Configuration in simple.sdn
 - ⏳ Lint explanation (`--explain`)
 
@@ -214,6 +311,21 @@ When implementing new lints or formatting rules:
 
 ## References
 
-- **Spec**: `doc/spec/formatting_lints.md`
-- **Features**: `doc/features/feature.md` (#1131-#1145)
+- **Formatter/Linter Spec**: `doc/spec/formatting_lints.md`
+- **LSP Status**: `doc/status/lsp_implementation.md`
+- **DAP Status**: `doc/status/dap_implementation.md`
+- **Features**:
+  - Formatter/Linter: `doc/features/feature.md` (#1131-#1145)
+  - LSP: `doc/features/postponed_feature.md` (#1359-#1365)
+  - DAP: `doc/features/postponed_feature.md` (#1366-#1368)
 - **Examples**: `simple/test/` directory
+
+## Why Self-Hosted?
+
+Writing Simple's development tools in Simple itself provides:
+
+1. **Dogfooding**: We use our own language daily, finding bugs and UX issues
+2. **Proof of Capability**: Shows Simple can build real-world tools
+3. **Performance Testing**: Exercises the compiler on substantial codebases
+4. **Community Example**: Demonstrates best practices for Simple development
+5. **Zero Dependencies**: No Rust/Python/etc needed for tooling once bootstrapped

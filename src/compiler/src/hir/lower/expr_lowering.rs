@@ -1,4 +1,4 @@
-use simple_parser::{self as ast, Expr};
+use simple_parser::{self as ast, ast::ReferenceCapability, Expr};
 
 use crate::value::BUILTIN_SPAWN;
 use super::context::FunctionContext;
@@ -170,6 +170,7 @@ impl Lowerer {
                         };
                         let ptr_type = HirType::Pointer {
                             kind,
+                            capability: ReferenceCapability::Shared, // Default capability
                             inner: operand_hir.ty,
                         };
                         self.module.types.register(ptr_type)
@@ -602,6 +603,7 @@ impl Lowerer {
                 let ptr_kind: PointerKind = (*kind).into();
                 let ptr_type = HirType::Pointer {
                     kind: ptr_kind,
+                    capability: ReferenceCapability::Shared, // Default capability
                     inner: inner_ty,
                 };
                 let ptr_ty = self.module.types.register(ptr_type);

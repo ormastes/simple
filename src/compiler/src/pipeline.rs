@@ -35,7 +35,7 @@ use crate::codegen::llvm::LlvmBackend;
 use crate::compilability::analyze_module;
 use crate::hir;
 use crate::import_loader::{has_script_statements, load_module_with_imports};
-use crate::interpreter::evaluate_module;
+use crate::interpreter::evaluate_module_with_di_and_aop;
 use crate::lint::{LintChecker, LintConfig, LintDiagnostic};
 use crate::mir::{self, ContractMode};
 use crate::monomorphize::monomorphize_module;
@@ -226,7 +226,7 @@ impl CompilerPipeline {
         }
 
         // Extract the main function's return value
-        let main_value = evaluate_module(&module.items)?;
+        let main_value = self.evaluate_module_with_project(&module.items)?;
 
         Ok(generate_smf_bytes(main_value, self.gc.as_ref()))
     }
@@ -257,6 +257,15 @@ impl CompilerPipeline {
         }
 
         Ok(())
+    }
+
+    fn evaluate_module_with_project(
+        &self,
+        items: &[simple_parser::ast::Node],
+    ) -> Result<i32, CompileError> {
+        let di_config = self.project.as_ref().and_then(|p| p.di_config.as_ref());
+        let aop_config = self.project.as_ref().and_then(|p| p.aop_config.as_ref());
+        evaluate_module_with_di_and_aop(items, di_config, aop_config)
     }
 
     /// Validate function effects against module capabilities.
@@ -325,8 +334,9 @@ impl CompilerPipeline {
         let hir_module = hir::lower(ast_module)
             .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
 
-        // Lower HIR to MIR with contract mode
-        mir::lower_to_mir_with_mode(&hir_module, self.contract_mode)
+        // Lower HIR to MIR with contract mode (and DI config if available)
+        let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
+        mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
             .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))
     }
 
@@ -405,7 +415,7 @@ impl CompilerPipeline {
 
         // If script-style statements exist, interpret directly and wrap result.
         if has_script_statements(&ast_module.items) {
-            let main_value = evaluate_module(&ast_module.items)?;
+            let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
@@ -427,7 +437,7 @@ impl CompilerPipeline {
 
         if !has_main_function {
             // Fallback: evaluate via interpreter and wrap result
-            let main_value = evaluate_module(&ast_module.items)?;
+            let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes(main_value, self.gc.as_ref()));
         }
 
@@ -474,7 +484,7 @@ impl CompilerPipeline {
 
         // If script-style statements exist, interpret directly and wrap result.
         if has_script_statements(&ast_module.items) {
-            let main_value = evaluate_module(&ast_module.items)?;
+            let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes_for_target(
                 main_value,
                 self.gc.as_ref(),
@@ -499,7 +509,7 @@ impl CompilerPipeline {
         if !has_main_function {
             // Fallback: evaluate via interpreter and wrap result
             // Note: Interpreter result is architecture-neutral (just an i32)
-            let main_value = evaluate_module(&ast_module.items)?;
+            let main_value = self.evaluate_module_with_project(&ast_module.items)?;
             return Ok(generate_smf_bytes_for_target(
                 main_value,
                 self.gc.as_ref(),

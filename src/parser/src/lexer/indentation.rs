@@ -9,6 +9,7 @@ impl<'a> super::Lexer<'a> {
 
         // Count leading spaces/tabs
         let mut indent = 0;
+        let mut pending_token: Option<Token> = None;
         while let Some(ch) = self.peek() {
             match ch {
                 ' ' => {
@@ -33,7 +34,7 @@ impl<'a> super::Lexer<'a> {
                     let next = self.peek();
                     if next == Some('[') {
                         // This is an attribute, not a comment
-                        return Some(Token::new(
+                        pending_token = Some(Token::new(
                             TokenKind::Hash,
                             Span::new(
                                 self.current_pos - 1,
@@ -43,6 +44,7 @@ impl<'a> super::Lexer<'a> {
                             ),
                             "#".to_string(),
                         ));
+                        break;
                     }
                     if next == Some('#') {
                         // Doc comment ## - emit DocComment token
@@ -64,11 +66,12 @@ impl<'a> super::Lexer<'a> {
                             content.push(c);
                             self.advance();
                         }
-                        return Some(Token::new(
+                        pending_token = Some(Token::new(
                             TokenKind::DocComment(content.trim().to_string()),
                             Span::new(hash_start, self.current_pos, self.line, self.column),
                             self.source[hash_start..self.current_pos].to_string(),
                         ));
+                        break;
                     }
                     // Regular comment line, skip to end
                     while let Some(c) = self.peek() {
@@ -209,6 +212,34 @@ impl<'a> super::Lexer<'a> {
                 }
                 _ => break,
             }
+        }
+
+        if let Some(token) = pending_token {
+            let current_indent = *self.indent_stack.last().unwrap_or(&0);
+            if indent > current_indent {
+                self.indent_stack.push(indent);
+                self.pending_tokens.push(token);
+                return Some(Token::new(
+                    TokenKind::Indent,
+                    Span::new(start_pos, self.current_pos, start_line, 1),
+                    String::new(),
+                ));
+            } else if indent < current_indent {
+                self.pending_tokens.push(token);
+                while let Some(&top) = self.indent_stack.last() {
+                    if top <= indent {
+                        break;
+                    }
+                    self.indent_stack.pop();
+                    self.pending_tokens.push(Token::new(
+                        TokenKind::Dedent,
+                        Span::new(start_pos, self.current_pos, start_line, 1),
+                        String::new(),
+                    ));
+                }
+                return self.pending_tokens.pop();
+            }
+            return Some(token);
         }
 
         let current_indent = *self.indent_stack.last().unwrap_or(&0);

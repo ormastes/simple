@@ -224,6 +224,24 @@ impl Lowerer {
         Ok(base_type)
     }
 
+    /// Parse concurrency mode from function attributes
+    /// Returns Actor mode (default) if no attribute is found
+    fn parse_concurrency_mode(attrs: &[ast::Attribute]) -> ConcurrencyMode {
+        for attr in attrs {
+            if attr.name == "concurrency_mode" {
+                // #[concurrency_mode(lock_base)]
+                if let Some(args) = &attr.args {
+                    if let Some(ast::Expr::Identifier(mode)) = args.first() {
+                        if let Some(cm) = ConcurrencyMode::from_attr_arg(mode) {
+                            return cm;
+                        }
+                    }
+                }
+            }
+        }
+        ConcurrencyMode::Actor  // Default
+    }
+
     /// Lower a function, optionally injecting type invariants for methods
     /// `owner_type`: If this function is a method, the name of the owning type
     fn lower_function(
@@ -231,12 +249,28 @@ impl Lowerer {
         f: &ast::FunctionDef,
         owner_type: Option<&str>,
     ) -> LowerResult<HirFunction> {
+        let inject = f
+            .attributes
+            .iter()
+            .any(|attr| attr.name == "inject" || attr.name == "sys_inject");
+        // Parse concurrency mode from attributes
+        let concurrency_mode = Self::parse_concurrency_mode(&f.attributes);
+
         let return_type = self.resolve_type_opt(&f.return_type)?;
         let mut ctx = FunctionContext::new(return_type);
 
-        // Add parameters as locals
+        // Add parameters as locals and check capability compatibility with mode
         for param in &f.params {
             let ty = if let Some(t) = &param.ty {
+                // Check if parameter has a capability that's incompatible with the mode
+                if let ast::Type::Capability { capability, .. } = t {
+                    use super::super::capability::CapabilityEnv;
+                    CapabilityEnv::check_mode_compatibility(
+                        *capability,
+                        concurrency_mode,
+                        &f.name,
+                    ).map_err(LowerError::Capability)?;
+                }
                 self.resolve_type(t)?
             } else {
                 return Err(LowerError::MissingParameterType(param.name.clone()));
@@ -318,6 +352,8 @@ impl Lowerer {
             visibility: f.visibility,
             contract,
             is_pure: f.is_pure(),
+            inject,
+            concurrency_mode,
         })
     }
 

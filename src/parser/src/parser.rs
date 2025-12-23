@@ -680,13 +680,14 @@ impl<'a> Parser<'a> {
             TokenKind::Class => self.parse_class_with_attrs(attributes),
             TokenKind::Enum => self.parse_enum_with_attrs(attributes),
             TokenKind::Union => self.parse_union_with_attrs(attributes),
+            TokenKind::Impl => self.parse_impl_with_attrs(attributes),
             TokenKind::Pub => {
                 self.advance();
                 self.parse_pub_item_with_attrs(attributes)
             }
             TokenKind::Mod => self.parse_mod(Visibility::Private, attributes),
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, enum, union, mod, or pub after attributes",
+                "fn, struct, class, enum, union, impl, mod, or pub after attributes",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),

@@ -157,6 +157,7 @@ fn compile_boolean_false() {
     assert_eq!(compile_and_run("main = if false: 0 else: 42"), 42);
 }
 
+
 // =============================================================================
 // Native compilation tests (HIR → MIR → Cranelift)
 // =============================================================================

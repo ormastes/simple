@@ -17,7 +17,7 @@ pub struct AbiVersion {
 
 impl AbiVersion {
     /// Current ABI version of the runtime.
-    pub const CURRENT: Self = Self { major: 1, minor: 0 };
+    pub const CURRENT: Self = Self { major: 1, minor: 1 };
 
     /// Create a new ABI version.
     pub const fn new(major: u16, minor: u16) -> Self {
@@ -91,6 +91,9 @@ pub trait RuntimeSymbolProvider: Send + Sync {
 /// These are the extern "C" functions exported by the runtime library
 /// that can be called from compiled Simple code.
 pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
+    // AOP runtime operations
+    "rt_aop_invoke_around",
+    "rt_aop_proceed",
     // Array operations
     "rt_array_new",
     "rt_array_push",

@@ -194,6 +194,13 @@ impl<'a> Parser<'a> {
     // === Impl ===
 
     pub(crate) fn parse_impl(&mut self) -> Result<Node, ParseError> {
+        self.parse_impl_with_attrs(Vec::new())
+    }
+
+    pub(crate) fn parse_impl_with_attrs(
+        &mut self,
+        attributes: Vec<Attribute>,
+    ) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Impl)?;
 
@@ -215,6 +222,7 @@ impl<'a> Parser<'a> {
 
         Ok(Node::Impl(ImplBlock {
             span: self.make_span(start_span),
+            attributes,
             generic_params,
             target_type,
             trait_name,
@@ -549,17 +557,23 @@ impl<'a> Parser<'a> {
                     ));
                 }
                 invariant = self.parse_invariant_block()?;
-            } else if self.check(&TokenKind::Fn) {
-                // Method: fn method_name(...)
+            } else if self.check(&TokenKind::Fn)
+                || self.check(&TokenKind::Async)
+                || self.check(&TokenKind::At)
+                || self.check(&TokenKind::Hash)
+                || (self.check(&TokenKind::Pub)
+                    && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+            {
+                // Method (optionally async/decorated/attributed/pub).
+                let start_span = self.current.span;
                 let item = self.parse_item()?;
                 if let Node::Function(f) = item {
                     methods.push(f);
-                }
-            } else if self.check(&TokenKind::Pub) && self.peek_is(&TokenKind::Fn) {
-                // Public method: pub fn method_name(...)
-                let item = self.parse_item()?;
-                if let Node::Function(f) = item {
-                    methods.push(f);
+                } else {
+                    return Err(ParseError::syntax_error_with_span(
+                        "Expected method definition in class body",
+                        start_span,
+                    ));
                 }
             } else {
                 // Field (may be public: pub field_name: Type)

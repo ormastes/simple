@@ -2,36 +2,97 @@
 
 ## 🚧 Current Status
 
-**Test Status:** ✅ Build passing - compilation warnings fixed  
-**Recent Work (2025-12-22):**
-- ✅ Implemented formatter and linter in Simple language (`simple/app/`)
-- ✅ Created build infrastructure for Simple-based tools
-- ✅ Analyzed orphaned commits (AOP specs present, no implementation)
-- ✅ Code duplication reduction: 4.49% → 4.45% (Phase 2 & 3 complete)
-- ✅ Fixed gherkin DSL parsing to handle f-strings
-- ✅ Split 8 large markdown documentation files into 18 parts
+**Build:** ✅ Passing - 617+ tests (572 compiler + 32 capability + 7 memory model + 6 sync)
 
-**New Tools:**
-- `simple/app/formatter/` - Canonical formatter (zero-config)
-- `simple/app/lint/` - Semantic linter with fix-it hints
-- Build outputs to `simple/bin_simple/` with intermediate files in `simple/build/`
+**Recent Work (2025-12-23):**
+- ✅ **Complete Memory Model Verification** (#1104-1106) - Formal proofs in Lean 4
+  - **Reference Capabilities**: Aliasing prevention, conversion safety (350+ lines Lean)
+  - **SC-DRF Guarantee**: Sequential consistency for data-race-free programs (510+ lines Lean)
+  - **Integration Proof**: Capabilities + SC-DRF = complete memory safety
+  - Runtime race detection API: `is_race_free()`, `detect_data_races()`
+  - 7 happens-before tests + 6 sync primitive tests + 32 capability tests passing
+  - See `verification/memory_capabilities/` and `verification/memory_model_drf/`
 
-**Pending Work:**
-- Build and test formatter/linter tools
-- Integrate formatter/linter with compiler
-- Review test failures in gherkin/attributes tests
+**Key Features:**
+- Memory model: Reference capabilities (`mut T`, `iso T`, `T`), concurrency modes (`actor`, `lock_base`, `unsafe`)
+- SC-DRF guarantee: Formally verified memory consistency model
+- Formatter/linter: Simple-based tools in `simple/app/`
+- See `doc/report/MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md`
+
+## Self-Hosted Tools (Written in Simple)
+
+**Status:** ✅ **Formatter/Linter SOURCE IMPLEMENTED** - ⏳ **NOT YET COMPILED**
+**Status:** 🔄 **LSP/DAP IN PROGRESS** - Reimplementing in Simple language
+
+**Location:** `simple/app/` - All development tools written in Simple itself
+
+### Formatter (`simple_fmt`) - 166 lines
+**Implementation Status:** ✅ Complete (line-by-line formatting)
+
+**Features:**
+- ✅ 4-space indentation, idempotent formatting
+- ✅ `--check` (CI mode), `--write` (in-place), stdout output
+- ✅ Handles indenting/dedenting for `:`, `{}`, `[]`, `else`, `elif`
+- ⏳ TODO: AST-based formatting, comment preservation, max line length
+
+**Lints Defined:** 14 total
+- Safety (S): 3 lints (S001-S003)
+- Correctness (C): 3 lints (C001-C003)
+- Warning (W): 3 lints (W001-W003)
+- Style (ST): 3 lints (ST001-ST003) - Allow by default
+- Concurrency (CC): 2 lints (CC001-CC002)
+
+### Linter (`simple_lint`) - 262 lines
+**Implementation Status:** ✅ Complete (pattern-based linting)
+
+**Features:**
+- ✅ 14 predefined lints across 5 categories
+- ✅ Fix-it hints, formatted output with line/column numbers
+- ✅ `--deny-all`, `--warn-all`, `--json` options
+- ⏳ TODO: AST-based semantic analysis, control flow analysis
+
+**To Build:**
+```bash
+# Prerequisites: cargo build (compiler must be ready)
+./simple/build_tools.sh
+```
+
+**Usage (after building):**
+```bash
+./simple/bin_simple/simple_fmt file.spl [--check|--write]
+./simple/bin_simple/simple_lint file.spl [--deny-all|--warn-all]
+```
+
+**Roadmap:**
+- Phase 1: ✅ Basic implementation (CURRENT - source complete, not compiled)
+- Phase 2: ⏳ AST integration, semantic analysis
+- Phase 3: ⏳ Auto-fix (`simple fix`), LSP integration, configuration
+
+### Language Server (`simple_lsp`) - 🔄 In Progress
+**Implementation Status:** 🔄 Reimplementing in Simple (was Rust prototype)
+
+**Features:**
+- ⏳ JSON-RPC transport over stdio
+- ⏳ Document synchronization
+- ⏳ Diagnostics (parse errors)
+- ⏳ TODO: Completion, go-to-definition, hover, references
+
+### Debug Adapter (`simple_dap`) - 🔄 In Progress
+**Implementation Status:** 🔄 Reimplementing in Simple (was Rust prototype)
+
+**Features:**
+- ⏳ DAP protocol handling
+- ⏳ Breakpoint management
+- ⏳ Execution control (step, continue, pause)
+- ⏳ TODO: Stack inspection, variable viewing, interpreter integration
+
+See `simple/app/README.md` for complete details. See `doc/status/lsp_implementation.md` and `doc/status/dap_implementation.md` for detailed status.
 
 ## Documentation Organization
 
 ### Report Directory (`doc/report/`)
 
-Job completion reports and maintenance documentation (see `doc/report/README.md` for details).
-
-**Key Decisions:**
-- ✅ Markdown files: Split for navigation (8 files → 18 parts, all <1000 lines)
-- ⚠️ Rust source: Intentionally NOT split (maintains code cohesion)
-- ⚠️ Test files: NOT split (would break compilation)
-- ⚠️ Generated files: Do not modify (auto-generated)
+Job completion reports and maintenance docs. See `doc/report/README.md`.
 
 ## Current File Structure
 
@@ -47,16 +108,22 @@ simple/                            # Project root - Rust compiler implementation
 ├── simple/                        # Simple language development workspace
 │   ├── bin -> ../target/debug/    # Symlink to compiled binaries
 │   ├── doc -> ../doc/             # Symlink to documentation
-│   ├── app/                       # Simple-language applications
-│   │   ├── formatter/             # Canonical formatter (main.spl)
-│   │   ├── lint/                  # Semantic linter (main.spl)
+│   ├── app/                       # Simple-language applications (self-hosted tools)
+│   │   ├── formatter/             # Canonical formatter (main.spl) ✅
+│   │   ├── lint/                  # Semantic linter (main.spl) ✅
+│   │   ├── lsp/                   # Language server (main.spl) 🔄
+│   │   ├── dap/                   # Debug adapter (main.spl) 🔄
 │   │   └── README.md              # Application documentation
 │   ├── bin_simple/                # Compiled Simple executables
-│   │   ├── simple_fmt             # Formatter binary
-│   │   └── simple_lint            # Linter binary
+│   │   ├── simple_fmt             # Formatter binary ✅
+│   │   ├── simple_lint            # Linter binary ✅
+│   │   ├── simple_lsp             # LSP server binary 🔄
+│   │   └── simple_dap             # DAP server binary 🔄
 │   ├── build/                     # Intermediate build files
 │   │   ├── formatter/             # Formatter .smf files
-│   │   └── lint/                  # Linter .smf files
+│   │   ├── lint/                  # Linter .smf files
+│   │   ├── lsp/                   # LSP .smf files 🔄
+│   │   └── dap/                   # DAP .smf files 🔄
 │   ├── build_tools.sh             # Build script for Simple tools
 │   └── std_lib/                   # Simple standard library (written in Simple)
 │       ├── README.md              # Standard library documentation
@@ -149,7 +216,9 @@ simple/                            # Project root - Rust compiler implementation
 │   ├── gc_manual_borrow/          # GC safety model
 │   ├── async_compile/             # Effect tracking model
 │   ├── nogc_compile/              # NoGC instruction model
-│   └── type_inference_compile/    # Type inference model
+│   ├── type_inference_compile/    # Type inference model
+│   ├── memory_capabilities/       # Reference capability verification (#1104)
+│   └── memory_model_drf/          # SC-DRF memory model verification (#1105-1106)
 │
 ├── tests/                         # Integration/system tests
 │
@@ -340,9 +409,6 @@ Source Code (.spl)
    Execution (main → exit code)
 ```
 
-### Syntax Notes
-- `match` arms accept both `case pattern:` (spec style) and `pattern =>` (existing tests); colon form requires a newline + indented block.
-
 ## Current Status
 
 | Component | Status |
@@ -381,66 +447,11 @@ Source Code (.spl)
 | **Contracts** | 2 | ContractCheck, ContractOldCapture |
 | Fallback | 2 | InterpCall, InterpEval |
 
-### Contract System (Design by Contract)
+### Contract System
 
-**Status:** MIR lowering complete, runtime FFI ready, formal verification in Lean 4
+**Status:** MIR lowering complete, runtime FFI ready, Lean 4 verified
 
-Simple supports Design by Contract with preconditions, postconditions, invariants, and `old()` snapshots.
-
-#### Contract Syntax
-
-```simple
-fn div(a: i64, b: i64) -> (i64 | DivByZero):
-    in:                           # Preconditions
-        b != 0
-    invariant:                    # Routine invariants (entry + exit)
-        true
-
-    if b == 0:
-        return DivByZero(msg: "division by zero")
-    return a / b
-
-    out(ret):                     # Postconditions (success)
-        ret * b == a
-    out_err(err):                 # Postconditions (error)
-        old(b) == 0
-
-class Account:
-    balance: i64
-    invariant:                    # Class invariant
-        balance >= 0
-```
-
-#### Contract Checking Order (per Lean model)
-
-| Phase | Checks | MIR Instruction |
-|-------|--------|-----------------|
-| Entry | 1. Preconditions (`in:`) | `ContractCheck(Precondition)` |
-| Entry | 2. Capture `old()` values | `ContractOldCapture` |
-| Entry | 3. Entry invariants | `ContractCheck(InvariantEntry)` |
-| Exit (success) | 4. Exit invariants | `ContractCheck(InvariantExit)` |
-| Exit (success) | 5. Postconditions (`out(ret):`) | `ContractCheck(Postcondition)` |
-| Exit (error) | 4. Exit invariants | `ContractCheck(InvariantExit)` |
-| Exit (error) | 6. Error postconditions (`out_err(err):`) | `ContractCheck(ErrorPostcondition)` |
-
-#### Implementation Files
-
-| Layer | File | Description |
-|-------|------|-------------|
-| Parser | `src/parser/src/statements/contract.rs` | Contract block parsing |
-| AST | `src/parser/src/ast/nodes.rs` | `ContractBlock`, `ContractClause`, `InvariantBlock` |
-| HIR | `src/compiler/src/hir/types.rs` | `HirContract`, `HirContractClause`, `HirClass`, `HirClassInvariant` |
-| MIR | `src/compiler/src/mir/instructions.rs` | `ContractCheck`, `ContractOldCapture`, `ContractKind` |
-| MIR Lower | `src/compiler/src/mir/lower.rs` | `lower_contract_entry()`, `lower_contract_success_exit()`, `lower_contract_error_exit()`, `lower_class_invariant()` |
-| Codegen | `src/compiler/src/codegen/instr.rs` | `compile_contract_check()` |
-| Runtime | `src/runtime/src/value/ffi.rs` | `simple_contract_check()` |
-| Lean Model | `verification/type_inference_compile/src/Contracts.lean` | Formal verification |
-
-#### Class Invariant Rules
-
-- Checked after constructor (`new` or `__init__`)
-- Checked after all public methods
-- Uses `ContractKind::InvariantExit` for consistency
+Supports `in:`, `out(ret):`, `out_err(err):`, `invariant:`, and `old()`. Checks: preconditions → capture old → entry invariants → (function) → exit invariants → postconditions. Class invariants checked after constructors and public methods.
 
 ### Codegen status snapshot (runtime FFI)
 - Actors: Spawn/Send/Recv now call runtime FFI; actor bodies still use a no-op stub until outlining is added.
@@ -449,70 +460,13 @@ class Account:
 
 ## Feature Documentation
 
-Features are tracked in `doc/features/feature.md` and archived in `doc/features/feature_done_*.md` files.
+Tracked in `doc/features/feature.md` and `feature_done_*.md`. Format: Feature ID (#NNN by category), Difficulty (1-5), Status (✅/📋), Impl (R/S/S+R), Doc, Tests.
 
-### Feature Table Format
-
-All feature tables use this standardized format:
-
-```markdown
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #100 | Feature Name | 3 | ✅/📋 | R/S/S+R | [doc.md](doc.md) | `path/` | `path/` |
-```
-
-**Column Definitions:**
-
-| Column | Description | Values |
-|--------|-------------|--------|
-| **Feature ID** | Unique identifier | `#NNN` format |
-| **Feature** | Feature name/description | Short text |
-| **Difficulty** | Implementation complexity | `1` Trivial, `2` Easy, `3` Medium, `4` Hard, `5` Very Hard |
-| **Status** | Implementation status | `✅` Complete, `📋` Planned |
-| **Impl** | Implementation location | `R` Rust, `S` Simple, `S+R` Both |
-| **Doc** | Specification/design doc | Link to `doc/spec/*.md` or `-` if none |
-| **S-Test** | Simple system test path | `std_lib/test/...` or `-` if none |
-| **R-Test** | Rust test path | `src/*/tests/` or `-` if none |
-
-**Feature ID Ranges:**
-
-| Range | Category |
-|-------|----------|
-| #1-#8 | Infrastructure (Lexer, Parser, AST, HIR, MIR, GC, Pkg) |
-| #10-#49 | Core Language |
-| #50-#99 | Extended Language (Union, Async SM, Interpreter) |
-| #100-#199 | Codegen & Runtime |
-| #200-#299 | Extended Features (Units, Networking) |
-| #300-#399 | GPU/SIMD |
-| #400-#499 | Contracts |
-| #500-#599 | UI Framework & Web |
-| #600-#699 | SDN |
-| #700-#799 | Database & Persistence |
-| #800-#899 | Build Optimization & Infrastructure |
-| #900-#999 | Verification & Code Quality |
-
-**Adding New Features:**
-
-1. Choose appropriate ID range for category
-2. Add row to `doc/features/feature.md` (planned) or `doc/features/feature_done_*.md` (complete)
-3. Fill all columns - use `-` for non-applicable fields
-4. Link to specification doc in `doc/spec/` or design doc in `doc/design/`
-5. Specify test paths where tests exist
-
-**Example Entry:**
-
-```markdown
-| #220 | TCP sockets | 3 | ✅ | S+R | [spec/stdlib.md](spec/stdlib.md) | `std_lib/test/unit/net/` | `src/runtime/tests/` |
-```
-
-## Logging Strategy
-- Use `tracing` for structured, span-based logging. Initialize once via `simple_log::init()` (respects `SIMPLE_LOG`/`RUST_LOG`).
-- For cross-cutting “AOP-like” logging, prefer `#[tracing::instrument]` on functions to capture args/latency without manual boilerplate.
-- Keep logging opt-in to avoid overhead; avoid ad-hoc `println!` on hot paths.
+**ID Ranges:** #1-8 Infrastructure, #10-49 Core, #50-99 Extended, #100-199 Codegen, #200-299 Extended Features, #300-399 GPU/SIMD, #400-499 Contracts, #500-599 UI/Web, #600-699 SDN, #700-799 DB, #800-899 Build, #900-999 Verification.
 
 ## Test Strategy
 
-See `doc/guides/test.md` for the complete test policy. Tests use `simple_mock_helper` for mock control and coverage tracking.
+See `doc/guides/test.md`. Tests use `simple_mock_helper` for mock control and coverage tracking.
 
 **Current Test Count: 631+ tests**
 
@@ -538,30 +492,7 @@ make coverage-all       # Generate all reports
 
 ### Test Binary Initialization
 
-Each test binary initializes its mock policy via `#[ctor::ctor]`:
-
-```rust
-use ctor::ctor;
-use simple_mock_helper::{init_unit_tests, validate_test_config};
-
-#[ctor]
-fn init() {
-    init_unit_tests!("my_crate_unit");
-}
-
-#[test]
-fn validate_config() {
-    validate_test_config().expect_pass();
-}
-```
-
-### TDD Cycle
-
-```
-Red    → Write failing test
-Green  → Minimal implementation to pass
-Refactor → Clean up, maintain passing tests
-```
+Each test binary uses `#[ctor::ctor]` with `init_unit_tests!("crate_name")` and `validate_test_config()`.
 
 ## Running Tests
 
@@ -578,7 +509,7 @@ cargo test -p simple-driver runner_compiles
 ```
 
 ### Simple Standard Library Tests
-The Simple stdlib includes BDD-style specification tests written in the Simple language itself. These tests are automatically discovered and wrapped as Rust tests via `build.rs`. The test structure mirrors `src/` organization with tests grouped by module.
+BDD-style tests written in Simple, auto-discovered by `build.rs` and wrapped as Rust tests.
 
 ```bash
 # Run all stdlib tests (unit + system + integration)
@@ -616,106 +547,15 @@ cargo test -p simple-driver simple_stdlib_unit_ui_gui_theme_spec  # Theme tests
 ./target/debug/simple simple/std_lib/test/system/doctest/parser/parser_spec.spl
 ```
 
-**Test Organization (mirroring src/ structure):**
+**Test Organization:** Mirrors `src/` structure - `unit/`, `system/`, `integration/`, `fixtures/`
 
-- `simple/std_lib/test/unit/core/` - Unit tests for core stdlib functionality
-  - `arithmetic_spec.spl`, `comparison_spec.spl`, `primitives_spec.spl` - Basic operations
-  - `collections_spec.spl` - Option, Result, Array, List, Dict
-  - `string_spec.spl` - String operations and manipulation
-  - `hello_spec.spl` - Basic example test
-
-- `simple/std_lib/test/unit/units/` - Unit tests for semantic units module
-  - `units_spec.spl` - Size units (bytes, KiB, MiB, etc.) and time units (ns, us, ms, s, min, hr, day)
-
-- `simple/std_lib/test/system/spec/` - BDD spec framework system tests
-  - `spec_framework_spec.spl` - describe/context/it/expect DSL functionality
-  - `matchers/spec_matchers_spec.spl` - All matcher types (core, comparison, collection, string)
-
-- `simple/std_lib/test/system/doctest/` - Doctest framework system tests
-  - `doctest_advanced_spec.spl` - Edge cases, error handling, Unicode support
-  - `parser/parser_spec.spl` - Docstring parsing and code extraction
-
-- `simple/std_lib/test/unit/ui/` - UI framework unit tests
-  - `element_spec.spl` - Element/NodeId/ElementTree tests
-  - `patchset_spec.spl` - PatchOp and PatchSet tests
-  - `diff_spec.spl` - Keyed diffing algorithm tests
-  - `widgets_spec.spl` - TUI widget tests (Menu, Dialog, etc.)
-
-- `simple/std_lib/test/unit/ui/gui/` - GUI renderer tests
-  - `theme_spec.spl` - Theme palette, typography, spacing tests
-  - `html_spec.spl` - HTML renderer and hydration manifest tests
-  - `gui_widgets_spec.spl` - GUI widget tests (Card, Chip, Avatar, etc.)
-
-- `simple/std_lib/test/integration/doctest/` - Integration tests
-  - `discovery_spec.spl` - Cross-module doctest discovery and execution
-
-- `simple/std_lib/test/fixtures/` - Test data and fixtures
-  - `fixture_spec.spl` - Fixture testing examples
-  - `doctest/sample.spl`, `sample_data.txt` - Doctest framework test samples
-
-**Test Discovery:** Files matching `*_spec.spl` or `*_test.spl` are auto-discovered by build.rs
-
-**Current Coverage (31 test files, 400+ test cases):**
-- ✅ Unit Tests: 14 files (core: 7, units: 1, ui: 4, ui/gui: 3, spec: 6)
-- ✅ System Tests: 6 files (spec: framework, matchers; doctest: parser, matcher, runner, advanced)
-- ✅ Integration Tests: 1 file (doctest discovery)
-- ✅ Plus Fixtures: 2 files (fixture_spec, doctest samples)
+**Coverage:** 31 test files, 400+ test cases (14 unit, 6 system, 1 integration, 2 fixtures)
 
 ### Writing Simple (.spl) Tests
 
-Simple tests are automatically linked to Rust's test framework via `build.rs`. This allows running all tests through `cargo test`.
+SPL tests auto-link to Rust via `build.rs`. Files matching `*_spec.spl`/`*_test.spl` → `simple_stdlib_{path}` test names.
 
-**How the linkage works:**
-
-1. `src/driver/build.rs` scans `simple/std_lib/test/` for `*_spec.spl` and `*_test.spl` files
-2. Generates Rust test wrappers in `OUT_DIR/simple_stdlib_tests.rs`
-3. Each SPL test becomes a Rust test: `simple_stdlib_{path}` (path sanitized)
-4. Tests are included via `include!()` in `src/driver/tests/simple_stdlib_tests.rs`
-
-**Path to test name mapping:**
-
-| SPL File Path | Rust Test Name |
-|---------------|----------------|
-| `test/unit/core/arithmetic_spec.spl` | `simple_stdlib_unit_core_arithmetic_spec` |
-| `test/unit/ui/element_spec.spl` | `simple_stdlib_unit_ui_element_spec` |
-| `test/unit/ui/gui/theme_spec.spl` | `simple_stdlib_unit_ui_gui_theme_spec` |
-
-**Creating a new SPL test:**
-
-1. Create test file in appropriate directory:
-   ```
-   simple/std_lib/test/unit/{module}/{name}_spec.spl
-   ```
-
-2. Use BDD-style spec syntax:
-   ```simple
-   use spec.*
-   use {module_to_test}.*
-
-   describe "FeatureName":
-       it "does something":
-           let result = some_function()
-           expect(result).to_equal(expected)
-
-       context "when condition":
-           it "behaves differently":
-               expect(other_function()).to_be_true()
-   ```
-
-3. Rebuild to link tests:
-   ```bash
-   cargo build -p simple-driver
-   ```
-
-4. Run the new test:
-   ```bash
-   cargo test -p simple-driver simple_stdlib_{path_to_test}
-   ```
-
-**Test file naming conventions:**
-- `*_spec.spl` - BDD-style specification tests (preferred)
-- `*_test.spl` - Traditional test files
-- Files in `fixtures/` directories are **skipped** (not auto-linked)
+Create in `simple/std_lib/test/{unit|system|integration}/`, use BDD syntax, rebuild with `cargo build -p simple-driver`.
 
 ## Code Quality Tools
 
@@ -729,87 +569,24 @@ make help              # Show all available targets
 
 ### Test Coverage
 
-Uses `cargo-llvm-cov` for accurate coverage measurement. Coverage metrics vary by test level:
-
-| Test Level | Coverage Metric | Target |
-|------------|-----------------|--------|
-| Unit | Branch/Condition | 100% |
-| Integration | Public function on class/struct | 100% |
-| System | Class/struct method | 100% |
-| Environment | Branch/Condition (merged with Unit) | 100% |
+Uses `cargo-llvm-cov`. All targets: 100% coverage.
 
 ```bash
-# Coverage by test level
-make coverage-unit      # Unit: branch/condition (all 631+ tests)
-make coverage-it        # IT: public function on class/struct
-make coverage-system    # System: class/struct method coverage
-make coverage-env       # Environment: branch/condition
-
-# Combined reports
-make coverage           # HTML report → target/coverage/html/index.html
-make coverage-all       # All test level reports
-make coverage-summary   # Print summary to console
+make coverage-unit/it/system/env  # Per-level reports
+make coverage                      # HTML → target/coverage/html/index.html
+make coverage-all                  # All reports
 ```
 
 Install: `cargo install cargo-llvm-cov`
 
-**Coverage Goals:**
-- Unit tests: 100% branch and condition coverage
-- IT tests: 100% public function coverage on class/struct (defined in public_api.yml)
-- System tests: 100% class/struct method coverage (defined in public_api.yml)
-- Focus on: parser edge cases, type system branches, error handling paths
-
-**Test Helper Pattern (reduces duplication):**
-```rust
-/// Helper to run source and assert expected exit code
-fn run_expect(src: &str, expected: i32) {
-    let runner = Runner::new();
-    let exit = runner.run_source(src).expect("run ok");
-    assert_eq!(exit, expected);
-}
-
-#[test]
-fn test_arithmetic() {
-    run_expect("main = 1 + 2", 3);
-    run_expect("main = 10 - 3", 7);
-    run_expect("main = 6 * 7", 42);
-}
-```
-
 ### Code Duplication Detection
 
-Uses `jscpd` for detecting copy-paste code that should be refactored.
+Uses `jscpd` (threshold: 2%, minLines: 5, minTokens: 50).
 
 ```bash
-make duplication       # Full report → target/duplication/
-make duplication-simple # Grep-based fallback (no npm needed)
-jscpd ./src            # Direct run with .jscpd.json config
+make duplication        # Report → target/duplication/
+jscpd ./src             # Direct run
 ```
-
-**Configuration (`.jscpd.json`):**
-```json
-{
-  "threshold": 2,        // Max allowed duplication % (fail if exceeded)
-  "minLines": 5,         // Minimum lines to detect as clone
-  "minTokens": 50,       // Minimum tokens to detect as clone
-  "ignore": ["**/target/**", "**/*.md"]
-}
-```
-
-**Adjusting Detection Sensitivity:**
-```bash
-# For stricter detection (find smaller duplicates):
-jscpd ./src --min-lines 3 --min-tokens 10
-
-# For test files specifically:
-jscpd ./src/driver/tests --min-lines 3 --min-tokens 10
-```
-
-**Refactoring Duplicates:**
-1. Run `jscpd` to identify clones
-2. Extract common patterns into helper functions/structs
-3. Use builder patterns for complex object creation (see `SmfBuilder` in loader_tests.rs)
-4. Use parameterized test helpers (see `run_expect` in runner_tests.rs)
 
 Install: `npm install -g jscpd`
 
@@ -828,22 +605,13 @@ make fmt-check         # Check formatting (CI-friendly)
 make install-tools     # Installs cargo-llvm-cov, cargo-audit, cargo-outdated
 ```
 
-Optional (requires npm): `npm install -g jscpd`
-
 ## Logging Strategy
-- Use `tracing` for structured, span-based logging. Initialize via `simple_log::init()` (respects `SIMPLE_LOG`/`RUST_LOG` filters).
-- For “AOP-like” logging, prefer `#[tracing::instrument]` on functions to auto-capture args/latency without scattering manual logs.
-- Avoid noisy logging on hot paths by default; keep it opt-in via env filters. Rust doesn’t do runtime AOP—proc macros + spans give the “weaving” you need at compile time.
+- Use `tracing` with `simple_log::init()` (respects `SIMPLE_LOG`/`RUST_LOG`)
+- Prefer `#[tracing::instrument]` for cross-cutting logging
+- Keep opt-in to avoid overhead on hot paths
 
-## How to Write System Tests (CLI/TUI)
-- Add `shadow-terminal` to the crate hosting the CLI tests (likely `src/driver`) so tests can spawn the binary in a fake PTY, send keys, and assert the screen/output without a real terminal.
-- Follow the flow in `doc/guides/test.md`:
-  - Create a temp dir and write a `main.spl` (and any imports) to exercise dependency analysis and SMF emission.
-  - Spawn the CLI via `shadow_terminal::Command::new([...])` with `rows/cols` set; wait for banners or diagnostics with `wait_for_stdout`.
-  - Assert exit code (`wait_for_exit_success`), artifact existence (`.with_extension("smf")` non-empty), and readable buffers (no ANSI errors or wrapped lines).
-  - For watch-mode scenarios, mutate the source after starting the command and assert a rebuild message + updated `.smf` mtime; remember to stop the process (`kill`) at the end of the test.
-- Keep system tests fast and isolated: no network, only temp directories, and avoid assuming a specific shell. Use plain-text assertions for errors so failures are legible in CI logs.
-- System tests must use `init_system_tests!()` - no mocks allowed.
+## System Tests (CLI/TUI)
+Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert exit codes/artifacts. No network, no mocks (`init_system_tests!()`). See `doc/guides/test.md`.
 
 ## Key Files
 
@@ -888,60 +656,72 @@ Optional (requires npm): `npm install -g jscpd`
 - `doc/research/improve_api.md` - API design overview
 - `doc/status/` - Feature implementation status (79+ files)
 
-**Note:** Large documentation files (feature.md, improve_api.md) have been reorganized into index files linking to focused sub-documents for better maintainability. Original files backed up with `.backup` extension.
-## Recent Work (2025-12-15)
+## Postponed Jobs & Features
 
-### Code Deduplication ✅ COMPLETED
+### Active Development (from TODO.md)
 
-Successfully reduced code duplication from **2.53% to 1.58%** (0.95 percentage points below threshold):
+**Contract Blocks (#400)** - 25% Complete (Parser Phase 1)
+- ✅ Lexer keywords, AST nodes, parsing logic
+- ⏳ Wire into function/class, type checking, runtime assertions
 
-**Final Results:**
-- **Lines reduced:** 869 lines (-0.95%)
-- **Tokens reduced:** 8424 tokens (-1.08%)
-- **Clones eliminated:** 78 clones (-36%)
-- **Achievement:** 37.5% reduction in duplication
+**JJ Integration (#303)** - 67% Complete (8/12 tasks)
+- ✅ State management, events, CLI, tests
+- ⏳ Test success tracking, system tests, docs
 
-**Refactoring Phases (5 total):**
-1. **Error Handling Macros** (-696 lines) - `semantic_err!`, `bail_semantic!`, `bail_unknown_method!`
-2. **Module Loading** (-72 lines) - Consolidated into `pipeline/` submodules
-3. **Method Error Macro** (-26 lines) - Standardized unknown method errors
-4. **Monomorphize Utilities** (-66 lines) - Shared type analysis helpers
-5. **TOML Helper** (-9 lines) - String array extraction
+**BDD Spec (#300)** - 70% Sprint 1 (10/12 tasks)
+- ✅ DSL, registry, runtime, matchers
+- ⏳ Unit tests, test registry
 
-**Impact:**
-- ✅ All 807+ tests passing
-- ✅ Code quality significantly improved
-- ✅ Centralized error handling patterns
-- ✅ Shared utilities for type analysis
-- ✅ Build time unchanged (~1.7s)
+**Doctest (#301)** - 90% Effective Complete
+- ✅ Parser, matcher, runner, discovery, FFI (40+ tests)
+- ⏳ CLI integration, interpreter execution (blocked)
 
-See `DEDUPLICATION_FINAL_REPORT.md` for complete details.
+### Planned Features (by Priority)
 
-### Build Fixes
-- Added Debug, Clone, Copy, PartialEq, Eq derives to BackendKind enum
-- Implemented missing `contains_assignment` function in doctest module  
-- Fixed REPL import paths to use `simple_driver::` prefix
-- Build now compiles successfully
+**High Priority:**
+1. LLM-Friendly Features (#880-919) - 40 features planned
+2. Test Framework Completion - BDD + Doctest finishing
+3. Language Server (LSP) - Editor support
 
-### File Organization Review
-Analyzed large files (>1000 lines) for potential splitting:
-- `instr.rs` (1305 lines) - Already well-modularized with include! files
-- `llvm.rs` (1071 lines) - LLVM backend, well-organized
-- `ast.rs` (1045 lines) - AST definitions, logically grouped
-- `lower.rs` (1023 lines) - HIR lowering with single large impl block
-- `container.rs` (1005 lines) - Settlement container, well-structured
+**Medium Priority:**
+4. Test CLI Integration (#302) - Unified `simple test`
+5. Convention Documentation
+6. TUI Framework
+7. Package Registry (crates.io-style)
 
-These files are already reasonably organized. Further splitting would require significant refactoring and could introduce issues with the impl block structures and module dependencies.
+**Low Priority:**
+8. Web Framework (Rails-style)
+9. GUI Framework (Native/Immediate Mode)
+10. Debugger (DAP)
 
-### Test Status
-- Main build: ✅ Compiles successfully
-- Tests: ⚠️ Some test compilation errors remain (test-only issues)
-  - Unresolved imports in test modules
-  - Private module access issues
-  - Missing test utility functions
+### Deferred/Postponed
 
-### Next Steps
-1. Fix remaining test compilation errors
-2. Run full test suite to ensure no regressions
-3. Consider duplication detection and removal
-4. Update documentation as needed
+**Blocked:**
+- Test state storage (JJ integration - needs test framework)
+- Doctest CLI/interpreter (needs infrastructure)
+- Generator JIT codegen (needs block layout)
+
+**Deferred:**
+- GPU backends (WGPU, Metal)
+- 32-bit architecture support (needs LLVM)
+- Unit conversion methods
+
+### Feature Ranges Summary
+
+| Range | Category | Total | Complete | Status |
+|-------|----------|-------|----------|--------|
+| #880-919 | LLM-Friendly | 40 | 0 | 📋 Planned |
+| #1000-1050 | AOP & Predicates | 51 | 0 | 📋 Planned |
+| #1051-1060 | SDN Self-Hosting | 10 | 0 | 📋 Planned |
+| #1061-1103 | Missing Lang Features | 43 | 7 | 🔄 16% |
+| #1104-1115 | Concurrency Modes | 12 | 4 | 🔄 33% |
+| #1131-1145 | Formatting & Lints* | 15 | 15** | ✅ Complete* |
+| #1146-1155 | Trait Coherence | 10 | 10 | ✅ Complete |
+
+\*Compiler lints complete; Simple-based tools (simple_fmt/simple_lint) in Phase 1
+\*\*Compiler infrastructure complete
+
+**Overall Progress:** 68% (296/434 features)
+
+See `TODO.md` and `doc/plans/30_pending_features.md` for details.
+

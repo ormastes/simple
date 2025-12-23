@@ -11,10 +11,10 @@ This document combines completed features from previous archives and adds new co
 
 ### Database & Persistence Design Documents (#700-#701)
 
-| Feature ID | Document | Status | Impl | Doc | S-Test | R-Test |
-|------------|----------|--------|------|-----|--------|--------|
-| #700 | `db.md` | ✅ Design Complete | - | [db.md](db.md) | - | - |
-| #701 | `sqp.md` | ✅ Design Complete | - | [sqp.md](sqp.md) | - | - |
+| Feature ID | Document | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|----------|------------|--------|------|-----|--------|--------|
+| #700 | `db.md` | 2 | ✅ Design Complete | - | [db.md](db.md) | - | - |
+| #701 | `sqp.md` | 2 | ✅ Design Complete | - | [sqp.md](sqp.md) | - | - |
 
 **DB Layer Features Designed:**
 - PostgreSQL driver support
@@ -36,9 +36,9 @@ This document combines completed features from previous archives and adds new co
 
 ### Mold Linker Integration Analysis (#800)
 
-| Feature ID | Document | Status | Impl | Doc | S-Test | R-Test |
-|------------|----------|--------|------|-----|--------|--------|
-| #800 | `mold_linker_analysis.md` | ✅ Analysis Complete | - | [research/mold_linker_analysis.md](research/mold_linker_analysis.md) | - | - |
+| Feature ID | Document | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|----------|------------|--------|------|-----|--------|--------|
+| #800 | `mold_linker_analysis.md` | 3 | ✅ Analysis Complete | - | [research/mold_linker_analysis.md](research/mold_linker_analysis.md) | - | - |
 
 **Added Sections:**
 - Appendix C: Design Patterns for Resource Management
@@ -67,26 +67,26 @@ This document combines completed features from previous archives and adds new co
 
 All pointer types implemented and tested (17 tests pass):
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #25 | Unique Pointers (`new &`) | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
-| #26 | Shared Pointers (`new *`) | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
-| #27 | Weak Pointers (`new -`) | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
-| #28 | Handle Pointers (`new +`) | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
-| #29 | Borrows (`&x`, `&mut x`) | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #25 | Unique Pointers (`new &`) | 4 | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
+| #26 | Shared Pointers (`new *`) | 4 | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
+| #27 | Weak Pointers (`new -`) | 4 | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
+| #28 | Handle Pointers (`new +`) | 4 | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
+| #29 | Borrows (`&x`, `&mut x`) | 4 | ✅ | R | [spec/memory.md](spec/memory.md) | [`memory_tests.rs`](../tests/system/memory_tests.rs) | `src/compiler/tests/` |
 
 ### Contracts (#400-#405)
 
 Design by Contract fully implemented (12 tests pass):
 
-| Feature ID | Feature | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|--------|------|-----|--------|--------|
-| #400 | Preconditions (`in:`) | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
-| #401 | Postconditions (`out:`) | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
-| #402 | Error postconditions (`out_err:`) | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
-| #403 | Invariants (`invariant:`) | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
-| #404 | Old value capture (`old()`) | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
-| #405 | Result binding | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #400 | Preconditions (`in:`) | 3 | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
+| #401 | Postconditions (`out:`) | 3 | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
+| #402 | Error postconditions (`out_err:`) | 3 | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
+| #403 | Invariants (`invariant:`) | 3 | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
+| #404 | Old value capture (`old()`) | 3 | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
+| #405 | Result binding | 2 | ✅ | R | [spec/functions.md](spec/functions.md) | [`core_tests.rs`](../tests/system/core_tests.rs) | `src/compiler/tests/` |
 
 ### Unit Types (#200-#215) ✅ COMPLETE
 

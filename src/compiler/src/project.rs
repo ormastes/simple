@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::CompileError;
+use crate::aop_config::{parse_aop_config, AopConfig};
+use crate::di::{parse_di_config, DiConfig};
 use crate::lint::{LintConfig, LintLevel, LintName};
 use crate::module_resolver::ModuleResolver;
 
@@ -27,6 +29,10 @@ pub struct ProjectContext {
     pub profiles: HashMap<String, (Vec<String>, Vec<String>)>,
     /// Lint configuration from simple.toml
     pub lint_config: LintConfig,
+    /// DI configuration from simple.toml
+    pub di_config: Option<DiConfig>,
+    /// Runtime AOP configuration from simple.toml
+    pub aop_config: Option<AopConfig>,
 }
 
 impl ProjectContext {
@@ -66,6 +72,8 @@ impl ProjectContext {
             features: HashSet::new(),
             profiles: HashMap::new(),
             lint_config: LintConfig::new(),
+            di_config: None,
+            aop_config: None,
         })
     }
 
@@ -140,6 +148,11 @@ impl ProjectContext {
             }
         }
 
+        let di_config = parse_di_config(&toml)
+            .map_err(|e| CompileError::Semantic(format!("invalid di config: {}", e)))?;
+        let aop_config = parse_aop_config(&toml)
+            .map_err(|e| CompileError::Semantic(format!("invalid aop config: {}", e)))?;
+
         // Create resolver with features and profiles
         let resolver = ModuleResolver::new(root.to_path_buf(), source_root.clone())
             .with_features(features.clone())
@@ -153,6 +166,8 @@ impl ProjectContext {
             features,
             profiles,
             lint_config,
+            di_config,
+            aop_config,
         })
     }
 
@@ -173,6 +188,8 @@ impl ProjectContext {
             features: HashSet::new(),
             profiles: HashMap::new(),
             lint_config: LintConfig::new(),
+            di_config: None,
+            aop_config: None,
         }
     }
 
@@ -355,6 +372,28 @@ bare_bool = "allow"
             ctx.lint_config.get_level(LintName::BareBool),
             LintLevel::Allow
         );
+    }
+
+    #[test]
+    fn test_di_configuration() {
+        let manifest = r#"
+[project]
+name = "myapp"
+
+[di]
+mode = "hybrid"
+
+[di.profiles.default]
+bindings = [
+  { on = "pc{ type(Foo) }", impl = "Bar", scope = "Singleton", priority = 10 }
+]
+"#;
+        let (_dir, ctx) = create_test_project_with_manifest(manifest);
+        let di = ctx.di_config.as_ref().expect("di config");
+        let profile = di.profiles.get("default").unwrap();
+        assert_eq!(profile.bindings.len(), 1);
+        assert_eq!(profile.bindings[0].impl_type, "Bar");
+        assert_eq!(profile.bindings[0].priority, 10);
     }
 
     #[test]

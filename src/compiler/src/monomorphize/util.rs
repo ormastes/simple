@@ -152,6 +152,10 @@ pub fn ast_type_to_concrete(
             // SIMD types are specialized arrays
             ConcreteType::Array(Box::new(ast_type_to_concrete(element, bindings)))
         }
+        AstType::Capability { inner, .. } => {
+            // Capability is a compile-time wrapper, unwrap to get the inner type
+            ast_type_to_concrete(inner, bindings)
+        }
         AstType::DynTrait(trait_name) => {
             // dyn Trait - represents a trait object (fat pointer)
             ConcreteType::Named(format!("dyn_{}", trait_name))

@@ -211,6 +211,23 @@ fn infers_trait_definition() {
 }
 
 #[test]
+fn rejects_overlapping_trait_impls_without_default() {
+    let items = parse_items(
+        "trait Process:\n    fn process(self)\nimpl[T] Process for T:\n    fn process(self):\n        return 0\nimpl Process for i32:\n    fn process(self):\n        return 1\nmain = 0",
+    );
+    let err = check(&items).expect_err("should reject overlapping impls");
+    assert!(format!("{err:?}").contains("overlapping impls"));
+}
+
+#[test]
+fn allows_specialization_with_default_impl() {
+    let items = parse_items(
+        "trait Process:\n    fn process(self)\n#[default]\nimpl[T] Process for T:\n    fn process(self):\n        return 0\nimpl Process for i32:\n    fn process(self):\n        return 1\nmain = 0",
+    );
+    check(&items).expect("type check ok");
+}
+
+#[test]
 fn infers_expression_statement() {
     let items = parse_items("fn test():\n    1 + 2\n    return 0\nmain = test()");
     check(&items).expect("type check ok");

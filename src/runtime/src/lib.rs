@@ -1,7 +1,9 @@
 pub mod concurrency;
+pub mod concurrent;
 pub mod coverage;
 pub mod cuda_runtime;
 pub mod executor;
+pub mod aop;
 pub mod memory;
 pub mod parallel;
 pub mod value;
@@ -42,6 +44,9 @@ pub use value::{
     RuntimeObject, RuntimeShared, RuntimeString, RuntimeTuple, RuntimeUnique, RuntimeValue,
     RuntimeWeak,
 };
+
+// Re-export AOP runtime FFI functions
+pub use aop::{rt_aop_invoke_around, rt_aop_proceed, AopAroundFn, AopTargetFn, ProceedContext};
 
 // Re-export runtime FFI functions for codegen
 pub use value::{
@@ -240,4 +245,40 @@ pub use coverage::{
     rt_coverage_path_probe, rt_coverage_path_finalize,
     rt_coverage_dump_sdn, rt_coverage_free_sdn,
     rt_coverage_clear, rt_coverage_enabled,
+};
+
+// Re-export concurrent collections types and FFI functions (#1108-#1112)
+pub use concurrent::{
+    // Types
+    ConcurrentQueue, ConcurrentMap, ConcurrentStack,
+    GcWriteBarrier, TraceConcurrent,
+    // Write barrier FFI
+    simple_gc_barrier_start_collection,
+    simple_gc_barrier_end_collection,
+    simple_gc_barrier_epoch,
+    // ConcurrentQueue FFI
+    simple_concurrent_queue_new,
+    simple_concurrent_queue_free,
+    simple_concurrent_queue_push,
+    simple_concurrent_queue_try_pop,
+    simple_concurrent_queue_is_empty,
+    simple_concurrent_queue_len,
+    // ConcurrentMap FFI
+    simple_concurrent_map_new,
+    simple_concurrent_map_with_capacity,
+    simple_concurrent_map_free,
+    simple_concurrent_map_insert,
+    simple_concurrent_map_get,
+    simple_concurrent_map_remove,
+    simple_concurrent_map_contains_key,
+    simple_concurrent_map_len,
+    simple_concurrent_map_is_empty,
+    simple_concurrent_map_clear,
+    // ConcurrentStack FFI
+    simple_concurrent_stack_new,
+    simple_concurrent_stack_free,
+    simple_concurrent_stack_push,
+    simple_concurrent_stack_try_pop,
+    simple_concurrent_stack_is_empty,
+    simple_concurrent_stack_len,
 };

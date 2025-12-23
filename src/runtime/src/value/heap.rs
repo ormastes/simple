@@ -25,6 +25,7 @@ pub enum HeapObjectType {
     RwLock = 0x12,
     Semaphore = 0x13,
     Barrier = 0x14,
+    Atomic = 0x15,
 }
 
 /// Header for all heap-allocated objects

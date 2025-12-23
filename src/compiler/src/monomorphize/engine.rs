@@ -376,6 +376,10 @@ impl<'a> Monomorphizer<'a> {
                 lanes: *lanes,
                 element: Box::new(self.substitute_ast_type(element, bindings)),
             },
+            AstType::Capability { capability, inner } => AstType::Capability {
+                capability: *capability,
+                inner: Box::new(self.substitute_ast_type(inner, bindings)),
+            },
             // dyn Trait doesn't have type parameters to substitute
             AstType::DynTrait(trait_name) => AstType::DynTrait(trait_name.clone()),
             // Unit with repr doesn't have type parameters to substitute

@@ -686,6 +686,8 @@ pub struct AssociatedTypeImpl {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ImplBlock {
     pub span: Span,
+    /// Attributes applied to the impl block: #[default]
+    pub attributes: Vec<Attribute>,
     /// Generic type parameters: impl[T]
     pub generic_params: Vec<String>,
     /// Where clause for trait bounds: where T: Clone + Default
@@ -1045,6 +1047,12 @@ pub enum Type {
     Generic {
         name: String,
         args: Vec<Type>,
+    },
+    /// Reference capability wrapper (mut T, iso T)
+    /// Tracks what operations are permitted on a reference
+    Capability {
+        capability: super::enums::ReferenceCapability,
+        inner: Box<Type>,
     },
     Pointer {
         kind: PointerKind,

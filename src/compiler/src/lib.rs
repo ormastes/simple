@@ -8,6 +8,8 @@ pub mod compilability;
 pub mod coverage;
 pub mod effects;
 pub mod effects_cache;
+pub mod aop_config;
+pub mod di;
 pub mod elf_utils;
 pub mod error;
 pub mod hir;

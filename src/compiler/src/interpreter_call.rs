@@ -1030,6 +1030,20 @@ fn evaluate_call(
             // Call a first-class function value with captured environment for closure
             exec_function_with_captured_env(&def, args, env, &captured_env, functions, classes, enums, impl_methods)
         }
+        Value::NativeFunction(native) => {
+            let evaluated: Vec<Value> = args
+                .iter()
+                .map(|a| {
+                    if a.name.is_some() {
+                        return Err(CompileError::Semantic(
+                            "native function does not support named arguments".into(),
+                        ));
+                    }
+                    evaluate_expr(&a.value, env, functions, classes, enums, impl_methods)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            (native.func)(&evaluated)
+        }
         Value::Constructor { class_name } => {
             // Call a constructor to create an instance
             instantiate_class(&class_name, args, env, functions, classes, enums, impl_methods)
@@ -1047,6 +1061,30 @@ fn bind_args(
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: simple_parser::ast::SelfMode,
+) -> Result<HashMap<String, Value>, CompileError> {
+    bind_args_with_injected(
+        params,
+        args,
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_mode,
+        &HashMap::new(),
+    )
+}
+
+fn bind_args_with_injected(
+    params: &[simple_parser::ast::Parameter],
+    args: &[simple_parser::ast::Argument],
+    outer_env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_mode: simple_parser::ast::SelfMode,
+    injected: &HashMap<String, Value>,
 ) -> Result<HashMap<String, Value>, CompileError> {
     use simple_parser::ast::Type;
     let params_to_bind: Vec<_> = params
@@ -1130,10 +1168,64 @@ fn bind_args(
                     }
                 }
                 bound.insert(param.name.clone(), v);
+            } else if let Some(injected_val) = injected.get(&param.name) {
+                bound.insert(param.name.clone(), injected_val.clone());
             } else {
                 bail_semantic!("missing argument {}", param.name);
             }
         }
+    }
+
+    Ok(bound)
+}
+
+fn bind_args_with_values(
+    params: &[simple_parser::ast::Parameter],
+    args: &[Value],
+    outer_env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_mode: simple_parser::ast::SelfMode,
+) -> Result<HashMap<String, Value>, CompileError> {
+    use simple_parser::ast::Type;
+    let params_to_bind: Vec<_> = params
+        .iter()
+        .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
+        .collect();
+
+    if args.len() > params_to_bind.len() {
+        bail_semantic!("too many arguments");
+    }
+
+    let mut bound = HashMap::new();
+    for (idx, param) in params_to_bind.iter().enumerate() {
+        let value = if idx < args.len() {
+            args[idx].clone()
+        } else if let Some(default_expr) = &param.default {
+            evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?
+        } else {
+            bail_semantic!("missing argument {}", param.name);
+        };
+
+        let value = if let Some(Type::DynTrait(trait_name)) = &param.ty {
+            Value::TraitObject {
+                trait_name: trait_name.clone(),
+                inner: Box::new(value),
+            }
+        } else {
+            value
+        };
+
+        if let Some(Type::Simple(type_name)) = &param.ty {
+            if is_unit_type(type_name) {
+                if let Err(e) = validate_unit_type(&value, type_name) {
+                    bail_semantic!("parameter '{}': {}", param.name, e);
+                }
+            }
+        }
+        bound.insert(param.name.clone(), value);
     }
 
     Ok(bound)
@@ -1196,6 +1288,20 @@ fn exec_function(
 ) -> Result<Value, CompileError> {
     with_effect_context(&func.effects, || {
         exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx)
+    })
+}
+
+fn exec_function_with_values(
+    func: &FunctionDef,
+    args: &[Value],
+    outer_env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    with_effect_context(&func.effects, || {
+        exec_function_with_values_inner(func, args, outer_env, functions, classes, enums, impl_methods)
     })
 }
 
@@ -1307,6 +1413,54 @@ fn exec_function_inner(
     Ok(result)
 }
 
+fn exec_function_with_values_inner(
+    func: &FunctionDef,
+    args: &[Value],
+    outer_env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    // Record function call for coverage tracking
+    if let Some(cov) = crate::coverage::get_global_coverage() {
+        cov.lock().unwrap().record_function_call(&func.name);
+    }
+
+    let mut local_env = Env::new();
+    let self_mode = simple_parser::ast::SelfMode::IncludeSelf;
+    let bound = bind_args_with_values(
+        &func.params,
+        args,
+        outer_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_mode,
+    )?;
+    for (name, val) in bound {
+        local_env.insert(name, val);
+    }
+    let result = match exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
+        Ok((Control::Return(v), _)) => v,
+        Ok((_, Some(v))) => v,
+        Ok((_, None)) => Value::Nil,
+        Err(CompileError::TryError(val)) => val,
+        Err(e) => return Err(e),
+    };
+
+    if let Some(Type::Simple(type_name)) = &func.return_type {
+        if is_unit_type(type_name) {
+            if let Err(e) = validate_unit_type(&result, type_name) {
+                bail_semantic!("return type mismatch in '{}': {}", func.name, e);
+            }
+        }
+    }
+
+    Ok(result)
+}
+
 /// Instantiate a class by calling its constructor (the 'new' method if present)
 /// or by creating an object with default field values.
 fn instantiate_class(
@@ -1350,7 +1504,32 @@ fn instantiate_class(
         }
 
         let self_mode = simple_parser::ast::SelfMode::SkipSelf;
-        let bound = bind_args(&new_method.params, args, env, functions, classes, enums, impl_methods, self_mode)?;
+        let injected = if has_inject_attr(new_method) {
+            resolve_injected_args(
+                &new_method.params,
+                args,
+                class_name,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                self_mode,
+            )?
+        } else {
+            HashMap::new()
+        };
+        let bound = bind_args_with_injected(
+            &new_method.params,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            self_mode,
+            &injected,
+        )?;
         for (name, val) in bound {
             local_env.insert(name, val);
         }
@@ -1395,4 +1574,277 @@ fn instantiate_class(
             fields,
         })
     }
+}
+
+fn has_inject_attr(method: &FunctionDef) -> bool {
+    method
+        .attributes
+        .iter()
+        .any(|attr| attr.name == "inject" || attr.name == "sys_inject")
+}
+
+fn resolve_injected_args(
+    params: &[simple_parser::ast::Parameter],
+    args: &[simple_parser::ast::Argument],
+    class_name: &str,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_mode: simple_parser::ast::SelfMode,
+) -> Result<HashMap<String, Value>, CompileError> {
+    use crate::di::DiMatchContext;
+
+    let params_to_bind: Vec<_> = params
+        .iter()
+        .filter(|p| !(self_mode.should_skip_self() && p.name == METHOD_SELF))
+        .collect();
+
+    let mut provided_names = HashSet::new();
+    let mut positional_count = 0usize;
+    for arg in args {
+        if let Some(name) = &arg.name {
+            provided_names.insert(name.clone());
+        } else {
+            positional_count += 1;
+        }
+    }
+
+    let mut injected = HashMap::new();
+    for (idx, param) in params_to_bind.iter().enumerate() {
+        if provided_names.contains(&param.name) {
+            continue;
+        }
+        if idx < positional_count {
+            continue;
+        }
+        let type_name = param_type_name(param).ok_or_else(|| {
+            semantic_err!("injectable parameter '{}' missing type", param.name)
+        })?;
+        let di_config = get_di_config().ok_or_else(|| {
+            semantic_err!("missing di config for injectable parameter '{}'", param.name)
+        })?;
+        let ctx = DiMatchContext {
+            type_name: &type_name,
+            module_path: class_name,
+            attrs: &[],
+        };
+        let binding = di_config
+            .select_binding("default", &ctx)
+            .map_err(|_| semantic_err!("ambiguous DI binding for '{}'", type_name))?
+            .ok_or_else(|| semantic_err!("no DI binding for '{}'", type_name))?;
+
+        let value = resolve_binding_instance(
+            &binding.impl_type,
+            binding.scope,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?;
+        injected.insert(param.name.clone(), value);
+    }
+
+    Ok(injected)
+}
+
+fn param_type_name(param: &simple_parser::ast::Parameter) -> Option<String> {
+    use simple_parser::ast::Type;
+    match param.ty.as_ref()? {
+        Type::Simple(name) => Some(name.clone()),
+        Type::Generic { name, .. } => Some(name.clone()),
+        Type::DynTrait(name) => Some(name.clone()),
+        Type::Optional(inner) => match inner.as_ref() {
+            Type::Simple(name) => Some(name.clone()),
+            Type::Generic { name, .. } => Some(name.clone()),
+            Type::DynTrait(name) => Some(name.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn resolve_binding_instance(
+    impl_type: &str,
+    scope: crate::di::DiScope,
+    env: &Env,
+    functions: &HashMap<String, FunctionDef>,
+    classes: &HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    if scope == crate::di::DiScope::Singleton {
+        if let Some(cached) = DI_SINGLETONS.with(|cell| cell.borrow().get(impl_type).cloned()) {
+            return Ok(cached);
+        }
+    }
+
+    let instance = if classes.contains_key(impl_type) {
+        if let Some(aop_config) = get_aop_config() {
+            let class_def = classes.get(impl_type).ok_or_else(|| {
+                semantic_err!("unknown class: {}", impl_type)
+            })?;
+            let around = collect_runtime_init_advices(impl_type, class_def, &aop_config);
+            if around.is_empty() {
+                instantiate_class(
+                    impl_type,
+                    &[],
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?
+            } else {
+                let ctx = Arc::new(ProceedContext {
+                    env: Arc::new(env.clone()),
+                    functions: Arc::new(functions.clone()),
+                    classes: Arc::new(classes.clone()),
+                    enums: Arc::new(enums.clone()),
+                    impl_methods: Arc::new(impl_methods.clone()),
+                });
+                invoke_runtime_around_chain(
+                    Arc::new(around),
+                    0,
+                    impl_type,
+                    ctx,
+                )?
+            }
+        } else {
+            instantiate_class(
+                impl_type,
+                &[],
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+        }
+    } else {
+        bail_semantic!("DI binding impl '{}' is not a class", impl_type);
+    };
+
+    if scope == crate::di::DiScope::Singleton {
+        DI_SINGLETONS.with(|cell| {
+            cell.borrow_mut().insert(impl_type.to_string(), instance.clone());
+        });
+    }
+
+    Ok(instance)
+}
+
+struct ProceedContext {
+    env: Arc<Env>,
+    functions: Arc<HashMap<String, FunctionDef>>,
+    classes: Arc<HashMap<String, ClassDef>>,
+    enums: Arc<Enums>,
+    impl_methods: Arc<ImplMethods>,
+}
+
+fn collect_runtime_init_advices(
+    impl_type: &str,
+    class_def: &ClassDef,
+    aop_config: &crate::aop_config::AopConfig,
+) -> Vec<crate::aop_config::AopAroundRule> {
+    if !aop_config.runtime_enabled {
+        return Vec::new();
+    }
+    let attrs: Vec<String> = class_def.attributes.iter().map(|attr| attr.name.clone()).collect();
+    let ctx = crate::aop_config::AopMatchContext {
+        type_name: impl_type,
+        module_path: impl_type,
+        attrs: &attrs,
+    };
+    let mut matches: Vec<_> = aop_config
+        .around
+        .iter()
+        .filter(|rule| rule.predicate.matches(&ctx))
+        .collect();
+    if matches.is_empty() {
+        return Vec::new();
+    }
+    matches.sort_by(|a, b| {
+        let a_spec = a.predicate.specificity();
+        let b_spec = b.predicate.specificity();
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| b_spec.cmp(&a_spec))
+            .then_with(|| a.order.cmp(&b.order))
+    });
+    matches.into_iter().cloned().collect()
+}
+
+fn invoke_runtime_around_chain(
+    advices: Arc<Vec<crate::aop_config::AopAroundRule>>,
+    idx: usize,
+    impl_type: &str,
+    ctx: Arc<ProceedContext>,
+) -> Result<Value, CompileError> {
+    if idx >= advices.len() {
+        return instantiate_class(
+            impl_type,
+            &[],
+            ctx.env.as_ref(),
+            ctx.functions.as_ref(),
+            ctx.classes.as_ref(),
+            ctx.enums.as_ref(),
+            ctx.impl_methods.as_ref(),
+        );
+    }
+
+    let advice = &advices[idx];
+    let func = ctx
+        .functions
+        .get(&advice.advice)
+        .ok_or_else(|| semantic_err!("around advice '{}' not found", advice.advice))?;
+
+    let called = Arc::new(AtomicBool::new(false));
+    let called_marker = Arc::clone(&called);
+    let advices_clone = Arc::clone(&advices);
+    let impl_name = impl_type.to_string();
+    let next_idx = idx + 1;
+    let ctx_clone = Arc::clone(&ctx);
+
+    let proceed = Value::NativeFunction(crate::value::NativeFunction {
+        name: "proceed".to_string(),
+        func: Arc::new(move |args: &[Value]| {
+            if !args.is_empty() {
+                return Err(CompileError::Semantic(
+                    "proceed() takes no arguments".to_string(),
+                ));
+            }
+            if called_marker.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Err(CompileError::Semantic(
+                    "around advice called proceed() more than once".to_string(),
+                ));
+            }
+            invoke_runtime_around_chain(
+                Arc::clone(&advices_clone),
+                next_idx,
+                &impl_name,
+                Arc::clone(&ctx_clone),
+            )
+        }),
+    });
+
+    let result = exec_function_with_values(
+        func,
+        &[proceed],
+        ctx.env.as_ref(),
+        ctx.functions.as_ref(),
+        ctx.classes.as_ref(),
+        ctx.enums.as_ref(),
+        ctx.impl_methods.as_ref(),
+    )?;
+
+    if !called.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(CompileError::Semantic(
+            "around advice did not call proceed() exactly once".to_string(),
+        ));
+    }
+
+    Ok(result)
 }

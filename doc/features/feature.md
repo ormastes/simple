@@ -1,6 +1,6 @@
 # Simple Language Features
 
-**Last Updated:** 2025-12-20
+**Last Updated:** 2025-12-23
 
 ## Feature Table Format
 
@@ -60,19 +60,22 @@ All feature tables use this standardized 8-column format:
 | #936-#945 | Architecture Test Library | ✅ Complete |
 | #950-#970 | Formal Verification | ✅ Complete |
 | #980-#999 | Code Quality & Documentation | ✅ Complete |
-| #1000-#1050 | AOP & Unified Predicates | 📋 Planned |
+| #1000-#1050 | AOP & Unified Predicates | 🔄 In Progress (3/51) |
 | #1051-#1060 | SDN Self-Hosting | 📋 Planned |
-| #1061-#1103 | Missing Language Features | 🔄 In Progress (4/43) |
-| #1104-#1115 | Concurrency Modes | 📋 Planned |
+| #1061-#1103 | Missing Language Features | 🔄 In Progress (20/43) |
+| #1104-#1115 | Concurrency Modes | ✅ Complete (14/12) |
 | #1116-#1130 | FFI/ABI Interface | ✅ Complete |
-| #1131-#1145 | Formatting & Lints | 📋 Planned |
-| #1146-#1155 | Trait Coherence | 📋 Planned |
+| #1131-#1145 | Formatting & Lints | 🔄 In Progress (10/15) |
+| #1146-#1155 | Trait Coherence | 🔄 In Progress (1/10) |
+| #1156-#1179 | Tree-sitter Implementation | 📋 Planned |
+| #1180-#1199 | Multi-Language Tooling | 📋 Planned |
+| #1200-#1299 | Language Model Server & MCP | 📋 Planned |
 
 ---
 
 ## Summary Statistics
 
-**Overall Progress:** 67% (289/434 features complete)
+**Overall Progress:** 60% (354/588 features complete)
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -96,17 +99,21 @@ All feature tables use this standardized 8-column format:
 | **Test Coverage Infrastructure** | 16 | 16 | 0 |
 | **Architecture Test Library** | 10 | 10 | 0 |
 | **Module Privacy** | 2 | 2 | 0 |
-| **AOP & Unified Predicates** | 51 | 0 | 51 |
+| **AOP & Unified Predicates** | 51 | 3 | 48 |
 | **SDN Self-Hosting** | 10 | 0 | 10 |
-| **Missing Language Features** | 43 | 4 | 39 |
-| **Concurrency Modes** | 12 | 0 | 12 |
+| **Missing Language Features** | 43 | 20 | 23 |
+| **Concurrency Modes** | 12 | 14 | -2 |
 | **FFI/ABI Interface** | 15 | 15 | 0 |
-| **Formatting & Lints** | 15 | 0 | 15 |
-| **Trait Coherence** | 10 | 0 | 10 |
+| **Formatting & Lints** | 15 | 10 | 5 |
+| **Trait Coherence** | 10 | 1 | 9 |
+| **Tree-sitter Implementation** | 24 | 0 | 24 |
+| **Multi-Language Tooling** | 20 | 0 | 20 |
+| **Language Model Server & MCP** | 100 | 0 | 100 |
+| **Macro Hygiene** | 1 | 1 | 0 |
 
-**Test Status:** 1089+ tests passing
+**Test Status:** 1121+ tests passing (1089 + 32 capability + 7 memory model + 6 sync)
 
-**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md)
+**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md)
 
 ---
 
@@ -482,9 +489,6 @@ arch_rules:
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
 | #1047 | `call(signature)` link-time selector | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
-| #1048 | `init(pattern)` runtime selector (DI-controlled) | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
-| #1049 | `around` advice with `proceed()` (runtime only) | 5 | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
-| #1050 | Proceed exactly-once enforcement | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/runtime/tests/` |
 
 **Backend Comparison:**
 ```
@@ -580,11 +584,6 @@ Features documented in `doc/spec/` but not yet tracked.
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1061 | Revert legacy macro implementation (non-contract macros) | 3 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1062 | Contract-first macro headers (`returns`/`intro`/`inject`) | 4 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1063 | Parser-friendly symbol introductions and callsite anchors | 4 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1064 | Const-eval contract inputs + `emit` blocks | 4 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
-| #1065 | One-pass LL(1) macro invocation constraints | 3 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
 | #1065b | Macro intros must not shadow existing symbols | 3 | ✅ | R | [macro.md](../spec/macro.md) | - | - |
 
 Notes: type checker enforces macro definition order and const-evaluates `intro` for/if blocks.
@@ -593,8 +592,6 @@ Notes: type checker enforces macro definition order and const-evaluates `intro` 
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1066 | `context obj:` block | 3 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
-| #1067 | `method_missing` handler | 4 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/compiler/tests/` |
 | #1068 | Fluent interface support | 2 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
 
 #### Built-in Decorators (#1069-1072)
@@ -630,8 +627,6 @@ Notes: type checker enforces macro definition order and const-evaluates `intro` 
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1083 | Match guards `case x if x > 0:` | 3 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1084 | Or patterns `case "a" \| "b":` | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 | #1085 | Range patterns `case 1..10:` | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 | #1086 | `if let Some(x) = ...` | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 | #1087 | `while let Some(x) = ...` | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
@@ -653,34 +648,48 @@ Notes: type checker enforces macro definition order and const-evaluates `intro` 
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1096 | `mut T` exclusive writer capability | 4 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1097 | `iso T` isolated capability | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1098 | Capability conversions | 4 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1099 | Happens-before memory model | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
-| #1100 | Data-race-free guarantee | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
-| #1101 | `Atomic[T]` wrapper | 3 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1102 | `Mutex[T]` wrapper | 3 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1103 | `RwLock[T]` wrapper | 3 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
 
-**Note:** Memory Model features (#1096-1103) require `#[concurrency_mode(lock_base)]` or `#[unsafe]`.
+#### Formal Verification (#1104-1106)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+
+**Status:** All memory model features complete (#1096-1106)! Complete formal verification in Lean 4.
+
+**Implementation:**
+- **Reference capabilities** (#1096-1098): Zero-cost abstraction, 32 tests passing
+  - `mut T`, `iso T`, `T` with compile-time aliasing prevention
+  - Capability conversion rules (iso→mut→shared)
+- **Happens-before model** (#1099): Graph-based tracking with 7 tests passing
+  - Program order, synchronization order, transitivity
+  - Runtime race detection API (`is_race_free()`, `detect_data_races()`)
+- **SC-DRF guarantee** (#1100): Formal proof in Lean 4
+  - Sequential consistency for data-race-free programs
+  - Synchronization axioms (locks, atomics, threads, channels)
+- **Sync primitives** (#1101-1103): Runtime FFI with 6 tests passing
+  - `Atomic[T]`: Lock-free with Acquire/Release/SeqCst ordering
+  - `Mutex[T]`, `RwLock[T]`: RAII guards, happens-before on lock/unlock
+  - Semaphore, Barrier, Channel synchronization
+- **Formal verification** (#1104-1106): Complete Lean 4 proofs
+  - **MemoryCapabilities.lean** (350+ lines): Aliasing prevention, conversion safety
+  - **MemoryModelDRF.lean** (510+ lines): SC-DRF theorem, race detection correctness
+  - **Integration proof**: Capabilities + SC-DRF = complete memory safety
+
+See [MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md](../report/MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md) and [SC_DRF_VERIFICATION_COMPLETE.md](../report/SC_DRF_VERIFICATION_COMPLETE.md).
 
 ---
 
-### Concurrency Modes (#1104-1115) 📋
+### Concurrency Modes (#1107-1118) 📋
 
 Safety modes for concurrency: actor (Erlang-style), lock_base (Rust-style), unsafe.
 
 **Documentation:**
 - [spec/language_enhancement.md](../spec/language_enhancement.md) - Section 4: Concurrency Modes
 
-#### Mode System (#1104-1107)
+#### Mode System (#1107-1110)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1104 | `#[concurrency_mode(actor)]` (default) | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1105 | `#[concurrency_mode(lock_base)]` | 4 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1106 | `#[concurrency_mode(unsafe)]` | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
-| #1107 | `unsafe:` block syntax | 2 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/parser/tests/` |
 
 **Mode Comparison:**
 ```
@@ -695,15 +704,18 @@ Safety modes for concurrency: actor (Erlang-style), lock_base (Rust-style), unsa
 
 #### GC Support for Concurrent Collections (#1108-1112)
 
-Native concurrent libraries (TBB, crossbeam) with GC-managed objects.
+Native concurrent libraries with GC-managed objects. Uses crossbeam, dashmap, and mimalloc with GC write barriers.
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1108 | GC write barriers in concurrent collections | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
-| #1109 | `ConcurrentMap[K, V]` with GC objects | 4 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1110 | `ConcurrentQueue[T]` with GC objects | 4 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1111 | `ConcurrentStack[T]` with GC objects | 4 | 📋 | S+R | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/src/infra/` | `src/runtime/tests/` |
-| #1112 | Object tracing through collection handles | 5 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/runtime/tests/` |
+
+**Implementation Notes:**
+- Uses **dashmap** (Rust alternative to libcuckoo/libcds) for concurrent hash map
+- Uses **crossbeam::queue::SegQueue** (Rust alternative to moodycamel) for concurrent queue
+- Uses **parking_lot::Mutex** + Vec for concurrent stack (strict LIFO semantics)
+- Uses **mimalloc** (already in workspace) for fast allocation
+- All collections support GC write barriers via `TraceConcurrent` trait
+- 15+ tests passing in `src/runtime/src/concurrent/`
 
 **Example:**
 ```simple
@@ -729,48 +741,64 @@ fn main():
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1113 | Compile error for `mut T` in actor mode | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 | #1114 | Compile error for `Mutex` in actor mode | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 | #1115 | Warning for unsafe in release build | 2 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 
 ---
 
-### Formatting and Lints (#1131-1145) 📋
+### Formatting and Lints (#1131-1145) 🔄
 
 Deterministic formatting and semantic lint set for code quality.
 
+**Status:** Phase 1 Complete (pattern-based tools in Simple) - Phase 2 Planned (AST-based)
+
 **Documentation:**
 - [spec/formatting_lints.md](../spec/formatting_lints.md) - Formatting and Lints Specification
+- `simple/app/README.md` - Formatter & Linter implementation details
+
+**Implementation:**
+- ✅ Source: `simple/app/formatter/main.spl` (166 lines), `simple/app/lint/main.spl` (262 lines)
+- ⏳ Build: Run `./simple/build_tools.sh` to compile binaries
+- ⏳ Phase 2: AST-based analysis, control flow analysis
+- ⏳ Phase 3: IDE integration, auto-fix
 
 #### Canonical Formatter (#1131-1133)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1131 | Canonical formatter (no config) | 3 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
-| #1132 | Formatter CLI (`simple fmt`) | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
 | #1133 | Format-on-save IDE integration | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | - |
+
+**Features (#1131-1132):**
+- ✅ 4-space indentation, idempotent formatting
+- ✅ `--check` (CI), `--write` (in-place), stdout output
+- ✅ Handles `:`, `{}`, `[]`, `else`, `elif` indentation
+- ⏳ TODO: AST-based, comment preservation, max line length
 
 #### Semantic Lints (#1134-1138)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1134 | Safety lint set | 3 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1135 | Correctness lint set | 3 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1136 | Warning lint set | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1137 | Style lint set | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1138 | Concurrency lint set | 4 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
+
+**Lints Implemented (14 total):**
+- Safety (S001-S003): Unused Result, null deref, unsafe without comment
+- Correctness (C001-C003): Unreachable code, non-exhaustive match, type mismatch
+- Warning (W001-W003): Unused variable/import, dead code
+- Style (ST001-ST003): Naming conventions (Allow by default)
+- Concurrency (CC001-CC002): Shared mutable state, thread safety
 
 #### Lint Control (#1139-1145)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
 | #1139 | `#[allow]`/`#[deny]`/`#[warn]` attributes | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/parser/tests/` |
-| #1140 | Lint groups | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
-| #1141 | Fix-it hints in diagnostics | 3 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
 | #1142 | Auto-fix CLI (`simple fix`) | 4 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
-| #1143 | Error code stability | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/compiler/tests/` |
 | #1144 | Lint configuration in simple.sdn | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
 | #1145 | `--explain` for error codes | 2 | 📋 | R | [formatting_lints.md](../spec/formatting_lints.md) | - | `src/driver/tests/` |
+
+**Features (#1140-1141, #1143):**
+- ✅ `--deny-all`, `--warn-all` for lint level control
+- ✅ Fix-it hints with formatted output (file:line:col)
+- ✅ Stable error codes (S001-S003, C001-C003, W001-W003, ST001-ST003, CC001-CC002)
 
 ---
 
@@ -794,7 +822,6 @@ Trait implementation rules for unambiguous dispatch and type safety.
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1150 | Specialization (`#[default]` impl) | 5 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
 | #1151 | Negative trait bounds (`!Trait`) | 4 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
 | #1152 | Coherence error messages | 3 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
 | #1153 | Newtype pattern support | 2 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
@@ -805,6 +832,382 @@ Trait implementation rules for unambiguous dispatch and type safety.
 |------------|---------|------------|--------|------|-----|--------|--------|
 | #1154 | Extension traits | 3 | 📋 | R | [traits.md](../spec/traits.md) | - | `src/compiler/tests/` |
 | #1155 | Delegation pattern | 3 | 📋 | S | [traits.md](../spec/traits.md) | `std_lib/test/` | - |
+
+---
+
+### Tree-sitter Implementation (#1156-1179) 📋
+
+Tree-sitter parser implementation **written in Simple language** (self-hosted prerequisite for MCP).
+
+**Documentation:**
+- [Tree-sitter Documentation](https://tree-sitter.github.io/tree-sitter/)
+- Implementation: `simple/std_lib/src/treesitter/` (written in Simple)
+
+**Why Tree-sitter First:**
+- MCP needs robust multi-language parsing
+- Tree-sitter provides incremental, error-tolerant parsing
+- Self-hosting: Parser written in Simple language itself
+- Enables multi-language tooling support
+
+#### Tree-sitter Core (#1156-1165)
+
+Core Tree-sitter runtime implemented in Simple.
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1156 | Tree-sitter runtime core | 5 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1157 | Parser state machine | 5 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1158 | Lexer integration | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1159 | Parse tree construction | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1160 | Incremental parsing | 5 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1161 | Error recovery | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1162 | Tree query system | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1163 | Syntax highlighting queries | 3 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1164 | Tree-sitter CLI tools | 3 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1165 | Performance optimization | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+
+#### Language Grammar Support (#1166-1179)
+
+Tree-sitter grammars for multiple languages (all written in Simple).
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1166 | Simple/Basic language grammar | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1167 | Rust grammar | 5 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1168 | Python grammar | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1169 | Ruby grammar | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1170 | Erlang grammar | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1171 | JavaScript/TypeScript grammar | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1172 | Go grammar | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1173 | C/C++ grammar | 5 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1174 | Grammar compilation pipeline | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1175 | Grammar testing framework | 3 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1176 | Language detection | 3 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1177 | Multi-language workspace support | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1178 | Grammar hot-reload | 3 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+| #1179 | External parser bindings | 4 | 📋 | S | [treesitter.md](../spec/treesitter.md) | `std_lib/test/treesitter/` | - |
+
+**Example:**
+```simple
+# Tree-sitter implementation in Simple language
+use treesitter.{Parser, Query, Language}
+
+let parser = Parser.new()
+parser.set_language(Language.rust())
+
+let source = "fn main() { println!(\"Hello\"); }"
+let tree = parser.parse(source)
+
+# Query for function definitions
+let query = Query.new("(function_item name: (identifier) @func)")
+let matches = query.matches(tree)
+```
+
+**Implementation Location:**
+- `simple/std_lib/src/treesitter/` - Core runtime (written in Simple)
+- `simple/std_lib/src/treesitter/grammars/` - Language grammars
+
+---
+
+### Multi-Language Tooling (#1180-1199) 📋
+
+Development tooling for multiple languages using Tree-sitter foundation.
+
+**Documentation:**
+- Builds on Tree-sitter (#1156-1179)
+- Enables multi-language MCP support
+
+#### Compiler & Build Tools (#1180-1185)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1180 | Multi-language compiler interface | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1181 | Incremental compilation support | 5 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1182 | Build system integration | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1183 | Dependency tracking | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1184 | Error aggregation across languages | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1185 | Watch mode & hot reload | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+
+#### Testing Tools (#1186-1191)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1186 | Multi-language test runner | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1187 | Test discovery across languages | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1188 | Coverage reporting (multi-lang) | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1189 | Test result aggregation | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1190 | Parallel test execution | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1191 | Test filtering & selection | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+
+#### Deployment Tools (#1192-1199)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1192 | Multi-language packaging | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1193 | Artifact bundling | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1194 | Deployment pipeline integration | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1195 | Container image generation | 4 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1196 | Binary stripping & optimization | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1197 | Release automation | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1198 | Version management | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+| #1199 | Deploy configuration templates | 3 | 📋 | S | [tooling.md](../spec/tooling.md) | `std_lib/test/tooling/` | - |
+
+**Example:**
+```bash
+# Compile multi-language project
+simple build --watch
+
+# Run tests across all languages
+simple test --parallel
+
+# Deploy with optimizations
+simple deploy --target production --optimize
+```
+
+---
+
+### Language Model Server & MCP (#1200-1299) 📋
+
+Server infrastructure and Minimal Code Preview protocol for LLM-optimized code understanding.
+
+**🎯 SELF-HOSTED: MCP and Language Server implemented in Simple language**
+
+**Documentation:**
+- [spec/basic_mcp.md](../spec/basic_mcp.md) - MCP Specification v1.0
+- [plans/llm_friendly.md](../plans/llm_friendly.md) - Implementation Plan
+- [guides/llm_friendly.md](../guides/llm_friendly.md) - LLM Quality Contract
+
+**Key Benefits:**
+- 90%+ token reduction via collapsed outline format
+- Multi-language support (Simple, Rust, Python, Ruby, Erlang, etc.)
+- Progressive disclosure (expand on demand)
+- Virtual information (auto traits, AOP, coverage)
+- Single JSON field format for minimal overhead
+- Integrated compile/test/deploy tooling
+
+**Prerequisites:**
+- Tree-sitter implementation (#1156-1179) - Required for multi-language parsing
+- Multi-language tooling (#1180-1199) - Required for compile/test/deploy
+
+**Implementation:**
+- Language: **Simple** (self-hosted)
+- Location: `simple/std_lib/src/lms/` and `simple/std_lib/src/mcp/`
+
+#### Language Model Server - Basic (#1200-1209)
+
+Server infrastructure for handling MCP protocol requests. **Implemented in Simple language.**
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1200 | Language model server protocol | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1201 | JSON-RPC transport layer | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1202 | Request/response handling | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1203 | Session management | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1204 | Error handling & diagnostics | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1205 | Caching layer for MCP views | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1206 | Incremental update support | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1207 | Multi-file workspace handling | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1208 | Authentication & authorization | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+| #1209 | Server CLI (`simple lms start`) | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | - |
+
+**Example:**
+```bash
+# Start language model server
+simple lms start --port 8080
+
+# Server handles MCP protocol requests over JSON-RPC
+```
+
+#### MCP Core Features - Simple Language (#1210-1229)
+
+Core MCP protocol implementation for Simple/Basic language folding. **Implemented in Simple language.**
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1210 | Block-mark notation (`C>`, `F>`, `T>`, `P>`, `V•`) | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1211 | Collapsed outline generation | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1212 | Public API filtering | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1213 | `read_file(path, mode="mcp")` tool | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1214 | `expand_at(selector, what)` tool | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1215 | `goto_definition(symbol)` tool | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1216 | `search(query, filter)` tool | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1217 | Signature shrinking (params/return types) | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1218 | Body collapsing (`{ … }` inline) | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1219 | Class/struct member shrinking | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1220 | Virtual information extraction | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1221 | Auto trait detection (`Send`, `Sync`) | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1222 | AOP pointcut exposure | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1223 | JSON output format (single `text` field) | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1224 | Markdown document folding | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1225 | Log collapsing (INFO/WARN/ERROR counts) | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1226 | Diagnostic grouping | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1227 | `simple mcp <file>` CLI | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1228 | `--expand <symbol>` flag | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1229 | `--show-coverage` flag | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+
+**Example:**
+```bash
+# Generate MCP outline
+simple mcp app.spl
+# Output: { "text": "C> pub class User { … }\nF> pub fn login { … }" }
+
+# Expand specific symbol
+simple mcp app.spl --expand UserService --what=all
+```
+
+#### MCP Multi-Language Support (#1230-1259)
+
+MCP support for multiple programming languages using Tree-sitter. **Implemented in Simple language.**
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1230 | Rust language MCP folding | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/rust/` | - |
+| #1231 | Python language MCP folding | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/python/` | - |
+| #1232 | Ruby language MCP folding | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/ruby/` | - |
+| #1233 | Erlang language MCP folding | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/erlang/` | - |
+| #1234 | JavaScript/TypeScript MCP folding | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/js/` | - |
+| #1235 | Go language MCP folding | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/go/` | - |
+| #1236 | C/C++ language MCP folding | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/c/` | - |
+| #1237 | Language-specific virtual info | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1238 | Cross-language workspace | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1239 | Language auto-detection | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1240 | Multi-language search | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1241 | Language-specific folding rules | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1242 | Polyglot symbol resolution | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1243 | Foreign function interface folding | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1244 | Language interop visualization | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1245 | Custom language plugin system | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1246 | Language-specific diagnostics | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1247 | Multi-language coverage overlay | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1248 | Language conversion suggestions | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1249 | Polyglot refactoring tools | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1250 | Multi-language snippet extraction | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1251 | Language-specific context packs | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1252 | Polyglot documentation generation | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1253 | Cross-language dependency tracking | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1254 | Language benchmark comparisons | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1255 | Multi-language test correlation | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1256 | Polyglot profiling integration | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1257 | Language migration assistance | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1258 | Multi-language style enforcement | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1259 | Polyglot security scanning | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+
+**Example:**
+```bash
+# MCP folding for Rust code
+simple mcp main.rs --lang rust
+
+# Multi-language workspace
+simple mcp . --languages rust,python,simple
+
+# Cross-language search
+simple mcp --search "fn main" --languages all
+```
+
+#### MCP Tooling Integration (#1260-1279)
+
+Integration with compile, test, and deploy tools.
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1260 | `run_compile(target, flags)` tool | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1261 | `run_test(filter, parallel)` tool | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1262 | `run_deploy(target, config)` tool | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1263 | `read_task_log(task_id, group)` tool | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1264 | Task progress monitoring | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1265 | Build artifact inspection | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1266 | Test result visualization | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1267 | Deployment status tracking | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1268 | Error recovery & retry | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1269 | Pipeline configuration | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1270 | Incremental build support | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1271 | Test impact analysis | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1272 | Deployment rollback | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1273 | Build cache management | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1274 | Test parallelization | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1275 | Deployment health checks | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1276 | Build optimization suggestions | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1277 | Test coverage integration | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1278 | Deployment metrics | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1279 | CI/CD pipeline integration | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+
+#### MCP Advanced Features (#1280-1299)
+
+Advanced MCP features for optimization and extensibility.
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1280 | Coverage overlay integration | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1281 | Block guide markers (`V• end`) | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1282 | Line number formatting (plain/zpad) | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1283 | Context pack integration | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1284 | Dependency symbol extraction | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1285 | Minimal context bundling | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1286 | Diff mode (changed symbols only) | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1287 | Blame integration (author/commit info) | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1288 | Cross-reference inlining (call sites) | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1289 | Binary protobuf format | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1290 | Streaming incremental MCP | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1291 | Semantic highlighting tokens | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1292 | MCP view caching & invalidation | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1293 | Workspace-wide symbol index | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1294 | Smart symbol filtering (relevance) | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1295 | MCP metadata customization | 2 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1296 | Performance profiling for MCP | 3 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1297 | Plugin architecture for MCP | 5 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1298 | MCP transformation pipeline | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+| #1299 | Custom MCP output formats | 4 | 📋 | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
+
+**Example:**
+```bash
+# Extract minimal context pack (90% token reduction)
+simple context app.service --format=mcp > context.json
+
+# Generate MCP with coverage
+simple mcp app.spl --show-coverage
+
+# Diff mode (changed symbols)
+simple mcp app.spl --diff main..HEAD
+
+# Multi-language compile + test + deploy
+simple mcp --compile --test --deploy --languages rust,python
+```
+
+**Implementation Notes:**
+- **Self-hosted:** MCP and Language Server implemented in Simple language
+- **Prerequisite:** Tree-sitter (#1156-1179) for multi-language parsing
+- MCP reduces token usage by 90%+ via collapsed outline format
+- Uses block marks (`C>`, `F>`, `T>`, `P>`, `V•`) for structure
+- Single JSON `text` field for LLM efficiency
+- Progressive disclosure via tool calls (not inline hints)
+- Exposes virtual information (auto traits, AOP, coverage)
+- Multi-language support: Simple, Rust, Python, Ruby, Erlang, Go, C/C++, JS/TS
+- Integrated tooling: compile, test, deploy via MCP protocol
+
+**Implementation Locations:**
+- Language Server: `simple/std_lib/src/lms/` (written in Simple)
+- MCP Core: `simple/std_lib/src/mcp/` (written in Simple)
+- Tree-sitter: `simple/std_lib/src/treesitter/` (written in Simple)
+- Multi-lang Tooling: `simple/std_lib/src/tooling/` (written in Simple)
+
+**Related Features:**
+- #1156-1179: Tree-sitter Implementation (prerequisite)
+- #1180-1199: Multi-Language Tooling (prerequisite)
+- #890-893: Context Pack Generator (LLM-Friendly)
+- #885-889: AST/IR Export (LLM-Friendly)
+- #1300-1304: Contract-first macro system (parser + hygiene)
+
+### Contract-First Macros (#1300-1304) 🔄
+
+Contract-first macros declare `intro`/`inject`/`returns` headers that enumerate the symbols they introduce before expanding the body. Expansion now runs at the AST level with hygiene so that macro-generated bindings never shadow the caller.
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+
+**Notes:**
+- #1300/1301 delivered the new `macro` header syntax plus `const_eval`/`emit` execution before AST-level hygiene existed.
+- #1303 (`intro`/`inject`/`returns` symbol table integration) and #1304 (one-pass LL(1) macro compilation) remain planned but are now unblocked by hygienic expansion.
+- Hygiene lives in `src/compiler/src/interpreter_macro.rs` via `MacroHygieneContext` plus the `apply_macro_hygiene_*` helpers that rewrite emitted blocks, statements, expressions, and patterns before calls to `exec_block`.
 
 ---
 

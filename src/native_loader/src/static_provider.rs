@@ -48,6 +48,9 @@ impl RuntimeSymbolProvider for StaticSymbolProvider {
 
         match_runtime_symbol!(
             name,
+            // AOP runtime operations
+            rt_aop_invoke_around,
+            rt_aop_proceed,
             // Array operations
             rt_array_new,
             rt_array_push,

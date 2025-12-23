@@ -299,6 +299,7 @@ impl Clone for Value {
             Value::BorrowMut(b) => Value::BorrowMut(b.clone()),
             Value::Mock(m) => Value::Mock(m.clone()),
             Value::Matcher(m) => Value::Matcher(m.clone()),
+            Value::NativeFunction(native) => Value::NativeFunction(native.clone()),
             Value::Nil => Value::Nil,
         }
     }
@@ -382,6 +383,7 @@ impl PartialEq for Value {
                     family: fb,
                 },
             ) => va == vb && sa == sb && fa == fb,
+            (Value::NativeFunction(_), Value::NativeFunction(_)) => false,
             (Value::Nil, Value::Nil) => true,
             _ => false,
         }

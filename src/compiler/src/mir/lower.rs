@@ -4,6 +4,7 @@ use super::{
     function::{MirFunction, MirLocal, MirModule},
     instructions::{BlockId, ContractKind, GpuAtomicOp, GpuMemoryScope, MirInst, UnitOverflowBehavior, VReg},
 };
+use crate::di::{DiConfig, DiMatchContext};
 use crate::hir::{GpuIntrinsicKind, HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, HirType, NeighborDirection, TypeId};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -19,6 +20,10 @@ pub struct MirLowerer<'a> {
     refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     type_registry: Option<&'a crate::hir::TypeRegistry>,
+    /// DI configuration for constructor injection
+    di_config: Option<DiConfig>,
+    /// Map of injectable function names to parameter types
+    inject_functions: HashMap<String, Vec<TypeId>>,
     /// Coverage instrumentation mode
     coverage_enabled: bool,
     /// Counter for generating unique decision IDs
@@ -34,6 +39,8 @@ impl<'a> MirLowerer<'a> {
             contract_mode: ContractMode::All,
             refined_types: None,
             type_registry: None,
+            di_config: None,
+            inject_functions: HashMap::new(),
             coverage_enabled: false,
             decision_counter: 0,
             current_file: None,
@@ -47,10 +54,17 @@ impl<'a> MirLowerer<'a> {
             contract_mode,
             refined_types: None,
             type_registry: None,
+            di_config: None,
+            inject_functions: HashMap::new(),
             coverage_enabled: false,
             decision_counter: 0,
             current_file: None,
         }
+    }
+
+    pub fn with_di_config(mut self, di_config: Option<DiConfig>) -> Self {
+        self.di_config = di_config;
+        self
     }
 
     /// Enable coverage instrumentation
@@ -323,6 +337,13 @@ impl<'a> MirLowerer<'a> {
     pub fn lower_module(mut self, hir: &'a HirModule) -> MirLowerResult<MirModule> {
         // Store reference to type registry for unit type bound checks
         self.type_registry = Some(&hir.types);
+        self.inject_functions.clear();
+        for func in &hir.functions {
+            if func.inject {
+                let param_types = func.params.iter().map(|p| p.ty).collect();
+                self.inject_functions.insert(func.name.clone(), param_types);
+            }
+        }
 
         let mut module = MirModule::new();
         module.name = hir.name.clone();
@@ -831,6 +852,20 @@ impl<'a> MirLowerer<'a> {
 
                 // Get function name and create CallTarget with effect information
                 let call_target = if let HirExprKind::Global(name) = &callee.kind {
+                    if let Some(param_types) = self.inject_functions.get(name).cloned() {
+                        if arg_regs.len() < param_types.len() {
+                            if self.di_config.is_none() {
+                                return Err(MirLowerError::Unsupported(format!(
+                                    "missing di config for injected call to '{}'",
+                                    name
+                                )));
+                            }
+                            for param_ty in param_types.iter().skip(arg_regs.len()) {
+                                let injected = self.resolve_di_arg(*param_ty)?;
+                                arg_regs.push(injected);
+                            }
+                        }
+                    }
                     CallTarget::from_name(name)
                 } else {
                     return Err(MirLowerError::Unsupported("indirect call".to_string()));
@@ -1157,6 +1192,50 @@ impl<'a> MirLowerer<'a> {
 
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
+    }
+
+    fn resolve_di_arg(&mut self, param_ty: TypeId) -> MirLowerResult<VReg> {
+        let type_name = self
+            .type_registry
+            .and_then(|registry| registry.get_type_name(param_ty))
+            .map(|name| name.to_string())
+            .or_else(|| builtin_type_name(param_ty).map(|name| name.to_string()))
+            .ok_or_else(|| {
+                MirLowerError::Unsupported("DI requires a named type parameter".to_string())
+            })?;
+
+        let di_config = self.di_config.as_ref().ok_or_else(|| {
+            MirLowerError::Unsupported("DI config not available".to_string())
+        })?;
+
+        let ctx = DiMatchContext {
+            type_name: &type_name,
+            module_path: "",
+            attrs: &[],
+        };
+        let binding = di_config
+            .select_binding("default", &ctx)
+            .map_err(|_| {
+                MirLowerError::Unsupported(format!(
+                    "ambiguous DI binding for '{}'",
+                    type_name
+                ))
+            })?
+            .ok_or_else(|| {
+                MirLowerError::Unsupported(format!("no DI binding for '{}'", type_name))
+            })?;
+
+        let impl_name = binding.impl_type.clone();
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: CallTarget::from_name(&impl_name),
+                args: Vec::new(),
+            });
+            dest
+        })
     }
 
     /// Lower a GPU intrinsic call to MIR instructions
@@ -1716,6 +1795,26 @@ impl<'a> MirLowerer<'a> {
     }
 }
 
+fn builtin_type_name(type_id: TypeId) -> Option<&'static str> {
+    match type_id {
+        TypeId::VOID => Some("void"),
+        TypeId::BOOL => Some("bool"),
+        TypeId::I8 => Some("i8"),
+        TypeId::I16 => Some("i16"),
+        TypeId::I32 => Some("i32"),
+        TypeId::I64 => Some("i64"),
+        TypeId::U8 => Some("u8"),
+        TypeId::U16 => Some("u16"),
+        TypeId::U32 => Some("u32"),
+        TypeId::U64 => Some("u64"),
+        TypeId::F32 => Some("f32"),
+        TypeId::F64 => Some("f64"),
+        TypeId::STRING => Some("str"),
+        TypeId::NIL => Some("nil"),
+        _ => None,
+    }
+}
+
 impl Default for MirLowerer<'_> {
     fn default() -> Self {
         Self::new()
@@ -1736,9 +1835,21 @@ pub fn lower_to_mir_with_mode(hir: &HirModule, contract_mode: ContractMode) -> M
         .lower_module(hir)
 }
 
+pub fn lower_to_mir_with_mode_and_di(
+    hir: &HirModule,
+    contract_mode: ContractMode,
+    di_config: Option<crate::di::DiConfig>,
+) -> MirLowerResult<MirModule> {
+    MirLowerer::with_contract_mode(contract_mode)
+        .with_di_config(di_config)
+        .with_refined_types(&hir.refined_types)
+        .lower_module(hir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::di::parse_di_config;
     use crate::hir::{self, BinOp};
     use simple_parser::Parser;
 
@@ -1747,6 +1858,17 @@ mod tests {
         let ast = parser.parse().expect("parse failed");
         let hir_module = hir::lower(&ast).expect("hir lower failed");
         lower_to_mir(&hir_module)
+    }
+
+    fn compile_to_mir_with_di(source: &str, di_toml: &str) -> MirLowerResult<MirModule> {
+        let mut parser = Parser::new(source);
+        let ast = parser.parse().expect("parse failed");
+        let hir_module = hir::lower(&ast).expect("hir lower failed");
+        let di_value: toml::Value = di_toml.parse().expect("parse di toml");
+        let di_config = parse_di_config(&di_value)
+            .expect("di config parse")
+            .expect("di config present");
+        lower_to_mir_with_mode_and_di(&hir_module, ContractMode::All, Some(di_config))
     }
 
     #[test]
@@ -1760,6 +1882,45 @@ mod tests {
         let entry = func.block(BlockId(0)).unwrap();
         assert!(!entry.instructions.is_empty());
         assert!(matches!(entry.terminator, Terminator::Return(Some(_))));
+    }
+
+    #[test]
+    fn test_di_injects_builtin_param_in_mir() {
+        let source = r#"
+#[inject]
+fn use_num(x: i64) -> i64:
+    return x
+
+fn make_num() -> i64:
+    return 42
+
+fn main() -> i64:
+    return use_num()
+"#;
+
+        let di_toml = r#"
+[di]
+mode = "hybrid"
+
+[di.profiles.default]
+bindings = [
+  { on = "pc{ type(i64) }", impl = "make_num", scope = "Transient", priority = 10 }
+]
+"#;
+
+        let mir = compile_to_mir_with_di(source, di_toml).expect("lower with di");
+        let main_fn = mir
+            .functions
+            .iter()
+            .find(|func| func.name == "main")
+            .expect("main function");
+
+        let has_make_num_call = main_fn.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                matches!(inst, MirInst::Call { target, .. } if target.name() == "make_num")
+            })
+        });
+        assert!(has_make_num_call, "expected injected call to make_num");
     }
 
     #[test]
@@ -2430,6 +2591,7 @@ fn get_user(id: UserId) -> i64:
         // This should NOT be snapshot-safe
         let mutable_ptr_type = registry.register(HirType::Pointer {
             kind: PointerKind::BorrowMut,
+            capability: simple_parser::ast::ReferenceCapability::Exclusive,
             inner: TypeId::I64,
         });
 
