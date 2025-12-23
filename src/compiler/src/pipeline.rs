@@ -30,6 +30,7 @@ use tracing::instrument;
 
 use simple_parser::ast::{Capability, Node};
 
+use crate::build_mode::BuildMode;
 use crate::codegen::{backend_trait::NativeBackend, BackendKind, Codegen};
 use crate::codegen::llvm::LlvmBackend;
 use crate::compilability::analyze_module;
@@ -55,6 +56,8 @@ pub struct CompilerPipeline {
     lint_diagnostics: Vec<LintDiagnostic>,
     /// Contract checking mode (CTR-040 to CTR-043)
     contract_mode: ContractMode,
+    /// Build mode (debug/release) for validation and optimization (#1034-1035)
+    build_mode: BuildMode,
 }
 
 impl CompilerPipeline {
@@ -65,6 +68,7 @@ impl CompilerPipeline {
             lint_config: None,
             lint_diagnostics: Vec::new(),
             contract_mode: ContractMode::All,
+            build_mode: BuildMode::default(),
         })
     }
 
@@ -75,6 +79,7 @@ impl CompilerPipeline {
             lint_config: None,
             lint_diagnostics: Vec::new(),
             contract_mode: ContractMode::All,
+            build_mode: BuildMode::default(),
         })
     }
 
@@ -87,6 +92,7 @@ impl CompilerPipeline {
             lint_config,
             lint_diagnostics: Vec::new(),
             contract_mode: ContractMode::All,
+            build_mode: BuildMode::default(),
         })
     }
 
@@ -102,6 +108,7 @@ impl CompilerPipeline {
             lint_config,
             lint_diagnostics: Vec::new(),
             contract_mode: ContractMode::All,
+            build_mode: BuildMode::default(),
         })
     }
 
@@ -162,6 +169,64 @@ impl CompilerPipeline {
         self.contract_mode
     }
 
+    /// Set the build mode (debug/release)
+    ///
+    /// This controls optimizations and validation rules:
+    /// - `Debug`: Full diagnostics, minimal optimizations (default)
+    /// - `Release`: Optimizations enabled, production validations (#1034-1035)
+    pub fn set_build_mode(&mut self, mode: BuildMode) {
+        self.build_mode = mode;
+    }
+
+    /// Get the current build mode
+    pub fn build_mode(&self) -> BuildMode {
+        self.build_mode
+    }
+
+    /// Validate AOP/DI configuration for release builds (#1034-1035).
+    ///
+    /// In release mode:
+    /// - #1034: DI profile must not be "test"
+    /// - #1035: AOP runtime interceptors must not be enabled
+    fn validate_release_config(&self) -> Result<(), CompileError> {
+        if !self.build_mode.is_release() {
+            return Ok(());
+        }
+
+        // #1034: Release MUST NOT select test profile
+        if let Some(ref project) = self.project {
+            if let Some(ref di_config) = project.di_config {
+                if di_config.profiles.contains_key("test") {
+                    // Check if any active profile is "test"
+                    // For now, we check if "test" profile exists and has bindings
+                    if let Some(test_profile) = di_config.profiles.get("test") {
+                        if !test_profile.bindings.is_empty() {
+                            return Err(CompileError::Semantic(
+                                "Release build must not select test DI profile (#1034). \
+                                 Found test profile with bindings. \
+                                 Either remove the test profile or use debug mode."
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // #1035: Release MUST NOT enable runtime interceptors
+            if let Some(ref aop_config) = project.aop_config {
+                if aop_config.runtime_enabled {
+                    return Err(CompileError::Semantic(
+                        "Release build must not enable runtime AOP interceptors (#1035). \
+                         Set runtime_enabled=false in AOP config or use debug mode."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Compile a Simple source file to an SMF at `out`.
     ///
     /// Currently supports `main = <integer>` which returns the integer value.
@@ -210,6 +275,9 @@ impl CompilerPipeline {
     ) -> Result<Vec<u8>, CompileError> {
         // Clear previous lint diagnostics
         self.lint_diagnostics.clear();
+
+        // Validate release mode configuration (#1034-1035)
+        self.validate_release_config()?;
 
         // Monomorphization: specialize generic functions for concrete types
         let module = monomorphize_module(&module);
@@ -452,6 +520,9 @@ impl CompilerPipeline {
         // Clear previous lint diagnostics
         self.lint_diagnostics.clear();
 
+        // Validate release mode configuration (#1034-1035)
+        self.validate_release_config()?;
+
         // 2. Monomorphization: specialize generic functions for concrete types
         let ast_module = monomorphize_module(&ast_module);
 
@@ -520,6 +591,9 @@ impl CompilerPipeline {
     ) -> Result<Vec<u8>, CompileError> {
         // Clear previous lint diagnostics
         self.lint_diagnostics.clear();
+
+        // Validate release mode configuration (#1034-1035)
+        self.validate_release_config()?;
 
         // 1. Parse source to AST
         let mut parser = simple_parser::Parser::new(source);
@@ -982,7 +1056,6 @@ main = 0
         pipeline.set_contract_mode(ContractMode::All);
         assert_eq!(pipeline.contract_mode(), ContractMode::All);
     }
-}
 
     #[test]
     fn test_pipeline_coherence_detects_errors_in_ast() {
@@ -1010,3 +1083,225 @@ main = 0
         assert!(!errors.is_empty(), "Should detect orphan rule violation");
         assert!(matches!(errors[0], crate::trait_coherence::CoherenceError::OrphanImpl { .. }));
     }
+
+    // ============== Build Mode and Release Validation Tests (#1034-1035) ==============
+
+    #[test]
+    fn test_build_mode_default() {
+        let pipeline = CompilerPipeline::new().expect("pipeline ok");
+        assert_eq!(pipeline.build_mode(), BuildMode::Debug);
+    }
+
+    #[test]
+    fn test_build_mode_set() {
+        let mut pipeline = CompilerPipeline::new().expect("pipeline ok");
+
+        pipeline.set_build_mode(BuildMode::Debug);
+        assert_eq!(pipeline.build_mode(), BuildMode::Debug);
+
+        pipeline.set_build_mode(BuildMode::Release);
+        assert_eq!(pipeline.build_mode(), BuildMode::Release);
+    }
+
+    #[test]
+    fn test_debug_mode_allows_test_profile() {
+        // Debug mode should allow test DI profile
+        let source = "main = 42";
+
+        // Create a project context with test DI profile
+        use std::path::PathBuf;
+        use crate::di::{DiConfig, DiProfile, DiMode};
+        use std::collections::HashMap;
+
+        let mut profiles = HashMap::new();
+        let mut test_profile = DiProfile::default();
+        // Add a test binding to simulate active test profile
+        test_profile.bindings.push(crate::di::DiBindingRule {
+            predicate: crate::predicate::Predicate::Selector(
+                crate::predicate::Selector::Within("*".to_string())
+            ),
+            impl_type: "TestLogger".to_string(),
+            scope: crate::di::DiScope::Singleton,
+            priority: 0,
+            order: 0,
+            raw_predicate: "*".to_string(),
+        });
+        profiles.insert("test".to_string(), test_profile);
+
+        let di_config = DiConfig {
+            mode: DiMode::Hybrid,
+            profiles,
+        };
+
+        let mut project = ProjectContext::single_file(Path::new("."));
+        project.di_config = Some(di_config);
+
+        let mut pipeline = CompilerPipeline::with_project(project).expect("pipeline ok");
+        pipeline.set_build_mode(BuildMode::Debug);
+
+        // Should succeed in debug mode
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_ok(), "Debug mode should allow test profile");
+    }
+
+    #[test]
+    fn test_release_mode_rejects_test_profile() {
+        // Release mode should reject test DI profile (#1034)
+        let source = "main = 42";
+
+        // Create a project context with test DI profile
+        use std::path::PathBuf;
+        use crate::di::{DiConfig, DiProfile, DiMode};
+        use std::collections::HashMap;
+
+        let mut profiles = HashMap::new();
+        let mut test_profile = DiProfile::default();
+        // Add a test binding to simulate active test profile
+        test_profile.bindings.push(crate::di::DiBindingRule {
+            predicate: crate::predicate::Predicate::Selector(
+                crate::predicate::Selector::Within("*".to_string())
+            ),
+            impl_type: "TestLogger".to_string(),
+            scope: crate::di::DiScope::Singleton,
+            priority: 0,
+            order: 0,
+            raw_predicate: "*".to_string(),
+        });
+        profiles.insert("test".to_string(), test_profile);
+
+        let di_config = DiConfig {
+            mode: DiMode::Hybrid,
+            profiles,
+        };
+
+        let mut project = ProjectContext::single_file(Path::new("."));
+        project.di_config = Some(di_config);
+
+        let mut pipeline = CompilerPipeline::with_project(project).expect("pipeline ok");
+        pipeline.set_build_mode(BuildMode::Release);
+
+        // Should fail in release mode
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_err(), "Release mode should reject test profile");
+
+        match result {
+            Err(CompileError::Semantic(msg)) => {
+                assert!(msg.contains("#1034"), "Error should reference #1034");
+                assert!(msg.contains("test"), "Error should mention test profile");
+            }
+            _ => panic!("Expected semantic error with #1034 reference"),
+        }
+    }
+
+    #[test]
+    fn test_debug_mode_allows_runtime_aop() {
+        // Debug mode should allow runtime AOP interceptors
+        let source = "main = 42";
+
+        // Create a project context with runtime AOP enabled
+        use std::path::PathBuf;
+        use crate::aop_config::AopConfig;
+
+        let aop_config = AopConfig {
+            runtime_enabled: true,
+            around: vec![],
+        };
+
+        let mut project = ProjectContext::single_file(Path::new("."));
+        project.aop_config = Some(aop_config);
+
+        let mut pipeline = CompilerPipeline::with_project(project).expect("pipeline ok");
+        pipeline.set_build_mode(BuildMode::Debug);
+
+        // Should succeed in debug mode
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_ok(), "Debug mode should allow runtime AOP");
+    }
+
+    #[test]
+    fn test_release_mode_rejects_runtime_aop() {
+        // Release mode should reject runtime AOP interceptors (#1035)
+        let source = "main = 42";
+
+        // Create a project context with runtime AOP enabled
+        use std::path::PathBuf;
+        use crate::aop_config::AopConfig;
+
+        let aop_config = AopConfig {
+            runtime_enabled: true,
+            around: vec![],
+        };
+
+        let mut project = ProjectContext::single_file(Path::new("."));
+        project.aop_config = Some(aop_config);
+
+        let mut pipeline = CompilerPipeline::with_project(project).expect("pipeline ok");
+        pipeline.set_build_mode(BuildMode::Release);
+
+        // Should fail in release mode
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_err(), "Release mode should reject runtime AOP");
+
+        match result {
+            Err(CompileError::Semantic(msg)) => {
+                assert!(msg.contains("#1035"), "Error should reference #1035");
+                assert!(msg.contains("runtime"), "Error should mention runtime interceptors");
+            }
+            _ => panic!("Expected semantic error with #1035 reference"),
+        }
+    }
+
+    #[test]
+    fn test_release_mode_allows_disabled_runtime_aop() {
+        // Release mode should allow runtime_enabled=false
+        let source = "main = 42";
+
+        // Create a project context with runtime AOP disabled
+        use std::path::PathBuf;
+        use crate::aop_config::AopConfig;
+
+        let aop_config = AopConfig {
+            runtime_enabled: false,
+            around: vec![],
+        };
+
+        let mut project = ProjectContext::single_file(Path::new("."));
+        project.aop_config = Some(aop_config);
+
+        let mut pipeline = CompilerPipeline::with_project(project).expect("pipeline ok");
+        pipeline.set_build_mode(BuildMode::Release);
+
+        // Should succeed when runtime AOP is disabled
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_ok(), "Release mode should allow disabled runtime AOP");
+    }
+
+    #[test]
+    fn test_release_mode_allows_empty_test_profile() {
+        // Release mode should allow empty test profile (no active bindings)
+        let source = "main = 42";
+
+        // Create a project context with empty test DI profile
+        use std::path::PathBuf;
+        use crate::di::{DiConfig, DiProfile, DiMode};
+        use std::collections::HashMap;
+
+        let mut profiles = HashMap::new();
+        profiles.insert("test".to_string(), DiProfile::default()); // Empty profile
+
+        let di_config = DiConfig {
+            mode: DiMode::Hybrid,
+            profiles,
+        };
+
+        let mut project = ProjectContext::single_file(Path::new("."));
+        project.di_config = Some(di_config);
+
+        let mut pipeline = CompilerPipeline::with_project(project).expect("pipeline ok");
+        pipeline.set_build_mode(BuildMode::Release);
+
+        // Should succeed when test profile has no bindings
+        let result = pipeline.compile_source_to_memory(source);
+        assert!(result.is_ok(), "Release mode should allow empty test profile");
+    }
+}

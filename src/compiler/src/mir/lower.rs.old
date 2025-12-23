@@ -994,7 +994,7 @@ impl<'a> MirLowerer<'a> {
                         let mut final_args = Vec::new();
                         let mut provided_idx = 0;
 
-                        for (param_ty, is_injectable) in param_info.iter() {
+                        for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
                             if *is_injectable {
                                 // This parameter should be DI-injected
                                 if self.di_config.is_none() {
@@ -1003,7 +1003,7 @@ impl<'a> MirLowerer<'a> {
                                         name
                                     )));
                                 }
-                                let injected = self.resolve_di_arg(*param_ty)?;
+                                let injected = self.resolve_di_arg(*param_ty, name, param_idx)?;
                                 final_args.push(injected);
                             } else {
                                 // This parameter should be provided by caller
@@ -1396,31 +1396,86 @@ impl<'a> MirLowerer<'a> {
         }
     }
 
-    fn resolve_di_arg(&mut self, param_ty: TypeId) -> MirLowerResult<VReg> {
+    fn resolve_di_arg(
+        &mut self,
+        param_ty: TypeId,
+        function_name: &str,
+        param_index: usize,
+    ) -> MirLowerResult<VReg> {
+        // Feature #1018: Parameter-level diagnostic for unresolvable dependencies
         let type_name = self
             .type_registry
             .and_then(|registry| registry.get_type_name(param_ty))
             .map(|name| name.to_string())
             .or_else(|| builtin_type_name(param_ty).map(|name| name.to_string()))
             .ok_or_else(|| {
-                MirLowerError::Unsupported("DI requires a named type parameter".to_string())
+                MirLowerError::Unsupported(format!(
+                    "DI resolution failed for parameter #{} in function '{}': \
+                     Cannot resolve unnamed type. DI requires parameters to have named types.",
+                    param_index, function_name
+                ))
             })?;
 
         let di_config = self.di_config.as_ref().ok_or_else(|| {
-            MirLowerError::Unsupported("DI config not available".to_string())
+            MirLowerError::Unsupported(format!(
+                "DI resolution failed for parameter #{} (type '{}') in function '{}': \
+                 No DI configuration available. Ensure a DI config is loaded.",
+                param_index, type_name, function_name
+            ))
         })?;
 
         let ctx = create_di_match_context(&type_name, "", &[]);
         let binding = di_config
             .select_binding("default", &ctx)
             .map_err(|_| {
+                // Get available bindings for diagnostic (#1018)
+                let available_bindings = di_config
+                    .profiles
+                    .get("default")
+                    .map(|profile| {
+                        profile
+                            .bindings
+                            .iter()
+                            .map(|b| format!("  - {} (scope: {:?}, priority: {})",
+                                b.impl_type, b.scope, b.priority))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_else(|| "  (no bindings available)".to_string());
+
                 MirLowerError::Unsupported(format!(
-                    "ambiguous DI binding for '{}'",
-                    type_name
+                    "DI resolution failed for parameter #{} (type '{}') in function '{}': \
+                     Ambiguous binding - multiple bindings match this type.\n\
+                     Available bindings:\n{}",
+                    param_index, type_name, function_name, available_bindings
                 ))
             })?
             .ok_or_else(|| {
-                MirLowerError::Unsupported(format!("no DI binding for '{}'", type_name))
+                // Get available bindings for diagnostic (#1018)
+                let available_bindings = di_config
+                    .profiles
+                    .get("default")
+                    .map(|profile| {
+                        if profile.bindings.is_empty() {
+                            "  (no bindings configured)".to_string()
+                        } else {
+                            profile
+                                .bindings
+                                .iter()
+                                .map(|b| format!("  - {} (scope: {:?}, priority: {})",
+                                    b.impl_type, b.scope, b.priority))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        }
+                    })
+                    .unwrap_or_else(|| "  (no profile 'default' found)".to_string());
+
+                MirLowerError::Unsupported(format!(
+                    "DI resolution failed for parameter #{} (type '{}') in function '{}': \
+                     No binding found for this type.\n\
+                     Available bindings:\n{}",
+                    param_index, type_name, function_name, available_bindings
+                ))
             })?;
 
         let impl_name = binding.impl_type.clone();
@@ -1457,16 +1512,17 @@ impl<'a> MirLowerer<'a> {
         // Check if the constructor has injectable parameters that need to be resolved
         let constructor_args = if let Some(param_info) = self.inject_functions.get(&impl_name).cloned() {
             let mut args = Vec::new();
-            for (param_ty, is_injectable) in param_info.iter() {
+            for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
                 if *is_injectable {
                     // Recursively resolve this parameter's dependency
-                    let injected = self.resolve_di_arg(*param_ty)?;
+                    let injected = self.resolve_di_arg(*param_ty, &impl_name, param_idx)?;
                     args.push(injected);
                 } else {
-                    // Non-injectable parameters in a DI constructor is an error
+                    // Non-injectable parameters in a DI constructor is an error (#1018)
                     return Err(MirLowerError::Unsupported(format!(
-                        "DI constructor '{}' has non-injectable parameters",
-                        impl_name
+                        "DI constructor '{}' has non-injectable parameter #{}: \
+                         All parameters in an @inject constructor must be marked as injectable.",
+                        impl_name, param_idx
                     )));
                 }
             }
@@ -2235,7 +2291,7 @@ mod tests {
     #[test]
     fn test_di_injects_builtin_param_in_mir() {
         let source = r#"
-#[inject]
+@inject
 fn use_num(x: i64) -> i64:
     return x
 
