@@ -17,7 +17,75 @@
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`), concurrency modes (`actor`, `lock_base`, `unsafe`)
 - SC-DRF guarantee: Formally verified memory consistency model
 - Formatter/linter: Simple-based tools in `simple/app/`
+- AOP & Unified Predicates: Compile-time weaving, architecture rules (19/51 features, 611 tests)
 - See `doc/report/MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md`
+
+## Implementing Applications in Simple Language
+
+**YES - Applications can and should be implemented in Simple!**
+
+Simple language is designed to be self-hosting and practical for real-world applications. The compiler itself includes an interpreter that can execute Simple code, and the language has full support for:
+
+**Available Now:**
+- ✅ **Standard Library**: Core data structures, I/O, string manipulation (`simple/std_lib/`)
+- ✅ **Module System**: Import/export, package management
+- ✅ **Concurrency**: Actors, async/await, futures, channels
+- ✅ **Testing**: BDD framework (describe/it), doctest
+- ✅ **CLI Tools**: Argument parsing, file I/O
+- ✅ **Pattern Matching**: Destructuring, guards
+- ✅ **Error Handling**: Result types, ? operator
+
+**Development Tools (Simple-based):**
+- ✅ Formatter (`simple_fmt`) - 166 lines
+- ✅ Linter (`simple_lint`) - 262 lines
+- 🔄 LSP Server (`simple_lsp`) - In progress
+- 🔄 DAP Debugger (`simple_dap`) - In progress
+
+**How to Create a Simple Application:**
+
+1. **Create your application structure:**
+   ```bash
+   mkdir my_app
+   cd my_app
+   # Create main.spl
+   ```
+
+2. **Write your Simple code:**
+   ```simple
+   # main.spl
+   import std.io
+   import std.args
+
+   fn main():
+       args = args.get_args()
+       if args.len() > 1:
+           io.println("Hello, " + args[1] + "!")
+       else:
+           io.println("Hello, World!")
+   ```
+
+3. **Run with interpreter:**
+   ```bash
+   ./target/debug/simple main.spl arg1 arg2
+   ```
+
+4. **Build to executable (when AOT ready):**
+   ```bash
+   ./target/debug/simple --compile main.spl -o my_app
+   ./my_app arg1 arg2
+   ```
+
+**Example Applications:**
+- See `simple/app/formatter/` - Complete formatter in 166 lines
+- See `simple/app/lint/` - Full linter with 14 rules in 262 lines
+- See `simple/std_lib/test/` - 31 test files demonstrating language features
+
+**Best Practices:**
+- Use the standard library (`simple/std_lib/src/`) for common operations
+- Write BDD tests alongside your code (`*_spec.spl`)
+- Follow the module structure: `__init__.spl` for packages
+- Use contracts for critical functions (`in:`, `out:`, `invariant:`)
+- Leverage AOP for cross-cutting concerns (logging, metrics, validation)
 
 ## Self-Hosted Tools (Written in Simple)
 
@@ -87,6 +155,44 @@
 - ⏳ TODO: Stack inspection, variable viewing, interpreter integration
 
 See `simple/app/README.md` for complete details. See `doc/status/lsp_implementation.md` and `doc/status/dap_implementation.md` for detailed status.
+
+## Bug Reports & Improvement Requests
+
+When working with Simple standard library or applications and you discover bugs or potential improvements:
+
+**Bug Reports:** File in `simple/bug_report.md`
+- Compiler/interpreter bugs
+- Standard library issues
+- Runtime errors or crashes
+- Incorrect behavior in self-hosted tools
+
+**Improvement Requests:** File in `simple/improve_request.md`
+- API design suggestions
+- Performance optimization ideas
+- Missing stdlib functionality
+- Developer experience improvements
+- New language features
+
+**Format:**
+```markdown
+### [Component] Brief description
+
+**Type:** Bug | Improvement
+**Priority:** High | Medium | Low
+**Discovered:** YYYY-MM-DD
+
+**Description:**
+[Detailed explanation]
+
+**Expected:**
+[What should happen]
+
+**Actual:**
+[What actually happens]
+
+**Reproduction:**
+[Steps to reproduce or code example]
+```
 
 ## Documentation Organization
 
@@ -178,8 +284,8 @@ simple/                            # Project root - Rust compiler implementation
 │   │   └── RUST_LONG_FILES.md     # Analysis of long Rust source files
 │   ├── architecture.md            # Design principles and dependency rules
 │   ├── codegen_technical.md       # Codegen implementation details
-│   ├── feature.md                 # Feature overview (→ feature_index.md for details)
-│   ├── feature_index.md           # Complete feature catalog with ratings/status
+│   ├── feature.md                 # Feature catalog
+│   ├── feature_index.md           # Feature index with links
 │   ├── codegen_status.md          # MIR instruction coverage, runtime FFI
 │   ├── formal_verification.md     # Lean 4 formal verification docs
 │   ├── import_export_and__init__.md  # Module system specification (v4)
@@ -713,7 +819,7 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 | #880-919 | LLM-Friendly | 40 | 0 | 📋 Planned |
 | #1000-1050 | AOP & Predicates | 51 | 0 | 📋 Planned |
 | #1051-1060 | SDN Self-Hosting | 10 | 0 | 📋 Planned |
-| #1061-1103 | Missing Lang Features | 43 | 7 | 🔄 16% |
+| #1061-1103 | Missing Lang Features | 43 | 37 | 🔄 86% |
 | #1104-1115 | Concurrency Modes | 12 | 4 | 🔄 33% |
 | #1131-1145 | Formatting & Lints* | 15 | 15** | ✅ Complete* |
 | #1146-1155 | Trait Coherence | 10 | 10 | ✅ Complete |
@@ -722,6 +828,12 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 \*\*Compiler infrastructure complete
 
 **Overall Progress:** 68% (296/434 features)
+
+**Missing Language Features (#1061-1103):** See `doc/features/feature.md` for complete list
+- **Categories:** Macros, DSL Features, Built-in Decorators, Attributes, Comprehensions, Pattern Matching, Context Managers, Memory Model
+- **Status:** 37/43 complete (86%)
+  - ✅ Completed: Macro hygiene (#1065b), Attributes (#1073-1077: inline, derive, cfg, allow/deny, test), Comprehensions (#1078-1082: list, dict, negative indexing, slicing, spread), Pattern matching (#1085-1088: range patterns, if let, while let, chained comparisons), Context managers (#1091: with statement), Error handling (#1094-1095: ? operator), Memory model (#1096-1103), Formal verification (#1104-1106)
+  - 📋 Remaining (6): Decorators (@cached, @logged, @deprecated, @timeout - parsing done, runtime impl needed), Pattern analysis (exhaustiveness checking, unreachable arm detection), ContextManager trait, move closures
 
 See `TODO.md` and `doc/plans/30_pending_features.md` for details.
 

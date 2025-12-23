@@ -4,7 +4,7 @@ use super::{
     function::{MirFunction, MirLocal, MirModule},
     instructions::{BlockId, ContractKind, GpuAtomicOp, GpuMemoryScope, MirInst, UnitOverflowBehavior, VReg},
 };
-use crate::di::{DiConfig, DiMatchContext};
+use crate::di::{DiConfig, create_di_match_context};
 use crate::hir::{GpuIntrinsicKind, HirContract, HirExpr, HirExprKind, HirFunction, HirModule, HirStmt, HirType, NeighborDirection, TypeId};
 use std::collections::HashMap;
 use thiserror::Error;
@@ -1208,11 +1208,7 @@ impl<'a> MirLowerer<'a> {
             MirLowerError::Unsupported("DI config not available".to_string())
         })?;
 
-        let ctx = DiMatchContext {
-            type_name: &type_name,
-            module_path: "",
-            attrs: &[],
-        };
+        let ctx = create_di_match_context(&type_name, "", &[]);
         let binding = di_config
             .select_binding("default", &ctx)
             .map_err(|_| {
@@ -1844,6 +1840,22 @@ pub fn lower_to_mir_with_mode_and_di(
         .with_di_config(di_config)
         .with_refined_types(&hir.refined_types)
         .lower_module(hir)
+}
+
+/// Apply AOP weaving to a MIR module.
+/// Returns statistics about the weaving process.
+pub fn apply_weaving(
+    mir_module: &mut MirModule,
+    aop_config: &crate::aop_config::AopConfig,
+) -> Vec<crate::weaving::WeavingResult> {
+    let weaving_config = crate::weaving::WeavingConfig::from_aop_config(aop_config);
+    let weaver = crate::weaving::Weaver::new(weaving_config);
+
+    mir_module
+        .functions
+        .iter_mut()
+        .map(|func| weaver.weave_function(func))
+        .collect()
 }
 
 #[cfg(test)]
