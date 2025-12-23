@@ -244,7 +244,7 @@ impl<'a> Parser<'a> {
         // Expect ':'
         self.expect(&TokenKind::Colon)?;
 
-        // Parse method expectations (simplified for now - just store as strings)
+        // Parse method expectations: expect method() -> Type:
         let mut expectations = Vec::new();
 
         // Expect INDENT
@@ -253,15 +253,20 @@ impl<'a> Parser<'a> {
 
             // Parse expectations until DEDENT
             while !matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
-                // For now, just consume the line as a string
-                // TODO: Proper parsing of expect method() -> Type: syntax
-                let exp_line = self.consume_until_newline();
-                expectations.push(exp_line);
+                // Skip any newlines before the next expectation
+                self.skip_newlines();
 
-                // Skip newlines
-                while matches!(&self.current.kind, TokenKind::Newline) {
-                    self.advance();
+                // Check if we're at the end of the mock block
+                if matches!(&self.current.kind, TokenKind::Dedent | TokenKind::Eof) {
+                    break;
                 }
+
+                // Parse a single expectation
+                let expectation = self.parse_mock_expectation()?;
+                expectations.push(expectation);
+
+                // Skip newlines after the expectation
+                self.skip_newlines();
             }
 
             // Expect DEDENT
@@ -273,6 +278,65 @@ impl<'a> Parser<'a> {
             name,
             trait_name,
             expectations,
+            span: Span::new(start.start, end.end, start.line, start.column),
+        })
+    }
+
+    /// Parse a mock expectation: `expect method_name(params) -> Type:`
+    fn parse_mock_expectation(&mut self) -> Result<crate::ast::MockExpectation, ParseError> {
+        let start = self.current.span;
+
+        // Expect 'expect' keyword
+        if let TokenKind::Identifier(s) = &self.current.kind {
+            if s != "expect" {
+                return Err(ParseError::unexpected_token(
+                    "expect",
+                    s.clone(),
+                    self.current.span,
+                ));
+            }
+        } else {
+            return Err(ParseError::unexpected_token(
+                "expect",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        }
+        self.advance();
+
+        // Parse method name
+        let method_name = self.expect_identifier()?;
+
+        // Parse parameters
+        let params = self.parse_parameters()?;
+
+        // Parse optional return type
+        let return_type = if self.check(&TokenKind::Arrow) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+
+        // Skip newlines before colon
+        self.skip_newlines();
+
+        // Expect ':'
+        self.expect(&TokenKind::Colon)?;
+
+        // After the colon, expect NEWLINE + INDENT to start the method body
+        self.expect(&TokenKind::Newline)?;
+        self.expect(&TokenKind::Indent)?;
+
+        // Parse the method body
+        let body_block = self.parse_block_body()?;
+
+        let end = self.previous.span;
+        Ok(crate::ast::MockExpectation {
+            method_name,
+            params,
+            return_type,
+            body: body_block.statements,
             span: Span::new(start.start, end.end, start.line, start.column),
         })
     }
