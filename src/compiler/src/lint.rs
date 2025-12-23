@@ -273,6 +273,38 @@ impl LintDiagnostic {
 
         result
     }
+
+    /// Convert to common Diagnostic format for JSON export (#903)
+    pub fn to_diagnostic(&self, file: Option<String>) -> simple_common::diagnostic::Diagnostic {
+        use simple_common::diagnostic::{Diagnostic, Severity, Span as CommonSpan};
+
+        let severity = match self.level {
+            LintLevel::Allow => Severity::Note,
+            LintLevel::Warn => Severity::Warning,
+            LintLevel::Deny => Severity::Error,
+        };
+
+        let common_span = CommonSpan::new(
+            self.span.start,
+            self.span.end,
+            self.span.line,
+            self.span.column,
+        );
+
+        let mut diag = Diagnostic::new(severity, self.message.clone())
+            .with_code(format!("L:{}", self.lint.as_str()))
+            .with_label(common_span, self.message.clone());
+
+        if let Some(ref file_path) = file {
+            diag = diag.with_file(file_path);
+        }
+
+        if let Some(ref suggestion) = self.suggestion {
+            diag = diag.with_help(suggestion);
+        }
+
+        diag
+    }
 }
 
 /// Lint configuration for a scope (module, function, etc.)
@@ -446,6 +478,28 @@ impl LintChecker {
     /// Take collected diagnostics
     pub fn take_diagnostics(&mut self) -> Vec<LintDiagnostic> {
         std::mem::take(&mut self.diagnostics)
+    }
+
+    /// Export diagnostics as JSON (#903)
+    pub fn to_json(&self, file: Option<String>) -> Result<String, serde_json::Error> {
+        use simple_common::diagnostic::Diagnostics;
+
+        let mut diags = Diagnostics::new();
+        for lint_diag in &self.diagnostics {
+            diags.push(lint_diag.to_diagnostic(file.clone()));
+        }
+        diags.to_json()
+    }
+
+    /// Export diagnostics as compact JSON (#903)
+    pub fn to_json_compact(&self, file: Option<String>) -> Result<String, serde_json::Error> {
+        use simple_common::diagnostic::Diagnostics;
+
+        let mut diags = Diagnostics::new();
+        for lint_diag in &self.diagnostics {
+            diags.push(lint_diag.to_diagnostic(file.clone()));
+        }
+        diags.to_json_compact()
     }
 
     /// Check if there are any errors
@@ -899,5 +953,67 @@ primitive_api = "warn"
         let config = LintConfig::from_sdn_string(sdn_content).unwrap();
         // Should use defaults
         assert_eq!(config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_lint_to_diagnostic_conversion() {
+        let lint = LintDiagnostic::new(
+            LintName::PrimitiveApi,
+            LintLevel::Warn,
+            Span::new(10, 13, 2, 5),
+            "bare primitive in public API".to_string(),
+        )
+        .with_suggestion("consider using a unit type".to_string());
+
+        let diag = lint.to_diagnostic(Some("test.spl".to_string()));
+
+        assert_eq!(diag.severity, simple_common::diagnostic::Severity::Warning);
+        assert_eq!(diag.message, "bare primitive in public API");
+        assert_eq!(diag.file, Some("test.spl".to_string()));
+        assert_eq!(diag.code, Some("L:primitive_api".to_string()));
+        assert_eq!(diag.help.len(), 1);
+        assert_eq!(diag.help[0], "consider using a unit type");
+    }
+
+    #[test]
+    fn test_lint_checker_json_export() {
+        let code = r#"
+pub fn get_value(x: i64) -> i64:
+    return x
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new();
+        checker.check_module(&module.items);
+
+        let json = checker.to_json(Some("test.spl".to_string())).unwrap();
+
+        // Verify it's valid JSON
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["has_errors"], false);
+        assert!(value["warning_count"].as_u64().unwrap() > 0);
+        assert!(value["diagnostics"].is_array());
+    }
+
+    #[test]
+    fn test_lint_checker_json_compact() {
+        let code = r#"
+pub fn set_active(active: bool):
+    pass
+"#;
+        let module = parse_code(code);
+        let mut checker = LintChecker::new();
+        checker.check_module(&module.items);
+
+        let compact = checker.to_json_compact(None).unwrap();
+        let pretty = checker.to_json(None).unwrap();
+
+        // Compact should have no extra whitespace
+        assert!(!compact.contains("\n  "));
+        assert!(pretty.contains("\n  "));
+
+        // Both should deserialize to same structure
+        let compact_val: serde_json::Value = serde_json::from_str(&compact).unwrap();
+        let pretty_val: serde_json::Value = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(compact_val, pretty_val);
     }
 }

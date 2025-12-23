@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{BlockId, MirBlock, MirFunction, MirInst, Terminator, VReg};
+use super::{state_machine_utils, BlockId, MirBlock, MirFunction, MirInst, Terminator, VReg};
 use crate::hir::TypeId;
 
 /// Metadata for a single generator state created from a `Yield`.
@@ -54,7 +54,7 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
     }
 
     // Collect reachable blocks from the generator body.
-    let reachable = reachable_from(func, body_block);
+    let reachable = state_machine_utils::reachable_from(func, body_block);
 
     // Map original block ids to new block ids (after dispatcher + completion).
     let mut block_map: HashMap<BlockId, BlockId> = HashMap::new();
@@ -65,7 +65,7 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
 
     // Compute liveness for the original function to derive live-after sets.
     let live_ins = func.compute_live_ins();
-    let live_outs = compute_live_outs(func, &live_ins);
+    let live_outs = state_machine_utils::compute_live_outs(func, &live_ins);
 
     let mut states = Vec::new();
 
@@ -75,7 +75,7 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
             .block(*orig)
             .unwrap_or_else(|| panic!("missing original block {:?}", orig));
 
-        let live_after = live_after_each_inst(orig_block, live_outs.get(orig));
+        let live_after = state_machine_utils::live_after_each_inst(orig_block, live_outs.get(orig));
 
         let mut current_id = mapped;
         let mut current_block = MirBlock::new(current_id);
@@ -94,9 +94,9 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
                         resume_block.instructions.push(inst_after.clone());
                     }
                     resume_block.terminator =
-                        remap_terminator(orig_block.terminator.clone(), &block_map)
+                        state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
                             .unwrap_or_else(|| Terminator::Return(None));
-                    write_block(&mut rewritten, resume_block);
+                    state_machine_utils::write_block(&mut rewritten, resume_block);
                     resume
                 } else {
                     complete_block
@@ -119,7 +119,7 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
                 });
 
                 current_block.terminator = Terminator::Return(Some(*value));
-                write_block(&mut rewritten, current_block);
+                state_machine_utils::write_block(&mut rewritten, current_block);
 
                 // Continue rewriting the suffix (if any) from the resume block.
                 current_id = resume_id;
@@ -140,11 +140,11 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
 
         // If the block ended without a yield, copy the original terminator.
         if !current_block.terminator.is_sealed() {
-            current_block.terminator = remap_terminator(orig_block.terminator.clone(), &block_map)
+            current_block.terminator = state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
                 .unwrap_or(Terminator::Return(None));
-            write_block(&mut rewritten, current_block);
+            state_machine_utils::write_block(&mut rewritten, current_block);
         } else {
-            write_block(&mut rewritten, current_block);
+            state_machine_utils::write_block(&mut rewritten, current_block);
         }
     }
 
@@ -166,83 +166,6 @@ pub fn lower_generator(func: &MirFunction, body_block: BlockId) -> GeneratorLowe
         },
         states,
         complete_block,
-    }
-}
-
-fn reachable_from(func: &MirFunction, start: BlockId) -> HashSet<BlockId> {
-    let mut reachable = HashSet::new();
-    let mut stack = vec![start];
-    while let Some(bid) = stack.pop() {
-        if !reachable.insert(bid) {
-            continue;
-        }
-        if let Some(b) = func.block(bid) {
-            for succ in b.terminator.successors() {
-                stack.push(succ);
-            }
-        }
-    }
-    reachable
-}
-
-fn compute_live_outs(
-    func: &MirFunction,
-    live_ins: &HashMap<BlockId, HashSet<VReg>>,
-) -> HashMap<BlockId, HashSet<VReg>> {
-    let mut live_outs = HashMap::new();
-    for block in &func.blocks {
-        let mut out = HashSet::new();
-        for succ in block.terminator.successors() {
-            if let Some(ins) = live_ins.get(&succ) {
-                out.extend(ins.iter().copied());
-            }
-        }
-        live_outs.insert(block.id, out);
-    }
-    live_outs
-}
-
-fn live_after_each_inst(block: &MirBlock, live_out: Option<&HashSet<VReg>>) -> Vec<HashSet<VReg>> {
-    let mut live = live_out.cloned().unwrap_or_default();
-    let mut states = Vec::with_capacity(block.instructions.len() + 1);
-    states.push(live.clone()); // After the final instruction
-
-    for inst in block.instructions.iter().rev() {
-        if let Some(dest) = inst.dest() {
-            live.remove(&dest);
-        }
-        for u in inst.uses() {
-            live.insert(u);
-        }
-        states.push(live.clone());
-    }
-
-    states.reverse();
-    states
-}
-
-fn remap_terminator(term: Terminator, map: &HashMap<BlockId, BlockId>) -> Option<Terminator> {
-    match term {
-        Terminator::Jump(target) => map.get(&target).copied().map(Terminator::Jump),
-        Terminator::Branch {
-            cond,
-            then_block,
-            else_block,
-        } => Some(Terminator::Branch {
-            cond,
-            then_block: map.get(&then_block).copied().unwrap_or(then_block),
-            else_block: map.get(&else_block).copied().unwrap_or(else_block),
-        }),
-        Terminator::Return(v) => Some(Terminator::Return(v)),
-        Terminator::Unreachable => None,
-    }
-}
-
-fn write_block(func: &mut MirFunction, block: MirBlock) {
-    if let Some(existing) = func.block_mut(block.id) {
-        *existing = block;
-    } else {
-        func.blocks.push(block);
     }
 }
 

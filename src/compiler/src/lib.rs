@@ -9,7 +9,10 @@ pub mod coverage;
 pub mod effects;
 pub mod effects_cache;
 pub mod aop_config;
+pub mod api_surface;
 pub mod arch_rules;
+pub mod build_mode;
+pub mod context_pack;
 pub mod di;
 pub mod mock;
 pub mod pattern_analysis;
@@ -18,6 +21,7 @@ pub mod predicate_parser;
 pub mod weaving;
 pub mod elf_utils;
 pub mod error;
+pub mod error_explanations;
 pub mod hir;
 pub mod import_loader;
 pub mod incremental;
@@ -57,6 +61,7 @@ pub use monomorphize::{
     monomorphize_module, CallSiteAnalyzer, ConcreteType, MonomorphizationTable, Monomorphizer,
     PointerKind, SpecializationKey, TypeBindings,
 };
+pub use build_mode::BuildMode;
 pub use mir::ContractMode;
 pub use parallel::{
     load_module_parallel, parse_all_parallel, parse_files_parallel, ParallelConfig,

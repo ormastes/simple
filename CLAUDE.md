@@ -214,7 +214,26 @@ When working with Simple standard library or applications and you discover bugs 
 
 ### Report Directory (`doc/report/`)
 
-Job completion reports and maintenance docs. See `doc/report/README.md`.
+**Purpose:** Store job completion reports, session summaries, and maintenance documentation.
+
+**When to Use:**
+- ✅ **After completing a significant feature or task** - Create a completion report documenting what was done
+- ✅ **Session summaries** - Document work completed in a development session
+- ✅ **Maintenance activities** - File organization, refactoring, code quality improvements
+- ✅ **Implementation summaries** - Technical details of how features were implemented
+
+**How to Report:**
+1. Create a descriptive markdown file in `doc/report/` (e.g., `CONTRACTS_PHASE_2_2025-12-23.md`)
+2. Include: date, summary, features completed, files modified, test results, next steps
+3. Update `doc/report/README.md` with a link to your report
+4. Reference from `CLAUDE.md` if relevant for future AI agent context
+
+**Examples:**
+- `doc/report/FILE_SPLITTING_SUMMARY.md` - File organization task
+- `doc/report/DUPLICATION_REDUCTION_2025-12-22.md` - Code quality improvement
+- `doc/report/MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md` - Feature implementation
+
+See `doc/report/README.md` for full details and guidelines.
 
 ## Current File Structure
 
@@ -298,11 +317,11 @@ simple/                            # Project root - Rust compiler implementation
 │   │   ├── FILE_SPLITTING_SUMMARY.md  # File organization analysis (2025-12-22)
 │   │   ├── SPLIT_FILES_INDEX.md   # Index of split documentation files
 │   │   └── RUST_LONG_FILES.md     # Analysis of long Rust source files
-│   ├── architecture.md            # Design principles and dependency rules
+│   ├── architecture/README.md     # Design principles and dependency rules
 │   ├── codegen_technical.md       # Codegen implementation details
 │   ├── feature.md                 # Feature catalog
 │   ├── feature_index.md           # Feature index with links
-│   ├── codegen_status.md          # MIR instruction coverage, runtime FFI
+│   ├── codegen/status.md          # MIR instruction coverage, runtime FFI
 │   ├── formal_verification.md     # Lean 4 formal verification docs
 │   ├── import_export_and__init__.md  # Module system specification (v4)
 │   ├── test.md                    # Test policy (mock control, coverage, test levels)

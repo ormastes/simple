@@ -5,6 +5,7 @@
 //! - Colored output (error=red, warning=yellow, note=blue, help=green)
 //! - Underlines pointing to the exact error location
 //! - Support for notes, hints, and help messages
+//! - JSON output format for LLM tooling (#888)
 //!
 //! Example output:
 //! ```text
@@ -17,10 +18,11 @@
 //!    = help: expressions cannot start with an operator
 //! ```
 
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Source location span (line, column, offset)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Span {
     pub start: usize,
     pub end: usize,
@@ -61,7 +63,8 @@ impl Span {
 }
 
 /// Severity level of a diagnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     /// Fatal error that prevents compilation
     Error,
@@ -96,7 +99,7 @@ impl Severity {
 }
 
 /// A label attached to a span in the source code.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Label {
     /// The span this label points to
     pub span: Span,
@@ -127,7 +130,7 @@ impl Label {
 }
 
 /// A diagnostic message with source context.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Diagnostic {
     /// The severity of this diagnostic
     pub severity: Severity,
@@ -545,6 +548,31 @@ impl Diagnostics {
     pub fn len(&self) -> usize {
         self.items.len()
     }
+
+    /// Serialize diagnostics to JSON format (#888)
+    ///
+    /// Produces structured JSON output for LLM tooling.
+    /// Format: { "diagnostics": [...], "error_count": N, "warning_count": M }
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        let json_output = serde_json::json!({
+            "diagnostics": self.items,
+            "error_count": self.error_count(),
+            "warning_count": self.warning_count(),
+            "has_errors": self.has_errors(),
+        });
+        serde_json::to_string_pretty(&json_output)
+    }
+
+    /// Serialize diagnostics to compact JSON (no whitespace)
+    pub fn to_json_compact(&self) -> Result<String, serde_json::Error> {
+        let json_output = serde_json::json!({
+            "diagnostics": self.items,
+            "error_count": self.error_count(),
+            "warning_count": self.warning_count(),
+            "has_errors": self.has_errors(),
+        });
+        serde_json::to_string(&json_output)
+    }
 }
 
 #[cfg(test)]
@@ -644,5 +672,55 @@ mod tests {
         assert!(output.contains("main.spl"));
         assert!(output.contains("undefined variable"));
         assert!(output.contains("unused import"));
+    }
+
+    #[test]
+    fn test_json_serialization() {
+        let mut diags = Diagnostics::new();
+        diags.push(
+            Diagnostic::error("type mismatch")
+                .with_code("E0308")
+                .with_file("test.spl")
+                .with_label(Span::new(10, 15, 2, 5), "expected i64, found str")
+                .with_help("try converting the string to an integer"),
+        );
+        diags.push(Diagnostic::warning("unused variable").with_code("W0001"));
+
+        let json = diags.to_json().unwrap();
+
+        // Verify JSON structure
+        assert!(json.contains(r#""error_count": 1"#));
+        assert!(json.contains(r#""warning_count": 1"#));
+        assert!(json.contains(r#""has_errors": true"#));
+        assert!(json.contains(r#""severity": "error""#));
+        assert!(json.contains(r#""severity": "warning""#));
+        assert!(json.contains(r#""code": "E0308""#));
+        assert!(json.contains(r#""message": "type mismatch""#));
+        assert!(json.contains(r#""file": "test.spl""#));
+
+        // Verify it can be deserialized
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["error_count"], 1);
+        assert_eq!(value["warning_count"], 1);
+        assert_eq!(value["has_errors"], true);
+        assert_eq!(value["diagnostics"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_json_compact() {
+        let mut diags = Diagnostics::new();
+        diags.push(Diagnostic::error("test error"));
+
+        let compact = diags.to_json_compact().unwrap();
+        let pretty = diags.to_json().unwrap();
+
+        // Compact should have no extra whitespace
+        assert!(!compact.contains("\n  "));
+        assert!(pretty.contains("\n  "));
+
+        // Both should deserialize to the same structure
+        let compact_val: serde_json::Value = serde_json::from_str(&compact).unwrap();
+        let pretty_val: serde_json::Value = serde_json::from_str(&pretty).unwrap();
+        assert_eq!(compact_val, pretty_val);
     }
 }
