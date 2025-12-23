@@ -60,10 +60,10 @@ All feature tables use this standardized 8-column format:
 | #936-#945 | Architecture Test Library | ✅ Complete |
 | #950-#970 | Formal Verification | ✅ Complete |
 | #980-#999 | Code Quality & Documentation | ✅ Complete |
-| #1000-#1050 | AOP & Unified Predicates | 🔄 In Progress (3/51) |
+| #1000-#1050 | AOP & Unified Predicates | 🔄 In Progress (19/51) |
 | #1051-#1060 | SDN Self-Hosting | 📋 Planned |
-| #1061-#1103 | Missing Language Features | 🔄 In Progress (20/43) |
-| #1104-#1115 | Concurrency Modes | ✅ Complete (14/12) |
+| #1061-#1103 | Missing Language Features | 🔄 In Progress (37/43) |
+| #1104-#1115 | Concurrency Modes | ✅ Complete (12/12) |
 | #1116-#1130 | FFI/ABI Interface | ✅ Complete |
 | #1131-#1145 | Formatting & Lints | 🔄 In Progress (10/15) |
 | #1146-#1155 | Trait Coherence | 🔄 In Progress (1/10) |
@@ -75,7 +75,7 @@ All feature tables use this standardized 8-column format:
 
 ## Summary Statistics
 
-**Overall Progress:** 60% (354/588 features complete)
+**Overall Progress:** 59% (361/607 features complete)
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -99,10 +99,10 @@ All feature tables use this standardized 8-column format:
 | **Test Coverage Infrastructure** | 16 | 16 | 0 |
 | **Architecture Test Library** | 10 | 10 | 0 |
 | **Module Privacy** | 2 | 2 | 0 |
-| **AOP & Unified Predicates** | 51 | 3 | 48 |
+| **AOP & Unified Predicates** | 51 | 19 | 32 |
 | **SDN Self-Hosting** | 10 | 0 | 10 |
-| **Missing Language Features** | 43 | 20 | 23 |
-| **Concurrency Modes** | 12 | 14 | -2 |
+| **Missing Language Features** | 43 | 37 | 6 |
+| **Concurrency Modes** | 12 | 12 | 0 |
 | **FFI/ABI Interface** | 15 | 15 | 0 |
 | **Formatting & Lints** | 15 | 10 | 5 |
 | **Trait Coherence** | 10 | 1 | 9 |
@@ -607,30 +607,30 @@ Notes: type checker enforces macro definition order and const-evaluates `intro` 
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1073 | `#[inline]` hint | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1074 | `#[derive(...)]` auto-impl | 4 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1075 | `#[cfg(...)]` conditional | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1076 | `#[allow(...)]`/`#[deny(...)]` | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1077 | `#[test]` marker | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1073 | `#[inline]` hint | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1074 | `#[derive(...)]` auto-impl | 4 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1075 | `#[cfg(...)]` conditional | 3 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1076 | `#[allow(...)]`/`#[deny(...)]` | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
+| #1077 | `#[test]` marker | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
 
 #### Comprehensions (#1078-1082)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1078 | List comprehension | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
-| #1079 | Dict comprehension | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
-| #1080 | Negative indexing `arr[-1]` | 2 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/runtime/tests/` |
-| #1081 | Slicing `arr[2:5]`, `arr[::2]` | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/runtime/tests/` |
-| #1082 | Spread `[*a, *b]`, `{**d1, **d2}` | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
+| #1078 | List comprehension | 3 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
+| #1079 | Dict comprehension | 3 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
+| #1080 | Negative indexing `arr[-1]` | 2 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/runtime/tests/` |
+| #1081 | Slicing `arr[2:5]`, `arr[::2]` | 3 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/runtime/tests/` |
+| #1082 | Spread `[*a, *b]`, `{**d1, **d2}` | 3 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
 
 #### Pattern Matching Enhancements (#1083-1090)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1085 | Range patterns `case 1..10:` | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1086 | `if let Some(x) = ...` | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1087 | `while let Some(x) = ...` | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1088 | Chained comparisons `0 < x < 10` | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1085 | Range patterns `case 1..10:` | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1086 | `if let Some(x) = ...` | 3 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1087 | `while let Some(x) = ...` | 3 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1088 | Chained comparisons `0 < x < 10` | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 | #1089 | Exhaustiveness checking | 4 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 | #1090 | Unreachable arm detection | 3 | 📋 | R | [language_enhancement.md](../spec/language_enhancement.md) | - | `src/compiler/tests/` |
 
@@ -638,11 +638,11 @@ Notes: type checker enforces macro definition order and const-evaluates `intro` 
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1091 | `with open(...) as f:` | 3 | 📋 | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
+| #1091 | `with open(...) as f:` | 3 | ✅ | S+R | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | `src/parser/tests/` |
 | #1092 | `ContextManager` trait | 2 | 📋 | S | [metaprogramming.md](../spec/metaprogramming.md) | `std_lib/test/` | - |
 | #1093 | `move \:` closures | 3 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/compiler/tests/` |
-| #1094 | `?` operator for Result | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
-| #1095 | `?` operator for Option | 2 | 📋 | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1094 | `?` operator for Result | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
+| #1095 | `?` operator for Option | 2 | ✅ | R | [metaprogramming.md](../spec/metaprogramming.md) | - | `src/parser/tests/` |
 
 #### Memory Model (#1096-1103)
 

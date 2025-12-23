@@ -1594,7 +1594,7 @@ fn resolve_injected_args(
     impl_methods: &ImplMethods,
     self_mode: simple_parser::ast::SelfMode,
 ) -> Result<HashMap<String, Value>, CompileError> {
-    use crate::di::DiMatchContext;
+    use crate::di::create_di_match_context;
 
     let params_to_bind: Vec<_> = params
         .iter()
@@ -1625,11 +1625,7 @@ fn resolve_injected_args(
         let di_config = get_di_config().ok_or_else(|| {
             semantic_err!("missing di config for injectable parameter '{}'", param.name)
         })?;
-        let ctx = DiMatchContext {
-            type_name: &type_name,
-            module_path: class_name,
-            attrs: &[],
-        };
+        let ctx = create_di_match_context(&type_name, class_name, &[]);
         let binding = di_config
             .select_binding("default", &ctx)
             .map_err(|_| semantic_err!("ambiguous DI binding for '{}'", type_name))?
@@ -1753,11 +1749,7 @@ fn collect_runtime_init_advices(
         return Vec::new();
     }
     let attrs: Vec<String> = class_def.attributes.iter().map(|attr| attr.name.clone()).collect();
-    let ctx = crate::aop_config::AopMatchContext {
-        type_name: impl_type,
-        module_path: impl_type,
-        attrs: &attrs,
-    };
+    let ctx = crate::aop_config::create_aop_match_context(impl_type, impl_type, &attrs);
     let mut matches: Vec<_> = aop_config
         .around
         .iter()
