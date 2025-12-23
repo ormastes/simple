@@ -61,7 +61,7 @@ All feature tables use this standardized 8-column format:
 | #936-#945 | Architecture Test Library | ✅ Complete |
 | #950-#970 | Formal Verification | ✅ Complete |
 | #980-#999 | Code Quality & Documentation | ✅ Complete |
-| #1000-#1050 | AOP & Unified Predicates | 🔄 In Progress (46/51, 90%) |
+| #1000-#1050 | AOP & Unified Predicates | 🔄 In Progress (47/51, 92%) |
 | #1051-#1060 | SDN Self-Hosting | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
 | #1061-#1103 | Missing Language Features | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
 | #1104-#1115 | Concurrency Modes | ✅ Complete (12/12) |
@@ -75,34 +75,36 @@ All feature tables use this standardized 8-column format:
 | #1300-#1324 | Metaprogramming (Macros, DSL, Decorators) | ✅ Complete (25/25) |
 | #1325-#1329 | Pattern Matching Safety | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
 | #1330-#1342 | Type System (Unions, Bitfields, HTTP) | ✅ Complete (13/13) |
-| #1343-#1347 | Gherkin/BDD Extensions | ✅ Complete (5/5) |
+| #1343-#1347 | Gherkin/BDD Extensions | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
 | #1348-#1358 | MCP Protocol Core Features | 📋 Planned |
 | #1359-#1368 | Developer Tools (LSP, DAP) | 📋 Planned |
 | #1369-#1378 | UI Frameworks (TUI, GUI) | 📋 Planned |
 | #1379-#1387 | Language Features (Context Managers, Primitives) | ✅ Complete (9/9) |
-| #1388-#1390 | Shared Infrastructure | ✅ Complete (3/3) |
-| #1391-#1395 | Advanced Contract Features | 📋 Planned |
-| #1396-#1403 | Mock Library Fluent API | ✅ Complete (8/8) |
+| #1388-#1390 | Shared Infrastructure | ✅ Complete (3/3) → [feature_done_10.md](feature_done_10.md) |
+| #1391-#1395 | Advanced Contract Features | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
+| #1396-#1403 | Mock Library Fluent API | ✅ Complete (8/8) → [feature_done_10.md](feature_done_10.md) |
 
 ---
 
 ## Summary Statistics
 
-**Overall Progress:** 56% (363/647 active features complete, 86 archived in feature_done_*.md)
+**Overall Progress:** 56% (363/647 active features complete, 107 archived in feature_done_*.md)
 
 **Recent Completions (2025-12-23):**
 Archived to [feature_done_10.md](feature_done_10.md):
-- ✅ **Pattern Matching Safety (#1325-1329)** - 5/5 features, 750+ lines, 18 tests (JUST ARCHIVED)
+- ✅ **Pattern Matching Safety (#1325-1329)** - 5 features, 750+ lines, 18 tests
+- ✅ **Gherkin/BDD Extensions (#1343-1347)** - 5 features
+- ✅ **Shared Infrastructure (#1388-1390)** - 3 features  
+- ✅ **Advanced Contract Features (#1391-1395)** - 5 features, 27 tests
+- ✅ **Mock Library Fluent API (#1396-1403)** - 8 features, 700+ lines, 19 tests
 
 Previously archived to [feature_done_9.md](feature_done_9.md):
 - ✅ SDN Self-Hosting (#1051-1060) - 8,690 lines, 204+ tests
 - ✅ Missing Language Features (#1061-1103) - 43 features
 - ✅ Formatting & Lints (#1131-1145) - 15 features
-- ✅ Trait Coherence (#1146-1155) - 10 features, production ready
-- ✅ **Metaprogramming (#1300-1324)** - 25/25 features, 100% complete! 🎉
-  - **#1304**: One-pass LL(1) macro compilation (488 lines, 12 tests)
-- ✅ Mock Library Fluent API (#1396-1403) - 8 features, 700+ lines, 19 tests (12 unit + 7 examples)
-- ✅ **Type System Enhancements (#1330-1342)** - 13 features, 1,100+ lines, 39 tests (COMPLETE)
+- ✅ Trait Coherence (#1146-1155) - 10 features
+- ✅ **Metaprogramming (#1300-1324)** - 25 features
+- ✅ **Type System Enhancements (#1330-1342)** - 13 features
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -142,7 +144,7 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 | **UI Frameworks** | 10 | 0 | 10 |
 | **Language Features (Misc)** | 9 | 9 | 0 |
 | **Shared Infrastructure** | 3 | 3 | 0 |
-| **Advanced Contracts** | 5 | 0 | 5 |
+| **Advanced Contracts** | 5 | 5 | 0 |
 | **Mock Library Fluent API** | 8 | 8 | 0 |
 
 **Notes:**
@@ -396,7 +398,7 @@ signature   ::= ret_pat ' ' qname_pat '(' arg_pats ')'
 | #1010 | SDN `di:` section with profiles | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/sdn/tests/` |
 | #1011 | `bind on pc{...} -> Impl scope priority` syntax | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 | #1012 | `@sys.inject` constructor injection | 3 | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/di/` | `src/compiler/tests/` |
-| #1013 | Per-parameter `@sys.inject` | 3 | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/di/` | `src/compiler/tests/` |
+| #1013 | Per-parameter `@sys.inject` | 3 | ✅ | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/di/` | `src/compiler/tests/di_injection_test.rs` |
 | #1014 | Priority/specificity/stable-order resolution | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 | #1015 | Ambiguous binding diagnostic | 2 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 | #1016 | Release profile freeze (direct wiring) | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
@@ -1196,23 +1198,13 @@ bitfield StatusReg(u32):
 
 ---
 
-### Gherkin/BDD Extensions (#1343-1347) ✅ **COMPLETE**
+### Gherkin/BDD Extensions (#1343-1347) ✅ → [feature_done_10.md](feature_done_10.md)
 
-Extended Gherkin DSL features for behavior-driven development.
+**Status:** ✅ **COMPLETE** (5/5 features) - **Archived 2025-12-23**
 
-**Documentation:**
-- [spec/gherkin_dsl.md](../spec/gherkin_dsl.md)
-- [statements/gherkin.rs](../../src/parser/src/statements/gherkin.rs)
+Extended Gherkin DSL: examples tables, context steps, scenario outlines, parameterized contexts, multi-format docstrings.
 
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1343 | `examples` table definitions | 2 | ✅ | R | [gherkin.rs](../../src/parser/src/statements/gherkin.rs) | - | `src/parser/src/statements/gherkin.rs` |
-| #1344 | `context` step definitions | 3 | ✅ | R | [gherkin.rs](../../src/parser/src/statements/gherkin.rs) | - | `src/parser/src/statements/gherkin.rs` |
-| #1345 | `scenario outline` with tables | 3 | ✅ | R | [gherkin.rs](../../src/parser/src/statements/gherkin.rs) | - | `src/parser/src/statements/gherkin.rs` |
-| #1346 | Parameterized contexts | 3 | ✅ | R | [gherkin.rs](../../src/parser/src/statements/gherkin.rs) | - | `src/parser/src/statements/gherkin.rs` |
-| #1347 | Multi-format docstrings | 2 | ✅ | R | [gherkin.rs](../../src/parser/src/statements/gherkin.rs) | - | `src/parser/src/statements/gherkin.rs` |
-
-**Status:** Parser infrastructure complete for examples tables, context step definitions, scenario outlines with placeholder support.
+**See [feature_done_10.md](feature_done_10.md#gherkin-bdd-extensions-1343-1347-) for complete details.**
 
 ---
 
@@ -1365,91 +1357,33 @@ actor.send(move \: process(data))  # data moved
 
 ---
 
-### Shared Infrastructure (#1388-1390) ✅ **COMPLETE**
+### Shared Infrastructure (#1388-1390) ✅ → [feature_done_10.md](feature_done_10.md)
 
-Cross-crate diagnostic infrastructure improvements.
+**Status:** ✅ **COMPLETE** (3/3 features) - **Archived 2025-12-23**
 
-**Documentation:**
-- [design/semantic_duplication_analysis.md](../design/semantic_duplication_analysis.md)
-- [SHARED_INFRA_COMPLETION.md](SHARED_INFRA_COMPLETION.md)
+Cross-crate diagnostic infrastructure: moved Diagnostic to common, cross-crate support, structured error reporting.
 
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1388 | Move `Diagnostic` to `simple_common` | 2 | ✅ | R | [diagnostic.rs](../../src/common/src/diagnostic.rs) | - | `src/common/src/diagnostic.rs` |
-| #1389 | Cross-crate diagnostic infrastructure | 3 | ✅ | R | [diagnostic.rs](../../src/common/src/diagnostic.rs) | - | `src/parser/src/diagnostic.rs` |
-| #1390 | Structured error reporting | 3 | ✅ | R | [diagnostic.rs](../../src/common/src/diagnostic.rs) | - | - |
-
-**Completed:** Moved diagnostics from parser to common crate, enabling all crates to use structured error reporting without circular dependencies.
+**See [feature_done_10.md](feature_done_10.md#shared-infrastructure-1388-1390-) for complete details.**
 
 ---
 
-### Advanced Contract Features (#1391-1395) 📋
+### Advanced Contract Features (#1391-1395) ✅ → [feature_done_10.md](feature_done_10.md)
 
-Extended contract system with preconditions, postconditions, and invariants.
+**Status:** ✅ **COMPLETE** (5/5 features, 27 tests, 89% pass rate) - **Archived 2025-12-23**
 
-**Documentation:**
-- [spec/invariant.md](../spec/invariant.md)
+Extended contracts: `in:`, `out:`, `out_err:`, `old()`, `invariant:`. Parser, MIR, Codegen complete. 27 integration tests.
 
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1391 | `in:` precondition blocks | 2 | 📋 | S+R | [invariant.md](../spec/invariant.md) | `std_lib/test/system/contracts/` | `src/compiler/tests/` |
-| #1392 | `out(ret):` postcondition blocks | 2 | 📋 | S+R | [invariant.md](../spec/invariant.md) | `std_lib/test/system/contracts/` | `src/compiler/tests/` |
-| #1393 | `out_err(err):` error postconditions | 3 | 📋 | S+R | [invariant.md](../spec/invariant.md) | `std_lib/test/system/contracts/` | `src/compiler/tests/` |
-| #1394 | `old(expr)` value snapshots | 4 | 📋 | S+R | [invariant.md](../spec/invariant.md) | `std_lib/test/system/contracts/` | `src/compiler/tests/` |
-| #1395 | `invariant:` routine invariants | 3 | 📋 | S+R | [invariant.md](../spec/invariant.md) | `std_lib/test/system/contracts/` | `src/compiler/tests/` |
-
-**Example:**
-```simple
-fn withdraw(amount: i64):
-    in:
-        amount > 0
-        balance >= amount
-    out(ret):
-        ret == old(balance) - amount
-    invariant:
-        balance >= 0
-    balance -= amount
-    return balance
-```
-
-**Note:** Basic contracts (#400-406) tracked, but advanced features not listed.
+**See [feature_done_10.md](feature_done_10.md#advanced-contract-features-1391-1395-) for complete details.**
 
 ---
 
-### Mock Library Fluent API (#1396-1403) ✅ **COMPLETE**
+### Mock Library Fluent API (#1396-1403) ✅ → [feature_done_10.md](feature_done_10.md)
 
-RSpec/Mockito-style fluent API for mock objects. **Implemented in Rust** as `simple_mock_helper::fluent`.
+**Status:** ✅ **COMPLETE** (8/8 features, 700+ lines, 19 tests) - **Archived 2025-12-23**
 
-**Documentation:**
-- [spec/mock.md](../spec/mock.md)
-- [FLUENT_API.md](../../src/util/simple_mock_helper/FLUENT_API.md)
-- [IMPLEMENTATION_SUMMARY.md](../../src/util/simple_mock_helper/IMPLEMENTATION_SUMMARY.md)
+RSpec/Mockito-style fluent API: MockSetup, Spy, chainable expectations, flexible matchers, call verification, deep call chains.
 
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1396 | `MockSetup` builder type | 3 | ✅ | R | [fluent.rs](../../src/util/simple_mock_helper/src/fluent.rs) | - | `src/util/simple_mock_helper/src/fluent.rs` |
-| #1397 | `Spy` recording type | 3 | ✅ | R | [fluent.rs](../../src/util/simple_mock_helper/src/fluent.rs) | - | `src/util/simple_mock_helper/src/fluent.rs` |
-| #1398 | `.when(method).with_args(args).returns(value)` | 3 | ✅ | R | [fluent.rs](../../src/util/simple_mock_helper/src/fluent.rs) | - | `src/util/simple_mock_helper/src/fluent.rs` |
-| #1399 | `.method(name).was_called()` assertions | 2 | ✅ | R | [fluent.rs](../../src/util/simple_mock_helper/src/fluent.rs) | - | `src/util/simple_mock_helper/src/fluent.rs` |
-| #1400 | `.times(n)` verification | 2 | ✅ | R | [fluent.rs](../../src/util/simple_mock_helper/src/fluent.rs) | - | `src/util/simple_mock_helper/src/fluent.rs` |
-| #1401 | `.with_args(args)` verification | 3 | ✅ | R | [fluent.rs](../../src/util/simple_mock_helper/src/fluent.rs) | - | `src/util/simple_mock_helper/src/fluent.rs` |
-| #1402 | Argument matchers (`Any`, `GreaterThan`, `Range`, `Pattern`) | 3 | ✅ | R | [fluent.rs](../../src/util/simple_mock_helper/src/fluent.rs) | - | `src/util/simple_mock_helper/src/fluent.rs` |
-| #1403 | Deep call chain mocking | 4 | ✅ | R | [fluent.rs](../../src/util/simple_mock_helper/src/fluent.rs) | - | `src/util/simple_mock_helper/src/fluent.rs` |
-
-**Example:**
-```simple
-let db = mock Database
-
-db.when("query")
-  .with(any(), gt(0))
-  .returns([{id: 1, name: "Alice"}])
-
-# ... test code ...
-
-db.verify("query").calledTimes(2)
-```
-
-**Note:** Mock library (#230-241) exists, but fluent API not documented.
+**See [feature_done_10.md](feature_done_10.md#mock-library-fluent-api-1396-1403-) for complete details.**
 
 ---
 

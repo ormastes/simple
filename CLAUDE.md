@@ -843,17 +843,18 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 | #1146-1155 | Trait Coherence | 10 | 10 | ✅ Complete → feature_done_9.md |
 | #1396-1403 | Mock Library Fluent API | 8 | 8 | ✅ Complete (2025-12-23) |
 
-**Overall Progress:** 56% (414/728 total features: 333/647 active + 86 archived)
+**Overall Progress:** 56% (414/728 total features: 333/647 active + 107 archived)
 
 **Recently Completed (2025-12-23):**
-- ✅ **Pattern Matching Safety (#1325-1329)** - **5 features COMPLETE** 🎉 → [feature_done_10.md](doc/features/feature_done_10.md)
-  - Exhaustiveness checking, unreachable detection, tagged union support
-  - 750+ lines, 18 comprehensive tests
-- ✅ SDN Self-Hosting (#1051-1060) - 10 features, 8,690 lines, 204+ tests → [feature_done_9.md](doc/features/feature_done_9.md)
-- ✅ Missing Language Features (#1061-1103) - 43 features complete → [feature_done_9.md](doc/features/feature_done_9.md)
+- ✅ **Pattern Matching Safety (#1325-1329)** - **5 features** → [feature_done_10.md](doc/features/feature_done_10.md)
+- ✅ **Gherkin/BDD Extensions (#1343-1347)** - **5 features** → [feature_done_10.md](doc/features/feature_done_10.md)
+- ✅ **Shared Infrastructure (#1388-1390)** - **3 features** → [feature_done_10.md](doc/features/feature_done_10.md)
+- ✅ **Advanced Contract Features (#1391-1395)** - **5 features, 27 tests** → [feature_done_10.md](doc/features/feature_done_10.md)
+- ✅ **Mock Library Fluent API (#1396-1403)** - **8 features, 700+ lines, 19 tests** → [feature_done_10.md](doc/features/feature_done_10.md)
+- ✅ SDN Self-Hosting (#1051-1060) - 10 features → [feature_done_9.md](doc/features/feature_done_9.md)
+- ✅ Missing Language Features (#1061-1103) - 43 features → [feature_done_9.md](doc/features/feature_done_9.md)
 - ✅ Formatting & Lints (#1131-1145) - 15 features → [feature_done_9.md](doc/features/feature_done_9.md)
-- ✅ Trait Coherence (#1146-1155) - 10 features, production ready → [feature_done_9.md](doc/features/feature_done_9.md)
-- ✅ Mock Library Fluent API (#1396-1403) - **8 features COMPLETE**, 700+ lines, 19 tests → [feature_done_9.md](doc/features/feature_done_9.md)
+- ✅ Trait Coherence (#1146-1155) - 10 features → [feature_done_9.md](doc/features/feature_done_9.md)
 
 See `TODO.md` and `doc/features/feature_done_*.md` for archived features.
 
