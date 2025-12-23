@@ -464,4 +464,28 @@ mod tests {
             panic!("Expected Call expression");
         }
     }
+
+    /// Parse a context definition: `context pattern:`
+    /// Transforms to: `context("pattern", do_block)`
+    pub(crate) fn parse_context(&mut self) -> Result<Node, ParseError> {
+        self.expect(&TokenKind::Context)?;
+
+        // Parse pattern with optional placeholders <param>
+        let pattern = self.parse_gherkin_pattern()?;
+        self.expect(&TokenKind::Colon)?;
+
+        // Parse body as block
+        let block = self.parse_block()?;
+
+        // Generate: context("pattern", do_block)
+        let call_expr = Expr::Call {
+            callee: Box::new(Expr::Identifier("context".to_string())),
+            args: vec![
+                Argument { name: None, value: Expr::String(pattern) },
+                Argument { name: None, value: Expr::DoBlock(block.statements) },
+            ],
+        };
+
+        Ok(Node::Expression(call_expr))
+    }
 }

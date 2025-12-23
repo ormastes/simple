@@ -72,6 +72,146 @@ impl LintName {
             LintName::BareBool => LintLevel::Warn,
         }
     }
+
+    /// Get a detailed explanation of this lint
+    ///
+    /// Provides:
+    /// - What the lint checks for
+    /// - Why it matters
+    /// - Examples of code that triggers it
+    /// - How to fix it
+    /// - How to suppress it
+    pub fn explain(&self) -> String {
+        match self {
+            LintName::PrimitiveApi => {
+                r#"Lint: primitive_api
+Level: warn (default)
+
+=== What it checks ===
+
+This lint warns when bare primitive types (i8, i16, i32, i64, u8, u16, u32, u64,
+f32, f64, bool) are used in public API signatures.
+
+=== Why it matters ===
+
+Primitive types lack semantic meaning. For example:
+
+    pub fn set_timeout(value: i64)
+
+What does the i64 represent? Seconds? Milliseconds? A timeout ID?
+
+Using semantic types makes code self-documenting:
+
+    pub fn set_timeout(duration: Duration)
+
+This is immediately clear and prevents errors like passing seconds when
+milliseconds are expected.
+
+=== Examples ===
+
+Triggers the lint:
+    pub fn calculate(x: i64, y: f64) -> bool
+    pub struct Config:
+        pub port: i32
+
+Does not trigger:
+    fn internal_helper(x: i64) -> bool     # Private function
+    pub fn get_name() -> str               # str is allowed
+    pub fn find(id: UserId) -> Option[User]  # Semantic types
+
+=== How to fix ===
+
+1. Use semantic unit types:
+    unit Duration: i64 as ms
+    pub fn set_timeout(duration: Duration)
+
+2. Use newtype wrappers:
+    struct UserId(i64)
+    pub fn find_user(id: UserId)
+
+3. Use enums for booleans:
+    enum CacheMode:
+        Enabled
+        Disabled
+    pub fn configure(cache: CacheMode)
+
+=== How to suppress ===
+
+If you really need primitives in a public API:
+
+    #[allow(primitive_api)]
+    pub fn legacy_api(value: i64)
+
+Or in simple.sdn:
+    [lints]
+    primitive_api = "allow"
+"#.to_string()
+            }
+            LintName::BareBool => {
+                r#"Lint: bare_bool
+Level: warn (default)
+
+=== What it checks ===
+
+This lint warns when boolean parameters are used in function signatures,
+especially public APIs.
+
+=== Why it matters ===
+
+Boolean parameters are unclear at call sites:
+
+    configure(true, false, true)  # What do these mean?
+
+Enums make intent explicit:
+
+    configure(CacheMode::Enabled, LogMode::Disabled, DebugMode::Enabled)
+
+=== Examples ===
+
+Triggers the lint:
+    pub fn configure(enable_cache: bool, debug: bool)
+    fn process(data: Data, validate: bool)
+
+Does not trigger:
+    pub fn configure(mode: CacheMode)
+    fn is_valid() -> bool  # Return values are OK
+
+=== How to fix ===
+
+Replace boolean parameters with enums:
+
+    enum CacheMode:
+        Enabled
+        Disabled
+
+    enum DebugMode:
+        Enabled
+        Disabled
+
+    pub fn configure(cache: CacheMode, debug: DebugMode)
+
+Call sites become self-documenting:
+    configure(CacheMode::Enabled, DebugMode::Disabled)
+
+=== How to suppress ===
+
+If you need boolean parameters:
+
+    #[allow(bare_bool)]
+    pub fn set_flag(value: bool)
+
+Or in simple.sdn:
+    [lints]
+    bare_bool = "allow"
+"#.to_string()
+            }
+        }
+    }
+
+    /// Get all available lint names
+    pub fn all_lints() -> Vec<Self> {
+        vec![LintName::PrimitiveApi, LintName::BareBool]
+    }
 }
 
 /// A lint diagnostic message
@@ -145,6 +285,71 @@ pub struct LintConfig {
 impl LintConfig {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Load lint configuration from a simple.sdn file
+    ///
+    /// Expected format:
+    /// ```sdn
+    /// [lints]
+    /// primitive_api = "deny"
+    /// bare_bool = "warn"
+    /// ```
+    pub fn from_sdn_file(path: &std::path::Path) -> Result<Self, String> {
+        use std::fs;
+
+        let content = fs::read_to_string(path)
+            .map_err(|e| format!("Failed to read lint config: {}", e))?;
+
+        Self::from_sdn_string(&content)
+    }
+
+    /// Parse lint configuration from SDN string
+    pub fn from_sdn_string(content: &str) -> Result<Self, String> {
+        let mut config = Self::new();
+        let mut in_lints_section = false;
+
+        for line in content.lines() {
+            let line = line.trim();
+
+            // Skip empty lines and comments
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            // Check for [lints] section
+            if line == "[lints]" {
+                in_lints_section = true;
+                continue;
+            }
+
+            // Check for other sections (exit lints section)
+            if line.starts_with('[') && line.ends_with(']') {
+                in_lints_section = false;
+                continue;
+            }
+
+            // Parse lint = "level" entries
+            if in_lints_section {
+                if let Some((lint_name, level_str)) = line.split_once('=') {
+                    let lint_name = lint_name.trim();
+                    let level_str = level_str.trim().trim_matches('"').trim_matches('\'');
+
+                    if let Some(lint) = LintName::from_str(lint_name) {
+                        if let Some(level) = LintLevel::from_str(level_str) {
+                            config.set_level(lint, level);
+                        } else {
+                            return Err(format!("Invalid lint level '{}' for lint '{}'", level_str, lint_name));
+                        }
+                    } else {
+                        // Unknown lint name - could be a warning in the future
+                        eprintln!("Warning: Unknown lint name '{}'", lint_name);
+                    }
+                }
+            }
+        }
+
+        Ok(config)
     }
 
     /// Set the level for a specific lint
@@ -640,5 +845,59 @@ pub fn find_value() -> Option[i64]:
         );
         assert_eq!(LintName::from_str("bare_bool"), Some(LintName::BareBool));
         assert_eq!(LintName::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_sdn_config_parsing() {
+        let sdn_content = r#"
+# Lint configuration for Simple project
+[lints]
+primitive_api = "deny"
+bare_bool = "warn"
+
+[other_section]
+something = "else"
+        "#;
+
+        let config = LintConfig::from_sdn_string(sdn_content).unwrap();
+        assert_eq!(config.get_level(LintName::PrimitiveApi), LintLevel::Deny);
+        assert_eq!(config.get_level(LintName::BareBool), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_sdn_config_with_invalid_level() {
+        let sdn_content = r#"
+[lints]
+primitive_api = "invalid"
+        "#;
+
+        let result = LintConfig::from_sdn_string(sdn_content);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid lint level"));
+    }
+
+    #[test]
+    fn test_sdn_config_with_unknown_lint() {
+        let sdn_content = r#"
+[lints]
+unknown_lint = "deny"
+primitive_api = "warn"
+        "#;
+
+        // Should succeed but warn about unknown lint
+        let config = LintConfig::from_sdn_string(sdn_content).unwrap();
+        assert_eq!(config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
+    }
+
+    #[test]
+    fn test_sdn_config_empty() {
+        let sdn_content = r#"
+[lints]
+# No lints configured
+        "#;
+
+        let config = LintConfig::from_sdn_string(sdn_content).unwrap();
+        // Should use defaults
+        assert_eq!(config.get_level(LintName::PrimitiveApi), LintLevel::Warn);
     }
 }

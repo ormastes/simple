@@ -8,6 +8,16 @@ impl<'a> super::Lexer<'a> {
             return self.scan_fstring();
         }
 
+        // Check for pc{...} pointcut syntax
+        if first == 'p' && self.peek() == Some('c') {
+            // Peek ahead to see if this is followed by {
+            if self.peek_ahead(1) == Some('{') {
+                self.advance(); // consume 'c'
+                self.advance(); // consume '{'
+                return self.scan_pointcut();
+            }
+        }
+
         let mut name = String::from(first);
 
         while let Some(ch) = self.peek() {
@@ -111,8 +121,44 @@ impl<'a> super::Lexer<'a> {
             // Memory management keywords
             "handle_pool" => TokenKind::HandlePool,
             "_" => TokenKind::Underscore,
+            // AOP keywords
+            "on" => TokenKind::On,
+            "bind" => TokenKind::Bind,
+            "forbid" => TokenKind::Forbid,
+            "allow" => TokenKind::Allow,
+            "mock" => TokenKind::Mock,
             _ => TokenKind::Identifier(name),
         }
+    }
+
+    /// Scan a pointcut predicate expression: pc{...}
+    /// Returns the content between { and } as a Pointcut token
+    pub(super) fn scan_pointcut(&mut self) -> TokenKind {
+        let mut content = String::new();
+        let mut depth = 1; // We've already consumed the opening {
+
+        while let Some(ch) = self.peek() {
+            if ch == '{' {
+                depth += 1;
+                content.push(ch);
+                self.advance();
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    self.advance(); // consume the closing }
+                    return TokenKind::Pointcut(content);
+                } else {
+                    content.push(ch);
+                    self.advance();
+                }
+            } else {
+                content.push(ch);
+                self.advance();
+            }
+        }
+
+        // Unclosed pointcut - return error
+        TokenKind::Error("Unclosed pointcut expression (missing '}')".to_string())
     }
 
     pub(super) fn scan_symbol(&mut self) -> TokenKind {

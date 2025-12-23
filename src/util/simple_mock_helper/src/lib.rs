@@ -1,6 +1,7 @@
 pub mod api_scanner;
 pub mod coverage;
 pub mod coverage_extended;
+pub mod fluent;
 pub mod mock_policy;
 pub mod test_check;
 
@@ -27,4 +28,7 @@ pub use test_check::{
     assert_mocks_allowed, assert_mocks_forbidden, assert_test_level, get_test_level,
     get_test_level_name, init_test_level, init_test_level_named, try_get_test_level,
     validate_test_config, TestCheckResult, TestLevel,
+};
+pub use fluent::{
+    ArgMatcher, MethodSetup, MethodVerification, MockSetup, MockVerify, Spy, VerifyCount,
 };

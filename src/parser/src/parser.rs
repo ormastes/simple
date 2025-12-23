@@ -147,6 +147,13 @@ impl<'a> Parser<'a> {
             TokenKind::Export => self.parse_export_use(),
             TokenKind::Auto => self.parse_auto_import(),
             TokenKind::Requires => self.parse_requires_capabilities(),
+            // AOP & Unified Predicates (#1000-1050)
+            TokenKind::On => self.parse_aop_advice().map(Node::AopAdvice),
+            TokenKind::Bind => self.parse_di_binding().map(Node::DiBinding),
+            TokenKind::Forbid | TokenKind::Allow => {
+                self.parse_arch_rule().map(Node::ArchitectureRule)
+            }
+            TokenKind::Mock => self.parse_mock_decl().map(Node::MockDecl),
             TokenKind::If => self.parse_if(),
             TokenKind::Match => self.parse_match_stmt(),
             TokenKind::For => self.parse_for(),
@@ -507,6 +514,7 @@ impl<'a> Parser<'a> {
                 span,
                 type_param,
                 bounds: trait_bounds,
+                negative_bounds: vec![], // TODO: Parse !Trait syntax (#1151)
             });
 
             // Check for comma to continue parsing more bounds
@@ -732,8 +740,27 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Hash)?;
         self.expect(&TokenKind::LBracket)?;
 
-        // Parse the attribute name
-        let name = self.expect_identifier()?;
+        // Parse the attribute name - accept identifiers and some keywords
+        let name = match &self.current.kind {
+            TokenKind::Identifier(s) => {
+                let name = s.clone();
+                self.advance();
+                name
+            }
+            // Accept 'allow' keyword as attribute name (used in architecture rules)
+            // Note: 'deny', 'warn', 'test', 'inline' are identifiers, not keywords
+            TokenKind::Allow => {
+                self.advance();
+                "allow".to_string()
+            }
+            _ => {
+                return Err(ParseError::unexpected_token(
+                    "identifier or attribute keyword (allow)",
+                    format!("{:?}", self.current.kind),
+                    self.current.span,
+                ));
+            }
+        };
 
         // Check for value: #[name = value]
         let value = if self.check(&TokenKind::Assign) {
@@ -884,6 +911,23 @@ impl<'a> Parser<'a> {
 
         while !self.check(&TokenKind::RParen) {
             let param_span = self.current.span;
+
+            // Check for @inject attribute on parameter (#1013)
+            let inject = if self.check(&TokenKind::At) {
+                self.advance();
+                let attr_name = self.expect_identifier()?;
+                if attr_name != "inject" {
+                    return Err(ParseError::UnexpectedToken {
+                        expected: "inject".to_string(),
+                        found: attr_name,
+                        span: self.current.span,
+                    });
+                }
+                true
+            } else {
+                false
+            };
+
             let mutability = if self.check(&TokenKind::Mut) {
                 self.advance();
                 Mutability::Mutable
@@ -919,6 +963,7 @@ impl<'a> Parser<'a> {
                 ty,
                 default,
                 mutability,
+                inject,
             });
 
             if !self.check(&TokenKind::RParen) {

@@ -2,9 +2,24 @@
 
 ## 🚧 Current Status
 
-**Build:** ✅ Passing - 617+ tests (572 compiler + 32 capability + 7 memory model + 6 sync)
+**Build:** ✅ Passing - 696+ tests (651 compiler + 32 capability + 7 memory model + 6 sync)
 
 **Recent Work (2025-12-23):**
+- ✅ **Pattern Matching Safety** (#1325-1329) - **5/5 features COMPLETE** 🎉
+  - **Exhaustiveness Checking**: Compile-time verification all cases are covered
+  - **Unreachable Detection**: Warns about patterns that can never match
+  - **Tagged Union Support**: Full integration with algebraic data types
+  - **Strong Enum Enforcement**: `#[strong]` enums prohibit wildcards
+  - **Subsumption Analysis**: Detects overlapping patterns
+  - 750+ lines, 18 comprehensive tests
+  - See `PATTERN_MATCH_SAFETY.md` for complete guide
+- ✅ **Mock Library Fluent API** (#1396-1403) - **8/8 features COMPLETE**
+  - **Chainable API**: `MockSetup`, `MockVerify`, `Spy` builders
+  - **Deep Call Chains**: `.chain()` for nested method calls (e.g., `library.getHead().getName()`)
+  - **Flexible Matchers**: Any, Exact, GreaterThan, LessThan, Range, Pattern
+  - **Verification**: `was_called()`, `times()`, `with_args()` assertions
+  - 700+ lines, 19 tests (12 unit + 7 examples)
+  - See `src/util/simple_mock_helper/FLUENT_API.md`
 - ✅ **Complete Memory Model Verification** (#1104-1106) - Formal proofs in Lean 4
   - **Reference Capabilities**: Aliasing prevention, conversion safety (350+ lines Lean)
   - **SC-DRF Guarantee**: Sequential consistency for data-race-free programs (510+ lines Lean)
@@ -14,6 +29,7 @@
   - See `verification/memory_capabilities/` and `verification/memory_model_drf/`
 
 **Key Features:**
+- **Pattern Matching Safety**: Exhaustiveness checking, unreachable detection, strong enums (5/5 complete)
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`), concurrency modes (`actor`, `lock_base`, `unsafe`)
 - SC-DRF guarantee: Formally verified memory consistency model
 - Formatter/linter: Simple-based tools in `simple/app/`
@@ -814,26 +830,30 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 
 ### Feature Ranges Summary
 
+**Note:** Many completed features have been archived to [feature_done_9.md](doc/features/feature_done_9.md) (2025-12-23)
+
 | Range | Category | Total | Complete | Status |
 |-------|----------|-------|----------|--------|
 | #880-919 | LLM-Friendly | 40 | 0 | 📋 Planned |
-| #1000-1050 | AOP & Predicates | 51 | 0 | 📋 Planned |
-| #1051-1060 | SDN Self-Hosting | 10 | 0 | 📋 Planned |
-| #1061-1103 | Missing Lang Features | 43 | 37 | 🔄 86% |
-| #1104-1115 | Concurrency Modes | 12 | 4 | 🔄 33% |
-| #1131-1145 | Formatting & Lints* | 15 | 15** | ✅ Complete* |
-| #1146-1155 | Trait Coherence | 10 | 10 | ✅ Complete |
+| #1000-1050 | AOP & Predicates | 51 | 25 | 🔄 49% In Progress |
+| #1051-1060 | SDN Self-Hosting | 10 | 10 | ✅ Complete → feature_done_9.md |
+| #1061-1103 | Missing Lang Features | 43 | 43 | ✅ Complete → feature_done_9.md |
+| #1104-1115 | Concurrency Modes | 12 | 12 | ✅ Complete |
+| #1131-1145 | Formatting & Lints | 15 | 15 | ✅ Complete → feature_done_9.md |
+| #1146-1155 | Trait Coherence | 10 | 10 | ✅ Complete → feature_done_9.md |
+| #1396-1403 | Mock Library Fluent API | 8 | 8 | ✅ Complete (2025-12-23) |
 
-\*Compiler lints complete; Simple-based tools (simple_fmt/simple_lint) in Phase 1
-\*\*Compiler infrastructure complete
+**Overall Progress:** 56% (414/728 total features: 333/647 active + 81 archived)
 
-**Overall Progress:** 68% (296/434 features)
-
-**Missing Language Features (#1061-1103):** See `doc/features/feature.md` for complete list
-- **Categories:** Macros, DSL Features, Built-in Decorators, Attributes, Comprehensions, Pattern Matching, Context Managers, Memory Model
-- **Status:** 37/43 complete (86%)
-  - ✅ Completed: Macro hygiene (#1065b), Attributes (#1073-1077: inline, derive, cfg, allow/deny, test), Comprehensions (#1078-1082: list, dict, negative indexing, slicing, spread), Pattern matching (#1085-1088: range patterns, if let, while let, chained comparisons), Context managers (#1091: with statement), Error handling (#1094-1095: ? operator), Memory model (#1096-1103), Formal verification (#1104-1106)
-  - 📋 Remaining (6): Decorators (@cached, @logged, @deprecated, @timeout - parsing done, runtime impl needed), Pattern analysis (exhaustiveness checking, unreachable arm detection), ContextManager trait, move closures
+**Recently Completed (2025-12-23):**
+- ✅ **Pattern Matching Safety (#1325-1329)** - **5 features COMPLETE** 🎉 (JUST COMPLETED)
+  - Exhaustiveness checking, unreachable detection, tagged union support
+  - 750+ lines, 18 comprehensive tests
+- ✅ SDN Self-Hosting (#1051-1060) - 10 features, 8,690 lines, 204+ tests
+- ✅ Missing Language Features (#1061-1103) - 43 features complete
+- ✅ Formatting & Lints (#1131-1145) - 15 features
+- ✅ Trait Coherence (#1146-1155) - 10 features, production ready
+- ✅ Mock Library Fluent API (#1396-1403) - **8 features COMPLETE**, 700+ lines, 19 tests
 
 See `TODO.md` and `doc/plans/30_pending_features.md` for details.
 

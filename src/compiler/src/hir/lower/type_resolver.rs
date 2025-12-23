@@ -7,11 +7,22 @@ use super::lowerer::Lowerer;
 impl Lowerer {
     pub(super) fn resolve_type(&mut self, ty: &Type) -> LowerResult<TypeId> {
         match ty {
-            Type::Simple(name) => self
-                .module
-                .types
-                .lookup(name)
-                .ok_or_else(|| LowerError::UnknownType(name.clone())),
+            Type::Simple(name) => {
+                // Handle Self type in class/struct methods
+                if name == "Self" {
+                    if let Some(class_ty) = self.current_class_type {
+                        return Ok(class_ty);
+                    } else {
+                        return Err(LowerError::UnknownType(
+                            "Self used outside of class/struct context".to_string()
+                        ));
+                    }
+                }
+                self.module
+                    .types
+                    .lookup(name)
+                    .ok_or_else(|| LowerError::UnknownType(name.clone()))
+            }
             Type::Pointer { kind, inner } => {
                 let inner_id = self.resolve_type(inner)?;
                 let ptr_type = HirType::Pointer {

@@ -191,3 +191,6 @@ pub mod gc;
 
 pub mod target;
 pub use target::{PointerSize, Target, TargetArch, TargetConfig, TargetOS, TargetParseError};
+
+pub mod diagnostic;
+pub use diagnostic::{Diagnostic, Label, Severity, Span};

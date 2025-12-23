@@ -1365,6 +1365,16 @@ fn exec_function_inner(
     }
 
     let mut local_env = Env::new();
+
+    // TODO(contracts): Add interpreter contract support
+    // For now, contracts are only checked in compiled code.
+    // Future work:
+    // 1. Evaluate preconditions before function execution
+    // 2. Capture old() values at entry
+    // 3. Evaluate entry invariants
+    // 4. Execute function body
+    // 5. Evaluate exit invariants and postconditions
+    // See interpreter_contract.rs module for helper functions
     if let Some((class_name, fields)) = self_ctx {
         local_env.insert(
             "self".into(),

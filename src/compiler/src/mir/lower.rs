@@ -22,8 +22,14 @@ pub struct MirLowerer<'a> {
     type_registry: Option<&'a crate::hir::TypeRegistry>,
     /// DI configuration for constructor injection
     di_config: Option<DiConfig>,
-    /// Map of injectable function names to parameter types
-    inject_functions: HashMap<String, Vec<TypeId>>,
+    /// Map of injectable function names to parameter types and inject flags (#1013)
+    inject_functions: HashMap<String, Vec<(TypeId, bool)>>,
+    /// Singleton instance cache for DI (impl_type -> VReg)
+    singleton_cache: HashMap<String, VReg>,
+    /// Dependency graph for cycle detection (#1009)
+    dependency_graph: crate::di::DependencyGraph,
+    /// Current DI resolution stack for cycle detection
+    di_resolution_stack: Vec<String>,
     /// Coverage instrumentation mode
     coverage_enabled: bool,
     /// Counter for generating unique decision IDs
@@ -41,6 +47,9 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             di_config: None,
             inject_functions: HashMap::new(),
+            singleton_cache: HashMap::new(),
+            dependency_graph: crate::di::DependencyGraph::default(),
+            di_resolution_stack: Vec::new(),
             coverage_enabled: false,
             decision_counter: 0,
             current_file: None,
@@ -56,6 +65,9 @@ impl<'a> MirLowerer<'a> {
             type_registry: None,
             di_config: None,
             inject_functions: HashMap::new(),
+            singleton_cache: HashMap::new(),
+            dependency_graph: crate::di::DependencyGraph::default(),
+            di_resolution_stack: Vec::new(),
             coverage_enabled: false,
             decision_counter: 0,
             current_file: None,
@@ -171,6 +183,7 @@ impl<'a> MirLowerer<'a> {
                     loop_stack: Vec::new(),
                     contract_ctx: ContractContext {
                         old_captures: HashMap::new(),
+                        old_expr_map: HashMap::new(),
                         return_value: None,
                         func_name: func_name.to_string(),
                         is_public,
@@ -338,10 +351,20 @@ impl<'a> MirLowerer<'a> {
         // Store reference to type registry for unit type bound checks
         self.type_registry = Some(&hir.types);
         self.inject_functions.clear();
+        self.singleton_cache.clear(); // Clear singleton cache for each module
+        self.dependency_graph = crate::di::DependencyGraph::default(); // Reset dependency graph per module (#1009)
+        self.di_resolution_stack.clear(); // Clear DI resolution stack per module
         for func in &hir.functions {
-            if func.inject {
-                let param_types = func.params.iter().map(|p| p.ty).collect();
-                self.inject_functions.insert(func.name.clone(), param_types);
+            // For per-parameter injection (#1013), we need to track which params are injectable
+            // A function is injectable if it has @inject decorator OR any parameter has @inject
+            let has_any_injectable = func.inject || func.params.iter().any(|p| p.inject);
+            if has_any_injectable {
+                // If function-level @inject, all params without explicit @inject are injectable
+                // If no function-level @inject, only params with @inject are injectable
+                let param_info: Vec<(TypeId, bool)> = func.params.iter()
+                    .map(|p| (p.ty, func.inject || p.inject))
+                    .collect();
+                self.inject_functions.insert(func.name.clone(), param_info);
             }
         }
 
@@ -353,11 +376,82 @@ impl<'a> MirLowerer<'a> {
             module.functions.push(mir_func);
         }
 
+        // Apply AOP weaving if there are advice declarations (#1000-1050)
+        if !hir.aop_advices.is_empty() {
+            let weaving_config = crate::weaving::WeavingConfig::from_hir_advices(&hir.aop_advices);
+            let weaver = crate::weaving::Weaver::new(weaving_config);
+
+            let mut total_join_points = 0;
+            let mut total_advices = 0;
+            let mut all_diagnostics = Vec::new();
+
+            for func in &mut module.functions {
+                let result = weaver.weave_function(func);
+                total_join_points += result.join_points_woven;
+                total_advices += result.advices_inserted;
+                all_diagnostics.extend(result.diagnostics);
+            }
+
+            // Report weaving summary and diagnostics
+            if total_join_points > 0 {
+                tracing::info!(
+                    "AOP weaving complete: {} advice calls at {} join points",
+                    total_advices,
+                    total_join_points
+                );
+            }
+
+            // Report diagnostics
+            for diagnostic in &all_diagnostics {
+                match diagnostic.level {
+                    crate::weaving::DiagnosticLevel::Error => {
+                        tracing::error!(
+                            "AOP weaving error{}: {}{}",
+                            diagnostic.location.as_ref().map(|l| format!(" in {}", l)).unwrap_or_default(),
+                            diagnostic.message,
+                            diagnostic.predicate.as_ref().map(|p| format!(" (predicate: {})", p)).unwrap_or_default()
+                        );
+                    }
+                    crate::weaving::DiagnosticLevel::Warning => {
+                        tracing::warn!(
+                            "AOP weaving warning{}: {}{}",
+                            diagnostic.location.as_ref().map(|l| format!(" in {}", l)).unwrap_or_default(),
+                            diagnostic.message,
+                            diagnostic.predicate.as_ref().map(|p| format!(" (predicate: {})", p)).unwrap_or_default()
+                        );
+                    }
+                    crate::weaving::DiagnosticLevel::Info => {
+                        tracing::info!(
+                            "AOP weaving{}: {}",
+                            diagnostic.location.as_ref().map(|l| format!(" in {}", l)).unwrap_or_default(),
+                            diagnostic.message
+                        );
+                    }
+                }
+            }
+
+            // Fail compilation if there are errors
+            let error_count = all_diagnostics.iter()
+                .filter(|d| d.level == crate::weaving::DiagnosticLevel::Error)
+                .count();
+            if error_count > 0 {
+                return Err(MirLowerError::AopWeavingFailed(format!(
+                    "{} weaving error(s) occurred",
+                    error_count
+                )));
+            }
+        }
+
         Ok(module)
     }
 
     fn lower_function(&mut self, func: &HirFunction) -> MirLowerResult<MirFunction> {
         let mut mir_func = MirFunction::new(func.name.clone(), func.return_type, func.visibility);
+
+        // Populate metadata for AOP join point matching
+        mir_func.module_path = self.current_module_path();
+        mir_func.attributes = self.extract_function_attributes(func);
+        mir_func.effects = self.extract_function_effects(func);
 
         // Add parameters
         for param in &func.params {
@@ -436,7 +530,10 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             })?;
-            self.try_contract_ctx_mut()?.old_captures.insert(*idx, dest);
+            let ctx = self.try_contract_ctx_mut()?;
+            ctx.old_captures.insert(*idx, dest);
+            // Store mapping from index to expression for reverse lookup during ContractOld lowering
+            ctx.old_expr_map.insert(*idx, expr.clone());
         }
 
         // 3. Check invariants at entry
@@ -491,6 +588,35 @@ impl<'a> MirLowerer<'a> {
                 block.instructions.push(MirInst::ContractCheck {
                     condition: cond_reg,
                     kind: ContractKind::Postcondition,
+                    func_name: func_name.clone(),
+                    message: clause.message.clone(),
+                });
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Emit error contract checks: error postconditions (for error returns)
+    fn emit_error_contracts(
+        &mut self,
+        contract: &HirContract,
+        error_value: VReg,
+    ) -> MirLowerResult<()> {
+        let func_name = self.try_contract_ctx()?.func_name.clone();
+
+        // Store error value in contract context for error postcondition expressions
+        // Use the error binding name if specified, otherwise "err"
+        self.try_contract_ctx_mut()?.return_value = Some(error_value);
+
+        // Check error postconditions (only for error returns)
+        for clause in &contract.error_postconditions {
+            let cond_reg = self.lower_expr(&clause.condition)?;
+            self.with_func(|func, current_block| {
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ContractCheck {
+                    condition: cond_reg,
+                    kind: ContractKind::ErrorPostcondition,
                     func_name: func_name.clone(),
                     message: clause.message.clone(),
                 });
@@ -561,10 +687,20 @@ impl<'a> MirLowerer<'a> {
                     None
                 };
 
-                // Emit exit contract checks before the actual return
-                // based on contract mode
+                // Emit contract checks before the actual return based on contract mode
                 if let Some(contract) = contract {
                     if self.should_emit_contracts() {
+                        // TODO(contracts): Detect Result::Err variant to call emit_error_contracts
+                        // For now, we always emit success postconditions. Future improvement:
+                        // 1. Check if return expression is enum variant construction
+                        // 2. If variant name is "Err" and enum is "Result", call emit_error_contracts
+                        // 3. Otherwise, call emit_exit_contracts
+                        //
+                        // This requires:
+                        // - Type information about the return value
+                        // - Pattern matching on HirExprKind to detect enum construction
+                        // - Variant name resolution
+
                         self.emit_exit_contracts(contract, ret_reg)?;
                     }
                 }
@@ -852,19 +988,38 @@ impl<'a> MirLowerer<'a> {
 
                 // Get function name and create CallTarget with effect information
                 let call_target = if let HirExprKind::Global(name) = &callee.kind {
-                    if let Some(param_types) = self.inject_functions.get(name).cloned() {
-                        if arg_regs.len() < param_types.len() {
-                            if self.di_config.is_none() {
-                                return Err(MirLowerError::Unsupported(format!(
-                                    "missing di config for injected call to '{}'",
-                                    name
-                                )));
-                            }
-                            for param_ty in param_types.iter().skip(arg_regs.len()) {
+                    if let Some(param_info) = self.inject_functions.get(name).cloned() {
+                        // Per-parameter injection (#1013)
+                        // Build final arg list by injecting params marked as injectable
+                        let mut final_args = Vec::new();
+                        let mut provided_idx = 0;
+
+                        for (param_ty, is_injectable) in param_info.iter() {
+                            if *is_injectable {
+                                // This parameter should be DI-injected
+                                if self.di_config.is_none() {
+                                    return Err(MirLowerError::Unsupported(format!(
+                                        "missing di config for injected call to '{}'",
+                                        name
+                                    )));
+                                }
                                 let injected = self.resolve_di_arg(*param_ty)?;
-                                arg_regs.push(injected);
+                                final_args.push(injected);
+                            } else {
+                                // This parameter should be provided by caller
+                                if provided_idx >= arg_regs.len() {
+                                    return Err(MirLowerError::Unsupported(format!(
+                                        "missing argument at position {} for call to '{}'",
+                                        provided_idx, name
+                                    )));
+                                }
+                                final_args.push(arg_regs[provided_idx]);
+                                provided_idx += 1;
                             }
                         }
+
+                        // Replace arg_regs with final_args
+                        arg_regs = final_args;
                     }
                     CallTarget::from_name(name)
                 } else {
@@ -1052,24 +1207,27 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirExprKind::ContractOld(inner) => {
-                // For old() expressions, we look up the captured value by its expression
-                // In practice, the old_values in HirContract map (index -> HirExpr)
-                // and we stored (index -> VReg) in contract_ctx.old_captures
-                // However, since we're lowering the expression directly here,
-                // we need to just use the captured value if it exists
-                //
-                // For now, lower the inner expression and use it directly
-                // This works because old() captures happen at function entry
-                // and we're accessing the captured VReg
-                //
-                // Note: In a full implementation, we'd need to track which old()
-                // expression corresponds to which captured VReg. For now, we just
-                // re-evaluate the inner expression (which works for simple cases
-                // where the value hasn't changed).
-                //
-                // TODO: Properly track old() expressions by assigning indices
-                // during HIR lowering and looking them up here.
-                self.lower_expr(inner)
+                // Look up the captured VReg for this old() expression
+                // During emit_entry_contracts(), we stored: index -> (VReg, HirExpr)
+                // Now we need to find which index corresponds to this inner expression
+
+                let ctx = self.try_contract_ctx()?;
+
+                // Search through old_expr_map to find matching expression
+                for (idx, captured_expr) in &ctx.old_expr_map {
+                    if captured_expr == inner.as_ref() {
+                        // Found matching expression, return the captured VReg
+                        if let Some(&vreg) = ctx.old_captures.get(idx) {
+                            return Ok(vreg);
+                        }
+                    }
+                }
+
+                // If we reach here, the old() expression wasn't found in captures
+                // This shouldn't happen with proper HIR lowering
+                Err(MirLowerError::Unsupported(
+                    format!("old() expression not found in captures: {:?}", inner)
+                ))
             }
 
             // =========================================================================
@@ -1190,6 +1348,50 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
+            HirExprKind::StructInit { ty, fields } => {
+                // Lower field expressions
+                let mut field_regs = Vec::new();
+                for field in fields {
+                    field_regs.push(self.lower_expr(field)?);
+                }
+
+                // Get struct type information from type registry
+                let (field_types, field_offsets, struct_size) = if let Some(registry) = self.type_registry {
+                    if let Some(HirType::Struct { fields: struct_fields, .. }) = registry.get(*ty) {
+                        let field_types: Vec<TypeId> = struct_fields.iter().map(|(_, ty)| *ty).collect();
+                        // For now, use simple sequential layout (simplified, may not match actual layout)
+                        let mut offsets = Vec::new();
+                        let mut offset = 0u32;
+                        for (_, field_ty) in struct_fields {
+                            offsets.push(offset);
+                            // Assume 8-byte fields for simplicity (pointer-sized)
+                            offset += 8;
+                        }
+                        (field_types, offsets, offset)
+                    } else {
+                        // Fallback: use empty struct
+                        (Vec::new(), Vec::new(), 0u32)
+                    }
+                } else {
+                    // No type registry, use empty struct
+                    (Vec::new(), Vec::new(), 0u32)
+                };
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::StructInit {
+                        dest,
+                        type_id: *ty,
+                        struct_size,
+                        field_offsets,
+                        field_types,
+                        field_values: field_regs,
+                    });
+                    dest
+                })
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }
@@ -1222,16 +1424,80 @@ impl<'a> MirLowerer<'a> {
             })?;
 
         let impl_name = binding.impl_type.clone();
-        self.with_func(|func, current_block| {
+        let scope = binding.scope;
+
+        // Check singleton cache first
+        if scope == crate::di::DiScope::Singleton {
+            if let Some(&cached_reg) = self.singleton_cache.get(&impl_name) {
+                tracing::debug!("DI: Reusing cached singleton instance for '{}'", impl_name);
+                return Ok(cached_reg);
+            }
+        }
+
+        // Circular dependency detection (#1009)
+        if self.di_resolution_stack.contains(&impl_name) {
+            // Build the dependency chain for error message
+            let mut chain = self.di_resolution_stack.clone();
+            chain.push(impl_name.clone());
+            let chain_str = chain.join(" -> ");
+            tracing::error!("DI: Circular dependency detected: {}", chain_str);
+            return Err(MirLowerError::CircularDependency(chain_str));
+        }
+
+        // Add to dependency graph for validation
+        if let Some(current_type) = self.di_resolution_stack.last() {
+            tracing::debug!("DI: Adding dependency edge: {} -> {}", current_type, impl_name);
+            self.dependency_graph.add_dependency(current_type.clone(), impl_name.clone());
+        }
+
+        // Push current type onto resolution stack
+        self.di_resolution_stack.push(impl_name.clone());
+        tracing::debug!("DI: Resolution stack depth: {}", self.di_resolution_stack.len());
+
+        // Check if the constructor has injectable parameters that need to be resolved
+        let constructor_args = if let Some(param_info) = self.inject_functions.get(&impl_name).cloned() {
+            let mut args = Vec::new();
+            for (param_ty, is_injectable) in param_info.iter() {
+                if *is_injectable {
+                    // Recursively resolve this parameter's dependency
+                    let injected = self.resolve_di_arg(*param_ty)?;
+                    args.push(injected);
+                } else {
+                    // Non-injectable parameters in a DI constructor is an error
+                    return Err(MirLowerError::Unsupported(format!(
+                        "DI constructor '{}' has non-injectable parameters",
+                        impl_name
+                    )));
+                }
+            }
+            args
+        } else {
+            Vec::new()
+        };
+
+        // Create new instance with resolved dependencies
+        let instance_reg = self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
             block.instructions.push(MirInst::Call {
                 dest: Some(dest),
                 target: CallTarget::from_name(&impl_name),
-                args: Vec::new(),
+                args: constructor_args,
             });
             dest
-        })
+        })?;
+
+        // Cache singleton instances
+        if scope == crate::di::DiScope::Singleton {
+            tracing::debug!("DI: Caching singleton instance for '{}'", impl_name);
+            self.singleton_cache.insert(impl_name.clone(), instance_reg);
+        }
+
+        // Pop from resolution stack after successful creation (#1009)
+        self.di_resolution_stack.pop();
+        tracing::debug!("DI: Resolution stack depth after pop: {}", self.di_resolution_stack.len());
+
+        Ok(instance_reg)
     }
 
     /// Lower a GPU intrinsic call to MIR instructions
@@ -1788,6 +2054,76 @@ impl<'a> MirLowerer<'a> {
             }
             _ => Err(MirLowerError::Unsupported("complex lvalue".to_string())),
         }
+    }
+
+    /// Get the current module path (e.g., "app.domain.user").
+    /// This is extracted from the current file path or module name.
+    fn current_module_path(&self) -> String {
+        // For now, return empty string. In the future, extract from self.current_file
+        // or pass through from HIR module metadata.
+        self.current_file
+            .as_ref()
+            .and_then(|path| {
+                // Convert file path like "app/domain/user.spl" to "app.domain.user"
+                if let Some(stem) = std::path::Path::new(path)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                {
+                    Some(
+                        path.trim_end_matches(".spl")
+                            .replace('/', ".")
+                            .replace('\\', "."),
+                    )
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
+    }
+
+    /// Extract function attributes for AOP matching.
+    /// Includes attributes like "inject", "test", "pure", etc.
+    fn extract_function_attributes(&self, func: &HirFunction) -> Vec<String> {
+        let mut attrs = func.attributes.clone();
+
+        // Add derived attributes from function flags (if not already present)
+        if func.inject && !attrs.contains(&"inject".to_string()) {
+            attrs.push("inject".to_string());
+        }
+
+        if func.is_pure && !attrs.contains(&"pure".to_string()) {
+            attrs.push("pure".to_string());
+        }
+
+        // Add concurrency mode as attribute
+        let mode_attr = match func.concurrency_mode {
+            crate::hir::ConcurrencyMode::LockBase => "lock_base",
+            crate::hir::ConcurrencyMode::Unsafe => "unsafe",
+            crate::hir::ConcurrencyMode::Actor => "actor", // default mode
+        };
+        if !mode_attr.is_empty() && !attrs.contains(&mode_attr.to_string()) {
+            attrs.push(mode_attr.to_string());
+        }
+
+        attrs
+    }
+
+    /// Extract function effects for AOP matching.
+    /// Includes effects like "io", "async", "net", etc.
+    fn extract_function_effects(&self, func: &HirFunction) -> Vec<String> {
+        let mut effects = func.effects.clone();
+
+        // Add inferred effects from concurrency mode (if not already present)
+        match func.concurrency_mode {
+            crate::hir::ConcurrencyMode::Actor => {
+                if !effects.contains(&"async".to_string()) {
+                    effects.push("async".to_string());
+                }
+            }
+            _ => {}
+        }
+
+        effects
     }
 }
 

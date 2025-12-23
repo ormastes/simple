@@ -1,4 +1,4 @@
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, DiagnosticParserExt};
 use crate::token::Span;
 use thiserror::Error;
 
@@ -110,9 +110,9 @@ impl ParseError {
                 let mut diag = Diagnostic::error(message.clone())
                     .with_code("E0001");
                 if let Some(s) = span {
-                    diag = diag.with_label(*s, "syntax error here");
+                    diag = diag.with_parser_label(*s, "syntax error here");
                 } else {
-                    diag = diag.with_label(
+                    diag = diag.with_parser_label(
                         Span::new(0, 1, *line, *column),
                         "syntax error here"
                     );
@@ -122,7 +122,7 @@ impl ParseError {
             ParseError::UnexpectedToken { expected, found, span } => {
                 Diagnostic::error(format!("unexpected token: expected {}, found {}", expected, found))
                     .with_code("E0002")
-                    .with_label(*span, format!("expected {} here", expected))
+                    .with_parser_label(*span, format!("expected {} here", expected))
                     .with_help(format!("try adding `{}` before this token", expected))
             }
             ParseError::UnexpectedEof => {
@@ -151,14 +151,14 @@ impl ParseError {
                     .with_code("E0007")
                     .with_help("string literals must be closed with a matching quote");
                 if let Some(s) = span {
-                    diag = diag.with_label(*s, "string started here but never closed");
+                    diag = diag.with_parser_label(*s, "string started here but never closed");
                 }
                 diag
             }
             ParseError::InvalidIndentation { line } => {
                 Diagnostic::error("invalid indentation")
                     .with_code("E0008")
-                    .with_label(Span::new(0, 1, *line, 1), "invalid indentation here")
+                    .with_parser_label(Span::new(0, 1, *line, 1), "invalid indentation here")
                     .with_help("use consistent indentation (spaces or tabs, but not mixed)")
             }
             ParseError::UnterminatedBlockComment { span } => {
@@ -166,24 +166,24 @@ impl ParseError {
                     .with_code("E0009")
                     .with_help("block comments must be closed with */");
                 if let Some(s) = span {
-                    diag = diag.with_label(*s, "block comment started here but never closed");
+                    diag = diag.with_parser_label(*s, "block comment started here but never closed");
                 }
                 diag
             }
             ParseError::MissingToken { expected, span } => {
                 Diagnostic::error(format!("missing expected token: {}", expected))
                     .with_code("E0010")
-                    .with_label(*span, format!("expected {} here", expected))
+                    .with_parser_label(*span, format!("expected {} here", expected))
             }
             ParseError::InvalidPattern { span, message } => {
                 Diagnostic::error(format!("invalid pattern: {}", message))
                     .with_code("E0011")
-                    .with_label(*span, "invalid pattern here")
+                    .with_parser_label(*span, "invalid pattern here")
             }
             ParseError::InvalidType { span, message } => {
                 Diagnostic::error(format!("invalid type: {}", message))
                     .with_code("E0012")
-                    .with_label(*span, "invalid type here")
+                    .with_parser_label(*span, "invalid type here")
             }
         }
     }
