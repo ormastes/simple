@@ -61,7 +61,7 @@ All feature tables use this standardized 8-column format:
 | #936-#945 | Architecture Test Library | ✅ Complete |
 | #950-#970 | Formal Verification | ✅ Complete |
 | #980-#999 | Code Quality & Documentation | ✅ Complete |
-| #1000-#1050 | AOP & Unified Predicates | 🔄 In Progress (45/51, 88%) |
+| #1000-#1050 | AOP & Unified Predicates | 🔄 In Progress (46/51, 90%) |
 | #1051-#1060 | SDN Self-Hosting | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
 | #1061-#1103 | Missing Language Features | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
 | #1104-#1115 | Concurrency Modes | ✅ Complete (12/12) |
@@ -73,7 +73,7 @@ All feature tables use this standardized 8-column format:
 | #1200-#1209 | Language Model Server | 📋 Planned |
 | #1210-#1299 | MCP (Minimal Code Preview) | 📋 Planned |
 | #1300-#1324 | Metaprogramming (Macros, DSL, Decorators) | ✅ Complete (25/25) |
-| #1325-#1329 | Pattern Matching Safety | ✅ Complete (5/5) |
+| #1325-#1329 | Pattern Matching Safety | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
 | #1330-#1342 | Type System (Unions, Bitfields, HTTP) | ✅ Complete (13/13) |
 | #1343-#1347 | Gherkin/BDD Extensions | ✅ Complete (5/5) |
 | #1348-#1358 | MCP Protocol Core Features | 📋 Planned |
@@ -88,11 +88,13 @@ All feature tables use this standardized 8-column format:
 
 ## Summary Statistics
 
-**Overall Progress:** 56% (363/647 active features complete, 81 archived in feature_done_9.md)
+**Overall Progress:** 56% (363/647 active features complete, 86 archived in feature_done_*.md)
 
 **Recent Completions (2025-12-23):**
-All recently completed features have been archived to [feature_done_9.md](feature_done_9.md):
-- ✅ **Pattern Matching Safety (#1325-1329)** - 5/5 features, 750+ lines, 18 tests (JUST COMPLETED)
+Archived to [feature_done_10.md](feature_done_10.md):
+- ✅ **Pattern Matching Safety (#1325-1329)** - 5/5 features, 750+ lines, 18 tests (JUST ARCHIVED)
+
+Previously archived to [feature_done_9.md](feature_done_9.md):
 - ✅ SDN Self-Hosting (#1051-1060) - 8,690 lines, 204+ tests
 - ✅ Missing Language Features (#1061-1103) - 43 features
 - ✅ Formatting & Lints (#1131-1145) - 15 features
@@ -149,7 +151,7 @@ All recently completed features have been archived to [feature_done_9.md](featur
 
 **Test Status:** 1,500+ tests passing (100% pass rate across all crates)
 
-**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md)
+**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md), [feature_done_10.md](feature_done_10.md)
 
 ---
 
@@ -390,7 +392,7 @@ signature   ::= ret_pat ' ' qname_pat '(' arg_pats ')'
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1009 | Typed dependency graph (compiler-built) | 4 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
+| #1009 | Typed dependency graph (compiler-built) | 4 | ✅ | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/di_injection_test.rs` |
 | #1010 | SDN `di:` section with profiles | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/sdn/tests/` |
 | #1011 | `bind on pc{...} -> Impl scope priority` syntax | 3 | 📋 | R | [aop.md](../research/aop.md) | - | `src/compiler/tests/` |
 | #1012 | `@sys.inject` constructor injection | 3 | 📋 | S+R | [aop.md](../research/aop.md) | `std_lib/test/system/di/` | `src/compiler/tests/` |
@@ -1137,33 +1139,13 @@ context html:
 
 ---
 
-### Pattern Matching Safety (#1325-1329) ✅
+### Pattern Matching Safety (#1325-1329) ✅ → [feature_done_10.md](feature_done_10.md)
 
-Rust-level match safety guarantees for production-grade language.
+**Status:** ✅ **COMPLETE** (5/5 features, 750+ lines, 18 tests) - **Archived 2025-12-23**
 
-**Status:** ✅ **COMPLETE** (5/5 features, 750+ lines, 18 tests)
+Rust-level match safety guarantees: exhaustiveness checking, unreachable arm detection, tagged union support, strong enum enforcement, pattern subsumption analysis.
 
-**Documentation:**
-- [PATTERN_MATCH_SAFETY.md](../../PATTERN_MATCH_SAFETY.md) - Complete implementation guide
-- [spec/language_enhancement.md](../spec/language_enhancement.md) - Section 7
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1325 | Exhaustiveness checking (compile-time) | 4 | ✅ | R | [PATTERN_MATCH_SAFETY.md](../../PATTERN_MATCH_SAFETY.md) | `test_pattern_safety.spl` | `src/compiler/tests/` |
-| #1326 | Unreachable arm detection | 3 | ✅ | R | [PATTERN_MATCH_SAFETY.md](../../PATTERN_MATCH_SAFETY.md) | `test_pattern_safety.spl` | `src/compiler/tests/` |
-| #1327 | Tagged union support | 3 | ✅ | R | [PATTERN_MATCH_SAFETY.md](../../PATTERN_MATCH_SAFETY.md) | `test_pattern_safety.spl` | `src/compiler/tests/` |
-| #1328 | Strong enum enforcement | 3 | ✅ | R | [PATTERN_MATCH_SAFETY.md](../../PATTERN_MATCH_SAFETY.md) | `test_pattern_safety.spl` | `src/compiler/tests/` |
-| #1329 | Pattern subsumption analysis | 1 | ✅ | R | [PATTERN_MATCH_SAFETY.md](../../PATTERN_MATCH_SAFETY.md) | `test_pattern_safety.spl` | `src/compiler/tests/` |
-
-**Key Features:**
-- Exhaustiveness checking for enums and tagged unions
-- Detection of unreachable pattern arms
-- Strong enum support (no wildcards allowed)
-- Pattern subsumption analysis for overlap detection
-- Integration with interpreter for runtime warnings
-- 18 comprehensive unit tests
-
-**Implementation:** `src/compiler/src/pattern_analysis.rs` (406 lines)
+**See [feature_done_10.md](feature_done_10.md) for complete details.**
 
 ---
 
