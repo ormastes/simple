@@ -30,6 +30,15 @@ pub struct CompileOptions {
 
     /// Output path for coverage report (default: coverage.sdn).
     pub coverage_output: Option<PathBuf>,
+
+    /// Emit AST as JSON to file or stdout.
+    pub emit_ast: Option<Option<PathBuf>>,
+
+    /// Emit HIR as JSON to file or stdout.
+    pub emit_hir: Option<Option<PathBuf>>,
+
+    /// Emit MIR as JSON to file or stdout.
+    pub emit_mir: Option<Option<PathBuf>>,
 }
 
 impl Default for CompileOptions {
@@ -42,6 +51,9 @@ impl Default for CompileOptions {
             verbose: false,
             coverage: false,
             coverage_output: None,
+            emit_ast: None,
+            emit_hir: None,
+            emit_mir: None,
         }
     }
 }
@@ -107,6 +119,42 @@ impl CompileOptions {
         self.coverage_output.clone().unwrap_or_else(|| PathBuf::from("coverage.sdn"))
     }
 
+    /// Enable AST emission to stdout.
+    pub fn with_emit_ast(mut self) -> Self {
+        self.emit_ast = Some(None);
+        self
+    }
+
+    /// Enable AST emission to file.
+    pub fn with_emit_ast_to(mut self, path: PathBuf) -> Self {
+        self.emit_ast = Some(Some(path));
+        self
+    }
+
+    /// Enable HIR emission to stdout.
+    pub fn with_emit_hir(mut self) -> Self {
+        self.emit_hir = Some(None);
+        self
+    }
+
+    /// Enable HIR emission to file.
+    pub fn with_emit_hir_to(mut self, path: PathBuf) -> Self {
+        self.emit_hir = Some(Some(path));
+        self
+    }
+
+    /// Enable MIR emission to stdout.
+    pub fn with_emit_mir(mut self) -> Self {
+        self.emit_mir = Some(None);
+        self
+    }
+
+    /// Enable MIR emission to file.
+    pub fn with_emit_mir_to(mut self, path: PathBuf) -> Self {
+        self.emit_mir = Some(Some(path));
+        self
+    }
+
     /// Get the number of threads to use for parallel compilation.
     /// Returns the configured number or all available cores.
     pub fn thread_count(&self) -> usize {
@@ -145,6 +193,24 @@ impl CompileOptions {
                 opts.coverage = true;
                 if let Some(path) = arg.strip_prefix("--coverage-output=") {
                     opts.coverage_output = Some(PathBuf::from(path));
+                }
+            } else if arg == "--emit-ast" {
+                opts.emit_ast = Some(None);
+            } else if arg.starts_with("--emit-ast=") {
+                if let Some(path) = arg.strip_prefix("--emit-ast=") {
+                    opts.emit_ast = Some(Some(PathBuf::from(path)));
+                }
+            } else if arg == "--emit-hir" {
+                opts.emit_hir = Some(None);
+            } else if arg.starts_with("--emit-hir=") {
+                if let Some(path) = arg.strip_prefix("--emit-hir=") {
+                    opts.emit_hir = Some(Some(PathBuf::from(path)));
+                }
+            } else if arg == "--emit-mir" {
+                opts.emit_mir = Some(None);
+            } else if arg.starts_with("--emit-mir=") {
+                if let Some(path) = arg.strip_prefix("--emit-mir=") {
+                    opts.emit_mir = Some(Some(PathBuf::from(path)));
                 }
             }
         }
@@ -316,5 +382,34 @@ mod tests {
     fn test_with_coverage() {
         let opts = CompileOptions::new().with_coverage();
         assert!(opts.coverage);
+    }
+
+    #[test]
+    fn test_emit_ast_stdout() {
+        let args = vec!["--emit-ast".to_string()];
+        let opts = CompileOptions::from_args(&args);
+        assert!(opts.emit_ast.is_some());
+        assert!(opts.emit_ast.as_ref().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_emit_ast_file() {
+        let args = vec!["--emit-ast=out.json".to_string()];
+        let opts = CompileOptions::from_args(&args);
+        assert_eq!(opts.emit_ast, Some(Some(PathBuf::from("out.json"))));
+    }
+
+    #[test]
+    fn test_emit_hir() {
+        let args = vec!["--emit-hir".to_string()];
+        let opts = CompileOptions::from_args(&args);
+        assert!(opts.emit_hir.is_some());
+    }
+
+    #[test]
+    fn test_emit_mir() {
+        let args = vec!["--emit-mir=mir.json".to_string()];
+        let opts = CompileOptions::from_args(&args);
+        assert_eq!(opts.emit_mir, Some(Some(PathBuf::from("mir.json"))));
     }
 }
