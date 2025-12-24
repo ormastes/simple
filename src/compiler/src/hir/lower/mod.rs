@@ -1,6 +1,6 @@
 mod context;
 mod error;
-mod expr_lowering;
+mod expr;
 mod lowerer;
 mod module_lowering;
 pub mod parallel;
