@@ -70,11 +70,15 @@ fn print_help() {
     eprintln!("  simple context <file.spl> --json        Output as JSON");
     eprintln!("  simple context <file.spl> --markdown    Output as Markdown");
     eprintln!();
-    eprintln!("Build & Audit (#913):");
+    eprintln!("Build & Audit (#913, #915):");
     eprintln!("  simple query --generated           Find all LLM-generated code");
     eprintln!("  simple query --generated --unverified    Find unverified generated code");
     eprintln!("  simple query --generated-by=<tool>       Find code by specific tool");
     eprintln!("  simple info <function> --provenance      Show provenance metadata");
+    eprintln!("  simple spec-coverage                     Show specification coverage");
+    eprintln!("  simple spec-coverage --by-category       Coverage by category");
+    eprintln!("  simple spec-coverage --missing           Show missing features");
+    eprintln!("  simple spec-coverage --report=html       Generate HTML report");
     eprintln!();
     eprintln!("Package Management:");
     eprintln!("  simple init [name]          Create a new project");
@@ -978,6 +982,51 @@ fn run_query(args: &[String]) -> i32 {
     0
 }
 
+fn run_spec_coverage(args: &[String]) -> i32 {
+    use simple_compiler::{SpecCoverageReport, find_spec_file};
+
+    // Find the spec file
+    let spec_path = match find_spec_file() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            eprintln!("Make sure specs/language.yaml exists in the project root");
+            return 1;
+        }
+    };
+
+    // Load the spec coverage report
+    let report = match SpecCoverageReport::load(&spec_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            return 1;
+        }
+    };
+
+    // Parse options
+    let by_category = args.iter().any(|a| a == "--by-category");
+    let show_missing = args.iter().any(|a| a == "--missing");
+    let html_report = args.iter()
+        .find(|a| a.starts_with("--report="))
+        .and_then(|a| a.strip_prefix("--report="));
+
+    // Generate requested output
+    if let Some("html") = html_report {
+        println!("{}", report.generate_html());
+        0
+    } else if by_category {
+        report.display_by_category();
+        0
+    } else if show_missing {
+        report.display_missing();
+        0
+    } else {
+        report.display_summary();
+        0
+    }
+}
+
 fn run_info(args: &[String]) -> i32 {
     use simple_parser::{Node, Parser};
     use std::fs;
@@ -1267,6 +1316,9 @@ fn main() {
         }
         "info" => {
             std::process::exit(run_info(&args));
+        }
+        "spec-coverage" => {
+            std::process::exit(run_spec_coverage(&args));
         }
         "init" => {
             let name = args.get(1).map(|s| s.as_str());

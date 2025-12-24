@@ -2,7 +2,7 @@
 
 **Date:** 2025-12-24
 **Feature Range:** #880-919 (40 features)
-**Status:** 28/40 Complete (70%)
+**Status:** 29/40 Complete (72.5%)
 
 ## Executive Summary
 
@@ -19,15 +19,15 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 | Snapshot/Golden Tests | 4 | 4 | 0 | 0 |
 | Lint Framework | 5 | 5 | 0 | 0 |
 | Canonical Formatter | 3 | 2 | 1 | 0 |
-| Build & Audit | 5 | 2 | 0 | 3 |
+| Build & Audit | 5 | 3 | 0 | 2 |
 | Sandboxed Execution | 4 | 0 | 0 | 4 |
-| **TOTAL** | **40** | **28** | **1** | **11** |
+| **TOTAL** | **40** | **29** | **1** | **10** |
 
-### Completion Rate: 70%
+### Completion Rate: 72.5%
 
-**Completed:** 28 features ✅
+**Completed:** 29 features ✅
 **In Progress:** 1 feature 🔄
-**Remaining:** 11 features 📋  
+**Remaining:** 10 features 📋  
 
 ---
 
@@ -273,11 +273,11 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 ---
 
-### 8. Build & Audit Infrastructure (#911-915) 📋
+### 8. Build & Audit Infrastructure (#911-915) 🔄
 
 **Purpose:** Deterministic builds, provenance tracking, API stability
 
-**Status:** 2/5 Complete (40%)
+**Status:** 3/5 Complete (60%)
 
 | Feature ID | Feature | Difficulty | Status | Documentation |
 |------------|---------|------------|--------|---------------|
@@ -285,11 +285,12 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 | #912 | Replay logs | 3 | 📋 | [build_audit.md](../spec/build_audit.md) |
 | #913 | `@generated_by` provenance | 2 | ✅ | [build_audit.md](../spec/build_audit.md) |
 | #914 | API surface lock file | 3 | ✅ | [LLM_FRIENDLY_API_SURFACE.md](../LLM_FRIENDLY_API_SURFACE.md) |
-| #915 | Spec coverage metric | 3 | 📋 | [build_audit.md](../spec/build_audit.md) |
+| #915 | Spec coverage metric | 3 | ✅ | [build_audit.md](../spec/build_audit.md) |
 
 **Completed Features:**
 - ✅ API surface lock file (#914) - tracks public API changes
 - ✅ `@generated_by` provenance (#913) - LLM code tracking with metadata
+- ✅ Spec coverage metric (#915) - Track test coverage of language specification
 
 **Implementation (#913):**
 - ✅ Parser support for `@generated_by` decorator
@@ -298,19 +299,26 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 - ✅ Filtering: by tool (`--generated-by=<tool>`), verification status (`--unverified`)
 - ✅ 5 comprehensive parser tests
 
+**Implementation (#915):**
+- ✅ YAML spec tracking file (`specs/language.yaml`) - 50 features tracked across 11 categories
+- ✅ Spec coverage module with YAML parser
+- ✅ CLI commands: `simple spec-coverage`, `--by-category`, `--missing`, `--report=html`
+- ✅ Coverage summary display (85.2% overall, 46/50 features implemented)
+- ✅ Category-based breakdown (11 categories)
+- ✅ Missing feature reports
+- ✅ HTML report generation (354 lines)
+
 **Remaining:**
 - 📋 Deterministic build mode (#911)
 - 📋 Replay logs (#912)
-- 📋 Spec coverage metric (#915)
 
 **Next Steps:**
 1. Implement deterministic timestamps and ordering (#911)
 2. Add build event logging (#912)
-3. Implement spec-to-test mapping (#915)
 
-**Completion Date:** 2025-12-24 (#913)
+**Completion Date:** 2025-12-24 (#913, #915)
 
-**Estimated Effort:** 2-3 weeks for remaining features
+**Estimated Effort:** 1-2 weeks for remaining features
 
 ---
 
