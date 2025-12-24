@@ -11,6 +11,7 @@ pub mod effects_cache;
 pub mod aop_config;
 pub mod api_surface;
 pub mod arch_rules;
+pub mod build_log;
 pub mod build_mode;
 pub mod context_pack;
 pub mod di;
@@ -64,6 +65,10 @@ pub use module_resolver::{DirectoryManifest, ModuleResolver, ResolvedModule};
 pub use monomorphize::{
     monomorphize_module, CallSiteAnalyzer, ConcreteType, MonomorphizationTable, Monomorphizer,
     PointerKind, SpecializationKey, TypeBindings,
+};
+pub use build_log::{
+    BuildComparison, BuildDiagnostic, BuildEnvironment, BuildInputs, BuildLog, BuildLogger,
+    BuildOutput, BuildPhase, BuildResult, DiagnosticLevel, PhaseDifference, PhaseResult,
 };
 pub use build_mode::{BuildMode, DeterministicConfig};
 pub use mir::ContractMode;
