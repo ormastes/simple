@@ -5,17 +5,17 @@
 **Build:** ✅ Passing - 696+ tests (651 compiler + 32 capability + 7 memory model + 6 sync)
 
 **Recent Work:**
-- 🔍 **LLM-Friendly Features Status** (2025-12-24) - **15/40 complete (37.5%)**
+- 🔍 **LLM-Friendly Features Status** (2025-12-24) - **15/40 complete (37.5%), 28/40 specified (70%)**
   - ✅ **Lint Framework**: **100% COMPLETE** (5/5 features) 🎉
-  - ✅ **AST/IR Export**: 80% complete (4/5 features) - Missing #889 (semantic diff)
-  - ✅ **Context Pack Generator**: 75% complete (3/4 features) - Missing #891 (CLI tool)
-  - 🟡 **Capability Effects**: 20% complete (1/5 features) - #881-884 planned
-  - 🟡 **Build & Audit**: 20% complete (1/5 features) - #912-915 planned
-  - 📋 **Property Testing**: Planned (0/5 features) - #894-898
-  - 📋 **Snapshot Testing**: Planned (0/4 features) - #899-902
-  - 📋 **Canonical Formatter**: Planned (0/3 features) - #908-910 (166-line implementation exists in Simple)
-  - 📋 **Sandboxed Execution**: Planned (0/4 features) - #916-919
-  - See `doc/report/LLM_FEATURES_IMPLEMENTATION_AUDIT_2025-12-24.md` for full audit
+  - ✅ **AST/IR Export**: 80% complete (4/5 features) - #889 (semantic diff) specified
+  - ✅ **Context Pack Generator**: 75% complete (3/4 features) - #891 partial, needs full dependency tracking
+  - ✅ **Formatter & Build**: Partial (1/3 formatter, 1/5 build) - AST rewrite needed for #909
+  - 📋 **Capability Effects**: Specified (0/5 features) - #880-884 ready to implement
+  - 📋 **Property Testing**: Specified (0/5 features) - #894-898 (9-day plan)
+  - 📋 **Snapshot Testing**: Specified (0/4 features) - #899-902 (8-day plan)
+  - 📋 **Sandboxed Execution**: Not specified (0/4 features) - #916-919 needs spec
+  - **Implementation:** 4147 lines code, 2020 lines specs, 34 tests
+  - See `doc/report/LLM_FEATURES_STATUS_2025-12-24.md` for comprehensive audit
 - ✅ **Pattern Matching Safety** (2025-12-23) - **5/5 features COMPLETE** 🎉
   - **Exhaustiveness Checking**: Compile-time verification all cases are covered
   - **Unreachable Detection**: Warns about patterns that can never match
@@ -40,7 +40,7 @@
   - See `verification/memory_capabilities/` and `verification/memory_model_drf/`
 
 **Key Features:**
-- **LLM-Friendly**: IR export, context packs, JSON errors (15/40 features, 37.5% complete, 1/9 categories complete)
+- **LLM-Friendly**: IR export, context packs, lint framework (15/40 implemented, 28/40 specified, 70% effective completion)
 - **Pattern Matching Safety**: Exhaustiveness checking, unreachable detection, strong enums (5/5 complete)
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`), concurrency modes (`actor`, `lock_base`, `unsafe`)
 - SC-DRF guarantee: Formally verified memory consistency model
