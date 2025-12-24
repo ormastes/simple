@@ -132,7 +132,7 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 | **Build & Linker Optimization** | 25 | 25 | 0 |
 | **Infrastructure & Dependencies** | 25 | 25 | 0 |
 | **Simple Stdlib - Infra APIs** | 30 | 30 | 0 |
-| **LLM-Friendly Features** | 40 | 8 | 32 |
+| **LLM-Friendly Features** | 40 | 14 | 26 |
 | **Test Coverage Infrastructure** | 16 | 16 | 0 |
 | **Architecture Test Library** | 10 | 10 | 0 |
 | **Module Privacy** | 2 | 2 | 0 |
@@ -163,7 +163,7 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 - Code duplication: 3.4% (reduced from 4.49%, -24%)
 - Lines of code: ~125,100 (net +1,129, but -262 duplication)
 - Test coverage: Comprehensive across all modules (776+ tests)
-- LLM-friendly features: 8/40 complete (20%)
+- LLM-friendly features: 14/40 complete (35%)
 
 **Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md), [feature_done_10.md](feature_done_10.md)
 
@@ -206,9 +206,9 @@ fn fetch_and_save(url: str, path: str):
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #885 | `--emit-ast` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #886 | `--emit-hir` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #887 | `--emit-mir` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #885 | `--emit-ast` | 2 | ✅ | R | [LLM_FRIENDLY_IR_EXPORT.md](../../LLM_FRIENDLY_IR_EXPORT.md) | `system/cli/` | `src/driver/tests/` |
+| #886 | `--emit-hir` | 2 | ✅ | R | [LLM_FRIENDLY_IR_EXPORT.md](../../LLM_FRIENDLY_IR_EXPORT.md) | `system/cli/` | `src/driver/tests/` |
+| #887 | `--emit-mir` | 2 | ✅ | R | [LLM_FRIENDLY_IR_EXPORT.md](../../LLM_FRIENDLY_IR_EXPORT.md) | `system/cli/` | `src/driver/tests/` |
 | #888 | `--error-format=json` | 2 | ✅ | R | [LLM_FRIENDLY_JSON_ERRORS.md](../../LLM_FRIENDLY_JSON_ERRORS.md) | - | `src/common/tests/` |
 | #889 | Semantic diff tool | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
 
@@ -223,7 +223,7 @@ simple diff --semantic old.spl new.spl
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #890 | `simple context` command | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #890 | `simple context` command | 3 | ✅ | R | [LLM_FEATURES_COMPLETE_2025-12-24.md](../../doc/report/LLM_FEATURES_COMPLETE_2025-12-24.md) | `system/cli/` | `src/driver/tests/` |
 | #891 | Dependency symbol extraction | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
 | #892 | Markdown context format | 2 | ✅ | R | [LLM_FRIENDLY_CONTEXT_PACK.md](../../LLM_FRIENDLY_CONTEXT_PACK.md) | - | `src/compiler/tests/` |
 | #893 | JSON context format | 2 | ✅ | R | [LLM_FRIENDLY_CONTEXT_PACK.md](../../LLM_FRIENDLY_CONTEXT_PACK.md) | - | `src/compiler/tests/` |

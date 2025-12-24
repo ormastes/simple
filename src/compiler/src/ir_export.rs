@@ -99,9 +99,9 @@ impl<'a> Serialize for SerializableAst<'a> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         
-        let mut state = serializer.serialize_struct("AstModule", 3)?;
+        let mut state = serializer.serialize_struct("AstModule", 2)?;
         state.serialize_field("type", "AST")?;
-        state.serialize_field("module_path", &format!("{:?}", self.0.path))?;
+        // state.serialize_field("module_path", &format!("{:?}", self.0.path))?; // TODO: Field removed from Module
         state.serialize_field("node_count", &self.0.items.len())?;
         // TODO: Add more detailed AST structure when needed
         state.end()
@@ -114,11 +114,11 @@ impl<'a> Serialize for SerializableHir<'a> {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         
-        let mut state = serializer.serialize_struct("HirModule", 4)?;
+        let mut state = serializer.serialize_struct("HirModule", 3)?;
         state.serialize_field("type", "HIR")?;
         state.serialize_field("name", &self.0.name)?;
         state.serialize_field("function_count", &self.0.functions.len())?;
-        state.serialize_field("struct_count", &self.0.structs.len())?;
+        // state.serialize_field("struct_count", &self.0.structs.len())?; // TODO: Field removed from HirModule
         // TODO: Add more detailed HIR structure when needed
         state.end()
     }
