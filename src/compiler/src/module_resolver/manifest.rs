@@ -1,6 +1,20 @@
-// DirectoryManifest implementation - methods for visibility, capabilities, and effect validation
+//! Directory manifest parsing and manipulation.
+//!
+//! This module handles parsing __init__.spl files and converting them to
+//! DirectoryManifest structures, as well as providing methods for working
+//! with capabilities and visibility.
 
-use super::*;
+use super::types::{ChildModule, DirectoryManifest, ModuleResolver, ResolveResult};
+use simple_dependency_tracker::{
+    self as tracker,
+    macro_import::{AutoImport, MacroDirManifest},
+    visibility::{DirManifest as TrackerDirManifest, ModDecl as TrackerModDecl},
+};
+use simple_parser::ast::{Capability, ImportTarget, Module, Node, Visibility};
+use simple_parser::Parser;
+use std::path::Path;
+
+use crate::error::CompileError;
 
 impl DirectoryManifest {
     /// Convert to tracker's visibility DirManifest for formal model operations.
@@ -158,5 +172,133 @@ impl DirectoryManifest {
         }
 
         Ok(())
+    }
+}
+
+impl ModuleResolver {
+    /// Load and parse a directory manifest (__init__.spl)
+    pub fn load_manifest(&mut self, dir_path: &Path) -> ResolveResult<DirectoryManifest> {
+        let init_path = dir_path.join("__init__.spl");
+
+        if let Some(cached) = self.manifests.get(&init_path) {
+            return Ok(cached.clone());
+        }
+
+        if !init_path.exists() {
+            return Ok(DirectoryManifest::default());
+        }
+
+        let source = std::fs::read_to_string(&init_path).map_err(|e| {
+            CompileError::Semantic(format!("failed to read {:?}: {}", init_path, e))
+        })?;
+
+        let manifest = self.parse_manifest(&source, dir_path)?;
+        self.manifests.insert(init_path, manifest.clone());
+
+        Ok(manifest)
+    }
+
+    /// Load a manifest and validate its capabilities against parent capabilities.
+    ///
+    /// This enforces the capability inheritance rule: child modules can only
+    /// restrict capabilities, not expand them. A child's capabilities must be
+    /// a subset of its parent's capabilities.
+    ///
+    /// # Arguments
+    /// * `dir_path` - Path to the directory containing __init__.spl
+    /// * `parent_capabilities` - Capabilities from the parent module (empty = unrestricted)
+    ///
+    /// # Returns
+    /// The loaded manifest, or an error if capabilities are invalid.
+    pub fn load_manifest_with_capability_check(
+        &mut self,
+        dir_path: &Path,
+        parent_capabilities: &[Capability],
+    ) -> ResolveResult<DirectoryManifest> {
+        let manifest = self.load_manifest(dir_path)?;
+
+        // Validate capability inheritance
+        if !manifest.capabilities_are_subset_of(parent_capabilities) {
+            let child_caps: Vec<&str> = manifest.capabilities.iter().map(|c| c.name()).collect();
+            let parent_caps: Vec<&str> = parent_capabilities.iter().map(|c| c.name()).collect();
+            return Err(CompileError::Semantic(format!(
+                "module '{}' declares capabilities [{}] which are not a subset of parent capabilities [{}]",
+                manifest.name,
+                child_caps.join(", "),
+                parent_caps.join(", ")
+            )));
+        }
+
+        Ok(manifest)
+    }
+
+    /// Parse a directory manifest from source
+    pub(super) fn parse_manifest(&self, source: &str, dir_path: &Path) -> ResolveResult<DirectoryManifest> {
+        let mut parser = Parser::new(source);
+        let module = parser.parse().map_err(|e| {
+            CompileError::Semantic(format!("failed to parse __init__.spl: {:?}", e))
+        })?;
+
+        self.extract_manifest(&module, dir_path)
+    }
+
+    /// Extract manifest information from parsed AST
+    pub(super) fn extract_manifest(
+        &self,
+        module: &Module,
+        dir_path: &Path,
+    ) -> ResolveResult<DirectoryManifest> {
+        let dir_name = dir_path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let mut manifest = DirectoryManifest {
+            name: dir_name,
+            ..Default::default()
+        };
+
+        for item in &module.items {
+            match item {
+                Node::ModDecl(decl) => {
+                    // Check if this is the directory header (mod <dirname>)
+                    if manifest.child_modules.is_empty() && decl.name == manifest.name {
+                        // This is the directory header - extract attributes
+                        manifest.attributes = decl.attributes.clone();
+                    } else {
+                        // This is a child module declaration
+                        manifest.child_modules.push(ChildModule {
+                            name: decl.name.clone(),
+                            visibility: decl.visibility,
+                            attributes: decl.attributes.clone(),
+                        });
+                    }
+                }
+                Node::CommonUseStmt(stmt) => {
+                    manifest.common_uses.push(stmt.clone());
+                }
+                Node::ExportUseStmt(stmt) => {
+                    manifest.exports.push(stmt.clone());
+                }
+                Node::AutoImportStmt(stmt) => {
+                    manifest.auto_imports.push(stmt.clone());
+                }
+                Node::RequiresCapabilities(stmt) => {
+                    // Extract capabilities from requires [...] statement
+                    manifest.capabilities = stmt.capabilities.clone();
+                }
+                Node::UseStmt(_) => {
+                    // Regular use statements in __init__.spl are allowed but
+                    // don't affect the manifest structure
+                }
+                _ => {
+                    // Other nodes in __init__.spl are not part of the manifest
+                    // (functions, types, etc. should not be in __init__.spl per spec)
+                }
+            }
+        }
+
+        Ok(manifest)
     }
 }

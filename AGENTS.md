@@ -26,11 +26,28 @@ jj git push
 
 **Learn more:** See `doc/plans/27_jj_integration.md` for full JJ integration details.
 
-## Recent Completions (2025-12-23)
+## Recent Completions
 
-### Type System Enhancements (#1330-1339)
+### LLM-Friendly Features Status (2025-12-24)
 
-Implemented tagged unions (algebraic data types) and bitfields for the Simple language type system.
+Assessed implementation status of LLM-Friendly Features (#880-919) - **14/40 complete (35%)**.
+
+**Completed Categories:**
+- AST/IR Export: 80% (4/5 features) - `--emit-ast`, `--emit-hir`, `--emit-mir`, `--error-format=json`
+- Context Pack Generator: 75% (3/4 features) - `simple context` command with markdown/JSON output
+- Lint Framework: 60% (3/5 features) - Lint rule trait, built-in rules, configurable severity
+
+**Next Priorities:**
+1. Complete AST/IR Export (#889 - Semantic diff tool)
+2. Complete Context Pack (#891 - Dependency symbol extraction)
+3. Complete Lint Framework (#906-907 - CLI command + auto-fix)
+4. Implement Canonical Formatter (#908-910)
+
+**Documentation:** See `doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md`
+
+### Type System Enhancements (2025-12-23)
+
+Implemented tagged unions (algebraic data types) and bitfields (#1330-1339).
 
 **Implementation:**
 - `src/type/src/tagged_union.rs` - TaggedUnion and UnionVariant types
@@ -47,7 +64,7 @@ Implemented tagged unions (algebraic data types) and bitfields for the Simple la
 
 **Tests:** 10 comprehensive unit tests (3 for unions, 7 for bitfields)
 
-**Documentation:** See `TYPE_SYSTEM_ENHANCEMENT.md` for full details.
+**Documentation:** See `doc/TYPE_SYSTEM_ENHANCEMENT.md` for full details.
 
 ## Development Guidelines
 
