@@ -12,7 +12,6 @@ pub mod aop_config;
 pub mod api_surface;
 pub mod arch_rules;
 pub mod build_mode;
-pub(crate) mod call;
 pub mod context_pack;
 pub mod di;
 pub mod ir_export;
