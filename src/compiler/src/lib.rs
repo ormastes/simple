@@ -34,6 +34,7 @@ pub mod interpreter_ffi;
 pub mod linker;
 pub mod lint;
 pub mod macro_contracts;
+pub mod spec_coverage;
 pub mod macro_validation;
 pub mod mir;
 pub mod module_resolver;
@@ -82,6 +83,7 @@ pub use mcp::{ExpandWhat, McpGenerator, McpMetadata, McpMode, McpOutput, McpTool
 pub use semantic_diff::{
     ChangeKind, ImpactLevel, SemanticChange, SemanticDiff, SemanticDiffer, DiffSummary,
 };
+pub use spec_coverage::{SpecCoverageReport, find_spec_file};
 pub use value::{
     BorrowMutValue,
     BorrowValue,
