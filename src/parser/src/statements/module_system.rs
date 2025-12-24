@@ -10,7 +10,7 @@
 use crate::ast::*;
 use crate::error::ParseError;
 use crate::token::{Span, TokenKind};
-use crate::Parser;
+use crate::parser_impl::core::Parser;
 
 impl<'a> Parser<'a> {
     /// Parse a module path: crate.sys.http.router

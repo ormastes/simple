@@ -5,10 +5,8 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
-use crate::parser::ParserMode;
+use crate::parser_impl::core::{Parser, ParserMode};
 use crate::token::{FStringToken, TokenKind};
-
-use super::Parser;
 
 /// Macro to generate binary operator parsing functions.
 /// Reduces duplication in precedence-climbing parser.

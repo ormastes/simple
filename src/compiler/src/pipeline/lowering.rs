@@ -24,6 +24,12 @@ impl CompilerPipeline {
         let hir_module = hir::lower(ast_module)
             .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
 
+        // Emit HIR if requested (LLM-friendly #886)
+        if let Some(path) = &self.emit_hir {
+            crate::ir_export::export_hir(&hir_module, path.as_deref())
+                .map_err(|e| CompileError::Semantic(e))?;
+        }
+
         // Check architecture rules if any are defined (#1026-1035)
         if !hir_module.arch_rules.is_empty() {
             let arch_config =
@@ -43,7 +49,15 @@ impl CompilerPipeline {
 
         // Lower HIR to MIR with contract mode (and DI config if available)
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
-        mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
-            .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))
+        let mir_module = mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
+            .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+
+        // Emit MIR if requested (LLM-friendly #887)
+        if let Some(path) = &self.emit_mir {
+            crate::ir_export::export_mir(&mir_module, path.as_deref())
+                .map_err(|e| CompileError::Semantic(e))?;
+        }
+
+        Ok(mir_module)
     }
 }

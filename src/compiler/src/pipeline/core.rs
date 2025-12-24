@@ -1,5 +1,6 @@
 //! Core CompilerPipeline struct and configuration management.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use simple_common::gc::GcAllocator;
@@ -23,6 +24,12 @@ pub struct CompilerPipeline {
     pub(super) contract_mode: ContractMode,
     /// Build mode (debug/release) for validation and optimization (#1034-1035)
     pub(super) build_mode: BuildMode,
+    /// Emit AST as JSON to file or stdout (LLM-friendly #885)
+    pub(super) emit_ast: Option<Option<PathBuf>>,
+    /// Emit HIR as JSON to file or stdout (LLM-friendly #886)
+    pub(super) emit_hir: Option<Option<PathBuf>>,
+    /// Emit MIR as JSON to file or stdout (LLM-friendly #887)
+    pub(super) emit_mir: Option<Option<PathBuf>>,
 }
 
 impl CompilerPipeline {
@@ -34,6 +41,9 @@ impl CompilerPipeline {
             lint_diagnostics: Vec::new(),
             contract_mode: ContractMode::All,
             build_mode: BuildMode::default(),
+            emit_ast: None,
+            emit_hir: None,
+            emit_mir: None,
         })
     }
 
@@ -45,6 +55,9 @@ impl CompilerPipeline {
             lint_diagnostics: Vec::new(),
             contract_mode: ContractMode::All,
             build_mode: BuildMode::default(),
+            emit_ast: None,
+            emit_hir: None,
+            emit_mir: None,
         })
     }
 
@@ -58,6 +71,9 @@ impl CompilerPipeline {
             lint_diagnostics: Vec::new(),
             contract_mode: ContractMode::All,
             build_mode: BuildMode::default(),
+            emit_ast: None,
+            emit_hir: None,
+            emit_mir: None,
         })
     }
 
@@ -74,6 +90,9 @@ impl CompilerPipeline {
             lint_diagnostics: Vec::new(),
             contract_mode: ContractMode::All,
             build_mode: BuildMode::default(),
+            emit_ast: None,
+            emit_hir: None,
+            emit_mir: None,
         })
     }
 
@@ -146,6 +165,21 @@ impl CompilerPipeline {
     /// Get the current build mode
     pub fn build_mode(&self) -> BuildMode {
         self.build_mode
+    }
+
+    /// Set emit AST option (LLM-friendly #885)
+    pub fn set_emit_ast(&mut self, path: Option<PathBuf>) {
+        self.emit_ast = Some(path);
+    }
+
+    /// Set emit HIR option (LLM-friendly #886)
+    pub fn set_emit_hir(&mut self, path: Option<PathBuf>) {
+        self.emit_hir = Some(path);
+    }
+
+    /// Set emit MIR option (LLM-friendly #887)
+    pub fn set_emit_mir(&mut self, path: Option<PathBuf>) {
+        self.emit_mir = Some(path);
     }
 
     /// Validate AOP/DI configuration for release builds (#1034-1035).

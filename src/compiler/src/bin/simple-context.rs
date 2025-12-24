@@ -101,7 +101,16 @@ fn main() {
     };
 
     // Create API surface (simplified - just for context extraction)
-    let api_surface = ApiSurface::default();
+    // TODO: API surface analysis (currently disabled - needs proper initialization)
+    use std::collections::BTreeMap;
+    let api_surface = ApiSurface {
+        module: String::new(),
+        functions: BTreeMap::new(),
+        structs: BTreeMap::new(),
+        classes: BTreeMap::new(),
+        enums: BTreeMap::new(),
+        traits: BTreeMap::new(),
+    };
 
     // Generate context pack
     let context = ContextPack::from_target(target, &module.items, &api_surface);

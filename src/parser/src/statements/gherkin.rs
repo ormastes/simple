@@ -12,7 +12,7 @@ use crate::ast::*;
 use crate::error::ParseError;
 use crate::token::{Span, TokenKind};
 
-use super::super::Parser;
+use crate::parser_impl::core::Parser;
 
 impl<'a> Parser<'a> {
     /// Parse an examples table: `examples name:`
@@ -328,7 +328,7 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::Parser;
+    use crate::parser_impl::core::Parser;
     use crate::ast::{Module, Node, Expr, Argument};
     use crate::error::ParseError;
     use crate::TokenKind;

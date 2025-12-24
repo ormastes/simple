@@ -13,7 +13,7 @@ use crate::ast::{
     PredicateExpr,
 };
 use crate::error::ParseError;
-use crate::parser::Parser;
+use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
 impl<'a> Parser<'a> {
