@@ -2,7 +2,7 @@
 
 **Date:** 2025-12-24
 **Feature Range:** #880-919 (40 features)
-**Status:** 27/40 Complete (67.5%)
+**Status:** 28/40 Complete (70%)
 
 ## Executive Summary
 
@@ -18,16 +18,16 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 | Property-Based Testing | 5 | 5 | 0 | 0 |
 | Snapshot/Golden Tests | 4 | 4 | 0 | 0 |
 | Lint Framework | 5 | 5 | 0 | 0 |
-| Canonical Formatter | 3 | 1 | 1 | 1 |
+| Canonical Formatter | 3 | 2 | 1 | 0 |
 | Build & Audit | 5 | 2 | 0 | 3 |
 | Sandboxed Execution | 4 | 0 | 0 | 4 |
-| **TOTAL** | **40** | **27** | **1** | **12** |
+| **TOTAL** | **40** | **28** | **1** | **11** |
 
-### Completion Rate: 67.5%
+### Completion Rate: 70%
 
-**Completed:** 27 features ✅
+**Completed:** 28 features ✅
 **In Progress:** 1 feature 🔄
-**Remaining:** 12 features 📋  
+**Remaining:** 11 features 📋  
 
 ---
 
@@ -220,19 +220,29 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 **Purpose:** Single correct formatting style (eliminates variance)
 
-**Status:** 1/3 Complete (33%), 1 In Progress (33%)
+**Status:** 2/3 Complete (67%), 1 In Progress (33%)
 
 | Feature ID | Feature | Difficulty | Status | Documentation |
 |------------|---------|------------|--------|---------------|
 | #908 | `simple fmt` command | 2 | ✅ | [FORMATTER_EXTENSION_2025-12-24.md](./FORMATTER_EXTENSION_2025-12-24.md) |
 | #909 | Single correct style | 3 | 🔄 | [FORMATTER_EXTENSION_2025-12-24.md](./FORMATTER_EXTENSION_2025-12-24.md) |
-| #910 | Format-on-save integration | 2 | 📋 | [formatter.md](../spec/formatter.md) |
+| #910 | Format-on-save integration | 2 | ✅ | [FORMAT_ON_SAVE.md](../FORMAT_ON_SAVE.md) |
 
 **Completed Features:**
 - ✅ `simple fmt` command with 4 modes: `--check`, `--write`, `--diff`, `--stdout`
 - ✅ Proper exit codes (0 = success, 1 = needs formatting)
 - ✅ User-friendly output with ✓/✗ indicators
 - ✅ Unified diff output showing formatting changes
+- ✅ Format-on-save documentation (#910) - Comprehensive guide for all major editors
+
+**Format-on-Save Documentation (#910):**
+- ✅ Editor integrations: VS Code, Vim/Neovim, Emacs, Sublime Text, IntelliJ IDEA
+- ✅ Git hooks: pre-commit, pre-commit framework, Husky
+- ✅ CI/CD: GitHub Actions, GitLab CI, CircleCI, Jenkins
+- ✅ Project config: Makefile, Justfile
+- ✅ Watch mode: watchexec, entr, fswatch
+- ✅ Troubleshooting and best practices
+- ✅ File: `doc/FORMAT_ON_SAVE.md` (450+ lines)
 
 **In Progress:**
 - 🔄 Single correct style (#909) - Basic rules defined (4-space indent, 100 char max)
@@ -250,18 +260,16 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 **Remaining:**
 - 📋 Complete AST-based formatting (#909)
-- 📋 Editor integrations (#910)
 
 **Next Steps:**
-1. Implement AST-based formatting
+1. Implement AST-based formatting (#909)
 2. Add import sorting
 3. Add intelligent line breaking
-4. Create editor integrations (VS Code, Vim, Emacs)
-5. LSP format-on-save support
+4. LSP format-on-save support (when `simple-lsp` ready)
 
-**Completion Date:** 2025-12-24 (CLI modes)
+**Completion Date:** 2025-12-24 (#908, #910)
 
-**Estimated Effort:** 2-3 weeks for remaining features
+**Estimated Effort:** 1-2 weeks for #909
 
 ---
 
