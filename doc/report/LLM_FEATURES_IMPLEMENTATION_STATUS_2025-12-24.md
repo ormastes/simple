@@ -2,7 +2,7 @@
 
 **Date:** 2025-12-24
 **Feature Range:** #880-919 (40 features)
-**Status:** 30/40 Complete (75.0%)
+**Status:** 31/40 Complete (77.5%)
 
 ## Executive Summary
 
@@ -19,15 +19,15 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 | Snapshot/Golden Tests | 4 | 4 | 0 | 0 |
 | Lint Framework | 5 | 5 | 0 | 0 |
 | Canonical Formatter | 3 | 2 | 1 | 0 |
-| Build & Audit | 5 | 4 | 0 | 1 |
+| Build & Audit | 5 | 5 | 0 | 0 |
 | Sandboxed Execution | 4 | 0 | 0 | 4 |
-| **TOTAL** | **40** | **30** | **1** | **9** |
+| **TOTAL** | **40** | **31** | **1** | **8** |
 
-### Completion Rate: 75.0%
+### Completion Rate: 77.5%
 
-**Completed:** 30 features ✅
+**Completed:** 31 features ✅
 **In Progress:** 1 feature 🔄
-**Remaining:** 9 features 📋  
+**Remaining:** 8 features 📋  
 
 ---
 
@@ -273,16 +273,16 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 ---
 
-### 8. Build & Audit Infrastructure (#911-915) 🔄
+### 8. Build & Audit Infrastructure (#911-915) ✅
 
 **Purpose:** Deterministic builds, provenance tracking, API stability
 
-**Status:** 4/5 Complete (80%)
+**Status:** 5/5 Complete (100%) ✅ **CATEGORY COMPLETE**
 
 | Feature ID | Feature | Difficulty | Status | Documentation |
 |------------|---------|------------|--------|---------------|
 | #911 | Deterministic build mode | 3 | ✅ | [build_audit.md](../spec/build_audit.md) |
-| #912 | Replay logs | 3 | 📋 | [build_audit.md](../spec/build_audit.md) |
+| #912 | Replay logs | 3 | ✅ | [build_audit.md](../spec/build_audit.md) |
 | #913 | `@generated_by` provenance | 2 | ✅ | [build_audit.md](../spec/build_audit.md) |
 | #914 | API surface lock file | 3 | ✅ | [LLM_FRIENDLY_API_SURFACE.md](../LLM_FRIENDLY_API_SURFACE.md) |
 | #915 | Spec coverage metric | 3 | ✅ | [build_audit.md](../spec/build_audit.md) |
@@ -292,6 +292,7 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 - ✅ `@generated_by` provenance (#913) - LLM code tracking with metadata
 - ✅ Spec coverage metric (#915) - Track test coverage of language specification
 - ✅ Deterministic build mode (#911) - Reproducible binary builds
+- ✅ Replay logs (#912) - Build session recording and comparison
 
 **Implementation (#913):**
 - ✅ Parser support for `@generated_by` decorator
@@ -319,23 +320,34 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 - ✅ 4 tests for CLI flag parsing
 - ✅ Help documentation updated
 
-**Features:**
+**Features (#911):**
 - Stable symbol ordering (configurable seed for random operations)
 - Reproducible timestamps (ISO 8601 override support)
 - Path normalization (relative paths for portability)
 - Configuration via simple.toml or CLI flags
 - Full integration with compilation pipeline
 
-**Remaining:**
-- 📋 Replay logs (#912)
+**Implementation (#912):**
+- ✅ `BuildLogger` for recording compilation sessions
+- ✅ JSON log format with session ID, timestamp, command, environment, phases, output
+- ✅ CLI flag: `--log=<file.json>` for compile command
+- ✅ `replay` command with 3 modes: display, compare, extract-errors
+- ✅ Phase timing and result tracking
+- ✅ Diagnostic message capture (errors/warnings)
+- ✅ Build comparison with duration and phase differences
+- ✅ 9 comprehensive tests for BuildLogger
+- ✅ 2 tests for CLI flag parsing
 
-**Next Steps:**
-1. Add build event logging (#912)
-2. Implement replay command and comparison tool
+**Features (#912):**
+- Record all compilation phases with timing
+- Capture input files and dependencies
+- Track environment variables
+- Save output artifacts (binary, size, hash)
+- Display build log summary
+- Compare two builds and show differences
+- Extract diagnostics for debugging
 
-**Completion Date:** 2025-12-24 (#911, #913, #914, #915)
-
-**Estimated Effort:** 1 week for #912
+**Completion Date:** 2025-12-24 (All 5 features)
 
 ---
 

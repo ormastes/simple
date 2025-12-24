@@ -45,6 +45,9 @@ pub struct CompileOptions {
 
     /// Override build timestamp for deterministic builds (ISO 8601 format).
     pub build_timestamp: Option<String>,
+
+    /// Build log output path for replay and debugging.
+    pub log_path: Option<PathBuf>,
 }
 
 impl Default for CompileOptions {
@@ -62,6 +65,7 @@ impl Default for CompileOptions {
             emit_mir: None,
             deterministic: false,
             build_timestamp: None,
+            log_path: None,
         }
     }
 }
@@ -176,6 +180,12 @@ impl CompileOptions {
         self
     }
 
+    /// Set the build log output path.
+    pub fn with_log(mut self, path: PathBuf) -> Self {
+        self.log_path = Some(path);
+        self
+    }
+
     /// Get the number of threads to use for parallel compilation.
     /// Returns the configured number or all available cores.
     pub fn thread_count(&self) -> usize {
@@ -239,6 +249,10 @@ impl CompileOptions {
                 opts.deterministic = true;
                 if let Some(ts) = arg.strip_prefix("--build-timestamp=") {
                     opts.build_timestamp = Some(ts.to_string());
+                }
+            } else if arg.starts_with("--log=") {
+                if let Some(path) = arg.strip_prefix("--log=") {
+                    opts.log_path = Some(PathBuf::from(path));
                 }
             }
         }
@@ -468,5 +482,18 @@ mod tests {
         let opts = CompileOptions::new().with_build_timestamp("2025-01-15T10:00:00Z".to_string());
         assert!(opts.deterministic);
         assert_eq!(opts.build_timestamp, Some("2025-01-15T10:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn test_log_path_flag() {
+        let args = vec!["--log=build.json".to_string()];
+        let opts = CompileOptions::from_args(&args);
+        assert_eq!(opts.log_path, Some(PathBuf::from("build.json")));
+    }
+
+    #[test]
+    fn test_with_log() {
+        let opts = CompileOptions::new().with_log(PathBuf::from("test.json"));
+        assert_eq!(opts.log_path, Some(PathBuf::from("test.json")));
     }
 }
