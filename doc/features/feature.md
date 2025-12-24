@@ -88,15 +88,21 @@ All feature tables use this standardized 8-column format:
 
 ## Summary Statistics
 
-**Overall Progress:** 58% (367/629 active features complete, 129 archived in feature_done_*.md)
+**Overall Progress:** 60% (375/629 active features complete, 169 archived in feature_done_*.md)
 
 **Recent Completions (2025-12-24):**
 
-**Latest Session (2025-12-24 - IR Export Complete):**
-- ✅ **AST/IR Export (#885-889)** - **CATEGORY COMPLETE** 5/5 features (100%)
-  - ✅ #886: HIR export - Enabled in interpreter mode
-  - ✅ #887: MIR export - Enabled in interpreter mode
-  - ✅ #889: Semantic diff - 782 lines, 5 tests, CLI integration
+**Latest Session (2025-12-24 - LLM-Friendly Features COMPLETE):**
+- ✅ **LLM-Friendly Features (#880-919)** - **40/40 COMPLETE (100%)** 🎉
+  - ✅ Capability-Based Effects (5/5) - Module capabilities, effect annotations, propagation
+  - ✅ AST/IR Export (5/5) - AST, HIR, MIR export, JSON errors, semantic diff
+  - ✅ Context Pack Generator (4/4) - CLI, symbol extraction, Markdown/JSON formats
+  - ✅ Property-Based Testing (5/5) - Decorators, generators, shrinking, combinators
+  - ✅ Snapshot Testing (4/4) - Decorators, storage, update flags, multi-format
+  - ✅ Lint Framework (5/5) - Rules, severity, CLI, JSON output, auto-fix
+  - ✅ Canonical Formatter (3/3) - CLI, single style, format-on-save
+  - ✅ Build & Audit (5/5) - Deterministic builds, replay logs, provenance, API lock
+  - ✅ Sandboxed Execution (4/4) - Resource limits, network/FS isolation, CLI
 
 **Previous Session (2025-12-23 - LLM Features):**
 - ✅ **JSON Error Format (#888)** - Structured diagnostic output, 3 tests
@@ -138,7 +144,7 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 | **Build & Linker Optimization** | 25 | 25 | 0 |
 | **Infrastructure & Dependencies** | 25 | 25 | 0 |
 | **Simple Stdlib - Infra APIs** | 30 | 30 | 0 |
-| **LLM-Friendly Features** | 40 | 32 | 8 |
+| **LLM-Friendly Features** | 40 | 40 | 0 |
 | **Test Coverage Infrastructure** | 16 | 16 | 0 |
 | **Architecture Test Library** | 10 | 10 | 0 |
 | **Module Privacy** | 2 | 2 | 0 |
@@ -169,17 +175,17 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 - Code duplication: 3.4% (reduced from 4.49%, -24%)
 - Lines of code: ~125,100 (net +1,129, but -262 duplication)
 - Test coverage: Comprehensive across all modules (776+ tests)
-- LLM-friendly features: 32/40 complete (80%)
+- LLM-friendly features: 40/40 complete (100%) ✅
 
-**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md), [feature_done_10.md](feature_done_10.md)
+**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md), [feature_done_10.md](feature_done_10.md), [feature_done_11.md](feature_done_11.md), [feature_done_12.md](feature_done_12.md)
 
 ---
 
 ## Planned Features
 
-### LLM-Friendly Features (#880-919) 🔄
+### LLM-Friendly Features (#880-919) ✅ → [feature_done_12.md](feature_done_12.md)
 
-**Status:** 32/40 Complete (80%)
+**Status:** ✅ **COMPLETE** (40/40 features, 100%) - **Archived 2025-12-24**
 
 Features to make Simple optimized for LLM-assisted development, verification, and collaboration.
 
@@ -188,15 +194,17 @@ Features to make Simple optimized for LLM-assisted development, verification, an
 - [plans/llm_friendly.md](./plans/llm_friendly.md) - Implementation Plan
 - [LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md](../../doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md) - Current Status
 
-#### Capability-Based Effects (#880-884)
+#### Capability-Based Effects (#880-884) ✅
+
+**Status:** 5/5 Complete (100%) ✅ **CATEGORY COMPLETE**
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #880 | `module requires[cap]` | 3 | 📋 | R | [capability_effects.md](../../doc/spec/capability_effects.md) | - | `src/compiler/tests/` |
-| #881 | `@pure` / `@io` / `@net` | 2 | 📋 | R | [capability_effects.md](../../doc/spec/capability_effects.md) | - | `src/compiler/tests/` |
-| #882 | Capability propagation | 4 | 📋 | R | [capability_effects.md](../../doc/spec/capability_effects.md) | - | `src/compiler/tests/` |
-| #883 | Forbidden effect errors | 2 | 📋 | R | [capability_effects.md](../../doc/spec/capability_effects.md) | - | `src/compiler/tests/` |
-| #884 | Stdlib effect annotations | 2 | 📋 | S | [capability_effects.md](../../doc/spec/capability_effects.md) | `std_lib/test/system/effects/` | - |
+| #880 | `module requires[cap]` | 3 | ✅ | R | [FEATURE_880_MODULE_CAPABILITIES_COMPLETE_2025-12-24.md](../../doc/report/FEATURE_880_MODULE_CAPABILITIES_COMPLETE_2025-12-24.md) | - | `src/compiler/tests/` |
+| #881 | `@pure` / `@io` / `@net` | 2 | ✅ | R | [FEATURE_881_EFFECT_ANNOTATIONS_COMPLETE.md](../../doc/report/FEATURE_881_EFFECT_ANNOTATIONS_COMPLETE.md) | - | `src/parser/tests/` |
+| #882 | Capability propagation | 4 | ✅ | R | [FEATURE_882_EFFECT_PROPAGATION_COMPLETE_2025-12-24.md](../../doc/report/FEATURE_882_EFFECT_PROPAGATION_COMPLETE_2025-12-24.md) | - | `src/compiler/tests/` |
+| #883 | Forbidden effect errors | 2 | ✅ | R | [FEATURES_882_883_884_COMPLETE_2025-12-24.md](../../doc/report/FEATURES_882_883_884_COMPLETE_2025-12-24.md) | - | `src/compiler/tests/` |
+| #884 | Stdlib effect annotations | 2 | ✅ | S | [FEATURES_882_883_884_COMPLETE_2025-12-24.md](../../doc/report/FEATURES_882_883_884_COMPLETE_2025-12-24.md) | `std_lib/test/system/effects/` | - |
 
 **Example:**
 ```simple
@@ -230,12 +238,14 @@ simple compile app.spl --error-format=json 2> errors.json
 simple diff --semantic old.spl new.spl
 ```
 
-#### Context Pack Generator (#890-893)
+#### Context Pack Generator (#890-893) ✅
+
+**Status:** 4/4 Complete (100%) ✅ **CATEGORY COMPLETE**
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
 | #890 | `simple context` command | 3 | ✅ | R | [LLM_FEATURES_COMPLETE_2025-12-24.md](../../doc/report/LLM_FEATURES_COMPLETE_2025-12-24.md) | `system/cli/` | `src/driver/tests/` |
-| #891 | Dependency symbol extraction | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
+| #891 | Dependency symbol extraction | 4 | ✅ | R | [CONTEXT_PACK_SYMBOL_ANALYSIS_2025-12-24.md](../../doc/report/CONTEXT_PACK_SYMBOL_ANALYSIS_2025-12-24.md) | - | `src/compiler/tests/` |
 | #892 | Markdown context format | 2 | ✅ | R | [LLM_FRIENDLY_CONTEXT_PACK.md](../../LLM_FRIENDLY_CONTEXT_PACK.md) | - | `src/compiler/tests/` |
 | #893 | JSON context format | 2 | ✅ | R | [LLM_FRIENDLY_CONTEXT_PACK.md](../../LLM_FRIENDLY_CONTEXT_PACK.md) | - | `src/compiler/tests/` |
 
@@ -349,14 +359,16 @@ fn calculate_tax(amount: i64) -> i64:
     ...
 ```
 
-#### Sandboxed Execution (#916-919)
+#### Sandboxed Execution (#916-919) ✅
+
+**Status:** 4/4 Complete (100%) ✅ **CATEGORY COMPLETE**
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #916 | Resource limits | 3 | 📋 | R | [sandboxed_execution.md](../../doc/spec/sandboxed_execution.md) | - | `src/runtime/tests/` |
-| #917 | Network isolation | 4 | 📋 | R | [sandboxed_execution.md](../../doc/spec/sandboxed_execution.md) | - | `src/runtime/tests/` |
-| #918 | Filesystem isolation | 4 | 📋 | R | [sandboxed_execution.md](../../doc/spec/sandboxed_execution.md) | - | `src/runtime/tests/` |
-| #919 | `simple run --sandbox` | 2 | 📋 | R | [sandboxed_execution.md](../../doc/spec/sandboxed_execution.md) | `system/cli/` | `src/driver/tests/` |
+| #916 | Resource limits | 3 | ✅ | R | [LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md](../../doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md) | - | `src/runtime/tests/` |
+| #917 | Network isolation | 4 | ✅ | R | [LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md](../../doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md) | - | `src/runtime/tests/` |
+| #918 | Filesystem isolation | 4 | ✅ | R | [LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md](../../doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md) | - | `src/runtime/tests/` |
+| #919 | `simple run --sandbox` | 2 | ✅ | R | [LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md](../../doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md) | `system/cli/` | `src/driver/tests/` |
 
 **Impact:** Safely verify LLM-generated code without risk
 
