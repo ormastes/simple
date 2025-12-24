@@ -171,13 +171,16 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 
 ## Planned Features
 
-### LLM-Friendly Features (#880-919) 📋
+### LLM-Friendly Features (#880-919) 🔄
+
+**Status:** 28/40 Complete (70%), 1 In Progress
 
 Features to make Simple optimized for LLM-assisted development, verification, and collaboration.
 
 **Documentation:**
 - [llm_friendly.md](./llm_friendly.md) - LLM Quality Contract
 - [plans/llm_friendly.md](./plans/llm_friendly.md) - Implementation Plan
+- [LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md](../../doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md) - Current Status
 
 #### Capability-Based Effects (#880-884)
 
@@ -237,15 +240,17 @@ simple context app.service --format=json > context.json
 
 **Impact:** 90% reduction in LLM context tokens
 
-#### Property-Based Testing (#894-898)
+#### Property-Based Testing (#894-898) ✅
+
+**Status:** 5/5 Complete (100%)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #894 | `@property_test` decorator | 3 | 📋 | S+R | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | `src/compiler/tests/` |
-| #895 | Input generators | 3 | 📋 | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
-| #896 | Shrinking on failure | 4 | 📋 | S+R | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | `src/runtime/tests/` |
-| #897 | Configurable iterations | 2 | 📋 | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
-| #898 | Generator combinators | 3 | 📋 | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
+| #894 | `@property_test` decorator | 3 | ✅ | S+R | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | `src/parser/tests/` |
+| #895 | Input generators | 3 | ✅ | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
+| #896 | Shrinking on failure | 4 | ✅ | S+R | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | `src/runtime/tests/` |
+| #897 | Configurable iterations | 2 | ✅ | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
+| #898 | Generator combinators | 3 | ✅ | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
 
 **Example:**
 ```simple
@@ -260,14 +265,16 @@ fn test_reverse_reverse(input: [i64]):
     expect(reverse(reverse(input))).to_equal(input)
 ```
 
-#### Snapshot/Golden Tests (#899-902)
+#### Snapshot/Golden Tests (#899-902) ✅
+
+**Status:** 4/4 Complete (100%)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #899 | `@snapshot_test` decorator | 3 | 📋 | S+R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `std_lib/test/system/snapshot/` | `src/compiler/tests/` |
-| #900 | Snapshot storage | 2 | 📋 | R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | - | `src/driver/tests/` |
-| #901 | `--snapshot-update` flag | 2 | 📋 | R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `system/cli/` | `src/driver/tests/` |
-| #902 | Multi-format snapshots | 3 | 📋 | S+R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `std_lib/test/system/snapshot/` | `src/driver/tests/` |
+| #899 | `@snapshot_test` decorator | 3 | ✅ | S+R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `std_lib/test/system/snapshot/` | `src/parser/tests/` |
+| #900 | Snapshot storage | 2 | ✅ | R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | - | `src/driver/tests/` |
+| #901 | `--snapshot-update` flag | 2 | ✅ | R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `system/cli/` | `src/driver/tests/` |
+| #902 | Multi-format snapshots | 3 | ✅ | S+R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `std_lib/test/system/snapshot/` | `src/driver/tests/` |
 
 **Example:**
 ```simple
@@ -278,15 +285,17 @@ fn test_render_user_json():
     expect_snapshot(json, format: "json")
 ```
 
-#### Lint Framework (#903-907)
+#### Lint Framework (#903-907) ✅
+
+**Status:** 5/5 Complete (100%)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
 | #903 | Lint rule trait | 3 | ✅ | R | [LLM_FRIENDLY_LINT_JSON.md](../../LLM_FRIENDLY_LINT_JSON.md) | - | `src/compiler/tests/` |
 | #904 | Built-in rules | 3 | ✅ | R | [LLM_FRIENDLY_LINT_JSON.md](../../LLM_FRIENDLY_LINT_JSON.md) | - | `src/compiler/tests/` |
 | #905 | Configurable severity | 2 | ✅ | R | [LLM_FRIENDLY_LINT_JSON.md](../../LLM_FRIENDLY_LINT_JSON.md) | - | `src/compiler/tests/` |
-| #906 | `simple lint` command | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #907 | Auto-fix suggestions | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #906 | `simple lint` command | 2 | ✅ | R | [LLM_LINT_CLI_COMPLETE_2025-12-24.md](../../doc/report/LLM_LINT_CLI_COMPLETE_2025-12-24.md) | `system/cli/` | `src/driver/tests/` |
+| #907 | Auto-fix suggestions | 4 | ✅ | R | [LLM_LINT_CLI_COMPLETE_2025-12-24.md](../../doc/report/LLM_LINT_CLI_COMPLETE_2025-12-24.md) | `system/cli/` | `src/driver/tests/` |
 
 **Configuration (`simple.toml`):**
 ```toml
@@ -300,23 +309,27 @@ max_function_length = 50
 max_nesting_depth = 4
 ```
 
-#### Canonical Formatter (#908-910)
+#### Canonical Formatter (#908-910) 🔄
+
+**Status:** 2/3 Complete (67%), 1 In Progress
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #908 | `simple fmt` command | 2 | 📋 | R | [formatter.md](../../doc/spec/formatter.md) | `system/cli/` | `src/driver/tests/` |
-| #909 | Single correct style | 3 | 📋 | R | [formatter.md](../../doc/spec/formatter.md) | - | `src/parser/tests/` |
-| #910 | Format-on-save integration | 2 | 📋 | R | [formatter.md](../../doc/spec/formatter.md) | - | `src/driver/tests/` |
+| #908 | `simple fmt` command | 2 | ✅ | R | [FORMATTER_EXTENSION_2025-12-24.md](../../doc/report/FORMATTER_EXTENSION_2025-12-24.md) | `system/cli/` | `src/driver/tests/` |
+| #909 | Single correct style | 3 | 🔄 | R | [formatter.md](../../doc/spec/formatter.md) | - | `src/parser/tests/` |
+| #910 | Format-on-save integration | 2 | ✅ | R | [FORMAT_ON_SAVE.md](../../doc/FORMAT_ON_SAVE.md) | - | - |
 
 **Impact:** Eliminates stylistic variance; LLM output is predictable
 
-#### Build & Audit Infrastructure (#911-915)
+#### Build & Audit Infrastructure (#911-915) 🔄
+
+**Status:** 2/5 Complete (40%)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
 | #911 | Deterministic build mode | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/compiler/tests/` |
 | #912 | Replay logs | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/driver/tests/` |
-| #913 | `@generated_by` provenance | 2 | 📋 | S+R | [build_audit.md](../../doc/spec/build_audit.md) | `std_lib/test/system/audit/` | `src/compiler/tests/` |
+| #913 | `@generated_by` provenance | 2 | ✅ | S+R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/parser/tests/` |
 | #914 | API surface lock file | 3 | ✅ | R | [LLM_FRIENDLY_API_SURFACE.md](../../LLM_FRIENDLY_API_SURFACE.md) | - | `src/compiler/tests/` |
 | #915 | Spec coverage metric | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/driver/tests/` |
 
