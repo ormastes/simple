@@ -329,8 +329,9 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use crate::Parser;
-    use crate::ast::{Module, Node, Expr};
+    use crate::ast::{Module, Node, Expr, Argument};
     use crate::error::ParseError;
+    use crate::TokenKind;
 
     fn parse_source(src: &str) -> Result<Module, ParseError> {
         let mut parser = Parser::new(src);

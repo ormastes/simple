@@ -7,7 +7,6 @@ use super::super::aop::*;
 use super::definitions::*;
 use super::statements::*;
 use super::modules::*;
-use super::contracts::*;
 
 /// All AST node types
 #[derive(Debug, Clone, PartialEq)]
