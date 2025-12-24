@@ -1128,3 +1128,128 @@ fn test_fixed_size_array_type() {
         panic!("Expected let statement");
     }
 }
+
+// === Provenance Tracking Tests (#913) ===
+
+#[test]
+fn test_generated_by_decorator_basic() {
+    // Test basic @generated_by decorator with tool name
+    let src = r#"
+@generated_by(tool: "claude")
+fn calculate_tax(amount: i64) -> i64:
+    return amount * 0.15
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert!(func.is_generated(), "Function should be marked as generated");
+        assert_eq!(func.name, "calculate_tax");
+
+        let metadata = func.generated_by_metadata();
+        assert!(metadata.is_some(), "Should have provenance metadata");
+
+        let args = metadata.unwrap();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].name, Some("tool".to_string()));
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_generated_by_decorator_full_metadata() {
+    // Test @generated_by with full metadata
+    let src = r#"
+@generated_by(
+    tool: "claude",
+    version: "3.5",
+    prompt_hash: "sha256:abc123",
+    timestamp: "2025-01-15T10:30:00Z"
+)
+fn process_payment(order: Order) -> Result[Payment]:
+    pass
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert!(func.is_generated());
+
+        let metadata = func.generated_by_metadata();
+        assert!(metadata.is_some());
+
+        let args = metadata.unwrap();
+        assert_eq!(args.len(), 4);
+
+        // Check all metadata fields are present
+        let field_names: Vec<_> = args.iter().filter_map(|a| a.name.as_ref()).collect();
+        assert!(field_names.contains(&&"tool".to_string()));
+        assert!(field_names.contains(&&"version".to_string()));
+        assert!(field_names.contains(&&"prompt_hash".to_string()));
+        assert!(field_names.contains(&&"timestamp".to_string()));
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_generated_by_with_verification() {
+    // Test @generated_by with verification metadata
+    let src = r#"
+@generated_by(
+    tool: "copilot",
+    verified: true,
+    reviewer: "alice@example.com",
+    review_date: "2025-01-16"
+)
+fn validate_input(data: String) -> bool:
+    return true
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert!(func.is_generated());
+
+        let metadata = func.generated_by_metadata();
+        assert!(metadata.is_some());
+
+        let args = metadata.unwrap();
+        let field_names: Vec<_> = args.iter().filter_map(|a| a.name.as_ref()).collect();
+        assert!(field_names.contains(&&"verified".to_string()));
+        assert!(field_names.contains(&&"reviewer".to_string()));
+        assert!(field_names.contains(&&"review_date".to_string()));
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_generated_by_no_decorator() {
+    // Test function without @generated_by decorator
+    let src = r#"
+fn manual_function(x: i64) -> i64:
+    return x + 1
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert!(!func.is_generated(), "Function should not be marked as generated");
+        assert!(func.generated_by_metadata().is_none(), "Should have no provenance metadata");
+    } else {
+        panic!("Expected function definition");
+    }
+}
+
+#[test]
+fn test_multiple_decorators_with_generated_by() {
+    // Test function with multiple decorators including @generated_by
+    let src = r#"
+@generated_by(tool: "claude", version: "3.5")
+@test
+fn test_calculation():
+    pass
+"#;
+    let module = parse(src).unwrap();
+    if let Node::Function(func) = &module.items[0] {
+        assert!(func.is_generated(), "Should be marked as generated");
+        assert!(func.is_test(), "Should also be marked as test");
+        assert!(func.generated_by_metadata().is_some());
+    } else {
+        panic!("Expected function definition");
+    }
+}

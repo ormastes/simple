@@ -2,7 +2,7 @@
 
 **Date:** 2025-12-24
 **Feature Range:** #880-919 (40 features)
-**Status:** 26/40 Complete (65%)
+**Status:** 27/40 Complete (67.5%)
 
 ## Executive Summary
 
@@ -19,15 +19,15 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 | Snapshot/Golden Tests | 4 | 4 | 0 | 0 |
 | Lint Framework | 5 | 5 | 0 | 0 |
 | Canonical Formatter | 3 | 1 | 1 | 1 |
-| Build & Audit | 5 | 1 | 0 | 4 |
+| Build & Audit | 5 | 2 | 0 | 3 |
 | Sandboxed Execution | 4 | 0 | 0 | 4 |
-| **TOTAL** | **40** | **26** | **1** | **13** |
+| **TOTAL** | **40** | **27** | **1** | **12** |
 
-### Completion Rate: 65%
+### Completion Rate: 67.5%
 
-**Completed:** 26 features ✅
+**Completed:** 27 features ✅
 **In Progress:** 1 feature 🔄
-**Remaining:** 13 features 📋  
+**Remaining:** 12 features 📋  
 
 ---
 
@@ -269,32 +269,40 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 **Purpose:** Deterministic builds, provenance tracking, API stability
 
-**Status:** 1/5 Complete (20%)
+**Status:** 2/5 Complete (40%)
 
 | Feature ID | Feature | Difficulty | Status | Documentation |
 |------------|---------|------------|--------|---------------|
 | #911 | Deterministic build mode | 3 | 📋 | [build_audit.md](../spec/build_audit.md) |
 | #912 | Replay logs | 3 | 📋 | [build_audit.md](../spec/build_audit.md) |
-| #913 | `@generated_by` provenance | 2 | 📋 | [build_audit.md](../spec/build_audit.md) |
+| #913 | `@generated_by` provenance | 2 | ✅ | [build_audit.md](../spec/build_audit.md) |
 | #914 | API surface lock file | 3 | ✅ | [LLM_FRIENDLY_API_SURFACE.md](../LLM_FRIENDLY_API_SURFACE.md) |
 | #915 | Spec coverage metric | 3 | 📋 | [build_audit.md](../spec/build_audit.md) |
 
 **Completed Features:**
 - ✅ API surface lock file (#914) - tracks public API changes
+- ✅ `@generated_by` provenance (#913) - LLM code tracking with metadata
+
+**Implementation (#913):**
+- ✅ Parser support for `@generated_by` decorator
+- ✅ Helper methods: `is_generated()`, `generated_by_metadata()`
+- ✅ CLI commands: `simple query --generated`, `simple info <func> --provenance`
+- ✅ Filtering: by tool (`--generated-by=<tool>`), verification status (`--unverified`)
+- ✅ 5 comprehensive parser tests
 
 **Remaining:**
 - 📋 Deterministic build mode (#911)
 - 📋 Replay logs (#912)
-- 📋 `@generated_by` provenance (#913)
 - 📋 Spec coverage metric (#915)
 
 **Next Steps:**
-1. Implement deterministic timestamps and ordering
-2. Add build event logging
-3. Create `@generated_by` decorator
-4. Implement spec-to-test mapping
+1. Implement deterministic timestamps and ordering (#911)
+2. Add build event logging (#912)
+3. Implement spec-to-test mapping (#915)
 
-**Estimated Effort:** 3-4 weeks
+**Completion Date:** 2025-12-24 (#913)
+
+**Estimated Effort:** 2-3 weeks for remaining features
 
 ---
 
