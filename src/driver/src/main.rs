@@ -357,12 +357,108 @@ fn run_lint(args: &[String]) -> i32 {
     let json_output = args.iter().any(|a| a == "--json");
     let _fix = args.iter().any(|a| a == "--fix"); // TODO: Implement auto-fix
 
+    // Check if path is directory
+    if path.is_dir() {
+        return lint_directory(&path, json_output);
+    }
+
+    // Lint single file
+    lint_file(&path, json_output)
+}
+
+fn lint_directory(dir: &PathBuf, json_output: bool) -> i32 {
+    use walkdir::WalkDir;
+    use simple_common::diagnostic::Diagnostics;
+
+    let mut all_errors = false;
+    let mut total_errors = 0;
+    let mut total_warnings = 0;
+    let mut all_diags = Diagnostics::new();
+
+    for entry in WalkDir::new(dir)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("spl"))
+    {
+        let path = entry.path();
+        let result = lint_file_internal(path, false);
+        
+        if let Some((has_err, err_count, warn_count, diags)) = result {
+            if has_err {
+                all_errors = true;
+            }
+            total_errors += err_count;
+            total_warnings += warn_count;
+            
+            if json_output {
+                for diag in diags {
+                    all_diags.push(diag);
+                }
+            }
+        }
+    }
+
+    if json_output {
+        match all_diags.to_json() {
+            Ok(json) => println!("{}", json),
+            Err(e) => {
+                eprintln!("error: failed to serialize diagnostics: {}", e);
+                return 1;
+            }
+        }
+    } else {
+        println!();
+        println!("Total: {} error(s), {} warning(s) across {} file(s)", 
+            total_errors, total_warnings, 
+            WalkDir::new(dir).into_iter().filter(|e| 
+                e.as_ref().ok().and_then(|e| 
+                    e.path().extension().and_then(|s| s.to_str())
+                ) == Some("spl")
+            ).count()
+        );
+    }
+
+    if all_errors { 1 } else { 0 }
+}
+
+fn lint_file(path: &PathBuf, json_output: bool) -> i32 {
+    use simple_common::diagnostic::Diagnostics;
+
+    if let Some((has_errors, _, _, diags)) = lint_file_internal(path, json_output) {
+        if json_output {
+            // Single file JSON output
+            let mut all_diags = Diagnostics::new();
+            for diag in diags {
+                all_diags.push(diag);
+            }
+            match all_diags.to_json() {
+                Ok(json) => println!("{}", json),
+                Err(e) => {
+                    eprintln!("error: failed to serialize diagnostics: {}", e);
+                    return 1;
+                }
+            }
+        }
+        if has_errors { 1 } else { 0 }
+    } else {
+        1
+    }
+}
+
+fn lint_file_internal(path: &std::path::Path, json_output: bool) -> Option<(bool, usize, usize, Vec<simple_common::diagnostic::Diagnostic>)> {
+    use simple_compiler::{LintChecker, LintConfig};
+    use simple_parser::Parser;
+    use std::fs;
+
     // Read file
-    let source = match fs::read_to_string(&path) {
+    let source = match fs::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("error: cannot read {}: {}", path.display(), e);
-            return 1;
+            if !json_output {
+                eprintln!("error: cannot read {}: {}", path.display(), e);
+            }
+            return None;
         }
     };
 
@@ -371,8 +467,10 @@ fn run_lint(args: &[String]) -> i32 {
     let module = match parser.parse() {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: parse failed: {}", e);
-            return 1;
+            if !json_output {
+                eprintln!("error: parse failed in {}: {}", path.display(), e);
+            }
+            return None;
         }
     };
 
@@ -384,34 +482,45 @@ fn run_lint(args: &[String]) -> i32 {
     checker.check_module(&module.items);
     let diagnostics = checker.diagnostics();
 
+    
+    let error_count = diagnostics.iter().filter(|d| d.is_error()).count();
+    let warning_count = diagnostics.len() - error_count;
+    let has_errors = error_count > 0;
+
+    // Convert to common diagnostics
+    let common_diags: Vec<simple_common::diagnostic::Diagnostic> = diagnostics
+        .iter()
+        .map(|d| d.to_diagnostic(Some(path.display().to_string())))
+        .collect();
+
     if json_output {
-        // JSON output for LLM tools
-        eprintln!("Note: JSON lint output requires Serialize impl for LintDiagnostic");
-        println!("[]"); // Empty array for now
+        // Return diagnostics for aggregation
     } else {
         // Human-readable output
         if diagnostics.is_empty() {
-            println!("No lint issues found in {}", path.display());
-            return 0;
+            println!("{}: OK", path.display());
+        } else {
+            for diagnostic in diagnostics {
+                // Format: file:line:col: level: message
+                let span = &diagnostic.span;
+                let level_str = if diagnostic.is_error() { "error" } else { "warning" };
+                println!(
+                    "{}:{}:{}: {}: {} [{}]",
+                    path.display(),
+                    span.line,
+                    span.column,
+                    level_str,
+                    diagnostic.message,
+                    diagnostic.lint.as_str()
+                );
+                if let Some(suggestion) = &diagnostic.suggestion {
+                    println!("  help: {}", suggestion);
+                }
+            }
         }
-
-        for diagnostic in diagnostics {
-            println!("{:?}", diagnostic); // Use Debug for now
-        }
-        
-        let error_count = diagnostics.iter().filter(|d| d.is_error()).count();
-        let warning_count = diagnostics.len() - error_count;
-        
-        println!();
-        println!("Found {} error(s), {} warning(s)", error_count, warning_count);
     }
 
-    // Return non-zero if there are errors
-    if diagnostics.iter().any(|d| d.is_error()) {
-        1
-    } else {
-        0
-    }
+    Some((has_errors, error_count, warning_count, common_diags))
 }
 
 fn run_fmt(args: &[String]) -> i32 {
