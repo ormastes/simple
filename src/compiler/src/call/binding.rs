@@ -1,16 +1,30 @@
 //! Argument binding for function calls
 
 use std::collections::HashMap;
-use simple_parser::ast::{Argument, Parameter, Type};
-use crate::value::Value;
-use crate::{ClassDef, CompileError, Enums, FunctionDef, ImplMethods};
-use crate::interpreter::env::Env;
-use crate::interpreter::expressions::evaluate_expr;
-use crate::interpreter::METHOD_SELF;
-use crate::interpreter::unit_types::{is_unit_type, validate_unit_type};
-use crate::{bail_semantic, semantic_err};
+use simple_parser::ast::{Argument, Parameter, Type, ClassDef, FunctionDef};
+use crate::value::{Value, Env};
+use crate::error::CompileError;
+use crate::interpreter::{Enums, ImplMethods, evaluate_expr, METHOD_SELF, is_unit_type, validate_unit_type};
 
-pub(super) fn bind_args(
+macro_rules! semantic_err {
+    ($msg:expr) => {
+        crate::error::CompileError::Semantic($msg.to_string())
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        crate::error::CompileError::Semantic(format!($fmt, $($arg)*))
+    };
+}
+
+macro_rules! bail_semantic {
+    ($msg:expr) => {
+        return Err(crate::error::CompileError::Semantic($msg.to_string()))
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        return Err(crate::error::CompileError::Semantic(format!($fmt, $($arg)*)))
+    };
+}
+
+pub(crate) fn bind_args(
     params: &[Parameter],
     args: &[Argument],
     outer_env: &Env,

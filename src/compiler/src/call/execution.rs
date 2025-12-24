@@ -1,20 +1,33 @@
 //! Function execution (lambdas, functions, class instantiation)
 
 use std::collections::HashMap;
-use simple_parser::ast::{Argument, Expr, Type};
-use crate::value::Value;
-use crate::{ClassDef, CompileError, Enums, FunctionDef, ImplMethods};
-use crate::interpreter::env::Env;
-use crate::interpreter::expressions::evaluate_expr;
-use crate::interpreter::control::Control;
-use crate::interpreter::exec_block_closure;
-use crate::interpreter::exec_block;
-use crate::interpreter::exec_block_fn;
-use crate::interpreter::effects::with_effect_context;
-use crate::interpreter::METHOD_SELF;
-use crate::interpreter::METHOD_NEW;
-use crate::interpreter::unit_types::{is_unit_type, validate_unit_type};
-use crate::{bail_semantic, semantic_err};
+use simple_parser::ast::{Argument, Expr, Type, ClassDef, FunctionDef};
+use crate::value::{Value, Env};
+use crate::error::CompileError;
+use crate::interpreter::{
+    Enums, ImplMethods, evaluate_expr, Control,
+    exec_block_closure, exec_block, exec_block_fn,
+    METHOD_SELF, METHOD_NEW, is_unit_type, validate_unit_type,
+    with_effect_context,
+};
+
+macro_rules! semantic_err {
+    ($msg:expr) => {
+        crate::error::CompileError::Semantic($msg.to_string())
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        crate::error::CompileError::Semantic(format!($fmt, $($arg)*))
+    };
+}
+
+macro_rules! bail_semantic {
+    ($msg:expr) => {
+        return Err(crate::error::CompileError::Semantic($msg.to_string()))
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        return Err(crate::error::CompileError::Semantic(format!($fmt, $($arg)*)))
+    };
+}
 
 use super::binding::*;
 use super::injection::*;
