@@ -65,7 +65,7 @@ pub use monomorphize::{
     monomorphize_module, CallSiteAnalyzer, ConcreteType, MonomorphizationTable, Monomorphizer,
     PointerKind, SpecializationKey, TypeBindings,
 };
-pub use build_mode::BuildMode;
+pub use build_mode::{BuildMode, DeterministicConfig};
 pub use mir::ContractMode;
 pub use parallel::{
     load_module_parallel, parse_all_parallel, parse_files_parallel, ParallelConfig,

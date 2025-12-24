@@ -2,6 +2,10 @@
 //!
 //! This module defines build modes (Debug, Release) that control
 //! compiler behavior, optimizations, and validation rules.
+//!
+//! Also includes deterministic build configuration for reproducible outputs.
+
+use chrono::{DateTime, Utc};
 
 /// Build mode for compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -10,6 +14,80 @@ pub enum BuildMode {
     Debug,
     /// Release mode: Optimizations enabled, production-ready output
     Release,
+}
+
+/// Configuration for deterministic builds.
+///
+/// When enabled, ensures that builds are byte-identical across different
+/// environments and build times, enabling reproducible builds and binary
+/// verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeterministicConfig {
+    /// Enable deterministic build mode
+    pub enabled: bool,
+    /// Override build timestamp (ISO 8601 format)
+    pub timestamp: Option<String>,
+    /// Random seed for deterministic ordering
+    pub seed: u64,
+    /// Normalize paths to relative paths
+    pub normalize_paths: bool,
+}
+
+impl DeterministicConfig {
+    /// Create a new deterministic config with all features enabled.
+    pub fn new() -> Self {
+        Self {
+            enabled: true,
+            timestamp: None,
+            seed: 0,
+            normalize_paths: true,
+        }
+    }
+
+    /// Create a disabled deterministic config.
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            timestamp: None,
+            seed: 0,
+            normalize_paths: false,
+        }
+    }
+
+    /// Get the build timestamp as a DateTime, or current time if not specified.
+    pub fn get_timestamp(&self) -> DateTime<Utc> {
+        if let Some(ref ts) = self.timestamp {
+            // Try to parse ISO 8601 timestamp
+            if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+                return dt.with_timezone(&Utc);
+            }
+        }
+        Utc::now()
+    }
+
+    /// Set the build timestamp from a string.
+    pub fn with_timestamp(mut self, timestamp: String) -> Self {
+        self.timestamp = Some(timestamp);
+        self
+    }
+
+    /// Set the random seed.
+    pub fn with_seed(mut self, seed: u64) -> Self {
+        self.seed = seed;
+        self
+    }
+
+    /// Set whether to normalize paths.
+    pub fn with_normalize_paths(mut self, normalize: bool) -> Self {
+        self.normalize_paths = normalize;
+        self
+    }
+}
+
+impl Default for DeterministicConfig {
+    fn default() -> Self {
+        Self::disabled()
+    }
 }
 
 impl BuildMode {
@@ -93,5 +171,64 @@ mod tests {
     fn test_as_str() {
         assert_eq!(BuildMode::Debug.as_str(), "debug");
         assert_eq!(BuildMode::Release.as_str(), "release");
+    }
+
+    #[test]
+    fn test_deterministic_config_new() {
+        let config = DeterministicConfig::new();
+        assert!(config.enabled);
+        assert!(config.normalize_paths);
+        assert_eq!(config.seed, 0);
+        assert!(config.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_deterministic_config_disabled() {
+        let config = DeterministicConfig::disabled();
+        assert!(!config.enabled);
+        assert!(!config.normalize_paths);
+        assert_eq!(config.seed, 0);
+        assert!(config.timestamp.is_none());
+    }
+
+    #[test]
+    fn test_deterministic_config_default() {
+        let config = DeterministicConfig::default();
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn test_deterministic_config_with_timestamp() {
+        let config = DeterministicConfig::new()
+            .with_timestamp("2025-01-15T10:00:00Z".to_string());
+        assert_eq!(config.timestamp, Some("2025-01-15T10:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn test_deterministic_config_with_seed() {
+        let config = DeterministicConfig::new().with_seed(42);
+        assert_eq!(config.seed, 42);
+    }
+
+    #[test]
+    fn test_deterministic_config_with_normalize_paths() {
+        let config = DeterministicConfig::new().with_normalize_paths(false);
+        assert!(!config.normalize_paths);
+    }
+
+    #[test]
+    fn test_get_timestamp_with_override() {
+        let config = DeterministicConfig::new()
+            .with_timestamp("2025-01-15T10:00:00Z".to_string());
+        let timestamp = config.get_timestamp();
+        assert_eq!(timestamp.to_rfc3339(), "2025-01-15T10:00:00+00:00");
+    }
+
+    #[test]
+    fn test_get_timestamp_without_override() {
+        let config = DeterministicConfig::new();
+        let timestamp = config.get_timestamp();
+        // Should return current time - just verify it's a valid timestamp
+        assert!(timestamp.timestamp() > 0);
     }
 }

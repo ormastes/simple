@@ -39,6 +39,12 @@ pub struct CompileOptions {
 
     /// Emit MIR as JSON to file or stdout.
     pub emit_mir: Option<Option<PathBuf>>,
+
+    /// Enable deterministic build mode (reproducible binaries).
+    pub deterministic: bool,
+
+    /// Override build timestamp for deterministic builds (ISO 8601 format).
+    pub build_timestamp: Option<String>,
 }
 
 impl Default for CompileOptions {
@@ -54,6 +60,8 @@ impl Default for CompileOptions {
             emit_ast: None,
             emit_hir: None,
             emit_mir: None,
+            deterministic: false,
+            build_timestamp: None,
         }
     }
 }
@@ -155,6 +163,19 @@ impl CompileOptions {
         self
     }
 
+    /// Enable deterministic build mode.
+    pub fn with_deterministic(mut self) -> Self {
+        self.deterministic = true;
+        self
+    }
+
+    /// Set the build timestamp for deterministic builds.
+    pub fn with_build_timestamp(mut self, timestamp: String) -> Self {
+        self.deterministic = true;
+        self.build_timestamp = Some(timestamp);
+        self
+    }
+
     /// Get the number of threads to use for parallel compilation.
     /// Returns the configured number or all available cores.
     pub fn thread_count(&self) -> usize {
@@ -211,6 +232,13 @@ impl CompileOptions {
             } else if arg.starts_with("--emit-mir=") {
                 if let Some(path) = arg.strip_prefix("--emit-mir=") {
                     opts.emit_mir = Some(Some(PathBuf::from(path)));
+                }
+            } else if arg == "--deterministic" {
+                opts.deterministic = true;
+            } else if arg.starts_with("--build-timestamp=") {
+                opts.deterministic = true;
+                if let Some(ts) = arg.strip_prefix("--build-timestamp=") {
+                    opts.build_timestamp = Some(ts.to_string());
                 }
             }
         }
@@ -411,5 +439,34 @@ mod tests {
         let args = vec!["--emit-mir=mir.json".to_string()];
         let opts = CompileOptions::from_args(&args);
         assert_eq!(opts.emit_mir, Some(Some(PathBuf::from("mir.json"))));
+    }
+
+    #[test]
+    fn test_deterministic_flag() {
+        let args = vec!["--deterministic".to_string()];
+        let opts = CompileOptions::from_args(&args);
+        assert!(opts.deterministic);
+        assert!(opts.build_timestamp.is_none());
+    }
+
+    #[test]
+    fn test_build_timestamp() {
+        let args = vec!["--build-timestamp=2025-01-15T10:00:00Z".to_string()];
+        let opts = CompileOptions::from_args(&args);
+        assert!(opts.deterministic);
+        assert_eq!(opts.build_timestamp, Some("2025-01-15T10:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn test_with_deterministic() {
+        let opts = CompileOptions::new().with_deterministic();
+        assert!(opts.deterministic);
+    }
+
+    #[test]
+    fn test_with_build_timestamp() {
+        let opts = CompileOptions::new().with_build_timestamp("2025-01-15T10:00:00Z".to_string());
+        assert!(opts.deterministic);
+        assert_eq!(opts.build_timestamp, Some("2025-01-15T10:00:00Z".to_string()));
     }
 }

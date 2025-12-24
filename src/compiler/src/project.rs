@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::CompileError;
 use crate::aop_config::{parse_aop_config, AopConfig};
+use crate::build_mode::DeterministicConfig;
 use crate::di::{parse_di_config, DiConfig};
 use crate::lint::{LintConfig, LintLevel, LintName};
 use crate::module_resolver::ModuleResolver;
@@ -33,6 +34,8 @@ pub struct ProjectContext {
     pub di_config: Option<DiConfig>,
     /// Runtime AOP configuration from simple.toml
     pub aop_config: Option<AopConfig>,
+    /// Deterministic build configuration from simple.toml
+    pub deterministic: DeterministicConfig,
 }
 
 impl ProjectContext {
@@ -74,6 +77,7 @@ impl ProjectContext {
             lint_config: LintConfig::new(),
             di_config: None,
             aop_config: None,
+            deterministic: DeterministicConfig::default(),
         })
     }
 
@@ -153,6 +157,39 @@ impl ProjectContext {
         let aop_config = parse_aop_config(&toml)
             .map_err(|e| CompileError::Semantic(format!("invalid aop config: {}", e)))?;
 
+        // Parse deterministic build configuration
+        let deterministic = if let Some(build_table) = toml.get("build").and_then(|v| v.as_table()) {
+            let enabled = build_table
+                .get("deterministic")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
+            let timestamp = build_table
+                .get("timestamp")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let seed = build_table
+                .get("seed")
+                .and_then(|v| v.as_integer())
+                .map(|n| n as u64)
+                .unwrap_or(0);
+
+            let normalize_paths = build_table
+                .get("normalize_paths")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            DeterministicConfig {
+                enabled,
+                timestamp,
+                seed,
+                normalize_paths,
+            }
+        } else {
+            DeterministicConfig::default()
+        };
+
         // Create resolver with features and profiles
         let resolver = ModuleResolver::new(root.to_path_buf(), source_root.clone())
             .with_features(features.clone())
@@ -168,6 +205,7 @@ impl ProjectContext {
             lint_config,
             di_config,
             aop_config,
+            deterministic,
         })
     }
 
@@ -190,6 +228,7 @@ impl ProjectContext {
             lint_config: LintConfig::new(),
             di_config: None,
             aop_config: None,
+            deterministic: DeterministicConfig::default(),
         }
     }
 

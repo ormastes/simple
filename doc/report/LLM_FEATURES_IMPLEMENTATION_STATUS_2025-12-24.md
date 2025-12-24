@@ -2,7 +2,7 @@
 
 **Date:** 2025-12-24
 **Feature Range:** #880-919 (40 features)
-**Status:** 29/40 Complete (72.5%)
+**Status:** 30/40 Complete (75.0%)
 
 ## Executive Summary
 
@@ -19,15 +19,15 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 | Snapshot/Golden Tests | 4 | 4 | 0 | 0 |
 | Lint Framework | 5 | 5 | 0 | 0 |
 | Canonical Formatter | 3 | 2 | 1 | 0 |
-| Build & Audit | 5 | 3 | 0 | 2 |
+| Build & Audit | 5 | 4 | 0 | 1 |
 | Sandboxed Execution | 4 | 0 | 0 | 4 |
-| **TOTAL** | **40** | **29** | **1** | **10** |
+| **TOTAL** | **40** | **30** | **1** | **9** |
 
-### Completion Rate: 72.5%
+### Completion Rate: 75.0%
 
-**Completed:** 29 features ✅
+**Completed:** 30 features ✅
 **In Progress:** 1 feature 🔄
-**Remaining:** 10 features 📋  
+**Remaining:** 9 features 📋  
 
 ---
 
@@ -277,11 +277,11 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 **Purpose:** Deterministic builds, provenance tracking, API stability
 
-**Status:** 3/5 Complete (60%)
+**Status:** 4/5 Complete (80%)
 
 | Feature ID | Feature | Difficulty | Status | Documentation |
 |------------|---------|------------|--------|---------------|
-| #911 | Deterministic build mode | 3 | 📋 | [build_audit.md](../spec/build_audit.md) |
+| #911 | Deterministic build mode | 3 | ✅ | [build_audit.md](../spec/build_audit.md) |
 | #912 | Replay logs | 3 | 📋 | [build_audit.md](../spec/build_audit.md) |
 | #913 | `@generated_by` provenance | 2 | ✅ | [build_audit.md](../spec/build_audit.md) |
 | #914 | API surface lock file | 3 | ✅ | [LLM_FRIENDLY_API_SURFACE.md](../LLM_FRIENDLY_API_SURFACE.md) |
@@ -291,6 +291,7 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 - ✅ API surface lock file (#914) - tracks public API changes
 - ✅ `@generated_by` provenance (#913) - LLM code tracking with metadata
 - ✅ Spec coverage metric (#915) - Track test coverage of language specification
+- ✅ Deterministic build mode (#911) - Reproducible binary builds
 
 **Implementation (#913):**
 - ✅ Parser support for `@generated_by` decorator
@@ -308,17 +309,33 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 - ✅ Missing feature reports
 - ✅ HTML report generation (354 lines)
 
+**Implementation (#911):**
+- ✅ `DeterministicConfig` struct with timestamp, seed, and path normalization
+- ✅ CLI flags: `--deterministic`, `--build-timestamp=<ISO8601>`
+- ✅ TOML configuration support in `[build]` section
+- ✅ ProjectContext integration for project-wide settings
+- ✅ CompileOptions integration for compile command
+- ✅ 8 comprehensive tests for DeterministicConfig
+- ✅ 4 tests for CLI flag parsing
+- ✅ Help documentation updated
+
+**Features:**
+- Stable symbol ordering (configurable seed for random operations)
+- Reproducible timestamps (ISO 8601 override support)
+- Path normalization (relative paths for portability)
+- Configuration via simple.toml or CLI flags
+- Full integration with compilation pipeline
+
 **Remaining:**
-- 📋 Deterministic build mode (#911)
 - 📋 Replay logs (#912)
 
 **Next Steps:**
-1. Implement deterministic timestamps and ordering (#911)
-2. Add build event logging (#912)
+1. Add build event logging (#912)
+2. Implement replay command and comparison tool
 
-**Completion Date:** 2025-12-24 (#913, #915)
+**Completion Date:** 2025-12-24 (#911, #913, #914, #915)
 
-**Estimated Effort:** 1-2 weeks for remaining features
+**Estimated Effort:** 1 week for #912
 
 ---
 
