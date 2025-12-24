@@ -5,14 +5,14 @@
 **Build:** ✅ Passing - 696+ tests (651 compiler + 32 capability + 7 memory model + 6 sync)
 
 **Recent Work:**
-- 🔍 **LLM-Friendly Features Status** (2025-12-24) - **14/40 complete (35%)**
+- 🔍 **LLM-Friendly Features Status** (2025-12-24) - **15/40 complete (37.5%)**
+  - ✅ **Lint Framework**: **100% COMPLETE** (5/5 features) 🎉
   - ✅ **AST/IR Export**: 80% complete (4/5 features)
   - ✅ **Context Pack Generator**: 75% complete (3/4 features)
-  - ✅ **Lint Framework**: 60% complete (3/5 features)
   - 📋 **Property Testing**: Planned (0/5 features)
   - 📋 **Snapshot Testing**: Planned (0/4 features)
   - 📋 **Canonical Formatter**: Planned (0/3 features)
-  - See `doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md`
+  - See `doc/report/LLM_LINT_CLI_COMPLETE_2025-12-24.md`
 - ✅ **Pattern Matching Safety** (2025-12-23) - **5/5 features COMPLETE** 🎉
   - **Exhaustiveness Checking**: Compile-time verification all cases are covered
   - **Unreachable Detection**: Warns about patterns that can never match
@@ -37,7 +37,7 @@
   - See `verification/memory_capabilities/` and `verification/memory_model_drf/`
 
 **Key Features:**
-- **LLM-Friendly**: IR export, context packs, JSON errors (14/40 features, 35% complete)
+- **LLM-Friendly**: IR export, context packs, JSON errors (15/40 features, 37.5% complete, 1/9 categories complete)
 - **Pattern Matching Safety**: Exhaustiveness checking, unreachable detection, strong enums (5/5 complete)
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`), concurrency modes (`actor`, `lock_base`, `unsafe`)
 - SC-DRF guarantee: Formally verified memory consistency model
