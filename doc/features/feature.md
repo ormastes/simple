@@ -88,11 +88,17 @@ All feature tables use this standardized 8-column format:
 
 ## Summary Statistics
 
-**Overall Progress:** 56% (349/629 active features complete, 129 archived in feature_done_*.md)
+**Overall Progress:** 58% (367/629 active features complete, 129 archived in feature_done_*.md)
 
-**Recent Completions (2025-12-23):**
+**Recent Completions (2025-12-24):**
 
-**Latest Session (2025-12-23 - LLM Features):**
+**Latest Session (2025-12-24 - IR Export Complete):**
+- ✅ **AST/IR Export (#885-889)** - **CATEGORY COMPLETE** 5/5 features (100%)
+  - ✅ #886: HIR export - Enabled in interpreter mode
+  - ✅ #887: MIR export - Enabled in interpreter mode
+  - ✅ #889: Semantic diff - 782 lines, 5 tests, CLI integration
+
+**Previous Session (2025-12-23 - LLM Features):**
 - ✅ **JSON Error Format (#888)** - Structured diagnostic output, 3 tests
 - ✅ **Lint JSON Export (#903-905)** - Machine-readable lint warnings, 18 tests
 - ✅ **Error Code Explanations** - Deep error understanding with examples, 4 tests
@@ -132,7 +138,7 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 | **Build & Linker Optimization** | 25 | 25 | 0 |
 | **Infrastructure & Dependencies** | 25 | 25 | 0 |
 | **Simple Stdlib - Infra APIs** | 30 | 30 | 0 |
-| **LLM-Friendly Features** | 40 | 14 | 26 |
+| **LLM-Friendly Features** | 40 | 32 | 8 |
 | **Test Coverage Infrastructure** | 16 | 16 | 0 |
 | **Architecture Test Library** | 10 | 10 | 0 |
 | **Module Privacy** | 2 | 2 | 0 |
@@ -163,7 +169,7 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 - Code duplication: 3.4% (reduced from 4.49%, -24%)
 - Lines of code: ~125,100 (net +1,129, but -262 duplication)
 - Test coverage: Comprehensive across all modules (776+ tests)
-- LLM-friendly features: 14/40 complete (35%)
+- LLM-friendly features: 32/40 complete (80%)
 
 **Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md), [feature_done_10.md](feature_done_10.md)
 
@@ -173,7 +179,7 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 
 ### LLM-Friendly Features (#880-919) 🔄
 
-**Status:** 31/40 Complete (77.5%), 1 In Progress
+**Status:** 32/40 Complete (80%)
 
 Features to make Simple optimized for LLM-assisted development, verification, and collaboration.
 
@@ -205,7 +211,9 @@ fn fetch_and_save(url: str, path: str):
     fs.write(path, data)?       # Requires @io
 ```
 
-#### AST/IR Export (#885-889)
+#### AST/IR Export (#885-889) ✅
+
+**Status:** 5/5 Complete (100%) ✅ **CATEGORY COMPLETE**
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
@@ -213,7 +221,7 @@ fn fetch_and_save(url: str, path: str):
 | #886 | `--emit-hir` | 2 | ✅ | R | [LLM_FRIENDLY_IR_EXPORT.md](../../LLM_FRIENDLY_IR_EXPORT.md) | `system/cli/` | `src/driver/tests/` |
 | #887 | `--emit-mir` | 2 | ✅ | R | [LLM_FRIENDLY_IR_EXPORT.md](../../LLM_FRIENDLY_IR_EXPORT.md) | `system/cli/` | `src/driver/tests/` |
 | #888 | `--error-format=json` | 2 | ✅ | R | [LLM_FRIENDLY_JSON_ERRORS.md](../../LLM_FRIENDLY_JSON_ERRORS.md) | - | `src/common/tests/` |
-| #889 | Semantic diff tool | 4 | 📋 | R | [semantic_diff.md](../../doc/spec/semantic_diff.md) | `system/cli/` | `src/driver/tests/` |
+| #889 | Semantic diff tool | 4 | ✅ | R | [FEATURE_889_SEMANTIC_DIFF_VERIFIED_2025-12-24.md](../../doc/report/FEATURE_889_SEMANTIC_DIFF_VERIFIED_2025-12-24.md) | `system/cli/` | `src/compiler/tests/` |
 
 **Example:**
 ```bash
