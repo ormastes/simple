@@ -14,8 +14,9 @@ mod execution;
 mod injection;
 
 // Re-export public items
-pub(crate) use evaluation::evaluate_call;
+pub(crate) use evaluation::{evaluate_call, exec_block_value};
 pub(crate) use execution::{exec_function, instantiate_class};
+pub(crate) use binding::bind_args;
 
 // Re-export BDD state for use by interpreter_control.rs
 pub(crate) use bdd_state::{BDD_INDENT, BDD_COUNTS, BDD_SHARED_EXAMPLES, BDD_CONTEXT_DEFS,

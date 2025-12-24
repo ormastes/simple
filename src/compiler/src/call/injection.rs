@@ -2,15 +2,28 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, atomic::AtomicBool};
-use simple_parser::ast::{Argument, Parameter, Type};
-use crate::value::Value;
-use crate::{ClassDef, CompileError, Enums, FunctionDef, ImplMethods};
-use crate::interpreter::env::Env;
-use crate::interpreter::METHOD_SELF;
-use crate::interpreter::DI_SINGLETONS;
-use crate::{bail_semantic, semantic_err};
-use crate::di::get_di_config;
-use crate::aop_config::get_aop_config;
+use simple_parser::ast::{Argument, Parameter, Type, ClassDef, FunctionDef};
+use crate::value::{Value, Env};
+use crate::error::CompileError;
+use crate::interpreter::{Enums, ImplMethods, METHOD_SELF, DI_SINGLETONS, get_di_config, get_aop_config};
+
+macro_rules! semantic_err {
+    ($msg:expr) => {
+        crate::error::CompileError::Semantic($msg.to_string())
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        crate::error::CompileError::Semantic(format!($fmt, $($arg)*))
+    };
+}
+
+macro_rules! bail_semantic {
+    ($msg:expr) => {
+        return Err(crate::error::CompileError::Semantic($msg.to_string()))
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        return Err(crate::error::CompileError::Semantic(format!($fmt, $($arg)*)))
+    };
+}
 
 use super::execution::*;
 

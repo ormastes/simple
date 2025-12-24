@@ -2,25 +2,38 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::AtomicBool};
-use simple_parser::ast::{Expr, Argument};
-use crate::value::{Value, BUILTIN_CHANNEL, ChannelValue, FutureValue, GeneratorValue, Message, ThreadPoolValue};
-use crate::{ClassDef, CompileError, Enums, FunctionDef, ImplMethods};
-use crate::interpreter::env::Env;
-use crate::interpreter::expressions::evaluate_expr;
-use crate::interpreter::{ACTOR_INBOX, ACTOR_OUTBOX, EXTERN_FUNCTIONS, CONTEXT_OBJECT, GENERATOR_YIELDS, METHOD_SELF, METHOD_NEW, DI_SINGLETONS};
-use crate::interpreter::call_extern_function;
-use crate::interpreter::dispatch_context_method;
-use crate::interpreter::message_to_value;
-use crate::interpreter::spawn_actor_with_expr;
-use crate::interpreter::spawn_future_with_expr;
-use crate::interpreter::spawn_future_with_callable_and_env;
-use crate::interpreter::effects::check_effect_violations;
-use crate::interpreter::ranges::create_range_object;
-use crate::interpreter::eval_arg;
-use crate::interpreter::eval_arg_int;
-use crate::interpreter::exec_block_closure;
-use crate::interpreter::unit_types::{is_unit_type, validate_unit_type};
-use crate::{bail_semantic, semantic_err};
+use simple_parser::ast::{Expr, Argument, ClassDef, FunctionDef};
+use crate::value::{Value, Env, BUILTIN_CHANNEL, ChannelValue, FutureValue, GeneratorValue, ThreadPoolValue};
+use simple_common::actor::Message;
+use crate::error::CompileError;
+use crate::interpreter::{
+    Enums, ImplMethods, evaluate_expr,
+    ACTOR_INBOX, ACTOR_OUTBOX, EXTERN_FUNCTIONS, CONTEXT_OBJECT, GENERATOR_YIELDS,
+    METHOD_SELF, METHOD_NEW, DI_SINGLETONS,
+    call_extern_function, dispatch_context_method, message_to_value,
+    spawn_actor_with_expr, spawn_future_with_expr, spawn_future_with_callable_and_env,
+    eval_arg, eval_arg_int, exec_block_closure,
+};
+use crate::effects::check_effect_violations;
+use crate::interpreter::{create_range_object, is_unit_type, validate_unit_type};
+
+macro_rules! semantic_err {
+    ($msg:expr) => {
+        crate::error::CompileError::Semantic($msg.to_string())
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        crate::error::CompileError::Semantic(format!($fmt, $($arg)*))
+    };
+}
+
+macro_rules! bail_semantic {
+    ($msg:expr) => {
+        return Err(crate::error::CompileError::Semantic($msg.to_string()))
+    };
+    ($fmt:expr, $($arg:tt)*) => {
+        return Err(crate::error::CompileError::Semantic(format!($fmt, $($arg)*)))
+    };
+}
 
 use super::bdd_state::*;
 use super::binding::*;
@@ -28,7 +41,7 @@ use super::execution::*;
 use super::injection::*;
 
 /// Execute a block value (lambda or block closure)
-pub(super) fn exec_block_value(
+pub(crate) fn exec_block_value(
     block: Value,
     env: &Env,
     functions: &HashMap<String, FunctionDef>,
@@ -47,7 +60,7 @@ pub(super) fn exec_block_value(
     }
 }
 
-pub(super) fn evaluate_call(
+pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
     args: &[Argument],
     env: &Env,
