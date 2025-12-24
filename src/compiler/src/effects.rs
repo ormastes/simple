@@ -116,7 +116,8 @@ pub fn check_async_violation(operation: &str) -> Result<(), CompileError> {
         if effects.contains(&Effect::Async) {
             if is_blocking_operation(operation) {
                 return Err(CompileError::Semantic(format!(
-                    "blocking operation '{}' not allowed in async function",
+                    "blocking operation '{}' not allowed in async function\n\
+                     help: remove @async decorator or use non-blocking alternative",
                     operation
                 )));
             }
@@ -131,9 +132,22 @@ pub fn check_pure_violation(operation: &str) -> Result<(), CompileError> {
         let effects = cell.borrow();
         if effects.contains(&Effect::Pure) {
             if has_side_effects(operation) {
+                // Determine which effect is needed
+                let needed_effect = if is_io_operation(operation) {
+                    "@io"
+                } else if is_fs_operation(operation) {
+                    "@fs"
+                } else if is_net_operation(operation) {
+                    "@net"
+                } else {
+                    "@io" // default
+                };
+
                 return Err(CompileError::Semantic(format!(
-                    "side-effecting operation '{}' not allowed in pure function",
-                    operation
+                    "side-effecting operation '{}' not allowed in pure function\n\
+                     help: remove @pure decorator or add {} effect to function",
+                    operation,
+                    needed_effect
                 )));
             }
         }
@@ -173,4 +187,65 @@ pub fn restore_effects(effects: HashSet<Effect>) {
 /// Check if currently in a function with the given effect.
 pub fn has_effect(effect: Effect) -> bool {
     CURRENT_EFFECTS.with(|cell| cell.borrow().contains(&effect))
+}
+
+/// Check if calling a function with `callee_effects` is allowed from the current effect context.
+/// Returns an error if the call would violate effect restrictions.
+///
+/// Rules:
+/// - @pure functions can only call @pure functions (no side effects allowed)
+/// - @async functions can call any function (no restrictions on callee)
+/// - Functions without effects can call anything (unrestricted)
+pub fn check_call_compatibility(
+    callee_name: &str,
+    callee_effects: &[Effect],
+) -> Result<(), CompileError> {
+    CURRENT_EFFECTS.with(|cell| {
+        let caller_effects = cell.borrow();
+
+        // If caller has no effects, it's unrestricted
+        if caller_effects.is_empty() {
+            return Ok(());
+        }
+
+        // If caller is @pure, callee must also be @pure
+        if caller_effects.contains(&Effect::Pure) {
+            // Callee must be pure (no side effects)
+            if !callee_effects.contains(&Effect::Pure) && !callee_effects.is_empty() {
+                return Err(CompileError::Semantic(format!(
+                    "pure function cannot call '{}' which has effects: {}\n\
+                     help: remove @pure decorator from caller or add @pure to callee",
+                    callee_name,
+                    format_effects(callee_effects)
+                )));
+            }
+
+            // If callee has any side-effecting decorators, reject
+            for effect in callee_effects {
+                if matches!(effect, Effect::Io | Effect::Net | Effect::Fs | Effect::Unsafe) {
+                    return Err(CompileError::Semantic(format!(
+                        "pure function cannot call '{}' with @{} effect\n\
+                         help: remove @pure decorator from caller or remove @{} from callee",
+                        callee_name,
+                        effect.decorator_name(),
+                        effect.decorator_name()
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    })
+}
+
+/// Format effects for error messages
+fn format_effects(effects: &[Effect]) -> String {
+    if effects.is_empty() {
+        return "none".to_string();
+    }
+    effects
+        .iter()
+        .map(|e| format!("@{}", e.decorator_name()))
+        .collect::<Vec<_>>()
+        .join(", ")
 }

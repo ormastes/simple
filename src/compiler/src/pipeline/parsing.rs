@@ -105,10 +105,13 @@ impl CompilerPipeline {
                     let cap = cap.unwrap();
                     if !capabilities.contains(&cap) {
                         return Err(CompileError::Semantic(format!(
-                            "function '{}' has @{} effect but module only allows capabilities: [{}]",
+                            "function '{}' has @{} effect but module only allows capabilities: [{}]\n\
+                             help: add '{}' to module's 'requires [...]' statement or remove @{} from function",
                             func.name,
                             effect.decorator_name(),
-                            capabilities.iter().map(|c| c.name()).collect::<Vec<_>>().join(", ")
+                            capabilities.iter().map(|c| c.name()).collect::<Vec<_>>().join(", "),
+                            cap.name(),
+                            effect.decorator_name()
                         )));
                     }
                 }

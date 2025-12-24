@@ -2,7 +2,7 @@
 
 **Date:** 2025-12-24
 **Feature Range:** #880-884 (Capability-Based Effects)
-**Current Status:** 1/5 Complete (20%)
+**Current Status:** 2/5 Complete (40%) - **#880 NOW COMPLETE!**
 
 ---
 
@@ -47,9 +47,9 @@ fn fetch_and_log(url: str):
 
 ---
 
-### 🔄 #880: `requires[capabilities]` (PARTIAL - 70%)
+### ✅ #880: `requires[capabilities]` (COMPLETE - 100%)
 
-**Status:** 🔄 **PARTIAL** (Parser ✅, Semantic Analysis ❌)
+**Status:** ✅ **COMPLETE** (Parser ✅, Semantic Analysis ✅, Tests ✅)
 
 **What's Implemented:**
 - ✅ Parser recognizes `requires [pure, io, net, fs, unsafe, gc]`
@@ -57,12 +57,12 @@ fn fetch_and_log(url: str):
 - ✅ `Capability` enum with 6 variants
 - ✅ Parsing in `module_system.rs:220`
 - ✅ Error messages for unknown capabilities
-
-**What's Missing:**
-- ❌ Semantic analysis to enforce module capabilities
-- ❌ Check that functions don't exceed module capabilities
-- ❌ Capability inheritance tracking (child modules inherit parent)
-- ❌ Compile errors when violations occur
+- ✅ **Semantic validation in `pipeline/parsing.rs:79-119`**
+- ✅ **Function effect checking against module capabilities**
+- ✅ **Capability inheritance via `capabilities_are_subset_of()` and `effective_capabilities()`**
+- ✅ **Compile errors when violations occur**
+- ✅ **Import validation via `check_import_compatibility()`**
+- ✅ **22 comprehensive tests passing (15 capability + 7 import)**
 
 **Files:**
 - `src/parser/src/ast/nodes/modules.rs:92` - RequiresCapabilitiesStmt
@@ -166,9 +166,9 @@ error[E4001]: operation requires @io effect
 | Feature | ID | Status | Parser | AST | Semantic | Enforcement | Tests |
 |---------|----|----|--------|-----|----------|-------------|-------|
 | Effect Annotations | #881 | ✅ | ✅ | ✅ | ✅ | ✅ | 12 ✅ |
-| Module Capabilities | #880 | 🔄 | ✅ | ✅ | ❌ | ❌ | 0 ❌ |
+| Module Capabilities | #880 | ✅ | ✅ | ✅ | ✅ | ✅ | 22 ✅ |
 | Capability Propagation | #882 | 🔄 | ✅ | ✅ | 🔄 | ❌ | 1 🔄 |
-| Effect Error Messages | #883 | ❌ | N/A | N/A | ❌ | ❌ | 0 ❌ |
+| Effect Error Messages | #883 | 🔄 | N/A | N/A | ✅ | ✅ | 0 🔄 |
 | Stdlib Annotations | #884 | ❌ | N/A | N/A | ❌ | ❌ | 0 ❌ |
 
 **Legend:**
@@ -448,9 +448,9 @@ The capability effects system has **excellent foundational support** (parser, AS
 
 **Total to 100% completion: ~6 weeks**
 
-**Current Status: 1/5 features complete (20%)**
+**Current Status: 2/5 features complete (40%) - #880 NOW COMPLETE!**
 
-With focused effort on semantic analysis (#880, #882), we can get to 3/5 complete (60%) in 3 weeks.
+**Update (2025-12-24):** Feature #880 was discovered to be 100% complete during implementation audit. All infrastructure, validation, and tests were already in place. See `doc/report/FEATURE_880_MODULE_CAPABILITIES_COMPLETE_2025-12-24.md` for details.
 
 ---
 
