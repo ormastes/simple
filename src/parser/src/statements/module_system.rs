@@ -1,0 +1,275 @@
+//! Module system statement parsing
+//!
+//! This module handles parsing of module system statements including:
+//! - Module paths and import targets
+//! - use and import statements
+//! - mod declarations
+//! - common use, export use, auto import
+//! - requires capabilities
+
+use crate::ast::*;
+use crate::error::ParseError;
+use crate::token::{Span, TokenKind};
+use crate::Parser;
+
+impl<'a> Parser<'a> {
+    /// Parse a module path: crate.sys.http.router
+    /// Returns the segments as a vector
+    pub(crate) fn parse_module_path(&mut self) -> Result<ModulePath, ParseError> {
+        let mut segments = Vec::new();
+
+        // First segment (could be 'crate' keyword or identifier)
+        if self.check(&TokenKind::Crate) {
+            self.advance();
+            segments.push("crate".to_string());
+        } else {
+            // Use expect_path_segment to allow keywords like 'unit', 'test', etc.
+            segments.push(self.expect_path_segment()?);
+        }
+
+        // Parse dot-separated segments
+        while self.check(&TokenKind::Dot) {
+            self.advance();
+
+            // Check for glob: module.*
+            if self.check(&TokenKind::Star) {
+                break; // Stop, let caller handle *
+            }
+
+            // Check for group: module.{A, B}
+            if self.check(&TokenKind::LBrace) {
+                break; // Stop, let caller handle {}
+            }
+
+            // Use expect_path_segment to allow keywords as path segments
+            segments.push(self.expect_path_segment()?);
+        }
+
+        Ok(ModulePath::new(segments))
+    }
+
+    /// Parse an import target: single item, alias, group, or glob
+    /// Called after the module path is parsed
+    pub(crate) fn parse_import_target(
+        &mut self,
+        last_segment: Option<String>,
+    ) -> Result<ImportTarget, ParseError> {
+        // Check for glob: *
+        if self.check(&TokenKind::Star) {
+            self.advance();
+            return Ok(ImportTarget::Glob);
+        }
+
+        // Check for group: {A, B, C}
+        if self.check(&TokenKind::LBrace) {
+            self.advance();
+            let mut targets = Vec::new();
+
+            while !self.check(&TokenKind::RBrace) {
+                let name = self.expect_identifier()?;
+                let target = if self.check(&TokenKind::As) {
+                    self.advance();
+                    let alias = self.expect_identifier()?;
+                    ImportTarget::Aliased { name, alias }
+                } else {
+                    ImportTarget::Single(name)
+                };
+                targets.push(target);
+
+                if !self.check(&TokenKind::RBrace) {
+                    self.expect(&TokenKind::Comma)?;
+                }
+            }
+            self.expect(&TokenKind::RBrace)?;
+            return Ok(ImportTarget::Group(targets));
+        }
+
+        // Single item (already parsed as last segment of path)
+        if let Some(name) = last_segment {
+            // Check for alias: as NewName
+            if self.check(&TokenKind::As) {
+                self.advance();
+                let alias = self.expect_identifier()?;
+                return Ok(ImportTarget::Aliased { name, alias });
+            }
+            return Ok(ImportTarget::Single(name));
+        }
+
+        Err(ParseError::unexpected_token(
+            "import target",
+            format!("{:?}", self.current.kind),
+            self.current.span,
+        ))
+    }
+
+    /// Parse use statement: use crate.module.Item
+    /// use crate.module.{A, B}
+    /// use crate.module.*
+    /// use crate.module.Item as Alias
+    pub(crate) fn parse_use(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Use)?;
+        self.parse_use_or_import_body(start_span)
+    }
+
+    /// Parse import statement (alias for use): import module.Item
+    /// This is syntactic sugar for `use` - both work identically.
+    pub(crate) fn parse_import(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Import)?;
+        self.parse_use_or_import_body(start_span)
+    }
+
+    /// Common body for use/import statements
+    pub(super) fn parse_use_or_import_body(&mut self, start_span: Span) -> Result<Node, ParseError> {
+        let (path, target) = self.parse_use_path_and_target()?;
+        Ok(Node::UseStmt(UseStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            path,
+            target,
+        }))
+    }
+
+    /// Parse mod declaration: mod name or pub mod name
+    pub(crate) fn parse_mod(
+        &mut self,
+        visibility: Visibility,
+        attributes: Vec<Attribute>,
+    ) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Mod)?;
+        let name = self.expect_identifier()?;
+        Ok(Node::ModDecl(ModDecl {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            name,
+            visibility,
+            attributes,
+        }))
+    }
+
+    /// Parse common use: common use crate.module.*
+    pub(crate) fn parse_common_use(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Common)?;
+        self.expect(&TokenKind::Use)?;
+        let (path, target) = self.parse_use_path_and_target()?;
+        Ok(Node::CommonUseStmt(CommonUseStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            path,
+            target,
+        }))
+    }
+
+    /// Parse export use: export use router.Router
+    pub(crate) fn parse_export_use(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Export)?;
+        self.expect(&TokenKind::Use)?;
+        let (path, target) = self.parse_use_path_and_target()?;
+        Ok(Node::ExportUseStmt(ExportUseStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            path,
+            target,
+        }))
+    }
+
+    /// Parse auto import: auto import router.route
+    pub(crate) fn parse_auto_import(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Auto)?;
+        self.expect(&TokenKind::Import)?;
+
+        let path = self.parse_module_path()?;
+
+        // Last segment is the macro name
+        let mut segments = path.segments;
+        let macro_name = segments.pop().unwrap_or_default();
+
+        Ok(Node::AutoImportStmt(AutoImportStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            path: ModulePath::new(segments),
+            macro_name,
+        }))
+    }
+
+    /// Parse requires capabilities statement: requires [pure, io, net]
+    ///
+    /// This declares the capabilities allowed in the current module.
+    /// Must appear at the top of __init__.spl files.
+    pub(crate) fn parse_requires_capabilities(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Requires)?;
+        self.expect(&TokenKind::LBracket)?;
+
+        let mut capabilities = Vec::new();
+
+        // Parse capability list
+        if !self.check(&TokenKind::RBracket) {
+            loop {
+                // Parse capability name as identifier
+                let cap_name = self.expect_identifier()?;
+
+                // Convert to Capability enum
+                let capability = Capability::from_name(&cap_name).ok_or_else(|| {
+                    ParseError::syntax_error_with_span(
+                        format!(
+                            "unknown capability '{}'. Valid capabilities: pure, io, net, fs, unsafe, gc",
+                            cap_name
+                        ),
+                        self.previous.span,
+                    )
+                })?;
+
+                capabilities.push(capability);
+
+                // Check for comma or end
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                    // Allow trailing comma
+                    if self.check(&TokenKind::RBracket) {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.expect(&TokenKind::RBracket)?;
+
+        Ok(Node::RequiresCapabilities(RequiresCapabilitiesStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            capabilities,
+        }))
+    }
+}
