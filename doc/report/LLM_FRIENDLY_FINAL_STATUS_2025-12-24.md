@@ -1,24 +1,24 @@
 # LLM-Friendly Features: Final Implementation Status
 
-**Date:** 2025-12-24  
-**Feature Range:** #880-919 (40 features)  
-**Overall Status:** 14/40 Complete (35%)
+**Date:** 2025-12-24
+**Feature Range:** #880-919 (40 features)
+**Overall Status:** 16/40 Complete (40%)
 
 ---
 
 ## Executive Summary
 
-The LLM-Friendly Features initiative provides 40 features across 9 categories designed to optimize Simple for LLM-assisted development. As of 2025-12-24, **14 features are complete** with **26 remaining**.
+The LLM-Friendly Features initiative provides 40 features across 9 categories designed to optimize Simple for LLM-assisted development. As of 2025-12-24, **16 features are complete** with **24 remaining**.
 
 ### Quick Stats
 
 | Metric | Value |
 |--------|-------|
 | **Total Features** | 40 |
-| **Complete** | 14 (35%) |
-| **Remaining** | 26 (65%) |
-| **Categories Complete** | 0/9 |
-| **Estimated Completion Time** | 27 weeks |
+| **Complete** | 16 (40%) |
+| **Remaining** | 24 (60%) |
+| **Categories Complete** | 2/9 |
+| **Estimated Completion Time** | 25 weeks |
 
 ---
 
@@ -55,8 +55,8 @@ The LLM-Friendly Features initiative provides 40 features across 9 categories de
 
 ### 2. AST/IR Export (#885-889) ✅
 
-**Status:** 4/5 Complete (80%)  
-**Priority:** High (nearly complete)  
+**Status:** 5/5 Complete (100%) 🎉
+**Priority:** Complete
 **Difficulty:** Low-Medium (2-4)
 
 | ID | Feature | Status | Difficulty |
@@ -65,38 +65,34 @@ The LLM-Friendly Features initiative provides 40 features across 9 categories de
 | #886 | `--emit-hir` JSON export | ✅ | 2 |
 | #887 | `--emit-mir` JSON export | ✅ | 2 |
 | #888 | `--error-format=json` | ✅ | 2 |
-| #889 | Semantic diff tool | 📋 | 4 |
+| #889 | Semantic diff tool | ✅ | 4 |
 
 **Completed:**
 - ✅ Full AST serialization to JSON
 - ✅ HIR export with type information
 - ✅ MIR export with instructions and basic blocks
 - ✅ Structured JSON error diagnostics
+- ✅ Semantic diff - AST/HIR-level comparison (700 lines)
+  - Detects 20+ change types (function/class/type changes)
+  - CLI: `simple diff --semantic old.spl new.spl`
+  - Impact levels: Breaking, Major, Minor, Info
+  - JSON and text output formats
+  - 5 comprehensive tests passing
 
-**Remaining:**
-- 📋 #889: Semantic diff - AST/HIR-level diffing algorithm
-
-**Next Steps for #889:**
-1. Implement AST/HIR tree diffing algorithm
-2. Add CLI command `simple diff --semantic file1.spl file2.spl`
-3. Output semantic changes (type changes, control flow modifications)
-4. Format output for LLM consumption
-
-**Estimated Effort:** 1 week to complete category  
 **Documentation:** [LLM_FRIENDLY_IR_EXPORT.md](../LLM_FRIENDLY_IR_EXPORT.md), [semantic_diff.md](../spec/semantic_diff.md)
 
 ---
 
 ### 3. Context Pack Generator (#890-893) ✅
 
-**Status:** 3/4 Complete (75%)  
-**Priority:** High (nearly complete)  
+**Status:** 4/4 Complete (100%) 🎉
+**Priority:** Complete
 **Difficulty:** Low-High (2-4)
 
 | ID | Feature | Status | Difficulty |
 |----|---------|--------|------------|
 | #890 | `simple context` CLI command | ✅ | 3 |
-| #891 | Dependency symbol extraction | 📋 | 4 |
+| #891 | Dependency symbol extraction | ✅ | 4 |
 | #892 | Markdown context format | ✅ | 2 |
 | #893 | JSON context format | ✅ | 2 |
 
@@ -104,18 +100,15 @@ The LLM-Friendly Features initiative provides 40 features across 9 categories de
 - ✅ `simple context` command with file analysis
 - ✅ Markdown output format (90% token reduction)
 - ✅ JSON output format for machine consumption
+- ✅ Symbol-level dependency extraction (260 lines)
+  - Symbol usage analyzer tracks function/type calls
+  - Full transitive dependency resolution
+  - Minimal mode with `--minimal` flag (direct deps only)
+  - Collects types from function signatures
+  - Constructor call detection (class/struct)
+  - CLI: `simple context file.spl [target] [--minimal|--json|--markdown]`
+  - 16 comprehensive tests passing (10 new tests added)
 
-**Remaining:**
-- 📋 #891: Symbol-level dependency extraction
-
-**Next Steps for #891:**
-1. Implement symbol usage analysis (track function/type calls)
-2. Build dependency graph at symbol level
-3. Filter context to only include actually-used symbols
-4. Add `--minimal` flag for maximum reduction
-5. Integrate with import resolution
-
-**Estimated Effort:** 1-2 weeks to complete category  
 **Documentation:** [LLM_FRIENDLY_CONTEXT_PACK.md](../LLM_FRIENDLY_CONTEXT_PACK.md)
 
 ---
