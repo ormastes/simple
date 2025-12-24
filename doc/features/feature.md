@@ -183,11 +183,11 @@ Features to make Simple optimized for LLM-assisted development, verification, an
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #880 | `module requires[cap]` | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #881 | `@pure` / `@io` / `@net` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #882 | Capability propagation | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #883 | Forbidden effect errors | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #884 | Stdlib effect annotations | 2 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/effects/` | - |
+| #880 | `module requires[cap]` | 3 | 📋 | R | [capability_effects.md](../../doc/spec/capability_effects.md) | - | `src/compiler/tests/` |
+| #881 | `@pure` / `@io` / `@net` | 2 | 📋 | R | [capability_effects.md](../../doc/spec/capability_effects.md) | - | `src/compiler/tests/` |
+| #882 | Capability propagation | 4 | 📋 | R | [capability_effects.md](../../doc/spec/capability_effects.md) | - | `src/compiler/tests/` |
+| #883 | Forbidden effect errors | 2 | 📋 | R | [capability_effects.md](../../doc/spec/capability_effects.md) | - | `src/compiler/tests/` |
+| #884 | Stdlib effect annotations | 2 | 📋 | S | [capability_effects.md](../../doc/spec/capability_effects.md) | `std_lib/test/system/effects/` | - |
 
 **Example:**
 ```simple
@@ -210,7 +210,7 @@ fn fetch_and_save(url: str, path: str):
 | #886 | `--emit-hir` | 2 | ✅ | R | [LLM_FRIENDLY_IR_EXPORT.md](../../LLM_FRIENDLY_IR_EXPORT.md) | `system/cli/` | `src/driver/tests/` |
 | #887 | `--emit-mir` | 2 | ✅ | R | [LLM_FRIENDLY_IR_EXPORT.md](../../LLM_FRIENDLY_IR_EXPORT.md) | `system/cli/` | `src/driver/tests/` |
 | #888 | `--error-format=json` | 2 | ✅ | R | [LLM_FRIENDLY_JSON_ERRORS.md](../../LLM_FRIENDLY_JSON_ERRORS.md) | - | `src/common/tests/` |
-| #889 | Semantic diff tool | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #889 | Semantic diff tool | 4 | 📋 | R | [semantic_diff.md](../../doc/spec/semantic_diff.md) | `system/cli/` | `src/driver/tests/` |
 
 **Example:**
 ```bash
@@ -241,11 +241,11 @@ simple context app.service --format=json > context.json
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #894 | `@property_test` decorator | 3 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | `src/compiler/tests/` |
-| #895 | Input generators | 3 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
-| #896 | Shrinking on failure | 4 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | `src/runtime/tests/` |
-| #897 | Configurable iterations | 2 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
-| #898 | Generator combinators | 3 | 📋 | S | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/property/` | - |
+| #894 | `@property_test` decorator | 3 | 📋 | S+R | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | `src/compiler/tests/` |
+| #895 | Input generators | 3 | 📋 | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
+| #896 | Shrinking on failure | 4 | 📋 | S+R | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | `src/runtime/tests/` |
+| #897 | Configurable iterations | 2 | 📋 | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
+| #898 | Generator combinators | 3 | 📋 | S | [property_testing.md](../../doc/spec/property_testing.md) | `std_lib/test/system/property/` | - |
 
 **Example:**
 ```simple
@@ -264,10 +264,10 @@ fn test_reverse_reverse(input: [i64]):
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #899 | `@snapshot_test` decorator | 3 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/snapshot/` | `src/compiler/tests/` |
-| #900 | Snapshot storage | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
-| #901 | `--snapshot-update` flag | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #902 | Multi-format snapshots | 3 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/snapshot/` | `src/driver/tests/` |
+| #899 | `@snapshot_test` decorator | 3 | 📋 | S+R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `std_lib/test/system/snapshot/` | `src/compiler/tests/` |
+| #900 | Snapshot storage | 2 | 📋 | R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | - | `src/driver/tests/` |
+| #901 | `--snapshot-update` flag | 2 | 📋 | R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `system/cli/` | `src/driver/tests/` |
+| #902 | Multi-format snapshots | 3 | 📋 | S+R | [snapshot_testing.md](../../doc/spec/snapshot_testing.md) | `std_lib/test/system/snapshot/` | `src/driver/tests/` |
 
 **Example:**
 ```simple
@@ -304,9 +304,9 @@ max_nesting_depth = 4
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #908 | `simple fmt` command | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
-| #909 | Single correct style | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/parser/tests/` |
-| #910 | Format-on-save integration | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
+| #908 | `simple fmt` command | 2 | 📋 | R | [formatter.md](../../doc/spec/formatter.md) | `system/cli/` | `src/driver/tests/` |
+| #909 | Single correct style | 3 | 📋 | R | [formatter.md](../../doc/spec/formatter.md) | - | `src/parser/tests/` |
+| #910 | Format-on-save integration | 2 | 📋 | R | [formatter.md](../../doc/spec/formatter.md) | - | `src/driver/tests/` |
 
 **Impact:** Eliminates stylistic variance; LLM output is predictable
 
@@ -314,11 +314,11 @@ max_nesting_depth = 4
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #911 | Deterministic build mode | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/compiler/tests/` |
-| #912 | Replay logs | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
-| #913 | `@generated_by` provenance | 2 | 📋 | S+R | [llm_friendly.md](llm_friendly.md) | `std_lib/test/system/audit/` | `src/compiler/tests/` |
+| #911 | Deterministic build mode | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/compiler/tests/` |
+| #912 | Replay logs | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/driver/tests/` |
+| #913 | `@generated_by` provenance | 2 | 📋 | S+R | [build_audit.md](../../doc/spec/build_audit.md) | `std_lib/test/system/audit/` | `src/compiler/tests/` |
 | #914 | API surface lock file | 3 | ✅ | R | [LLM_FRIENDLY_API_SURFACE.md](../../LLM_FRIENDLY_API_SURFACE.md) | - | `src/compiler/tests/` |
-| #915 | Spec coverage metric | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/driver/tests/` |
+| #915 | Spec coverage metric | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/driver/tests/` |
 
 **Example:**
 ```simple
@@ -332,10 +332,10 @@ fn calculate_tax(amount: i64) -> i64:
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #916 | Resource limits | 3 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
-| #917 | Network isolation | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
-| #918 | Filesystem isolation | 4 | 📋 | R | [llm_friendly.md](llm_friendly.md) | - | `src/runtime/tests/` |
-| #919 | `simple run --sandbox` | 2 | 📋 | R | [llm_friendly.md](llm_friendly.md) | `system/cli/` | `src/driver/tests/` |
+| #916 | Resource limits | 3 | 📋 | R | [sandboxed_execution.md](../../doc/spec/sandboxed_execution.md) | - | `src/runtime/tests/` |
+| #917 | Network isolation | 4 | 📋 | R | [sandboxed_execution.md](../../doc/spec/sandboxed_execution.md) | - | `src/runtime/tests/` |
+| #918 | Filesystem isolation | 4 | 📋 | R | [sandboxed_execution.md](../../doc/spec/sandboxed_execution.md) | - | `src/runtime/tests/` |
+| #919 | `simple run --sandbox` | 2 | 📋 | R | [sandboxed_execution.md](../../doc/spec/sandboxed_execution.md) | `system/cli/` | `src/driver/tests/` |
 
 **Impact:** Safely verify LLM-generated code without risk
 
