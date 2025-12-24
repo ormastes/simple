@@ -6,6 +6,7 @@ pub mod executor;
 pub mod aop;
 pub mod memory;
 pub mod parallel;
+pub mod sandbox;
 pub mod value;
 
 // Re-export executor types and functions
@@ -281,4 +282,10 @@ pub use concurrent::{
     simple_concurrent_stack_try_pop,
     simple_concurrent_stack_is_empty,
     simple_concurrent_stack_len,
+};
+
+// Re-export sandbox types and functions (#916-923)
+pub use sandbox::{
+    apply_sandbox, FilesystemIsolation, FilesystemMode, NetworkIsolation, NetworkMode,
+    ResourceLimits, SandboxConfig, SandboxError, SandboxResult,
 };

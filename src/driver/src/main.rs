@@ -107,6 +107,18 @@ fn print_help() {
     eprintln!("  --linker <name>  Native linker: mold, lld, ld (auto-detected if not set)");
     eprintln!("  --snapshot     Create JJ snapshot on successful build/test");
     eprintln!();
+    eprintln!("Sandboxed Execution (#916-919):");
+    eprintln!("  --sandbox               Enable sandboxing with default limits");
+    eprintln!("  --time-limit <secs>     Set CPU time limit (seconds)");
+    eprintln!("  --memory-limit <bytes>  Set memory limit (bytes, accepts K/M/G suffix)");
+    eprintln!("  --fd-limit <count>      Set file descriptor limit");
+    eprintln!("  --thread-limit <count>  Set thread limit");
+    eprintln!("  --no-network            Block all network access");
+    eprintln!("  --network-allow <domains>  Allow specific domains (comma-separated)");
+    eprintln!("  --network-block <domains>  Block specific domains (comma-separated)");
+    eprintln!("  --read-only <paths>     Restrict filesystem to read-only paths (comma-separated)");
+    eprintln!("  --read-write <paths>    Restrict filesystem to specific read-write paths (comma-separated)");
+    eprintln!();
     eprintln!("Build Optimization (#824):");
     eprintln!("  --parallel     Enable parallel compilation (uses all CPU cores)");
     eprintln!("  --parallel=N   Use N threads for parallel compilation");
@@ -152,10 +164,117 @@ fn print_help() {
     eprintln!("  simple init myapp           # Create new project");
     eprintln!("  simple add http \"1.0\"       # Add dependency");
     eprintln!("  simple add mylib --path ../mylib  # Add local dep");
+    eprintln!();
+    eprintln!("Sandbox Examples:");
+    eprintln!("  simple script.spl --sandbox                    # Run with default sandbox");
+    eprintln!("  simple script.spl --time-limit 30              # 30 second CPU limit");
+    eprintln!("  simple script.spl --memory-limit 100M          # 100 MB memory limit");
+    eprintln!("  simple script.spl --no-network                 # Block all network");
+    eprintln!("  simple script.spl --network-allow github.com   # Allow only GitHub");
+    eprintln!("  simple script.spl --read-only /tmp,/usr/lib    # Read-only filesystem");
+    eprintln!("  simple script.spl --sandbox --time-limit 60 --memory-limit 256M  # Combined");
 }
 
 fn print_version() {
     println!("Simple Language v{}", VERSION);
+}
+
+/// Parse memory size from string (supports K, M, G suffixes)
+fn parse_memory_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (num_str, multiplier) = if s.ends_with('G') || s.ends_with('g') {
+        (&s[..s.len() - 1], 1024 * 1024 * 1024)
+    } else if s.ends_with('M') || s.ends_with('m') {
+        (&s[..s.len() - 1], 1024 * 1024)
+    } else if s.ends_with('K') || s.ends_with('k') {
+        (&s[..s.len() - 1], 1024)
+    } else {
+        (s, 1)
+    };
+
+    num_str
+        .parse::<u64>()
+        .map(|n| n * multiplier)
+        .map_err(|e| format!("invalid memory size '{}': {}", s, e))
+}
+
+/// Parse sandbox configuration from command-line arguments
+fn parse_sandbox_config(args: &[String]) -> Option<simple_runtime::SandboxConfig> {
+    use simple_runtime::SandboxConfig;
+    use std::time::Duration;
+
+    // Check if sandboxing is enabled at all
+    let has_sandbox_flag = args.iter().any(|a| {
+        a == "--sandbox"
+            || a.starts_with("--time-limit")
+            || a.starts_with("--memory-limit")
+            || a.starts_with("--fd-limit")
+            || a.starts_with("--thread-limit")
+            || a == "--no-network"
+            || a.starts_with("--network-allow")
+            || a.starts_with("--network-block")
+            || a.starts_with("--read-only")
+            || a.starts_with("--read-write")
+    });
+
+    if !has_sandbox_flag {
+        return None;
+    }
+
+    let mut config = SandboxConfig::new();
+
+    // Parse resource limits
+    for i in 0..args.len() {
+        let arg = &args[i];
+
+        if arg == "--time-limit" && i + 1 < args.len() {
+            if let Ok(secs) = args[i + 1].parse::<u64>() {
+                config = config.with_cpu_time(Duration::from_secs(secs));
+            }
+        } else if arg == "--memory-limit" && i + 1 < args.len() {
+            if let Ok(bytes) = parse_memory_size(&args[i + 1]) {
+                config = config.with_memory(bytes);
+            }
+        } else if arg == "--fd-limit" && i + 1 < args.len() {
+            if let Ok(count) = args[i + 1].parse::<u64>() {
+                config = config.with_file_descriptors(count);
+            }
+        } else if arg == "--thread-limit" && i + 1 < args.len() {
+            if let Ok(count) = args[i + 1].parse::<u64>() {
+                config = config.with_threads(count);
+            }
+        } else if arg == "--no-network" {
+            config = config.with_no_network();
+        } else if arg == "--network-allow" && i + 1 < args.len() {
+            let domains: Vec<String> = args[i + 1].split(',').map(|s| s.trim().to_string()).collect();
+            config = config.with_network_allowlist(domains);
+        } else if arg == "--network-block" && i + 1 < args.len() {
+            let domains: Vec<String> = args[i + 1].split(',').map(|s| s.trim().to_string()).collect();
+            config = config.with_network_blocklist(domains);
+        } else if arg == "--read-only" && i + 1 < args.len() {
+            let paths: Vec<std::path::PathBuf> = args[i + 1]
+                .split(',')
+                .map(|s| std::path::PathBuf::from(s.trim()))
+                .collect();
+            config = config.with_read_paths(paths);
+        } else if arg == "--read-write" && i + 1 < args.len() {
+            let read_write: Vec<&str> = args[i + 1].split(',').collect();
+            let paths: Vec<std::path::PathBuf> = read_write
+                .iter()
+                .map(|s| std::path::PathBuf::from(s.trim()))
+                .collect();
+            // For --read-write, set both read and write paths to the same set
+            config = config.with_restricted_paths(paths.clone(), paths);
+        }
+    }
+
+    Some(config)
+}
+
+/// Apply sandbox configuration to the current process
+fn apply_sandbox(config: &simple_runtime::SandboxConfig) -> Result<(), String> {
+    simple_runtime::apply_sandbox(config)
+        .map_err(|e| format!("Failed to apply sandbox: {}", e))
 }
 
 fn create_runner(gc_log: bool, gc_off: bool) -> Runner {
@@ -1351,11 +1470,48 @@ fn main() {
     let gc_log = args.iter().any(|a| a == "--gc-log");
     let gc_off = args.iter().any(|a| a == "--gc=off" || a == "--gc=OFF");
 
-    // Filter out flags
-    let args: Vec<String> = args
-        .into_iter()
-        .filter(|a| !a.starts_with("--gc"))
-        .collect();
+    // Parse and apply sandbox configuration before running code (#916-919)
+    if let Some(sandbox_config) = parse_sandbox_config(&args) {
+        if let Err(e) = apply_sandbox(&sandbox_config) {
+            eprintln!("warning: {}", e);
+            eprintln!("Continuing without full sandboxing...");
+        }
+    }
+
+    // Filter out flags (GC and sandbox flags) and their values
+    let mut filtered_args = Vec::new();
+    let mut skip_next = false;
+    for arg in args.iter() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+
+        if arg.starts_with("--gc") {
+            continue;
+        }
+
+        if arg == "--sandbox" || arg == "--no-network" {
+            continue;
+        }
+
+        // These flags take a value, so skip the next argument too
+        if arg == "--time-limit"
+            || arg == "--memory-limit"
+            || arg == "--fd-limit"
+            || arg == "--thread-limit"
+            || arg == "--network-allow"
+            || arg == "--network-block"
+            || arg == "--read-only"
+            || arg == "--read-write"
+        {
+            skip_next = true;
+            continue;
+        }
+
+        filtered_args.push(arg.clone());
+    }
+    let args = filtered_args;
 
     // No arguments -> REPL
     if args.is_empty() {
