@@ -108,11 +108,41 @@ impl CompilerPipeline {
         // Check trait coherence (orphan rule, overlap, associated types, blanket conflicts)
         self.check_trait_coherence(&module.items)?;
 
-        // If the module has script-style statements, skip type_check and interpret directly.
-        if !has_script_statements(&module.items) {
-            // Type inference/checking (features #13/#14 scaffolding)
+        // If HIR or MIR export is requested, generate them even in interpreter mode (#886-887)
+        if self.emit_hir.is_some() || self.emit_mir.is_some() {
+            // Type check is required for HIR/MIR lowering
             type_check(&module.items)
                 .map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+
+            // Lower to HIR
+            let hir_module = crate::hir::lower(&module)
+                .map_err(|e| CompileError::Semantic(format!("HIR lowering: {e}")))?;
+
+            // Emit HIR if requested
+            if let Some(path) = &self.emit_hir {
+                crate::ir_export::export_hir(&hir_module, path.as_deref())
+                    .map_err(|e| CompileError::Semantic(e))?;
+            }
+
+            // Lower to MIR if requested
+            if self.emit_mir.is_some() {
+                let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
+                let mir_module = crate::mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
+                    .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+
+                // Emit MIR if requested
+                if let Some(path) = &self.emit_mir {
+                    crate::ir_export::export_mir(&mir_module, path.as_deref())
+                        .map_err(|e| CompileError::Semantic(e))?;
+                }
+            }
+        } else {
+            // If the module has script-style statements and no IR export needed, skip type_check
+            if !has_script_statements(&module.items) {
+                // Type inference/checking (features #13/#14 scaffolding)
+                type_check(&module.items)
+                    .map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+            }
         }
 
         // Extract the main function's return value
