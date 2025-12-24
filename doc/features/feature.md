@@ -173,7 +173,7 @@ Previously archived to [feature_done_9.md](feature_done_9.md):
 
 ### LLM-Friendly Features (#880-919) 🔄
 
-**Status:** 28/40 Complete (70%), 1 In Progress
+**Status:** 30/40 Complete (75%), 1 In Progress
 
 Features to make Simple optimized for LLM-assisted development, verification, and collaboration.
 
@@ -323,15 +323,15 @@ max_nesting_depth = 4
 
 #### Build & Audit Infrastructure (#911-915) 🔄
 
-**Status:** 2/5 Complete (40%)
+**Status:** 4/5 Complete (80%)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #911 | Deterministic build mode | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/compiler/tests/` |
+| #911 | Deterministic build mode | 3 | ✅ | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/compiler/tests/` |
 | #912 | Replay logs | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/driver/tests/` |
 | #913 | `@generated_by` provenance | 2 | ✅ | S+R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/parser/tests/` |
 | #914 | API surface lock file | 3 | ✅ | R | [LLM_FRIENDLY_API_SURFACE.md](../../LLM_FRIENDLY_API_SURFACE.md) | - | `src/compiler/tests/` |
-| #915 | Spec coverage metric | 3 | 📋 | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/driver/tests/` |
+| #915 | Spec coverage metric | 3 | ✅ | R | [build_audit.md](../../doc/spec/build_audit.md) | - | `src/driver/tests/` |
 
 **Example:**
 ```simple

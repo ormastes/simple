@@ -119,6 +119,10 @@ fn print_help() {
     eprintln!("  --emit-mir     Export MIR to stdout");
     eprintln!("  --emit-mir=<file>  Export MIR to file");
     eprintln!();
+    eprintln!("Deterministic Builds (#911):");
+    eprintln!("  --deterministic              Enable deterministic build mode");
+    eprintln!("  --build-timestamp=<ISO8601>  Override build timestamp (e.g., 2025-01-15T10:00:00Z)");
+    eprintln!();
     eprintln!("Target Architectures:");
     eprintln!("  x86_64   64-bit x86 (default on most systems)");
     eprintln!("  aarch64  64-bit ARM (Apple Silicon, ARM servers)");
