@@ -86,6 +86,47 @@ impl FunctionDef {
             matches!(&d.name, Expr::Identifier(name) if name == "simd")
         })
     }
+
+    /// Check if this function has the @property_test decorator.
+    /// Property tests generate random inputs to verify invariant properties.
+    pub fn is_property_test(&self) -> bool {
+        self.decorators.iter().any(|d| {
+            matches!(&d.name, Expr::Identifier(name) if name == "property_test")
+        })
+    }
+
+    /// Check if this function has the @snapshot_test decorator.
+    /// Snapshot tests capture and compare output against stored golden files.
+    pub fn is_snapshot_test(&self) -> bool {
+        self.decorators.iter().any(|d| {
+            matches!(&d.name, Expr::Identifier(name) if name == "snapshot_test")
+        })
+    }
+
+    /// Check if this function is any kind of test (unit, property, or snapshot).
+    /// Includes functions with @test, @property_test, or @snapshot_test decorators.
+    pub fn is_test(&self) -> bool {
+        self.decorators.iter().any(|d| {
+            matches!(&d.name, Expr::Identifier(name) 
+                if name == "test" || name == "property_test" || name == "snapshot_test")
+        })
+    }
+
+    /// Get property test configuration parameters from @property_test(iterations: N, ...).
+    /// Returns None if not a property test or no parameters specified.
+    pub fn property_test_config(&self) -> Option<&Vec<Argument>> {
+        self.decorators.iter()
+            .find(|d| matches!(&d.name, Expr::Identifier(name) if name == "property_test"))
+            .and_then(|d| d.args.as_ref())
+    }
+
+    /// Get snapshot test configuration parameters from @snapshot_test(name: "...", format: "...").
+    /// Returns None if not a snapshot test or no parameters specified.
+    pub fn snapshot_test_config(&self) -> Option<&Vec<Argument>> {
+        self.decorators.iter()
+            .find(|d| matches!(&d.name, Expr::Identifier(name) if name == "snapshot_test"))
+            .and_then(|d| d.args.as_ref())
+    }
 }
 
 // =============================================================================
