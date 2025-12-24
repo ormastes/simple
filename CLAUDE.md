@@ -4,23 +4,31 @@
 
 **Build:** ✅ Passing - 696+ tests (651 compiler + 32 capability + 7 memory model + 6 sync)
 
-**Recent Work (2025-12-23):**
-- ✅ **Pattern Matching Safety** (#1325-1329) - **5/5 features COMPLETE** 🎉
+**Recent Work:**
+- 🔍 **LLM-Friendly Features Status** (2025-12-24) - **14/40 complete (35%)**
+  - ✅ **AST/IR Export**: 80% complete (4/5 features)
+  - ✅ **Context Pack Generator**: 75% complete (3/4 features)
+  - ✅ **Lint Framework**: 60% complete (3/5 features)
+  - 📋 **Property Testing**: Planned (0/5 features)
+  - 📋 **Snapshot Testing**: Planned (0/4 features)
+  - 📋 **Canonical Formatter**: Planned (0/3 features)
+  - See `doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md`
+- ✅ **Pattern Matching Safety** (2025-12-23) - **5/5 features COMPLETE** 🎉
   - **Exhaustiveness Checking**: Compile-time verification all cases are covered
   - **Unreachable Detection**: Warns about patterns that can never match
   - **Tagged Union Support**: Full integration with algebraic data types
   - **Strong Enum Enforcement**: `#[strong]` enums prohibit wildcards
   - **Subsumption Analysis**: Detects overlapping patterns
   - 750+ lines, 18 comprehensive tests
-  - See `PATTERN_MATCH_SAFETY.md` for complete guide
-- ✅ **Mock Library Fluent API** (#1396-1403) - **8/8 features COMPLETE**
+  - See `doc/PATTERN_MATCH_SAFETY.md` for complete guide
+- ✅ **Mock Library Fluent API** (2025-12-23) - **8/8 features COMPLETE**
   - **Chainable API**: `MockSetup`, `MockVerify`, `Spy` builders
   - **Deep Call Chains**: `.chain()` for nested method calls (e.g., `library.getHead().getName()`)
   - **Flexible Matchers**: Any, Exact, GreaterThan, LessThan, Range, Pattern
   - **Verification**: `was_called()`, `times()`, `with_args()` assertions
   - 700+ lines, 19 tests (12 unit + 7 examples)
   - See `src/util/simple_mock_helper/FLUENT_API.md`
-- ✅ **Complete Memory Model Verification** (#1104-1106) - Formal proofs in Lean 4
+- ✅ **Complete Memory Model Verification** (2025-12-23) - Formal proofs in Lean 4
   - **Reference Capabilities**: Aliasing prevention, conversion safety (350+ lines Lean)
   - **SC-DRF Guarantee**: Sequential consistency for data-race-free programs (510+ lines Lean)
   - **Integration Proof**: Capabilities + SC-DRF = complete memory safety
@@ -29,6 +37,7 @@
   - See `verification/memory_capabilities/` and `verification/memory_model_drf/`
 
 **Key Features:**
+- **LLM-Friendly**: IR export, context packs, JSON errors (14/40 features, 35% complete)
 - **Pattern Matching Safety**: Exhaustiveness checking, unreachable detection, strong enums (5/5 complete)
 - Memory model: Reference capabilities (`mut T`, `iso T`, `T`), concurrency modes (`actor`, `lock_base`, `unsafe`)
 - SC-DRF guarantee: Formally verified memory consistency model
