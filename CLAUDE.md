@@ -7,12 +7,15 @@
 **Recent Work:**
 - 🔍 **LLM-Friendly Features Status** (2025-12-24) - **15/40 complete (37.5%)**
   - ✅ **Lint Framework**: **100% COMPLETE** (5/5 features) 🎉
-  - ✅ **AST/IR Export**: 80% complete (4/5 features)
-  - ✅ **Context Pack Generator**: 75% complete (3/4 features)
-  - 📋 **Property Testing**: Planned (0/5 features)
-  - 📋 **Snapshot Testing**: Planned (0/4 features)
-  - 📋 **Canonical Formatter**: Planned (0/3 features)
-  - See `doc/report/LLM_LINT_CLI_COMPLETE_2025-12-24.md`
+  - ✅ **AST/IR Export**: 80% complete (4/5 features) - Missing #889 (semantic diff)
+  - ✅ **Context Pack Generator**: 75% complete (3/4 features) - Missing #891 (CLI tool)
+  - 🟡 **Capability Effects**: 20% complete (1/5 features) - #881-884 planned
+  - 🟡 **Build & Audit**: 20% complete (1/5 features) - #912-915 planned
+  - 📋 **Property Testing**: Planned (0/5 features) - #894-898
+  - 📋 **Snapshot Testing**: Planned (0/4 features) - #899-902
+  - 📋 **Canonical Formatter**: Planned (0/3 features) - #908-910 (166-line implementation exists in Simple)
+  - 📋 **Sandboxed Execution**: Planned (0/4 features) - #916-919
+  - See `doc/report/LLM_FEATURES_IMPLEMENTATION_AUDIT_2025-12-24.md` for full audit
 - ✅ **Pattern Matching Safety** (2025-12-23) - **5/5 features COMPLETE** 🎉
   - **Exhaustiveness Checking**: Compile-time verification all cases are covered
   - **Unreachable Detection**: Warns about patterns that can never match
