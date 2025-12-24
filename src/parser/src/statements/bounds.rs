@@ -5,7 +5,7 @@
 use crate::ast::{BoundsAtom, BoundsBlock, BoundsCase, BoundsKind, BoundsPattern};
 use crate::error::ParseError;
 use crate::token::{Span, TokenKind};
-use crate::Parser;
+use crate::parser_impl::core::Parser;
 
 impl Parser<'_> {
     /// Parse optional bounds: block after @simd function body

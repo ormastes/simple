@@ -15,7 +15,7 @@
 /// - result identifiers
 use crate::ast::{ContractBlock, ContractClause, Expr, InvariantBlock};
 use crate::error::ParseError;
-use crate::parser::Parser;
+use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
 impl Parser<'_> {

@@ -14,6 +14,7 @@ pub mod arch_rules;
 pub mod build_mode;
 pub mod context_pack;
 pub mod di;
+pub mod mcp;
 pub mod ir_export;
 pub mod mock;
 pub mod pattern_analysis;
@@ -76,6 +77,7 @@ pub use di::{
     DiContainer, DiMode, DiProfile, DiResolveError, DiScope,
 };
 pub use ir_export::{export_ast, export_hir, export_mir, ExportResult};
+pub use mcp::{ExpandWhat, McpGenerator, McpMetadata, McpMode, McpOutput, McpTools};
 pub use value::{
     BorrowMutValue,
     BorrowValue,

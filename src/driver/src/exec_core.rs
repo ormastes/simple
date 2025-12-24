@@ -92,6 +92,17 @@ impl ExecCore {
         fs::write(out, smf_bytes).map_err(|e| format!("write smf: {e}"))
     }
 
+    /// Compile source string to SMF file with options (LLM-friendly #885-887)
+    pub fn compile_source_with_options(
+        &self,
+        source: &str,
+        out: &Path,
+        options: &crate::CompileOptions,
+    ) -> Result<(), String> {
+        let smf_bytes = self.compile_to_memory_with_options(source, options)?;
+        fs::write(out, smf_bytes).map_err(|e| format!("write smf: {e}"))
+    }
+
     /// Compile source string to SMF file for a specific target architecture.
     /// This enables cross-compilation.
     pub fn compile_source_for_target(
@@ -108,6 +119,31 @@ impl ExecCore {
     pub fn compile_to_memory(&self, source: &str) -> Result<Vec<u8>, String> {
         let mut compiler =
             CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        compiler
+            .compile_source_to_memory(source)
+            .map_err(|e| format!("compile failed: {e}"))
+    }
+
+    /// Compile source string to SMF bytes with options (LLM-friendly #885-887)
+    pub fn compile_to_memory_with_options(
+        &self,
+        source: &str,
+        options: &crate::CompileOptions,
+    ) -> Result<Vec<u8>, String> {
+        let mut compiler =
+            CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
+        
+        // Set emit options
+        if let Some(path) = &options.emit_ast {
+            compiler.set_emit_ast(path.clone());
+        }
+        if let Some(path) = &options.emit_hir {
+            compiler.set_emit_hir(path.clone());
+        }
+        if let Some(path) = &options.emit_mir {
+            compiler.set_emit_mir(path.clone());
+        }
+        
         compiler
             .compile_source_to_memory(source)
             .map_err(|e| format!("compile failed: {e}"))

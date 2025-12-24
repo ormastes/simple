@@ -76,6 +76,13 @@ impl CompilerPipeline {
         let module = parser
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
+        
+        // Emit AST if requested (LLM-friendly #885)
+        if let Some(path) = &self.emit_ast {
+            crate::ir_export::export_ast(&module, path.as_deref())
+                .map_err(|e| CompileError::Semantic(e))?;
+        }
+        
         self.compile_module_to_memory(module)
     }
 
@@ -139,6 +146,13 @@ impl CompilerPipeline {
         let ast_module = parser
             .parse()
             .map_err(|e| CompileError::Parse(format!("{e}")))?;
+        
+        // Emit AST if requested (LLM-friendly #885)
+        if let Some(path) = &self.emit_ast {
+            crate::ir_export::export_ast(&ast_module, path.as_deref())
+                .map_err(|e| CompileError::Semantic(e))?;
+        }
+        
         self.compile_module_to_memory_native(ast_module)
     }
 

@@ -1,4 +1,6 @@
 use super::*;
+use crate::ast::*;
+use crate::error::ParseError;
 use pretty_assertions::assert_eq;
 
 fn parse(source: &str) -> Result<Module, ParseError> {

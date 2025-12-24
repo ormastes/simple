@@ -86,6 +86,17 @@ impl Runner {
         self.core.compile_source(source, out)
     }
 
+    /// Compile source to an SMF with options (LLM-friendly #885-887)
+    #[instrument(skip(self, source, options))]
+    pub fn compile_to_smf_with_options(
+        &self,
+        source: &str,
+        out: &Path,
+        options: &crate::CompileOptions,
+    ) -> Result<(), String> {
+        self.core.compile_source_with_options(source, out, options)
+    }
+
     /// Compile source to an SMF at the given path for a specific target architecture.
     /// This enables cross-compilation to different architectures.
     #[instrument(skip(self, source))]

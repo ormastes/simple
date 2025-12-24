@@ -28,6 +28,30 @@ jj git push
 
 ## Recent Completions
 
+### AST/HIR/MIR Export Complete (2025-12-24)
+
+Completed IR export functionality for LLM-friendly compiler introspection (#885-887).
+
+**Implementation:**
+- `src/compiler/src/ir_export.rs` - JSON export for AST, HIR, MIR
+- `src/compiler/src/pipeline/core.rs` - Emit options in CompilerPipeline
+- `src/compiler/src/pipeline/execution.rs` - AST emission point
+- `src/compiler/src/pipeline/lowering.rs` - HIR/MIR emission points
+- `src/driver/src/exec_core.rs` - compile_with_options methods
+- `src/driver/src/runner.rs` - Public API with options
+- `src/driver/src/main.rs` - CLI integration
+
+**Key Features:**
+- `--emit-ast[=file]` - Export AST to file or stdout
+- `--emit-hir[=file]` - Export HIR to file or stdout (native path only)
+- `--emit-mir[=file]` - Export MIR to file or stdout (native path only)
+- JSON format with pretty-printing
+- Minimal changes to existing pipeline
+
+**Status:** AST/IR Export category now 80% complete (4/5 features)
+
+**Documentation:** See `doc/report/AST_HIR_MIR_EXPORT_COMPLETE_2025-12-24.md`
+
 ### LLM-Friendly Features Status (2025-12-24)
 
 Assessed implementation status of LLM-Friendly Features (#880-919) - **14/40 complete (35%)**.

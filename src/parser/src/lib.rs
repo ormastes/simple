@@ -5,8 +5,10 @@ pub mod doc_gen;
 pub mod error;
 pub mod interner;
 pub mod lexer;
-pub mod parser;
 pub mod token;
+
+// Parser implementation (split across multiple modules)
+mod parser_impl;
 
 // Parser submodules (split from parser.rs for maintainability)
 mod expressions;
@@ -23,5 +25,5 @@ pub use doc_gen::{generate as generate_docs, DocItem, DocItemKind, ModuleDocs};
 pub use error::*;
 pub use interner::*;
 pub use lexer::*;
-pub use parser::*;
+pub use parser_impl::{Parser, ParserMode};
 pub use token::*;

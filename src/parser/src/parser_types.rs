@@ -4,9 +4,8 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
+use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
-
-use super::Parser;
 
 impl<'a> Parser<'a> {
     // === Type Parsing ===
