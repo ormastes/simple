@@ -1286,6 +1286,9 @@ fn exec_function(
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
+    // Check if calling this function is allowed from the current effect context
+    crate::effects::check_call_compatibility(&func.name, &func.effects)?;
+
     with_effect_context(&func.effects, || {
         exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx)
     })
@@ -1300,6 +1303,9 @@ fn exec_function_with_values(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Check if calling this function is allowed from the current effect context
+    crate::effects::check_call_compatibility(&func.name, &func.effects)?;
+
     with_effect_context(&func.effects, || {
         exec_function_with_values_inner(func, args, outer_env, functions, classes, enums, impl_methods)
     })
@@ -1316,6 +1322,9 @@ fn exec_function_with_captured_env(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Check if calling this function is allowed from the current effect context
+    crate::effects::check_call_compatibility(&func.name, &func.effects)?;
+
     with_effect_context(&func.effects, || {
         // Start with the captured environment (for closure variables)
         let mut local_env = captured_env.clone();

@@ -98,20 +98,28 @@ fn check_formatting(path: String) -> Result[Bool, String]:
 
 fn main():
     let args = sys.args()
-    
+
     if args.len() < 2:
-        print("Usage: simple_fmt <file.spl> [--check] [--write]")
+        print("Usage: simple_fmt <file.spl> [OPTIONS]")
         print("")
         print("Options:")
-        print("  --check    Check if file is formatted (exit 1 if not)")
-        print("  --write    Format file in place")
+        print("  --check     Check if file is formatted (exit 1 if not)")
+        print("  --write     Format file in place")
+        print("  --diff      Show formatting diff")
+        print("  --stdout    Print formatted output to stdout (default)")
         print("")
-        print("Without options, prints formatted output to stdout")
+        print("Examples:")
+        print("  simple_fmt app.spl            # Print formatted to stdout")
+        print("  simple_fmt app.spl --write    # Format in-place")
+        print("  simple_fmt app.spl --check    # Check formatting (CI)")
+        print("  simple_fmt app.spl --diff     # Show diff")
         sys.exit(1)
     
     let file_path = args[1]
     let check_mode = args.contains("--check")
     let write_mode = args.contains("--write")
+    let diff_mode = args.contains("--diff")
+    let stdout_mode = args.contains("--stdout") or (!check_mode and !write_mode and !diff_mode)
     
     # Verify file exists
     if not fs.exists(file_path):
@@ -142,11 +150,29 @@ fn main():
                 print("Error: " + error)
                 sys.exit(1)
     
-    else:
-        # Default: print to stdout
+    elif diff_mode:
+        # Diff mode: show formatting diff
         let config = FormatConfig.new()
         let formatter = Formatter.new(config)
-        
+
+        match formatter.format_file(file_path):
+            case Ok(formatted):
+                let original = fs.read_to_string(file_path)?
+                if original == formatted:
+                    print("✓ " + file_path + " is correctly formatted")
+                    sys.exit(0)
+                else:
+                    print_diff(original, formatted, file_path)
+                    sys.exit(1)
+            case Err(error):
+                print("Error: " + error)
+                sys.exit(1)
+
+    else:
+        # Default/stdout mode: print to stdout
+        let config = FormatConfig.new()
+        let formatter = Formatter.new(config)
+
         match formatter.format_file(file_path):
             case Ok(formatted):
                 print(formatted)
@@ -154,3 +180,26 @@ fn main():
             case Err(error):
                 print("Error: " + error)
                 sys.exit(1)
+
+fn print_diff(original: String, formatted: String, file_path: String):
+    """Print unified diff between original and formatted code"""
+    print("--- " + file_path + " (original)")
+    print("+++ " + file_path + " (formatted)")
+    print("")
+
+    let orig_lines = original.split("\n")
+    let fmt_lines = formatted.split("\n")
+
+    # Simple line-by-line diff
+    for i in 0..max(orig_lines.len(), fmt_lines.len()):
+        if i < orig_lines.len() and i < fmt_lines.len():
+            if orig_lines[i] != fmt_lines[i]:
+                print(f"@@ Line {i + 1} @@")
+                print(f"-{orig_lines[i]}")
+                print(f"+{fmt_lines[i]}")
+        elif i < orig_lines.len():
+            print(f"@@ Line {i + 1} @@")
+            print(f"-{orig_lines[i]}")
+        else:
+            print(f"@@ Line {i + 1} @@")
+            print(f"+{fmt_lines[i]}")
