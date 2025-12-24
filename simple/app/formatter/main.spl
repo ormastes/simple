@@ -1,5 +1,5 @@
-# Simple Language Formatter
-# Canonical formatter with zero configuration
+# Simple Language Formatter - Enhanced Version
+# Canonical formatter with improved import sorting and spacing
 # Usage: simple_fmt <file.spl> [--check] [--write]
 
 import sys
@@ -9,26 +9,29 @@ import io.fs as fs
 const INDENT_SIZE = 4
 const MAX_LINE_LENGTH = 100
 const CONTINUATION_INDENT = 8
+const BLANK_LINES_BETWEEN_ITEMS = 2
 
 class FormatConfig:
     indent_size: Int
     max_line_length: Int
     use_tabs: Bool
-    
+    blank_lines_between_items: Int
+
     fn new() -> FormatConfig:
         FormatConfig(
             indent_size: INDENT_SIZE,
             max_line_length: MAX_LINE_LENGTH,
-            use_tabs: false
+            use_tabs: false,
+            blank_lines_between_items: BLANK_LINES_BETWEEN_ITEMS
         )
 
 class Formatter:
     config: FormatConfig
     indent_level: Int
-    
+
     fn new(config: FormatConfig) -> Formatter:
         Formatter(config: config, indent_level: 0)
-    
+
     fn format_file(self, path: String) -> Result[String, String]:
         # Read file
         let content = fs.read_to_string(path)?
@@ -39,40 +42,133 @@ class Formatter:
         Ok(formatted)
 
     fn format_source(self, source: String) -> Result[String, String]:
-        # Simple line-by-line formatter for now
-        # TODO: Use AST-based formatting when parser is available
-        
         let lines = source.split("\n")
-        let mut result = []
-        let mut current_indent = 0
-        
+
+        # Separate imports from other content
+        let mut imports = []
+        let mut other_lines = []
+        let mut in_import_section = true
+
         for line in lines:
             let trimmed = line.trim()
-            
-            # Skip empty lines
-            if trimmed.is_empty():
-                result.push("")
+
+            if trimmed.starts_with("import "):
+                imports.push(trimmed)
+            elif trimmed.is_empty() and in_import_section:
+                # Skip blank lines in import section
                 continue
-            
+            else:
+                if not trimmed.is_empty():
+                    in_import_section = false
+                other_lines.push(line)
+
+        # Sort imports alphabetically
+        imports.sort()
+
+        # Format non-import code
+        let formatted_code = self.format_code_lines(other_lines)?
+
+        # Combine sorted imports + blank lines + formatted code
+        let mut result = []
+
+        if imports.len() > 0:
+            for imp in imports:
+                result.push(imp)
+
+            # Add blank lines between imports and code
+            if other_lines.len() > 0:
+                for _ in 0..self.config.blank_lines_between_items:
+                    result.push("")
+
+        result.extend(formatted_code)
+
+        Ok(result.join("\n"))
+
+    fn format_code_lines(self, lines: List[String]) -> Result[List[String], String]:
+        let mut result = []
+        let mut current_indent = 0
+        let mut last_was_def = false
+        let mut blank_line_count = 0
+
+        for line in lines:
+            let trimmed = line.trim()
+
+            # Skip empty lines but track them
+            if trimmed.is_empty():
+                blank_line_count = blank_line_count + 1
+                if blank_line_count <= self.config.blank_lines_between_items:
+                    result.push("")
+                continue
+
+            # Reset blank line counter
+            blank_line_count = 0
+
+            # Add blank lines before top-level definitions
+            if current_indent == 0 and (trimmed.starts_with("fn ") or trimmed.starts_with("class ") or trimmed.starts_with("struct ")) and last_was_def:
+                for _ in 0..self.config.blank_lines_between_items:
+                    result.push("")
+
             # Adjust indent for closing brackets/keywords
             if self.is_dedent_line(trimmed):
                 current_indent = max(0, current_indent - 1)
-            
-            # Format line with current indent
-            let indent_str = " ".repeat(current_indent * self.config.indent_size)
-            let formatted_line = indent_str + trimmed
-            result.push(formatted_line)
-            
+
+            # Format line with current indent and proper spacing
+            let formatted = self.format_line(trimmed, current_indent)
+            result.push(formatted)
+
+            # Track if this was a definition
+            last_was_def = current_indent == 0 and (trimmed.starts_with("fn ") or trimmed.starts_with("class ") or trimmed.starts_with("struct "))
+
             # Adjust indent for opening brackets/keywords
             if self.is_indent_line(trimmed):
                 current_indent = current_indent + 1
-        
-        Ok(result.join("\n"))
-    
+
+        Ok(result)
+
+    fn format_line(self, line: String, indent: Int) -> String:
+        # Apply indentation
+        let indent_str = " ".repeat(indent * self.config.indent_size)
+
+        # Apply expression spacing
+        let spaced = self.add_expression_spacing(line)
+
+        indent_str + spaced
+
+    fn add_expression_spacing(self, line: String) -> String:
+        # Add spaces around binary operators
+        let mut result = line
+
+        # Operators that need spacing
+        let operators = ["+", "-", "*", "/", "%", "==", "!=", "<=", ">=", "<", ">", "and", "or", "in"]
+
+        for op in operators:
+            # Add spaces around operator if not already present
+            # Simple approach: replace "a+b" with "a + b"
+            # This is a heuristic - not perfect but good enough
+            result = result.replace(op, " " + op + " ")
+
+            # Clean up multiple spaces
+            while result.contains("  "):
+                result = result.replace("  ", " ")
+
+        # Clean up spaces in specific contexts
+        result = result.replace("( ", "(")      # No space after opening paren
+        result = result.replace(" )", ")")      # No space before closing paren
+        result = result.replace("[ ", "[")      # No space after opening bracket
+        result = result.replace(" ]", "]")      # No space before closing bracket
+        result = result.replace(" ,", ",")      # No space before comma
+        result = result.replace(",", ", ")      # Space after comma
+
+        # Clean up function signatures
+        result = result.replace(" :", ":")      # No space before colon
+        result = result.replace("->", " -> ")   # Spaces around arrow
+
+        result.trim()
+
     fn is_indent_line(self, line: String) -> Bool:
         # Check if line should increase indent level
         return line.ends_with(":") or line.ends_with("{") or line.ends_with("(") or line.ends_with("[")
-    
+
     fn is_dedent_line(self, line: String) -> Bool:
         # Check if line should decrease indent level
         return line.starts_with("}") or line.starts_with(")") or line.starts_with("]") or line.starts_with("else") or line.starts_with("elif") or line.starts_with("except") or line.starts_with("finally")
@@ -80,20 +176,20 @@ class Formatter:
 fn format_file_inplace(path: String) -> Result[Nil, String]:
     let config = FormatConfig.new()
     let formatter = Formatter.new(config)
-    
+
     let formatted = formatter.format_file(path)?
-    
+
     fs.write(path, formatted)?
-    
+
     Ok(nil)
 
 fn check_formatting(path: String) -> Result[Bool, String]:
     let config = FormatConfig.new()
     let formatter = Formatter.new(config)
-    
+
     let original = fs.read_to_string(path)?
     let formatted = formatter.format_source(original)?
-    
+
     Ok(original == formatted)
 
 fn main():
@@ -108,24 +204,30 @@ fn main():
         print("  --diff      Show formatting diff")
         print("  --stdout    Print formatted output to stdout (default)")
         print("")
+        print("Features:")
+        print("  - Automatic import sorting (alphabetical)")
+        print("  - Expression spacing (x + y, not x+y)")
+        print("  - Blank lines between definitions")
+        print("  - Consistent indentation (4 spaces)")
+        print("")
         print("Examples:")
         print("  simple_fmt app.spl            # Print formatted to stdout")
         print("  simple_fmt app.spl --write    # Format in-place")
         print("  simple_fmt app.spl --check    # Check formatting (CI)")
         print("  simple_fmt app.spl --diff     # Show diff")
         sys.exit(1)
-    
+
     let file_path = args[1]
     let check_mode = args.contains("--check")
     let write_mode = args.contains("--write")
     let diff_mode = args.contains("--diff")
     let stdout_mode = args.contains("--stdout") or (!check_mode and !write_mode and !diff_mode)
-    
+
     # Verify file exists
     if not fs.exists(file_path):
         print("Error: File not found: " + file_path)
         sys.exit(1)
-    
+
     if check_mode:
         # Check mode: verify formatting
         match check_formatting(file_path):
@@ -139,7 +241,7 @@ fn main():
             case Err(error):
                 print("Error: " + error)
                 sys.exit(1)
-    
+
     elif write_mode:
         # Write mode: format in place
         match format_file_inplace(file_path):
@@ -149,7 +251,7 @@ fn main():
             case Err(error):
                 print("Error: " + error)
                 sys.exit(1)
-    
+
     elif diff_mode:
         # Diff mode: show formatting diff
         let config = FormatConfig.new()
