@@ -1,0 +1,90 @@
+# Context Manager Support for File I/O
+#
+# Implements context manager protocols for automatic resource cleanup.
+# Enables `with` and `async with` statements for file handling.
+
+use file.mmap
+use file.async_handle
+
+# Sync context manager trait
+pub trait ContextManager[T]:
+    fn __enter__(self) -> T
+    fn __exit__(self, exc: Option[Exception]) -> bool
+
+# Async context manager trait
+pub trait AsyncContextManager[T]:
+    async fn __aenter__(self) -> T
+    async fn __aexit__(self, exc: Option[Exception]) -> bool
+
+# Context manager for MmapRegion (sync)
+impl ContextManager[MmapRegion] for MmapRegion:
+    fn __enter__(self) -> MmapRegion:
+        # Return self - already loaded
+        return self
+
+    fn __exit__(self, exc: Option[Exception]) -> bool:
+        # Cleanup: unmap the memory region
+        # Call sys_munmap from __init__.spl
+        # TODO: Implement actual cleanup
+        # For now, just return false (don't suppress exceptions)
+        return false
+
+# Async context manager for AsyncFileHandle (Pattern 1: auto-loading)
+# Usage: async with await file.open(path) as mmap:
+impl AsyncContextManager[MmapRegion] for AsyncFileHandle:
+    async fn __aenter__(self) -> MmapRegion:
+        # Wait for loading to complete, then return the region
+        let region = await self.wait()
+        match region:
+            case Ok(r):
+                return r
+            case Err(e):
+                # TODO: Raise exception
+                # For now, create empty region as placeholder
+                return MmapRegion {
+                    data: null,
+                    length: 0,
+                    mode: MmapMode::ReadOnly,
+                    fd: -1,
+                    path: ""
+                }
+
+    async fn __aexit__(self, exc: Option[Exception]) -> bool:
+        # Cleanup: unmap the region if it was loaded
+        match self.state:
+            case FileState::Ready(region):
+                # TODO: Call sys_munmap on region
+                pass
+            case _:
+                pass
+        return false
+
+# Alternative: Lazy loading context manager (Pattern 3)
+# This would be used with a hypothetical open_lazy() function
+# Usage: async with await file.open_lazy(path) as handle:
+impl AsyncContextManager[AsyncFileHandle] for AsyncFileHandle:
+    async fn __aenter__(self) -> AsyncFileHandle:
+        # Start loading if not already started
+        if not self.is_ready() and not self.is_failed():
+            self.start_loading()
+        return self
+
+    async fn __aexit__(self, exc: Option[Exception]) -> bool:
+        # Cleanup: cancel loading if still in progress, unmap if ready
+        match self.state:
+            case FileState::Loading:
+                self.cancel()
+            case FileState::Ready(region):
+                # TODO: Call sys_munmap on region
+                pass
+            case _:
+                pass
+        return false
+
+# Exception type for file operations
+# (Placeholder - should be defined in core error system)
+pub struct Exception:
+    message: String
+
+    pub fn new(message: String) -> Exception:
+        return Exception { message: message }

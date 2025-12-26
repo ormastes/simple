@@ -1,0 +1,130 @@
+# Memory-Mapped File Region
+#
+# Core mmap abstraction with safety wrappers.
+# Provides zero-copy file access through memory mapping.
+
+# Memory-mapped region - represents a file mapped into memory
+pub struct MmapRegion:
+    data: *u8              # Pointer to mapped memory
+    length: usize          # Size of mapped region in bytes
+    mode: MmapMode         # Access mode (read-only, read-write, etc.)
+    fd: i32                # File descriptor
+    path: String           # Original file path (for debugging)
+
+    # Get the mapped data as a byte slice
+    pub fn as_bytes(self) -> &[u8]:
+        # Safety: data pointer is valid for length bytes
+        # TODO: Implement via FFI - slice_from_raw_parts
+        return []
+
+    # Get the mapped data as a string (UTF-8 validated)
+    pub fn as_str(self) -> Result[&str, FileError]:
+        let bytes = self.as_bytes()
+        # TODO: Validate UTF-8
+        # For now, placeholder
+        return Ok("")
+
+    # Advise kernel on memory access pattern
+    pub fn advise(self, advice: MmapAdvice):
+        # Call madvise system call
+        # Defined in __init__.spl as sys_madvise
+        pass
+
+    # Get the length of the mapped region
+    pub fn len(self) -> usize:
+        return self.length
+
+    # Check if the region is empty
+    pub fn is_empty(self) -> bool:
+        return self.length == 0
+
+    # Get a slice of the mapped region
+    pub fn slice(self, start: usize, end: usize) -> Result[&[u8], FileError]:
+        if start > self.length or end > self.length or start > end:
+            return Err(FileError::OutOfBounds)
+        # TODO: Return slice
+        return Ok([])
+
+# Memory map mode
+pub enum MmapMode:
+    ReadOnly        # MAP_PRIVATE | PROT_READ
+    ReadWrite       # MAP_SHARED | PROT_READ | PROT_WRITE
+    CopyOnWrite     # MAP_PRIVATE | PROT_READ | PROT_WRITE
+
+# Memory access advice for madvise(2)
+pub enum MmapAdvice:
+    Normal          # MADV_NORMAL - No specific advice
+    Sequential      # MADV_SEQUENTIAL - Expect sequential access
+    Random          # MADV_RANDOM - Expect random access
+    WillNeed        # MADV_WILLNEED - Expect to access soon (prefault)
+    DontNeed        # MADV_DONTNEED - Don't expect to access soon
+
+# File opening options
+pub struct OpenOptions:
+    mode: MmapMode              # Access mode
+    async_loading: bool         # Enable async background loading
+    prefault: bool              # Prefault pages during load
+    advice: MmapAdvice          # Memory access pattern hint
+
+    # Create default options (read-only, no async)
+    pub fn new() -> OpenOptions:
+        return OpenOptions {
+            mode: MmapMode::ReadOnly,
+            async_loading: false,
+            prefault: false,
+            advice: MmapAdvice::Normal
+        }
+
+    # Set access mode
+    pub fn with_mode(mut self, mode: MmapMode) -> OpenOptions:
+        self.mode = mode
+        return self
+
+    # Enable async loading
+    pub fn with_async(mut self, enable: bool) -> OpenOptions:
+        self.async_loading = enable
+        return self
+
+    # Enable prefaulting
+    pub fn with_prefault(mut self, enable: bool) -> OpenOptions:
+        self.prefault = enable
+        return self
+
+    # Set access pattern advice
+    pub fn with_advice(mut self, advice: MmapAdvice) -> OpenOptions:
+        self.advice = advice
+        return self
+
+    # Get mmap protection flags (for sys_mmap)
+    pub fn get_prot_flags(self) -> i32:
+        # TODO: Map to actual PROT_* constants
+        # PROT_READ = 1, PROT_WRITE = 2
+        match self.mode:
+            case MmapMode::ReadOnly:
+                return 1  # PROT_READ
+            case MmapMode::ReadWrite:
+                return 3  # PROT_READ | PROT_WRITE
+            case MmapMode::CopyOnWrite:
+                return 3  # PROT_READ | PROT_WRITE
+
+    # Get mmap flags (for sys_mmap)
+    pub fn get_map_flags(self) -> i32:
+        # TODO: Map to actual MAP_* constants
+        # MAP_SHARED = 1, MAP_PRIVATE = 2
+        match self.mode:
+            case MmapMode::ReadOnly:
+                return 2  # MAP_PRIVATE
+            case MmapMode::ReadWrite:
+                return 1  # MAP_SHARED
+            case MmapMode::CopyOnWrite:
+                return 2  # MAP_PRIVATE
+
+# File I/O errors
+pub enum FileError:
+    NotFound(String)           # File not found at path
+    PermissionDenied(String)   # Permission denied for file
+    MmapFailed(String)         # mmap system call failed
+    InvalidUtf8                # File contents not valid UTF-8
+    OutOfBounds                # Slice operation out of bounds
+    AlreadyClosed              # Operation on closed file
+    IoError(String)            # Generic I/O error

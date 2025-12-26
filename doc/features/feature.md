@@ -1,7 +1,7 @@
 # Simple Language Features
 
 **Last Updated:** 2025-12-26
-**Recent Update:** Vulkan Font Rendering Complete (23/60 Vulkan, 7/10 UI) - GPU-accelerated text with texture atlas (~434 lines), TTF/OTF loading, cross-platform fonts (See [VULKAN_GUI_INTEGRATION_2025-12-26.md](../report/VULKAN_GUI_INTEGRATION_2025-12-26.md))
+**Recent Update:** Monoio Async Networking Complete (19/30, 63%) - High-performance io_uring runtime, TCP/UDP networking with zero-copy I/O, thread-per-core architecture (2-3x faster than Tokio). Foundation ready for async execution (~2,000 lines). (See [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md))
 
 ## Feature Table Format
 
@@ -32,71 +32,47 @@ All feature tables use this standardized 8-column format:
 
 | Range | Category | Status |
 |-------|----------|--------|
-| #1-#9 | Infrastructure (Lexer, Parser, AST, HIR, MIR, GC, Pkg, SMF) | ✅ Complete |
-| #10-#24 | Core Language (Types, Functions, Structs, Actors, Async) | ✅ Complete |
-| #25-#29 | Memory & Pointers | ✅ Complete |
-| #30-#49 | Type Inference, Associated Types, Effects | ✅ Complete |
-| #50-#56 | Union Types | ✅ Complete |
-| #60-#66 | Async State Machine | ✅ Complete |
-| #70-#74 | Interpreter Enhancements | ✅ Complete |
-| #95-#103 | Codegen (Outlining, Generators, LLVM) | ✅ Complete |
-| #110-#157 | Concurrency (Channels, Generators, Executor, Actors, Futures) | ✅ Complete |
-| #160-#172 | Pattern Matching | ✅ Complete |
-| #180-#197 | Testing - BDD & Doctest | ✅ Complete |
-| #200-#217 | Unit Types | ✅ Complete |
-| #220-#225 | Networking | ✅ Complete |
-| #230-#241 | Mock Library | ✅ Complete |
-| #250-#258 | CLI Features | ✅ Complete |
-| #300-#311 | GPU/SIMD (Vulkan/SPIR-V + CPU backends) | ✅ Complete |
-| #400-#406 | Contracts | ✅ Complete |
-| #510-#519 | UI Framework | ✅ Complete |
-| #520-#536 | Web Framework | ✅ Complete (17/17) |
-| #600-#610 | SDN + Gherkin DSL | ✅ Complete (11/11) |
-| #700-#713 | Database & Persistence (DB + SQP) | ✅ Complete (14/14) |
-| #800-#824 | Build & Linker Optimization | ✅ Complete (25/25) |
-| #825-#849 | Infrastructure & Dependencies | ✅ Complete |
-| #850-#879 | Simple Stdlib - Infra APIs | ✅ Complete (30/30) |
-| #880-#919 | LLM-Friendly Features | 📋 Planned |
-| #920-#935 | Test Coverage Infrastructure | ✅ Complete |
-| #936-#945 | Architecture Test Library | ✅ Complete |
-| #950-#970 | Formal Verification | ✅ Complete |
-| #980-#999 | Code Quality & Documentation | ✅ Complete |
+| #1-#879 | Core Infrastructure & Libraries | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
+| #880-#919 | LLM-Friendly Features | ✅ Complete → [feature_done_12.md](feature_done_12.md) |
+| #920-#999 | Testing & Quality Infrastructure | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1000-#1050 | AOP & Unified Predicates | ✅ Complete → [feature_done_11.md](feature_done_11.md) |
 | #1051-#1060 | SDN Self-Hosting | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
 | #1061-#1103 | Missing Language Features | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
-| #1104-#1115 | Concurrency Modes | ✅ Complete (12/12) |
-| #1116-#1130 | FFI/ABI Interface | ✅ Complete |
+| #1104-#1115 | Concurrency Modes | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
+| #1116-#1130 | FFI/ABI Interface | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1131-#1145 | Formatting & Lints | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
 | #1146-#1155 | Trait Coherence | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
 | #1156-#1179 | Tree-sitter Implementation | ✅ Complete (24/24) → [feature_done_13.md](feature_done_13.md) |
 | #1180-#1199 | Multi-Language Tooling | 🔄 In Progress (1/20, 5%) |
-| #1200-#1209 | Language Model Server | ✅ Complete (100% - Parser Pending) |
+| #1200-#1209 | Language Model Server | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1210-#1299 | MCP-MCP (Model Context Preview) | 🔄 Core + Server Complete (35/90) |
 | #1300-#1324 | Metaprogramming (Macros, DSL, Decorators) | ✅ Complete → [feature_done_11.md](feature_done_11.md) |
 | #1325-#1329 | Pattern Matching Safety | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
-| #1330-#1342 | Type System (Unions, Bitfields, HTTP) | ✅ Complete (13/13) |
+| #1330-#1342 | Type System (Unions, Bitfields, HTTP) | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1343-#1347 | Gherkin/BDD Extensions | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
-| #1348-#1358 | MCP-MCP Protocol Core | ✅ Complete (11/11) |
+| #1348-#1358 | MCP-MCP Protocol Core | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1359-#1368 | Developer Tools (LSP, DAP) | ✅ Complete (10/10) → [feature_done_13.md](feature_done_13.md) |
 | #1369-#1378 | UI Frameworks (TUI, GUI) | ✅ Complete (10/10, 100%) → [feature_done_17.md](feature_done_17.md) |
-| #1379-#1387 | Language Features (Context Managers, Primitives) | ✅ Complete (9/9) |
+| #1379-#1387 | Language Features (Context Managers, Primitives) | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1388-#1390 | Shared Infrastructure | ✅ Complete (3/3) → [feature_done_10.md](feature_done_10.md) |
 | #1391-#1395 | Advanced Contract Features | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
 | #1396-#1403 | Mock Library Fluent API | ✅ Complete (8/8) → [feature_done_10.md](feature_done_10.md) |
-| #1404-#1420 | Electron Desktop Apps | ✅ Complete (Non-UI: 3 modules + 50+ tests) |
-| #1421-#1440 | VSCode Extension Support | ✅ Complete (20/20, 100%) |
-| #1441-#1450 | LSP Tree-sitter Integration | ✅ Complete (10/10) |
+| #1404-#1420 | Electron Desktop Apps | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
+| #1421-#1440 | VSCode Extension Support | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
+| #1441-#1450 | LSP Tree-sitter Integration | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1450-#1509 | Vulkan GPU Backend | 🔄 In Progress (23/60, 38%) - Phase 1 & 2 Complete |
 | #1510 | While-With Context Manager Loop | ✅ Complete (1/1) |
 | #1520-#1589 | 3D Game Engine Integration (Godot/Unreal) | 📋 Planned (0/70) |
 | #1590-#1649 | Physics Engine Integration (Isaac Lab/Genesis) | 📋 Planned (0/60) |
 | #1650-#1729 | ML/PyTorch Integration | 📋 Planned (0/80) |
+| #1730-#1759 | Monoio Async Runtime | 🔄 In Progress (19/30, 63%) → [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) |
+| #1760-#1779 | Async Memory-Mapped File I/O | 🔄 In Progress (9/20, 45%) - Core FFI & Platform Support Complete |
 
 ---
 
 ## Summary Statistics
 
-**Overall Progress:** 54% (515/946 active features complete, 169 archived in feature_done_*.md, 60 Vulkan + 210 new features added)
+**Overall Progress:** 53% (515/976 active features complete, 169 archived in feature_done_*.md, 60 Vulkan + 240 new features added)
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -165,790 +141,11 @@ All feature tables use this standardized 8-column format:
 - Tests: `simple/std_lib/test/` (unit/, system/, integration/, fixtures/)
 - Legacy (to remove): `test/`, `lib/` directories
 
-**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md), [feature_done_10.md](feature_done_10.md), [feature_done_11.md](feature_done_11.md), [feature_done_12.md](feature_done_12.md)
+**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md), [feature_done_10.md](feature_done_10.md), [feature_done_11.md](feature_done_11.md), [feature_done_12.md](feature_done_12.md), [feature_done_13.md](feature_done_13.md), [feature_done_14.md](feature_done_14.md), [feature_done_15.md](feature_done_15.md), [feature_done_16.md](feature_done_16.md), [feature_done_17.md](feature_done_17.md), [feature_done_18.md](feature_done_18.md)
 
 ---
 
 ## Planned Features
-
-### LLM-Friendly Features (#880-919) ✅ → [feature_done_12.md](feature_done_12.md)
-
-**Status:** ✅ **COMPLETE** (40/40 features, 100%) - **Archived 2025-12-24**
-
-Features to make Simple optimized for LLM-assisted development, verification, and collaboration: capability-based effects, AST/IR export, context pack generator, property-based testing, snapshot testing, lint framework, canonical formatter, build & audit infrastructure, and sandboxed execution.
-
-**See [feature_done_12.md](feature_done_12.md) for complete details.**
-
----
-
-
-### Concurrency Modes (#1107-1118) ✅ **COMPLETE** (12/12)
-
-Safety modes for concurrency: actor (Erlang-style), lock_base (Rust-style), unsafe.
-
-**Total Implementation:** ~1,980 lines
-- Concurrent Collections: 810 lines (`infra/concurrent.spl`)
-- Synchronization Primitives: 563 lines (`infra/sync.spl`)
-- Atomic Types: 607 lines (`infra/atomic.spl`)
-
-**Documentation:**
-- [spec/language_enhancement.md](../spec/language_enhancement.md) - Section 4: Concurrency Modes
-- [examples/concurrency_modes.spl](../../examples/concurrency_modes.spl) - Complete examples
-- [report/CONCURRENCY_MODES_COMPLETE_2025-12-26.md](../report/CONCURRENCY_MODES_COMPLETE_2025-12-26.md) - Completion report
-
-#### Mode System (#1107-1110) ✅
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1107 | Actor mode (default) - Message passing | 3 | ✅ | S | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-| #1108 | Lock-base mode - Shared state with locks | 4 | ✅ | S | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-| #1109 | Unsafe mode - Manual control | 3 | ✅ | S | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-| #1110 | Mode attribute syntax `#[concurrency_mode(...)]` | 2 | ✅ | S | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-
-**Mode Comparison:**
-```
-+------------------------------------------------------------------+
-| Mode       | Shared State | mut T | Mutex | Atomic | Data Races  |
-+------------------------------------------------------------------+
-| actor      | ❌ No        | ❌    | ❌    | ❌     | Impossible  |
-| lock_base  | ✅ Yes       | ✅    | ✅    | ✅     | Runtime trap|
-| unsafe     | ✅ Yes       | ✅    | ✅    | ✅     | Undefined   |
-+------------------------------------------------------------------+
-```
-
-#### GC Support for Concurrent Collections (#1111-1113) ✅
-
-Native concurrent libraries with GC-managed objects. Uses crossbeam, dashmap, and mimalloc with GC write barriers.
-
-**Implementation:** 810 lines (`infra/concurrent.spl`)
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1111 | ConcurrentMap[K,V] with GC support | 4 | ✅ | S (810 lines) | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-| #1112 | ConcurrentQueue, ConcurrentStack | 3 | ✅ | S (concurrent.spl) | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-| #1113 | ConcurrentVec, ShardedMap | 3 | ✅ | S (concurrent.spl) | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-
-**Implementation Notes:**
-- Uses **dashmap** (Rust alternative to libcuckoo/libcds) for concurrent hash map
-- Uses **crossbeam::queue::SegQueue** (Rust alternative to moodycamel) for concurrent queue
-- Uses **parking_lot::Mutex** + Vec for concurrent stack (strict LIFO semantics)
-- Uses **mimalloc** (already in workspace) for fast allocation
-- All collections support GC write barriers via `TraceConcurrent` trait
-- 15+ tests passing in `src/runtime/src/concurrent/`
-
-**Example:**
-```simple
-#[concurrency_mode(lock_base)]
-mod gc_concurrent
-
-use infra.concurrent.ConcurrentMap
-
-struct User:
-    name: str
-    age: i64
-
-fn main():
-    let users = ConcurrentMap[str, User].new()
-    users.insert("alice", User(name: "Alice", age: 30))
-
-    spawn \:
-        let user = users.get("alice")
-        print(user.name)  # GC keeps object alive across threads
-```
-
-#### Synchronization Primitives (#1114-1116) ✅
-
-**Implementation:** 563 lines (`infra/sync.spl`)
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1114 | Mutex, RwLock, CondVar | 4 | ✅ | S (563 lines) | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-| #1115 | Once, Lazy, ThreadLocal | 3 | ✅ | S (sync.spl) | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-| #1116 | Barrier, Semaphore, Latch | 3 | ✅ | S (sync.spl) | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-
-#### Atomic Types (#1117-1118) ✅
-
-**Implementation:** 607 lines (`infra/atomic.spl`)
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1117 | AtomicInt with memory ordering | 4 | ✅ | S (607 lines) | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-| #1118 | AtomicBool, AtomicFlag | 3 | ✅ | S (atomic.spl) | [language_enhancement.md](../spec/language_enhancement.md) | `std_lib/test/infra/` | - |
-
----
-
-### Tree-sitter Implementation (#1156-1179) ✅ → [feature_done_13.md](feature_done_13.md)
-
-**Status:** ✅ **COMPLETE** (24/24 features) - **Archived 2025-12-25**
-
-Self-hosted tree-sitter parser in Simple language. All 8 phases complete with 9,910 lines of implementation and 478 tests.
-
-See [feature_done_13.md](feature_done_13.md) for complete details.
-
----
-
-### Multi-Language Tooling (#1180-1199) ✅
-
-Multi-language development tooling using Tree-sitter foundation. All 3 phases complete with 5,770 lines of implementation across 31 modules.
-
-See [feature_done_14.md](feature_done_14.md) for complete details.
-
----
-
-### Language Model Server (#1200-1209) ✅
-
-Server infrastructure for handling Model Context Protocol (Anthropic) requests and multi-language tooling integration.
-
-**🎯 SELF-HOSTED: Language Server implemented in Simple language**
-
-**Current Status:** ✅ 100% Complete (10/10 features)
-- ✅ **Code Complete:** ~1,900 lines across 10 files
-- ✅ **All Features:** Transport, protocol, error handling, session, workspace, incremental, auth, server, CLI
-- ⏳ **Parser Blocked:** Cannot compile - requires 6 parser features (see [improve_request.md](../../simple/improve_request.md))
-- 📊 **Reports:**
-  - [LMS_IMPLEMENTATION_2025-12-25.md](../report/LMS_IMPLEMENTATION_2025-12-25.md) - Initial implementation
-  - [LMS_FEATURES_COMPLETE_2025-12-25.md](../report/LMS_FEATURES_COMPLETE_2025-12-25.md) - All features complete
-
-**Documentation:**
-- [spec/basic_mcp.md](../spec/basic_mcp.md) - MCP-MCP Protocol Specification
-- [plans/llm_friendly.md](../plans/llm_friendly.md) - Implementation Plan
-- [improve_request.md](../../simple/improve_request.md) - Parser features needed
-
-**Key Features:**
-- JSON-RPC transport layer for Model Context Protocol (Anthropic MCP)
-- Session management and caching
-- Multi-file workspace handling
-- Incremental update support
-- Authentication and authorization
-
-**Prerequisites:**
-- Tree-sitter implementation (#1156-1179) - ✅ Complete
-- Multi-language tooling (#1180-1199) - 📋 Planned
-- **Parser features:** Match expressions, return type annotations, generics, enum variants, qualified calls, struct literals
-
-**Implementation:**
-- Language: **Simple** (self-hosted)
-- Location: `simple/std_lib/src/lms/` (10 files, 1,900+ lines)
-- Alternative: `simple/std_lib/src/lms_simple/` (simplified working version for demo)
-
-**New in Phase 2:**
-- `workspace.spl` - Multi-file workspace with dependency tracking (220 lines)
-- `incremental.spl` - Incremental update support with change buffering (250 lines)
-- `auth.spl` - Authentication & authorization with RBAC (280 lines)
-
-#### Language Model Server Core (#1200-1209)
-
-Core server infrastructure for handling Model Context Protocol (Anthropic) requests.
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1200 | Language model server protocol | 4 | 🔄 | S (196 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1201 | JSON-RPC transport layer | 3 | ✅ | S (119 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1202 | Request/response handling | 3 | ✅ | S (423 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1203 | Session management | 3 | ✅ | S (77 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1204 | Error handling & diagnostics | 2 | ✅ | S (80 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1205 | Caching layer for MCP-MCP views | 4 | ✅ | S (220 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1206 | Incremental update support | 4 | ✅ | S (250 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1207 | Multi-file workspace handling | 3 | ✅ | S (220 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1208 | Authentication & authorization | 3 | ✅ | S (280 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-| #1209 | Server CLI (`simple lms start`) | 2 | ✅ | S (44 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/lms/` | Parser blocked |
-
-**Example:**
-```bash
-# Start language model server
-simple lms start --port 8080
-
-# Server handles Model Context Protocol (Anthropic) requests over JSON-RPC
-```
-
----
-
-### MCP-MCP (Model Context Preview) (#1210-1299) ✅ **COMPLETE** (90/90)
-
-Model Context Preview protocol for LLM-optimized code understanding with collapsed outline format.
-**Now includes full MCP server mode** supporting Anthropic's Model Context Protocol over stdio.
-
-**🎯 SELF-HOSTED: MCP-MCP implementation in Simple language**
-
-**Total Implementation:** ~6,009 lines across all modules
-- Core features (Simple language): 4,500 lines ✅
-- Multi-language support (7 languages): 991 lines ✅
-- Tooling integration: 182 lines ✅
-- Advanced features: 336 lines ✅
-
-**Documentation:**
-- [spec/basic_mcp.md](../spec/basic_mcp.md) - MCP-MCP Specification v1.0
-- [guides/llm_friendly.md](../guides/llm_friendly.md) - LLM Quality Contract
-
-**Key Benefits:**
-- 90%+ token reduction via collapsed outline format
-- **MCP Server Mode** - Full stdio transport with JSON-RPC 2.0
-- Multi-language support (Simple, Rust, Python, Ruby, Erlang, etc.)
-- Progressive disclosure (expand on demand)
-- Virtual information (auto traits, AOP, coverage)
-- Single JSON field format for minimal overhead
-- Integrated compile/test/deploy tooling
-
-**Interpreter Support (2025-12-26):**
-- Stdio extern functions: `stdin_read_char`, `stdout_write`, `stdout_flush`, `stderr_write`, `stderr_flush`
-- System extern functions: `sys_get_args`, `sys_exit`
-- Command-line argument passing to Simple programs
-- Implemented in `src/compiler/src/interpreter_extern.rs`
-
-**MCP Server Usage:**
-```bash
-# Start MCP server (for use with Claude Code, etc.)
-simple mcp server
-
-# Start with debug logging
-simple mcp server --debug
-
-# CLI mode (direct file preview)
-simple mcp user.spl
-
-# Run with arguments
-simple app.spl arg1 arg2
-```
-
-**Prerequisites:**
-- Language Model Server (#1200-1209) - Protocol transport layer
-- Tree-sitter implementation (#1156-1179) - Multi-language parsing
-- Multi-language tooling (#1180-1199) - Compile/test/deploy integration
-
-**Implementation:**
-- Language: **Simple** (self-hosted)
-- Location: `simple/std_lib/src/mcp/` (MCP-MCP implementation)
-- Server: `simple/app/mcp/main.spl` (MCP server entry point)
-- JSON: `simple/std_lib/src/core/json.spl` (JSON parser/serializer)
-
-#### MCP-MCP Core Features - Simple Language (#1210-1229) ✅ **20/20 COMPLETE**
-
-Core MCP-MCP protocol implementation for Simple/Basic language folding - refactored as reusable library framework.
-
-**Implementation:** ~4,500 lines total
-- Core library: 1,308 lines (`mcp/core/`)
-- Simple_lang: 1,167 lines (`mcp/simple_lang/`)
-- **JSON parser/serializer: 450 lines** (`core/json.spl`) - NEW
-- **MCP transport: 400 lines** (`mcp/core/transport.spl`) - NEW
-- **MCP server: 300 lines** (`mcp/core/server.spl`) - NEW
-- CLI: 358 lines (`app/mcp/main.spl`) - Updated with server mode
-- Examples: 77 lines, Docs: 383 lines, Tests: 137 lines
-
-**Location:** `simple/std_lib/src/mcp/` (core/, simple_lang/, examples/), `simple/std_lib/src/core/json.spl`, `simple/app/mcp/`
-**Status:** ✅ Core protocol + interpreter support complete. Ready for testing.
-
-**Completed (2025-12-26):**
-- ✅ Rust interpreter extern functions: `stdin_read_char`, `stdout_write`, `stdout_flush`, `stderr_write`, `stderr_flush`
-- ✅ System extern functions: `sys_get_args`, `sys_exit`
-- ✅ Command-line argument passing infrastructure
-- ✅ Lambda syntax refactoring: Converted `fn(args) -> T:` to handler classes with `\args: handler.handle(args)`
-- ✅ MCP server code refactored (server.spl, main.spl) - uses handler class pattern
-- ✅ TextToolWrapper class for simple string-returning handlers
-- ✅ 5 handler classes: ReadCodeHandler, ExpandSymbolHandler, SearchSymbolsHandler, ListFilesHandler, FileInfoHandler
-
-**Resolved Issues:**
-- Lambda syntax fixed: Handler classes with `\args: handler.handle(args)` pattern
-- Parser limitation worked around: Classes with fields capture closures properly
-**Completion Reports:**
-- [MCP_IMPLEMENTATION_SUMMARY_2025-12-26.md](../report/MCP_IMPLEMENTATION_SUMMARY_2025-12-26.md) - Initial implementation
-- [MCP_LIBRARY_REFACTORING_2025-12-26.md](../report/MCP_LIBRARY_REFACTORING_2025-12-26.md) - Library refactoring
-- **MCP Server Mode:** JSON-RPC 2.0 over stdio, Content-Length framing, tool registration (read_code, expand_symbol, search_symbols, list_files, file_info)
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1210 | Block-mark notation (`C>`, `F>`, `T>`, `P>`, `V•`) | 3 | ✅ | S (types.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1211 | Collapsed outline generation | 4 | ✅ | S (formatter.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1212 | Public API filtering | 2 | ✅ | S (parser.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1213 | `read_file(path, mode="mcp")` tool | 3 | ✅ | S (api.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1214 | `expand_at(selector, what)` tool | 4 | ✅ | S (api.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1215 | `goto_definition(symbol)` tool | 3 | ✅ | S (api.spl stub) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1216 | `search(query, filter)` tool | 4 | ✅ | S (api.spl stub) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1217 | Signature shrinking (params/return types) | 3 | ✅ | S (parser.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1218 | Body collapsing (`{ … }` inline) | 2 | ✅ | S (formatter.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1219 | Class/struct member shrinking | 3 | ✅ | S (parser.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1220 | Virtual information extraction | 4 | ✅ | S (formatter.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1221 | Auto trait detection (`Send`, `Sync`) | 3 | ✅ | S (formatter.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1222 | AOP pointcut exposure | 3 | ✅ | S (parser.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1223 | JSON output format (single `text` field) | 2 | ✅ | S (formatter.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1224 | Markdown document folding | 3 | ✅ | S (core/markdown.spl 278 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1225 | Log collapsing (INFO/WARN/ERROR counts) | 3 | ✅ | S (core/logs.spl 228 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1226 | Diagnostic grouping | 3 | ✅ | S (core/diagnostics.spl 260 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1227 | `simple mcp <file>` CLI | 2 | ✅ | S (main.spl 173 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1228 | `--expand <symbol>` flag | 2 | ✅ | S (main.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1229 | `--show-coverage` flag | 2 | ✅ | S (main.spl + coverage.spl) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-
-**Completion Reports:**
-- [MCP_MCP_COMPLETE_2025-12-26.md](../report/MCP_MCP_COMPLETE_2025-12-26.md) - **COMPLETE: All 90 features (6,009 lines)**
-- [MCP_IMPLEMENTATION_SUMMARY_2025-12-26.md](../report/MCP_IMPLEMENTATION_SUMMARY_2025-12-26.md) - Initial implementation
-- [MCP_LIBRARY_REFACTORING_2025-12-26.md](../report/MCP_LIBRARY_REFACTORING_2025-12-26.md) - Library refactoring
-
-**Example:**
-```bash
-# Generate MCP-MCP outline
-simple mcp app.spl
-# Output: { "text": "C> pub class User { … }\nF> pub fn login { … }" }
-
-# Expand specific symbol
-simple mcp app.spl --expand UserService --what=all
-```
-
-#### MCP-MCP Multi-Language Support (#1230-1259) ✅ **30/30 COMPLETE**
-
-MCP-MCP support for multiple programming languages using Tree-sitter.
-
-**Implementation:** 991 lines total
-- Infrastructure & base types: 283 lines (`multi_lang/__init__.spl`)
-- Rust provider: 407 lines (`multi_lang/rust.spl`)
-- Python provider: 99 lines (`multi_lang/python.spl`)
-- JavaScript/TypeScript provider: 82 lines (`multi_lang/javascript.spl`)
-- Go provider: 30 lines (`multi_lang/go.spl`)
-- C/C++ provider: 30 lines (`multi_lang/c.spl`)
-- Ruby provider: 30 lines (`multi_lang/ruby.spl`)
-- Erlang provider: 30 lines (`multi_lang/erlang.spl`)
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1230 | Rust language MCP-MCP folding | 4 | ✅ | S (407 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/rust/` | - |
-| #1231 | Python language MCP-MCP folding | 4 | ✅ | S (99 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/python/` | - |
-| #1232 | Ruby language MCP-MCP folding | 4 | ✅ | S (30 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/ruby/` | - |
-| #1233 | Erlang language MCP-MCP folding | 4 | ✅ | S (30 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/erlang/` | - |
-| #1234 | JavaScript/TypeScript MCP-MCP folding | 4 | ✅ | S (82 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/js/` | - |
-| #1235 | Go language MCP-MCP folding | 4 | ✅ | S (30 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/go/` | - |
-| #1236 | C/C++ language MCP-MCP folding | 4 | ✅ | S (30 lines) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/c/` | - |
-| #1237 | Language-specific virtual info | 4 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1238 | Cross-language workspace | 4 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1239 | Language auto-detection | 3 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1240 | Multi-language search | 4 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1241 | Language-specific folding rules | 4 | ✅ | S (providers) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1242 | Polyglot symbol resolution | 5 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1243 | Foreign function interface folding | 4 | ✅ | S (providers) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1244 | Language interop visualization | 4 | ✅ | S (advanced) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1245 | Custom language plugin system | 5 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1246 | Language-specific diagnostics | 4 | ✅ | S (providers) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1247 | Multi-language coverage overlay | 4 | ✅ | S (advanced) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1248 | Language conversion suggestions | 4 | ✅ | S (providers) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1249 | Polyglot refactoring tools | 5 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1250 | Multi-language snippet extraction | 3 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1251 | Language-specific context packs | 4 | ✅ | S (advanced) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1252 | Polyglot documentation generation | 4 | ✅ | S (providers) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1253 | Cross-language dependency tracking | 5 | ✅ | S (advanced) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1254 | Language benchmark comparisons | 4 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1255 | Multi-language test correlation | 4 | ✅ | S (tooling) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1256 | Polyglot profiling integration | 4 | ✅ | S (advanced) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1257 | Language migration assistance | 5 | ✅ | S (multi_lang) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1258 | Multi-language style enforcement | 4 | ✅ | S (providers) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1259 | Polyglot security scanning | 5 | ✅ | S (providers) | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-
-**Example:**
-```bash
-# MCP-MCP folding for Rust code
-simple mcp main.rs --lang rust
-
-# Multi-language workspace
-simple mcp . --languages rust,python,simple
-
-# Cross-language search
-simple mcp --search "fn main" --languages all
-```
-
-#### MCP-MCP Tooling Integration (#1260-1279) ✅ **20/20 COMPLETE**
-
-Integration with compile, test, and deploy tools.
-
-**Implementation:** 182 lines (`mcp/tooling.spl`)
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1260 | `run_compile(target, flags)` tool | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1261 | `run_test(filter, parallel)` tool | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1262 | `run_deploy(target, config)` tool | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1263 | `read_task_log(task_id, group)` tool | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1264 | Task progress monitoring | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1265 | Build artifact inspection | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1266 | Test result visualization | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1267 | Deployment status tracking | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1268 | Error recovery & retry | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1269 | Pipeline configuration | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1270 | Incremental build support | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1271 | Test impact analysis | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1272 | Deployment rollback | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1273 | Build cache management | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1274 | Test parallelization | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1275 | Deployment health checks | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1276 | Build optimization suggestions | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1277 | Test coverage integration | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1278 | Deployment metrics | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1279 | CI/CD pipeline integration | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-
-#### MCP-MCP Advanced Features (#1280-1299) ✅ **20/20 COMPLETE**
-
-Advanced MCP-MCP features for optimization and extensibility.
-
-**Implementation:** 336 lines (`mcp/advanced.spl`)
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1280 | Coverage overlay integration | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1281 | Block guide markers (`V• end`) | 2 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1282 | Line number formatting (plain/zpad) | 2 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1283 | Context pack integration | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1284 | Dependency symbol extraction | 5 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1285 | Minimal context bundling | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1286 | Diff mode (changed symbols only) | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1287 | Blame integration (author/commit info) | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1288 | Cross-reference inlining (call sites) | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1289 | Binary protobuf format | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1290 | Streaming incremental MCP-MCP | 5 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1291 | Semantic highlighting tokens | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1292 | MCP-MCP view caching & invalidation | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1293 | Workspace-wide symbol index | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1294 | Smart symbol filtering (relevance) | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1295 | MCP-MCP metadata customization | 2 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1296 | Performance profiling for MCP-MCP | 3 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1297 | Plugin architecture for MCP-MCP | 5 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1298 | MCP-MCP transformation pipeline | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-| #1299 | Custom MCP-MCP output formats | 4 | ✅ | S | [basic_mcp.md](../spec/basic_mcp.md) | `std_lib/test/mcp/` | - |
-
-**Example:**
-```bash
-# Extract minimal context pack (90% token reduction)
-simple context app.service --format=mcp > context.json
-
-# Generate MCP-MCP with coverage
-simple mcp app.spl --show-coverage
-
-# Diff mode (changed symbols)
-simple mcp app.spl --diff main..HEAD
-
-# Multi-language compile + test + deploy
-simple mcp --compile --test --deploy --languages rust,python
-```
-
-**MCP-MCP Summary:**
-- Token reduction: 90%+ via collapsed outline format
-- Block marks: `C>`, `F>`, `T>`, `P>`, `V•` for structure
-- Format: Single JSON `text` field for LLM efficiency
-- Disclosure: Progressive via tool calls (not inline hints)
-- Virtual info: Auto traits, AOP, coverage overlay
-- Languages: Simple, Rust, Python, Ruby, Erlang, Go, C/C++, JS/TS
-- Tooling: Compile, test, deploy via MCP-MCP protocol
-
-**Implementation Locations:**
-- Language Server: `simple/std_lib/src/lms/` (self-hosted in Simple)
-- MCP-MCP Core: `simple/std_lib/src/mcp/` (self-hosted in Simple)
-- Tree-sitter: `simple/std_lib/src/treesitter/` (self-hosted in Simple)
-- Multi-lang Tooling: `simple/std_lib/src/tooling/` (self-hosted in Simple)
-
-**Related Features:**
-- #1200-1209: Language Model Server (protocol transport)
-- #1156-1179: Tree-sitter Implementation (parsing)
-- #1180-1199: Multi-Language Tooling (compile/test/deploy)
-- #890-893: Context Pack Generator (LLM-Friendly)
-- #885-889: AST/IR Export (LLM-Friendly)
-
-### Metaprogramming (#1300-1324) ✅ → [feature_done_11.md](feature_done_11.md)
-
-**Status:** ✅ **COMPLETE** (25/25 features) - **Archived 2025-12-23**
-
-Advanced metaprogramming: contract-first macros, DSL support, decorators, comprehensions, pattern matching enhancements.
-
-**See [feature_done_11.md](feature_done_11.md#metaprogramming-1300-1324-) for complete details.**
-
----
-
-### Pattern Matching Safety (#1325-1329) ✅ → [feature_done_10.md](feature_done_10.md)
-
-**Status:** ✅ **COMPLETE** (5/5 features, 750+ lines, 18 tests) - **Archived 2025-12-23**
-
-Rust-level match safety guarantees: exhaustiveness checking, unreachable arm detection, tagged union support, strong enum enforcement, pattern subsumption analysis.
-
-**See [feature_done_10.md](feature_done_10.md) for complete details.**
-
----
-
-
-### Gherkin/BDD Extensions (#1343-1347) ✅ → [feature_done_10.md](feature_done_10.md)
-
-**Status:** ✅ **COMPLETE** (5/5 features) - **Archived 2025-12-23**
-
-Extended Gherkin DSL: examples tables, context steps, scenario outlines, parameterized contexts, multi-format docstrings.
-
-**See [feature_done_10.md](feature_done_10.md#gherkin-bdd-extensions-1343-1347-) for complete details.**
-
----
-
-### MCP-MCP Protocol Core Features (#1348-1358) ✅
-
-Core MCP-MCP protocol with token-efficient code representation and full Anthropic MCP server mode. 4,500 lines of implementation with block-mark notation, progressive disclosure, and JSON-RPC 2.0 over stdio.
-
-See [feature_done_16.md](feature_done_16.md) for complete details.
-
----
-
-### Developer Tools (#1359-1368) ✅ → [feature_done_13.md](feature_done_13.md)
-
-**Status:** ✅ **COMPLETE** (10/10 features) - **Archived 2025-12-25**
-
-Language Server Protocol (LSP) and Debug Adapter Protocol (DAP) implementation in Simple language. 1,550+ lines of LSP implementation with 112 tests, 1,017 lines of DAP implementation with 270+ tests.
-
-See [feature_done_13.md](feature_done_13.md) for complete details.
-
----
-
-
-### UI Frameworks (#1369-1378) ✅ → [feature_done_17.md](feature_done_17.md)
-
-**Status:** ✅ **COMPLETE** (10/10 features, 100%) - **Archived 2025-12-26**
-
-Production-ready unified UI framework with builder pattern widgets, reactive state management, event system, and multi-platform renderers (Terminal, Browser, VSCode, Electron, Vulkan GPU). ~450 KB across 40+ modules.
-
-**Implementation:**
-- ✅ Terminal UI (5/5): Widget system, layout engine, event handling, styling, screen management
-- ✅ Browser/Electron GUI (5/5): Immediate mode GUI, native widgets, web-based GUI, hot reload, cross-platform rendering with Vulkan GPU backend
-
-**Key Features:**
-- Builder pattern API with method chaining
-- Reactive state: State[T], Computed[T], Signal[T], Effect
-- Multi-platform renderers: TUI, Browser, VSCode, Electron, Vulkan
-- Comprehensive widget library: Button, TextField, Checkbox, Select, Slider, RadioGroup, Text, Icon, Image, Badge, ProgressBar, Divider
-- Layout widgets: Column, Row, Stack, Container, Grid, Spacer
-- Example: `simple/std_lib/examples/ui_todo_app.spl` (145 lines)
-
-**See [feature_done_17.md](feature_done_17.md#ui-frameworks-1369-1378--all-phases-complete) for complete details.**
-
----
-
-
-### Shared Infrastructure (#1388-1390) ✅ → [feature_done_10.md](feature_done_10.md)
-
-**Status:** ✅ **COMPLETE** (3/3 features) - **Archived 2025-12-23**
-
-Cross-crate diagnostic infrastructure: moved Diagnostic to common, cross-crate support, structured error reporting.
-
-**See [feature_done_10.md](feature_done_10.md#shared-infrastructure-1388-1390-) for complete details.**
-
----
-
-### Advanced Contract Features (#1391-1395) ✅ → [feature_done_10.md](feature_done_10.md)
-
-**Status:** ✅ **COMPLETE** (5/5 features, 27 tests, 89% pass rate) - **Archived 2025-12-23**
-
-Extended contracts: `in:`, `out:`, `out_err:`, `old()`, `invariant:`. Parser, MIR, Codegen complete. 27 integration tests.
-
-**See [feature_done_10.md](feature_done_10.md#advanced-contract-features-1391-1395-) for complete details.**
-
-**Phase 2 Extension:** Class Invariants ✅ **COMPLETE** (2025-12-23)
-- Constructor invariant checks (automatic detection of factory methods)
-- Public method invariant checks (entry + exit)
-- Private method optimization (skip checks)
-- 18 tests (17 passing, 94%)
-- 56 lines production code, 482 lines tests
-- See [CLASS_INVARIANTS_COMPLETE.md](../../CLASS_INVARIANTS_COMPLETE.md)
-
----
-
-### Mock Library Fluent API (#1396-1403) ✅ → [feature_done_10.md](feature_done_10.md)
-
-**Status:** ✅ **COMPLETE** (8/8 features, 700+ lines, 19 tests) - **Archived 2025-12-23**
-
-RSpec/Mockito-style fluent API: MockSetup, Spy, chainable expectations, flexible matchers, call verification, deep call chains.
-
-**See [feature_done_10.md](feature_done_10.md#mock-library-fluent-api-1396-1403-) for complete details.**
-
----
-
-### Electron Desktop Apps (#1404-#1420)
-
-**Status:** ✅ **COMPLETE** (Non-UI: 3/3 core modules + comprehensive E2E tests) - Headless apps and background workers
-
-Electron support for building desktop applications with Simple. Complete implementation of non-UI features (file watching, worker pools, JSON parsing) with 88 comprehensive E2E system tests using Playwright and @vscode/test-electron.
-
-**Completed Implementations:**
-- ✅ File System Watcher (`fs_watcher.spl` - 161 lines) - Event-driven file/directory watching
-- ✅ Background Worker Pool (`worker.spl` - 246 lines) - Multi-threaded task execution
-- ✅ Enhanced JSON Parser (`core/json.spl` - 360 lines) - Full parser/serializer
-- ✅ Electron Playwright Tests (4 suites, 50+ tests) - System monitor, IPC, FS watching, workers
-- ✅ VSCode Extension Tests (4 suites, 38+ tests) - Diagnostics, code actions, language features
-- ✅ CI/CD Workflows (2 workflows) - Multi-platform automated testing (Ubuntu, macOS, Windows)
-
-**See:** [ELECTRON_DESKTOP_COMPLETION_2025-12-26.md](../report/ELECTRON_DESKTOP_COMPLETION_2025-12-26.md) for complete implementation report.
-
-Electron support for building desktop applications with Simple WASM modules. Focuses on headless/background workers, system tray apps, and native integrations without UI framework dependencies.
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1404 | Main process WASM loader | 3 | 📋 | S+R | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | `src/driver/tests/electron/` |
-| #1405 | Renderer process WASM loader | 3 | 📋 | S+R | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | `src/driver/tests/electron/` |
-| #1406 | Node.js FFI bridge for WASM | 4 | 📋 | S+R | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | `src/driver/tests/electron/` |
-| #1407 | IPC WASM message handlers | 3 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1408 | Native module integration (N-API) | 4 | 📋 | S+R | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | `src/driver/tests/electron/` |
-| #1409 | System tray app support | 3 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1410 | Background worker pool | 4 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1411 | File system watcher integration | 3 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1412 | `simple electron build` CLI | 3 | 📋 | R | [electron_support.md](../spec/electron_support.md) | - | `src/driver/tests/electron/` |
-| #1413 | `simple electron package` CLI | 3 | 📋 | R | [electron_support.md](../spec/electron_support.md) | - | `src/driver/tests/electron/` |
-| #1414 | Electron manifest generation | 2 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1415 | Auto-updater WASM integration | 3 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1416 | Native notifications from WASM | 2 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1417 | Global shortcuts handler | 2 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1418 | Power monitor integration | 2 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1419 | Clipboard access from WASM | 2 | 📋 | S | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | - |
-| #1420 | Electron testing framework | 4 | 📋 | S+R | [electron_support.md](../spec/electron_support.md) | `std_lib/test/electron/` | `src/driver/tests/electron/` |
-
-**Example Use Cases:**
-```simple
-# System tray monitor app (headless)
-import electron.tray
-import electron.power
-
-fn main():
-    tray = Tray.new("System Monitor")
-    tray.setIcon("icon.png")
-
-    power.onBatteryLow(fn():
-        tray.showNotification("Battery Low", "Please plug in")
-    )
-
-    electron.run()
-```
-
-**Build & Package:**
-```bash
-# Build WASM for Electron
-simple electron build monitor.spl -o dist/
-
-# Package for distribution
-simple electron package dist/ --platform all --arch x64,arm64
-# Output: monitor-1.0.0-win.exe, monitor-1.0.0-mac.dmg, monitor-1.0.0-linux.AppImage
-```
-
----
-
-### VSCode Extension Support (#1421-#1440)
-
-**Status:** ✅ **MOSTLY COMPLETE** (14/20 features, 70%) - Editor plugins and language tools
-
-VSCode extension support for building editor plugins with Simple. Complete E2E test infrastructure with @vscode/test-electron covering diagnostics, code actions, language features, and extension lifecycle.
-
-**Completed Test Infrastructure:**
-- ✅ Diagnostics Tests (8 tests) - Diagnostic collections, severities, updates, clearing
-- ✅ Code Actions Tests (11 tests) - Quick fixes, refactoring, formatting, status bar
-- ✅ Language Features Tests (13 tests) - Definition, references, symbols, signature help
-- ✅ Extension Tests (6 tests) - Activation, commands, completion, hover providers
-- ✅ CI/CD Workflow - Multi-platform testing with packaging and integration tests
-
-**See:** [ELECTRON_DESKTOP_COMPLETION_2025-12-26.md](../report/ELECTRON_DESKTOP_COMPLETION_2025-12-26.md) for test implementation details.
-
-VSCode extension support for building editor plugins with Simple WASM. Focuses on language servers, code actions, custom commands, and background processing without UI dependencies.
-
-| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
-|------------|---------|------------|--------|------|-----|--------|--------|
-| #1421 | Extension manifest generator | 2 | 🔄 | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1422 | WASM language server protocol | 4 | 📋 | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1423 | Command registration API | 2 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1424 | Document provider (virtual files) | 3 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1425 | Code action provider | 3 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1426 | Diagnostics publisher | 3 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1427 | Completion provider (WASM-based) | 4 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1428 | Hover provider | 2 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1429 | Go-to-definition provider | 3 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1430 | Tree view provider (file explorer) | 3 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1431 | Status bar integration | 2 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1432 | Configuration API | 2 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1433 | Task provider (build tasks) | 3 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1434 | Debug adapter protocol (DAP) | 5 | 📋 | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1435 | Terminal integration | 2 | ✅ | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1436 | `simple vscode build` CLI | 3 | 🔄 | R | [vscode_extension.md](../spec/vscode_extension.md) | - | `src/driver/tests/vscode/` |
-| #1437 | `simple vscode package` CLI (vsix) | 3 | ✅ | R | [vscode_extension.md](../spec/vscode_extension.md) | - | `src/driver/tests/vscode/` |
-| #1438 | Extension testing framework | 4 | ✅ | S+R | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | `src/driver/tests/vscode/` |
-| #1439 | Webview WASM loader | 3 | 📋 | S | [vscode_extension.md](../spec/vscode_extension.md) | `std_lib/test/vscode/` | - |
-| #1440 | Extension marketplace publisher | 3 | ✅ | R | [vscode_extension.md](../spec/vscode_extension.md) | - | `src/driver/tests/vscode/` |
-
-**Example Use Cases:**
-
-```simple
-# Language server extension (headless)
-import vscode
-
-fn activate(context: ExtensionContext):
-    # Register language features
-    vscode.languages.registerCompletionProvider("simple", {
-        provideCompletionItems: fn(document, position):
-            # WASM-based completion logic
-            return [
-                CompletionItem.new("fn", CompletionItemKind.Keyword),
-                CompletionItem.new("let", CompletionItemKind.Keyword)
-            ]
-    })
-
-    vscode.languages.registerHoverProvider("simple", {
-        provideHover: fn(document, position):
-            word = document.getWordRangeAtPosition(position)
-            # Look up symbol documentation
-            return Hover.new("Function definition...")
-    })
-
-    context.subscriptions.push(provider)
-
-fn deactivate():
-    # Cleanup
-    pass
-```
-
-```simple
-# Code action provider (auto-fix)
-import vscode
-
-fn activate(context: ExtensionContext):
-    provider = vscode.languages.registerCodeActionsProvider("simple", {
-        provideCodeActions: fn(document, range, context):
-            actions = []
-
-            for diagnostic in context.diagnostics:
-                if diagnostic.code == "unused-variable":
-                    action = CodeAction.new("Remove unused variable")
-                    action.edit = WorkspaceEdit.new()
-                    action.edit.delete(document.uri, diagnostic.range)
-                    actions.append(action)
-
-            return actions
-    })
-
-    context.subscriptions.push(provider)
-```
-
-**Build & Package:**
-```bash
-# Build extension WASM
-simple vscode build my-extension.spl -o dist/
-
-# Generate package.json manifest
-# Output: package.json with activationEvents, contributes, etc.
-
-# Package as .vsix
-simple vscode package dist/ --name my-extension --version 1.0.0
-# Output: my-extension-1.0.0.vsix
-
-# Publish to marketplace
-simple vscode publish my-extension-1.0.0.vsix --token <pat>
-```
-
-**Key Advantages:**
-- ✅ **Performance**: WASM for CPU-intensive language analysis
-- ✅ **Safety**: Memory-safe code processing
-- ✅ **Cross-platform**: Single codebase for all platforms
-- ✅ **Type-safe**: Compile-time validation of extension logic
-- ✅ **Headless**: No UI dependencies, pure background processing
-
----
-
-### LSP Tree-sitter Integration (#1441-#1450) ✅
-
-Complete LSP implementation with Tree-sitter semantic tokens for VSCode. 990 lines of implementation with highlight queries, VSCode extension, and full LSP capabilities.
-
-See [feature_done_15.md](feature_done_15.md) for complete details.
-
----
 
 ### Vulkan GPU Backend (#1450-#1509) 🔄
 
@@ -1379,6 +576,132 @@ Complete PyTorch integration for machine learning in Simple. Uses LibTorch C++ A
 
 ---
 
+## Monoio Async Runtime Integration (#1730-#1759)
+
+**Purpose:** High-performance async runtime based on io_uring
+**Library:** [monoio](https://github.com/bytedance/monoio) by ByteDance (TikTok)
+**Architecture:** Thread-per-core with native io_uring support
+**Performance:** 2-3x faster than Tokio on multi-core (16 cores)
+**Research:** [monoio_runtime_integration.md](../research/monoio_runtime_integration.md)
+**Implementation:** [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md)
+**Status:** 🔄 In Progress (19/30, 63%) - Foundation complete, runtime integration pending
+
+### Core Runtime (#1730-#1739) - 8/10 Complete
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1730 | monoio dependency integration | 2 | ✅ | R | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | - | `src/runtime/src/monoio_runtime.rs` |
+| #1731 | Thread-per-core runtime init | 3 | ✅ | R | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/runtime.spl` | `src/runtime/src/monoio_runtime.rs:163` |
+| #1732 | Runtime configuration (cores, entries) | 2 | ✅ | R+S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/runtime.spl` | `src/runtime/src/monoio_runtime.rs:95,103` |
+| #1733 | io_uring driver initialization | 3 | 🔄 | R | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | - | `src/runtime/src/monoio_runtime.rs:22` |
+| #1734 | Fallback to epoll/kqueue | 3 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | - | - |
+| #1735 | Task spawning (monoio::spawn) | 2 | 🔄 | R | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/runtime.spl:88` | `src/runtime/src/monoio_runtime.rs:49` |
+| #1736 | Task local storage support | 2 | ✅ | R | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | - | `src/runtime/src/monoio_runtime.rs:12` |
+| #1737 | Timer support (sleep, timeout) | 2 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | - | - |
+| #1738 | Interval timers | 2 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | - | - |
+| #1739 | Runtime shutdown & cleanup | 3 | ✅ | R | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/runtime.spl:56` | `src/runtime/src/monoio_runtime.rs:76,87` |
+
+### File I/O with monoio (#1740-#1744) - 0/5 (Deferred)
+
+**Note:** File I/O deferred - current mmap approach provides superior performance for compilation workloads (see [io_uring_vs_mmap_performance.md](../research/io_uring_vs_mmap_performance.md))
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1740 | File open/create (ownership transfer) | 3 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | `std_lib/test/unit/io/` | `src/runtime/tests/` |
+| #1741 | File read/write (rent model) | 3 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | `std_lib/test/unit/io/` | `src/runtime/tests/` |
+| #1742 | File read_at/write_at (positioned) | 3 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | `std_lib/test/unit/io/` | `src/runtime/tests/` |
+| #1743 | File sync (fsync, datasync) | 2 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | `std_lib/test/unit/io/` | `src/runtime/tests/` |
+| #1744 | File metadata operations | 2 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | `std_lib/test/unit/io/` | `src/runtime/tests/` |
+
+### Network I/O with monoio (#1745-#1749) - 5/5 Complete
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1745 | TCP listener (bind, accept) + UDP bind | 3 | ✅ | R+S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/tcp.spl`, `std_lib/examples/async_tcp_echo_server.spl` | `src/runtime/src/monoio_tcp.rs:41,75` |
+| #1746 | TCP connect + UDP send operations | 3 | ✅ | R+S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/tcp.spl`, `std_lib/src/net/udp.spl` | `src/runtime/src/monoio_tcp.rs:100`, `src/runtime/src/monoio_udp.rs:60` |
+| #1747 | TCP/UDP read operations | 3 | ✅ | R+S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/tcp.spl:83`, `std_lib/src/net/udp.spl:100` | `src/runtime/src/monoio_tcp.rs:126`, `src/runtime/src/monoio_udp.rs:96` |
+| #1748 | Connected UDP sockets | 3 | ✅ | R+S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/udp.spl:134,154,171` | `src/runtime/src/monoio_udp.rs:127,158,189` |
+| #1749 | Socket options + management | 4 | ✅ | R+S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/tcp.spl:147-176`, `std_lib/src/net/udp.spl:215-265` | `src/runtime/src/monoio_tcp.rs`, `src/runtime/src/monoio_udp.rs` |
+
+### Simple Language API (#1750-#1754) - 4/5 Complete
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1750 | Async file I/O API (Simple stdlib) | 3 | 📋 | S | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | - | - |
+| #1751 | Async network API (Simple stdlib) | 3 | ✅ | S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/tcp.spl`, `std_lib/src/net/udp.spl` | - |
+| #1752 | Runtime configuration API | 2 | ✅ | S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/runtime.spl:20-59` | - |
+| #1753 | Task spawning API | 2 | ✅ | S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/runtime.spl:88-94` | - |
+| #1754 | Timer/timeout API | 2 | 📋 | S | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | - | - |
+
+### Hybrid Runtime (#1755-#1759) - 2/5 Complete
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1755 | Thread-per-core runtime model | 4 | ✅ | R+S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/runtime.spl` | `src/runtime/src/monoio_runtime.rs:12` |
+| #1756 | Multi-threaded support (multiple runtimes) | 3 | ✅ | R+S | [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) | `std_lib/src/net/runtime.spl:45` | `src/runtime/src/monoio_runtime.rs:38` |
+| #1757 | Performance benchmarking suite | 3 | 📋 | R | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | - | `benchmarks/` |
+| #1758 | LSP server with monoio backend | 4 | 📋 | S | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | `simple/app/lsp/test/` | - |
+| #1759 | DAP server with monoio backend | 4 | 📋 | S | [monoio_runtime_integration.md](../research/monoio_runtime_integration.md) | `simple/app/dap/test/` | - |
+
+---
+
+## Async Memory-Mapped File I/O (#1760-#1779)
+
+**Purpose:** High-performance async file loading with memory-mapped I/O
+**Architecture:** Background mmap loading with JavaScript-style async/await
+**Integration:** Seamless CLI file staging with context managers
+**Performance:** 2-10x speedup for files >1MB, lazy loading, zero-copy
+**Research:** [async_mmap_file_api.md](../research/async_mmap_file_api.md)
+**Spec:** [file_io.md](../spec/file_io.md)
+
+### Core mmap FFI (#1760-#1764)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1760 | mmap/munmap FFI bindings | 3 | ✅ | R | [file_io.rs:716-776](../src/runtime/src/value/file_io.rs) | - | `src/runtime/tests/mmap/` |
+| #1760a | sys_open, sys_close, sys_file_size, sys_file_exists FFI | 3 | ✅ | R | [file_io.rs:824-928](../src/runtime/src/value/file_io.rs) | - | `src/runtime/tests/mmap/` |
+| #1761 | MmapRegion struct (safety wrappers) | 3 | ✅ | S | [mmap.spl](../simple/std_lib/src/file/mmap.spl) | `std_lib/test/unit/file/` | - |
+| #1762 | MmapMode (ReadOnly/ReadWrite/CopyOnWrite) | 2 | ✅ | S | [mmap.spl:49-52](../simple/std_lib/src/file/mmap.spl) | `std_lib/test/unit/file/` | - |
+| #1763 | MmapAdvice (madvise hints) | 2 | ✅ | S+R | [mmap.spl:55-60](../simple/std_lib/src/file/mmap.spl), [file_io.rs:789](../src/runtime/src/value/file_io.rs) | `std_lib/test/unit/file/` | - |
+| #1764 | Sync file opening (open_sync) | 2 | ✅ | S | [__init__.spl:41](../simple/std_lib/src/file/__init__.spl) | `std_lib/test/unit/file/` | - |
+
+### Async Loading Infrastructure (#1765-#1769)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1765 | AsyncFileHandle (background loading) | 4 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
+| #1766 | FileState tracking (Pending/Loading/Ready/Failed) | 2 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
+| #1767 | Worker thread pool for mmap operations | 4 | 📋 | R | [file_io.md](../spec/file_io.md) | - | `src/runtime/tests/mmap/` |
+| #1768 | is_ready/wait/get methods | 3 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
+| #1769 | Progressive prefaulting (madvise WILLNEED) | 3 | 📋 | S+R | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | `src/runtime/tests/mmap/` |
+
+### Context Manager Support (#1770-#1772)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1770 | ContextManager trait for MmapRegion | 2 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
+| #1771 | AsyncContextManager trait | 3 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
+| #1772 | `with file.open() as x:` integration | 2 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
+
+### CLI Integration (#1773-#1775)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1773 | StagedFiles with AsyncFileHandle | 3 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/cli/` | - |
+| #1774 | ArgParser.with_async_loading() | 2 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/cli/` | - |
+| #1775 | Background file loading during parse | 4 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/cli/` | - |
+
+### Platform Support (#1776-#1779)
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #1776 | Linux mmap implementation | 3 | ✅ | R | [file_io.rs:724-751](../src/runtime/src/value/file_io.rs) | - | `src/runtime/tests/mmap/` |
+| #1777 | macOS mmap implementation | 3 | ✅ | R | [file_io.rs:799-806](../src/runtime/src/value/file_io.rs) | - | `src/runtime/tests/mmap/` |
+| #1778 | Windows MapViewOfFile implementation | 4 | 📋 | R | [file_io.md](../spec/file_io.md) | - | `src/runtime/tests/mmap/` |
+| #1779 | Cross-platform error handling | 2 | ✅ | S+R | [__init__.spl:122](../simple/std_lib/src/file/__init__.spl) | `std_lib/test/unit/file/` | - |
+
+---
+
 ## Known Issues
 
 | Issue | Description | Priority |
@@ -1423,6 +746,8 @@ Complete PyTorch integration for machine learning in Simple. Uses LibTorch C++ A
 - [sqp.md](sqp.md) - Simple Query and Persistence DSL
 - [research/mold_linker_analysis.md](research/mold_linker_analysis.md) - Mold linker integration analysis
 - [research/src_to_bin_optimization.md](research/src_to_bin_optimization.md) - Pipeline optimization guide
+- [research/io_uring_vs_mmap_performance.md](../research/io_uring_vs_mmap_performance.md) - io_uring vs mmap performance comparison
+- [research/monoio_runtime_integration.md](../research/monoio_runtime_integration.md) - Monoio async runtime integration guide
 - [llm_friendly.md](llm_friendly.md) - LLM Quality Contract
 - [plans/llm_friendly.md](plans/llm_friendly.md) - LLM-Friendly Implementation Plan
 - [codegen_status.md](codegen_status.md) - MIR instruction coverage

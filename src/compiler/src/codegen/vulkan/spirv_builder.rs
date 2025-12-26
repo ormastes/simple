@@ -3,8 +3,7 @@
 //! This module provides functionality to construct SPIR-V bytecode from Simple's MIR.
 
 use crate::error::CompileError;
-use crate::hir::BinOp;
-use crate::hir::types::TypeId;
+use crate::hir::{BinOp, TypeId};
 use crate::mir::{BlockId, GpuAtomicOp, GpuMemoryScope, MirFunction, MirInst, MirModule, Terminator, VReg};
 use rspirv::dr::{Builder, Module};
 use rspirv::spirv::{
@@ -59,6 +58,9 @@ pub struct SpirvModule {
     /// Map from VReg to parameter index (for tracking which VReg holds which parameter reference)
     vreg_param_map: HashMap<VReg, usize>,
 
+    /// Map from VReg to TypeId (for type-aware operation selection)
+    vreg_types: HashMap<VReg, TypeId>,
+
     /// Type IDs cache (to avoid recreating identical types)
     type_cache: TypeCache,
 }
@@ -109,6 +111,7 @@ impl SpirvModule {
             param_var_map: HashMap::new(),
             param_elem_type_map: HashMap::new(),
             vreg_param_map: HashMap::new(),
+            vreg_types: HashMap::new(),
             type_cache: TypeCache::default(),
         })
     }
@@ -198,7 +201,7 @@ impl SpirvModule {
             struct_type,
             0,
             Decoration::Offset,
-            vec![rspirv::dr::Operand::LiteralInt32(0)],
+            vec![rspirv::dr::Operand::LiteralBit32(0)],
         );
 
         // Create pointer type to the struct in StorageBuffer storage class
@@ -211,13 +214,13 @@ impl SpirvModule {
         self.builder.decorate(
             var_id,
             Decoration::DescriptorSet,
-            vec![rspirv::dr::Operand::LiteralInt32(0)],
+            vec![rspirv::dr::Operand::LiteralBit32(0)],
         );
 
         self.builder.decorate(
             var_id,
             Decoration::Binding,
-            vec![rspirv::dr::Operand::LiteralInt32(index as u32)],
+            vec![rspirv::dr::Operand::LiteralBit32(index as u32)],
         );
 
         // Store the mapping
@@ -232,17 +235,18 @@ impl SpirvModule {
         // Clear maps for this function
         self.vreg_id_map.clear();
         self.block_id_map.clear();
+        self.vreg_types.clear();
 
         // Pre-allocate labels for all blocks
         for (i, _) in func.blocks.iter().enumerate() {
-            let block_id = BlockId(i);
+            let block_id = BlockId(i.try_into().unwrap());
             let label = self.builder.id();
             self.block_id_map.insert(block_id, label);
         }
 
         // Compile all blocks
         for (i, block) in func.blocks.iter().enumerate() {
-            let block_id = BlockId(i);
+            let block_id = BlockId(i.try_into().unwrap());
 
             // Start the block with its pre-allocated label
             let label = *self.block_id_map.get(&block_id)
@@ -321,15 +325,25 @@ impl SpirvModule {
         match inst {
             // Constants
             MirInst::ConstInt { dest, value } => {
-                let i32_type = self.get_i32_type();
-                let const_id = self.builder.constant_bit32(i32_type, *value as u32);
+                // Determine type based on value range
+                // For now, use i32 for small values, i64 for larger
+                let (type_id, const_id) = if *value >= i32::MIN as i64 && *value <= i32::MAX as i64 {
+                    let i32_type = self.get_i32_type();
+                    (TypeId::I32, self.builder.constant_bit32(i32_type, *value as u32))
+                } else {
+                    let i64_type = self.get_i64_type();
+                    (TypeId::I64, self.builder.constant_bit64(i64_type, *value as u64))
+                };
                 self.vreg_id_map.insert(*dest, const_id);
+                self.vreg_types.insert(*dest, type_id);
             }
 
             MirInst::ConstFloat { dest, value } => {
+                // Use f32 by default
                 let f32_type = self.get_f32_type();
                 let const_id = self.builder.constant_bit32(f32_type, (*value as f32).to_bits());
                 self.vreg_id_map.insert(*dest, const_id);
+                self.vreg_types.insert(*dest, TypeId::F32);
             }
 
             MirInst::ConstBool { dest, value } => {
@@ -340,45 +354,183 @@ impl SpirvModule {
                     self.builder.constant_false(bool_type)
                 };
                 self.vreg_id_map.insert(*dest, const_id);
+                self.vreg_types.insert(*dest, TypeId::BOOL);
             }
 
             MirInst::Copy { dest, src } => {
                 let src_id = *self.vreg_id_map.get(src)
                     .ok_or_else(|| CompileError::Codegen(format!("Undefined register: {:?}", src)))?;
                 self.vreg_id_map.insert(*dest, src_id);
+
+                // Propagate type
+                if let Some(&src_type) = self.vreg_types.get(src) {
+                    self.vreg_types.insert(*dest, src_type);
+                }
             }
 
             // Binary operations
             MirInst::BinOp { dest, op, left, right } => {
-
                 let left_id = *self.vreg_id_map.get(left)
                     .ok_or_else(|| CompileError::Codegen(format!("Undefined register: {:?}", left)))?;
                 let right_id = *self.vreg_id_map.get(right)
                     .ok_or_else(|| CompileError::Codegen(format!("Undefined register: {:?}", right)))?;
 
-                // Assume i32 for now - TODO: proper type tracking to distinguish int vs float
-                let i32_type = self.get_i32_type();
-                let bool_type = self.get_bool_type();
+                // Get operand type (default to i32 if not tracked)
+                let left_type = self.vreg_types.get(left).copied().unwrap_or(TypeId::I32);
 
-                let result = match op {
-                    BinOp::Add => self.builder.i_add(i32_type, None, left_id, right_id),
-                    BinOp::Sub => self.builder.i_sub(i32_type, None, left_id, right_id),
-                    BinOp::Mul => self.builder.i_mul(i32_type, None, left_id, right_id),
-                    BinOp::Div => self.builder.s_div(i32_type, None, left_id, right_id),
-                    BinOp::Mod => self.builder.s_mod(i32_type, None, left_id, right_id),
-                    BinOp::Lt => self.builder.s_less_than(bool_type, None, left_id, right_id),
-                    BinOp::LtEq => self.builder.s_less_than_equal(bool_type, None, left_id, right_id),
-                    BinOp::Gt => self.builder.s_greater_than(bool_type, None, left_id, right_id),
-                    BinOp::GtEq => self.builder.s_greater_than_equal(bool_type, None, left_id, right_id),
-                    BinOp::Eq => self.builder.i_equal(bool_type, None, left_id, right_id),
-                    BinOp::NotEq => self.builder.i_not_equal(bool_type, None, left_id, right_id),
-                    BinOp::BitAnd => self.builder.bitwise_and(i32_type, None, left_id, right_id),
-                    BinOp::BitOr => self.builder.bitwise_or(i32_type, None, left_id, right_id),
-                    BinOp::BitXor => self.builder.bitwise_xor(i32_type, None, left_id, right_id),
-                    _ => return Err(CompileError::Codegen(format!("Unsupported binary op: {:?}", op))),
-                }.map_err(|e| CompileError::Codegen(format!("Failed to emit binary op: {}", e)))?;
+                // Select SPIR-V type and operation based on operand type
+                let (result_type_id, result_spirv_type, result) = match (op, left_type) {
+                    // Arithmetic operations
+                    (BinOp::Add, TypeId::I32 | TypeId::I64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.i_add(ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::Add, TypeId::U32 | TypeId::U64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.i_add(ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::Add, TypeId::F32 | TypeId::F64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.f_add(ty, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::Sub, TypeId::I32 | TypeId::I64 | TypeId::U32 | TypeId::U64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.i_sub(ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::Sub, TypeId::F32 | TypeId::F64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.f_sub(ty, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::Mul, TypeId::I32 | TypeId::I64 | TypeId::U32 | TypeId::U64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.i_mul(ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::Mul, TypeId::F32 | TypeId::F64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.f_mul(ty, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::Div, TypeId::I32 | TypeId::I64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.s_div(ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::Div, TypeId::U32 | TypeId::U64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.u_div(ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::Div, TypeId::F32 | TypeId::F64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.f_div(ty, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::Mod, TypeId::I32 | TypeId::I64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.s_mod(ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::Mod, TypeId::U32 | TypeId::U64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.u_mod(ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::Mod, TypeId::F32 | TypeId::F64) => {
+                        let ty = self.type_id_to_spirv(left_type)?;
+                        (left_type, ty, self.builder.f_mod(ty, None, left_id, right_id)?)
+                    }
+
+                    // Comparison operations (return bool)
+                    (BinOp::Lt, TypeId::I32 | TypeId::I64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.s_less_than(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::Lt, TypeId::U32 | TypeId::U64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.u_less_than(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::Lt, TypeId::F32 | TypeId::F64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.f_ord_less_than(bool_type, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::LtEq, TypeId::I32 | TypeId::I64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.s_less_than_equal(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::LtEq, TypeId::U32 | TypeId::U64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.u_less_than_equal(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::LtEq, TypeId::F32 | TypeId::F64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.f_ord_less_than_equal(bool_type, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::Gt, TypeId::I32 | TypeId::I64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.s_greater_than(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::Gt, TypeId::U32 | TypeId::U64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.u_greater_than(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::Gt, TypeId::F32 | TypeId::F64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.f_ord_greater_than(bool_type, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::GtEq, TypeId::I32 | TypeId::I64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.s_greater_than_equal(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::GtEq, TypeId::U32 | TypeId::U64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.u_greater_than_equal(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::GtEq, TypeId::F32 | TypeId::F64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.f_ord_greater_than_equal(bool_type, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::Eq, TypeId::F32 | TypeId::F64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.f_ord_equal(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::Eq, _) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.i_equal(bool_type, None, left_id, right_id)?)
+                    }
+
+                    (BinOp::NotEq, TypeId::F32 | TypeId::F64) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.f_ord_not_equal(bool_type, None, left_id, right_id)?)
+                    }
+                    (BinOp::NotEq, _) => {
+                        let bool_type = self.get_bool_type();
+                        (TypeId::BOOL, bool_type, self.builder.i_not_equal(bool_type, None, left_id, right_id)?)
+                    }
+
+                    // Bitwise operations (integer only)
+                    (BinOp::BitAnd, ty @ (TypeId::I32 | TypeId::I64 | TypeId::U32 | TypeId::U64)) => {
+                        let spirv_ty = self.type_id_to_spirv(ty)?;
+                        (ty, spirv_ty, self.builder.bitwise_and(spirv_ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::BitOr, ty @ (TypeId::I32 | TypeId::I64 | TypeId::U32 | TypeId::U64)) => {
+                        let spirv_ty = self.type_id_to_spirv(ty)?;
+                        (ty, spirv_ty, self.builder.bitwise_or(spirv_ty, None, left_id, right_id)?)
+                    }
+                    (BinOp::BitXor, ty @ (TypeId::I32 | TypeId::I64 | TypeId::U32 | TypeId::U64)) => {
+                        let spirv_ty = self.type_id_to_spirv(ty)?;
+                        (ty, spirv_ty, self.builder.bitwise_xor(spirv_ty, None, left_id, right_id)?)
+                    }
+
+                    _ => return Err(CompileError::Codegen(format!(
+                        "Unsupported binary op {:?} for type {:?}",
+                        op, left_type
+                    ))),
+                };
 
                 self.vreg_id_map.insert(*dest, result);
+                self.vreg_types.insert(*dest, result_type_id);
             }
 
             // GPU built-ins
@@ -418,6 +570,7 @@ impl SpirvModule {
                     .map_err(|e| CompileError::Codegen(format!("Failed to extract component: {}", e)))?;
 
                 self.vreg_id_map.insert(*dest, component);
+                self.vreg_types.insert(*dest, TypeId::U32);
             }
 
             MirInst::GpuBarrier => {
@@ -502,6 +655,7 @@ impl SpirvModule {
                     .map_err(|e| CompileError::Codegen(format!("Failed to extract component: {}", e)))?;
 
                 self.vreg_id_map.insert(*dest, component);
+                self.vreg_types.insert(*dest, TypeId::U32);
             }
 
             MirInst::GpuGroupId { dest, dim } => {
@@ -524,6 +678,7 @@ impl SpirvModule {
                     .map_err(|e| CompileError::Codegen(format!("Failed to extract component: {}", e)))?;
 
                 self.vreg_id_map.insert(*dest, component);
+                self.vreg_types.insert(*dest, TypeId::U32);
             }
 
             // Memory operations
@@ -538,6 +693,7 @@ impl SpirvModule {
                     .map_err(|e| CompileError::Codegen(format!("Failed to load from memory: {}", e)))?;
 
                 self.vreg_id_map.insert(*dest, loaded);
+                self.vreg_types.insert(*dest, *ty);
             }
 
             MirInst::Store { addr, value, ty } => {
@@ -597,7 +753,8 @@ impl SpirvModule {
 
                 // OpAccessChain to compute element pointer
                 // Indices: struct member 0 (the array), then the array index
-                let zero = self.builder.constant_bit32(self.get_u32_type(), 0);
+                let u32_type = self.get_u32_type();
+                let zero = self.builder.constant_bit32(u32_type, 0);
                 let ptr_id = self.builder.access_chain(element_ptr_type, None, base_id, vec![zero, index_id])
                     .map_err(|e| CompileError::Codegen(format!("Failed to emit access chain: {}", e)))?;
 

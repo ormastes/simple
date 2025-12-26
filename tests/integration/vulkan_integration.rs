@@ -196,7 +196,6 @@ fn test_spirv_magic_number() {
 // =============================================================================
 
 #[test]
-#[ignore] // Requires spirv-val to be installed
 fn test_spirv_validation_with_spirv_val() {
     use std::process::{Command, Stdio};
     use std::io::Write;

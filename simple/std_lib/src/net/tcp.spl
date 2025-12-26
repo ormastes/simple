@@ -1,0 +1,218 @@
+# TCP networking for Simple language using monoio
+# Provides async TCP server and client capabilities
+# Feature: #1753 (Simple Language TCP API)
+
+import core.result
+import core.option
+import net::{NetError, error_from_code}
+
+# External TCP functions
+extern fn monoio_tcp_listen(addr: String) -> i64
+extern fn monoio_tcp_accept(listener_handle: i64) -> i64
+extern fn monoio_tcp_connect(addr: String) -> i64
+extern fn monoio_tcp_read(stream_handle: i64, buffer: any, max_len: i64) -> i64
+extern fn monoio_tcp_write(stream_handle: i64, buffer: any) -> i64
+extern fn monoio_tcp_flush(stream_handle: i64) -> i64
+extern fn monoio_tcp_shutdown(stream_handle: i64, how: i64) -> i64
+extern fn monoio_tcp_close(stream_handle: i64) -> i64
+extern fn monoio_tcp_listener_close(listener_handle: i64) -> i64
+extern fn monoio_tcp_local_addr(stream_handle: i64) -> Option[String]
+extern fn monoio_tcp_peer_addr(stream_handle: i64) -> Option[String]
+extern fn monoio_tcp_set_nodelay(stream_handle: i64, nodelay: i64) -> i64
+extern fn monoio_tcp_set_keepalive(stream_handle: i64, keepalive_secs: i64) -> i64
+
+# TCP listener for accepting incoming connections
+pub struct TcpListener:
+    handle: i64
+    local_addr: String
+
+    # Bind to an address and start listening for connections
+    # Feature #1745: TCP server implementation
+    #
+    # Example:
+    #   let listener = await TcpListener::bind("127.0.0.1:8080")?
+    pub async fn bind(addr: String) -> Result[TcpListener, NetError]:
+        let handle = monoio_tcp_listen(addr)
+        if handle < 0:
+            return Err(error_from_code(handle))
+
+        return Ok(TcpListener {
+            handle: handle,
+            local_addr: addr
+        })
+
+    # Accept an incoming connection
+    # Returns a TcpStream for the new connection
+    #
+    # Example:
+    #   let stream = await listener.accept()?
+    pub async fn accept(self) -> Result[TcpStream, NetError]:
+        let stream_handle = monoio_tcp_accept(self.handle)
+        if stream_handle < 0:
+            return Err(error_from_code(stream_handle))
+
+        # Get peer and local addresses
+        let peer = monoio_tcp_peer_addr(stream_handle)
+        let local = monoio_tcp_local_addr(stream_handle)
+
+        return Ok(TcpStream {
+            handle: stream_handle,
+            peer_addr: peer,
+            local_addr: local
+        })
+
+    # Get the local address this listener is bound to
+    pub fn local_addr(self) -> String:
+        return self.local_addr
+
+    # Close the listener and stop accepting connections
+    pub fn close(self) -> Result[(), NetError]:
+        let result = monoio_tcp_listener_close(self.handle)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+# TCP stream for reading and writing data
+pub struct TcpStream:
+    handle: i64
+    peer_addr: Option[String]
+    local_addr: Option[String]
+
+    # Connect to a remote TCP server
+    # Feature #1746: TCP client implementation
+    #
+    # Example:
+    #   let stream = await TcpStream::connect("127.0.0.1:8080")?
+    pub async fn connect(addr: String) -> Result[TcpStream, NetError]:
+        let handle = monoio_tcp_connect(addr)
+        if handle < 0:
+            return Err(error_from_code(handle))
+
+        # Get peer and local addresses
+        let peer = monoio_tcp_peer_addr(handle)
+        let local = monoio_tcp_local_addr(handle)
+
+        return Ok(TcpStream {
+            handle: handle,
+            peer_addr: peer,
+            local_addr: local
+        })
+
+    # Read data from the stream into a buffer
+    # Feature #1747: Zero-copy TCP read
+    #
+    # Returns number of bytes read (0 means EOF)
+    #
+    # Example:
+    #   let mut buffer = Bytes::with_capacity(1024)
+    #   let n = await stream.read(&mut buffer, 1024)?
+    pub async fn read(self, buffer: &mut any, max_len: i64) -> Result[i64, NetError]:
+        let n = monoio_tcp_read(self.handle, buffer, max_len)
+        if n < 0:
+            return Err(error_from_code(n))
+        return Ok(n)
+
+    # Write data from a buffer to the stream
+    # Feature #1748: Zero-copy TCP write
+    #
+    # Returns number of bytes written
+    #
+    # Example:
+    #   let data = "Hello, world!".as_bytes()
+    #   let n = await stream.write(data)?
+    pub async fn write(self, buffer: any) -> Result[i64, NetError]:
+        let n = monoio_tcp_write(self.handle, buffer)
+        if n < 0:
+            return Err(error_from_code(n))
+        return Ok(n)
+
+    # Flush pending writes to the stream
+    pub async fn flush(self) -> Result[(), NetError]:
+        let result = monoio_tcp_flush(self.handle)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Write all data from buffer (convenience method)
+    # Keeps writing until all data is sent
+    pub async fn write_all(self, buffer: any) -> Result[(), NetError]:
+        # TODO: Implement retry logic for partial writes
+        let n = await self.write(buffer)?
+        await self.flush()?
+        return Ok(())
+
+    # Read exact amount of data (convenience method)
+    # Keeps reading until buffer is full
+    pub async fn read_exact(self, buffer: &mut any, len: i64) -> Result[(), NetError]:
+        # TODO: Implement retry logic for partial reads
+        let n = await self.read(buffer, len)?
+        if n == 0:
+            return Err(NetError::ConnectionReset)
+        return Ok(())
+
+    # Shutdown the connection (read, write, or both)
+    # Feature #1749: TCP connection management
+    #
+    # Modes:
+    #   0 = Read only
+    #   1 = Write only
+    #   2 = Both read and write
+    pub fn shutdown(self, how: i64) -> Result[(), NetError]:
+        let result = monoio_tcp_shutdown(self.handle, how)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Close the connection
+    pub fn close(self) -> Result[(), NetError]:
+        let result = monoio_tcp_close(self.handle)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Get peer address (who we're connected to)
+    pub fn peer_addr(self) -> Option[String]:
+        return self.peer_addr
+
+    # Get local address (our endpoint)
+    pub fn local_addr(self) -> Option[String]:
+        return self.local_addr
+
+    # Set TCP_NODELAY option (disable Nagle's algorithm)
+    # When enabled, sends data immediately instead of buffering
+    pub fn set_nodelay(self, nodelay: bool) -> Result[(), NetError]:
+        let value = if nodelay: 1 else: 0
+        let result = monoio_tcp_set_nodelay(self.handle, value)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Set TCP keepalive interval
+    # Sends keepalive probes after period of inactivity
+    pub fn set_keepalive(self, secs: Option[i64]) -> Result[(), NetError]:
+        let value = match secs:
+            case Some(s):
+                s
+            case None:
+                0
+
+        let result = monoio_tcp_set_keepalive(self.handle, value)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+# Shutdown modes for TCP connections
+pub enum ShutdownMode:
+    Read       # Shutdown read half
+    Write      # Shutdown write half
+    Both       # Shutdown both halves
+
+# Convert ShutdownMode to integer for FFI
+fn shutdown_mode_to_int(mode: ShutdownMode) -> i64:
+    match mode:
+        case ShutdownMode::Read:
+            return 0
+        case ShutdownMode::Write:
+            return 1
+        case ShutdownMode::Both:
+            return 2

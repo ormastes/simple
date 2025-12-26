@@ -34,9 +34,10 @@ class Formatter:
     fn new(config: FormatConfig) -> Formatter:
         Formatter(config: config, indent_level: 0)
 
-    fn format_file(self, path: String) -> Result[String, String]:
-        # Read file
-        let content = fs.read_to_string(path)?
+    async fn format_file(self, path: String) -> Result[String, String]:
+        # Read file using new io.fs API
+        let path_fp = FilePath::from(path)
+        let content = await fs.read_text(path_fp)?
 
         # Parse and format
         let formatted = self.format_source(content)?
@@ -410,26 +411,28 @@ class Formatter:
         # Check if line should decrease indent level
         return line.starts_with("}") or line.starts_with(")") or line.starts_with("]") or line.starts_with("else") or line.starts_with("elif") or line.starts_with("except") or line.starts_with("finally")
 
-fn format_file_inplace(path: String) -> Result[Nil, String]:
+async fn format_file_inplace(path: String) -> Result[Nil, String]:
     let config = FormatConfig.new()
     let formatter = Formatter.new(config)
 
-    let formatted = formatter.format_file(path)?
+    let formatted = await formatter.format_file(path)?
 
-    fs.write(path, formatted)?
+    let path_fp = FilePath::from(path)
+    await fs.write_text(path_fp, formatted)?
 
     Ok(nil)
 
-fn check_formatting(path: String) -> Result[Bool, String]:
+async fn check_formatting(path: String) -> Result[Bool, String]:
     let config = FormatConfig.new()
     let formatter = Formatter.new(config)
 
-    let original = fs.read_to_string(path)?
+    let path_fp = FilePath::from(path)
+    let original = await fs.read_text(path_fp)?
     let formatted = formatter.format_source(original)?
 
     Ok(original == formatted)
 
-fn main():
+async fn main():
     let args = sys.args()
 
     if args.len() < 2:
@@ -474,13 +477,14 @@ fn main():
     let stdout_mode = args.contains("--stdout") or (!check_mode and !write_mode and !diff_mode)
 
     # Verify file exists
-    if not fs.exists(file_path):
+    let file_path_fp = FilePath::from(file_path)
+    if not await fs.exists(file_path_fp):
         print("Error: File not found: " + file_path)
         sys.exit(1)
 
     if check_mode:
         # Check mode: verify formatting
-        match check_formatting(file_path):
+        match await check_formatting(file_path):
             case Ok(is_formatted):
                 if is_formatted:
                     print("✓ " + file_path + " is formatted")
@@ -494,7 +498,7 @@ fn main():
 
     elif write_mode:
         # Write mode: format in place
-        match format_file_inplace(file_path):
+        match await format_file_inplace(file_path):
             case Ok(_):
                 print("✓ Formatted " + file_path)
                 sys.exit(0)
@@ -507,15 +511,19 @@ fn main():
         let config = FormatConfig.new()
         let formatter = Formatter.new(config)
 
-        match formatter.format_file(file_path):
+        match await formatter.format_file(file_path):
             case Ok(formatted):
-                let original = fs.read_to_string(file_path)?
-                if original == formatted:
-                    print("✓ " + file_path + " is correctly formatted")
-                    sys.exit(0)
-                else:
-                    print_diff(original, formatted, file_path)
-                    sys.exit(1)
+                match await fs.read_text(file_path_fp):
+                    case Ok(original):
+                        if original == formatted:
+                            print("✓ " + file_path + " is correctly formatted")
+                            sys.exit(0)
+                        else:
+                            print_diff(original, formatted, file_path)
+                            sys.exit(1)
+                    case Err(error):
+                        print("Error reading file: " + error.to_string())
+                        sys.exit(1)
             case Err(error):
                 print("Error: " + error)
                 sys.exit(1)
@@ -525,7 +533,7 @@ fn main():
         let config = FormatConfig.new()
         let formatter = Formatter.new(config)
 
-        match formatter.format_file(file_path):
+        match await formatter.format_file(file_path):
             case Ok(formatted):
                 print(formatted)
                 sys.exit(0)
