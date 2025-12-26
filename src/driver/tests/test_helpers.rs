@@ -237,6 +237,118 @@ pub fn run_expect_output(src: &str, expected_stdout: &str, expected_exit: i32) {
     );
 }
 
+// ============================================================================
+// WASM execution helpers
+// ============================================================================
+
+/// Run source with WASM compilation and execution.
+/// Use this to test WASM compilation and runtime.
+#[cfg(feature = "wasm")]
+#[allow(dead_code)]
+fn run_wasm(src: &str) -> Result<simple_driver::interpreter::RunResult, String> {
+    let interpreter = Interpreter::new();
+    interpreter.run(
+        src,
+        RunConfig {
+            running_type: RunningType::Wasm,
+            in_memory: false, // WASM needs temp files
+            ..Default::default()
+        },
+    )
+}
+
+/// Helper to run source via WASM and assert expected exit code.
+/// Use this for WASM-specific tests.
+#[cfg(feature = "wasm")]
+#[allow(dead_code)]
+pub fn run_expect_wasm(src: &str, expected: i32) {
+    let result = run_wasm(src).expect("wasm run ok");
+    assert_eq!(
+        result.exit_code, expected,
+        "Expected exit code {}, got {}",
+        expected, result.exit_code
+    );
+}
+
+/// Helper to run source via WASM with output capture.
+/// Captures stdout and asserts expected output.
+#[cfg(feature = "wasm")]
+#[allow(dead_code)]
+pub fn run_expect_wasm_output(src: &str, expected_stdout: &str) {
+    let interpreter = Interpreter::new();
+    let result = interpreter
+        .run(
+            src,
+            RunConfig {
+                running_type: RunningType::Wasm,
+                in_memory: false,
+                capture_output: true,
+                ..Default::default()
+            },
+        )
+        .expect("wasm run ok");
+    assert_eq!(
+        result.stdout, expected_stdout,
+        "Expected stdout '{}', got '{}'",
+        expected_stdout, result.stdout
+    );
+}
+
+/// Helper for parity testing: runs code via interpreter, JIT, and WASM,
+/// asserting all produce the same result.
+/// Use this to verify WASM execution matches other backends.
+#[cfg(feature = "wasm")]
+#[allow(dead_code)]
+pub fn run_expect_all_including_wasm(src: &str, expected: i32) {
+    // Run interpreter
+    let interp_result = run_interpreter(src).expect("interpreter ok");
+    assert_eq!(
+        interp_result.exit_code, expected,
+        "Interpreter: expected {}, got {}",
+        expected, interp_result.exit_code
+    );
+
+    // Run JIT compiler
+    let interpreter = Interpreter::new();
+    let jit_result = interpreter
+        .run(
+            src,
+            RunConfig {
+                running_type: RunningType::Compiler,
+                in_memory: true,
+                ..Default::default()
+            },
+        )
+        .expect("jit ok");
+    assert_eq!(
+        jit_result.exit_code, expected,
+        "JIT: expected {}, got {}",
+        expected, jit_result.exit_code
+    );
+
+    // Run WASM
+    let wasm_result = run_wasm(src).expect("wasm ok");
+    assert_eq!(
+        wasm_result.exit_code, expected,
+        "WASM: expected {}, got {}",
+        expected, wasm_result.exit_code
+    );
+
+    // Verify all results match
+    assert_eq!(
+        interp_result.exit_code, jit_result.exit_code,
+        "Interpreter and JIT results differ: interpreter={}, jit={}",
+        interp_result.exit_code,
+        jit_result.exit_code
+    );
+    assert_eq!(
+        interp_result.exit_code, wasm_result.exit_code,
+        "Interpreter and WASM results differ: interpreter={}, wasm={}",
+        interp_result.exit_code,
+        wasm_result.exit_code
+    );
+}
+
 /// Run source and assert stdout contains expected substring.
 #[allow(dead_code)]
 pub fn run_expect_stdout_contains(src: &str, expected: &str) {

@@ -5,6 +5,7 @@ pub mod doc_gen;
 pub mod error;
 pub mod interner;
 pub mod lexer;
+pub mod sui_parser;
 pub mod token;
 
 // Parser implementation (split across multiple modules)
@@ -26,4 +27,5 @@ pub use error::*;
 pub use interner::*;
 pub use lexer::*;
 pub use parser_impl::{Parser, ParserMode};
+pub use sui_parser::*;
 pub use token::*;

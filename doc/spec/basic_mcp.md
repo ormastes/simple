@@ -1,19 +1,21 @@
-# Minimal Code Preview (MCP) Specification
+# Model Context Preview (MCP-MCP) Specification
 
 **Version:** 1.0
 **Status:** Draft
-**Last Updated:** 2025-12-22
+**Last Updated:** 2025-12-25
 
 **Target Language:** Simple (colon + indentation)
 **Outline Notation:** Block-mark (LLM-first, collapsed by default)
 
 ## Overview
 
-MCP (Minimal Code Preview) provides a compact, navigable, LLM-friendly representation of Simple codebases. It reduces token usage by 90%+ while preserving semantic information, making it ideal for AI-assisted development and code review.
+MCP-MCP (Model Context Preview) provides a compact, navigable, LLM-friendly representation of Simple codebases. It reduces token usage by 90%+ while preserving semantic information, making it ideal for AI-assisted development and code review.
+
+**Note:** MCP-MCP is distinct from "Model Context Protocol" (Anthropic's MCP), which is a protocol for connecting AI assistants to external data sources.
 
 **Key Benefits:**
 - **Token Efficiency:** Default view shows only public API outlines
-- **On-Demand Detail:** Expand signatures, bodies, docs, traits, tests via MCP tools
+- **On-Demand Detail:** Expand signatures, bodies, docs, traits, tests via MCP-MCP tools
 - **Virtual Information:** Expose implicit traits, AOP pointcuts, coverage, diagnostics explicitly
 - **LLM-Optimized:** Single JSON text field format minimizes token overhead
 

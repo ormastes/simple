@@ -179,18 +179,58 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_export_use(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Export)?;
-        self.expect(&TokenKind::Use)?;
-        let (path, target) = self.parse_use_path_and_target()?;
-        Ok(Node::ExportUseStmt(ExportUseStmt {
-            span: Span::new(
-                start_span.start,
-                self.previous.span.end,
-                start_span.line,
-                start_span.column,
-            ),
-            path,
-            target,
-        }))
+
+        // Check for two syntaxes:
+        // 1. export use X (traditional)
+        // 2. export X, Y from module (JS/Python style)
+        if self.check(&TokenKind::Use) {
+            // Traditional: export use X
+            self.advance();
+            let (path, target) = self.parse_use_path_and_target()?;
+            Ok(Node::ExportUseStmt(ExportUseStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                path,
+                target,
+            }))
+        } else {
+            // New style: export X, Y, Z from module
+            // Parse list of identifiers
+            let mut items = Vec::new();
+            items.push(self.expect_identifier()?);
+
+            while self.check(&TokenKind::Comma) {
+                self.advance(); // consume ','
+                items.push(self.expect_identifier()?);
+            }
+
+            // Expect 'from'
+            self.expect(&TokenKind::From)?;
+
+            // Parse module path
+            let module_path = self.parse_module_path()?;
+
+            // Create export use statement with group import
+            let targets: Vec<ImportTarget> = items
+                .into_iter()
+                .map(|name| ImportTarget::Single(name))
+                .collect();
+
+            Ok(Node::ExportUseStmt(ExportUseStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                path: module_path,
+                target: ImportTarget::Group(targets),
+            }))
+        }
     }
 
     /// Parse auto import: auto import router.route

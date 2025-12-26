@@ -31,13 +31,37 @@ impl<'a> Parser<'a> {
             elif_branches.push((elif_condition, elif_block));
         }
 
-        let else_block = if self.check(&TokenKind::Else) {
-            self.advance();
-            self.expect(&TokenKind::Colon)?;
-            Some(self.parse_block()?)
-        } else {
-            None
-        };
+        // Handle 'else if' as 'elif' (support both syntaxes)
+        let mut else_block = None;
+        if self.check(&TokenKind::Else) {
+            self.advance(); // consume 'else'
+
+            // Check if this is 'else if' (multiple times) or just 'else'
+            while self.check(&TokenKind::If) {
+                // This is 'else if', treat it as elif
+                self.advance(); // consume 'if'
+                let elif_condition = self.parse_expression()?;
+                self.expect(&TokenKind::Colon)?;
+                let elif_block = self.parse_block()?;
+                elif_branches.push((elif_condition, elif_block));
+
+                // Check if there's another 'else if' or final 'else'
+                if self.check(&TokenKind::Else) {
+                    self.advance(); // consume 'else'
+                    // Loop will check if there's another 'if'
+                } else {
+                    // No more else/elif, done
+                    break;
+                }
+            }
+
+            // If we're here and consumed an 'else' without following 'if',
+            // we need to parse the else block
+            if self.check(&TokenKind::Colon) {
+                self.expect(&TokenKind::Colon)?;
+                else_block = Some(self.parse_block()?);
+            }
+        }
 
         Ok(Node::If(IfStmt {
             span: Span::new(
@@ -232,7 +256,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        let body = if self.check(&TokenKind::FatArrow) {
+        let body = if self.check(&TokenKind::Arrow) || self.check(&TokenKind::FatArrow) {
             self.advance();
             // Body can be single expression or block
             if self.check(&TokenKind::Newline) {

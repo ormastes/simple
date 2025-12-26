@@ -163,6 +163,8 @@ pub enum Arch {
     Arm = 3,
     Riscv64 = 4,
     Riscv32 = 5,
+    Wasm32 = 6,
+    Wasm64 = 7,
 }
 
 impl Arch {
@@ -175,6 +177,8 @@ impl Arch {
             3 => Some(Arch::Arm),
             4 => Some(Arch::Riscv64),
             5 => Some(Arch::Riscv32),
+            6 => Some(Arch::Wasm32),
+            7 => Some(Arch::Wasm64),
             _ => None,
         }
     }
@@ -188,6 +192,8 @@ impl Arch {
             TargetArch::Arm => Arch::Arm,
             TargetArch::Riscv64 => Arch::Riscv64,
             TargetArch::Riscv32 => Arch::Riscv32,
+            TargetArch::Wasm32 => Arch::Wasm32,
+            TargetArch::Wasm64 => Arch::Wasm64,
         }
     }
 
@@ -200,16 +206,18 @@ impl Arch {
             Arch::Arm => TargetArch::Arm,
             Arch::Riscv64 => TargetArch::Riscv64,
             Arch::Riscv32 => TargetArch::Riscv32,
+            Arch::Wasm32 => TargetArch::Wasm32,
+            Arch::Wasm64 => TargetArch::Wasm64,
         }
     }
 
     /// Check if this is a 32-bit architecture.
     pub fn is_32bit(self) -> bool {
-        matches!(self, Arch::X86 | Arch::Arm | Arch::Riscv32)
+        matches!(self, Arch::X86 | Arch::Arm | Arch::Riscv32 | Arch::Wasm32)
     }
 
     /// Check if this is a 64-bit architecture.
     pub fn is_64bit(self) -> bool {
-        matches!(self, Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64)
+        matches!(self, Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 | Arch::Wasm64)
     }
 }
