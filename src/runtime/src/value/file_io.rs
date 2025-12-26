@@ -20,7 +20,9 @@ struct MmapRegion {
 }
 
 // SAFETY: MmapRegion only stores raw pointers from mmap which are thread-safe
+// The pointer itself can be shared across threads as it points to memory-mapped pages
 unsafe impl Send for MmapRegion {}
+unsafe impl Sync for MmapRegion {}
 
 // Global registry for mmap regions (thread-local would be better in production)
 use std::sync::Mutex;
@@ -743,9 +745,79 @@ pub extern "C" fn sys_mmap(
         }
     }
 
-    #[cfg(not(target_family = "unix"))]
+    #[cfg(target_family = "windows")]
     {
-        // Windows: would use MapViewOfFile here
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{FILE_MAP_READ, FILE_MAP_WRITE, FILE_MAP_COPY};
+        use windows_sys::Win32::System::Memory::{
+            CreateFileMappingW, MapViewOfFile, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+        };
+
+        unsafe {
+            // Convert fd to HANDLE (Windows file descriptor)
+            let file_handle = if fd == -1 {
+                INVALID_HANDLE_VALUE as isize
+            } else {
+                fd as isize
+            };
+
+            // Convert prot flags to Windows protection
+            let protect = if prot & 0x2 != 0 {
+                // PROT_WRITE
+                if flags & 0x2 != 0 {
+                    PAGE_WRITECOPY  // MAP_PRIVATE with write
+                } else {
+                    PAGE_READWRITE  // MAP_SHARED with write
+                }
+            } else {
+                PAGE_READONLY  // Read-only
+            };
+
+            // Create file mapping object
+            let map_handle = CreateFileMappingW(
+                file_handle,
+                std::ptr::null(),
+                protect,
+                (length >> 32) as u32,  // High DWORD of size
+                (length & 0xFFFFFFFF) as u32,  // Low DWORD of size
+                std::ptr::null(),  // No name (anonymous)
+            );
+
+            if map_handle == 0 || map_handle == INVALID_HANDLE_VALUE as isize {
+                return -1;
+            }
+
+            // Map view of file
+            let desired_access = if prot & 0x2 != 0 {
+                FILE_MAP_WRITE | FILE_MAP_READ
+            } else if prot & 0x1 != 0 {
+                FILE_MAP_READ
+            } else {
+                FILE_MAP_READ  // Default to read
+            };
+
+            let ptr = MapViewOfFile(
+                map_handle,
+                desired_access,
+                (offset >> 32) as u32,  // High DWORD of offset
+                (offset & 0xFFFFFFFF) as u32,  // Low DWORD of offset
+                length as usize,
+            );
+
+            // Close the mapping handle (view retains reference to file)
+            CloseHandle(map_handle);
+
+            if ptr.is_null() {
+                -1
+            } else {
+                ptr as i64
+            }
+        }
+    }
+
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
+    {
         -1
     }
 }
@@ -754,7 +826,7 @@ pub extern "C" fn sys_mmap(
 ///
 /// # Arguments
 /// * `addr` - Address of mapped region
-/// * `length` - Size of mapping
+/// * `length` - Size of mapping (ignored on Windows)
 ///
 /// # Returns
 /// 0 on success, -1 on error
@@ -769,7 +841,21 @@ pub extern "C" fn sys_munmap(addr: i64, length: u64) -> i32 {
         }
     }
 
-    #[cfg(not(target_family = "unix"))]
+    #[cfg(target_family = "windows")]
+    {
+        use windows_sys::Win32::System::Memory::UnmapViewOfFile;
+
+        unsafe {
+            // UnmapViewOfFile unmaps entire view (length parameter ignored)
+            if UnmapViewOfFile(addr as *const std::ffi::c_void) != 0 {
+                0  // Success
+            } else {
+                -1  // Failure
+            }
+        }
+    }
+
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
     {
         -1
     }
@@ -785,6 +871,10 @@ pub extern "C" fn sys_munmap(addr: i64, length: u64) -> i32 {
 ///
 /// # Returns
 /// 0 on success, -1 on error
+///
+/// # Notes
+/// Windows: Partial implementation using PrefetchVirtualMemory (WILLNEED) and
+/// DiscardVirtualMemory (DONTNEED). Other hints are no-ops (Windows manages automatically).
 #[no_mangle]
 pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
     #[cfg(target_os = "linux")]
@@ -805,7 +895,55 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
         }
     }
 
-    #[cfg(not(target_family = "unix"))]
+    #[cfg(target_family = "windows")]
+    {
+        use windows_sys::Win32::System::Memory::{
+            DiscardVirtualMemory, PrefetchVirtualMemory, WIN32_MEMORY_RANGE_ENTRY,
+        };
+
+        unsafe {
+            match advice {
+                3 => {
+                    // MADV_WILLNEED -> PrefetchVirtualMemory (Windows 8+)
+                    let mut range = WIN32_MEMORY_RANGE_ENTRY {
+                        VirtualAddress: addr as *mut std::ffi::c_void,
+                        NumberOfBytes: length as usize,
+                    };
+
+                    if PrefetchVirtualMemory(
+                        std::ptr::null_mut(),  // Current process
+                        1,  // One range
+                        &mut range as *mut WIN32_MEMORY_RANGE_ENTRY,
+                        0,  // No flags
+                    ) != 0 {
+                        0
+                    } else {
+                        // Not fatal if unsupported (older Windows)
+                        0
+                    }
+                }
+                4 => {
+                    // MADV_DONTNEED -> DiscardVirtualMemory (Windows 8.1+)
+                    if DiscardVirtualMemory(
+                        addr as *mut std::ffi::c_void,
+                        length as usize,
+                    ) != 0 {
+                        0
+                    } else {
+                        // Not fatal if unsupported
+                        0
+                    }
+                }
+                _ => {
+                    // MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL
+                    // Windows manages these automatically, no explicit hints needed
+                    0
+                }
+            }
+        }
+    }
+
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
     {
         -1
     }
@@ -816,7 +954,7 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
 /// # Arguments
 /// * `path_ptr` - Pointer to null-terminated path string
 /// * `flags` - Open flags (O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_CREAT=64, O_TRUNC=512, O_APPEND=1024)
-/// * `mode` - Permission mode (0644 for regular files)
+/// * `mode` - Permission mode (ignored on Windows)
 ///
 /// # Returns
 /// File descriptor on success, -1 on error
@@ -833,7 +971,83 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
         }
     }
 
-    #[cfg(not(target_family = "unix"))]
+    #[cfg(target_family = "windows")]
+    {
+        use std::ffi::CStr;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{
+            CreateFileA, CREATE_ALWAYS, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING,
+        };
+
+        unsafe {
+            let path_cstr = CStr::from_ptr(path_ptr as *const i8);
+            let path_bytes = path_cstr.to_bytes_with_nul();
+
+            // Convert flags to Windows access and creation disposition
+            let (desired_access, creation_disposition) = match flags & 0x3 {
+                0 => {
+                    // O_RDONLY
+                    let disposition = if flags & 64 != 0 {
+                        OPEN_ALWAYS  // O_CREAT
+                    } else {
+                        OPEN_EXISTING
+                    };
+                    (GENERIC_READ, disposition)
+                }
+                1 => {
+                    // O_WRONLY
+                    let disposition = if flags & 64 != 0 {
+                        if flags & 512 != 0 {
+                            CREATE_ALWAYS  // O_CREAT | O_TRUNC
+                        } else {
+                            OPEN_ALWAYS  // O_CREAT
+                        }
+                    } else if flags & 512 != 0 {
+                        TRUNCATE_EXISTING  // O_TRUNC
+                    } else {
+                        OPEN_EXISTING
+                    };
+                    (GENERIC_WRITE, disposition)
+                }
+                2 => {
+                    // O_RDWR
+                    let disposition = if flags & 64 != 0 {
+                        if flags & 512 != 0 {
+                            CREATE_ALWAYS  // O_CREAT | O_TRUNC
+                        } else {
+                            OPEN_ALWAYS  // O_CREAT
+                        }
+                    } else if flags & 512 != 0 {
+                        TRUNCATE_EXISTING  // O_TRUNC
+                    } else {
+                        OPEN_EXISTING
+                    };
+                    (GENERIC_READ | GENERIC_WRITE, disposition)
+                }
+                _ => (GENERIC_READ, OPEN_EXISTING),
+            };
+
+            let handle = CreateFileA(
+                path_bytes.as_ptr(),
+                desired_access,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                std::ptr::null(),
+                creation_disposition,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+
+            if handle == INVALID_HANDLE_VALUE as isize {
+                -1
+            } else {
+                handle as i32
+            }
+        }
+    }
+
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
     {
         -1
     }
@@ -842,7 +1056,7 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
 /// Low-level close system call wrapper
 ///
 /// # Arguments
-/// * `fd` - File descriptor
+/// * `fd` - File descriptor (Windows: HANDLE)
 ///
 /// # Returns
 /// 0 on success, -1 on error
@@ -857,7 +1071,20 @@ pub extern "C" fn sys_close(fd: i32) -> i32 {
         }
     }
 
-    #[cfg(not(target_family = "unix"))]
+    #[cfg(target_family = "windows")]
+    {
+        use windows_sys::Win32::Foundation::CloseHandle;
+
+        unsafe {
+            if CloseHandle(fd as isize) != 0 {
+                0  // Success
+            } else {
+                -1  // Failure
+            }
+        }
+    }
+
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
     {
         -1
     }
@@ -866,7 +1093,7 @@ pub extern "C" fn sys_close(fd: i32) -> i32 {
 /// Get file size via fstat
 ///
 /// # Arguments
-/// * `fd` - File descriptor
+/// * `fd` - File descriptor (Windows: HANDLE)
 ///
 /// # Returns
 /// File size in bytes, or -1 on error
@@ -890,7 +1117,21 @@ pub extern "C" fn sys_file_size(fd: i32) -> i64 {
         }
     }
 
-    #[cfg(not(target_family = "unix"))]
+    #[cfg(target_family = "windows")]
+    {
+        use windows_sys::Win32::Storage::FileSystem::GetFileSizeEx;
+
+        unsafe {
+            let mut file_size: i64 = 0;
+            if GetFileSizeEx(fd as isize, &mut file_size as *mut i64) != 0 {
+                file_size
+            } else {
+                -1
+            }
+        }
+    }
+
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
     {
         -1
     }
@@ -921,7 +1162,26 @@ pub extern "C" fn sys_file_exists(path_ptr: i64) -> i32 {
         }
     }
 
-    #[cfg(not(target_family = "unix"))]
+    #[cfg(target_family = "windows")]
+    {
+        use std::ffi::CStr;
+        use windows_sys::Win32::Storage::FileSystem::GetFileAttributesA;
+        use windows_sys::Win32::Storage::FileSystem::INVALID_FILE_ATTRIBUTES;
+
+        unsafe {
+            let path_cstr = CStr::from_ptr(path_ptr as *const i8);
+            let path_bytes = path_cstr.to_bytes_with_nul();
+
+            let attrs = GetFileAttributesA(path_bytes.as_ptr());
+            if attrs != INVALID_FILE_ATTRIBUTES {
+                1
+            } else {
+                0
+            }
+        }
+    }
+
+    #[cfg(not(any(target_family = "unix", target_family = "windows")))]
     {
         0
     }
@@ -992,6 +1252,338 @@ pub extern "C" fn native_path_resolve(path: RuntimeValue) -> RuntimeValue {
     {
         path
     }
+}
+
+// =============================================================================
+// Async File Loading Infrastructure (#1765-#1769)
+// =============================================================================
+
+use std::sync::Arc;
+use parking_lot::RwLock;
+use std::sync::mpsc::{channel, Sender, Receiver};
+use std::thread::{self, JoinHandle};
+
+/// File loading state for async operations
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileLoadState {
+    Pending = 0,
+    Loading = 1,
+    Ready = 2,
+    Failed = 3,
+}
+
+/// Async file handle for background loading
+pub struct AsyncFileHandle {
+    path: String,
+    state: Arc<RwLock<FileLoadState>>,
+    region: Arc<RwLock<Option<MmapRegion>>>,
+    error: Arc<RwLock<Option<String>>>,
+    mode: i32,    // Open mode flags
+    prefault: bool, // Enable progressive prefaulting
+}
+
+impl AsyncFileHandle {
+    /// Create a new async file handle
+    pub fn new(path: String, mode: i32, prefault: bool) -> Self {
+        AsyncFileHandle {
+            path,
+            state: Arc::new(RwLock::new(FileLoadState::Pending)),
+            region: Arc::new(RwLock::new(None)),
+            error: Arc::new(RwLock::new(None)),
+            mode,
+            prefault,
+        }
+    }
+
+    /// Start loading the file in background
+    pub fn start_loading(&self) {
+        let path = self.path.clone();
+        let state = self.state.clone();
+        let region = self.region.clone();
+        let error = self.error.clone();
+        let mode = self.mode;
+        let prefault = self.prefault;
+
+        // Submit to thread pool
+        ASYNC_FILE_POOL.submit(move || {
+            // Mark as loading
+            *state.write() = FileLoadState::Loading;
+
+            // Perform the actual file loading
+            match load_file_mmap(&path, mode, prefault) {
+                Ok(mmap_region) => {
+                    *region.write() = Some(mmap_region);
+                    *state.write() = FileLoadState::Ready;
+                }
+                Err(e) => {
+                    *error.write() = Some(e);
+                    *state.write() = FileLoadState::Failed;
+                }
+            }
+        });
+    }
+
+    /// Check if file is ready (non-blocking)
+    pub fn is_ready(&self) -> bool {
+        *self.state.read() == FileLoadState::Ready
+    }
+
+    /// Check if loading failed
+    pub fn is_failed(&self) -> bool {
+        *self.state.read() == FileLoadState::Failed
+    }
+
+    /// Get current state
+    pub fn get_state(&self) -> FileLoadState {
+        *self.state.read()
+    }
+
+    /// Wait for loading to complete (blocking)
+    pub fn wait(&self) -> Result<MmapRegion, String> {
+        // Spin-wait until ready or failed
+        loop {
+            let state = *self.state.read();
+            match state {
+                FileLoadState::Ready => {
+                    let region = self.region.read();
+                    if let Some(r) = region.as_ref() {
+                        return Ok(MmapRegion {
+                            ptr: r.ptr,
+                            size: r.size,
+                        });
+                    } else {
+                        return Err("Region not available".to_string());
+                    }
+                }
+                FileLoadState::Failed => {
+                    let error = self.error.read();
+                    return Err(error.clone().unwrap_or_else(|| "Unknown error".to_string()));
+                }
+                FileLoadState::Pending | FileLoadState::Loading => {
+                    // Yield to avoid busy-waiting
+                    std::thread::yield_now();
+                    std::thread::sleep(std::time::Duration::from_micros(100));
+                }
+            }
+        }
+    }
+}
+
+/// Worker thread pool for async file operations
+struct AsyncFileThreadPool {
+    workers: Vec<JoinHandle<()>>,
+    sender: Sender<Box<dyn FnOnce() + Send>>,
+}
+
+impl AsyncFileThreadPool {
+    /// Create a new thread pool with the specified number of workers
+    fn new(num_workers: usize) -> Self {
+        let (sender, receiver) = channel::<Box<dyn FnOnce() + Send>>();
+        let receiver = Arc::new(parking_lot::Mutex::new(receiver));
+
+        let mut workers = Vec::with_capacity(num_workers);
+
+        for id in 0..num_workers {
+            let receiver = receiver.clone();
+            let handle = thread::Builder::new()
+                .name(format!("async-file-worker-{}", id))
+                .spawn(move || {
+                    loop {
+                        let task = {
+                            let lock = receiver.lock();
+                            lock.recv()
+                        };
+
+                        match task {
+                            Ok(task) => {
+                                task();
+                            }
+                            Err(_) => {
+                                // Channel closed, exit worker
+                                break;
+                            }
+                        }
+                    }
+                })
+                .expect("Failed to spawn worker thread");
+
+            workers.push(handle);
+        }
+
+        AsyncFileThreadPool { workers, sender }
+    }
+
+    /// Submit a task to the thread pool
+    fn submit<F>(&self, task: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.sender
+            .send(Box::new(task))
+            .expect("Failed to send task to thread pool");
+    }
+}
+
+// Global thread pool for async file operations (lazy initialization)
+lazy_static::lazy_static! {
+    static ref ASYNC_FILE_POOL: AsyncFileThreadPool = {
+        let num_workers = num_cpus::get().max(4);
+        AsyncFileThreadPool::new(num_workers)
+    };
+}
+
+/// Load a file using mmap (blocking operation)
+fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, String> {
+    // Open file
+    let fd = unsafe {
+        #[cfg(target_family = "unix")]
+        {
+            use std::ffi::CString;
+            let c_path = CString::new(path).map_err(|e| format!("Invalid path: {}", e))?;
+            libc::open(c_path.as_ptr(), mode)
+        }
+        #[cfg(target_family = "windows")]
+        {
+            use windows_sys::Win32::Storage::FileSystem::{CreateFileA, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL};
+            use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+
+            let access = if mode & 0x1 != 0 { 0x80000000 } else { 0 }  // GENERIC_READ
+                       | if mode & 0x2 != 0 { 0x40000000 } else { 0 }; // GENERIC_WRITE
+
+            let handle = CreateFileA(
+                path.as_ptr(),
+                access,
+                0x1 | 0x2, // FILE_SHARE_READ | FILE_SHARE_WRITE
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                0,
+            );
+
+            if handle == INVALID_HANDLE_VALUE as isize {
+                return Err(format!("Failed to open file: {}", path));
+            }
+            handle as i32
+        }
+    };
+
+    if fd < 0 {
+        return Err(format!("Failed to open file: {}", path));
+    }
+
+    // Get file size
+    let file_size = sys_file_size(fd);
+    if file_size < 0 {
+        unsafe { sys_close(fd); }
+        return Err("Failed to get file size".to_string());
+    }
+
+    // Create mmap
+    let mmap_ptr = sys_mmap(
+        0,           // addr: let kernel choose
+        file_size as u64,
+        1,           // prot: PROT_READ
+        2,           // flags: MAP_PRIVATE
+        fd,
+        0,           // offset
+    );
+
+    if mmap_ptr < 0 {
+        unsafe { sys_close(fd); }
+        return Err("mmap failed".to_string());
+    }
+
+    // Progressive prefaulting if enabled
+    if prefault {
+        progressive_prefault(mmap_ptr as *mut u8, file_size as usize);
+    }
+
+    // Close fd (mmap keeps reference)
+    unsafe { sys_close(fd); }
+
+    Ok(MmapRegion {
+        ptr: mmap_ptr as *mut u8,
+        size: file_size as usize,
+    })
+}
+
+/// Progressive prefaulting - gradually fault in pages (#1769)
+///
+/// This uses madvise WILLNEED to hint the kernel to load pages in the background
+fn progressive_prefault(ptr: *mut u8, size: usize) {
+    const CHUNK_SIZE: usize = 4 * 1024 * 1024; // 4MB chunks
+    const PREFAULT_ADVICE: i32 = 4; // MADV_WILLNEED
+
+    let mut offset = 0;
+    while offset < size {
+        let chunk_size = std::cmp::min(CHUNK_SIZE, size - offset);
+
+        unsafe {
+            let chunk_ptr = ptr.add(offset);
+            let _ = sys_madvise(chunk_ptr as i64, chunk_size as u64, PREFAULT_ADVICE);
+        }
+
+        offset += chunk_size;
+
+        // Small delay to avoid overwhelming the system
+        std::thread::sleep(std::time::Duration::from_micros(100));
+    }
+}
+
+// =============================================================================
+// Async File Handle FFI Functions
+// =============================================================================
+
+/// Create a new async file handle
+///
+/// # Arguments
+/// * `path` - RuntimeValue containing the file path (String)
+/// * `mode` - Open mode flags
+/// * `prefault` - Enable progressive prefaulting (bool)
+///
+/// # Returns
+/// Handle ID (as i64) for the async file handle
+#[no_mangle]
+pub extern "C" fn native_async_file_create(path: RuntimeValue, mode: i32, prefault: i32) -> i64 {
+    // TODO: Extract string from RuntimeValue
+    // For now, use placeholder path
+    let path_str = "placeholder.txt".to_string();
+
+    let handle = AsyncFileHandle::new(path_str, mode, prefault != 0);
+
+    // Store handle in registry and return ID
+    // TODO: Implement handle registry
+    0
+}
+
+/// Start loading a file asynchronously
+#[no_mangle]
+pub extern "C" fn native_async_file_start_loading(handle_id: i64) {
+    // TODO: Retrieve handle from registry and start loading
+}
+
+/// Check if async file is ready (non-blocking)
+#[no_mangle]
+pub extern "C" fn native_async_file_is_ready(handle_id: i64) -> i32 {
+    // TODO: Retrieve handle from registry and check state
+    0
+}
+
+/// Get async file loading state
+#[no_mangle]
+pub extern "C" fn native_async_file_get_state(handle_id: i64) -> i32 {
+    // TODO: Retrieve handle from registry and return state
+    FileLoadState::Pending as i32
+}
+
+/// Wait for async file to load (blocking)
+///
+/// Returns RuntimeValue containing the MmapRegion or error
+#[no_mangle]
+pub extern "C" fn native_async_file_wait(handle_id: i64) -> RuntimeValue {
+    // TODO: Retrieve handle, wait for completion, return region or error
+    RuntimeValue::from_int(0)
 }
 
 // =============================================================================

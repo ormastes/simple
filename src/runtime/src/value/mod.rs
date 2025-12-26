@@ -231,6 +231,10 @@ pub use file_io::{
     // Process management with staging
     native_spawn_worker, native_process_wait,
     native_process_is_alive, native_process_kill,
+    // Async file loading (#1765-#1769)
+    native_async_file_create, native_async_file_start_loading,
+    native_async_file_is_ready, native_async_file_get_state,
+    native_async_file_wait,
     // Path resolution and async primitives
     native_path_resolve, async_yield,
 };

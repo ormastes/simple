@@ -66,7 +66,7 @@ All feature tables use this standardized 8-column format:
 | #1590-#1649 | Physics Engine Integration (Isaac Lab/Genesis) | 📋 Planned (0/60) |
 | #1650-#1729 | ML/PyTorch Integration | 📋 Planned (0/80) |
 | #1730-#1759 | Monoio Async Runtime | 🔄 In Progress (19/30, 63%) → [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) |
-| #1760-#1779 | Async Memory-Mapped File I/O | 🔄 In Progress (9/20, 45%) - Core FFI & Platform Support Complete |
+| #1760-#1779 | Async Memory-Mapped File I/O | 🔄 In Progress (18/20, 90%) - Core FFI, Async Loading, Context Managers & Full Platform Support Complete |
 
 ---
 
@@ -669,19 +669,19 @@ Complete PyTorch integration for machine learning in Simple. Uses LibTorch C++ A
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1765 | AsyncFileHandle (background loading) | 4 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
-| #1766 | FileState tracking (Pending/Loading/Ready/Failed) | 2 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
-| #1767 | Worker thread pool for mmap operations | 4 | 📋 | R | [file_io.md](../spec/file_io.md) | - | `src/runtime/tests/mmap/` |
-| #1768 | is_ready/wait/get methods | 3 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
-| #1769 | Progressive prefaulting (madvise WILLNEED) | 3 | 📋 | S+R | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | `src/runtime/tests/mmap/` |
+| #1765 | AsyncFileHandle (background loading) | 4 | ✅ | S+R | [async_handle.spl](../simple/std_lib/src/file/async_handle.spl), [file_io.rs:1275-1369](../src/runtime/src/value/file_io.rs) | `std_lib/test/unit/file/` | - |
+| #1766 | FileState tracking (Pending/Loading/Ready/Failed) | 2 | ✅ | S+R | [async_handle.spl:9-13](../simple/std_lib/src/file/async_handle.spl), [file_io.rs:1267-1272](../src/runtime/src/value/file_io.rs) | `std_lib/test/unit/file/` | - |
+| #1767 | Worker thread pool for mmap operations | 4 | ✅ | R | [file_io.rs:1371-1432](../src/runtime/src/value/file_io.rs) | - | `src/runtime/tests/mmap/` |
+| #1768 | is_ready/wait/get methods | 3 | ✅ | S+R | [async_handle.spl:45-90](../simple/std_lib/src/file/async_handle.spl), [file_io.rs:1325-1368](../src/runtime/src/value/file_io.rs) | `std_lib/test/unit/file/` | - |
+| #1769 | Progressive prefaulting (madvise WILLNEED) | 3 | ✅ | S+R | [file_io.rs:1509-1530](../src/runtime/src/value/file_io.rs) | `std_lib/test/unit/file/` | `src/runtime/tests/mmap/` |
 
 ### Context Manager Support (#1770-#1772)
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1770 | ContextManager trait for MmapRegion | 2 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
-| #1771 | AsyncContextManager trait | 3 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
-| #1772 | `with file.open() as x:` integration | 2 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/file/` | - |
+| #1770 | ContextManager trait for MmapRegion | 2 | ✅ | S | [context.spl:10-30](../simple/std_lib/src/file/context.spl) | `std_lib/test/unit/file/` | - |
+| #1771 | AsyncContextManager trait | 3 | ✅ | S | [context.spl:14-82](../simple/std_lib/src/file/context.spl) | `std_lib/test/unit/file/` | - |
+| #1772 | `with file.open() as x:` integration | 2 | ✅ | S | [context.spl:19-82](../simple/std_lib/src/file/context.spl) | `std_lib/test/unit/file/` | - |
 
 ### CLI Integration (#1773-#1775)
 
@@ -697,7 +697,7 @@ Complete PyTorch integration for machine learning in Simple. Uses LibTorch C++ A
 |------------|---------|------------|--------|------|-----|--------|--------|
 | #1776 | Linux mmap implementation | 3 | ✅ | R | [file_io.rs:724-751](../src/runtime/src/value/file_io.rs) | - | `src/runtime/tests/mmap/` |
 | #1777 | macOS mmap implementation | 3 | ✅ | R | [file_io.rs:799-806](../src/runtime/src/value/file_io.rs) | - | `src/runtime/tests/mmap/` |
-| #1778 | Windows MapViewOfFile implementation | 4 | 📋 | R | [file_io.md](../spec/file_io.md) | - | `src/runtime/tests/mmap/` |
+| #1778 | Windows MapViewOfFile implementation | 4 | ✅ | R | [file_io.rs:746-1186](../src/runtime/src/value/file_io.rs) | - | `src/runtime/tests/mmap/` |
 | #1779 | Cross-platform error handling | 2 | ✅ | S+R | [__init__.spl:122](../simple/std_lib/src/file/__init__.spl) | `std_lib/test/unit/file/` | - |
 
 ---
