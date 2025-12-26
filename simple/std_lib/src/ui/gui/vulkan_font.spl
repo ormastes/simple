@@ -1,0 +1,433 @@
+# Vulkan Font Atlas - Text Rendering
+#
+# Implements GPU-accelerated text rendering using a texture atlas approach.
+# Rasterizes font glyphs to a GPU texture and renders text as textured quads.
+#
+# Architecture:
+#   TTF Font → Glyph Rasterization → Atlas Texture → GPU Upload
+#   Text String → Glyph Lookup → Quad Generation → Batch Rendering
+#
+# Features:
+#   - TTF/OTF font loading
+#   - Dynamic atlas generation (512x512 or 1024x1024)
+#   - Glyph caching and metrics
+#   - Kerning support
+#   - Multiple font sizes
+#   - Unicode support (Basic Multilingual Plane)
+
+use core.*
+use ui.gui.vulkan_types.*
+use ui.gui.vulkan_buffers.*
+
+# =============================================================================
+# Font Atlas - Main Structure
+# =============================================================================
+
+pub struct FontAtlas:
+    device: VulkanDevice
+    atlas_texture: VkTexture
+    atlas_size: u32
+    font_size: u32
+
+    # Glyph cache
+    glyph_map: Dict[char, GlyphInfo]
+
+    # Atlas packing state
+    current_x: u32
+    current_y: u32
+    row_height: u32
+
+    # Font metrics
+    ascent: f32
+    descent: f32
+    line_gap: f32
+
+pub struct GlyphInfo:
+    # Atlas texture coordinates (normalized 0..1)
+    atlas_x: f32
+    atlas_y: f32
+    atlas_w: f32
+    atlas_h: f32
+
+    # Glyph metrics (in pixels)
+    width: f32
+    height: f32
+    bearing_x: f32  # Horizontal bearing
+    bearing_y: f32  # Vertical bearing
+    advance: f32    # Horizontal advance
+
+impl FontAtlas:
+    # Create font atlas from TTF file
+    pub async fn new(
+        device: &VulkanDevice,
+        font_path: &str,
+        font_size: u32
+    ) -> Result[FontAtlas, String]:
+        # Load TTF font file
+        let font_data = await load_font_file(font_path)?
+
+        # Create atlas texture (512x512 RGBA)
+        let atlas_size = 512u32
+        let atlas_texture = vulkan_create_texture(
+            device.device,
+            atlas_size,
+            atlas_size,
+            VK_FORMAT_R8G8B8A8_UNORM
+        )?
+
+        # Initialize with transparent pixels
+        let mut atlas_data: Array[u8] = Array::with_capacity((atlas_size * atlas_size * 4) as usize)
+        for _ in 0..(atlas_size * atlas_size * 4):
+            atlas_data.push(0)
+
+        # Upload initial empty texture
+        vulkan_upload_texture(device.device, atlas_texture, &atlas_data)?
+
+        # Get font metrics
+        let metrics = parse_font_metrics(&font_data, font_size)?
+
+        let mut atlas = FontAtlas {
+            device: device.clone(),
+            atlas_texture: atlas_texture,
+            atlas_size: atlas_size,
+            font_size: font_size,
+            glyph_map: Dict::new(),
+            current_x: 0,
+            current_y: 0,
+            row_height: 0,
+            ascent: metrics.ascent,
+            descent: metrics.descent,
+            line_gap: metrics.line_gap,
+        }
+
+        # Pre-rasterize common ASCII characters (32-126)
+        await atlas.rasterize_ascii_set(&font_data)?
+
+        Ok(atlas)
+
+    # Pre-rasterize ASCII character set
+    async fn rasterize_ascii_set(&mut self, font_data: &Array[u8]) -> Result[(), String]:
+        # Common ASCII printable characters
+        let ascii_chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+        for ch in ascii_chars.chars():
+            await self.rasterize_glyph(font_data, ch)?
+
+        Ok(())
+
+    # Rasterize a single glyph and add to atlas
+    async fn rasterize_glyph(&mut self, font_data: &Array[u8], ch: char) -> Result[(), String]:
+        # Check if already cached
+        if self.glyph_map.contains_key(&ch):
+            return Ok(())
+
+        # Rasterize glyph using font data
+        let glyph_bitmap = rasterize_char(font_data, ch, self.font_size)?
+
+        # Check if we need to advance to next row
+        if self.current_x + glyph_bitmap.width > self.atlas_size:
+            self.current_x = 0
+            self.current_y += self.row_height
+            self.row_height = 0
+
+        # Check if atlas is full
+        if self.current_y + glyph_bitmap.height > self.atlas_size:
+            return Err("Font atlas full - need to resize or use multiple atlases")
+
+        # Upload glyph bitmap to atlas texture
+        await self.upload_glyph_region(
+            &glyph_bitmap.pixels,
+            self.current_x,
+            self.current_y,
+            glyph_bitmap.width,
+            glyph_bitmap.height
+        )?
+
+        # Store glyph info (normalized coordinates)
+        let atlas_size_f = self.atlas_size as f32
+        let glyph_info = GlyphInfo {
+            atlas_x: self.current_x as f32 / atlas_size_f,
+            atlas_y: self.current_y as f32 / atlas_size_f,
+            atlas_w: glyph_bitmap.width as f32 / atlas_size_f,
+            atlas_h: glyph_bitmap.height as f32 / atlas_size_f,
+            width: glyph_bitmap.width as f32,
+            height: glyph_bitmap.height as f32,
+            bearing_x: glyph_bitmap.bearing_x,
+            bearing_y: glyph_bitmap.bearing_y,
+            advance: glyph_bitmap.advance,
+        }
+
+        self.glyph_map.insert(ch, glyph_info)
+
+        # Update packing state
+        self.current_x += glyph_bitmap.width
+        if glyph_bitmap.height > self.row_height:
+            self.row_height = glyph_bitmap.height
+
+        Ok(())
+
+    # Upload glyph bitmap region to atlas texture
+    async fn upload_glyph_region(
+        &mut self,
+        pixels: &Array[u8],
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32
+    ) -> Result[(), String]:
+        vulkan_upload_texture_region(
+            self.device.device,
+            self.atlas_texture,
+            pixels,
+            x,
+            y,
+            width,
+            height
+        )
+
+    # Add text to vertex cache with proper glyph positioning
+    pub async fn add_text(
+        &mut self,
+        cache: &mut VertexCache,
+        text: &str,
+        x: f32,
+        y: f32,
+        color: [f32; 4]
+    ) -> Result[(), String]:
+        let mut cursor_x = x
+        let cursor_y = y + self.ascent  # Baseline position
+
+        for ch in text.chars():
+            # Get or rasterize glyph
+            if !self.glyph_map.contains_key(&ch):
+                # Dynamically rasterize if not cached
+                # TODO: Load font data from somewhere
+                // await self.rasterize_glyph(&font_data, ch)?
+                continue
+
+            let glyph = self.glyph_map.get(&ch).unwrap()
+
+            # Calculate glyph position
+            let glyph_x = cursor_x + glyph.bearing_x
+            let glyph_y = cursor_y - glyph.bearing_y
+
+            # Add textured quad to vertex cache
+            cache.add_textured_rect(
+                glyph_x,
+                glyph_y,
+                glyph.width,
+                glyph.height,
+                glyph.atlas_x,
+                glyph.atlas_y,
+                glyph.atlas_w,
+                glyph.atlas_h,
+                color
+            )
+
+            # Advance cursor
+            cursor_x += glyph.advance
+
+        Ok(())
+
+    # Measure text width for layout
+    pub fn measure_text(&self, text: &str) -> f32:
+        let mut width = 0.0f32
+
+        for ch in text.chars():
+            if let Some(glyph) = self.glyph_map.get(&ch):
+                width += glyph.advance
+
+        width
+
+    # Get line height
+    pub fn line_height(&self) -> f32:
+        self.ascent - self.descent + self.line_gap
+
+    # Cleanup
+    pub async fn destroy(&mut self):
+        await vulkan_destroy_texture_async(self.device.device, self.atlas_texture)
+    }
+
+# =============================================================================
+# Glyph Bitmap - Rasterized Character Data
+# =============================================================================
+
+struct GlyphBitmap:
+    pixels: Array[u8]      # RGBA pixel data
+    width: u32
+    height: u32
+    bearing_x: f32         # Horizontal bearing (offset from cursor)
+    bearing_y: f32         # Vertical bearing (offset from baseline)
+    advance: f32           # How far to advance cursor
+
+# =============================================================================
+# Font Metrics
+# =============================================================================
+
+struct FontMetrics:
+    ascent: f32            # Distance from baseline to top
+    descent: f32           # Distance from baseline to bottom (negative)
+    line_gap: f32          # Recommended line spacing
+
+# =============================================================================
+# Font Loading and Rasterization (FFI)
+# =============================================================================
+
+# Load TTF/OTF font file
+async fn load_font_file(path: &str) -> Result[Array[u8], String]:
+    # Read font file bytes
+    let bytes = await read_file_async(path)?
+    Ok(bytes)
+
+# Parse font metrics from font data
+fn parse_font_metrics(font_data: &Array[u8], font_size: u32) -> Result[FontMetrics, String]:
+    # Call FFI to parse TTF header and get metrics
+    vulkan_parse_font_metrics(font_data, font_size)
+}
+
+# Rasterize a character to a bitmap
+fn rasterize_char(font_data: &Array[u8], ch: char, font_size: u32) -> Result[GlyphBitmap, String]:
+    # Call FFI to rasterize character using FreeType or similar
+    vulkan_rasterize_char(font_data, ch, font_size)
+}
+
+# =============================================================================
+# Vertex Cache Extension for Textured Rendering
+# =============================================================================
+
+# Already implemented in vulkan_renderer.spl:
+# impl VertexCache:
+#     pub fn add_textured_rect(...)
+
+# =============================================================================
+# FFI Declarations - Font Operations
+# =============================================================================
+
+extern fn read_file_async(path: &str) -> Future[Result[Array[u8], String]]
+extern fn vulkan_parse_font_metrics(font_data: &Array[u8], font_size: u32) -> Result[FontMetrics, String]
+extern fn vulkan_rasterize_char(font_data: &Array[u8], ch: char, font_size: u32) -> Result[GlyphBitmap, String]
+
+# =============================================================================
+# FFI Declarations - Texture Operations
+# =============================================================================
+
+extern fn vulkan_create_texture(device: VkDevice, width: u32, height: u32, format: VkFormat) -> Result[VkTexture, String]
+extern fn vulkan_upload_texture(device: VkDevice, texture: VkTexture, data: &Array[u8]) -> Result[(), String]
+extern fn vulkan_upload_texture_region(device: VkDevice, texture: VkTexture, data: &Array[u8], x: u32, y: u32, width: u32, height: u32) -> Result[(), String]
+extern fn vulkan_destroy_texture_async(device: VkDevice, texture: VkTexture) -> Future[Result[(), String]]
+
+# =============================================================================
+# Vulkan Constants
+# =============================================================================
+
+pub type VkTexture = i64
+pub type VkFormat = u32
+
+pub const VK_FORMAT_R8G8B8A8_UNORM: u32 = 37  # Standard RGBA format
+
+# =============================================================================
+# Default Font Fallback
+# =============================================================================
+
+impl FontAtlas:
+    # Create font atlas with embedded default font
+    pub async fn default(device: &VulkanDevice) -> Result[FontAtlas, String]:
+        # Use embedded DejaVu Sans or similar free font
+        # For now, try to load system font
+        let font_paths = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Linux
+            "C:\\Windows\\Fonts\\arial.ttf",                     # Windows
+            "/System/Library/Fonts/Helvetica.ttc",              # macOS
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",              # Arch Linux
+        ]
+
+        for path in &font_paths:
+            match Self::new(device, path, 16).await:
+                case Ok(atlas): return Ok(atlas)
+                case Err(_): continue
+
+        Err("No default font found - please provide font path explicitly")
+    }
+
+# =============================================================================
+# Text Layout Helpers
+# =============================================================================
+
+impl FontAtlas:
+    # Layout multi-line text
+    pub fn layout_text(&self, text: &str, max_width: f32) -> Array[TextLine]:
+        let mut lines: Array[TextLine] = Array::new()
+        let mut current_line = String::new()
+        let mut current_width = 0.0f32
+
+        for word in text.split(' '):
+            let word_width = self.measure_text(word) + self.measure_text(" ")
+
+            if current_width + word_width > max_width and !current_line.is_empty():
+                # Start new line
+                lines.push(TextLine {
+                    text: current_line.clone(),
+                    width: current_width,
+                })
+                current_line = String::new()
+                current_width = 0.0
+
+            current_line.push_str(word)
+            current_line.push(' ')
+            current_width += word_width
+
+        # Add last line
+        if !current_line.is_empty():
+            lines.push(TextLine {
+                text: current_line,
+                width: current_width,
+            })
+
+        lines
+
+    # Center text horizontally
+    pub fn center_text(&self, text: &str, container_width: f32) -> f32:
+        let text_width = self.measure_text(text)
+        (container_width - text_width) / 2.0
+
+    # Align text right
+    pub fn align_right(&self, text: &str, container_width: f32) -> f32:
+        let text_width = self.measure_text(text)
+        container_width - text_width
+
+pub struct TextLine:
+    text: String
+    width: f32
+
+# =============================================================================
+# Advanced Font Features (TODO)
+# =============================================================================
+
+impl FontAtlas:
+    # TODO: Kerning support
+    pub fn get_kerning(&self, left: char, right: char) -> f32:
+        # Would need kerning table from TTF file
+        0.0
+
+    # TODO: Bold/italic variants
+    pub fn set_font_weight(&mut self, weight: FontWeight):
+        # Would need to load different font file or apply transformations
+        pass
+
+    # TODO: Sub-pixel rendering
+    pub fn enable_subpixel_rendering(&mut self):
+        # Would need RGB sub-pixel layout and special shader
+        pass
+
+    # TODO: SDF (Signed Distance Field) rendering for scalable text
+    pub fn enable_sdf_rendering(&mut self):
+        # Would generate SDF atlas instead of bitmap atlas
+        pass
+
+pub enum FontWeight:
+    Thin
+    Light
+    Regular
+    Medium
+    Bold
+    Black

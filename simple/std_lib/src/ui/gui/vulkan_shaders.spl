@@ -1,0 +1,280 @@
+# Vulkan Shader Compilation - Phase 1 Implementation
+#
+# Shader loading and compilation for Vulkan graphics pipeline.
+# Supports SPIR-V bytecode loading and shader module creation.
+#
+# Implementation Status: Phase 1 - Task 4
+# - ShaderModule: SPIR-V shader loading
+# - Vertex/Fragment shader support
+# - Smart defaults for graphics pipeline
+
+use core.*
+use ui.gui.vulkan_types.*
+
+# =============================================================================
+# Shader Stage Types
+# =============================================================================
+
+pub enum ShaderStage:
+    Vertex
+    Fragment
+    Compute
+    Geometry
+    TessellationControl
+    TessellationEvaluation
+
+# =============================================================================
+# Shader Module - SPIR-V Shader Compilation
+# =============================================================================
+
+pub struct ShaderModule:
+    # Core handles
+    device: VkDevice
+    module: VkShaderModule
+    stage: ShaderStage
+    entry_point: String
+
+impl ShaderModule:
+    # Create shader module from SPIR-V bytecode
+    pub fn from_spirv(device: &VulkanDevice, spirv_code: &Array[u8], stage: ShaderStage) -> Result[ShaderModule, String]:
+        # Validate SPIR-V magic number (0x07230203)
+        if spirv_code.len() < 4:
+            return Err("SPIR-V code too small (less than 4 bytes)")
+
+        let magic = (spirv_code[0] as u32) |
+                   ((spirv_code[1] as u32) << 8) |
+                   ((spirv_code[2] as u32) << 16) |
+                   ((spirv_code[3] as u32) << 24)
+
+        if magic != 0x07230203:
+            return Err("Invalid SPIR-V magic number")
+
+        # Create shader module via FFI
+        let module = vulkan_create_shader_module(device.device, spirv_code)?
+
+        Ok(ShaderModule {
+            device: device.device,
+            module: module,
+            stage: stage,
+            entry_point: "main".to_string(),
+        })
+
+    # Create shader module from SPIR-V file
+    pub fn from_file(device: &VulkanDevice, path: &str, stage: ShaderStage) -> Result[ShaderModule, String]:
+        # TODO: Read file contents
+        let spirv_code = vulkan_read_file(path)?
+        Self::from_spirv(device, &spirv_code, stage)
+
+    # Get pipeline shader stage info for pipeline creation
+    pub fn get_stage_info(&self) -> VkPipelineShaderStageCreateInfo:
+        VkPipelineShaderStageCreateInfo {
+            stage: self.stage_to_vk_flags(),
+            module: self.module,
+            name: self.entry_point.clone(),
+        }
+
+    # Convert ShaderStage to VkShaderStageFlagBits
+    fn stage_to_vk_flags(&self) -> u32:
+        match self.stage:
+            case ShaderStage::Vertex: VK_SHADER_STAGE_VERTEX_BIT
+            case ShaderStage::Fragment: VK_SHADER_STAGE_FRAGMENT_BIT
+            case ShaderStage::Compute: VK_SHADER_STAGE_COMPUTE_BIT
+            case ShaderStage::Geometry: VK_SHADER_STAGE_GEOMETRY_BIT
+            case ShaderStage::TessellationControl: VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT
+            case ShaderStage::TessellationEvaluation: VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT
+
+    # Cleanup
+    pub async fn destroy(&self):
+        await vulkan_destroy_shader_module_async(self.device, self.module)
+
+# =============================================================================
+# Default Vertex Shader - Passthrough with Position + Color
+# =============================================================================
+#
+# GLSL Source (reference):
+# ```glsl
+# #version 450
+#
+# layout(location = 0) in vec3 in_position;
+# layout(location = 1) in vec4 in_color;
+#
+# layout(location = 0) out vec4 frag_color;
+#
+# void main() {
+#     gl_Position = vec4(in_position, 1.0);
+#     frag_color = in_color;
+# }
+# ```
+#
+# Compiled to SPIR-V:
+# ```bash
+# glslangValidator -V shader.vert -o vert.spv
+# ```
+
+pub const DEFAULT_VERTEX_SHADER_SPIRV: Array[u8] = [
+    # SPIR-V magic number
+    0x03, 0x02, 0x23, 0x07,
+
+    # TODO: Replace with actual compiled SPIR-V bytecode
+    # This is a placeholder - real SPIR-V would be ~500-1000 bytes
+    # For now, FFI implementation will need to provide default shaders
+]
+
+# =============================================================================
+# Default Fragment Shader - Output Color
+# =============================================================================
+#
+# GLSL Source (reference):
+# ```glsl
+# #version 450
+#
+# layout(location = 0) in vec4 frag_color;
+#
+# layout(location = 0) out vec4 out_color;
+#
+# void main() {
+#     out_color = frag_color;
+# }
+# ```
+#
+# Compiled to SPIR-V:
+# ```bash
+# glslangValidator -V shader.frag -o frag.spv
+# ```
+
+pub const DEFAULT_FRAGMENT_SHADER_SPIRV: Array[u8] = [
+    # SPIR-V magic number
+    0x03, 0x02, 0x23, 0x07,
+
+    # TODO: Replace with actual compiled SPIR-V bytecode
+    # This is a placeholder - real SPIR-V would be ~300-500 bytes
+]
+
+# =============================================================================
+# Shader Builder - Convenient Shader Creation
+# =============================================================================
+
+pub struct ShaderBuilder:
+    device: VulkanDevice
+    vertex_shader: Option[ShaderModule]
+    fragment_shader: Option[ShaderModule]
+
+impl ShaderBuilder:
+    # Create new shader builder
+    pub fn new(device: &VulkanDevice) -> ShaderBuilder:
+        ShaderBuilder {
+            device: device.clone(),
+            vertex_shader: None,
+            fragment_shader: None,
+        }
+
+    # Load vertex shader from file
+    pub fn vertex_from_file(mut self, path: &str) -> Result[ShaderBuilder, String]:
+        let shader = ShaderModule::from_file(&self.device, path, ShaderStage::Vertex)?
+        self.vertex_shader = Some(shader)
+        Ok(self)
+
+    # Load fragment shader from file
+    pub fn fragment_from_file(mut self, path: &str) -> Result[ShaderBuilder, String]:
+        let shader = ShaderModule::from_file(&self.device, path, ShaderStage::Fragment)?
+        self.fragment_shader = Some(shader)
+        Ok(self)
+
+    # Use default vertex shader
+    pub fn default_vertex(mut self) -> Result[ShaderBuilder, String]:
+        let shader = ShaderModule::from_spirv(
+            &self.device,
+            &DEFAULT_VERTEX_SHADER_SPIRV,
+            ShaderStage::Vertex
+        )?
+        self.vertex_shader = Some(shader)
+        Ok(self)
+
+    # Use default fragment shader
+    pub fn default_fragment(mut self) -> Result[ShaderBuilder, String]:
+        let shader = ShaderModule::from_spirv(
+            &self.device,
+            &DEFAULT_FRAGMENT_SHADER_SPIRV,
+            ShaderStage::Fragment
+        )?
+        self.fragment_shader = Some(shader)
+        Ok(self)
+
+    # Build shader stages for pipeline
+    pub fn build(self) -> Result[ShaderStages, String]:
+        let vertex = self.vertex_shader.ok_or("No vertex shader specified")?
+        let fragment = self.fragment_shader.ok_or("No fragment shader specified")?
+
+        Ok(ShaderStages {
+            vertex: vertex,
+            fragment: fragment,
+        })
+
+# =============================================================================
+# Shader Stages - Vertex + Fragment Pair
+# =============================================================================
+
+pub struct ShaderStages:
+    vertex: ShaderModule
+    fragment: ShaderModule
+
+impl ShaderStages:
+    # Create shader stages with smart defaults
+    pub fn new_default(device: &VulkanDevice) -> Result[ShaderStages, String]:
+        ShaderBuilder::new(device)
+            .default_vertex()?
+            .default_fragment()?
+            .build()
+
+    # Create shader stages from files
+    pub fn new_from_files(device: &VulkanDevice, vertex_path: &str, fragment_path: &str) -> Result[ShaderStages, String]:
+        ShaderBuilder::new(device)
+            .vertex_from_file(vertex_path)?
+            .fragment_from_file(fragment_path)?
+            .build()
+
+    # Get stage infos for pipeline creation
+    pub fn get_stage_infos(&self) -> Array[VkPipelineShaderStageCreateInfo]:
+        [
+            self.vertex.get_stage_info(),
+            self.fragment.get_stage_info(),
+        ]
+
+    # Cleanup both shaders
+    pub async fn destroy(&self):
+        await self.vertex.destroy()
+        await self.fragment.destroy()
+
+# =============================================================================
+# FFI Declarations
+# =============================================================================
+
+# Shader module creation/destruction
+extern fn vulkan_create_shader_module(device: VkDevice, spirv_code: &Array[u8]) -> Result[VkShaderModule, String]
+extern fn vulkan_destroy_shader_module_async(device: VkDevice, module: VkShaderModule) -> Future[Result[(), String]]
+
+# File I/O
+extern fn vulkan_read_file(path: &str) -> Result[Array[u8], String]
+
+# =============================================================================
+# Vulkan Constants - Shader Stage Flags
+# =============================================================================
+
+pub const VK_SHADER_STAGE_VERTEX_BIT: u32 = 0x00000001
+pub const VK_SHADER_STAGE_FRAGMENT_BIT: u32 = 0x00000004
+pub const VK_SHADER_STAGE_COMPUTE_BIT: u32 = 0x00000020
+pub const VK_SHADER_STAGE_GEOMETRY_BIT: u32 = 0x00000008
+pub const VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT: u32 = 0x00000002
+pub const VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT: u32 = 0x00000010
+
+# =============================================================================
+# Supporting Types
+# =============================================================================
+
+pub struct VkPipelineShaderStageCreateInfo:
+    stage: u32
+    module: VkShaderModule
+    name: String
+
+# Opaque FFI type
+pub type VkShaderModule = i64

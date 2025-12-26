@@ -1,0 +1,323 @@
+# Vulkan Buffers - Phase 2 Implementation
+#
+# Vertex, index, and uniform buffer management for graphics pipeline.
+# Supports both graphics and compute use cases.
+
+use core.*
+use ui.gui.vulkan_types.*
+
+# =============================================================================
+# Buffer Types
+# =============================================================================
+
+pub enum BufferUsage:
+    Vertex          # Vertex buffer
+    Index           # Index buffer
+    Uniform         # Uniform buffer (UBO)
+    Storage         # Storage buffer (SSBO)
+    TransferSrc     # Source for transfer
+    TransferDst     # Destination for transfer
+
+# =============================================================================
+# Vertex Buffer - GPU-side vertex data storage
+# =============================================================================
+
+pub struct VertexBuffer:
+    device: VkDevice
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+    size: u64
+    vertex_count: u32
+
+impl VertexBuffer:
+    # Create vertex buffer from data
+    pub fn new[T](device: &VulkanDevice, vertices: &Array[T]) -> Result[VertexBuffer, String]:
+        let size = (vertices.len() * size_of::<T>()) as u64
+
+        # Create staging buffer (CPU-visible)
+        let staging_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Map and copy data to staging
+        let data_ptr = vulkan_map_memory(device.device, staging_buffer.memory, 0, size)?
+        vulkan_memcpy(data_ptr, vertices.as_ptr(), size)
+        vulkan_unmap_memory(device.device, staging_buffer.memory)
+
+        # Create device-local vertex buffer
+        let vertex_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        )?
+
+        # Copy from staging to device-local
+        vulkan_copy_buffer(device.device, staging_buffer.buffer, vertex_buffer.buffer, size)?
+
+        # Clean up staging buffer
+        vulkan_destroy_buffer(device.device, staging_buffer.buffer, staging_buffer.memory)
+
+        Ok(VertexBuffer {
+            device: device.device,
+            buffer: vertex_buffer.buffer,
+            memory: vertex_buffer.memory,
+            size: size,
+            vertex_count: vertices.len() as u32,
+        })
+
+    # Cleanup
+    pub async fn destroy(&self):
+        await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+# =============================================================================
+# Index Buffer - GPU-side index data storage
+# =============================================================================
+
+pub struct IndexBuffer:
+    device: VkDevice
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+    size: u64
+    index_count: u32
+    index_type: VkIndexType
+
+impl IndexBuffer:
+    # Create index buffer from u16 indices
+    pub fn new_u16(device: &VulkanDevice, indices: &Array[u16]) -> Result[IndexBuffer, String]:
+        Self::new_impl(device, indices, VK_INDEX_TYPE_UINT16)
+
+    # Create index buffer from u32 indices
+    pub fn new_u32(device: &VulkanDevice, indices: &Array[u32]) -> Result[IndexBuffer, String]:
+        Self::new_impl(device, indices, VK_INDEX_TYPE_UINT32)
+
+    # Internal implementation
+    fn new_impl[T](device: &VulkanDevice, indices: &Array[T], index_type: VkIndexType) -> Result[IndexBuffer, String]:
+        let size = (indices.len() * size_of::<T>()) as u64
+
+        # Create staging buffer
+        let staging_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Map and copy
+        let data_ptr = vulkan_map_memory(device.device, staging_buffer.memory, 0, size)?
+        vulkan_memcpy(data_ptr, indices.as_ptr(), size)
+        vulkan_unmap_memory(device.device, staging_buffer.memory)
+
+        # Create device-local index buffer
+        let index_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        )?
+
+        # Copy
+        vulkan_copy_buffer(device.device, staging_buffer.buffer, index_buffer.buffer, size)?
+
+        # Clean up staging
+        vulkan_destroy_buffer(device.device, staging_buffer.buffer, staging_buffer.memory)
+
+        Ok(IndexBuffer {
+            device: device.device,
+            buffer: index_buffer.buffer,
+            memory: index_buffer.memory,
+            size: size,
+            index_count: indices.len() as u32,
+            index_type: index_type,
+        })
+
+    # Cleanup
+    pub async fn destroy(&self):
+        await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+# =============================================================================
+# Uniform Buffer - GPU-side uniform data (UBO)
+# =============================================================================
+
+pub struct UniformBuffer[T]:
+    device: VkDevice
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+    size: u64
+    mapped_ptr: Option[*mut u8]  # Persistently mapped
+
+impl UniformBuffer[T]:
+    # Create uniform buffer (persistently mapped for easy updates)
+    pub fn new(device: &VulkanDevice, initial_data: &T) -> Result[UniformBuffer[T], String]:
+        let size = size_of::<T>() as u64
+
+        # Create host-visible uniform buffer (persistently mapped)
+        let uniform_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Map memory (keep mapped)
+        let mapped_ptr = vulkan_map_memory(device.device, uniform_buffer.memory, 0, size)?
+
+        # Copy initial data
+        vulkan_memcpy(mapped_ptr, initial_data as *const u8, size)
+
+        Ok(UniformBuffer {
+            device: device.device,
+            buffer: uniform_buffer.buffer,
+            memory: uniform_buffer.memory,
+            size: size,
+            mapped_ptr: Some(mapped_ptr),
+        })
+
+    # Update uniform data (no map/unmap needed - already mapped)
+    pub fn update(&mut self, data: &T):
+        if let Some(ptr) = self.mapped_ptr:
+            vulkan_memcpy(ptr, data as *const u8, self.size)
+
+    # Cleanup
+    pub async fn destroy(&mut self):
+        if let Some(_) = self.mapped_ptr:
+            vulkan_unmap_memory(self.device, self.memory)
+            self.mapped_ptr = None
+        await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+# =============================================================================
+# Storage Buffer - GPU-side storage buffer (SSBO)
+# =============================================================================
+
+pub struct StorageBuffer[T]:
+    device: VkDevice
+    buffer: VkBuffer
+    memory: VkDeviceMemory
+    size: u64
+    element_count: u32
+
+impl StorageBuffer[T]:
+    # Create storage buffer from array
+    pub fn new(device: &VulkanDevice, data: &Array[T]) -> Result[StorageBuffer[T], String]:
+        let size = (data.len() * size_of::<T>()) as u64
+
+        # Create staging buffer
+        let staging_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Map and copy
+        let data_ptr = vulkan_map_memory(device.device, staging_buffer.memory, 0, size)?
+        vulkan_memcpy(data_ptr, data.as_ptr(), size)
+        vulkan_unmap_memory(device.device, staging_buffer.memory)
+
+        # Create device-local storage buffer
+        let storage_buffer = vulkan_create_buffer(
+            device.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        )?
+
+        # Copy
+        vulkan_copy_buffer(device.device, staging_buffer.buffer, storage_buffer.buffer, size)?
+
+        # Clean up staging
+        vulkan_destroy_buffer(device.device, staging_buffer.buffer, staging_buffer.memory)
+
+        Ok(StorageBuffer {
+            device: device.device,
+            buffer: storage_buffer.buffer,
+            memory: storage_buffer.memory,
+            size: size,
+            element_count: data.len() as u32,
+        })
+
+    # Download data from GPU
+    pub fn download(&self) -> Result[Array[T], String]:
+        let size = self.size
+
+        # Create staging buffer for readback
+        let staging_buffer = vulkan_create_buffer(
+            self.device,
+            size,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        )?
+
+        # Copy from device to staging
+        vulkan_copy_buffer(self.device, self.buffer, staging_buffer.buffer, size)?
+
+        # Map and read
+        let data_ptr = vulkan_map_memory(self.device, staging_buffer.memory, 0, size)?
+        let mut result: Array[T] = Array::with_capacity(self.element_count as usize)
+        vulkan_memcpy(result.as_mut_ptr(), data_ptr, size)
+        result.set_len(self.element_count as usize)
+        vulkan_unmap_memory(self.device, staging_buffer.memory)
+
+        # Clean up staging
+        vulkan_destroy_buffer(self.device, staging_buffer.buffer, staging_buffer.memory)
+
+        Ok(result)
+
+    # Cleanup
+    pub async fn destroy(&self):
+        await vulkan_destroy_buffer_async(self.device, self.buffer, self.memory)
+
+# =============================================================================
+# FFI Declarations
+# =============================================================================
+
+# Buffer creation/destruction
+extern fn vulkan_create_buffer(device: VkDevice, size: u64, usage: VkBufferUsageFlags, properties: VkMemoryPropertyFlags) -> Result[VkBufferMemory, String]
+extern fn vulkan_destroy_buffer(device: VkDevice, buffer: VkBuffer, memory: VkDeviceMemory)
+extern fn vulkan_destroy_buffer_async(device: VkDevice, buffer: VkBuffer, memory: VkDeviceMemory) -> Future[Result[(), String]]
+
+# Memory operations
+extern fn vulkan_map_memory(device: VkDevice, memory: VkDeviceMemory, offset: u64, size: u64) -> Result[*mut u8, String]
+extern fn vulkan_unmap_memory(device: VkDevice, memory: VkDeviceMemory)
+extern fn vulkan_memcpy(dst: *mut u8, src: *const u8, size: u64)
+extern fn vulkan_copy_buffer(device: VkDevice, src: VkBuffer, dst: VkBuffer, size: u64) -> Result[(), String]
+
+# Utility
+extern fn size_of[T]() -> usize
+
+# =============================================================================
+# Vulkan Constants - Buffer Usage
+# =============================================================================
+
+pub const VK_BUFFER_USAGE_TRANSFER_SRC_BIT: u32 = 0x00000001
+pub const VK_BUFFER_USAGE_TRANSFER_DST_BIT: u32 = 0x00000002
+pub const VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT: u32 = 0x00000010
+pub const VK_BUFFER_USAGE_STORAGE_BUFFER_BIT: u32 = 0x00000020
+pub const VK_BUFFER_USAGE_INDEX_BUFFER_BIT: u32 = 0x00000040
+pub const VK_BUFFER_USAGE_VERTEX_BUFFER_BIT: u32 = 0x00000080
+
+# Memory properties
+pub const VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT: u32 = 0x00000001
+pub const VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT: u32 = 0x00000002
+pub const VK_MEMORY_PROPERTY_HOST_COHERENT_BIT: u32 = 0x00000004
+
+# Index types
+pub const VK_INDEX_TYPE_UINT16: u32 = 0
+pub const VK_INDEX_TYPE_UINT32: u32 = 1
+
+# =============================================================================
+# Supporting Types
+# =============================================================================
+
+pub type VkBuffer = i64
+pub type VkDeviceMemory = i64
+pub type VkBufferUsageFlags = u32
+pub type VkMemoryPropertyFlags = u32
+pub type VkIndexType = u32
+
+pub struct VkBufferMemory:
+    buffer: VkBuffer
+    memory: VkDeviceMemory

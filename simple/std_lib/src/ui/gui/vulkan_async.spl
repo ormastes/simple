@@ -1,0 +1,788 @@
+# Vulkan Async Renderer - JavaScript-Style Async/Await UI Backend
+#
+# Fully async UI rendering using Vulkan with Futures/Promises.
+# Enables non-blocking operations, CPU-GPU parallelism, and JavaScript-like patterns.
+#
+# Key Features:
+#   - Async API (await renderer.render(tree))
+#   - CPU-GPU parallel execution
+#   - Multi-threaded layout computation
+#   - Parallel resource loading
+#   - Non-blocking event handling
+#   - Future combinators (all, race, join)
+
+use core.*
+use concurrency.*  # For Future, async/await
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+use ui.renderer.*
+use ui.gui.vulkan_types.*  # Import Vulkan core types
+
+# =============================================================================
+# Async Vulkan Renderer
+# =============================================================================
+
+pub struct VulkanAsyncRenderer:
+    # Core Vulkan components
+    device: VulkanDevice
+    swapchain: Swapchain
+    render_pass: RenderPass
+
+    # CPU-side processing (async capable)
+    layout_engine: AsyncLayoutEngine
+    element_processor: AsyncElementProcessor
+    resource_manager: AsyncResourceManager
+
+    # GPU-side management
+    buffer_manager: AsyncBufferManager
+    text_renderer: AsyncTextRenderer
+
+    # Frame management (triple buffering)
+    frame_data: Array[FrameData]  # Size 3
+    frame_index: usize
+
+    # State
+    initialized: bool
+    window_width: u32
+    window_height: u32
+
+impl VulkanAsyncRenderer:
+    # Create a new async Vulkan renderer
+    pub fn new(window_title: &str, width: u32, height: u32) -> Result[VulkanAsyncRenderer, RenderError]:
+        # TODO: Create window handle (platform-specific)
+        let window_handle = vulkan_create_window(window_title, width, height)
+        if window_handle == 0:
+            return Err(RenderError::IoError("Failed to create window".to_string()))
+
+        # TODO: Initialize Vulkan device
+        let device = match VulkanDevice::new(window_handle):
+            case Ok(dev): dev
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # TODO: Create swapchain
+        let swapchain = match Swapchain::new(&device, width, height):
+            case Ok(sc): sc
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # TODO: Create render pass
+        let render_pass = match RenderPass::new(&device, &swapchain):
+            case Ok(rp): rp
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # Initialize async CPU-side components
+        let layout_engine = AsyncLayoutEngine::new()
+        let element_processor = AsyncElementProcessor::new()
+        let resource_manager = AsyncResourceManager::new(&device)
+
+        # Initialize async GPU-side components
+        let buffer_manager = AsyncBufferManager::new(&device)
+        let text_renderer = AsyncTextRenderer::new(&device)
+
+        # Create frame data for triple buffering
+        let mut frame_data: Array[FrameData] = []
+        for _ in 0..3:
+            frame_data.push(FrameData::new(&device))
+
+        return Ok(VulkanAsyncRenderer {
+            device: device,
+            swapchain: swapchain,
+            render_pass: render_pass,
+            layout_engine: layout_engine,
+            element_processor: element_processor,
+            resource_manager: resource_manager,
+            buffer_manager: buffer_manager,
+            text_renderer: text_renderer,
+            frame_data: frame_data,
+            frame_index: 0,
+            initialized: false,
+            window_width: width,
+            window_height: height
+        })
+
+# =============================================================================
+# Async RenderBackend Implementation
+# =============================================================================
+
+impl RenderBackend for VulkanAsyncRenderer:
+    # Initialize renderer asynchronously
+    async fn init(self) -> Future[Result[(), RenderError]]:
+        if self.initialized:
+            return Future::ready(Err(RenderError::AlreadyInitialized))
+
+        # TODO: Async initialization of Vulkan resources
+        # These can be done in parallel
+        let shader_future = async {
+            # TODO: Compile and load shaders
+            # vkCreateShaderModule for each shader
+            self.compile_shaders_async()
+        }
+
+        let pipeline_future = async {
+            # TODO: Create graphics pipelines
+            # vkCreateGraphicsPipelines
+            self.create_pipelines_async()
+        }
+
+        let font_future = async {
+            # TODO: Load default font atlas
+            self.text_renderer.load_default_font_async()
+        }
+
+        # Wait for all initialization tasks in parallel
+        match await Future::all([shader_future, pipeline_future, font_future]):
+            case Ok(_):
+                self.initialized = true
+                return Future::ready(Ok(()))
+            case Err(e):
+                return Future::ready(Err(RenderError::IoError(e)))
+
+    # Shutdown renderer asynchronously
+    async fn shutdown(self) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # TODO: Wait for GPU to finish all work
+        # vkDeviceWaitIdle
+        await self.device.wait_idle_async()
+
+        # TODO: Destroy Vulkan resources
+        # - Destroy pipelines
+        # - Destroy descriptor pools
+        # - Destroy frame resources
+        # - Destroy render pass
+        # - Destroy swapchain
+        # - Destroy device
+
+        self.initialized = false
+        return Future::ready(Ok(()))
+
+    fn dimensions(self) -> (u16, u16):
+        return (self.window_width as u16, self.window_height as u16)
+
+    # Async rendering - the main event!
+    async fn render(self, tree: &ElementTree) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # === ASYNC RENDERING PIPELINE ===
+
+        # 1. Begin frame (async - acquire swapchain image)
+        let frame = match await self.begin_frame_async():
+            case Ok(f): f
+            case Err(e): return Future::ready(Err(e))
+
+        # 2. Spawn parallel CPU tasks
+        # Layout computation (can use multiple CPU cores)
+        let layout_future = async {
+            let constraints = BoxConstraints::new(
+                0, 0,
+                self.window_width, self.window_height
+            )
+            self.layout_engine.compute_layout_async(tree.root(), constraints)
+        }
+
+        # Resource preloading (images, fonts in parallel)
+        let preload_future = async {
+            self.resource_manager.preload_resources_async(tree)
+        }
+
+        # 3. Wait for layout to complete (needed for next step)
+        let layout_result = await layout_future
+
+        # 4. Process elements into draw list (can overlap with preload)
+        let process_future = async {
+            self.element_processor.process_tree_async(tree, &layout_result)
+        }
+
+        # 5. Wait for both process and preload to complete
+        let (draw_list, _) = await Future::join(process_future, preload_future)
+
+        # 6. Upload geometry to GPU (async DMA transfers)
+        await self.buffer_manager.upload_draw_list_async(&draw_list, frame.buffer_index)
+
+        # 7. Record rendering commands (can be parallelized with secondary command buffers)
+        await self.record_commands_async(&frame, &draw_list)
+
+        # 8. Submit to GPU (async - GPU executes in parallel with CPU)
+        let submit_future = self.submit_frame_async(frame)
+
+        # 9. Present and wait for completion
+        await self.present_async(frame, submit_future)
+
+        return Future::ready(Ok(()))
+
+    # Async patch application (incremental updates)
+    async fn apply_patches(self, patches: &PatchSet) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # 1. Compute dirty regions (fast CPU work)
+        let dirty_regions = self.compute_dirty_regions(patches)
+
+        # 2. Parallel re-layout of affected regions
+        let layout_futures = dirty_regions.map(|region| async {
+            self.layout_engine.recompute_region_async(region)
+        })
+        let layout_results = await Future::all(layout_futures)
+
+        # 3. Regenerate draw list for dirty regions only
+        let partial_draw_list = await async {
+            self.element_processor.process_dirty_regions_async(&layout_results)
+        }
+
+        # 4. Upload updated geometry
+        await self.buffer_manager.update_partial_async(
+            &partial_draw_list,
+            &dirty_regions
+        )
+
+        # 5. Re-record affected command buffers
+        await self.record_partial_commands_async(&partial_draw_list, &dirty_regions)
+
+        return Future::ready(Ok(()))
+
+    async fn clear(self) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # Begin frame and clear
+        let frame = match await self.begin_frame_async():
+            case Ok(f): f
+            case Err(e): return Future::ready(Err(e))
+
+        # TODO: Clear framebuffer (async GPU operation)
+        # - Begin render pass with clear color
+        # - End render pass
+        # - Submit command buffer
+
+        await self.present_async(frame, self.submit_frame_async(frame))
+
+        return Future::ready(Ok(()))
+
+    async fn flush(self) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # TODO: Wait for GPU to finish all pending work
+        await self.device.wait_idle_async()
+
+        return Future::ready(Ok(()))
+
+    # Async event polling
+    async fn poll_event(self, timeout_ms: u64) -> Future[Result[Option[Event], RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # TODO: Async window event polling
+        # Create future that completes when event arrives or timeout
+        let event_future = async {
+            # TODO: Platform-specific event polling
+            # Returns Option[Event] when event available or timeout
+            vulkan_poll_event_async(self.window_handle, timeout_ms)
+        }
+
+        match await event_future:
+            case Ok(event_opt): return Future::ready(Ok(event_opt))
+            case Err(e): return Future::ready(Err(RenderError::IoError(e)))
+
+    async fn read_event(self) -> Future[Result[Event, RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # Block until event arrives
+        loop:
+            match await self.poll_event(1000):
+                case Ok(Some(event)): return Future::ready(Ok(event))
+                case Ok(None): pass  # Timeout, retry
+                case Err(e): return Future::ready(Err(e))
+
+# =============================================================================
+# Async Frame Management
+# =============================================================================
+
+impl VulkanAsyncRenderer:
+    # Begin frame asynchronously
+    async fn begin_frame_async(self) -> Future[Result[Frame, RenderError]]:
+        # Wait for previous frame fence (non-blocking)
+        let fence = self.frame_data[self.frame_index].fence
+        await self.device.wait_for_fence_async(fence)
+
+        # Reset fence for this frame
+        self.device.reset_fence(fence)
+
+        # Acquire next swapchain image (async - may wait for vsync)
+        let image_index = match await self.swapchain.acquire_next_image_async(
+            self.frame_data[self.frame_index].image_available
+        ):
+            case Ok(idx): idx
+            case Err(SwapchainError::OutOfDate):
+                # Window resized - need to recreate swapchain
+                await self.recreate_swapchain_async()
+                # Retry
+                return await self.begin_frame_async()
+            case Err(e):
+                return Future::ready(Err(RenderError::IoError(e.to_string())))
+
+        # Reset command buffer
+        let cmd_buf = self.frame_data[self.frame_index].command_buffer
+        self.device.reset_command_buffer(cmd_buf)
+
+        return Future::ready(Ok(Frame {
+            image_index: image_index,
+            buffer_index: self.frame_index,
+            command_buffer: cmd_buf
+        }))
+
+    # Record rendering commands asynchronously
+    async fn record_commands_async(self, frame: &Frame, draw_list: &DrawList)
+        -> Future[()]:
+        # For maximum parallelism, use secondary command buffers
+        # Each draw call can be recorded in parallel on different threads
+
+        let num_draw_calls = draw_list.draw_calls.len()
+        if num_draw_calls == 0:
+            return Future::ready(())
+
+        # TODO: Allocate secondary command buffers
+        let secondary_cmd_bufs = self.allocate_secondary_command_buffers(num_draw_calls)
+
+        # Record each draw call in parallel
+        let record_futures: Array[Future[()]] = []
+
+        for (i, draw_call) in draw_list.draw_calls.enumerate():
+            let cmd_buf = secondary_cmd_bufs[i]
+            let future = async {
+                # TODO: Record draw call to secondary command buffer
+                # - vkBeginCommandBuffer with RENDER_PASS_CONTINUE
+                # - vkCmdBindPipeline
+                # - vkCmdBindDescriptorSets
+                # - vkCmdPushConstants
+                # - vkCmdBindVertexBuffers
+                # - vkCmdBindIndexBuffer
+                # - vkCmdDrawIndexed
+                # - vkEndCommandBuffer
+                self.record_draw_call(cmd_buf, draw_call)
+            }
+            record_futures.push(future)
+
+        # Wait for all recordings to complete in parallel
+        await Future::all(record_futures)
+
+        # Record primary command buffer (executes secondaries)
+        let cmd_buf = frame.command_buffer
+
+        # TODO: Begin primary command buffer
+        # vkBeginCommandBuffer
+
+        # TODO: Begin render pass
+        # vkCmdBeginRenderPass with clear color
+
+        # TODO: Set viewport and scissor
+        # vkCmdSetViewport, vkCmdSetScissor
+
+        # TODO: Execute all secondary command buffers
+        for secondary in secondary_cmd_bufs:
+            # vkCmdExecuteCommands(cmd_buf, 1, &secondary)
+            pass
+
+        # TODO: End render pass
+        # vkCmdEndRenderPass
+
+        # TODO: End command buffer
+        # vkEndCommandBuffer
+
+        return Future::ready(())
+
+    # Submit frame to GPU asynchronously
+    fn submit_frame_async(self, frame: Frame) -> Future[GpuSubmitResult]:
+        # TODO: Submit command buffer to queue
+        # Returns future that completes when GPU finishes
+
+        let submit_info = VkSubmitInfo {
+            wait_semaphores: [self.frame_data[frame.buffer_index].image_available],
+            wait_stages: [VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT],
+            command_buffers: [frame.command_buffer],
+            signal_semaphores: [self.frame_data[frame.buffer_index].render_finished],
+            fence: self.frame_data[frame.buffer_index].fence
+        }
+
+        # Submit (non-blocking - GPU executes in parallel)
+        # TODO: vkQueueSubmit(graphics_queue, 1, &submit_info, fence)
+
+        # Return future that completes when fence is signaled
+        return self.device.create_fence_future(self.frame_data[frame.buffer_index].fence)
+
+    # Present frame asynchronously
+    async fn present_async(self, frame: Frame, gpu_future: Future[GpuSubmitResult])
+        -> Future[Result[(), RenderError]]:
+        # Wait for GPU to finish rendering
+        await gpu_future
+
+        # Present to swapchain (async - may wait for vsync)
+        let present_info = VkPresentInfo {
+            wait_semaphores: [self.frame_data[frame.buffer_index].render_finished],
+            swapchains: [self.swapchain.swapchain],
+            image_indices: [frame.image_index]
+        }
+
+        # TODO: vkQueuePresentKHR (async - waits for vsync)
+        let result = await self.device.queue_present_async(present_info)
+
+        match result:
+            case Ok(()):
+                # Advance frame index for triple buffering
+                self.frame_index = (self.frame_index + 1) % 3
+                return Future::ready(Ok(()))
+            case Err(SwapchainError::OutOfDate):
+                # Window resized
+                await self.recreate_swapchain_async()
+                return Future::ready(Ok(()))
+            case Err(e):
+                return Future::ready(Err(RenderError::IoError(e.to_string())))
+
+    # Recreate swapchain asynchronously (e.g., after window resize)
+    async fn recreate_swapchain_async(self) -> Future[Result[(), RenderError]]:
+        # Wait for GPU to finish
+        await self.device.wait_idle_async()
+
+        # TODO: Query new window size
+        # TODO: Destroy old swapchain
+        # TODO: Create new swapchain with new size
+        # TODO: Recreate framebuffers
+
+        return Future::ready(Ok(()))
+
+# =============================================================================
+# Async Layout Engine
+# =============================================================================
+
+struct AsyncLayoutEngine:
+    cache: LayoutCache
+
+impl AsyncLayoutEngine:
+    fn new() -> AsyncLayoutEngine:
+        return AsyncLayoutEngine {
+            cache: LayoutCache::new()
+        }
+
+    # Compute layout asynchronously (can parallelize children)
+    async fn compute_layout_async(self, elem: &Element, constraints: BoxConstraints)
+        -> Future[LayoutResult]:
+        # Check cache (fast path)
+        if let Some(cached) = self.cache.get(elem.id):
+            if cached.constraints == constraints:
+                return Future::ready(cached.result)
+
+        # For complex layouts with many children, parallelize
+        if elem.children.len() > 4:
+            return await self.parallel_layout(elem, constraints)
+        else:
+            return await self.sequential_layout(elem, constraints)
+
+    # Layout children in parallel
+    async fn parallel_layout(self, elem: &Element, constraints: BoxConstraints)
+        -> Future[LayoutResult]:
+        let children_futures: Array[Future[LayoutResult]] = []
+
+        for child in &elem.children:
+            let child_constraints = self.compute_child_constraints(child, constraints)
+            # Spawn async task for each child
+            let future = async {
+                self.compute_layout_async(child, child_constraints)
+            }
+            children_futures.push(future)
+
+        # Wait for all children in parallel (utilize all CPU cores!)
+        let children_results = await Future::all(children_futures)
+
+        # Combine results
+        let result = self.combine_layout_results(elem, &children_results)
+
+        # Cache
+        self.cache.set(elem.id, constraints, result)
+
+        return Future::ready(result)
+
+    # Layout children sequentially (for small trees)
+    async fn sequential_layout(self, elem: &Element, constraints: BoxConstraints)
+        -> Future[LayoutResult]:
+        # TODO: Implement layout algorithm (flexbox, grid, block)
+        return Future::ready(LayoutResult::default())
+
+    async fn recompute_region_async(self, region: &DirtyRegion) -> Future[LayoutResult]:
+        # TODO: Recompute layout for dirty region only
+        return Future::ready(LayoutResult::default())
+
+# =============================================================================
+# Async Element Processor
+# =============================================================================
+
+struct AsyncElementProcessor:
+    vertex_builder: VertexBuilder
+    draw_list: DrawList
+
+impl AsyncElementProcessor:
+    fn new() -> AsyncElementProcessor:
+        return AsyncElementProcessor {
+            vertex_builder: VertexBuilder::new(),
+            draw_list: DrawList::new()
+        }
+
+    async fn process_tree_async(self, tree: &ElementTree, layout: &LayoutResult)
+        -> Future[DrawList]:
+        # Clear previous frame
+        self.draw_list.clear()
+        self.vertex_builder.clear()
+
+        # Process tree (can be parallelized by subtree)
+        await self.process_element_async(tree.root(), layout)
+
+        # Finalize
+        self.draw_list.vertices = self.vertex_builder.vertices
+        self.draw_list.indices = self.vertex_builder.indices
+
+        return Future::ready(self.draw_list)
+
+    async fn process_element_async(self, elem: &Element, layout: &LayoutResult)
+        -> Future[()]:
+        # TODO: Generate geometry for this element
+        # Can spawn parallel tasks for children
+
+        return Future::ready(())
+
+    async fn process_dirty_regions_async(self, layouts: &Array[LayoutResult])
+        -> Future[DrawList]:
+        # TODO: Process only dirty regions
+        return Future::ready(DrawList::new())
+
+# =============================================================================
+# Async Resource Manager
+# =============================================================================
+
+struct AsyncResourceManager:
+    textures: Dict[u64, Image]
+    font_atlas: Option[Image]
+    loading_cache: Dict[String, Future[Result[TextureId, String]]]
+
+impl AsyncResourceManager:
+    fn new(device: &VulkanDevice) -> AsyncResourceManager:
+        return AsyncResourceManager {
+            textures: Dict::new(),
+            font_atlas: None,
+            loading_cache: Dict::new()
+        }
+
+    # Load texture asynchronously
+    async fn load_texture_async(self, path: &str) -> Future[Result[TextureId, String]]:
+        # Check if already loading
+        if let Some(future) = self.loading_cache.get(path):
+            return await future  # Reuse in-flight request
+
+        # Start loading
+        let load_future = async {
+            # TODO: Read file asynchronously
+            let image_data = await fs::read_async(path)
+
+            # TODO: Decode image (CPU-bound, spawn on thread pool)
+            let decoded = await spawn_blocking(|| {
+                decode_image(&image_data)
+            })
+
+            # TODO: Upload to GPU (async DMA)
+            let texture = await self.device.create_texture_async(
+                decoded.width,
+                decoded.height,
+                decoded.data
+            )
+
+            # Cache and return
+            let texture_id = self.next_texture_id
+            self.next_texture_id = self.next_texture_id + 1
+            self.textures.set(texture_id, texture)
+
+            return Ok(texture_id)
+        }
+
+        # Cache the future
+        self.loading_cache.set(path.to_string(), load_future)
+
+        return await load_future
+
+    # Preload all resources in parallel
+    async fn preload_resources_async(self, tree: &ElementTree) -> Future[()]:
+        let load_futures: Array[Future[Result[TextureId, String>]] = []
+
+        # Traverse tree and collect resources
+        for elem in tree.iter():
+            if let Some(src) = elem.attrs.get("src"):
+                if not self.is_loaded(src):
+                    load_futures.push(self.load_texture_async(src))
+
+        # Load all in parallel
+        let results = await Future::all(load_futures)
+
+        # Log any failures
+        for result in results:
+            match result:
+                case Err(e):
+                    log_error(f"Failed to load resource: {e}")
+                case Ok(_):
+                    pass
+
+        return Future::ready(())
+
+# =============================================================================
+# Async Buffer Manager
+# =============================================================================
+
+struct AsyncBufferManager:
+    vertex_buffers: Array[Buffer]
+    index_buffers: Array[Buffer]
+
+impl AsyncBufferManager:
+    fn new(device: &VulkanDevice) -> AsyncBufferManager:
+        return AsyncBufferManager {
+            vertex_buffers: [],
+            index_buffers: []
+        }
+
+    async fn upload_draw_list_async(self, draw_list: &DrawList, frame_index: usize)
+        -> Future[()]:
+        # TODO: Get or allocate buffers
+        # TODO: Upload vertex data (async DMA)
+        # TODO: Upload index data (async DMA)
+
+        # Parallel uploads
+        let vertex_upload = async {
+            # TODO: vmaMapMemory + memcpy + vmaUnmapMemory (async)
+            ()
+        }
+
+        let index_upload = async {
+            # TODO: vmaMapMemory + memcpy + vmaUnmapMemory (async)
+            ()
+        }
+
+        # Wait for both
+        await Future::join(vertex_upload, index_upload)
+
+        return Future::ready(())
+
+    async fn update_partial_async(self, draw_list: &DrawList, regions: &Array[DirtyRegion])
+        -> Future[()]:
+        # TODO: Update only affected regions
+        return Future::ready(())
+
+# =============================================================================
+# Async Text Renderer
+# =============================================================================
+
+struct AsyncTextRenderer:
+    font_atlas: Option[Image]
+
+impl AsyncTextRenderer:
+    fn new(device: &VulkanDevice) -> AsyncTextRenderer:
+        return AsyncTextRenderer {
+            font_atlas: None
+        }
+
+    async fn load_default_font_async(self) -> Future[Result[(), String]]:
+        # TODO: Load default font, generate SDF atlas
+        return Future::ready(Ok(()))
+
+# =============================================================================
+# FFI Declarations
+# =============================================================================
+
+extern fn vulkan_create_window(title_ptr: *const u8, title_len: u64, width: u32, height: u32) -> i64
+extern fn vulkan_poll_event_async(window: i64, timeout_ms: u64) -> Future[Result[Option[Event], String]]
+
+# Supporting types (same as vulkan.spl)
+struct Frame:
+    image_index: u32
+    buffer_index: usize
+    command_buffer: i64
+
+struct FrameData:
+    command_buffer: i64
+    fence: i64
+    image_available: i64
+    render_finished: i64
+
+struct BoxConstraints:
+    min_width: u32
+    min_height: u32
+    max_width: u32
+    max_height: u32
+
+struct LayoutResult:
+    bounds: Dict[u64, Rect]
+
+struct Rect:
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+
+struct DrawList:
+    vertices: Array[Vertex]
+    indices: Array[u32]
+    draw_calls: Array[DrawCall]
+
+struct Vertex:
+    position: (f32, f32)
+    uv: (f32, f32)
+    color: u32
+
+struct DrawCall:
+    pipeline_type: PipelineType
+    vertex_offset: u32
+    vertex_count: u32
+    index_offset: u32
+    index_count: u32
+
+enum PipelineType:
+    SolidColor
+    RoundedRect
+    Text
+
+struct VertexBuilder:
+    vertices: Array[Vertex]
+    indices: Array[u32]
+
+struct Buffer:
+    handle: i64
+    size: u64
+
+struct Image:
+    handle: i64
+    width: u32
+    height: u32
+
+struct DirtyRegion:
+    bounds: Rect
+
+struct GpuSubmitResult:
+    success: bool
+
+struct VkSubmitInfo:
+    wait_semaphores: Array[i64]
+    wait_stages: Array[u32]
+    command_buffers: Array[i64]
+    signal_semaphores: Array[i64]
+    fence: i64
+
+struct VkPresentInfo:
+    wait_semaphores: Array[i64]
+    swapchains: Array[i64]
+    image_indices: Array[u32]
+
+enum SwapchainError:
+    OutOfDate
+    DeviceLost
+
+# Supporting types
+struct LayoutCache:
+    # TODO: Implement layout caching
+    pass

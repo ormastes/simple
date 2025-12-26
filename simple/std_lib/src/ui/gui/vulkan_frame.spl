@@ -1,0 +1,403 @@
+# Vulkan Frame Management - Phase 2 Implementation
+#
+# Frame context for render loop with automatic resource management.
+# Supports while-with context manager pattern for ergonomic rendering.
+
+use core.*
+use ui.gui.vulkan_types.*
+use ui.gui.vulkan_buffers.*
+use ui.gui.vulkan_commands.*
+use ui.gui.vulkan_pipeline.*
+
+# =============================================================================
+# Frame Context - Manages one frame of rendering
+# =============================================================================
+
+pub struct Frame:
+    # Core resources
+    device: VulkanDevice
+    swapchain: Swapchain
+    render_pass: RenderPass
+    command_buffer: CommandBuffer
+    framebuffer: Framebuffer
+
+    # Synchronization
+    image_available_semaphore: VkSemaphore
+    render_finished_semaphore: VkSemaphore
+    in_flight_fence: VkFence
+
+    # Current frame state
+    image_index: u32
+    width: u32
+    height: u32
+    is_active: bool
+
+impl Frame:
+    # Begin frame - acquires swapchain image
+    fn begin(
+        device: &VulkanDevice,
+        swapchain: &Swapchain,
+        render_pass: &RenderPass,
+        command_buffer: &mut CommandBuffer,
+        framebuffers: &Array[Framebuffer],
+        sync: &FrameSync
+    ) -> Result[Frame, String]:
+        # Wait for previous frame to finish
+        await device.wait_for_fence_async(sync.fence)
+        device.reset_fence(sync.fence)?
+
+        # Acquire next swapchain image
+        let image_index = await swapchain.acquire_next_image_async(sync.image_available)?
+
+        # Begin command buffer
+        command_buffer.begin()?
+
+        let frame = Frame {
+            device: device.clone(),
+            swapchain: swapchain.clone(),
+            render_pass: render_pass.clone(),
+            command_buffer: command_buffer.clone(),
+            framebuffer: framebuffers[image_index].clone(),
+            image_available_semaphore: sync.image_available,
+            render_finished_semaphore: sync.render_finished,
+            in_flight_fence: sync.fence,
+            image_index: image_index,
+            width: swapchain.extent.width,
+            height: swapchain.extent.height,
+            is_active: true,
+        }
+
+        Ok(frame)
+
+    # Clear the frame with a color
+    pub fn clear(&mut self, color: [f32; 4]) -> Result[(), String]:
+        if !self.is_active:
+            return Err("Frame not active")
+
+        # Begin render pass (clears automatically)
+        self.command_buffer.begin_render_pass(
+            &self.render_pass,
+            self.framebuffer.framebuffer,
+            self.width,
+            self.height,
+            color
+        )
+
+    # Bind pipeline for drawing
+    pub fn bind(&mut self, pipeline: &GraphicsPipeline) -> Result[(), String]:
+        if !self.is_active:
+            return Err("Frame not active")
+
+        self.command_buffer.bind_pipeline(pipeline)?
+
+        # Set viewport and scissor to full screen by default
+        self.command_buffer.set_viewport(
+            0.0,
+            0.0,
+            self.width as f32,
+            self.height as f32
+        )?
+
+        self.command_buffer.set_scissor(
+            0,
+            0,
+            self.width,
+            self.height
+        )
+
+    # Draw vertices
+    pub fn draw(&mut self, vertex_buffer: &VertexBuffer, vertex_count: u32) -> Result[(), String]:
+        if !self.is_active:
+            return Err("Frame not active")
+
+        self.command_buffer.bind_vertex_buffer(vertex_buffer)?
+        self.command_buffer.draw(vertex_count, 1, 0, 0)
+
+    # Draw with custom parameters
+    pub fn draw_instanced(
+        &mut self,
+        vertex_buffer: &VertexBuffer,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32
+    ) -> Result[(), String]:
+        if !self.is_active:
+            return Err("Frame not active")
+
+        self.command_buffer.bind_vertex_buffer(vertex_buffer)?
+        self.command_buffer.draw(vertex_count, instance_count, first_vertex, first_instance)
+
+    # Draw indexed vertices
+    pub fn draw_indexed(
+        &mut self,
+        vertex_buffer: &VertexBuffer,
+        index_buffer: &IndexBuffer,
+        index_count: u32
+    ) -> Result[(), String]:
+        if !self.is_active:
+            return Err("Frame not active")
+
+        self.command_buffer.bind_vertex_buffer(vertex_buffer)?
+        self.command_buffer.bind_index_buffer(index_buffer)?
+        self.command_buffer.draw_indexed(index_count, 1, 0, 0, 0)
+
+    # Draw indexed with custom parameters
+    pub fn draw_indexed_instanced(
+        &mut self,
+        vertex_buffer: &VertexBuffer,
+        index_buffer: &IndexBuffer,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32
+    ) -> Result[(), String]:
+        if !self.is_active:
+            return Err("Frame not active")
+
+        self.command_buffer.bind_vertex_buffer(vertex_buffer)?
+        self.command_buffer.bind_index_buffer(index_buffer)?
+        self.command_buffer.draw_indexed(
+            index_count,
+            instance_count,
+            first_index,
+            vertex_offset,
+            first_instance
+        )
+
+    # End frame - submits to queue and presents
+    async fn end(&mut self) -> Result[(), String]:
+        if !self.is_active:
+            return Err("Frame already ended")
+
+        # End render pass
+        self.command_buffer.end_render_pass()?
+
+        # End command buffer
+        self.command_buffer.end()?
+
+        # Submit to graphics queue
+        let submission = CommandSubmission::new(&self.device)
+        await submission.submit_async(
+            self.device.graphics_queue,
+            &self.command_buffer,
+            &[self.image_available_semaphore],
+            &[self.render_finished_semaphore],
+            self.in_flight_fence
+        )?
+
+        # Present to screen
+        let present_info = VkPresentInfo {
+            wait_semaphores: [self.render_finished_semaphore],
+            swapchain: self.swapchain.swapchain,
+            image_index: self.image_index,
+        }
+
+        await self.device.queue_present_async(present_info)?
+
+        self.is_active = false
+        Ok(())
+
+# =============================================================================
+# Frame Sync - Synchronization primitives for frame rendering
+# =============================================================================
+
+pub struct FrameSync:
+    image_available: VkSemaphore
+    render_finished: VkSemaphore
+    fence: VkFence
+
+impl FrameSync:
+    pub fn new(device: &VulkanDevice) -> Result[FrameSync, String]:
+        let image_available = device.create_semaphore()?
+        let render_finished = device.create_semaphore()?
+        let fence = device.create_fence(signaled: true)?  # Start signaled
+
+        Ok(FrameSync {
+            image_available: image_available,
+            render_finished: render_finished,
+            fence: fence,
+        })
+
+    pub async fn destroy(&self, device: &VulkanDevice):
+        await device.destroy_semaphore_async(self.image_available)
+        await device.destroy_semaphore_async(self.render_finished)
+        await device.destroy_fence_async(self.fence)
+
+# =============================================================================
+# Render Loop - High-level rendering context
+# =============================================================================
+
+pub struct RenderLoop:
+    device: VulkanDevice
+    swapchain: Swapchain
+    render_pass: RenderPass
+    command_pool: CommandPool
+    command_buffers: Array[CommandBuffer]
+    framebuffers: Array[Framebuffer]
+    frame_sync: Array[FrameSync]  # One per frame in flight
+    current_frame: usize
+    max_frames_in_flight: usize
+    window_open: bool
+
+impl RenderLoop:
+    # Create render loop with triple buffering
+    pub fn new(
+        device: &VulkanDevice,
+        swapchain: &Swapchain,
+        render_pass: &RenderPass
+    ) -> Result[RenderLoop, String]:
+        let max_frames = 2  # Double buffering (can be 3 for triple)
+
+        # Create command pool
+        let command_pool = CommandPool::new(device, device.graphics_family)?
+
+        # Create command buffers (one per frame in flight)
+        let mut command_buffers: Array[CommandBuffer] = []
+        for _ in 0..max_frames:
+            command_buffers.push(command_pool.allocate()?)
+
+        # Create framebuffers (one per swapchain image)
+        let mut framebuffers: Array[Framebuffer] = []
+        for image_view in &swapchain.image_views:
+            let framebuffer = Framebuffer::new(
+                device,
+                render_pass,
+                &[*image_view],
+                swapchain.extent.width,
+                swapchain.extent.height
+            )?
+            framebuffers.push(framebuffer)
+
+        # Create synchronization primitives (one set per frame in flight)
+        let mut frame_sync: Array[FrameSync] = []
+        for _ in 0..max_frames:
+            frame_sync.push(FrameSync::new(device)?)
+
+        Ok(RenderLoop {
+            device: device.clone(),
+            swapchain: swapchain.clone(),
+            render_pass: render_pass.clone(),
+            command_pool: command_pool,
+            command_buffers: command_buffers,
+            framebuffers: framebuffers,
+            frame_sync: frame_sync,
+            current_frame: 0,
+            max_frames_in_flight: max_frames,
+            window_open: true,
+        })
+
+    # Get next frame (for while-with loop)
+    pub async fn next_frame(&mut self) -> Option[Frame]:
+        if !self.window_open:
+            return None
+
+        # Get current frame resources
+        let sync = &self.frame_sync[self.current_frame]
+        let cmd = &mut self.command_buffers[self.current_frame]
+
+        # Try to begin frame
+        let frame = match Frame::begin(
+            &self.device,
+            &self.swapchain,
+            &self.render_pass,
+            cmd,
+            &self.framebuffers,
+            sync
+        ):
+            case Ok(f): f
+            case Err(e):
+                # Window closed or error
+                self.window_open = false
+                return None
+
+        # Advance to next frame
+        self.current_frame = (self.current_frame + 1) % self.max_frames_in_flight
+
+        Some(frame)
+
+    # Wait for all rendering to finish
+    pub async fn wait_idle(&self):
+        await self.device.wait_idle_async()
+
+    # Cleanup
+    pub async fn destroy(&mut self):
+        await self.wait_idle()
+
+        for sync in &self.frame_sync:
+            await sync.destroy(&self.device)
+
+        for framebuffer in &self.framebuffers:
+            await framebuffer.destroy()
+
+        await self.command_pool.destroy()
+
+# =============================================================================
+# Context Manager Protocol - For while-with loop
+# =============================================================================
+
+impl Frame:
+    # Context manager enter
+    pub fn enter(&mut self) -> &mut Frame:
+        self
+
+    # Context manager exit (automatic cleanup)
+    pub async fn exit(&mut self, exception: Option[String]):
+        if self.is_active:
+            # End frame and present
+            match await self.end():
+                case Ok(_): pass
+                case Err(e):
+                    # Log error but don't propagate (cleanup must succeed)
+                    println("Warning: Frame end failed: {e}")
+
+impl RenderLoop:
+    # Support for: while with render_loop.frame() as frame:
+    pub async fn frame(&mut self) -> Option[Frame]:
+        await self.next_frame()
+
+# =============================================================================
+# Supporting Types
+# =============================================================================
+
+pub struct VkPresentInfo:
+    wait_semaphores: Array[VkSemaphore]
+    swapchain: VkSwapchainKHR
+    image_index: u32
+
+# Add to VulkanDevice (extend existing impl)
+impl VulkanDevice:
+    pub fn create_semaphore(&self) -> Result[VkSemaphore, String]:
+        vulkan_create_semaphore(self.device)
+
+    pub fn create_fence(&self, signaled: bool) -> Result[VkFence, String]:
+        vulkan_create_fence(self.device, signaled)
+
+    pub fn reset_fence(&self, fence: VkFence) -> Result[(), String]:
+        vulkan_reset_fence(self.device, fence)
+
+    pub async fn destroy_semaphore_async(&self, semaphore: VkSemaphore):
+        await vulkan_destroy_semaphore_async(self.device, semaphore)
+
+    pub async fn destroy_fence_async(&self, fence: VkFence):
+        await vulkan_destroy_fence_async(self.device, fence)
+
+    pub async fn queue_present_async(&self, present_info: VkPresentInfo) -> Result[(), String]:
+        await vulkan_queue_present_async(
+            self.present_queue,
+            &present_info.wait_semaphores,
+            present_info.swapchain,
+            present_info.image_index
+        )
+
+# =============================================================================
+# FFI Declarations
+# =============================================================================
+
+extern fn vulkan_create_semaphore(device: VkDevice) -> Result[VkSemaphore, String]
+extern fn vulkan_create_fence(device: VkDevice, signaled: bool) -> Result[VkFence, String]
+extern fn vulkan_reset_fence(device: VkDevice, fence: VkFence) -> Result[(), String]
+extern fn vulkan_destroy_semaphore_async(device: VkDevice, semaphore: VkSemaphore) -> Future[Result[(), String]]
+extern fn vulkan_destroy_fence_async(device: VkDevice, fence: VkFence) -> Future[Result[(), String]]
+extern fn vulkan_queue_present_async(queue: VkQueue, wait_semaphores: &Array[VkSemaphore], swapchain: VkSwapchainKHR, image_index: u32) -> Future[Result[(), String]]

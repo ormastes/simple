@@ -1,0 +1,393 @@
+# Vulkan Graphics Pipeline - Phase 1 Implementation
+#
+# Graphics pipeline configuration with smart defaults.
+# Follows builder pattern for zero-config initialization.
+#
+# Implementation Status: Phase 1 - Task 5
+# - Pipeline creation with smart defaults
+# - Vertex input state from reflection
+# - Rasterization state with sensible defaults
+# - Dynamic viewport/scissor
+
+use core.*
+use ui.gui.vulkan_types.*
+use ui.gui.vulkan_shaders.*
+
+# =============================================================================
+# Graphics Pipeline - Complete Pipeline with Smart Defaults
+# =============================================================================
+
+pub struct GraphicsPipeline:
+    # Core handles
+    device: VkDevice
+    pipeline: VkPipeline
+    pipeline_layout: VkPipelineLayout
+
+impl GraphicsPipeline:
+    # Create pipeline with smart defaults
+    pub fn new(
+        device: &VulkanDevice,
+        render_pass: &RenderPass,
+        shaders: &ShaderStages,
+    ) -> Result[GraphicsPipeline, String]:
+        # Create pipeline layout (no descriptors for now)
+        let pipeline_layout = vulkan_create_pipeline_layout(device.device)?
+
+        # Build pipeline with smart defaults
+        let pipeline_info = PipelineBuilder::new()
+            .shaders(shaders)
+            .vertex_input_auto()  # Auto-detect from #[vertex] macro
+            .input_assembly_triangles()
+            .rasterization_default()
+            .viewport_dynamic()
+            .multisample_none()
+            .color_blend_none()
+            .render_pass(render_pass)
+            .layout(pipeline_layout)
+            .build()
+
+        # Create pipeline via FFI
+        let pipeline = vulkan_create_graphics_pipeline(device.device, &pipeline_info)?
+
+        Ok(GraphicsPipeline {
+            device: device.device,
+            pipeline: pipeline,
+            pipeline_layout: pipeline_layout,
+        })
+
+    # Cleanup
+    pub async fn destroy(&self):
+        await vulkan_destroy_pipeline_async(self.device, self.pipeline)
+        await vulkan_destroy_pipeline_layout_async(self.device, self.pipeline_layout)
+
+# =============================================================================
+# Pipeline Builder - Fluent API for Pipeline Configuration
+# =============================================================================
+
+pub struct PipelineBuilder:
+    # Shader stages
+    shader_stages: Option[ShaderStages]
+
+    # Vertex input
+    vertex_bindings: Array[VkVertexInputBindingDescription]
+    vertex_attributes: Array[VkVertexInputAttributeDescription]
+
+    # Input assembly
+    topology: VkPrimitiveTopology
+    primitive_restart: bool
+
+    # Rasterization
+    polygon_mode: VkPolygonMode
+    cull_mode: VkCullModeFlags
+    front_face: VkFrontFace
+    line_width: f32
+
+    # Viewport (dynamic by default)
+    dynamic_viewport: bool
+
+    # Multisample
+    sample_count: VkSampleCountFlagBits
+    sample_shading: bool
+
+    # Color blend
+    blend_enable: bool
+
+    # Render pass
+    render_pass: Option[VkRenderPass]
+    subpass: u32
+
+    # Layout
+    pipeline_layout: Option[VkPipelineLayout]
+
+impl PipelineBuilder:
+    pub fn new() -> PipelineBuilder:
+        PipelineBuilder {
+            shader_stages: None,
+            vertex_bindings: [],
+            vertex_attributes: [],
+            topology: VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+            primitive_restart: false,
+            polygon_mode: VK_POLYGON_MODE_FILL,
+            cull_mode: VK_CULL_MODE_BACK_BIT,
+            front_face: VK_FRONT_FACE_COUNTER_CLOCKWISE,
+            line_width: 1.0,
+            dynamic_viewport: true,
+            sample_count: VK_SAMPLE_COUNT_1_BIT,
+            sample_shading: false,
+            blend_enable: false,
+            render_pass: None,
+            subpass: 0,
+            pipeline_layout: None,
+        }
+
+    # Set shader stages
+    pub fn shaders(mut self, shaders: &ShaderStages) -> PipelineBuilder:
+        self.shader_stages = Some(shaders.clone())
+        self
+
+    # Auto-detect vertex input from #[vertex] macro reflection
+    pub fn vertex_input_auto(mut self) -> PipelineBuilder:
+        # TODO: Use reflection to auto-detect vertex format
+        # For now, use default position + color layout
+        self.vertex_bindings = [
+            VkVertexInputBindingDescription {
+                binding: 0,
+                stride: 28,  # 3 floats (position) + 4 floats (color) = 7 * 4 bytes
+                input_rate: VK_VERTEX_INPUT_RATE_VERTEX,
+            }
+        ]
+
+        self.vertex_attributes = [
+            # Position (location = 0)
+            VkVertexInputAttributeDescription {
+                location: 0,
+                binding: 0,
+                format: VK_FORMAT_R32G32B32_SFLOAT,
+                offset: 0,
+            },
+            # Color (location = 1)
+            VkVertexInputAttributeDescription {
+                location: 1,
+                binding: 0,
+                format: VK_FORMAT_R32G32B32A32_SFLOAT,
+                offset: 12,
+            },
+        ]
+
+        self
+
+    # Set custom vertex input
+    pub fn vertex_input(
+        mut self,
+        bindings: Array[VkVertexInputBindingDescription],
+        attributes: Array[VkVertexInputAttributeDescription]
+    ) -> PipelineBuilder:
+        self.vertex_bindings = bindings
+        self.vertex_attributes = attributes
+        self
+
+    # Input assembly - triangle list (default)
+    pub fn input_assembly_triangles(mut self) -> PipelineBuilder:
+        self.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST
+        self.primitive_restart = false
+        self
+
+    # Input assembly - triangle strip
+    pub fn input_assembly_triangle_strip(mut self) -> PipelineBuilder:
+        self.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP
+        self.primitive_restart = true
+        self
+
+    # Input assembly - line list
+    pub fn input_assembly_lines(mut self) -> PipelineBuilder:
+        self.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST
+        self.primitive_restart = false
+        self
+
+    # Rasterization - default settings
+    pub fn rasterization_default(mut self) -> PipelineBuilder:
+        self.polygon_mode = VK_POLYGON_MODE_FILL
+        self.cull_mode = VK_CULL_MODE_BACK_BIT
+        self.front_face = VK_FRONT_FACE_COUNTER_CLOCKWISE
+        self.line_width = 1.0
+        self
+
+    # Rasterization - wireframe
+    pub fn rasterization_wireframe(mut self) -> PipelineBuilder:
+        self.polygon_mode = VK_POLYGON_MODE_LINE
+        self.cull_mode = VK_CULL_MODE_NONE
+        self.line_width = 1.0
+        self
+
+    # Viewport - dynamic (recommended)
+    pub fn viewport_dynamic(mut self) -> PipelineBuilder:
+        self.dynamic_viewport = true
+        self
+
+    # Multisample - none (default)
+    pub fn multisample_none(mut self) -> PipelineBuilder:
+        self.sample_count = VK_SAMPLE_COUNT_1_BIT
+        self.sample_shading = false
+        self
+
+    # Multisample - MSAA 4x
+    pub fn multisample_4x(mut self) -> PipelineBuilder:
+        self.sample_count = VK_SAMPLE_COUNT_4_BIT
+        self.sample_shading = true
+        self
+
+    # Color blend - none (default)
+    pub fn color_blend_none(mut self) -> PipelineBuilder:
+        self.blend_enable = false
+        self
+
+    # Color blend - alpha blending
+    pub fn color_blend_alpha(mut self) -> PipelineBuilder:
+        self.blend_enable = true
+        self
+
+    # Set render pass
+    pub fn render_pass(mut self, render_pass: &RenderPass) -> PipelineBuilder:
+        self.render_pass = Some(render_pass.render_pass)
+        self
+
+    # Set pipeline layout
+    pub fn layout(mut self, layout: VkPipelineLayout) -> PipelineBuilder:
+        self.pipeline_layout = Some(layout)
+        self
+
+    # Build pipeline info
+    pub fn build(self) -> VkGraphicsPipelineCreateInfo:
+        # Validate required fields
+        if self.shader_stages.is_none():
+            panic("Shader stages not set")
+        if self.render_pass.is_none():
+            panic("Render pass not set")
+        if self.pipeline_layout.is_none():
+            panic("Pipeline layout not set")
+
+        VkGraphicsPipelineCreateInfo {
+            # Shader stages
+            shader_stages: self.shader_stages.unwrap().get_stage_infos(),
+
+            # Vertex input
+            vertex_bindings: self.vertex_bindings,
+            vertex_attributes: self.vertex_attributes,
+
+            # Input assembly
+            topology: self.topology,
+            primitive_restart: self.primitive_restart,
+
+            # Rasterization
+            polygon_mode: self.polygon_mode,
+            cull_mode: self.cull_mode,
+            front_face: self.front_face,
+            line_width: self.line_width,
+
+            # Viewport
+            dynamic_viewport: self.dynamic_viewport,
+
+            # Multisample
+            sample_count: self.sample_count,
+            sample_shading: self.sample_shading,
+
+            # Color blend
+            blend_enable: self.blend_enable,
+
+            # Render pass
+            render_pass: self.render_pass.unwrap(),
+            subpass: self.subpass,
+
+            # Layout
+            pipeline_layout: self.pipeline_layout.unwrap(),
+        }
+
+# =============================================================================
+# FFI Declarations
+# =============================================================================
+
+# Pipeline creation/destruction
+extern fn vulkan_create_pipeline_layout(device: VkDevice) -> Result[VkPipelineLayout, String]
+extern fn vulkan_create_graphics_pipeline(device: VkDevice, info: &VkGraphicsPipelineCreateInfo) -> Result[VkPipeline, String]
+extern fn vulkan_destroy_pipeline_async(device: VkDevice, pipeline: VkPipeline) -> Future[Result[(), String]]
+extern fn vulkan_destroy_pipeline_layout_async(device: VkDevice, layout: VkPipelineLayout) -> Future[Result[(), String]]
+
+# =============================================================================
+# Vulkan Constants - Topology
+# =============================================================================
+
+pub const VK_PRIMITIVE_TOPOLOGY_POINT_LIST: u32 = 0
+pub const VK_PRIMITIVE_TOPOLOGY_LINE_LIST: u32 = 1
+pub const VK_PRIMITIVE_TOPOLOGY_LINE_STRIP: u32 = 2
+pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST: u32 = 3
+pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP: u32 = 4
+pub const VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: u32 = 5
+
+# Polygon mode
+pub const VK_POLYGON_MODE_FILL: u32 = 0
+pub const VK_POLYGON_MODE_LINE: u32 = 1
+pub const VK_POLYGON_MODE_POINT: u32 = 2
+
+# Cull mode
+pub const VK_CULL_MODE_NONE: u32 = 0
+pub const VK_CULL_MODE_FRONT_BIT: u32 = 0x00000001
+pub const VK_CULL_MODE_BACK_BIT: u32 = 0x00000002
+pub const VK_CULL_MODE_FRONT_AND_BACK: u32 = 0x00000003
+
+# Front face
+pub const VK_FRONT_FACE_COUNTER_CLOCKWISE: u32 = 0
+pub const VK_FRONT_FACE_CLOCKWISE: u32 = 1
+
+# Sample count
+pub const VK_SAMPLE_COUNT_1_BIT: u32 = 0x00000001
+pub const VK_SAMPLE_COUNT_2_BIT: u32 = 0x00000002
+pub const VK_SAMPLE_COUNT_4_BIT: u32 = 0x00000004
+pub const VK_SAMPLE_COUNT_8_BIT: u32 = 0x00000008
+pub const VK_SAMPLE_COUNT_16_BIT: u32 = 0x00000010
+
+# Vertex input rate
+pub const VK_VERTEX_INPUT_RATE_VERTEX: u32 = 0
+pub const VK_VERTEX_INPUT_RATE_INSTANCE: u32 = 1
+
+# Formats
+pub const VK_FORMAT_R32G32B32_SFLOAT: u32 = 106
+pub const VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109
+
+# =============================================================================
+# Supporting Types
+# =============================================================================
+
+# Opaque FFI types
+pub type VkPipeline = i64
+pub type VkPipelineLayout = i64
+pub type VkPrimitiveTopology = u32
+pub type VkPolygonMode = u32
+pub type VkCullModeFlags = u32
+pub type VkFrontFace = u32
+pub type VkSampleCountFlagBits = u32
+
+pub struct VkVertexInputBindingDescription:
+    binding: u32
+    stride: u32
+    input_rate: u32
+
+pub struct VkVertexInputAttributeDescription:
+    location: u32
+    binding: u32
+    format: u32
+    offset: u32
+
+pub struct VkGraphicsPipelineCreateInfo:
+    # Shader stages
+    shader_stages: Array[VkPipelineShaderStageCreateInfo]
+
+    # Vertex input
+    vertex_bindings: Array[VkVertexInputBindingDescription]
+    vertex_attributes: Array[VkVertexInputAttributeDescription]
+
+    # Input assembly
+    topology: VkPrimitiveTopology
+    primitive_restart: bool
+
+    # Rasterization
+    polygon_mode: VkPolygonMode
+    cull_mode: VkCullModeFlags
+    front_face: VkFrontFace
+    line_width: f32
+
+    # Viewport
+    dynamic_viewport: bool
+
+    # Multisample
+    sample_count: VkSampleCountFlagBits
+    sample_shading: bool
+
+    # Color blend
+    blend_enable: bool
+
+    # Render pass
+    render_pass: VkRenderPass
+    subpass: u32
+
+    # Layout
+    pipeline_layout: VkPipelineLayout

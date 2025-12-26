@@ -1,0 +1,402 @@
+# Hot Reload Support for GUI Applications
+#
+# Provides hot module reloading for GUI applications without losing state.
+# Monitors source files for changes and reloads UI components on the fly.
+#
+# Key Features:
+#   - File watching: Detects changes to .spl and .sui files
+#   - State preservation: Maintains application state across reloads
+#   - Incremental updates: Only reloads changed components
+#   - Error recovery: Graceful handling of compilation errors
+#   - Socket-based communication: Live connection to dev server
+#
+# Usage:
+#   let hot_reload = HotReload::new("./src")
+#   hot_reload.watch()?
+#
+#   loop:
+#       if let Some(update) = hot_reload.poll_update():
+#           app.apply_update(update)
+#       app.render()
+
+use core.*
+use concurrency.*
+use host.async_nogc_mut.io.fs.*
+use host.async_nogc_mut.net.tcp.*
+
+# =============================================================================
+# Hot Reload Manager
+# =============================================================================
+
+pub struct HotReload:
+    # Watch configuration
+    watch_paths: Array[String]
+    ignore_patterns: Array[String]
+
+    # File system monitoring
+    file_watcher: FileWatcher
+    last_modified: Dict[String, u64]  # path -> timestamp
+
+    # Update queue
+    pending_updates: Array[HotUpdate]
+
+    # State preservation
+    state_snapshot: Option[StateSnapshot]
+    preserve_state: bool
+
+    # Socket connection to dev server
+    dev_server: Option[TcpClient]
+    server_addr: String
+
+    # Status
+    watching: bool
+    last_error: Option[String]
+
+# Hot reload update
+pub struct HotUpdate:
+    kind: UpdateKind
+    file_path: String
+    content: Option[String]
+    timestamp: u64
+
+pub enum UpdateKind:
+    ComponentReload  # UI component (.sui)
+    ModuleReload     # Code module (.spl)
+    StyleUpdate      # Style changes (CSS/theme)
+    AssetUpdate      # Asset file (image, font, etc.)
+
+# State snapshot for preservation
+struct StateSnapshot:
+    component_states: Dict[String, ComponentState]
+    global_state: Dict[String, Any]
+    timestamp: u64
+
+struct ComponentState:
+    component_id: String
+    props: Dict[String, Any]
+    local_state: Dict[String, Any]
+
+# File watcher
+struct FileWatcher:
+    watched_files: Dict[String, FileMetadata]
+    poll_interval_ms: u64
+
+struct FileMetadata:
+    path: String
+    size: u64
+    modified: u64
+    hash: u64
+
+# TCP client for dev server
+struct TcpClient:
+    socket: TcpStream
+    connected: bool
+
+# =============================================================================
+# Hot Reload Implementation
+# =============================================================================
+
+impl HotReload:
+    # Create new hot reload manager
+    pub fn new(watch_path: &str) -> HotReload:
+        return HotReload {
+            watch_paths: [watch_path.to_string()],
+            ignore_patterns: [
+                "target/".to_string(),
+                "build/".to_string(),
+                ".git/".to_string(),
+                "node_modules/".to_string()
+            ],
+            file_watcher: FileWatcher::new(),
+            last_modified: Dict::new(),
+            pending_updates: [],
+            state_snapshot: None,
+            preserve_state: true,
+            dev_server: None,
+            server_addr: "127.0.0.1:3030".to_string(),
+            watching: false,
+            last_error: None
+        }
+
+    # Add watch path
+    pub fn add_watch_path(self, path: &str):
+        self.watch_paths.push(path.to_string())
+
+    # Add ignore pattern
+    pub fn ignore(self, pattern: &str):
+        self.ignore_patterns.push(pattern.to_string())
+
+    # Start watching files
+    pub fn watch(self) -> Result[(), HotReloadError]:
+        if self.watching:
+            return Err(HotReloadError::AlreadyWatching)
+
+        # Scan initial files
+        self.scan_files()?
+
+        # Connect to dev server (optional)
+        self.connect_dev_server().ok()  # Ignore connection errors
+
+        self.watching = true
+        return Ok(())
+
+    # Stop watching
+    pub fn stop(self):
+        self.watching = false
+        if let Some(server) = &mut self.dev_server:
+            server.disconnect()
+
+    # Poll for updates
+    pub fn poll_update(self) -> Option[HotUpdate]:
+        if not self.watching:
+            return None
+
+        # Check file system changes
+        self.check_file_changes()
+
+        # Check dev server messages
+        self.check_server_messages()
+
+        # Return next pending update
+        if not self.pending_updates.is_empty():
+            return Some(self.pending_updates.remove(0))
+
+        return None
+
+    # Preserve current application state
+    pub fn preserve_state(self, snapshot: StateSnapshot):
+        self.state_snapshot = Some(snapshot)
+
+    # Restore preserved state
+    pub fn restore_state(self) -> Option[StateSnapshot]:
+        return self.state_snapshot.take()
+
+    # Enable/disable state preservation
+    pub fn set_preserve_state(self, enabled: bool):
+        self.preserve_state = enabled
+
+# =============================================================================
+# File System Monitoring
+# =============================================================================
+
+impl HotReload:
+    # Scan all watched files
+    fn scan_files(self) -> Result[(), HotReloadError]:
+        for watch_path in &self.watch_paths:
+            self.scan_directory(watch_path)?
+
+        return Ok(())
+
+    # Recursively scan directory
+    fn scan_directory(self, path: &str) -> Result[(), HotReloadError]:
+        let entries = list_directory(path)?
+
+        for entry in entries:
+            # Skip ignored patterns
+            if self.should_ignore(&entry.path):
+                continue
+
+            if entry.is_dir:
+                self.scan_directory(&entry.path)?
+            else:
+                self.add_file(&entry.path, entry.modified)
+
+        return Ok(())
+
+    # Add file to watch list
+    fn add_file(self, path: &str, modified: u64):
+        if self.should_watch(path):
+            self.last_modified.insert(path.to_string(), modified)
+
+    # Check if file should be ignored
+    fn should_ignore(self, path: &str) -> bool:
+        for pattern in &self.ignore_patterns:
+            if path.contains(pattern):
+                return true
+        return false
+
+    # Check if file should be watched
+    fn should_watch(self, path: &str) -> bool:
+        return path.ends_with(".spl")
+            or path.ends_with(".sui")
+            or path.ends_with(".css")
+
+    # Check for file changes
+    fn check_file_changes(self):
+        let mut changed_files: Array[String] = []
+
+        for (path, last_mod) in &self.last_modified:
+            if let Ok(metadata) = get_file_metadata(path):
+                if metadata.modified > *last_mod:
+                    changed_files.push(path.clone())
+                    self.last_modified.insert(path.clone(), metadata.modified)
+
+        # Generate updates for changed files
+        for path in changed_files:
+            if let Some(update) = self.create_update(&path):
+                self.pending_updates.push(update)
+
+    # Create update from file path
+    fn create_update(self, path: &str) -> Option[HotUpdate]:
+        let kind = if path.ends_with(".sui"):
+            UpdateKind::ComponentReload
+        else if path.ends_with(".spl"):
+            UpdateKind::ModuleReload
+        else if path.ends_with(".css"):
+            UpdateKind::StyleUpdate
+        else:
+            UpdateKind::AssetUpdate
+
+        # Read file content
+        let content = read_file_to_string(path).ok()
+
+        return Some(HotUpdate {
+            kind: kind,
+            file_path: path.to_string(),
+            content: content,
+            timestamp: get_current_timestamp()
+        })
+
+# =============================================================================
+# Dev Server Communication
+# =============================================================================
+
+impl HotReload:
+    # Connect to development server
+    fn connect_dev_server(self) -> Result[(), HotReloadError]:
+        let socket = TcpStream::connect(&self.server_addr)?
+        self.dev_server = Some(TcpClient {
+            socket: socket,
+            connected: true
+        })
+        return Ok(())
+
+    # Check for messages from dev server
+    fn check_server_messages(self):
+        if let Some(server) = &mut self.dev_server:
+            if let Some(message) = server.poll_message():
+                self.handle_server_message(message)
+
+    # Handle message from dev server
+    fn handle_server_message(self, message: String):
+        # Parse message and create update
+        # Format: "UPDATE <kind> <path>"
+        let parts: Array[&str] = message.split(' ').collect()
+        if parts.len() >= 3 and parts[0] == "UPDATE":
+            let kind = match parts[1]:
+                case "component": UpdateKind::ComponentReload
+                case "module": UpdateKind::ModuleReload
+                case "style": UpdateKind::StyleUpdate
+                case "asset": UpdateKind::AssetUpdate
+                case _: return
+
+            let path = parts[2].to_string()
+            if let Some(update) = self.create_update(&path):
+                self.pending_updates.push(update)
+
+# =============================================================================
+# TCP Client Implementation
+# =============================================================================
+
+impl TcpClient:
+    fn poll_message(self) -> Option[String]:
+        if not self.connected:
+            return None
+
+        # Non-blocking read
+        let mut buffer = [0u8; 4096]
+        match self.socket.read_timeout(&mut buffer, 0):
+            case Ok(n):
+                if n > 0:
+                    return Some(String::from_utf8_lossy(&buffer[0..n]).to_string())
+            case Err(_):
+                pass
+
+        return None
+
+    fn disconnect(self):
+        self.socket.shutdown()
+        self.connected = false
+
+# =============================================================================
+# File System Helpers
+# =============================================================================
+
+# Directory entry
+struct DirEntry:
+    path: String
+    is_dir: bool
+    modified: u64
+
+# List directory contents
+fn list_directory(path: &str) -> Result[Array[DirEntry], HotReloadError]:
+    # TODO: Implement using FFI to readdir
+    let mut entries: Array[DirEntry] = []
+    return Ok(entries)
+
+# Get file metadata
+struct FileMetadataInfo:
+    modified: u64
+    size: u64
+
+fn get_file_metadata(path: &str) -> Result[FileMetadataInfo, HotReloadError]:
+    # TODO: Implement using FFI to stat
+    return Err(HotReloadError::IoError("Not implemented".to_string()))
+
+# Read file to string
+fn read_file_to_string(path: &str) -> Result[String, HotReloadError]:
+    # TODO: Implement using File::read_to_string
+    return Err(HotReloadError::IoError("Not implemented".to_string()))
+
+# Get current timestamp (milliseconds since epoch)
+fn get_current_timestamp() -> u64:
+    # TODO: Implement using system time
+    return 0
+
+# =============================================================================
+# Error Types
+# =============================================================================
+
+pub enum HotReloadError:
+    AlreadyWatching
+    NotWatching
+    IoError(String)
+    ParseError(String)
+    ConnectionError(String)
+
+impl HotReloadError:
+    pub fn to_string(self) -> String:
+        match self:
+            case HotReloadError::AlreadyWatching:
+                return "Already watching files".to_string()
+            case HotReloadError::NotWatching:
+                return "Not currently watching".to_string()
+            case HotReloadError::IoError(msg):
+                return format("IO error: {}", msg)
+            case HotReloadError::ParseError(msg):
+                return format("Parse error: {}", msg)
+            case HotReloadError::ConnectionError(msg):
+                return format("Connection error: {}", msg)
+
+# =============================================================================
+# File Watcher Implementation
+# =============================================================================
+
+impl FileWatcher:
+    fn new() -> FileWatcher:
+        return FileWatcher {
+            watched_files: Dict::new(),
+            poll_interval_ms: 200  # Poll every 200ms
+        }
+
+# =============================================================================
+# Placeholder Any Type
+# =============================================================================
+
+enum Any:
+    String(String)
+    Int(i64)
+    Float(f64)
+    Bool(bool)
+    Array(Array[Any])
+    Dict(Dict[String, Any])
