@@ -1,44 +1,5 @@
 # Simple Language Compiler - Development Guide
 
-## 🚧 Current Status
-
-**Build:** ✅ Passing - 696+ tests (651 compiler + 32 capability + 7 memory model + 6 sync)
-
-**Recent Work:**
-- 🔍 **LLM-Friendly Features Status** (2025-12-24) - **15/40 complete (37.5%), 28/40 specified (70%)**
-  - ✅ **Lint Framework**: **100% COMPLETE** (5/5 features) 🎉
-  - ✅ **AST/IR Export**: 80% complete (4/5 features) - #889 (semantic diff) specified
-  - ✅ **Context Pack Generator**: 75% complete (3/4 features) - #891 partial, needs full dependency tracking
-  - ✅ **Formatter & Build**: Partial (1/3 formatter, 1/5 build) - AST rewrite needed for #909
-  - 📋 **Capability Effects**: Specified (0/5 features) - #880-884 ready to implement
-  - 📋 **Property Testing**: Specified (0/5 features) - #894-898 (9-day plan)
-  - 📋 **Snapshot Testing**: Specified (0/4 features) - #899-902 (8-day plan)
-  - 📋 **Sandboxed Execution**: Not specified (0/4 features) - #916-919 needs spec
-  - **Implementation:** 4147 lines code, 2020 lines specs, 34 tests
-  - See `doc/report/LLM_FEATURES_STATUS_2025-12-24.md` for comprehensive audit
-- ✅ **Pattern Matching Safety** (2025-12-23) - **5/5 features COMPLETE** 🎉
-  - **Exhaustiveness Checking**: Compile-time verification all cases are covered
-  - **Unreachable Detection**: Warns about patterns that can never match
-  - **Tagged Union Support**: Full integration with algebraic data types
-  - **Strong Enum Enforcement**: `#[strong]` enums prohibit wildcards
-  - **Subsumption Analysis**: Detects overlapping patterns
-  - 750+ lines, 18 comprehensive tests
-  - See `doc/PATTERN_MATCH_SAFETY.md` for complete guide
-- ✅ **Mock Library Fluent API** (2025-12-23) - **8/8 features COMPLETE**
-  - **Chainable API**: `MockSetup`, `MockVerify`, `Spy` builders
-  - **Deep Call Chains**: `.chain()` for nested method calls (e.g., `library.getHead().getName()`)
-  - **Flexible Matchers**: Any, Exact, GreaterThan, LessThan, Range, Pattern
-  - **Verification**: `was_called()`, `times()`, `with_args()` assertions
-  - 700+ lines, 19 tests (12 unit + 7 examples)
-  - See `src/util/simple_mock_helper/FLUENT_API.md`
-- ✅ **Complete Memory Model Verification** (2025-12-23) - Formal proofs in Lean 4
-  - **Reference Capabilities**: Aliasing prevention, conversion safety (350+ lines Lean)
-  - **SC-DRF Guarantee**: Sequential consistency for data-race-free programs (510+ lines Lean)
-  - **Integration Proof**: Capabilities + SC-DRF = complete memory safety
-  - Runtime race detection API: `is_race_free()`, `detect_data_races()`
-  - 7 happens-before tests + 6 sync primitive tests + 32 capability tests passing
-  - See `verification/memory_capabilities/` and `verification/memory_model_drf/`
-
 **Key Features:**
 - **LLM-Friendly**: IR export, context packs, lint framework (15/40 implemented, 28/40 specified, 70% effective completion)
 - **Pattern Matching Safety**: Exhaustiveness checking, unreachable detection, strong enums (5/5 complete)
@@ -54,20 +15,6 @@
 
 Simple language is designed to be self-hosting and practical for real-world applications. The compiler itself includes an interpreter that can execute Simple code, and the language has full support for:
 
-**Available Now:**
-- ✅ **Standard Library**: Core data structures, I/O, string manipulation (`simple/std_lib/`)
-- ✅ **Module System**: Import/export, package management
-- ✅ **Concurrency**: Actors, async/await, futures, channels
-- ✅ **Testing**: BDD framework (describe/it), doctest
-- ✅ **CLI Tools**: Argument parsing, file I/O
-- ✅ **Pattern Matching**: Destructuring, guards
-- ✅ **Error Handling**: Result types, ? operator
-
-**Development Tools (Simple-based):**
-- ✅ Formatter (`simple_fmt`) - 166 lines
-- ✅ Linter (`simple_lint`) - 262 lines
-- 🔄 LSP Server (`simple_lsp`) - In progress
-- 🔄 DAP Debugger (`simple_dap`) - In progress
 
 **How to Create a Simple Application:**
 
@@ -115,74 +62,7 @@ Simple language is designed to be self-hosting and practical for real-world appl
 - Use contracts for critical functions (`in:`, `out:`, `invariant:`)
 - Leverage AOP for cross-cutting concerns (logging, metrics, validation)
 
-## Self-Hosted Tools (Written in Simple)
-
-**Status:** ✅ **Formatter/Linter SOURCE IMPLEMENTED** - ⏳ **NOT YET COMPILED**
-**Status:** 🔄 **LSP/DAP IN PROGRESS** - Reimplementing in Simple language
-
-**Location:** `simple/app/` - All development tools written in Simple itself
-
-### Formatter (`simple_fmt`) - 166 lines
-**Implementation Status:** ✅ Complete (line-by-line formatting)
-
-**Features:**
-- ✅ 4-space indentation, idempotent formatting
-- ✅ `--check` (CI mode), `--write` (in-place), stdout output
-- ✅ Handles indenting/dedenting for `:`, `{}`, `[]`, `else`, `elif`
-- ⏳ TODO: AST-based formatting, comment preservation, max line length
-
-**Lints Defined:** 14 total
-- Safety (S): 3 lints (S001-S003)
-- Correctness (C): 3 lints (C001-C003)
-- Warning (W): 3 lints (W001-W003)
-- Style (ST): 3 lints (ST001-ST003) - Allow by default
-- Concurrency (CC): 2 lints (CC001-CC002)
-
-### Linter (`simple_lint`) - 262 lines
-**Implementation Status:** ✅ Complete (pattern-based linting)
-
-**Features:**
-- ✅ 14 predefined lints across 5 categories
-- ✅ Fix-it hints, formatted output with line/column numbers
-- ✅ `--deny-all`, `--warn-all`, `--json` options
-- ⏳ TODO: AST-based semantic analysis, control flow analysis
-
-**To Build:**
-```bash
-# Prerequisites: cargo build (compiler must be ready)
-./simple/build_tools.sh
-```
-
-**Usage (after building):**
-```bash
-./simple/bin_simple/simple_fmt file.spl [--check|--write]
-./simple/bin_simple/simple_lint file.spl [--deny-all|--warn-all]
-```
-
-**Roadmap:**
-- Phase 1: ✅ Basic implementation (CURRENT - source complete, not compiled)
-- Phase 2: ⏳ AST integration, semantic analysis
-- Phase 3: ⏳ Auto-fix (`simple fix`), LSP integration, configuration
-
-### Language Server (`simple_lsp`) - 🔄 In Progress
-**Implementation Status:** 🔄 Reimplementing in Simple (was Rust prototype)
-
-**Features:**
-- ⏳ JSON-RPC transport over stdio
-- ⏳ Document synchronization
-- ⏳ Diagnostics (parse errors)
-- ⏳ TODO: Completion, go-to-definition, hover, references
-
-### Debug Adapter (`simple_dap`) - 🔄 In Progress
-**Implementation Status:** 🔄 Reimplementing in Simple (was Rust prototype)
-
-**Features:**
-- ⏳ DAP protocol handling
-- ⏳ Breakpoint management
-- ⏳ Execution control (step, continue, pause)
-- ⏳ TODO: Stack inspection, variable viewing, interpreter integration
-
-See `simple/app/README.md` for complete details. See `doc/status/lsp_implementation.md` and `doc/status/dap_implementation.md` for detailed status.
+See `simple/app/README.md` for complete details. 
 
 ## Bug Reports & Improvement Requests
 
@@ -226,7 +106,7 @@ When working with Simple standard library or applications and you discover bugs 
 
 ### Report Directory (`doc/report/`)
 
-**Purpose:** Store job completion reports, session summaries, and maintenance documentation.
+**Purpose:** Store job completion reports, session summaries, and maintenance documentation. Make any docuement which user not specifically requested documents on doc/report/ directory.
 
 **When to Use:**
 - ✅ **After completing a significant feature or task** - Create a completion report documenting what was done
@@ -241,9 +121,6 @@ When working with Simple standard library or applications and you discover bugs 
 4. Reference from `CLAUDE.md` if relevant for future AI agent context
 
 **Examples:**
-- `doc/report/FILE_SPLITTING_SUMMARY.md` - File organization task
-- `doc/report/DUPLICATION_REDUCTION_2025-12-22.md` - Code quality improvement
-- `doc/report/MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md` - Feature implementation
 
 See `doc/report/README.md` for full details and guidelines.
 
@@ -811,24 +688,6 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 
 ## Postponed Jobs & Features
 
-### Active Development (from TODO.md)
-
-**Contract Blocks (#400)** - 25% Complete (Parser Phase 1)
-- ✅ Lexer keywords, AST nodes, parsing logic
-- ⏳ Wire into function/class, type checking, runtime assertions
-
-**JJ Integration (#303)** - 67% Complete (8/12 tasks)
-- ✅ State management, events, CLI, tests
-- ⏳ Test success tracking, system tests, docs
-
-**BDD Spec (#300)** - 70% Sprint 1 (10/12 tasks)
-- ✅ DSL, registry, runtime, matchers
-- ⏳ Unit tests, test registry
-
-**Doctest (#301)** - 90% Effective Complete
-- ✅ Parser, matcher, runner, discovery, FFI (40+ tests)
-- ⏳ CLI integration, interpreter execution (blocked)
-
 ### Planned Features (by Priority)
 
 **High Priority:**
@@ -858,34 +717,6 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 - GPU backends (WGPU, Metal)
 - 32-bit architecture support (needs LLVM)
 - Unit conversion methods
-
-### Feature Ranges Summary
-
-**Note:** Many completed features have been archived to [feature_done_9.md](doc/features/feature_done_9.md) (2025-12-23)
-
-| Range | Category | Total | Complete | Status |
-|-------|----------|-------|----------|--------|
-| #880-919 | LLM-Friendly | 40 | 0 | 📋 Planned |
-| #1000-1050 | AOP & Predicates | 51 | 25 | 🔄 49% In Progress |
-| #1051-1060 | SDN Self-Hosting | 10 | 10 | ✅ Complete → feature_done_9.md |
-| #1061-1103 | Missing Lang Features | 43 | 43 | ✅ Complete → feature_done_9.md |
-| #1104-1115 | Concurrency Modes | 12 | 12 | ✅ Complete |
-| #1131-1145 | Formatting & Lints | 15 | 15 | ✅ Complete → feature_done_9.md |
-| #1146-1155 | Trait Coherence | 10 | 10 | ✅ Complete → feature_done_9.md |
-| #1396-1403 | Mock Library Fluent API | 8 | 8 | ✅ Complete (2025-12-23) |
-
-**Overall Progress:** 56% (414/728 total features: 333/647 active + 107 archived)
-
-**Recently Completed (2025-12-23):**
-- ✅ **Pattern Matching Safety (#1325-1329)** - **5 features** → [feature_done_10.md](doc/features/feature_done_10.md)
-- ✅ **Gherkin/BDD Extensions (#1343-1347)** - **5 features** → [feature_done_10.md](doc/features/feature_done_10.md)
-- ✅ **Shared Infrastructure (#1388-1390)** - **3 features** → [feature_done_10.md](doc/features/feature_done_10.md)
-- ✅ **Advanced Contract Features (#1391-1395)** - **5 features, 27 tests** → [feature_done_10.md](doc/features/feature_done_10.md)
-- ✅ **Mock Library Fluent API (#1396-1403)** - **8 features, 700+ lines, 19 tests** → [feature_done_10.md](doc/features/feature_done_10.md)
-- ✅ SDN Self-Hosting (#1051-1060) - 10 features → [feature_done_9.md](doc/features/feature_done_9.md)
-- ✅ Missing Language Features (#1061-1103) - 43 features → [feature_done_9.md](doc/features/feature_done_9.md)
-- ✅ Formatting & Lints (#1131-1145) - 15 features → [feature_done_9.md](doc/features/feature_done_9.md)
-- ✅ Trait Coherence (#1146-1155) - 10 features → [feature_done_9.md](doc/features/feature_done_9.md)
 
 See `TODO.md` and `doc/features/feature_done_*.md` for archived features.
 
