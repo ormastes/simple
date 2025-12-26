@@ -3,6 +3,50 @@
 
 use simple_parser::{Parser, Module, Node, Expr};
 
+/// Helper to parse code and extract the first function
+fn parse_and_get_function(input: &str) -> simple_parser::ast::FunctionDef {
+    let mut parser = Parser::new(input);
+    let result: Result<Module, _> = parser.parse();
+    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
+
+    let module = result.unwrap();
+    assert!(module.items.len() >= 1, "Expected at least one item");
+
+    if let Node::Function(func) = &module.items[0] {
+        func.clone()
+    } else {
+        panic!("Expected function");
+    }
+}
+
+/// Helper to parse code and get all functions
+fn parse_and_get_all_functions(input: &str) -> Vec<simple_parser::ast::FunctionDef> {
+    let mut parser = Parser::new(input);
+    let result: Result<Module, _> = parser.parse();
+    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
+
+    let module = result.unwrap();
+    module.items.iter().filter_map(|item| {
+        if let Node::Function(func) = item {
+            Some(func.clone())
+        } else {
+            None
+        }
+    }).collect()
+}
+
+/// Helper to check if decorator with name exists
+fn has_decorator_named(func: &simple_parser::ast::FunctionDef, name: &str) -> bool {
+    func.decorators.iter().any(|d| {
+        matches!(&d.name, Expr::Identifier(n) if n == name)
+    })
+}
+
+/// Helper to check if argument with name exists
+fn has_arg_named(args: &[simple_parser::ast::Argument], name: &str) -> bool {
+    args.iter().any(|arg| arg.name.as_ref().map_or(false, |n| n == name))
+}
+
 #[test]
 fn test_property_test_decorator() {
     let input = r#"
@@ -11,21 +55,11 @@ fn test_sort(arr: [i64]):
     let sorted = sort(arr)
     expect(sorted).to_be_sorted()
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    assert_eq!(module.items.len(), 1);
-    
-    if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_property_test(), "Should be property test");
-        assert!(func.is_test(), "Should be a test");
-        assert!(!func.is_snapshot_test(), "Should not be snapshot test");
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(func.is_property_test(), "Should be property test");
+    assert!(func.is_test(), "Should be a test");
+    assert!(!func.is_snapshot_test(), "Should not be snapshot test");
 }
 
 #[test]
@@ -35,29 +69,17 @@ fn test_property_test_with_params() {
 fn test_commutative(a: i64, b: i64):
     expect(add(a, b)).to_equal(add(b, a))
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    assert_eq!(module.items.len(), 1);
-    
-    if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_property_test());
-        
-        let config = func.property_test_config();
-        assert!(config.is_some(), "Should have config parameters");
-        
-        let args = config.unwrap();
-        assert_eq!(args.len(), 2);
-        
-        // Check for named arguments
-        assert!(args.iter().any(|arg| arg.name.as_ref().map_or(false, |n| n == "iterations")));
-        assert!(args.iter().any(|arg| arg.name.as_ref().map_or(false, |n| n == "seed")));
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(func.is_property_test());
+
+    let config = func.property_test_config();
+    assert!(config.is_some(), "Should have config parameters");
+
+    let args = config.unwrap();
+    assert_eq!(args.len(), 2);
+    assert!(has_arg_named(&args, "iterations"));
+    assert!(has_arg_named(&args, "seed"));
 }
 
 #[test]
@@ -68,21 +90,11 @@ fn test_render_output():
     let result = render_template("user", data)
     expect_snapshot(result)
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    assert_eq!(module.items.len(), 1);
-    
-    if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_snapshot_test(), "Should be snapshot test");
-        assert!(func.is_test(), "Should be a test");
-        assert!(!func.is_property_test(), "Should not be property test");
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(func.is_snapshot_test(), "Should be snapshot test");
+    assert!(func.is_test(), "Should be a test");
+    assert!(!func.is_property_test(), "Should not be property test");
 }
 
 #[test]
@@ -93,29 +105,17 @@ fn test_api_output():
     let response = api.get_user(42)
     expect_snapshot(response)
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    assert_eq!(module.items.len(), 1);
-    
-    if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_snapshot_test());
-        
-        let config = func.snapshot_test_config();
-        assert!(config.is_some(), "Should have config parameters");
-        
-        let args = config.unwrap();
-        assert_eq!(args.len(), 2);
-        
-        // Check for named arguments
-        assert!(args.iter().any(|arg| arg.name.as_ref().map_or(false, |n| n == "format")));
-        assert!(args.iter().any(|arg| arg.name.as_ref().map_or(false, |n| n == "name")));
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(func.is_snapshot_test());
+
+    let config = func.snapshot_test_config();
+    assert!(config.is_some(), "Should have config parameters");
+
+    let args = config.unwrap();
+    assert_eq!(args.len(), 2);
+    assert!(has_arg_named(&args, "format"));
+    assert!(has_arg_named(&args, "name"));
 }
 
 #[test]
@@ -125,21 +125,11 @@ fn test_regular_test_decorator() {
 fn test_addition():
     expect(add(2, 2)).to_equal(4)
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    assert_eq!(module.items.len(), 1);
-    
-    if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_test(), "Should be a test");
-        assert!(!func.is_property_test(), "Should not be property test");
-        assert!(!func.is_snapshot_test(), "Should not be snapshot test");
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(func.is_test(), "Should be a test");
+    assert!(!func.is_property_test(), "Should not be property test");
+    assert!(!func.is_snapshot_test(), "Should not be snapshot test");
 }
 
 #[test]
@@ -150,31 +140,12 @@ fn test_multiple_decorators() {
 fn test_expensive_property(x: i64):
     expect(expensive_computation(x)).to_be_positive()
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    assert_eq!(module.items.len(), 1);
-    
-    if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_property_test());
-        assert_eq!(func.decorators.len(), 2);
-        
-        // Check both decorators exist
-        let has_property = func.decorators.iter().any(|d| {
-            matches!(&d.name, Expr::Identifier(n) if n == "property_test")
-        });
-        let has_slow = func.decorators.iter().any(|d| {
-            matches!(&d.name, Expr::Identifier(n) if n == "slow")
-        });
-        
-        assert!(has_property, "Should have @property_test");
-        assert!(has_slow, "Should have @slow");
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(func.is_property_test());
+    assert_eq!(func.decorators.len(), 2);
+    assert!(has_decorator_named(&func, "property_test"), "Should have @property_test");
+    assert!(has_decorator_named(&func, "slow"), "Should have @slow");
 }
 
 #[test]
@@ -183,23 +154,13 @@ fn test_no_test_decorator() {
 fn regular_function(x: i64) -> i64:
     return x * 2
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    assert_eq!(module.items.len(), 1);
-    
-    if let Node::Function(func) = &module.items[0] {
-        assert!(!func.is_test(), "Should not be a test");
-        assert!(!func.is_property_test(), "Should not be property test");
-        assert!(!func.is_snapshot_test(), "Should not be snapshot test");
-        assert!(func.property_test_config().is_none());
-        assert!(func.snapshot_test_config().is_none());
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(!func.is_test(), "Should not be a test");
+    assert!(!func.is_property_test(), "Should not be property test");
+    assert!(!func.is_snapshot_test(), "Should not be snapshot test");
+    assert!(func.property_test_config().is_none());
+    assert!(func.snapshot_test_config().is_none());
 }
 
 #[test]
@@ -209,18 +170,10 @@ fn test_property_test_no_params() {
 fn test_idempotent(x: String):
     expect(normalize(normalize(x))).to_equal(normalize(x))
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_property_test());
-        assert!(func.property_test_config().is_none(), "Should have no config params");
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(func.is_property_test());
+    assert!(func.property_test_config().is_none(), "Should have no config params");
 }
 
 #[test]
@@ -238,20 +191,14 @@ fn test_config_json():
 fn test_config_text():
     expect_snapshot(config)
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    assert_eq!(module.items.len(), 3);
-    
+
+    let funcs = parse_and_get_all_functions(input);
+    assert_eq!(funcs.len(), 3);
+
     // All should be snapshot tests
-    for item in &module.items {
-        if let Node::Function(func) = item {
-            assert!(func.is_snapshot_test());
-            assert!(func.is_test());
-        }
+    for func in &funcs {
+        assert!(func.is_snapshot_test());
+        assert!(func.is_test());
     }
 }
 
@@ -264,18 +211,10 @@ fn test_with_io(path: String):
     let content = read_file(path)
     expect(content.len()).to_be_positive()
 "#;
-    
-    let mut parser = Parser::new(input);
-    let result: Result<Module, _> = parser.parse();
-    assert!(result.is_ok(), "Parse failed: {:?}", result.err());
-    
-    let module = result.unwrap();
-    if let Node::Function(func) = &module.items[0] {
-        assert!(func.is_property_test(), "Should be property test");
-        assert!(func.has_io(), "Should have @io effect");
-        assert_eq!(func.decorators.len(), 1); // Only @property_test (not @io)
-        assert_eq!(func.effects.len(), 1); // @io is an effect
-    } else {
-        panic!("Expected function");
-    }
+
+    let func = parse_and_get_function(input);
+    assert!(func.is_property_test(), "Should be property test");
+    assert!(func.has_io(), "Should have @io effect");
+    assert_eq!(func.decorators.len(), 1); // Only @property_test (not @io)
+    assert_eq!(func.effects.len(), 1); // @io is an effect
 }

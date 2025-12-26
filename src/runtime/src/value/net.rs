@@ -197,6 +197,23 @@ macro_rules! with_socket {
     }};
 }
 
+/// Macro to get mutable registry and socket entry with error handling
+/// Usage: with_socket_mut!(handle, TcpStream, error_fn, socket => { use socket here })
+macro_rules! with_socket_mut {
+    ($handle:expr, $variant:ident, $error_ret:expr, $socket:ident => $body:expr) => {{
+        let mut registry = SOCKET_REGISTRY.lock().unwrap();
+        let entry = match registry.get_mut(&$handle) {
+            Some(e) => e,
+            None => return $error_ret(NetError::InvalidHandle),
+        };
+        let $socket = match entry {
+            SocketEntry::$variant(s) => s,
+            _ => return $error_ret(NetError::InvalidHandle),
+        };
+        $body
+    }};
+}
+
 /// Macro to validate buffer pointer and length
 /// Returns early with InvalidInput error if validation fails
 macro_rules! validate_buffer {

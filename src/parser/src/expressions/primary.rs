@@ -118,14 +118,43 @@ impl<'a> Parser<'a> {
                     && name.chars().next().map_or(false, |c| c.is_uppercase())
                 {
                     self.advance(); // consume '{'
+                    // Skip newlines after opening brace
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
                     let mut fields = Vec::new();
                     while !self.check(&TokenKind::RBrace) {
                         let field_name = self.expect_identifier()?;
-                        self.expect(&TokenKind::Colon)?;
-                        let value = self.parse_expression()?;
+                        // Skip newlines before colon or comma
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
+
+                        // Check for shorthand syntax: { x, y } instead of { x: x, y: y }
+                        let value = if self.check(&TokenKind::Colon) {
+                            // Explicit value: field: value
+                            self.advance(); // consume ':'
+                            // Skip newlines after colon
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+                            self.parse_expression()?
+                        } else {
+                            // Shorthand: field means field: field
+                            Expr::Identifier(field_name.clone())
+                        };
+
+                        // Skip newlines after value
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
                         fields.push((field_name, value));
                         if !self.check(&TokenKind::RBrace) {
                             self.expect(&TokenKind::Comma)?;
+                            // Skip newlines after comma
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
                         }
                     }
                     self.expect(&TokenKind::RBrace)?;
@@ -330,6 +359,11 @@ impl<'a> Parser<'a> {
             }
             TokenKind::LBrace => {
                 self.advance();
+                // Skip newlines after opening brace
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
+
                 // Empty dict
                 if self.check(&TokenKind::RBrace) {
                     self.advance();
@@ -343,8 +377,20 @@ impl<'a> Parser<'a> {
 
                 // Parse first key
                 let key = self.parse_expression()?;
+                // Skip newlines before colon
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
                 self.expect(&TokenKind::Colon)?;
+                // Skip newlines after colon
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
                 let value = self.parse_expression()?;
+                // Skip newlines after value
+                while self.check(&TokenKind::Newline) {
+                    self.advance();
+                }
 
                 // Check for dict comprehension: {k: v for pattern in iterable}
                 if self.check(&TokenKind::For) {
@@ -364,6 +410,10 @@ impl<'a> Parser<'a> {
                 let mut pairs = vec![(key, value)];
                 while self.check(&TokenKind::Comma) {
                     self.advance();
+                    // Skip newlines after comma
+                    while self.check(&TokenKind::Newline) {
+                        self.advance();
+                    }
                     if self.check(&TokenKind::RBrace) {
                         break;
                     }
@@ -375,8 +425,20 @@ impl<'a> Parser<'a> {
                         pairs.push((Expr::DictSpread(Box::new(spread_expr)), Expr::Nil));
                     } else {
                         let k = self.parse_expression()?;
+                        // Skip newlines before colon
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
                         self.expect(&TokenKind::Colon)?;
+                        // Skip newlines after colon
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
                         let v = self.parse_expression()?;
+                        // Skip newlines after value
+                        while self.check(&TokenKind::Newline) {
+                            self.advance();
+                        }
                         pairs.push((k, v));
                     }
                 }
@@ -534,7 +596,15 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        self.expect(&TokenKind::FatArrow)?;
+        // Accept both -> and => for match arms
+        if !self.check(&TokenKind::Arrow) && !self.check(&TokenKind::FatArrow) {
+            return Err(ParseError::unexpected_token(
+                "-> or =>",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        }
+        self.advance();
         let body = if self.check(&TokenKind::Newline) {
             self.parse_block()?
         } else {

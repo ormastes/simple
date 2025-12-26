@@ -190,20 +190,37 @@ impl<'a> Parser<'a> {
             return Ok(Type::DynTrait(trait_name));
         }
 
-        // Simple or generic type
-        let name = self.expect_identifier()?;
+        // Simple or generic type (possibly qualified: module.Type)
+        let mut name = self.expect_identifier()?;
 
-        // Check for generic arguments
-        if self.check(&TokenKind::LBracket) {
-            self.advance();
+        // Check for qualified type name: module.Type or module.submodule.Type
+        while self.check(&TokenKind::Dot) {
+            self.advance(); // consume '.'
+            let segment = self.expect_identifier()?;
+            name.push('.');
+            name.push_str(&segment);
+        }
+
+        // Check for generic arguments - support both [] and <> syntax
+        let using_angle_brackets = self.check(&TokenKind::Lt);
+        let using_square_brackets = self.check(&TokenKind::LBracket);
+
+        if using_angle_brackets || using_square_brackets {
+            self.advance(); // consume '[' or '<'
             let mut args = Vec::new();
-            while !self.check(&TokenKind::RBracket) {
+            let closing_token = if using_angle_brackets {
+                TokenKind::Gt
+            } else {
+                TokenKind::RBracket
+            };
+
+            while !self.check(&closing_token) {
                 args.push(self.parse_type()?);
-                if !self.check(&TokenKind::RBracket) {
+                if !self.check(&closing_token) {
                     self.expect(&TokenKind::Comma)?;
                 }
             }
-            self.expect(&TokenKind::RBracket)?;
+            self.expect(&closing_token)?;
 
             // Special handling for Constructor[T] or Constructor[T, (args)]
             if name == "Constructor" {

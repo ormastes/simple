@@ -6,10 +6,7 @@
 /// Returns (handle, error_code)
 #[no_mangle]
 pub unsafe extern "C" fn native_tcp_bind(addr_ptr: i64, addr_len: i64) -> (i64, i64) {
-    let addr = match parse_socket_addr(addr_ptr, addr_len) {
-        Ok(a) => a,
-        Err(e) => return (0, e as i64),
-    };
+    let addr = parse_addr!(addr_ptr, addr_len, err_to_tuple2);
 
     match TcpListener::bind(addr) {
         Ok(listener) => {
@@ -50,10 +47,7 @@ pub extern "C" fn native_tcp_accept(handle: i64) -> (i64, i64, i64) {
 /// Returns (handle, local_addr_ptr, error_code)
 #[no_mangle]
 pub unsafe extern "C" fn native_tcp_connect(addr_ptr: i64, addr_len: i64) -> (i64, i64, i64) {
-    let addr = match parse_socket_addr(addr_ptr, addr_len) {
-        Ok(a) => a,
-        Err(e) => return (0, 0, e as i64),
-    };
+    let addr = parse_addr!(addr_ptr, addr_len, err_to_tuple3);
 
     match TcpStream::connect(addr) {
         Ok(stream) => {
@@ -74,10 +68,7 @@ pub unsafe extern "C" fn native_tcp_connect_timeout(
     addr_len: i64,
     timeout_ns: i64,
 ) -> (i64, i64, i64) {
-    let addr = match parse_socket_addr(addr_ptr, addr_len) {
-        Ok(a) => a,
-        Err(e) => return (0, 0, e as i64),
-    };
+    let addr = parse_addr!(addr_ptr, addr_len, err_to_tuple3);
 
     let timeout = if timeout_ns > 0 {
         Duration::from_nanos(timeout_ns as u64)
@@ -100,26 +91,15 @@ pub unsafe extern "C" fn native_tcp_connect_timeout(
 /// Returns (bytes_read, error_code)
 #[no_mangle]
 pub unsafe extern "C" fn native_tcp_read(handle: i64, buf_ptr: i64, buf_len: i64) -> (i64, i64) {
-    if buf_ptr == 0 || buf_len <= 0 {
-        return (0, NetError::InvalidInput as i64);
-    }
+    validate_buffer!(buf_ptr, buf_len, err_to_tuple2);
 
-    let mut registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get_mut(&handle) {
-        Some(e) => e,
-        None => return (0, NetError::InvalidHandle as i64),
-    };
-
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return (0, NetError::InvalidHandle as i64),
-    };
-
-    let buf = std::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len as usize);
-    match stream.read(buf) {
-        Ok(n) => (n as i64, NetError::Success as i64),
-        Err(e) => (0, NetError::from(e) as i64),
-    }
+    with_socket_mut!(handle, TcpStream, err_to_tuple2, stream => {
+        let buf = std::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len as usize);
+        match stream.read(buf) {
+            Ok(n) => (n as i64, NetError::Success as i64),
+            Err(e) => (0, NetError::from(e) as i64),
+        }
+    })
 }
 
 /// Write data to a TCP stream.
@@ -130,74 +110,45 @@ pub unsafe extern "C" fn native_tcp_write(
     data_ptr: i64,
     data_len: i64,
 ) -> (i64, i64) {
-    if data_ptr == 0 || data_len <= 0 {
-        return (0, NetError::InvalidInput as i64);
-    }
+    validate_buffer!(data_ptr, data_len, err_to_tuple2);
 
-    let mut registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get_mut(&handle) {
-        Some(e) => e,
-        None => return (0, NetError::InvalidHandle as i64),
-    };
-
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return (0, NetError::InvalidHandle as i64),
-    };
-
-    let data = std::slice::from_raw_parts(data_ptr as *const u8, data_len as usize);
-    match stream.write(data) {
-        Ok(n) => (n as i64, NetError::Success as i64),
-        Err(e) => (0, NetError::from(e) as i64),
-    }
+    with_socket_mut!(handle, TcpStream, err_to_tuple2, stream => {
+        let data = std::slice::from_raw_parts(data_ptr as *const u8, data_len as usize);
+        match stream.write(data) {
+            Ok(n) => (n as i64, NetError::Success as i64),
+            Err(e) => (0, NetError::from(e) as i64),
+        }
+    })
 }
 
 /// Flush a TCP stream's output buffer.
 /// Returns error_code
 #[no_mangle]
 pub extern "C" fn native_tcp_flush(handle: i64) -> i64 {
-    let mut registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get_mut(&handle) {
-        Some(e) => e,
-        None => return NetError::InvalidHandle as i64,
-    };
-
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return NetError::InvalidHandle as i64,
-    };
-
-    match stream.flush() {
-        Ok(_) => NetError::Success as i64,
-        Err(e) => NetError::from(e) as i64,
-    }
+    with_socket_mut!(handle, TcpStream, err_to_i64, stream => {
+        match stream.flush() {
+            Ok(_) => NetError::Success as i64,
+            Err(e) => NetError::from(e) as i64,
+        }
+    })
 }
 
 /// Shutdown a TCP stream (0=read, 1=write, 2=both).
 /// Returns error_code
 #[no_mangle]
 pub extern "C" fn native_tcp_shutdown(handle: i64, how: i64) -> i64 {
-    let registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get(&handle) {
-        Some(e) => e,
-        None => return NetError::InvalidHandle as i64,
-    };
+    with_socket!(handle, TcpStream, err_to_i64, stream => {
+        let shutdown = match how {
+            0 => std::net::Shutdown::Read,
+            1 => std::net::Shutdown::Write,
+            _ => std::net::Shutdown::Both,
+        };
 
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return NetError::InvalidHandle as i64,
-    };
-
-    let shutdown = match how {
-        0 => std::net::Shutdown::Read,
-        1 => std::net::Shutdown::Write,
-        _ => std::net::Shutdown::Both,
-    };
-
-    match stream.shutdown(shutdown) {
-        Ok(_) => NetError::Success as i64,
-        Err(e) => NetError::from(e) as i64,
-    }
+        match stream.shutdown(shutdown) {
+            Ok(_) => NetError::Success as i64,
+            Err(e) => NetError::from(e) as i64,
+        }
+    })
 }
 
 /// Close a TCP socket (listener or stream).
@@ -224,146 +175,90 @@ pub extern "C" fn native_tcp_set_backlog(_handle: i64, _backlog: i64) -> i64 {
 /// Returns error_code
 #[no_mangle]
 pub extern "C" fn native_tcp_set_nodelay(handle: i64, nodelay: i64) -> i64 {
-    let registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get(&handle) {
-        Some(e) => e,
-        None => return NetError::InvalidHandle as i64,
-    };
-
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return NetError::InvalidHandle as i64,
-    };
-
-    match stream.set_nodelay(nodelay != 0) {
-        Ok(_) => NetError::Success as i64,
-        Err(e) => NetError::from(e) as i64,
-    }
+    with_socket!(handle, TcpStream, err_to_i64, stream => {
+        match stream.set_nodelay(nodelay != 0) {
+            Ok(_) => NetError::Success as i64,
+            Err(e) => NetError::from(e) as i64,
+        }
+    })
 }
 
 /// Set keepalive option.
 /// Returns error_code
 #[no_mangle]
 pub extern "C" fn native_tcp_set_keepalive(handle: i64, keepalive_ns: i64) -> i64 {
-    let registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get(&handle) {
-        Some(e) => e,
-        None => return NetError::InvalidHandle as i64,
-    };
+    with_socket!(handle, TcpStream, err_to_i64, stream => {
+        // Convert to socket2 for keepalive control
+        // keepalive_ns > 0 means enable, 0 means disable
+        let socket = Socket::from(stream.try_clone().unwrap());
+        let enable = keepalive_ns > 0;
 
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return NetError::InvalidHandle as i64,
-    };
-
-    // Convert to socket2 for keepalive control
-    // keepalive_ns > 0 means enable, 0 means disable
-    let socket = Socket::from(stream.try_clone().unwrap());
-    let enable = keepalive_ns > 0;
-
-    match socket.set_keepalive(enable) {
-        Ok(_) => NetError::Success as i64,
-        Err(e) => NetError::from(e) as i64,
-    }
+        match socket.set_keepalive(enable) {
+            Ok(_) => NetError::Success as i64,
+            Err(e) => NetError::from(e) as i64,
+        }
+    })
 }
 
 /// Set read timeout.
 /// Returns error_code
 #[no_mangle]
 pub extern "C" fn native_tcp_set_read_timeout(handle: i64, timeout_ns: i64) -> i64 {
-    let registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get(&handle) {
-        Some(e) => e,
-        None => return NetError::InvalidHandle as i64,
-    };
+    with_socket!(handle, TcpStream, err_to_i64, stream => {
+        let timeout = if timeout_ns > 0 {
+            Some(Duration::from_nanos(timeout_ns as u64))
+        } else {
+            None
+        };
 
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return NetError::InvalidHandle as i64,
-    };
-
-    let timeout = if timeout_ns > 0 {
-        Some(Duration::from_nanos(timeout_ns as u64))
-    } else {
-        None
-    };
-
-    match stream.set_read_timeout(timeout) {
-        Ok(_) => NetError::Success as i64,
-        Err(e) => NetError::from(e) as i64,
-    }
+        match stream.set_read_timeout(timeout) {
+            Ok(_) => NetError::Success as i64,
+            Err(e) => NetError::from(e) as i64,
+        }
+    })
 }
 
 /// Set write timeout.
 /// Returns error_code
 #[no_mangle]
 pub extern "C" fn native_tcp_set_write_timeout(handle: i64, timeout_ns: i64) -> i64 {
-    let registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get(&handle) {
-        Some(e) => e,
-        None => return NetError::InvalidHandle as i64,
-    };
+    with_socket!(handle, TcpStream, err_to_i64, stream => {
+        let timeout = if timeout_ns > 0 {
+            Some(Duration::from_nanos(timeout_ns as u64))
+        } else {
+            None
+        };
 
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return NetError::InvalidHandle as i64,
-    };
-
-    let timeout = if timeout_ns > 0 {
-        Some(Duration::from_nanos(timeout_ns as u64))
-    } else {
-        None
-    };
-
-    match stream.set_write_timeout(timeout) {
-        Ok(_) => NetError::Success as i64,
-        Err(e) => NetError::from(e) as i64,
-    }
+        match stream.set_write_timeout(timeout) {
+            Ok(_) => NetError::Success as i64,
+            Err(e) => NetError::from(e) as i64,
+        }
+    })
 }
 
 /// Get TCP_NODELAY option.
 /// Returns (nodelay, error_code)
 #[no_mangle]
 pub extern "C" fn native_tcp_get_nodelay(handle: i64) -> (i64, i64) {
-    let registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get(&handle) {
-        Some(e) => e,
-        None => return (0, NetError::InvalidHandle as i64),
-    };
-
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return (0, NetError::InvalidHandle as i64),
-    };
-
-    match stream.nodelay() {
-        Ok(nodelay) => (if nodelay { 1 } else { 0 }, NetError::Success as i64),
-        Err(e) => (0, NetError::from(e) as i64),
-    }
+    with_socket!(handle, TcpStream, err_to_tuple2, stream => {
+        match stream.nodelay() {
+            Ok(nodelay) => (if nodelay { 1 } else { 0 }, NetError::Success as i64),
+            Err(e) => (0, NetError::from(e) as i64),
+        }
+    })
 }
 
 /// Peek data from a TCP stream without consuming it.
 /// Returns (bytes_peeked, error_code)
 #[no_mangle]
 pub unsafe extern "C" fn native_tcp_peek(handle: i64, buf_ptr: i64, buf_len: i64) -> (i64, i64) {
-    if buf_ptr == 0 || buf_len <= 0 {
-        return (0, NetError::InvalidInput as i64);
-    }
+    validate_buffer!(buf_ptr, buf_len, err_to_tuple2);
 
-    let registry = SOCKET_REGISTRY.lock().unwrap();
-    let entry = match registry.get(&handle) {
-        Some(e) => e,
-        None => return (0, NetError::InvalidHandle as i64),
-    };
-
-    let stream = match entry {
-        SocketEntry::TcpStream(s) => s,
-        _ => return (0, NetError::InvalidHandle as i64),
-    };
-
-    let buf = std::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len as usize);
-    match stream.peek(buf) {
-        Ok(n) => (n as i64, NetError::Success as i64),
-        Err(e) => (0, NetError::from(e) as i64),
-    }
+    with_socket!(handle, TcpStream, err_to_tuple2, stream => {
+        let buf = std::slice::from_raw_parts_mut(buf_ptr as *mut u8, buf_len as usize);
+        match stream.peek(buf) {
+            Ok(n) => (n as i64, NetError::Success as i64),
+            Err(e) => (0, NetError::from(e) as i64),
+        }
+    })
 }

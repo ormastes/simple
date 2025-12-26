@@ -27,5 +27,5 @@ mod attributes;
 pub use core::{Parser, ParserMode};
 
 #[cfg(test)]
-#[path = "../parser_tests.rs"]
+#[path = "../../tests/mod.rs"]
 mod tests;

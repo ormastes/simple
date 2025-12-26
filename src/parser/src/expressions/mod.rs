@@ -382,7 +382,7 @@ impl<'a> Parser<'a> {
 
     /// Parse comparisons with chaining support: a < b < c becomes (a < b) and (b < c)
     pub(crate) fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let left = self.parse_bitwise_or()?;
+        let left = self.parse_range()?;
 
         // Check if there's a comparison operator
         let op = match &self.current.kind {
@@ -410,7 +410,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_bitwise_or()?;
+            let right = self.parse_range()?;
 
             comparisons.push(Expr::Binary {
                 op,
@@ -437,6 +437,33 @@ impl<'a> Parser<'a> {
         }
 
         Ok(result)
+    }
+
+    /// Parse range expressions: a..b (exclusive) or a..=b (inclusive)
+    pub(crate) fn parse_range(&mut self) -> Result<Expr, ParseError> {
+        use crate::ast::RangeBound;
+        let start = self.parse_bitwise_or()?;
+
+        // Check for range operators
+        let bound = if self.check(&TokenKind::DoubleDotEq) {
+            Some(RangeBound::Inclusive)
+        } else if self.check(&TokenKind::DoubleDot) {
+            Some(RangeBound::Exclusive)
+        } else {
+            None
+        };
+
+        if let Some(bound) = bound {
+            self.advance(); // consume '..' or '..='
+            let end = self.parse_bitwise_or()?;
+            Ok(Expr::Range {
+                start: Some(Box::new(start)),
+                end: Some(Box::new(end)),
+                bound,
+            })
+        } else {
+            Ok(start)
+        }
     }
 
     parse_binary_multi!(parse_shift, parse_term,
@@ -549,6 +576,21 @@ impl<'a> Parser<'a> {
                 }
             }
             _ => self.parse_postfix(),
+        }
+    }
+
+    /// Convert an expression to a qualified name (e.g., a.b.c -> "a.b.c")
+    fn expr_to_qualified_name(&self, expr: Expr) -> Result<String, ParseError> {
+        match expr {
+            Expr::Identifier(name) => Ok(name),
+            Expr::FieldAccess { receiver, field } => {
+                let receiver_name = self.expr_to_qualified_name(*receiver)?;
+                Ok(format!("{}.{}", receiver_name, field))
+            }
+            _ => Err(ParseError::syntax_error_with_span(
+                "Expected qualified name (identifier or field access)".to_string(),
+                self.current.span,
+            )),
         }
     }
 
@@ -681,6 +723,54 @@ impl<'a> Parser<'a> {
                                     name: None,
                                     value: trailing_lambda,
                                 }],
+                            };
+                        } else if self.check(&TokenKind::LBrace)
+                            && field.chars().next().map_or(false, |c| c.is_uppercase())
+                        {
+                            // Qualified struct initialization: module.StructName { ... }
+                            // Convert receiver.field to qualified name
+                            let qualified_name = self.expr_to_qualified_name(expr)?;
+                            let full_name = format!("{}.{}", qualified_name, field);
+
+                            self.advance(); // consume '{'
+                            // Skip newlines after opening brace
+                            while self.check(&TokenKind::Newline) {
+                                self.advance();
+                            }
+                            let mut fields = Vec::new();
+                            while !self.check(&TokenKind::RBrace) {
+                                let field_name = self.expect_identifier()?;
+                                // Skip newlines before colon or comma
+                                while self.check(&TokenKind::Newline) {
+                                    self.advance();
+                                }
+
+                                // Check for shorthand syntax
+                                let value = if self.check(&TokenKind::Colon) {
+                                    self.advance(); // consume ':'
+                                    while self.check(&TokenKind::Newline) {
+                                        self.advance();
+                                    }
+                                    self.parse_expression()?
+                                } else {
+                                    Expr::Identifier(field_name.clone())
+                                };
+
+                                while self.check(&TokenKind::Newline) {
+                                    self.advance();
+                                }
+                                fields.push((field_name, value));
+                                if !self.check(&TokenKind::RBrace) {
+                                    self.expect(&TokenKind::Comma)?;
+                                    while self.check(&TokenKind::Newline) {
+                                        self.advance();
+                                    }
+                                }
+                            }
+                            self.expect(&TokenKind::RBrace)?;
+                            expr = Expr::StructInit {
+                                name: full_name,
+                                fields,
                             };
                         } else {
                             expr = Expr::FieldAccess {

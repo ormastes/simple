@@ -94,17 +94,24 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn expect_identifier(&mut self) -> Result<String, ParseError> {
-        if let TokenKind::Identifier(name) = &self.current.kind {
-            let name = name.clone();
-            self.advance();
-            Ok(name)
-        } else {
-            Err(ParseError::unexpected_token(
-                "identifier",
-                format!("{:?}", self.current.kind),
-                self.current.span,
-            ))
-        }
+        let name = match &self.current.kind {
+            TokenKind::Identifier(name) => name.clone(),
+            // Allow contract keywords to be used as identifiers (parameter names, variable names, etc.)
+            // These are only keywords in specific contract contexts
+            TokenKind::Result => "result".to_string(),
+            TokenKind::Type => "type".to_string(),
+            TokenKind::Out => "out".to_string(),
+            TokenKind::OutErr => "out_err".to_string(),
+            _ => {
+                return Err(ParseError::unexpected_token(
+                    "identifier",
+                    format!("{:?}", self.current.kind),
+                    self.current.span,
+                ))
+            }
+        };
+        self.advance();
+        Ok(name)
     }
 
     pub(crate) fn check_ident(&self, name: &str) -> bool {
