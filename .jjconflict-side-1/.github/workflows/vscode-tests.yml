@@ -1,0 +1,267 @@
+name: VSCode Extension Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'simple/std_lib/src/vscode/**'
+      - 'simple/std_lib/test/vscode/**'
+      - 'simple/std_lib/test/examples/vscode_*.spl'
+      - '.github/workflows/vscode-tests.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'simple/std_lib/src/vscode/**'
+      - 'simple/std_lib/test/vscode/**'
+      - 'simple/std_lib/test/examples/vscode_*.spl'
+      - '.github/workflows/vscode-tests.yml'
+
+jobs:
+  test:
+    name: VSCode Tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: [18.x, 20.x]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+          cache-dependency-path: simple/std_lib/test/vscode/package.json
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build Simple compiler
+        run: cargo build --release
+
+      - name: Install VSCode test dependencies
+        working-directory: simple/std_lib/test/vscode
+        run: npm ci
+
+      - name: Compile TypeScript
+        working-directory: simple/std_lib/test/vscode
+        run: npm run compile
+
+      - name: Setup xvfb (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxkbfile-dev pkg-config \
+            libsecret-1-dev libxss1 libasound2 libgtk-3-0 libnss3
+
+      - name: Run VSCode tests (Linux)
+        if: runner.os == 'Linux'
+        working-directory: simple/std_lib/test/vscode
+        run: xvfb-run -a npm test
+        env:
+          CI: true
+
+      - name: Run VSCode tests (macOS/Windows)
+        if: runner.os != 'Linux'
+        working-directory: simple/std_lib/test/vscode
+        run: npm test
+        env:
+          CI: true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: vscode-test-results-${{ matrix.os }}-node${{ matrix.node-version }}
+          path: simple/std_lib/test/vscode/test-results/
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: vscode-coverage-${{ matrix.os }}-node${{ matrix.node-version }}
+          path: simple/std_lib/test/vscode/coverage/
+
+  lint:
+    name: Lint VSCode Extension Code
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Install dependencies
+        working-directory: simple/std_lib/test/vscode
+        run: npm ci
+
+      - name: Run ESLint
+        working-directory: simple/std_lib/test/vscode
+        run: npm run lint --if-present
+
+      - name: Check TypeScript types
+        working-directory: simple/std_lib/test/vscode
+        run: npm run compile
+
+  package:
+    name: Package Extension
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Build Simple compiler
+        run: cargo build --release
+
+      - name: Install dependencies
+        working-directory: simple/std_lib/test/vscode
+        run: npm ci
+
+      - name: Compile TypeScript
+        working-directory: simple/std_lib/test/vscode
+        run: npm run compile
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Package extension
+        working-directory: simple/std_lib/test/vscode
+        run: vsce package --no-dependencies
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v3
+        with:
+          name: vscode-extension
+          path: simple/std_lib/test/vscode/*.vsix
+
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: package
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Build Simple compiler
+        run: cargo build --release
+
+      - name: Download VSIX
+        uses: actions/download-artifact@v3
+        with:
+          name: vscode-extension
+          path: simple/std_lib/test/vscode
+
+      - name: Install dependencies
+        working-directory: simple/std_lib/test/vscode
+        run: npm ci
+
+      - name: Setup xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxkbfile-dev pkg-config \
+            libsecret-1-dev libxss1 libasound2 libgtk-3-0 libnss3
+
+      - name: Run integration tests
+        working-directory: simple/std_lib/test/vscode
+        run: xvfb-run -a npm run test:integration --if-present
+        env:
+          CI: true
+
+  coverage:
+    name: Test Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Build Simple compiler
+        run: cargo build --release
+
+      - name: Install dependencies
+        working-directory: simple/std_lib/test/vscode
+        run: npm ci
+
+      - name: Compile TypeScript
+        working-directory: simple/std_lib/test/vscode
+        run: npm run compile
+
+      - name: Setup xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxkbfile-dev pkg-config \
+            libsecret-1-dev libxss1 libasound2 libgtk-3-0 libnss3
+
+      - name: Run tests with coverage
+        working-directory: simple/std_lib/test/vscode
+        run: xvfb-run -a npm run test:coverage --if-present
+        env:
+          CI: true
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          files: simple/std_lib/test/vscode/coverage/coverage-final.json
+          flags: vscode-tests
+          name: vscode-coverage

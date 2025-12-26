@@ -1,0 +1,255 @@
+///
+SDN Round-trip Tests
+
+Tests for parse → serialize → parse idempotency.
+
+Ensures that:
+- Parsing and serialization are inverses
+- No data is lost in round-trip conversion
+- Structure is preserved
+- All value types survive round-trip
+///
+
+import std.spec
+import sdn.parser.parse
+import sdn.serializer.to_sdn
+import sdn.value.SdnValue
+
+describe "SDN Round-trip":
+    context "parse → serialize → parse":
+        it "preserves primitives":
+            let original = "int: 42\nfloat: 3.14\nstring: hello\nbool: true\nnull_val: null"
+
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            expect doc2.get("int").flatmap(|v| v.as_i64()) == Some(42)
+                            expect doc2.get("bool").flatmap(|v| v.as_bool()) == Some(True)
+                            expect doc2.get("null_val").map(|v| v.is_null()) == Some(True)
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+        it "preserves inline dicts":
+            let original = "point = {x: 10, y: 20}"
+
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            expect doc2.get_path("point.x").flatmap(|v| v.as_i64()) == Some(10)
+                            expect doc2.get_path("point.y").flatmap(|v| v.as_i64()) == Some(20)
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+        it "preserves inline arrays":
+            let original = "items = [1, 2, 3, 4, 5]"
+
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            match doc2.get("items"):
+                                case Some(arr):
+                                    match arr.as_array():
+                                        case Some(list):
+                                            expect list.len == 5
+                                        case None:
+                                            fail("Expected array")
+                                case None:
+                                    fail("Expected items")
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+        it "preserves block structures":
+            let original = "server:\n    host: localhost\n    port: 8080\n    workers: 4"
+
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            expect doc2.get_path("server.host").flatmap(|v| v.as_str()) == Some("localhost")
+                            expect doc2.get_path("server.port").flatmap(|v| v.as_i64()) == Some(8080)
+                            expect doc2.get_path("server.workers").flatmap(|v| v.as_i64()) == Some(4)
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+        it "preserves tables":
+            let original = "users |id, name|\n    1, Alice\n    2, Bob"
+
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            match doc2.get("users"):
+                                case Some(table):
+                                    expect table.is_table() == True
+                                case None:
+                                    fail("Expected users table")
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+        it "preserves nested structures":
+            let original = """
+app:
+    name: MyService
+    config:
+        debug: true
+        level: 5
+"""
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            expect doc2.get_path("app.name").flatmap(|v| v.as_str()) == Some("MyService")
+                            expect doc2.get_path("app.config.debug").flatmap(|v| v.as_bool()) == Some(True)
+                            expect doc2.get_path("app.config.level").flatmap(|v| v.as_i64()) == Some(5)
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+        it "preserves real config files":
+            let original = """
+app:
+    name: MyService
+    version: 2.1.0
+
+server:
+    host: 0.0.0.0
+    port: 8080
+
+features = [auth, logging, metrics]
+"""
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            expect doc2.get_path("app.name").flatmap(|v| v.as_str()) == Some("MyService")
+                            expect doc2.get_path("server.port").flatmap(|v| v.as_i64()) == Some(8080)
+
+                            match doc2.get("features"):
+                                case Some(arr):
+                                    expect arr.is_array() == True
+                                case None:
+                                    fail("Expected features")
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+        it "preserves real data files":
+            let original = """
+users |id, name, email|
+    1, Alice, alice@example.com
+    2, Bob, bob@example.com
+    3, Carol, carol@example.com
+"""
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            match doc2.get("users"):
+                                case Some(table):
+                                    expect table.is_table() == True
+                                case None:
+                                    fail("Expected users table")
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+    context "idempotency":
+        it "is idempotent on second round-trip":
+            let original = "key: value\nnum: 42"
+
+            match parse(original):
+                case Ok(doc1):
+                    let sdn1 = to_sdn(doc1)
+
+                    match parse(sdn1):
+                        case Ok(doc2):
+                            let sdn2 = to_sdn(doc2)
+
+                            # Second serialization should match first
+                            expect sdn1 == sdn2
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+    context "edge cases":
+        it "handles empty collections":
+            let original = "empty_dict = {}\nempty_array = []"
+
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            match doc2.get("empty_dict"):
+                                case Some(dict):
+                                    expect dict.is_dict() == True
+                                case None:
+                                    fail("Expected empty_dict")
+
+                            match doc2.get("empty_array"):
+                                case Some(arr):
+                                    expect arr.is_array() == True
+                                case None:
+                                    fail("Expected empty_array")
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")
+
+        it "handles special characters in strings":
+            let original = "msg: \"Hello\\nWorld\\t!\""
+
+            match parse(original):
+                case Ok(doc1):
+                    let sdn = to_sdn(doc1)
+
+                    match parse(sdn):
+                        case Ok(doc2):
+                            match doc2.get("msg"):
+                                case Some(str_val):
+                                    match str_val.as_str():
+                                        case Some(s):
+                                            expect s.contains("\n")
+                                            expect s.contains("\t")
+                                        case None:
+                                            fail("Expected string")
+                                case None:
+                                    fail("Expected msg")
+                        case Err(e):
+                            fail("Round-trip parse failed: ${e.to_string()}")
+                case Err(e):
+                    fail("Initial parse failed: ${e.to_string()}")

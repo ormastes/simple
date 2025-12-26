@@ -1,0 +1,312 @@
+# RenderBackend - Platform-Agnostic Rendering Abstraction
+#
+# Defines the RenderBackend trait that all platform renderers implement.
+# Provides a unified API for rendering widgets to different targets.
+# Based on: doc/research/ui_framework_unified.md
+
+use core.*
+use ui.element.*
+use ui.widget.*
+use ui.events.*
+use ui.viewport.*
+
+# Render context - passed to renderers during rendering
+pub struct RenderContext:
+    # Viewport information
+    pub viewport: Viewport
+    # Current theme (for styling)
+    pub theme_id: u64
+    # Render pass counter (for animations)
+    pub frame_count: u64
+    # Delta time since last frame (milliseconds)
+    pub delta_time: f64
+
+impl RenderContext:
+    pub fn new(viewport: Viewport) -> RenderContext:
+        return RenderContext {
+            viewport: viewport,
+            theme_id: 0,
+            frame_count: 0,
+            delta_time: 0.0
+        }
+
+    pub fn next_frame(self, delta_time: f64):
+        self.frame_count = self.frame_count + 1
+        self.delta_time = delta_time
+
+# Render result - output from rendering operation
+pub enum RenderResult:
+    Success(RenderOutput)
+    Error(String)
+    NeedsRerender  # Request another render pass
+
+# Platform-specific render output
+pub struct RenderOutput:
+    # Platform-specific data (opaque)
+    data: String  # JSON or serialized representation
+    # Performance metrics
+    metrics: RenderMetrics
+
+pub struct RenderMetrics:
+    pub render_time_ms: f64
+    pub element_count: u32
+    pub draw_calls: u32
+
+impl RenderMetrics:
+    pub fn new() -> RenderMetrics:
+        return RenderMetrics {
+            render_time_ms: 0.0,
+            element_count: 0,
+            draw_calls: 0
+        }
+
+# Core RenderBackend trait
+pub trait RenderBackend:
+    # Initialize the renderer
+    fn init(self, viewport: Viewport) -> Result[(), String]
+
+    # Render an element tree
+    fn render(self, tree: &ElementTree, ctx: &RenderContext) -> RenderResult
+
+    # Update viewport (e.g., on window resize)
+    fn resize(self, viewport: Viewport)
+
+    # Clear the render target
+    fn clear(self)
+
+    # Present/swap buffers (platform-specific)
+    fn present(self)
+
+    # Shutdown the renderer
+    fn shutdown(self)
+
+    # Get renderer capabilities
+    fn capabilities(self) -> RendererCapabilities
+
+# Renderer capabilities - what features the renderer supports
+pub struct RendererCapabilities:
+    pub supports_transparency: bool
+    pub supports_shadows: bool
+    pub supports_blur: bool
+    pub supports_animations: bool
+    pub supports_custom_fonts: bool
+    pub supports_images: bool
+    pub supports_video: bool
+    pub max_texture_size: u32
+
+impl RendererCapabilities:
+    # Full-featured renderer (Browser, Vulkan)
+    pub fn full() -> RendererCapabilities:
+        return RendererCapabilities {
+            supports_transparency: true,
+            supports_shadows: true,
+            supports_blur: true,
+            supports_animations: true,
+            supports_custom_fonts: true,
+            supports_images: true,
+            supports_video: true,
+            max_texture_size: 4096
+        }
+
+    # Limited renderer (Terminal)
+    pub fn limited() -> RendererCapabilities:
+        return RendererCapabilities {
+            supports_transparency: false,
+            supports_shadows: false,
+            supports_blur: false,
+            supports_animations: true,
+            supports_custom_fonts: false,
+            supports_images: false,
+            supports_video: false,
+            max_texture_size: 0
+        }
+
+# Renderer factory - creates platform-specific renderers
+pub struct RendererFactory:
+    pass
+
+impl RendererFactory:
+    # Create a renderer for the specified platform
+    pub fn create(platform: Platform) -> Box[dyn RenderBackend]:
+        match platform:
+            case Platform::Browser:
+                return Box::new(HtmlRenderer::new())
+            case Platform::Electron:
+                return Box::new(HtmlRenderer::new())
+            case Platform::VSCode:
+                return Box::new(VscodeRenderer::new())
+            case Platform::Terminal:
+                return Box::new(TuiRenderer::new())
+            case Platform::Vulkan:
+                return Box::new(VulkanRenderer::new())
+
+    # Auto-detect platform and create renderer
+    pub fn auto_detect() -> Box[dyn RenderBackend]:
+        # Detect from environment
+        # For now, default to Browser
+        return RendererFactory::create(Platform::Browser)
+
+# Render pipeline - orchestrates rendering
+pub struct RenderPipeline:
+    renderer: Box[dyn RenderBackend]
+    context: RenderContext
+    last_frame_time: f64
+
+impl RenderPipeline:
+    pub fn new(renderer: Box[dyn RenderBackend], viewport: Viewport) -> RenderPipeline:
+        return RenderPipeline {
+            renderer: renderer,
+            context: RenderContext::new(viewport),
+            last_frame_time: 0.0
+        }
+
+    # Initialize the pipeline
+    pub fn init(self) -> Result[(), String]:
+        return self.renderer.init(self.context.viewport)
+
+    # Render a frame
+    pub fn render_frame(self, tree: &ElementTree, current_time: f64) -> RenderResult:
+        # Calculate delta time
+        let delta = if self.last_frame_time > 0.0:
+            current_time - self.last_frame_time
+        else:
+            0.0
+
+        self.context.next_frame(delta)
+        self.last_frame_time = current_time
+
+        # Clear previous frame
+        self.renderer.clear()
+
+        # Render the tree
+        let result = self.renderer.render(tree, &self.context)
+
+        # Present
+        self.renderer.present()
+
+        return result
+
+    # Handle viewport change
+    pub fn resize(self, viewport: Viewport):
+        self.context.viewport = viewport
+        self.renderer.resize(viewport)
+
+    # Shutdown the pipeline
+    pub fn shutdown(self):
+        self.renderer.shutdown()
+
+# Forward declarations for platform renderers (implemented in separate files)
+pub struct HtmlRenderer:
+    viewport: Viewport
+    dom_root: Option[String]  # DOM element ID
+
+impl HtmlRenderer:
+    pub fn new() -> HtmlRenderer:
+        return HtmlRenderer {
+            viewport: Viewport::new(1920, 1080, 1.0),
+            dom_root: None
+        }
+
+pub struct TuiRenderer:
+    viewport: Viewport
+    buffer: Option[String]  # Terminal buffer
+
+impl TuiRenderer:
+    pub fn new() -> TuiRenderer:
+        return TuiRenderer {
+            viewport: Viewport::new(80, 24, 1.0),
+            buffer: None
+        }
+
+pub struct VscodeRenderer:
+    viewport: Viewport
+    webview_id: Option[String>
+
+impl VscodeRenderer:
+    pub fn new() -> VscodeRenderer:
+        return VscodeRenderer {
+            viewport: Viewport::new(1920, 1080, 1.0),
+            webview_id: None
+        }
+
+pub struct VulkanRenderer:
+    viewport: Viewport
+    device: Option[String]  # Placeholder for Vulkan device
+
+impl VulkanRenderer:
+    pub fn new() -> VulkanRenderer:
+        return VulkanRenderer {
+            viewport: Viewport::new(1920, 1080, 1.0),
+            device: None
+        }
+
+# Common rendering utilities
+
+# Convert Element to render commands
+pub fn element_to_render_commands(elem: &Element) -> Array[RenderCommand]:
+    let mut commands: Array[RenderCommand] = []
+    commands.push(RenderCommand::BeginElement(elem.id, elem.kind))
+
+    # Apply attributes
+    for (name, value) in &elem.attrs:
+        commands.push(RenderCommand::SetAttribute(elem.id, name.clone(), value.clone()))
+
+    # Apply styles
+    for (prop, value) in &elem.styles:
+        commands.push(RenderCommand::SetStyle(elem.id, prop.clone(), value.clone()))
+
+    # Render text content
+    if let Some(text) = &elem.text:
+        commands.push(RenderCommand::SetText(elem.id, text.clone()))
+
+    # Render children
+    for child in &elem.children:
+        let child_commands = element_to_render_commands(child)
+        commands.extend(child_commands)
+
+    commands.push(RenderCommand::EndElement(elem.id))
+    return commands
+
+# Render commands - intermediate representation
+pub enum RenderCommand:
+    BeginElement(NodeId, ElementKind)
+    EndElement(NodeId)
+    SetAttribute(NodeId, String, String)
+    SetStyle(NodeId, String, String)
+    SetText(NodeId, String)
+    AppendChild(NodeId, NodeId)
+    RemoveChild(NodeId, NodeId)
+    Clear
+
+# CSS style generator helper
+pub fn generate_css_styles(elem: &Element) -> String:
+    let mut css = String::new()
+
+    # Inline styles
+    for (prop, value) in &elem.styles:
+        css.push_str(&f"{prop}: {value}; ")
+
+    return css
+
+# Class list generator helper
+pub fn generate_class_list(elem: &Element) -> String:
+    return elem.classes.join(" ")
+
+# Example: Unified rendering API
+#
+# let renderer = RendererFactory::create(Platform::Browser)
+# let pipeline = RenderPipeline::new(renderer, viewport)
+# pipeline.init()?
+#
+# loop:
+#     let result = pipeline.render_frame(&element_tree, get_time())
+#     match result:
+#         case RenderResult::Success(output):
+#             # Frame rendered successfully
+#             pass
+#         case RenderResult::Error(msg):
+#             print(f"Render error: {msg}")
+#             break
+#         case RenderResult::NeedsRerender:
+#             # Continue loop for another pass
+#             continue

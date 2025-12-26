@@ -1,0 +1,200 @@
+# Element Spec - Tests for UI Element Types
+#
+# Tests the shared Element/Node types used by both TUI and GUI.
+
+use spec.*
+use ui.element.*
+use ui.attrs.*
+
+describe "NodeId":
+    it "creates unique IDs":
+        let id1 = NodeId::new(1)
+        let id2 = NodeId::new(2)
+        expect(id1.value()).to(equal(1))
+        expect(id2.value()).to(equal(2))
+        expect(id1).not_to(equal(id2))
+
+    it "generates sequential IDs":
+        let id = NodeId::new(5)
+        let next = id.next()
+        expect(next.value()).to(equal(6))
+
+describe "ElementKind":
+    it "identifies block elements":
+        expect(ElementKind::Div.is_block()).to(be_true())
+        expect(ElementKind::Paragraph.is_block()).to(be_true())
+        expect(ElementKind::Header.is_block()).to(be_true())
+        expect(ElementKind::Span.is_block()).to(be_false())
+        expect(ElementKind::Text.is_block()).to(be_false())
+
+    it "identifies inline elements":
+        expect(ElementKind::Span.is_inline()).to(be_true())
+        expect(ElementKind::Text.is_inline()).to(be_true())
+        expect(ElementKind::Div.is_inline()).to(be_false())
+
+    it "identifies interactive elements":
+        expect(ElementKind::Button.is_interactive()).to(be_true())
+        expect(ElementKind::Input.is_interactive()).to(be_true())
+        expect(ElementKind::Checkbox.is_interactive()).to(be_true())
+        expect(ElementKind::Div.is_interactive()).to(be_false())
+        expect(ElementKind::Text.is_interactive()).to(be_false())
+
+    it "provides HTML tag names":
+        expect(ElementKind::Div.tag_name()).to(equal("div"))
+        expect(ElementKind::Span.tag_name()).to(equal("span"))
+        expect(ElementKind::Button.tag_name()).to(equal("button"))
+        expect(ElementKind::Heading(1).tag_name()).to(equal("h1"))
+        expect(ElementKind::Heading(3).tag_name()).to(equal("h3"))
+
+describe "Element":
+    it "creates elements with given kind":
+        let id = NodeId::new(1)
+        let elem = Element::new(id, ElementKind::Div)
+        expect(elem.id).to(equal(id))
+        expect(elem.kind).to(equal(ElementKind::Div))
+        expect(elem.has_children()).to(be_false())
+
+    it "creates text elements":
+        let id = NodeId::new(1)
+        let elem = Element::text(id, "Hello World")
+        expect(elem.kind).to(equal(ElementKind::Text))
+        expect(elem.text).to(equal(Some("Hello World".to_string())))
+
+    it "creates button elements with tab index":
+        let id = NodeId::new(1)
+        let elem = Element::button(id, "Click Me")
+        expect(elem.kind).to(equal(ElementKind::Button))
+        expect(elem.text).to(equal(Some("Click Me".to_string())))
+        expect(elem.tab_index).to(equal(Some(0)))
+
+    it "supports builder pattern":
+        let id = NodeId::new(1)
+        let elem = Element::div(id)
+            .with_key("my-key")
+            .with_attr("data-value", "123")
+            .with_class("container")
+            .with_class("primary")
+            .with_style("color", "red")
+
+        expect(elem.key).to(equal(Some("my-key".to_string())))
+        expect(elem.attrs.get("data-value")).to(equal(Some(&"123".to_string())))
+        expect(elem.classes.len()).to(equal(2))
+        expect(elem.classes.contains(&"container".to_string())).to(be_true())
+        expect(elem.styles.get("color")).to(equal(Some(&"red".to_string())))
+
+    it "adds children":
+        let id1 = NodeId::new(1)
+        let id2 = NodeId::new(2)
+        let id3 = NodeId::new(3)
+
+        let child1 = Element::text(id2, "Child 1")
+        let child2 = Element::text(id3, "Child 2")
+
+        let parent = Element::div(id1)
+            .with_child(child1)
+            .with_child(child2)
+
+        expect(parent.has_children()).to(be_true())
+        expect(parent.children.len()).to(equal(2))
+
+    it "finds child by index":
+        let id1 = NodeId::new(1)
+        let id2 = NodeId::new(2)
+        let child = Element::text(id2, "Child")
+        let parent = Element::div(id1).with_child(child)
+
+        expect(parent.child_at(0).is_some()).to(be_true())
+        expect(parent.child_at(1).is_none()).to(be_true())
+
+    it "finds child by key":
+        let id1 = NodeId::new(1)
+        let id2 = NodeId::new(2)
+        let id3 = NodeId::new(3)
+
+        let child1 = Element::text(id2, "A").with_key("key-a")
+        let child2 = Element::text(id3, "B").with_key("key-b")
+
+        let parent = Element::div(id1)
+            .with_child(child1)
+            .with_child(child2)
+
+        let found = parent.find_by_key("key-b")
+        expect(found.is_some()).to(be_true())
+        expect(found.unwrap().id).to(equal(id3))
+
+    it "finds descendant by ID":
+        let id1 = NodeId::new(1)
+        let id2 = NodeId::new(2)
+        let id3 = NodeId::new(3)
+
+        let grandchild = Element::text(id3, "Nested")
+        let child = Element::div(id2).with_child(grandchild)
+        let root = Element::div(id1).with_child(child)
+
+        let found = root.find_by_id(id3)
+        expect(found.is_some()).to(be_true())
+        expect(found.unwrap().text).to(equal(Some("Nested".to_string())))
+
+    it "manages focus state":
+        let id = NodeId::new(1)
+        let elem = Element::button(id, "Btn")
+
+        expect(elem.focused).to(be_false())
+
+        elem.focus()
+        expect(elem.focused).to(be_true())
+
+        elem.blur()
+        expect(elem.focused).to(be_false())
+
+describe "ElementTree":
+    it "creates tree with root element":
+        let tree = ElementTree::new(ElementKind::Div)
+        expect(tree.root().kind).to(equal(ElementKind::Div))
+        expect(tree.root().id.value()).to(equal(0))
+
+    it "allocates sequential node IDs":
+        let tree = ElementTree::new(ElementKind::Div)
+        let id1 = tree.alloc_id()
+        let id2 = tree.alloc_id()
+        let id3 = tree.alloc_id()
+
+        expect(id1.value()).to(equal(1))
+        expect(id2.value()).to(equal(2))
+        expect(id3.value()).to(equal(3))
+
+    it "manages focus":
+        let mut tree = ElementTree::new(ElementKind::Div)
+        let btn_id = tree.alloc_id()
+        let btn = Element::button(btn_id, "Test")
+        tree.root_mut().children.push(btn)
+
+        tree.set_focus(btn_id)
+        expect(tree.focus_id).to(equal(Some(btn_id)))
+
+    it "cycles focus through focusable elements":
+        let mut tree = ElementTree::new(ElementKind::Div)
+
+        let btn1_id = tree.alloc_id()
+        let btn2_id = tree.alloc_id()
+        let btn3_id = tree.alloc_id()
+
+        let btn1 = Element::button(btn1_id, "Btn 1")
+        let btn2 = Element::button(btn2_id, "Btn 2")
+        let btn3 = Element::button(btn3_id, "Btn 3")
+
+        tree.root_mut().children.push(btn1)
+        tree.root_mut().children.push(btn2)
+        tree.root_mut().children.push(btn3)
+
+        tree.focus_next()
+        expect(tree.focus_id).to(equal(Some(btn1_id)))
+
+        tree.focus_next()
+        expect(tree.focus_id).to(equal(Some(btn2_id)))
+
+        tree.focus_next()
+        expect(tree.focus_id).to(equal(Some(btn3_id)))
+
+        tree.focus_next()  # Should wrap
+        expect(tree.focus_id).to(equal(Some(btn1_id)))

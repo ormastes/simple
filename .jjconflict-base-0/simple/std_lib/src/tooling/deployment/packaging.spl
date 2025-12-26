@@ -1,0 +1,422 @@
+# Multi-Language Packaging
+# Package artifacts from multiple languages into deployable units
+
+use tooling.core.project.{Language, ProjectContext}
+use tooling.compiler.interface.Artifact
+use core.result.{Result, Ok, Err}
+
+# Package format
+pub enum PackageFormat:
+    Tarball     # .tar.gz archive
+    Zip         # .zip archive
+    Deb         # Debian package
+    Rpm         # RPM package
+    NuGet       # NuGet package
+    Npm         # NPM package
+    PyPI        # Python wheel/sdist
+
+# Package metadata
+pub class PackageMetadata:
+    pub name: String
+    pub version: String
+    pub description: String
+    pub author: String
+    pub license: String
+    pub homepage: String
+    pub dependencies: List[String]
+
+    pub fn new(name: String, version: String): PackageMetadata =
+        """Create package metadata.
+
+        Args:
+            name: Package name
+            version: Package version
+
+        Returns:
+            Package metadata
+        """
+        PackageMetadata {
+            name: name,
+            version: version,
+            description: "",
+            author: "",
+            license: "MIT",
+            homepage: "",
+            dependencies: []
+        }
+
+# Package manifest
+pub class PackageManifest:
+    pub metadata: PackageMetadata
+    pub files: List[PackageFile]
+    pub scripts: Dict[String, String]  # install, uninstall, etc.
+
+    pub fn new(metadata: PackageMetadata): PackageManifest =
+        """Create package manifest.
+
+        Args:
+            metadata: Package metadata
+
+        Returns:
+            Package manifest
+        """
+        PackageManifest {
+            metadata: metadata,
+            files: [],
+            scripts: {}
+        }
+
+    pub fn add_file(self, source: String, destination: String):
+        """Add file to package.
+
+        Args:
+            source: Source file path
+            destination: Destination path in package
+        """
+        self.files.append(PackageFile.new(source, destination))
+
+    pub fn add_script(self, name: String, script: String):
+        """Add installation script.
+
+        Args:
+            name: Script name (install, uninstall, pre-install, post-install)
+            script: Script contents
+        """
+        self.scripts[name] = script
+
+# Package file entry
+pub class PackageFile:
+    pub source: String
+    pub destination: String
+    pub mode: i32  # Unix file permissions
+
+    pub fn new(source: String, destination: String): PackageFile =
+        """Create package file entry.
+
+        Args:
+            source: Source file path
+            destination: Destination path
+
+        Returns:
+            Package file entry
+        """
+        PackageFile {
+            source: source,
+            destination: destination,
+            mode: 0o644  # rw-r--r--
+        }
+
+# Package builder
+pub class Packager:
+    pub root: String
+    pub manifest: PackageManifest
+    pub verbose: bool
+
+    pub fn new(root: String): Packager =
+        """Create packager.
+
+        Args:
+            root: Project root
+
+        Returns:
+            Packager instance
+
+        Example:
+            let packager = Packager.new(".")
+
+            let package = packager.create_package(
+                name: "my-app",
+                version: "1.0.0",
+                include: [Language::Simple, Language::Rust],
+                format: PackageFormat::Tarball
+            )
+
+            package.write("my-app-1.0.0.tar.gz")
+        """
+        let metadata = PackageMetadata.new("unnamed", "0.1.0")
+        let manifest = PackageManifest.new(metadata)
+
+        Packager {
+            root: root,
+            manifest: manifest,
+            verbose: false
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
+
+    pub fn set_metadata(self, metadata: PackageMetadata):
+        """Set package metadata.
+
+        Args:
+            metadata: Package metadata
+        """
+        self.manifest.metadata = metadata
+
+    pub fn create_package(
+        self,
+        name: String,
+        version: String,
+        include: List[Language],
+        format: PackageFormat
+    ): Package =
+        """Create package from multi-language artifacts.
+
+        Args:
+            name: Package name
+            version: Package version
+            include: Languages to include
+            format: Package format
+
+        Returns:
+            Package ready to write
+
+        Example:
+            let package = packager.create_package(
+                name: "my-app",
+                version: "1.0.0",
+                include: [Language::Simple, Language::Rust, Language::Python],
+                format: PackageFormat::Tarball
+            )
+
+            print(f"Package size: {package.size_mb}MB")
+            package.write("my-app-1.0.0.tar.gz")
+        """
+        if self.verbose:
+            print(f"Creating package {name} v{version}")
+
+        # Update metadata
+        self.manifest.metadata.name = name
+        self.manifest.metadata.version = version
+
+        # Collect artifacts for each language
+        for language in include:
+            self.collect_language_artifacts(language)
+
+        # Create package
+        let package = Package.new(self.manifest, format)
+
+        if self.verbose:
+            print(f"Package contains {package.file_count} files")
+
+        package
+
+    fn collect_language_artifacts(self, language: Language):
+        """Collect artifacts for language.
+
+        Args:
+            language: Language to collect artifacts for
+        """
+        match language:
+            Language::Simple:
+                self.collect_simple_artifacts()
+            Language::Rust:
+                self.collect_rust_artifacts()
+            Language::Python:
+                self.collect_python_artifacts()
+            Language::JavaScript:
+                self.collect_javascript_artifacts()
+            _:
+                pass
+
+    fn collect_simple_artifacts(self):
+        """Collect Simple language artifacts."""
+        # TODO: Find .smf files, executables
+        # Add to manifest
+        pass
+
+    fn collect_rust_artifacts(self):
+        """Collect Rust artifacts."""
+        # TODO: Find target/release/* binaries, libraries
+        # Add to manifest
+        pass
+
+    fn collect_python_artifacts(self):
+        """Collect Python artifacts."""
+        # TODO: Find .py files, wheels, .pyc files
+        # Add to manifest
+        pass
+
+    fn collect_javascript_artifacts(self):
+        """Collect JavaScript artifacts."""
+        # TODO: Find built bundles, node_modules (if needed)
+        # Add to manifest
+        pass
+
+    pub fn add_binary(self, binary_path: String):
+        """Add binary to package.
+
+        Args:
+            binary_path: Path to binary
+        """
+        self.manifest.add_file(binary_path, f"bin/{self.get_filename(binary_path)}")
+
+    pub fn add_library(self, lib_path: String):
+        """Add library to package.
+
+        Args:
+            lib_path: Path to library
+        """
+        self.manifest.add_file(lib_path, f"lib/{self.get_filename(lib_path)}")
+
+    pub fn add_resource(self, resource_path: String, dest: String):
+        """Add resource file to package.
+
+        Args:
+            resource_path: Path to resource
+            dest: Destination path in package
+        """
+        self.manifest.add_file(resource_path, dest)
+
+    fn get_filename(self, path: String): String =
+        """Extract filename from path.
+
+        Args:
+            path: File path
+
+        Returns:
+            Filename
+        """
+        # TODO: Implement path parsing
+        # For now, return full path
+        path
+
+# Package
+pub class Package:
+    pub manifest: PackageManifest
+    pub format: PackageFormat
+    pub file_count: i32
+    pub size_mb: f64
+
+    pub fn new(manifest: PackageManifest, format: PackageFormat): Package =
+        """Create package.
+
+        Args:
+            manifest: Package manifest
+            format: Package format
+
+        Returns:
+            Package
+        """
+        Package {
+            manifest: manifest,
+            format: format,
+            file_count: manifest.files.len(),
+            size_mb: 0.0  # TODO: Calculate size
+        }
+
+    pub fn write(self, output_path: String): Result[(), String] =
+        """Write package to file.
+
+        Args:
+            output_path: Output file path
+
+        Returns:
+            Ok if successful
+
+        Example:
+            package.write("my-app-1.0.0.tar.gz")
+        """
+        match self.format:
+            PackageFormat::Tarball:
+                self.write_tarball(output_path)
+            PackageFormat::Zip:
+                self.write_zip(output_path)
+            PackageFormat::Deb:
+                self.write_deb(output_path)
+            PackageFormat::Rpm:
+                self.write_rpm(output_path)
+            PackageFormat::NuGet:
+                self.write_nuget(output_path)
+            PackageFormat::Npm:
+                self.write_npm(output_path)
+            PackageFormat::PyPI:
+                self.write_pypi(output_path)
+
+    fn write_tarball(self, output_path: String): Result[(), String] =
+        """Write tarball (.tar.gz).
+
+        Args:
+            output_path: Output file
+
+        Returns:
+            Ok if successful
+        """
+        # TODO: Create tarball
+        # Use tar command or native implementation
+        Ok(())
+
+    fn write_zip(self, output_path: String): Result[(), String] =
+        """Write zip archive.
+
+        Args:
+            output_path: Output file
+
+        Returns:
+            Ok if successful
+        """
+        # TODO: Create zip archive
+        Ok(())
+
+    fn write_deb(self, output_path: String): Result[(), String] =
+        """Write Debian package.
+
+        Args:
+            output_path: Output file
+
+        Returns:
+            Ok if successful
+        """
+        # TODO: Create .deb package
+        # Generate control file, data.tar.gz, etc.
+        Ok(())
+
+    fn write_rpm(self, output_path: String): Result[(), String] =
+        """Write RPM package.
+
+        Args:
+            output_path: Output file
+
+        Returns:
+            Ok if successful
+        """
+        # TODO: Create .rpm package
+        Ok(())
+
+    fn write_nuget(self, output_path: String): Result[(), String] =
+        """Write NuGet package.
+
+        Args:
+            output_path: Output file
+
+        Returns:
+            Ok if successful
+        """
+        # TODO: Create .nupkg package
+        Ok(())
+
+    fn write_npm(self, output_path: String): Result[(), String] =
+        """Write NPM package.
+
+        Args:
+            output_path: Output file
+
+        Returns:
+            Ok if successful
+        """
+        # TODO: Create npm package
+        # Generate package.json
+        Ok(())
+
+    fn write_pypi(self, output_path: String): Result[(), String] =
+        """Write Python package (wheel or sdist).
+
+        Args:
+            output_path: Output file
+
+        Returns:
+            Ok if successful
+        """
+        # TODO: Create Python wheel (.whl) or source distribution
+        Ok(())

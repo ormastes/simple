@@ -1,0 +1,7327 @@
+# Doc Refactor Map
+
+Inventory of doc/ files with line counts and headings (excluding doc/report).
+
+## doc/README.md
+- lines: 38
+- headings:
+- Simple Language Documentation
+  - Directory Structure
+  - Highlights
+  - Related Directories
+
+## doc/architecture/architecture.md
+- lines: 9
+- headings:
+- Architecture Overview (Index)
+
+## doc/architecture/architecture_dev.md
+- lines: 3
+- headings:
+- Architecture Dev (Alias)
+
+## doc/architecture/architecture_flows.md
+- lines: 3
+- headings:
+- Architecture Flows (Alias)
+
+## doc/architecture/architecture_modules.md
+- lines: 3
+- headings:
+- Architecture Modules (Alias)
+
+## doc/architecture/dev.md
+- lines: 166
+- headings:
+- Architecture: Development Guide
+    - Adding a New Feature: Checklist
+    - Feature → Module Mapping
+    - Example: Adding a New Builtin Method (e.g., `array.sum()`)
+    - Example: Adding a New Pointer Kind
+    - Cross-Module Communication Rules
+  - Logging Strategy (cross-cutting)
+  - Formal Verification (Lean 4)
+    - Model-Implementation Correspondence
+    - Building Proofs
+- Install Lean 4
+- Build individual proof
+- All proofs verified with Lean 4.x
+    - Rust Types Matching Lean
+  - Refactoring Plan (grounded in current code)
+
+## doc/architecture/flows.md
+- lines: 543
+- headings:
+- Architecture: Data Flow and Execution
+  - Potential Duplications (⚠️ Review Required)
+  - Dependency Discipline (by feature area)
+    - common (ZERO dependencies)
+    - parser (ZERO internal dependencies)
+    - type (depends: parser)
+    - loader (depends: common)
+    - native_loader (depends: common)
+    - runtime (depends: common)
+    - compiler (depends: parser, type, loader/smf, common)
+    - pkg (depends: common)
+    - driver (depends: all modules)
+  - Duplication Prevention Rules
+    - Where Logic MUST Live (Single Source of Truth)
+    - Anti-Patterns to Avoid
+    - Shared Abstraction Patterns
+  - Data Flow Diagrams
+    - Compilation Pipeline
+    - Runtime Execution
+    - Driver Component Hierarchy
+    - Execution Modes
+    - Module Loading & Caching
+  - Hybrid Execution Architecture (Codegen + Interpreter)
+    - Architecture Overview
+    - MIR Instruction Summary
+    - Runtime Value Representation
+    - Interpreter Fallback Design
+    - Effect Tracking
+  - GC / Memory Management Strategy (from spec: GC-managed default)
+    - Architecture
+    - Key Principles
+  - Watch/Build/Run Flow (driver)
+  - Code Quality Tools
+    - Test Coverage
+    - Code Duplication Detection
+    - Linting & Formatting
+    - Combined Checks
+    - Additional Tools
+  - Feature Implementation Guidance
+
+## doc/architecture/modules.md
+- lines: 616
+- headings:
+- Architecture: Module Details
+  - File-Based Type/Struct/Enum Listing
+    - common/src/
+    - parser/src/
+    - type/src/
+    - compiler/src/
+    - loader/src/
+    - native_loader/src/
+    - runtime/src/
+    - pkg/src/ (Package Manager)
+    - util/simple_mock_helper/src/
+    - driver/src/
+
+## doc/architecture/overview.md
+- lines: 320
+- headings:
+- Architecture Overview
+  - Index
+  - Project Structure
+  - Execution Modes
+  - Goals (grounded in feature list & language spec)
+  - Module Dependency Diagram
+  - Project Layout (detailed)
+
+## doc/architecture/support.md
+- lines: 208
+- headings:
+- Simple Language Architecture Support
+  - Supported Architectures
+    - ✅ Fully Supported (via Cranelift - Default)
+    - ⚠️ Supported via LLVM Backend (In Development)
+  - Current Implementation Status
+    - Cranelift Backend (Default) ✅ COMPLETE
+    - LLVM Backend (Optional) 🚧 IN DEVELOPMENT
+  - Architecture Selection Logic
+  - Cross-Compilation Support
+    - Host → Target Matrix
+  - ISA Features
+    - x86/x86_64
+    - ARM/AArch64
+    - RISC-V
+  - Platform-Specific Notes
+    - 32-bit Limitations
+    - Performance Characteristics
+  - Testing Matrix
+    - Current Test Coverage
+  - Build Examples
+    - Default (64-bit Cranelift)
+- Builds for host architecture
+    - With LLVM (All Architectures)
+- Requires LLVM 18 installed
+- Target 32-bit x86
+- Target ARMv7
+    - Cross-Compilation
+- From x86_64 to AArch64 (Cranelift)
+- From x86_64 to ARMv7 (requires LLVM)
+  - Roadmap
+    - Q4 2025
+    - Q1 2026
+    - Q2 2026
+  - See Also
+
+## doc/architecture.md
+- lines: 3
+- headings:
+- Architecture (Index)
+
+## doc/archive/32bit_support.md
+- lines: 235
+- headings:
+- 32-bit Architecture Support Implementation
+  - Overview
+  - Supported 32-bit Targets
+    - i686 (x86 32-bit)
+    - ARMv7 (ARM 32-bit)
+    - RISC-V 32 (RV32)
+  - Implementation Checklist
+    - Phase 1: Target Infrastructure ✅ COMPLETE
+    - Phase 2: LLVM Integration ✅ COMPLETE
+    - Phase 3: Type System 🚧 IN PROGRESS
+    - Phase 4: IR Generation 🚧 IN PROGRESS
+    - Phase 5: Object Emission ⏳ PENDING
+    - Phase 6: Runtime Integration ⏳ PENDING
+    - Phase 7: Testing ⏳ PENDING
+  - 32-bit Specific Considerations
+    - Memory Layout
+    - Calling Conventions
+    - Performance Impact
+    - Testing Strategy
+- Build for i686
+- Build for ARMv7
+- Build for RISC-V 32
+- Install QEMU user-mode emulation
+- Run i686 binary
+- Run ARMv7 binary
+- Run RISC-V 32 binary
+  - Current Test Results
+    - Without LLVM Feature (default)
+    - With LLVM Feature (development)
+  - Milestones
+    - M1: Cross-Compilation ✅ COMPLETE
+    - M2: Basic IR Generation 🚧 IN PROGRESS
+    - M3: Object Emission ⏳ PLANNED
+    - M4: Runtime Integration ⏳ PLANNED
+    - M5: Full Test Suite ⏳ PLANNED
+  - Known Issues
+  - Resources
+  - See Also
+
+## doc/archive/LLVM_ACHIEVEMENT.md
+- lines: 497
+- headings:
+- LLVM Backend - Complete Implementation Achievement
+  - Executive Summary
+    - Key Metrics
+  - Complete Phase Breakdown
+    - Phase 1: Dependencies & Scaffolding ✅ COMPLETE
+    - Phase 2: Type System ✅ COMPLETE
+    - Phase 3: Backend Trait ✅ COMPLETE
+    - Phase 4: Function Compilation ✅ COMPLETE
+    - Phase 5: Object Emission ✅ COMPLETE
+    - Phase 6: Integration ✅ COMPLETE
+  - 32-bit Architecture Support - Production Ready
+    - i686 (Intel x86 32-bit) ✅ WORKING
+    - ARMv7 (ARM 32-bit) ✅ WORKING
+    - RISC-V 32 ✅ WORKING
+  - Complete Feature Matrix
+  - Technical Achievements
+    - 1. Hybrid Backend Architecture
+    - 2. Feature-Gated Design
+    - 3. Complete Pipeline
+    - 4. Production Quality
+  - Real-World Applications Enabled
+    - Embedded Systems
+    - IoT Devices
+    - Legacy Hardware
+    - Single-Board Computers
+    - Mobile & Edge
+  - Example Outputs
+    - Input Simple Code
+    - Generated LLVM IR (i686)
+    - Generated Object Code
+  - Build & Test Instructions
+    - Default Build (Cranelift only)
+- 73/73 tests pass, ~30 seconds
+- No LLVM needed
+- No 32-bit support
+    - LLVM Build (Full 32-bit support)
+- Install LLVM 18
+- Ubuntu/Debian:
+- macOS:
+- Set environment
+- Build with LLVM
+- 39 LLVM tests + 73 workspace tests pass
+- ~45 seconds
+- Full 32-bit support!
+    - Cross-Compilation Test
+- Build for i686
+- Build for ARMv7
+- Build for RISC-V 32
+  - Documentation
+  - Test Coverage
+  - Performance Characteristics
+    - Compilation Speed
+    - Code Quality
+    - Binary Size
+  - What Makes This Special
+  - Future Enhancements
+    - Short Term (1-2 weeks)
+    - Medium Term (1 month)
+    - Long Term (3 months)
+  - Impact on Simple Language
+  - Recognition & Achievement
+  - Conclusion
+
+## doc/archive/README.md
+- lines: 75
+- headings:
+- Documentation Archive
+  - Why Archive?
+  - Archived Documents
+    - JJ Integration (Superseded)
+    - LLVM Backend (Historical)
+    - Doctest (Superseded)
+    - Outdated/Temporary
+  - Finding Current Documentation
+  - Archive Policy
+  - See Also
+
+## doc/archive/doctest_integration.md
+- lines: 376
+- headings:
+- Simple Doctest - BDD Spec Integration Plan
+  - Architecture Overview
+  - Component Responsibilities
+    - std.spec (BDD Framework)
+    - std.doctest (Doctest Framework)
+  - Integration Points
+    - 1. Discovery Phase
+- In spec runner initialization:
+- 1. Discover BDD specs
+- 2. Discover doctests
+- 3. Convert doctests to spec examples
+    - 2. Execution Phase
+- Doctest example converted to spec example:
+- This closure wraps the doctest runner
+- Convert to spec assertion
+    - 3. Reporting Phase
+- Progress formatter output:
+    - 4. Coverage Integration
+- Coverage report:
+  - File Organization
+  - CLI Commands
+    - Basic Usage
+- Run all tests (specs + doctests)
+- Run only BDD specs
+- Run only doctests
+- Run specific layer + doctests
+- List all tests
+    - Filtering
+- Filter by pattern (matches specs and doctests)
+- Filter by tag
+- Skip slow doctests
+    - Output Formats
+- Progress (default)
+- Doc format (nested describe/context)
+- JSON (for IDE integration)
+    - Coverage
+- Run with coverage
+- Coverage for specific layer
+- Show missing public functions
+  - Implementation Status
+    - Phase 1: Core Parser and Runner (COMPLETE)
+    - Phase 2: Discovery and Integration (TODO)
+    - Phase 3: Advanced Features (TODO)
+    - Phase 4: Coverage and Polish (TODO)
+  - Open Questions
+  - Success Criteria
+  - Next Steps
+  - References
+
+## doc/archive/jj_integration_plan.md
+- lines: 420
+- headings:
+- JJ Version Control Integration Plan
+  - Overview
+  - Goals
+  - Architecture
+    - Components
+- Auto-snapshot on successful builds
+- Auto-snapshot on test success
+  - Implementation Phases
+    - Phase 1: JJ Initialization (Setup)
+    - Phase 2: Core JJ State Manager (TDD)
+    - Phase 3: Build Integration (TDD)
+    - Phase 4: Test Integration (TDD)
+    - Phase 5: CLI Commands (TDD)
+    - Phase 6: Documentation & Polish
+    - Phase 7: Test State Storage (DEFERRED)
+  - Commit Message Format
+    - Build Success
+    - Test Success
+  - Makefile Targets
+- JJ Integration
+- Auto-snapshot targets
+- Convenience targets
+- State management
+  - File: `.jjignore`
+- Build artifacts
+- IDE
+- Logs
+- Coverage
+- Temporary
+  - Dependencies
+- Add to src/driver/Cargo.toml
+  - Success Metrics
+  - Timeline
+  - Rollout Strategy
+  - Benefits
+  - Risks & Mitigations
+  - Future Enhancements (Phase 7+)
+  - Implementation Order (TDD)
+  - Notes
+
+## doc/archive/jj_phase1_2_complete.md
+- lines: 281
+- headings:
+- JJ Integration - Phase 1 & 2 Completion Summary
+  - Date
+  - Status
+  - What Was Accomplished
+    - Phase 1: Setup (✅ Complete)
+    - Phase 2: Core JJ State Manager (✅ Complete)
+    - Test Coverage
+    - Documentation Created
+  - Technical Highlights
+    - Commit Message Format
+    - Revset Magic
+    - Snapshot Flow
+  - Code Quality
+    - Test Coverage
+    - Error Handling
+    - Documentation
+  - Integration Status
+    - Workspace Tests
+    - Git Compatibility
+  - Lessons Learned
+  - Next Steps
+    - Phase 3: Build Integration (Next)
+    - Phase 4: Test Integration
+    - Phase 5: CLI Commands
+    - Phase 6: Final Documentation
+  - Metrics
+  - Success Criteria
+  - 🎉 Achievement Unlocked
+
+## doc/archive/jj_usage.md
+- lines: 423
+- headings:
+- Jujutsu (JJ) Version Control Integration
+  - Overview
+  - Setup
+    - Installation
+- Install jj
+- Verify installation
+    - Repository Setup
+- Check status
+- Track main branch
+  - Features
+    - 1. Automatic Build Snapshots
+- Manual snapshot
+- Automatic (via check)
+    - 2. Automatic Test Snapshots
+- Snapshot after all tests pass
+- Snapshot after specific test level
+    - 3. State Management
+- View snapshot history
+- Get last working state
+- Rollback to specific snapshot
+  - Workflow
+    - Normal Development
+- Make changes
+- Build and test (auto-snapshots on success)
+- View history
+    - After Breaking Changes
+- Oh no, tests are failing!
+- Find last working state
+- Output: "Last working state: abc123 (2 hours ago)"
+- Rollback
+- Verify it works
+- Compare differences
+    - Exploring Build History
+- List all successful builds
+- List all test successes
+- Show specific snapshot
+- Compare two snapshots
+  - Commit Message Formats
+    - Build Success
+    - Test Success
+  - Makefile Targets
+- JJ initialization (already done)
+- Build with snapshot
+- Test with snapshot (all levels)
+- Test specific level with snapshot
+- Full check with snapshot
+- View snapshots
+- Get last working state
+- Rollback to snapshot
+  - CLI Commands
+- Snapshot successful build
+- Snapshot successful test run
+- Get last working state
+- List snapshots (uses jj)
+  - JJ vs Git
+    - Co-Located Mode
+    - When to Use Each
+  - Best Practices
+    - 1. Let Automation Work
+- ✅ Good: Let make handle it
+- ❌ Bad: Manual snapshots for routine work
+    - 2. Use Snapshots for Exploration
+- Try experimental change
+- Experiment
+- Rollback if needed
+    - 3. Clean Up Old Snapshots
+- JJ automatically garbage collects
+- Manual cleanup (if needed)
+    - 4. Preserve Git Workflow
+- Keep Git commits clean
+- JJ snapshots are separate
+  - Troubleshooting
+    - JJ Not Found
+- Install jj
+- Verify
+    - Snapshots Not Created
+- Check if jj is enabled
+- Re-initialize if needed
+    - Too Many Snapshots
+- Garbage collect
+- Abandon old snapshots
+    - JJ Status Fails
+- Check current directory
+- Verify jj repo exists
+- Check jj log
+  - Advanced Usage
+    - Custom Snapshot Messages
+- Manual snapshot with custom message
+    - Bisecting Failures
+- Find when tests started failing
+- Test each snapshot
+    - Comparing Performance
+- Benchmark current state
+- Go back to previous snapshot
+- Compare results
+  - Integration with CI/CD
+    - GitHub Actions
+    - Local Pre-Commit
+- .git/hooks/pre-commit
+  - Future Features (Planned)
+  - References
+  - Support
+
+## doc/archive/llvm_implementation_complete.md
+- lines: 357
+- headings:
+- LLVM Backend Implementation - COMPLETE
+  - What Was Accomplished
+    - Phase 1: Dependencies & Scaffolding ✅ COMPLETE
+    - Phase 2: Type System ✅ COMPLETE
+    - Phase 3: Backend Trait ✅ COMPLETE
+    - Phase 4: Function Compilation ✅ COMPLETE
+    - Phase 5: Object Emission ✅ COMPLETE
+    - Phase 6: Integration ⏳ IN PROGRESS
+  - 32-bit Architecture Support - WORKING
+    - Fully Functional 32-bit Targets
+  - Complete Feature List
+    - LLVM IR Generation
+    - Object Code Generation
+    - Architecture Support
+  - Test Coverage
+  - Example Outputs
+    - LLVM IR (x86_64)
+    - LLVM IR (i686 - 32-bit)
+    - Object Code
+  - Build Instructions
+    - Default (Cranelift only - no LLVM needed)
+- All tests pass, no 32-bit support
+    - With LLVM (32-bit + 64-bit support)
+- Requires LLVM 18
+- 36 LLVM tests pass, full 32-bit support!
+  - Usage Example
+  - Performance Characteristics
+    - Compilation Speed
+    - Generated Code Quality
+    - Binary Size
+  - Known Limitations
+    - Current
+    - Design Decisions
+  - Future Work
+    - Short Term (1-2 weeks)
+    - Medium Term (1 month)
+    - Long Term (3 months)
+  - Impact
+  - Recognition
+  - Documentation
+  - See Also
+
+## doc/archive/sdoctest_implementation.md
+- lines: 266
+- headings:
+- Simple Doctest (sdoctest) - Implementation Status
+  - Overview
+  - Current Status: Sprint 2 (Discovery and Integration)
+    - Sprint 1: Core Parser and Runner ✅ COMPLETE
+    - Sprint 2: Discovery and Integration ⏳ IN PROGRESS (60% complete)
+    - Sprint 3: Advanced Features 📋 PLANNED
+    - Sprint 4: Coverage and Polish 📋 PLANNED
+  - Architecture
+    - Module Hierarchy
+    - Data Flow
+    - Key Data Structures
+  - Test Coverage
+  - Dependencies
+    - Internal (Simple stdlib)
+    - External (Runtime)
+  - Next Steps (Immediate)
+    - Option A: Implement with Rust Bridge (Fast Path)
+    - Option B: Wait for stdlib (Clean Path)
+  - Success Metrics (Sprint 2)
+  - Open Questions
+  - References
+
+## doc/archive/sdoctest_session_summary.md
+- lines: 216
+- headings:
+- Simple Doctest Implementation - Session Summary
+  - Key Achievements
+    - 1. Unblocked File I/O Dependency ✅
+    - 2. Completed Discovery Framework ✅
+    - 3. Created Test Infrastructure ✅
+    - 4. Updated Documentation ✅
+  - Technical Highlights
+    - FFI Architecture
+    - Discovery Flow
+  - Metrics
+  - Sprint 2 Progress
+  - Next Session Plan
+    - Priority 1: FFI Wiring (1-2 hours)
+    - Priority 2: Integration Tests (1 hour)
+    - Priority 3: Glob Matching (2 hours)
+  - Blockers
+  - Recommendations
+    - For Next Session
+    - For Future Sessions
+  - Quality Notes
+    - What Went Well ✅
+    - What Could Improve ⚠️
+    - Technical Debt 📝
+  - Files Modified
+  - Conclusion
+
+## doc/archive/sdoctest_sprint2_final.md
+- lines: 369
+- headings:
+- Simple Doctest - Sprint 2 Completion Report
+  - Executive Summary
+  - Completion Status
+    - Completed Tasks (9/9 non-blocked)
+    - Blocked Tasks (3/3)
+  - Technical Achievements
+    - 1. Complete FFI Integration Pipeline
+    - 2. FFI Functions Implemented
+    - 3. Glob Pattern Matching
+    - 4. Test Infrastructure
+  - Quality Metrics
+    - Code Quality
+    - Test Coverage
+    - Documentation
+  - Files Modified
+    - Created (11 files)
+    - Modified (11 files)
+  - Commits
+  - Sprint Metrics
+  - Architecture Decisions
+    - 1. FFI Bridge Strategy
+    - 2. Glob Pattern Matching
+    - 3. Discovery Architecture
+  - Blockers Analysis
+    - 1. BDD Spec Framework Integration (Task 10)
+    - 2. CLI Integration (Task 11)
+    - 3. Integration Tests (Task 12)
+  - Risk Assessment
+    - Low Risks ✅
+    - Medium Risks ⚠️
+    - Mitigations
+  - Next Steps
+    - Immediate (When Unblocked)
+    - Sprint 3 (Advanced Features)
+    - Sprint 4 (Coverage & Polish)
+  - Recommendations
+    - For Project Maintainers
+    - For Doctest Development
+    - For Testing
+  - Conclusion
+
+## doc/archive/sdoctest_sprint2_progress.md
+- lines: 176
+- headings:
+- Simple Doctest - Sprint 2 Progress Report
+  - Sprint 2 Goal
+  - Completed Tasks ✅
+    - 1. Discovery Module Enhancement
+    - 2. Integration Test Infrastructure
+    - 3. Test Fixtures
+    - 4. **NEW: Rust FFI Bridge for File I/O**
+  - Remaining Tasks ⏳
+    - 5. Wire FFI into Simple Code
+    - 6. Glob Pattern Matching
+    - 7. BDD Spec Integration
+    - 8. CLI Integration
+    - 9. Integration Test Execution
+  - Architecture Decisions
+    - FFI Bridge vs Pure Simple I/O
+    - String Conversion Strategy
+  - Test Status
+  - Blockers
+  - Next Steps (Priority Order)
+  - Success Criteria (Sprint 2)
+  - References
+
+## doc/archive/temp_stdlib_inconsistencies.md
+- lines: 172
+- headings:
+- Stdlib Interface Inconsistencies - Temporary Analysis Document
+  - Fixes Applied
+    - Fixed Files:
+  - 1. Naming Inconsistencies
+    - 1.1 Function/Method Name Variations
+    - 1.2 Type Name Inconsistencies
+    - 1.3 Field Name Inconsistencies
+  - 2. Argument Order Inconsistencies
+    - 2.1 File Operations
+    - 2.2 Network send/recv
+  - 3. Missing Functions Across Variants
+    - 3.1 async_gc_immut Missing (compared to async_nogc_mut)
+    - 3.2 Static String Missing Methods (compared to FixedString)
+    - 3.3 Static Vec Missing Methods (compared to FixedVec)
+  - 4. Return Type Inconsistencies
+    - 4.1 Error Type Usage
+    - 4.2 Success Return Values
+  - 5. Priority Fixes
+    - High Priority (Breaking API differences)
+    - Medium Priority (Missing functionality)
+    - Low Priority (Cosmetic)
+  - 6. Files to Modify
+
+## doc/codegen/architecture.md
+- lines: 269
+- headings:
+- Codegen Architecture and FFI
+  - Architecture Diagrams
+    - Compilation Pipeline
+    - Runtime FFI Architecture
+  - Runtime FFI Interface
+    - Function Specification Format
+    - Complete FFI Function List
+  - Testing Strategy
+    - Test Coverage by Feature
+    - Key Test Files
+    - Parity Testing Strategy
+  - Remaining Gaps and Future Work
+    - Feature 103 Gaps
+    - Performance Optimization Opportunities
+
+## doc/codegen/codegen_technical.md
+- lines: 9
+- headings:
+- Codegen Technical Overview (Index)
+
+## doc/codegen/codegen_technical_arch.md
+- lines: 3
+- headings:
+- Codegen Technical Architecture (Alias)
+
+## doc/codegen/codegen_technical_features.md
+- lines: 3
+- headings:
+- Codegen Technical Features (Alias)
+
+## doc/codegen/codegen_technical_impl.md
+- lines: 3
+- headings:
+- Codegen Technical Implementation (Alias)
+
+## doc/codegen/features.md
+- lines: 592
+- headings:
+- Codegen Features 99 and 103
+  - Feature 99: Body Block Outlining
+    - Goal
+    - Problem Statement
+    - Solution Architecture
+    - Implementation: `expand_with_outlined()`
+    - Capture Buffer Encoding
+    - OutlinedBody Metadata
+    - Liveness Analysis
+  - Feature 103: Codegen Parity Completion
+    - Goal
+    - Current Codegen Coverage
+    - Implementation Phases
+
+## doc/codegen/implementation.md
+- lines: 768
+- headings:
+- How to Implement Codegen
+  - How to Implement in Another Project
+    - Prerequisites
+    - Step 1: Define Your IR Hierarchy
+    - Step 2: Set Up Cranelift
+- Cargo.toml
+    - Step 3: Implement Basic Codegen
+    - Step 4: Implement MIR → Cranelift Translation
+    - Step 5: Implement Runtime FFI
+    - Step 6: Implement Body Block Outlining
+    - Step 7: Implement Generator State Machine
+    - Step 8: Emit and Link
+    - Complete Implementation Checklist
+    - Common Pitfalls and Solutions
+    - Performance Tips
+  - References
+
+## doc/codegen/llvm_backend.md
+- lines: 165
+- headings:
+- LLVM Backend
+  - Features
+  - Default Behavior
+  - Building with LLVM Support
+    - Prerequisites
+    - Build Commands
+- Enable LLVM backend
+- Run tests with LLVM
+- Build without LLVM (Cranelift only)
+  - Usage
+  - Architecture Support
+  - Implementation Status
+  - GPU Support
+    - Features
+    - GPU-Specific Components
+    - GPU MIR Instructions Supported
+    - CUDA Runtime Functions
+  - Design Principles
+  - Limitations
+  - Future Work
+  - See Also
+
+## doc/codegen/overview.md
+- lines: 184
+- headings:
+- Codegen Technical Documentation
+  - Table of Contents
+  - Overview
+    - Key Files
+  - Current Design Rationale
+    - Why Cranelift?
+    - Why a Multi-Stage IR (AST -> HIR -> MIR)?
+    - Why Runtime FFI for Collections?
+    - Why Zero-Cost Abstractions for Closures/Structs?
+    - Why Stackless Generators?
+    - Why Eager Future Execution?
+    - Why Hybrid Compiled/Interpreted Execution?
+    - Why 64-bit Tagged Pointers?
+  - References
+
+## doc/codegen_status.md
+- lines: 5
+- headings:
+- Codegen Status (Index)
+
+## doc/design/codegen_module.md
+- lines: 318
+- headings:
+- Codegen Module Design
+  - Module Overview
+  - Architecture Diagram
+  - File Structure
+  - Module Responsibilities
+    - 1. shared.rs - Shared Utilities
+    - 2. runtime_ffi.rs - Runtime FFI Specifications
+    - 3. types_util.rs - Type Conversion
+    - 4. cranelift.rs / jit.rs - Backend Entry Points
+    - 5. cranelift_instr.rs / jit_instr.rs - Instruction Compilation
+  - Data Flow
+  - Duplication Analysis
+    - Before Refactoring
+    - After Refactoring
+    - Current Duplication (jscpd report)
+  - Extension Points
+    - Adding New MIR Instructions
+    - Adding New Runtime Functions
+    - Adding New Type Support
+  - Testing Strategy
+  - Performance Considerations
+
+## doc/design/concurrency.md
+- lines: 29
+- headings:
+- Concurrency Design (Incremental)
+  - Goals
+  - Current Implementation
+  - Near-Term Plan
+  - Scheduler/Mailbox Future
+  - Testing
+
+## doc/design/coverage_json_format.md
+- lines: 407
+- headings:
+- Extended Coverage JSON Format Specification
+  - Overview
+  - JSON Format
+    - Root Structure
+    - Type Coverage (System Tests)
+    - Function Coverage (Integration Tests)
+    - File Coverage (Merged Data)
+  - Output Files
+  - Thresholds
+  - Public API Specification (Input)
+- public_api.yml
+  - Command Line Interface
+- Generate all coverage reports
+- Generate specific report
+- Check thresholds
+- Print summary
+  - Integration with Makefile
+- Generate coverage with extended format
+- System test coverage
+- Integration test coverage
+  - Example Extended Output
+  - See Also
+
+## doc/design/llvm_coverage.md
+- lines: 261
+- headings:
+- LLVM Coverage Integration Design
+  - Overview
+  - Architecture
+  - Implementation Plan
+    - Phase 1: Basic Block Coverage (Current)
+    - Phase 2: Source-Based Coverage Mapping
+    - Phase 3: Integration with Test Framework
+- In std.spec
+  - LLVM API Usage
+    - Enabling Coverage in Module
+    - Creating Coverage Counters
+    - Incrementing Counters
+  - Integration with simple_mock_helper
+    - Usage Flow
+- 1. Compile with coverage
+- 2. Run tests (generates .profraw)
+- 3. Merge profile data
+- 4. Export coverage JSON
+- 5. Generate report
+  - Configuration
+    - Cargo Feature
+    - CLI Flag
+    - Environment Variable
+  - Files to Modify
+  - Testing
+    - Unit Tests
+    - Integration Tests
+  - See Also
+
+## doc/design/memory.md
+- lines: 62
+- headings:
+- Memory Design: GC + Manual Cooperation
+  - Goals
+  - Model
+  - Borrow References (planned)
+  - Layout/ABI
+  - Current Implementation Snapshot
+  - Safety Rules (front-end)
+  - Incremental Plan (borrowing + memory)
+  - Testing
+
+## doc/design/semantic_duplication_analysis.md
+- lines: 239
+- headings:
+- Semantic Duplication Analysis - Simple Compiler
+  - Executive Summary
+  - 1. Module Loaders (High Priority)
+    - Files:
+    - Duplication:
+    - LoadedModule Duplication:
+    - Recommendation:
+  - 2. Error Types (Medium Priority)
+    - Files:
+    - Common Patterns:
+    - Differences:
+    - Recommendation:
+  - 3. Diagnostic Infrastructure (High Priority - MERGE CANDIDATE)
+    - Current State:
+    - Issue:
+    - Recommendation:
+  - 4. Module Resolution (Medium Priority)
+    - Files:
+    - Overlap:
+    - Recommendation:
+  - 5. Value Conversion/Marshalling (Low Priority)
+    - Files:
+    - Current State:
+    - Recommendation:
+  - 6. Memory Management Abstractions (Low Priority)
+    - Files:
+    - Overlap:
+    - Recommendation:
+  - 7. Test Helpers (High Priority - MERGE CANDIDATE)
+    - Pattern Found:
+    - Recommendation:
+  - Summary of Recommendations
+  - Next Steps
+
+## doc/design/stdlib_test_integration.md
+- lines: 390
+- headings:
+- Simple Std Lib Test Integration with Rust
+  - Overview
+  - Architecture
+  - Components
+    - 1. Test Discovery Module (`simple_test_discovery`)
+    - 2. Test Runner Module (`SimpleTestRunner`)
+    - 3. Build-time Test Generation (`build.rs`)
+    - 4. Test Integration Module
+  - Test File Naming Convention
+  - Simple Test Syntax Support
+- setup code
+- teardown code
+    - Test Result Extraction
+- Success format:
+- Failure format:
+- Summary format:
+  - Implementation Phases
+    - Phase 1: Basic Discovery and Execution
+    - Phase 2: Result Parsing
+    - Phase 3: Filtering and Categories
+    - Phase 4: Parallel Execution
+  - File Structure
+  - Configuration
+    - Cargo.toml additions
+- Already has what we need from simple_driver
+    - Environment Variables
+  - Usage Examples
+    - Run all Simple stdlib tests
+    - Run specific category
+    - Run specific module tests
+    - Verbose output
+  - Expected Output
+  - Error Reporting
+    - Compile Error
+    - Test Failure
+  - Future Enhancements
+  - Related Documents
+
+## doc/design/type_inference.md
+- lines: 25
+- headings:
+- Type Inference Design
+  - Goals
+  - Current State
+  - Planned Improvements
+  - Error Strategy
+  - Testing
+
+## doc/design/type_system_features.md
+- lines: 336
+- headings:
+- Type System Features - Design TODOs
+  - Design TODO List
+  - 1. Implements Traits
+    - Implementation Tasks
+    - Design Questions
+    - Related Files
+  - 2. Impl Blocks
+    - Implementation Tasks
+    - Design Questions
+  - 3. Union Types
+    - Proposed Syntax
+- Tagged union (discriminated)
+- Usage
+    - Implementation Tasks
+    - Impl Blocks for Unions
+- Inherent impl block - add methods to union
+- Associated function (constructor helper)
+- Usage
+    - Trait Implementations for Unions
+- Derive common traits
+    - Variant-Specific Methods (Planned)
+- Methods on specific variants
+- Or using pattern guards
+    - Design Questions
+    - Related to Existing
+  - 4. Result/Option Types
+    - Proposed Design
+- Option type (nullable)
+- Result type (fallible)
+- Shorthand syntax
+    - Implementation Tasks
+    - Design Questions
+    - Standard Library Methods
+- Option methods
+- Result methods
+  - 5. Bitfields
+    - Proposed Syntax
+- Packed bitfield struct
+- Usage
+- Multi-bit fields
+    - Implementation Tasks
+    - Design Questions
+    - Use Cases
+  - Implementation Order
+    - Phase 1: Foundation
+    - Phase 2: Trait Completion
+    - Phase 3: Low-Level
+  - Related Documentation
+  - References
+
+## doc/design/unit_arithmetic.md
+- lines: 238
+- headings:
+- Unit Arithmetic Design
+  - Overview
+  - Grammar
+    - 1. Unit Family with Arithmetic Rules
+    - 2. Compound Unit Definition
+    - 3. Examples
+- Type-safe: length + length -> length
+- Scaling: length * number -> length
+- Unary operations
+- Custom operations (return raw value, loses unit)
+- Velocity = length / time
+- velocity * time -> length
+- Acceleration = velocity / time = length / time²
+- acceleration * time -> velocity
+- Force = mass * acceleration (Newton's second law)
+- Valid operations
+- Invalid operations (compile error)
+  - Semantics
+    - Type Checking Rules
+    - Default Arithmetic (No Rules Specified)
+- user_id + user_id -> ERROR (no rules defined)
+    - Primitive Interop
+  - Implementation Notes
+    - Parser Changes
+    - Interpreter Changes
+    - Error Messages
+  - Future Extensions
+
+## doc/examples/example_simple.sdn
+- lines: 0
+- headings: (none)
+
+## doc/features/FEATURE_STATUS.md
+- lines: 697
+- headings:
+- Simple Language - Complete Feature Status
+  - Status Legend
+  - Core Language Features (#1-50)
+    - #1: Basic Types ✅
+    - #2: String Types ✅
+    - #3: Mutability Control ✅
+    - #4: Variables & Let Bindings ✅
+    - #5: Control Flow (if/elif/else) ✅
+    - #6: Loops (for/while/loop/break/continue) ✅
+    - #7: Functions ✅
+    - #8: Indentation-Based Blocks ✅
+    - #9: Structs ✅
+    - #10: Classes & Methods ✅
+    - #11: Enums ✅
+    - #12: Pattern Matching ✅
+    - #13: Type Inference 🔄
+    - #14: Generics ✅
+    - #15: Traits ✅
+    - #16: Impl Blocks ✅
+    - #17: Lambdas/Closures ✅
+    - #18: Named Arguments ✅
+    - #19: Trailing Blocks ✅
+    - #20: Functional Update Operator ✅
+    - #21: String Interpolation ✅
+    - #22: Comments ✅
+    - #23: Line Continuation ✅
+    - #24: GC-Managed Memory ✅
+    - #25: Unique Pointers ✅
+    - #26: Shared Pointers ✅
+    - #27: Weak Pointers ✅
+    - #28: Handle Pointers ✅
+    - #29: Borrowing ✅
+    - #30: Actors ✅
+    - #31: Concurrency Primitives ✅
+    - #32: Async Effects ✅
+    - #33: Stackless Coroutine Actors ✅
+    - #34: Macros ✅
+    - #35: Context Blocks ✅
+    - #36: Method Missing ✅
+    - #37: Union Types 📋
+    - #37b: Result Type 📋
+    - #37c: Bitfields 📋
+    - #38: Option Type ✅
+    - #39: Symbols/Atoms ✅
+    - #40: Tuple Types ✅
+    - #41: Array Types ✅
+    - #42: Dictionary Types ✅
+    - #43: Type Aliases ✅
+    - #44: Visibility Modifiers ✅
+    - #45: Static/Const Declarations ✅
+    - #46: Extern Functions (FFI) ✅
+    - #47: No-Parentheses Calls ✅
+    - #48: Futures and Promises ✅
+    - #49: Arithmetic Operators ✅
+    - #50: Comparison Operators ✅
+  - Codegen Features (#99-103)
+    - #99: Body Block Outlining ✅
+    - #100: Capture Buffer & VReg Remapping ✅
+    - #101: Generator State Machine Codegen ✅
+    - #102: Future Body Execution 🔄
+    - #103: Codegen Parity Completion 🔄
+  - Extended Features (#200-220)
+    - #200-209: Unit Types ✅
+    - #210-215: Networking APIs ✅
+    - #220: LLVM Backend ✅
+  - Testing Features (#300-303)
+    - #300: BDD Spec Framework ✅
+    - #301: Doctest ✅
+    - #302: Test CLI Integration ✅
+    - #303: JJ Version Control 🔄
+  - Advanced Features (#400-536)
+    - #400-405: Contract Blocks 🔄
+    - #410-415: Capability-Based Imports ✅
+    - #510-512: UI Framework 📋
+    - #520-536: Web Framework 📋
+    - GPU & SIMD (#400-418) 🔄
+  - Infrastructure Features
+    - Package Manager ✅
+    - Module System ✅
+    - Interpreter Interface ✅
+    - Code Quality Tools ✅
+    - Formal Verification ✅
+  - Summary Statistics
+  - Recent Work (2025-12-17)
+    - Interpreter Enhancements
+    - Test Status
+  - Next Priorities
+    - Immediate (Sprint)
+    - Short Term (Month)
+    - Medium Term (Quarter)
+
+## doc/features/architecture.md
+- lines: 3
+- headings:
+- Architecture Overview (Alias)
+
+## doc/features/codegen_status.md
+- lines: 3
+- headings:
+- Codegen Status (Alias)
+
+## doc/features/codegen_technical.md
+- lines: 3
+- headings:
+- Codegen Technical Overview (Alias)
+
+## doc/features/db.md
+- lines: 644
+- headings:
+- Database Abstraction Layer (DB)
+  - Overview
+  - Feature Summary
+  - Crate Structure
+  - Core Traits
+    - Connection Trait
+    - Row Abstraction
+  - Type Mapping (#705)
+    - Simple ↔ SQL Type Correspondence
+    - Rust Traits
+  - Connection Pooling (#703)
+    - Pool Configuration
+  - Transaction API (#704)
+    - Transaction Usage
+  - Driver Implementations
+    - libSQL Driver (#701, #702)
+    - PostgreSQL Driver (#700)
+  - FFI Interface for Simple
+    - FFI Functions
+  - Simple Language API
+    - Connection
+- Local SQLite/libSQL
+- In-memory database
+- Turso (remote libSQL)
+- PostgreSQL
+    - Queries
+- Execute (returns affected rows)
+- Query (returns rows)
+- Single row
+    - Transactions
+- Transaction with auto-rollback on error
+- Auto-commits if no exception
+- Manual transaction control
+    - Connection Pool
+- Create pool
+- Acquire and use
+- Or manual acquire/release
+  - Error Handling
+  - Dependencies
+- libSQL (SQLite-compatible)
+- PostgreSQL
+- Connection pooling utilities
+- Async runtime (for PostgreSQL)
+  - Related Documents
+
+## doc/features/feature.md
+- lines: 1728
+- headings:
+- Simple Language Features
+  - Feature Table Format
+  - Feature ID Ranges
+  - Summary Statistics
+  - Planned Features
+    - SDN - Simple Data Notation (#600-610)
+    - Database & Persistence (#700-713) 📋
+- Query DSL
+    - Web Framework (#520-536) ✅
+    - Build & Linker Optimization (#800-824) 📋
+    - Infrastructure & Dependencies (#825-849) ✅
+- Allocators
+- Threading
+- Hashing
+- Data Structures
+- I/O
+    - Simple Stdlib - Infrastructure APIs (#850-879) 📋
+- Arena for batch allocations
+- Object pool with reuse
+- Custom allocator for class
+- Safe concurrent access from multiple actors
+- Parallel iteration
+- Lock-free increment
+- Compare-and-swap
+- Spin-lock pattern
+- Critical section
+- Trait definition
+- Use different hashers
+- Custom hasher for Map
+- Parallel map (uses all CPU cores)
+- Parallel filter
+- Parallel reduce
+- Parallel for_each with chunking
+- Chained parallel operations
+- Mutex for exclusive access
+- RwLock for read-heavy workloads
+- Lazy initialization
+- Thread-local storage
+    - LLM-Friendly Features (#880-919) 📋
+- Only pure functions - no I/O allowed
+- Extract minimal context (only symbols used by app.service)
+- Auto-generated provenance annotation
+    - Test Coverage Infrastructure (#920-935) 📋
+  - Part 2: Issues & Priorities
+- System Test: Public interface class touch
+- Service Test: Interface classes (trait implementors)
+- Service Test: External library touch points
+- Integration Test: Neighbor package touch
+- Integration Test: Public functions (existing)
+- ...
+- System Test: Types with methods (existing)
+- ...
+    - Architecture Test Library (#936-945)
+- test/arch/layer_rules_spec.spl
+    - Module Privacy & Explicit Proxying (#48-49) ✅
+- mypackage/__init__.spl
+- Explicit public exports (proxy)
+- Private - NOT exported (no pub)
+- Re-export with rename
+- ALLOWED - explicitly proxied
+- FORBIDDEN - child not proxied
+    - AOP & Unified Predicates (#1000-1049) 📋
+- SDN binding
+    - SDN Self-Hosting (#1051-1060) 📋
+    - Missing Language Features (#1061-1103) 🔄
+    - Concurrency Modes (#1104-1115) 📋
+    - FFI/ABI Interface (#1116-1130) ✅
+    - Formatting and Lints (#1131-1145) 📋
+    - Trait Coherence (#1146-1155) 📋
+  - Known Issues
+  - Next Priorities
+    - Immediate (Sprint)
+    - Short Term (Month)
+    - Medium Term (Quarter)
+  - Status Legend
+  - Related Documentation
+
+## doc/features/feature_done_1.md
+- lines: 195
+- headings:
+- Completed Features (Archive 1)
+  - Completed Infrastructure Components (#1-#9)
+    - Feature #9 - SMF (Simple Module Format)
+  - Completed Core Language Features (#10-#24)
+  - Completed Codegen Features (#95-#98)
+  - Completed Testing Features (#180-#197)
+    - BDD Spec Framework (#180-#188)
+    - Doctest (#192-#197)
+    - Doctest Example
+  - Completed Formal Verification Features (#950-#970)
+    - Type System Verification (#950-#951)
+    - Memory Safety Verification (#952-#954)
+    - Effect System Verification (#955)
+    - Module System Verification (#956-#958)
+    - Integration with Rust Implementation
+    - Building Verification Projects
+    - Proven Theorems
+    - Partial Proofs (with `sorry`)
+  - Completion Timeline (December 2025)
+
+## doc/features/feature_done_2.md
+- lines: 268
+- headings:
+- Completed Features (Archive 2)
+  - Completed Codegen Features (#99-#103)
+    - Feature #102 - Future Body Execution
+    - Feature #103 - Codegen Parity Completion
+  - Completed Concurrency Features (#110-#157)
+    - Channels (#110-#116)
+    - Generators (#120-#126)
+    - Executor (#130-#134)
+    - Actor Runtime (#140-#145)
+    - Future Runtime (#150-#157)
+  - Completed Pattern Matching (#160-#172)
+  - Completed Testing Features (#189-#241)
+    - BDD Extensions (#189-#191)
+    - Mock Library (#230-#241)
+  - Completed CLI Features (#250-#258)
+    - Output Format Details (CLI-008, CLI-009)
+  - Completed Contract Features (#400-#403)
+    - Core Contract Blocks
+  - Completed Formal Verification (#960-#964)
+    - Contract Verification
+  - Importance Scale
+  - Difficulty Scale
+
+## doc/features/feature_done_3.md
+- lines: 191
+- headings:
+- Completed Features (Archive 3)
+  - UI Framework Implementation (#513-#524)
+  - Union Types Infrastructure (#50-#56)
+  - Async State Machine (#60-#66)
+  - GPU/SIMD Features (#300-#311)
+  - Bit-Limited Unit Types (#210-#217)
+  - Interpreter Enhancements (#70-#74)
+  - Code Quality & Maintainability (#980-#987)
+  - Simple Language Test Integration (#990-#994)
+  - System Test Documentation (#995-#999)
+  - Contract Test Fixes (#404-#406)
+  - Summary
+  - Timeline
+
+## doc/features/feature_done_4.md
+- lines: 392
+- headings:
+- Completed Features (Archive 4)
+  - New Completions (December 2025)
+    - Database & Persistence Design Documents (#700-#701)
+    - Mold Linker Integration Analysis (#800)
+  - Recent Completions from feature.md (Dec 2025)
+    - Memory & Pointers (#25-#29)
+    - Contracts (#400-#405)
+    - Unit Types (#200-#215) ✅ COMPLETE
+    - Networking (#220-#225) ✅
+    - UI Framework (#510-#512) ✅
+    - GPU & SIMD (#300-#311) ✅
+    - Previous Completions (#30-#49)
+  - Completed Infrastructure Components (#1-#8)
+  - Completed Core Language Features (#10-#24)
+  - Completed Codegen Features (#95-#103)
+  - Completed Testing Features (#180-#258)
+    - BDD Spec Framework (#180-#191)
+    - Doctest (#192-#197)
+    - Mock Library (#230-#241)
+    - CLI Test Commands (#250-#258)
+  - Completed Concurrency Features (#110-#157)
+    - Channels (#110-#116)
+    - Generators (#120-#126)
+    - Executor (#130-#134)
+    - Actors & Futures (#140-#157)
+  - Completed Pattern Matching (#160-#172)
+  - Completed Contract Features (#400-#403)
+  - Completed Formal Verification (#950-#970)
+    - Type System Verification (#950-#951)
+    - Memory Safety Verification (#952-#954)
+    - Effect System Verification (#955)
+    - Contract Verification (#960-#964)
+  - Summary Statistics
+  - Importance Scale
+  - Difficulty Scale
+
+## doc/features/feature_done_5.md
+- lines: 0
+- headings: (none)
+
+## doc/features/feature_done_6.md
+- lines: 243
+- headings:
+- Simple Language Features - Archived (Set 6)
+  - Build & Linker Optimization (#800-824) ✅ Complete
+    - Mold Linker Integration (#800-805)
+    - Parallelization (#806-812)
+    - String Interning (#813-815)
+    - Memory Optimization (#816-820)
+    - Caching (#821-824)
+  - Module Privacy & Explicit Proxying (#48-49) ✅
+    - Module Privacy Features (#48-49)
+- mypackage/__init__.spl
+- Explicit public exports (proxy)
+- Private - NOT exported (no pub)
+- Re-export with rename
+- ALLOWED - explicitly proxied
+- FORBIDDEN - child not proxied
+  - Formatting and Lints (#1131-1145) ✅
+    - Canonical Formatter (#1131-1133)
+    - Semantic Lints (#1134-1138)
+    - Lint Control (#1139-1145)
+  - Trait Coherence (#1146-1155) ✅
+    - Core Coherence (#1146-1149)
+    - Advanced Coherence (#1150-1153)
+    - Extension Methods (#1154-1155)
+  - Summary
+
+## doc/features/feature_index.md
+- lines: 3
+- headings:
+- Feature Index (Alias)
+
+## doc/features/formal_verification.md
+- lines: 3
+- headings:
+- Formal Verification (Alias)
+
+## doc/features/llm_friendly.md
+- lines: 3
+- headings:
+- LLM Friendly Guide (Alias)
+
+## doc/features/plans/llm_friendly.md
+- lines: 3
+- headings:
+- LLM Friendly Plan (Alias)
+
+## doc/features/research/mold_linker_analysis.md
+- lines: 3
+- headings:
+- Mold Linker Analysis (Alias)
+
+## doc/features/research/src_to_bin_optimization.md
+- lines: 3
+- headings:
+- Source-to-Binary Optimization (Alias)
+
+## doc/features/spec/bdd_spec.md
+- lines: 3
+- headings:
+- Bdd Spec (Alias)
+
+## doc/features/spec/concurrency.md
+- lines: 3
+- headings:
+- Concurrency (Alias)
+
+## doc/features/spec/data_structures.md
+- lines: 3
+- headings:
+- Data Structures (Alias)
+
+## doc/features/spec/functions.md
+- lines: 3
+- headings:
+- Functions (Alias)
+
+## doc/features/spec/gpu_simd.md
+- lines: 3
+- headings:
+- Gpu Simd (Alias)
+
+## doc/features/spec/lexer_parser.md
+- lines: 3
+- headings:
+- Lexer Parser (Alias)
+
+## doc/features/spec/memory.md
+- lines: 3
+- headings:
+- Memory (Alias)
+
+## doc/features/spec/metaprogramming.md
+- lines: 3
+- headings:
+- Metaprogramming (Alias)
+
+## doc/features/spec/sdn.md
+- lines: 3
+- headings:
+- Sdn (Alias)
+
+## doc/features/spec/stdlib.md
+- lines: 3
+- headings:
+- Stdlib (Alias)
+
+## doc/features/spec/syntax.md
+- lines: 3
+- headings:
+- Syntax (Alias)
+
+## doc/features/spec/traits.md
+- lines: 3
+- headings:
+- Traits (Alias)
+
+## doc/features/spec/types.md
+- lines: 3
+- headings:
+- Types (Alias)
+
+## doc/features/spec/units.md
+- lines: 3
+- headings:
+- Units (Alias)
+
+## doc/features/sqp.md
+- lines: 692
+- headings:
+- Simple Query and Persistence (SQP)
+  - Overview
+  - Feature Summary
+  - Casual Mode (#707)
+    - Data Definition
+- Casual mode - conventions inferred
+    - Convention Rules
+    - Generated Schema
+  - Formal Mode (#708)
+    - Model Definition
+- Formal mode - explicit schema
+    - Formal Mode Features
+  - Query DSL (#709)
+    - Basic Queries
+- Find all
+- Find by ID
+- Find with condition
+- Multiple conditions
+    - Query Methods
+- Comparison operators
+- String matching
+- NULL checks
+- IN clause
+- Logical operators
+    - Ordering and Pagination
+- Order by
+- Pagination
+- Count
+    - Aggregations
+- Count
+- Sum, Avg, Min, Max
+- Group by
+    - Select and Pluck
+- Select specific columns
+- Pluck single column
+- Pluck multiple columns
+  - Relations (#710)
+    - Relationship Types
+- has_many: User has many Posts
+- belongs_to: Post belongs to User
+- has_one: User has one Profile
+- many_to_many: Posts have many Tags
+    - Accessing Relations
+- Access has_many (lazy loaded by default)
+- Access belongs_to
+- Access has_one
+    - Eager Loading (#712)
+- N+1 problem (bad)
+- Eager loading (good)
+- Nested preload
+- Preload with conditions
+    - Joins
+- Inner join
+- Left join
+- Join with conditions
+  - Migrations (#711)
+    - Migration Files
+- migrations/001_create_users.spl
+    - Migration Operations
+- Create table
+- Alter table
+- Create index
+- Drop
+- Foreign keys
+    - Running Migrations
+- Run pending migrations
+- Rollback last migration
+- Rollback N migrations
+- Reset (rollback all, migrate all)
+- Migration status
+  - Raw SQL Escape (#713)
+- Raw SQL query
+- Raw SQL in query chain
+- Raw SQL for updates
+  - CRUD Operations
+    - Create
+- Create single record
+- Create with relations
+- Bulk create
+    - Read
+- Find by ID
+- Find by attribute
+- Find or create
+- First/Last
+- Exists?
+    - Update
+- Update single record
+- Update with save
+- Bulk update
+- Increment/Decrement
+    - Delete
+- Delete single record
+- Delete with relations (cascade)
+- Bulk delete
+- Soft delete (if supported)
+  - Transactions
+- Transaction block
+- Auto-commits at end
+- Nested transactions (savepoints)
+  - Validation
+- Custom validation
+  - Schema Introspection (#706)
+- Get table info
+- Check if table exists
+- Get column info
+  - Configuration
+- simple.toml
+- Default connection
+- Named connections
+  - Related Documents
+
+## doc/features/system_test.md
+- lines: 3
+- headings:
+- System Test Guide (Alias)
+
+## doc/features/test.md
+- lines: 3
+- headings:
+- Test Policy (Alias)
+
+## doc/formal_verification/formal_verification.md
+- lines: 8
+- headings:
+- Formal Verification (Index)
+
+## doc/formal_verification/formal_verification_impl.md
+- lines: 3
+- headings:
+- Formal Verification Implementation (Alias)
+
+## doc/formal_verification/formal_verification_models.md
+- lines: 3
+- headings:
+- Formal Verification Models (Alias)
+
+## doc/formal_verification/formal_verification_simplifications.md
+- lines: 3
+- headings:
+- Formal Verification Simplifications (Alias)
+
+## doc/formal_verification/implementation.md
+- lines: 255
+- headings:
+- Formal Verification: Rust Implementations
+    - 1. Borrow State (`src/common/src/manual.rs`)
+    - 2. GC State (`src/common/src/manual.rs`)
+    - 3. MIR Lowerer State (`src/compiler/src/mir/lower.rs`)
+    - 4. Effect Tracking (`src/compiler/src/mir/types.rs`)
+    - 5. Call Target with Effects (`src/compiler/src/mir/types.rs`)
+    - 6. Pure Type Inference (`src/type/src/lib.rs`)
+  - Simplification Guidelines
+  - Verification Levels
+  - Remaining Simplification Opportunities
+
+## doc/formal_verification/models.md
+- lines: 226
+- headings:
+- Formal Verification: Models 5-8
+    - 5. Type Inference Compile Model ✅ VERIFIED
+    - 6. Module Resolution Model ✅ VERIFIED
+    - 7. Visibility Export Model ✅ VERIFIED
+    - 8. Macro Auto-Import Model ✅ VERIFIED
+  - Verification Models
+  - Rust Implementation Mappings
+
+## doc/formal_verification/overview.md
+- lines: 259
+- headings:
+- Formal Verification Sketches (Lean 4)
+  - Index
+  - Terminology
+  - Formal Verification Summary
+  - Model-Implementation Correspondence Status
+  - Individual Model Verification Reports
+    - 1. Manual Pointer Borrow Model ✅ VERIFIED
+    - 2. GC Manual Borrow Model ✅ VERIFIED
+    - 3. Async Compile Model ✅ VERIFIED
+    - 4. NoGC Compile Model ✅ VERIFIED
+
+## doc/formal_verification/simplifications.md
+- lines: 758
+- headings:
+- Formal Verification: Completed Simplifications
+  - Completed Simplifications
+    - ExecutionMode Enum (`src/compiler/src/interpreter.rs`)
+    - Type-Safe Enum Matching in Interpreter
+    - Special Name Constants (`src/compiler/src/value.rs`)
+    - Builtin Operation Categories (`src/compiler/src/value.rs`)
+    - Visibility and Mutability Enums (`src/parser/src/ast.rs`)
+    - MoveMode Enum (`src/parser/src/ast.rs`)
+    - Special Enum Types (`src/compiler/src/value.rs`)
+    - BuiltinClass Enum (`src/compiler/src/value.rs`)
+    - MethodLookup Result (`src/compiler/src/value.rs`)
+    - Actor Lifecycle State (`src/common/src/actor.rs`)
+    - TypeId Allocator (`src/compiler/src/hir/types.rs`)
+    - LowererState Result-Based Access (`src/compiler/src/mir/lower.rs`)
+    - BinOp Is/In Operators (`src/compiler/src/hir/types.rs`)
+    - Block Builder State (`src/compiler/src/mir/types.rs`)
+    - TypeId::UNKNOWN Removal
+  - Next Steps
+  - Running Verification
+- Check all Lean proofs
+- Test Rust implementations
+- Verify effect properties
+  - Detailed Model-Implementation Analysis
+    - 1. Manual Pointer Borrow (`manual_pointer_borrow/`)
+    - 2. GC Manual Borrow (`gc_manual_borrow/`)
+    - 3. Async Compile (`async_compile/`)
+    - 4. NoGC Compile (`nogc_compile/`)
+    - 5. Type Inference (`type_inference_compile/`)
+  - Verified Properties Summary
+  - Theoretical Correctness Analysis
+    - What the Proofs Guarantee
+    - What Remains Unproven
+
+## doc/guides/basic_sample_check.md
+- lines: 692
+- headings:
+  - 1) Language spec inventory (from your `doc/spec/language.md` index)
+  - 2) Checklist: spec → sample files
+- 3) Sample code pack
+  - 00_syntax_basics.spl (indentation blocks, if/else, interpreter vs compiler mode)
+- Default common imports are automatically available (print, etc.)
+- No explicit import needed for basic I/O functions
+- Interpreter-mode friendly (types optional). In compiler mode, add parameter/return types.
+- Cases without "let" - direct assignments and expressions
+- Direct expression evaluation
+- Type inference in function - return type inferred from body
+  - 01_literals_strings_units.spl (numeric formats, interpolation, raw strings, unit suffix literals)
+- Numeric literal formats & underscores :contentReference[oaicite:15]{index=15}
+- Interpolated string (double quotes interpolate by default)
+- Raw string (single quotes = no interpolation / no escapes) :contentReference[oaicite:16]{index=16}
+- Unit-typed numeric literals (suffix with underscore) :contentReference[oaicite:17]{index=17}
+  - 02_calls_trailing_blocks.spl (statement-level no-paren calls, trailing block lambdas)
+- No-parens calls allowed at statement level; nested calls should use parens.
+- OK: outermost call can omit parens in statement position (DSL-style)
+- Lambda cases - various lambda syntaxes
+- Simple lambda with type inference
+- Filter with a trailing lambda block
+- Map with trailing block
+- Multi-parameter lambda
+- Lambda with closure over local variables
+- Complex lambda with block body
+  - 03_functional_update_arrow.spl (`->` functional update sugar)
+- `target->method(...)` means: target = target.method(...) :contentReference[oaicite:20]{index=20}
+  - 09_type_inference.spl (type inference in functions, traits, and classes)
+- Type inference in functions - parameter and return types inferred
+- Generic function with type inference
+- Type inference in trait implementations
+- Type inference in classes
+- Method chaining with type inference
+  - 10_types_mutability.spl (struct immutability default, mut struct, class mutability default, immut class)
+- Structs immutable by default; `mut struct` makes fields writable. :contentReference[oaicite:21]{index=21}
+- p.x = 9  # should be an error (immutable struct)
+- Classes mutable by default; `immut class` prevents mutation. :contentReference[oaicite:22]{index=22}
+  - 11_compound_types.spl (tuples, lists, dicts; type annotations optional in interpreter)
+- Compound type shapes with type inference and without let
+- Dictionary with inferred types
+- Complex nested structures without let
+- Type inference with compound operations
+- Tuple destructuring without let
+  - 20_units_public_api_positive.spl (semantic types in public APIs)
+- Rule: avoid bare primitives in public APIs; prefer unit/newtypes/enums/Option/Result. :contentReference[oaicite:24]{index=24}
+- Assume UserId and FilePath are unit types provided/declared in your stdlib.
+- Numeric unit literal example uses `_uid`. :contentReference[oaicite:25]{index=25}
+  - 21_units_public_api_negative.spl (expected warnings/errors)
+- These are intended “negative tests” for the unit-type rules. :contentReference[oaicite:26]{index=26}
+- WARNING (or error if deny enabled): bare primitive return in public API
+- WARNING (or error if deny enabled): bare string in public API
+- ERROR (always): implicit nil without Option[...] in public API shape
+- if a user is not found, returning nil here should be illegal
+  - 30_struct_class_semantics.spl (value copy vs reference semantics)
+- Structs are value types (copy-on-assign); classes are reference types. :contentReference[oaicite:27]{index=27}
+  - 31_auto_forward_properties.spl (get_/set_/is_ forwarding)
+- Auto-forwarding properties for get_/set_/is_ prefixes. :contentReference[oaicite:28]{index=28}
+- Property-style access should forward to get_/set_
+  - 40_functions_closures.spl (first-class functions + closures)
+- First-class functions and lambdas with backslash params.
+- Lambda cases with different patterns
+- Lambda with multiple parameters
+- Lambda with conditional logic
+- Higher-order function with lambda parameter
+- Without let - direct usage
+- Closure capturing multiple variables
+  - 41_match_exhaustive.spl (pattern matching, guards, destructuring, exhaustiveness)
+- Match patterns and exhaustiveness requirement. :contentReference[oaicite:30]{index=30}
+  - 42_constructor_polymorphism.spl (constructor as first-class value)
+- Constructor polymorphism is explicitly called out in the functions spec. :contentReference[oaicite:31]{index=31}
+- ctor is a “constructor-like” callable
+  - 50_traits_default_methods.spl (trait with required + default method)
+- Trait with required method + default method implementation. :contentReference[oaicite:32]{index=32}
+  - 51_trait_bounds_polymorphism.spl (polymorphic function over a trait)
+- Polymorphism over any type implementing a trait. :contentReference[oaicite:33]{index=33}
+  - 60_memory_gc_unique_shared_weak_handle.spl (GC T, unique &T, shared *T, weak -T, handle +T)
+- Pointer kinds are explicit: T (GC), &T unique, *T shared, -T weak, +T handle. :contentReference[oaicite:34]{index=34}
+- GC-managed (default)
+- Unique owner
+- print u.hp  # should be compile error: moved
+- Shared owner
+- Weak pointer
+- Handle pointer (resource-like; runtime-managed pool)
+  - 70_actors_send_recv_reply_join.spl (spawn/send/recv/reply/join)
+- Actor model primitives: spawn, send, recv, reply, join. :contentReference[oaicite:35]{index=35}
+  - 71_async_await_skeleton.spl (shape-only sample; aligns with concurrency direction)
+- This is a shape-check sample: async/await is part of the concurrency spec scope. :contentReference[oaicite:36]{index=36}
+  - 80_macro_define_counter.spl (macro that generates static + functions)
+- Macro system: compile-time codegen with declared names/types; example macro in spec. :contentReference[oaicite:37]{index=37}
+  - 81_dsl_trailing_blocks.spl (macro + trailing blocks = DSL-style)
+- Combines “DSL-ish” call style + trailing blocks from syntax spec. :contentReference[oaicite:38]{index=38}
+  - 90_stdlib_semantic_types_and_variants.spl (semantic-only APIs + variants notion)
+- Stdlib goals: variants (async/sync, gc/no_gc, platform overlays) + semantic types in public APIs. :contentReference[oaicite:39]{index=39}
+- Example: “semantic types only” in the boundary
+- Variant usage is implementation-defined; treat as a config-driven import resolution demo.
+- (Your stdlib spec describes the variant-aware layout/goal, not the concrete syntax here.) :contentReference[oaicite:40]{index=40}
+  - 95_simd_vectors.spl (vec[N,T], lane-wise ops, reductions)
+- SIMD vector types and ops. :contentReference[oaicite:41]{index=41}
+  - 96_gpu_buffer_kernel_skeleton.spl (device/context/buffer/kernel shape)
+- GPU API surface + buffer upload/download shape. :contentReference[oaicite:42]{index=42}
+- Kernel shape (details depend on your eventual compiler/runtime implementation)
+  - Notes on gaps I could not cover from the repo docs (yet)
+
+## doc/guides/context_sharing_usage_guide.md
+- lines: 585
+- headings:
+- Context Sharing Usage Guide
+  - Overview
+  - Basic Syntax
+    - 1. Define a Reusable Context
+- Return the fixture value (evaluated once per example)
+- Eager setup (runs before each example)
+    - 2. Reference a Single Context
+    - 3. Compose Multiple Contexts
+  - Usage Patterns
+    - Pattern 1: Reusable Test Data
+- Define the context
+- Use it in multiple places
+    - Pattern 2: Database/External Service Setup
+- Eager given - setup runs before each test
+- Lazy given - connection is memoized
+    - Pattern 3: Fixture Dependencies
+    - Pattern 4: API/Authentication Setup
+- Use single context
+- Compose multiple contexts
+    - Pattern 5: BDD Given-When-Then Style
+- Given: calculator at zero
+- When: add 5
+- Then: value is 5
+- When: multiply by 2
+- Then: value is 10
+    - Pattern 6: Named Eager Fixtures - BDD "When" Setup (given :name)
+- Given: initial fixtures
+- When: setup database and cache
+- Then: verify setup complete
+    - Pattern 7: Sequential Given Blocks - Contexts + Variables
+- Simulate: db.connect(), db.migrate()
+- Single given: block with multiple sequential steps
+- Step 1: Apply database setup from context_def
+- Step 2: Apply user fixtures from context_def
+- Step 3: Define derived variables from fixtures
+- Then: all variables are available
+    - Pattern 8: Inline Lazy Fixtures (given_lazy in Regular Context)
+- Define lazy fixture inline (memoized per example)
+- Same user object within this example
+- Combine eager and lazy fixtures inline
+  - Comparing Old vs New
+    - Old Style (Still Supported)
+    - New Style (Context Sharing)
+  - Best Practices
+    - ✅ Do
+    - ❌ Don't
+  - Fixture Types & BDD Pattern
+- Given: test data/initial state (lazy - memoized)
+- When: setup database (named eager)
+- When: initialize cache (unnamed eager)
+- Then: verify the behavior
+  - When to Use: context_def vs inline fixtures
+  - Common Patterns
+    - Setup and Teardown
+- No after_all needed - each test gets fresh data via given
+    - Multiple Test Data Variants
+    - Shared Complex Setup
+  - Migration Guide: From let to Context Sharing
+    - Before (No Sharing)
+- string_spec.spl
+- array_spec.spl
+    - After (With Sharing)
+- test_fixtures.spl
+- string_spec.spl
+- array_spec.spl
+  - Troubleshooting
+    - Issue: Fixture not available in example
+- Wrong - fixture won't be available
+- Forget to reference it
+- Correct
+    - Issue: Fixture is being reused across examples
+- Wrong - count is memoized
+- Right - count is fresh
+    - Issue: Undefined context error
+- Context must be defined
+  - See Also
+
+## doc/guides/db.md
+- lines: 8
+- headings:
+- Database Access Guide (Index)
+  - Parts
+
+## doc/guides/db_part1.md
+- lines: 604
+- headings:
+- Simple Database Abstraction Layer (DB)
+  - Executive Summary
+  - 1. Design Principles
+  - 2. Core Interface
+    - 2.1 Database Connection
+- Database configuration
+- Connection URL formats:
+- PostgreSQL:  "postgres://user:pass@host:5432/dbname"
+- libSQL:      "file:./data/app.db" or ":memory:"
+- libSQL (Turso): "libsql://db-name.turso.io?authToken=..."
+    - 2.2 Database Handle
+- Main database handle (opaque to SQP)
+- Connect to database
+- Execute query with parameters
+- Query with result set
+- Query single row
+- Begin transaction
+- Prepare statement (for repeated execution)
+- Get backend type (for SQP internal use only)
+- Close connection
+    - 2.3 Transaction API
+- Execute within transaction
+- Savepoint support
+- Commit or rollback
+- Transaction helper (auto-commit/rollback)
+    - 2.4 Prepared Statements
+- Execute prepared statement
+- Query with prepared statement
+- Deallocate (optional - auto on drop)
+  - 3. Type System
+    - 3.1 Unified Types
+    - 3.2 Type Mapping Table
+    - 3.3 Type Conversion
+- Auto-implemented for standard types
+  - 4. Result Types
+    - 4.1 Query Results
+- Result of execute (INSERT, UPDATE, DELETE)
+- Row from query result
+- Get value by column name
+- Get value by index
+- Check if column exists
+- Get all column names
+    - 4.2 Error Types
+- Connection errors
+- Query errors
+- Data errors
+- Transaction errors
+- Other
+  - 5. SQL Dialect Abstraction
+    - 5.1 Query Builder (Internal)
+- Internal query builder (used by DB layer, not exposed to SQP)
+- Placeholder syntax: ? (positional) -> backend-specific
+- Convert ? to $1, $2, $3...
+- Keep ? as-is (SQLite style)
+- RETURNING clause support
+- UPSERT syntax
+- Boolean literal
+    - 5.2 SQL Compatibility Subset
+    - 5.3 Unsupported Feature Handling
+- Features that differ between backends
+- Check if feature is supported
+- Get backend-specific raw connection (escape hatch)
+  - 6. Connection Management
+    - 6.1 Connection Pool
+- Pool configuration
+- Pool statistics
+    - 6.2 Health Checks
+- Ping database
+- Check connection health
+- Get server version
+  - 7. Migration Support
+    - 7.1 Schema Information
+- Table metadata
+    - 7.2 Schema Operations
+- List tables
+- Get table info
+- Check if table exists
+- Raw DDL execution (for migrations)
+    - 7.3 DDL Translation
+- DDL generator for migrations
+  - 8. Backend Implementations
+    - 8.1 PostgreSQL Backend
+- PostgreSQL-specific configuration
+- PostgreSQL driver (internal)
+    - 8.2 libSQL Backend
+- libSQL-specific configuration
+- Remote libSQL (Turso) configuration
+- libSQL driver (internal)
+- Embedded replica sync (Turso)
+  - 9. Usage Examples
+    - 9.1 Basic Usage (Backend-Agnostic)
+- Configuration (could come from environment)
+- Connect
+- Execute query
+- Query
+
+## doc/guides/db_part2.md
+- lines: 483
+- headings:
+- Database Access - Part 2: Patterns & Implementation
+- Transaction
+    - 9.2 SQP Integration
+- SQP uses DB layer internally
+- User sees only SQP API, never DB directly
+- SQP internally generates:
+- - CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT UNIQUE, ...)
+- - Uses Db.execute() for all operations
+- User query (SQP DSL)
+- SQP translates to:
+- db.query("SELECT * FROM users WHERE active = ? LIMIT ?", [true, 10])
+    - 9.3 Switching Backends
+- Development: Use embedded libSQL
+- Production: Use PostgreSQL
+- Same code works with both!
+- SQP doesn't know or care which backend is used
+    - 9.4 Embedded Replica (Turso)
+- Local SQLite with Turso cloud sync
+- Or embedded replica (local + sync)
+- Queries hit local replica (fast!)
+- Writes sync to cloud
+  - 10. Design Patterns
+    - 10.1 Repository Pattern Integration
+- Generic repository (used by SQP)
+- SQP generates repository implementations
+- INSERT
+- UPDATE
+    - 10.2 Connection Factory
+- Factory for creating database connections
+- Use in-memory SQLite for tests
+    - 10.3 Query Builder Pattern
+- Internal query builder (DB layer uses this)
+  - 11. Error Handling Strategy
+    - 11.1 Retry Logic
+- Retry configuration
+- Retry wrapper
+    - 11.2 Error Mapping
+- Map backend-specific errors to DbError
+  - 12. Testing Support
+    - 12.1 Test Utilities
+- Test database helpers
+- Create isolated test database
+- Create test database with schema
+- Transaction rollback wrapper (for test isolation)
+- Seed test data
+    - 12.2 Test Examples
+  - 13. Performance Considerations
+    - 13.1 Prepared Statement Caching
+- Statement cache (per connection)
+- LRU eviction
+    - 13.2 Batch Operations
+- Batch insert (single transaction)
+- Batch execute with different statements
+  - 14. Configuration Reference
+    - 14.1 Environment Variables
+    - 14.2 Simple.toml Configuration
+  - 15. Future Considerations
+    - 15.1 Potential Additions
+    - 15.2 Backend Candidates
+  - References
+
+## doc/guides/depedency_tracking.md
+- lines: 790
+- headings:
+- Simple Language: Module, Import, Export, and `__init__.spl` Specification (v5)
+  - 1. Scope
+  - 2. Module Paths
+- ...
+- ...
+- ...
+- ...
+- ...
+- ...
+- ...
+- Public re-exports
+- Macros that participate in glob imports
+- router.route_debug intentionally NOT auto-imported
+
+## doc/guides/llm_friendly.md
+- lines: 66
+- headings:
+- llm friendly features
+
+## doc/guides/module_system.md
+- lines: 563
+- headings:
+- ...
+- ...
+- ...
+- ...
+- ...
+- ...
+- ...
+- public API
+- which macros are included when glob-importing http.*
+- route_debug intentionally NOT auto-imported
+  - 10. Standard Library Structure
+    - lib/std/__init__.spl
+- Common imports for all stdlib modules
+    - Native Integration
+- lib/std/host/async_gc/io/fs.spl
+
+## doc/guides/sqp.md
+- lines: 308
+- headings:
+- Simple Query and Persistence (SQP)
+  - Overview
+  - Design Principles (matching Simple's philosophy)
+  - **1. Casual Mode (Minimal Typing)**
+- Automatic: id, created_at, updated_at
+  - **2. Formal Mode (Explicit Schema)**
+  - **3. Query DSL (Ruby-inspired, Simple-native)**
+- Simple queries - chainable
+- Lambda filters (using Simple's \x syntax)
+- Eager loading
+- Raw SQL escape hatch
+  - **4. Comparison: Casual vs Formal**
+- ========== CASUAL (5 lines) ==========
+- ========== FORMAL (15 lines) ==========
+  - **5. Suggested Keywords**
+  - **6. Migration (Auto-inferred)**
+- migrations/001_create_users.spl (auto-generated)
+  - My Recommendation
+  - **7. Database Backend Integration**
+    - Backend Selection
+- Development: embedded libSQL (default)
+- Production: PostgreSQL (via DATABASE_URL)
+- SQP auto-detects from environment
+    - Type Mapping (SQP → DB)
+  - **8. Transaction Support**
+- Explicit transaction
+- Or use save! for auto-transaction
+  - **9. Connection Configuration**
+- simple.toml
+- Or via environment
+  - **10. Implementation Notes**
+    - SQP Generates SQL via DB Layer
+- SQP DSL:
+- Translates to DB layer call:
+- DB layer handles:
+- - Placeholder syntax (? → $1 for Postgres)
+- - Boolean conversion (true → TRUE or 1)
+- - Connection pooling
+    - Migration Integration
+- SQP migration uses DB layer's DDL generator
+- DB layer generates backend-specific DDL:
+- PostgreSQL: CREATE TABLE users (id BIGSERIAL PRIMARY KEY, ...)
+- libSQL: CREATE TABLE users (id INTEGER PRIMARY KEY AUTOINCREMENT, ...)
+  - Related Documentation
+
+## doc/guides/system_test.md
+- lines: 529
+- headings:
+- System Test Framework
+  - Overview
+    - Test Organization
+    - Auto-Discovery
+- Run all system tests (65 tests)
+- Run specific subsystem
+  - Data Formats
+    - SDN - Simple Data Notation
+    - Gherkin DSL - Examples Tables
+  - BDD Spec Framework
+    - Basic Structure
+- Arrange (Given)
+- Act (When)
+- Assert (Then)
+    - Given-When-Then Pattern
+- Given: initial state
+- When: action
+- Then: verify
+    - System Test Example
+  - Test Discovery
+    - File Patterns
+    - Running Tests
+- Run all Simple language tests (96 total: 31 stdlib + 65 system)
+- Run only stdlib tests (31 tests)
+- Run only system tests (65 tests)
+- Run specific test category
+- Run specific feature test
+    - Test Organization
+  - Writing System Tests
+    - CLI Testing Pattern
+    - File Watcher Testing
+- Start watcher in background
+- Wait for initial build
+- Modify source
+- Wait for rebuild
+- Check output contains rebuild message
+- Cleanup
+  - Integration with Rust Tests
+  - Living Documentation Generation
+    - Overview
+    - Concept
+    - Output Formats
+    - Generated Structure
+- User Authentication
+  - When user has valid credentials
+  - When user has invalid credentials
+    - CLI Usage
+- Generate HTML documentation
+- Generate Markdown documentation
+- Generate with test results
+- Watch mode - regenerate on file changes
+    - Configuration
+- Output format: html, markdown, json
+- Output directory
+- Include test status in documentation
+- Include code examples
+- Template customization
+- Sections to include
+    - Template Variables
+    - Status: ✅ 100% COMPLETE (8/8 components)
+- Run tests and generate documentation (one-time)
+- Watch mode: auto-rerun and regenerate on changes
+- Watch specific test levels
+- Output files:
+  - Gherkin-Style System Tests
+    - Quick Example
+  - See Also
+
+## doc/guides/test.md
+- lines: 750
+- headings:
+- Test Policy
+  - Overview
+  - Test Categories and Directory Structure
+- Rust unit tests in each crate (631+ tests total):
+- Simple language tests (BDD framework):
+- Specialized test levels in tests/ crate (Rust):
+  - Test Levels
+    - Coverage Data Strategy
+    - Coverage Policy by Test Level
+  - Full Test Mode with Automatic Coverage
+    - Quick Start
+- Run all tests + generate coverage reports (System, Integration, Merged)
+- Run tests with coverage but skip extended reports
+- Run full tests + verify coverage thresholds
+    - Environment Variables
+    - Generated Reports
+    - Coverage Tool CLI
+- Generate extended reports from LLVM coverage data
+- Check coverage against threshold
+- Print coverage summary
+    - Public API Specification
+- Public functions for Integration test coverage
+- Types for System test coverage (class/struct methods)
+  - Using simple_mock_helper
+    - Initialization per Test Binary
+    - Mock Policy Enforcement
+    - HAL Layer Patterns
+  - Coverage Integration
+    - Coverage Data Strategy
+    - Generating Coverage Data
+- 1. Overall coverage: ALL tests merged (UT+IT+ST+ENV) for branch/condition
+- (Automatically switches to LLVM backend for native instrumentation)
+- 2. Integration tests: Own raw data for public function touch
+- 3. System tests: Own raw data for public class/struct touch
+- Or use Makefile targets (backend selection is automatic)
+    - Public API Specification
+- For Integration Tests: Public functions
+- For System Tests: Class/struct methods
+    - Computing Coverage by Test Level
+- Generate merged coverage report
+- Check thresholds
+    - Coverage CLI Tool
+- Check merged coverage (UT + environment)
+- Check integration coverage (public function touch)
+- Check system coverage (public class/struct touch)
+  - Cargo.toml Configuration
+- Define test executables
+  - Running Tests
+- Run all tests
+- Run specific test level
+- Run with coverage
+  - System Tests
+    - Tooling
+    - CLI Test Example
+    - GC Logging Tests
+    - System Test Scenarios
+  - Environment Tests
+    - Mock Patterns for Environment Tests
+    - HAL/External Mock Examples
+  - Best Practices
+  - Coverage Thresholds
+  - Makefile Targets
+- Test execution
+- Coverage generation (separated by policy)
+- Coverage verification
+- Reports
+  - CI/CD Integration
+    - Coverage Check Pipeline
+- .github/workflows/coverage.yml
+- 1. Run tests and generate coverage
+- 2. Check thresholds
+    - Coverage Report Summary
+  - GC/Abfall Hooks
+  - See Also
+
+## doc/guides/test_guides.md
+- lines: 412
+- headings:
+- Test Rules and Coverage Guidelines
+  - Overview
+  - Test Types Hierarchy
+  - 1. System Test (E2E)
+    - Characteristics
+    - Coverage Requirements
+    - Quality Metrics
+    - Bug-Oriented System Test Ideas
+  - 2. Service Test (SVC)
+    - Characteristics
+    - Coverage Requirements
+    - Quality Metrics
+  - 3. Integration Test (INT)
+    - Characteristics
+    - Coverage Requirements
+    - Quality Metrics
+  - 4. Element Touch Rules Summary
+    - Touch Coverage Formula
+  - 5. Architecture Test
+    - Purpose
+    - Rules
+    - Mock Prevention
+    - Proper Connection Validation
+  - 6. Coverage Metrics Summary
+    - System / Service Test Quality Metrics
+    - Integration Test Quality Metrics
+  - 7. Test Execution Order
+  - 8. Checklist
+    - Before Release
+  - Appendix: Quick Reference
+
+## doc/guides/ui.md
+- lines: 562
+- headings:
+- Simple UI Framework Specification
+  - 1. Architecture Overview
+  - 2. Template Syntax
+    - Example: Counter Component
+  - 3. Execution Timeline
+  - 4. File Types and Structure
+    - 4.1 Page vs Component
+    - 4.2 Directory Layout
+    - 4.3 UI/Logic Pairing Rules
+  - 5. Embedding Components
+    - Hydration Strategies
+  - 6. Control Flow in Templates
+    - Conditionals
+    - Loops
+    - Local Variables
+  - 7. Server vs Client Code
+    - 7.1 Server Block (`{- -}`)
+    - 7.2 Client Block (`{+ +}`)
+    - 7.3 What Goes Where?
+  - 8. Layouts and Slots
+    - 8.1 Defining a Layout
+    - 8.2 Using a Layout
+  - 9. Dual Renderer: GUI + TUI
+    - 9.1 GUI (Browser/WebView)
+    - 9.2 TUI (Terminal)
+    - 9.3 Element Mapping
+    - 9.4 TUI Theme
+- theme.tui.toml
+  - 10. PatchSet Architecture
+  - 11. Runtime APIs
+    - 11.1 Client APIs (in `{+ +}` blocks)
+- Events
+- State
+- Navigation
+- Context
+- Storage
+    - 11.2 Server APIs (in `{- -}` blocks)
+- Request
+- Response helpers
+  - 12. Milestones
+  - 13. Full Example: User List Page
+  - 14. See Also
+
+## doc/guides/web_framework.md
+- lines: 560
+- headings:
+- SimpleWeb Framework Specification
+  - 1. Architecture Overview
+  - 2. Project Configuration
+    - 2.1 web_app.toml
+- Externalized config (Spring-style)
+- Directory roles and preludes
+- Starters (auto-config bundles)
+- Client build
+    - 2.2 Config Layering
+  - 3. Routing
+    - 3.1 Route Definition
+- Basic routes
+- Resource routes (REST)
+- GET    /users          => UsersController.index
+- GET    /users/:id      => UsersController.show
+- GET    /users/new      => UsersController.new
+- POST   /users          => UsersController.create
+- GET    /users/:id/edit => UsersController.edit
+- PUT    /users/:id      => UsersController.update
+- DELETE /users/:id      => UsersController.destroy
+- Nested resources
+- API namespace
+- Catch-all
+    - 3.2 Path Parameters
+- Route: GET /users/:id/posts/:post_id
+    - 3.3 Query Parameters
+- URL: /search?q=hello&page=2
+  - 4. Controllers
+    - 4.1 Page Controller
+- app/controllers/users_controller.spl
+- Implicit render: app/ui/pages/users/Index.page.sui
+- Explicit page with props
+    - 4.2 API Controller
+- app/controllers/api/users_controller.spl
+    - 4.3 Response Helpers
+- Page responses (SSR)
+- JSON responses
+- Redirects
+- Raw responses
+  - 5. Services
+    - 5.1 Service Definition
+- app/services/user_service.spl
+    - 5.2 Dependency Injection
+- Automatic injection via @inject
+- Manual registration (for interfaces)
+- config/services.spl
+  - 6. Middleware
+    - 6.1 Defining Middleware
+- app/middleware/auth.spl
+    - 6.2 Applying Middleware
+- config/routes.spl
+- Global middleware
+- Route-specific
+  - 7. Request/Response Objects
+    - 7.1 Request
+    - 7.2 Response
+  - 8. Production Features
+    - 8.1 Health & Metrics (via Starters)
+- web_app.toml
+    - 8.2 Custom Health Checks
+- config/health.spl
+  - 9. Auto-Config with Backoff
+- Starter provides default Router
+- But if you define your own, starter backs off:
+- Your custom implementation
+- Starter's default Router is NOT used
+  - 10. CLI Tools
+- Development
+- Routes
+- Generation
+- Production
+  - 11. Directory Structure
+  - 12. Full Example: Blog API + Pages
+    - 12.1 Routes
+- config/routes.spl
+- Pages (SSR)
+- API
+    - 12.2 Controller
+- app/controllers/posts_controller.spl
+    - 12.3 API Controller
+- app/controllers/api/posts_controller.spl
+  - 13. See Also
+
+## doc/plans/01_dynlib_format_suggestion.md
+- lines: 653
+- headings:
+- Dynamic Library Format Suggestion
+  - Index
+  - Overview
+  - Design Inspiration: Java Class File Format
+  - Suggested Format: Simple Module Format (SMF)
+    - Design Goals
+  - File Structure: `.smf` (Simple Module File)
+  - Header Format (88 bytes)
+  - Constant Pool (Inspired by Java)
+    - Constant Pool Structures
+  - External References & ABI Compatibility
+    - Import Table
+    - Imported Symbol Structures
+    - Export Table
+    - Breaking Change Detection
+    - Hash Computation
+    - What Changes Are Breaking?
+    - Load-Time Verification
+    - Detailed Error Messages
+  - Compact Type Descriptors (Inspired by Java)
+    - Base Types
+    - Compound Types
+    - Pointer Types (Simple-specific)
+    - Examples
+  - Type Definitions
+  - Function Table
+
+## doc/plans/01_dynlib_format_suggestion_2.md
+- lines: 646
+- headings:
+- Dynamic Library Format Suggestion - Part 2
+  - Attributes (Inspired by Java)
+    - Standard Attributes
+    - ReloadInfo Attribute (Simple-specific)
+    - LineNumberTable Attribute (from Java)
+  - Relocation Table
+  - Hot Reload Support
+    - Reload Safety Checks
+    - Reload Protocol
+    - Trampoline Table
+- Reload updates:
+  - SMF Loading Modes
+    - Mode 1: Standalone Loading (As-Is)
+    - Mode 2: Settlement Loading (Optimized)
+    - Mode Comparison
+    - Hybrid Approach
+    - Runtime Decision
+  - Settlement Space (Runtime Module Container)
+    - Settlement Space Layout
+    - Indirection Tables
+    - Module Registry Entry
+    - Slot-Based Allocation
+    - Adding a Module
+    - Removing a Module
+    - Call Indirection (Generated Code)
+    - Benefits of Settlement Space
+    - Compaction (Optional)
+  - Platform Abstraction
+    - Loading Strategy
+    - Why SMF Instead of Native Formats?
+  - Performance Optimizations
+  - File Extension Convention
+  - Comparison with Alternatives
+  - Implementation Priority
+  - Summary
+    - Loading Mode Selection
+    - Settlement Space Key Benefits
+  - References
+
+## doc/plans/02_parser_implementation.md
+- lines: 641
+- headings:
+- Parser Implementation Plan
+  - Overview
+  - Architecture
+  - Tasks
+    - Task 1: Project Setup
+    - Task 2: Tree-sitter Grammar (grammar.js)
+    - Task 3: External Scanner (scanner.c)
+    - Task 4: Rust AST Definitions (ast.rs)
+    - Task 5: AST Builder (builder.rs)
+    - Task 6: Error Handling (error.rs)
+    - Task 7: Parser Public API (lib.rs)
+  - Testing Plan
+    - Unit Tests
+    - Integration Tests
+  - Implementation Order
+  - Dependencies
+
+## doc/plans/03_basic_io_library.md
+- lines: 648
+- headings:
+- Basic I/O Library Plan
+  - Overview
+  - Architecture
+  - Simple Language API
+    - Output Functions
+- Print without newline
+- Print with newline
+- Formatted print (with string interpolation)
+- Print to stderr
+    - Input Functions
+- Read a line from stdin (blocking - NOT async)
+- Read a line with prompt
+- Read single character
+- Check if input available (non-blocking)
+  - Rust Implementation
+    - File Structure
+    - Core Types (io/mod.rs)
+    - Stdout Implementation (io/stdout.rs)
+    - Stdin Implementation (io/stdin.rs)
+    - Platform Layer (io/platform.rs)
+    - Builtin Functions (builtin/io.rs)
+  - Value Formatting
+    - To-String Conversion
+  - String Interpolation Support
+  - Testing
+  - Cargo.toml
+  - Summary
+
+## doc/plans/04_dynamic_loading_library.md
+- lines: 593
+- headings:
+- Dynamic Loading Library Plan
+  - Index
+  - Overview
+  - Architecture
+  - File Structure
+  - SMF Format Parsing
+    - Header (smf/header.rs)
+    - Section (smf/section.rs)
+    - Symbol Table (smf/symbol.rs)
+    - Relocation (smf/reloc.rs)
+  - Memory Allocation
+    - Abstraction (memory/mod.rs)
+    - Linux Implementation (memory/linux.rs)
+    - Windows Implementation (memory/windows.rs)
+
+## doc/plans/04_dynamic_loading_library_2.md
+- lines: 578
+- headings:
+- Dynamic Loading Library Plan - Part 2
+  - Module Loader
+    - Loader Implementation (loader.rs)
+    - Loaded Module (module.rs)
+  - Module Registry
+  - Usage Example
+  - Cargo.toml
+  - Summary
+
+## doc/plans/05_ahead_of_time_compile.md
+- lines: 318
+- headings:
+- Ahead of Time Compilation Plan
+  - Index
+  - Overview
+  - Architecture
+  - File Structure
+  - High-Level IR (HIR)
+    - HIR Types (hir/types.rs)
+
+## doc/plans/05_ahead_of_time_compile_codegen.md
+- lines: 547
+- headings:
+- AOT Compilation: HIR to MIR and Cranelift Backend
+    - HIR to MIR Lowering (mir/lower.rs)
+  - Code Generation with Cranelift
+    - Cranelift Backend (codegen/cranelift.rs)
+
+## doc/plans/05_ahead_of_time_compile_lowering.md
+- lines: 337
+- headings:
+- AOT Compilation: AST to HIR and MIR Types
+    - AST to HIR Lowering (hir/lower.rs)
+  - Mid-Level IR (MIR)
+    - MIR Types (mir/types.rs)
+
+## doc/plans/05_ahead_of_time_compile_smf.md
+- lines: 373
+- headings:
+- AOT Compilation: SMF Linker and Pipeline
+  - SMF Linker
+    - SMF Emission (linker/emit.rs)
+  - Compilation Pipeline
+  - Cargo.toml
+  - Summary
+
+## doc/plans/06_dynamic_reload.md
+- lines: 939
+- headings:
+- Dynamic Reload Plan
+  - Overview
+  - Architecture
+  - File Structure
+  - Trampoline Table
+    - Trampoline Implementation (trampoline.rs)
+  - Version Tracking
+    - Version Manager (version.rs)
+  - File Watcher
+    - Watcher Implementation (watcher.rs)
+  - Reload Manager
+    - Manager Implementation (manager.rs)
+  - Symbol Patcher
+    - Patcher Implementation (patcher.rs)
+  - State Migration
+    - Migrator Implementation (migration.rs)
+  - Compiler Integration
+    - Reloadable Code Generation
+  - Usage Example
+  - Cargo.toml
+  - Summary
+
+## doc/plans/07_basic_types.md
+- lines: 713
+- headings:
+- Basic Types Implementation Plan
+  - Index
+  - Overview
+  - Architecture
+  - File Structure
+  - Value Representation
+    - Strategy: Tagged Union
+    - Value Enum (value/mod.rs)
+  - Primitive Types
+    - Primitive Operations (value/primitive.rs)
+  - String Type
+    - String Implementation (value/string.rs)
+  - Tuple Type
+    - Tuple Implementation (value/tuple.rs)
+
+## doc/plans/07_basic_types_2.md
+- lines: 692
+- headings:
+- Basic Types Implementation Plan - Part 2
+  - Array Type
+    - Array Implementation (value/array.rs)
+  - Dict Type
+    - Dict Implementation (value/dict.rs)
+  - Display Implementation
+    - Display Trait (value/display.rs)
+  - Type Coercion
+    - Coercion Rules (types/coerce.rs)
+  - Cargo.toml
+- No external dependencies for core types
+  - Summary
+
+## doc/plans/08_function_lib_call.md
+- lines: 683
+- headings:
+- Function Library Call Plan
+  - Index
+  - Overview
+  - Architecture
+  - File Structure
+  - Function Types
+    - Function Value (function/mod.rs)
+    - Regular Functions (function/regular.rs)
+    - Closures (function/closure.rs)
+    - Method Dispatch (function/method.rs)
+    - FFI Functions (function/ffi.rs)
+  - Call Frame Management
+    - Call Frame (call/frame.rs)
+
+## doc/plans/08_function_lib_call_2.md
+- lines: 677
+- headings:
+- Function Library Call Plan - Part 2
+    - Argument Handling (call/args.rs)
+  - Module System
+    - Module Definition (module/mod.rs)
+    - Import Resolution (module/import.rs)
+  - Builtin Functions
+    - Builtin Registry
+  - Summary
+
+## doc/plans/09_dynamic_runtime_loading.md
+- lines: 177
+- headings:
+- Dynamic Runtime Library Loading
+  - Overview
+  - Architecture
+  - Usage
+    - Static Linking (Default)
+    - Dynamic Loading
+    - Chained Providers (Plugin Support)
+    - With JIT Compiler
+  - ABI Versioning
+    - Version Bump Guidelines
+  - Platform Support
+  - Building the Shared Library
+- Build release version (smaller, optimized)
+- Output: target/release/libsimple_runtime.so (Linux)
+- target/release/libsimple_runtime.dylib (macOS)
+- target/release/simple_runtime.dll (Windows)
+  - Performance Considerations
+  - Files
+  - Symbol List
+
+## doc/plans/09_interpreter_like_workflow.md
+- lines: 950
+- headings:
+- Interpreter-Like Workflow Plan
+  - Overview
+  - Workflow
+  - File Structure
+  - CLI Implementation
+    - Main Entry Point (main.rs)
+    - Runner (runner.rs)
+    - Compilation Cache (cache.rs)
+    - Watch Mode (watch.rs)
+    - REPL (repl.rs)
+  - Startup Time Optimization
+    - 1. Fast Cache Check
+    - 2. Memory-Mapped Module Loading
+    - 3. Parallel Compilation
+  - Complete Usage Examples
+- Run a file (compiles if needed)
+- Run with watch mode (rerun on file change)
+- Force recompile
+- Verbose output (shows compile/load times)
+- Just compile, don't run
+- Check syntax
+- Interactive REPL
+- Clean build cache
+  - Performance Targets
+  - Cargo.toml
+  - Summary
+
+## doc/plans/09_stdlib_units_and_networking.md
+- lines: 808
+- headings:
+- Plan: Standard Library Units and Networking
+  - Overview
+  - 1. Default Variant: async_nogc
+    - 1.1 Rationale
+    - 1.2 Profile Configuration
+- simple.toml - default profile
+    - 1.3 Directory Structure
+  - 2. String Warning in Public APIs
+    - 2.1 New Lint: `bare_string`
+- WARNING: Bare string in public function
+- OK: Semantic type (no warning)
+    - 2.2 Lint Levels
+- std/__init__.spl
+    - 2.3 Exemptions
+    - 2.4 Configuration
+- simple.toml
+  - 3. File System Units
+    - 3.1 File Path Unit: `_file`
+- std/units/file.spl
+- FilePath - platform-aware file path
+- FilePath components
+- Drive letter for Windows (optional)
+- Usage examples
+    - 3.2 FilePath API
+- std/units/file.spl
+- Construction
+- Components
+- Operations
+- Normalization
+- Platform conversion
+- Validation
+    - 3.3 Drive Letter Handling (mingw-style)
+- Windows path handling
+- Access drive
+- Unix paths have no drive
+- Conversion
+    - 3.4 File System API
+- std/host/async_nogc/io/fs.spl
+- All functions use semantic types - no bare strings!
+  - 4. Network Units
+    - 4.1 IP Address Unit: `_ip`
+- std/units/net.spl
+- IP address - v4 or v6 (multi-base unit)
+- Accepts both string and numeric bases
+- Specific versions
+- Port number
+- Socket address (IP + port)
+- MAC address (string or 48-bit integer)
+- Usage - String format (human-readable)
+- Usage - Numeric format (efficient, no parsing)
+    - 4.2 IpAddr API
+- Construction from components
+- Construction from literals (both formats work)
+- Properties
+- Conversion between formats
+- Numeric operations (since backed by u32)
+- These are equivalent at runtime:
+    - 4.3 TCP/UDP API
+- std/host/async_nogc/net/tcp.spl
+- std/host/async_nogc/net/udp.spl
+  - 5. HTTP Units
+    - 5.1 HTTP URL Unit: `_http`
+- std/units/url.spl
+- Generic URL
+- Protocol-specific URLs
+- URL components
+- Usage
+    - 5.2 Url API
+- Construction
+- Components
+- Operations
+    - 5.3 HTTP Client API
+- std/host/async_nogc/net/http.spl
+- HTTP method enum
+- HTTP status code
+- HTTP header
+- Convenience methods
+- Usage
+  - 6. FTP Units
+    - 6.1 FTP URL Unit: `_ftp`
+- std/units/url.spl (addition)
+    - 6.2 FTP Client API
+- std/host/async_nogc/net/ftp.spl
+- FTP transfer mode
+- FTP file type
+- Navigation
+- Transfer
+- File operations
+- Settings
+- Disconnect
+  - 7. Complete Unit Postfix Summary
+    - 7.1 All Standard Unit Postfixes
+    - 7.2 Compound Literal Rules
+- Numeric postfixes (no underscore between number and suffix)
+- String postfixes (literal string with postfix)
+- Combining with string interpolation
+  - 8. Updated Spec Changes
+    - 8.1 New Lint: `bare_string`
+    - 8.1 The `bare_string` Lint
+- std/__init__.spl
+    - 8.2 String Postfix Extension
+    - String Literal Postfixes
+- Syntax: "string"_suffix
+- ERROR
+- OK
+    - 8.3 Updated Type Warning Table
+  - 9. Implementation Features
+    - Feature List
+    - Implementation Order
+  - 10. Native Library Support
+    - 10.1 native_lib/io/net.rs
+    - 10.2 Async Integration
+  - Related Documents
+
+## doc/plans/10_std_print_migration.md
+- lines: 512
+- headings:
+- Plan: Migrate Tests to Use std Print Library
+  - Status: Phase 1-5 Complete ✓
+    - Completed Work
+    - Usage
+  - Original Analysis (for reference)
+  - Current State Analysis
+    - 1. Ad-hoc Print Implementation
+    - 2. Test Infrastructure
+    - 3. New std Print Library
+    - 4. Codegen FFI
+  - What Needs to Be Done
+    - Phase 1: Runtime I/O Infrastructure
+    - Phase 2: Update Interpreter
+    - Phase 3: Module System Integration
+    - Phase 4: Native Library Loading (for compiled code)
+    - Phase 5: Update Test Helpers
+    - Phase 6: Update Test Code
+- Prelude auto-imports print
+  - Implementation Order
+  - Files to Modify
+  - Test Files Using Ad-hoc Print
+  - Alternative: Minimal Change
+
+## doc/plans/10_watch_mode.md
+- lines: 30
+- headings:
+- Watch Mode & Dependency Cache Plan
+  - Goals
+  - Design
+    - Components
+    - Flow
+    - Notes
+
+## doc/plans/13_type_inference_generics_gc.md
+- lines: 38
+- headings:
+- Plan: Features #13 (Type Inference), #14 (Generics), #24 (GC-Managed Default)
+  - Goals
+  - Scope & Constraints
+  - Work Breakdown
+  - Acceptance Checklist
+
+## doc/plans/14_interpreter_interface.md
+- lines: 443
+- headings:
+- Interpreter Interface Plan
+  - Overview
+  - Architecture
+  - API Design
+    - Core Struct and Result
+    - Interface Function
+    - Standalone Function (for simple use)
+  - Implementation Plan
+    - Phase 1: Basic Interpreter Module
+    - Phase 2: I/O Capture
+    - Phase 3: System Tests
+  - File Structure
+  - Implementation Details
+    - interpreter.rs
+  - Usage Examples
+    - Basic Usage
+    - With Configuration
+    - Error Handling
+  - Testing Strategy
+  - Future Enhancements
+  - Summary
+
+## doc/plans/15_package_manager.md
+- lines: 445
+- headings:
+- Package Manager Design
+  - Overview
+  - Why UV is Fast
+    - 1. Rust Implementation
+    - 2. PubGrub Resolution Algorithm
+    - 3. Parallel Operations
+    - 4. Global Cache with Hard Links
+    - 5. Lazy Metadata Fetching
+    - 6. HTTP/2 Multiplexing
+    - 7. Memory-Mapped I/O
+  - Registry Design
+    - Phase 1: Git Registry (No Server)
+- Where packages are actually hosted
+- Template for package downloads
+- Version entries (append-only, newest last)
+    - Phase 2: Registry Server (Optional)
+  - Project Manifest (simple.toml)
+- Entry point
+- Registry packages
+- Git dependencies
+- Path dependencies (local development)
+- Optional dependencies
+- Only for tests/development
+- For build scripts
+- Default registry (can be overridden)
+- Or server: default = "https://registry.simple-lang.org"
+  - Lock File (simple.lock)
+- Auto-generated - do not edit
+  - CLI Commands
+- Initialize new project
+- Dependency management
+- Install and build
+- Publishing (Phase 1: Git registry)
+- Publishing (Phase 2: Server)
+- Cache management
+- Registry
+  - Directory Structure
+    - Global Cache
+    - Project Layout
+  - Implementation Architecture
+  - Performance Targets
+  - Implementation Phases
+    - Phase 1: Core (MVP)
+    - Phase 2: Git Registry
+    - Phase 3: Performance
+    - Phase 4: Server Registry (Optional)
+  - Dependencies (Rust Crates)
+- Manifest parsing
+- Version handling
+- Resolution
+- Network
+- Git
+- Cache
+- CLI
+- Hashing
+  - Security Considerations
+  - References
+
+## doc/plans/16_python_feature_migration.md
+- lines: 690
+- headings:
+- Python Feature Migration
+  - Guiding Principles
+  - Already Implemented (Better Than Python)
+    - Conditional Expression
+    - String Interpolation
+    - Pattern Matching
+    - Lambda Expressions
+    - In Operator
+  - Recommended Additions
+    - 1. List Comprehension
+    - 2. Dict Comprehension
+    - 3. Unpacking Assignment
+    - 4. Chained Comparisons
+- 0 < x < 10 becomes:
+- But x is only evaluated once:
+    - 5. Slicing
+    - 6. Negative Indexing
+    - 7. Truthiness (Implicit Bool Conversion)
+- NOT recommended - explicit is better
+    - 8. Walrus Operator (Assignment Expression)
+    - 9. Spread/Rest Operators
+    - 10. Context Managers
+- with resource as r: body
+- becomes:
+    - 11. Decorators vs Attributes
+- @decorator fn foo(): body
+- becomes:
+    - 12. For-Else
+  - Summary Table
+  - Implementation Order
+    - Phase 1: Core Comprehensions
+    - Phase 2: Unpacking & Safety
+    - Phase 3: Convenience
+    - Phase 4: Optional
+  - Grammar Changes Required
+
+## doc/plans/17_rust_feature_migration.md
+- lines: 667
+- headings:
+- Rust Feature Migration Analysis
+  - Rust Features Analysis
+    - 1. Result/Option Types
+    - 2. The `?` Operator (Error Propagation)
+- x = expr?
+- becomes:
+    - 3. Impl Blocks
+    - 4. Traits
+    - 5. Lifetime Annotations
+    - 6. Match Guards
+    - 7. If Let / While Let
+- if let pattern = expr: body
+- becomes:
+    - 8. Derive Macros
+    - 9. Declarative Macros (macro_rules!)
+    - 10. Closures with `move`
+    - 11. Iterator Combinators
+    - 12. Turbofish `::<T>`
+    - 13. Associated Types
+    - 14. Where Clauses
+    - 15. Async/Await
+    - 16. Pattern Bindings (`@`)
+    - 17. Or Patterns
+    - 18. Range Patterns
+    - 19. Const Generics
+    - 20. Struct Update Syntax
+- or
+  - Summary Table
+  - Features to Add to feature.md
+  - Rejected Rust Features
+  - Simple vs Rust: Design Differences
+  - Implementation Order
+    - Phase 1: Error Handling (0.2.x)
+    - Phase 2: Pattern Extensions (0.2.x)
+    - Phase 3: Advanced Generics (0.3.x)
+    - Phase 4: Closures (0.3.x)
+
+## doc/plans/18_actor_runtime_scheduler.md
+- lines: 292
+- headings:
+- Actor Runtime Scheduler Implementation Plan
+  - Overview
+  - Current State
+    - MIR Instructions (mir/types.rs)
+    - Existing Runtime Infrastructure (runtime/concurrency/mod.rs)
+    - Current Codegen Status
+  - Implementation Plan
+    - Phase 1: Runtime FFI Functions
+    - Phase 2: Thread-Local Actor Context
+    - Phase 3: Codegen Declarations (cranelift.rs, jit.rs)
+    - Phase 4: Codegen Implementation
+  - Design Decisions
+    - Body Block Compilation
+    - Message Serialization
+    - Blocking vs Non-blocking Recv
+  - Testing Strategy
+    - Unit Tests (runtime)
+    - Integration Tests (driver)
+  - Implementation Order
+  - Estimated Effort
+  - Dependencies
+  - Future Enhancements
+
+## doc/plans/19_stackless_coroutines.md
+- lines: 479
+- headings:
+- Stackless Coroutine Implementation Plan (Yield/Generator Codegen)
+  - Overview
+  - Current State
+    - Interpreter Implementation (Eager)
+    - MIR Instructions
+    - Current Codegen Status
+  - The Challenge: Yield
+  - Implementation Approaches
+    - Approach 1: CPS Transformation (Continuation-Passing Style)
+    - Approach 2: Stackful Coroutines (Fiber/Green Thread)
+    - Approach 3: Async/Await State Machine (Rust-style)
+  - Recommended Approach: Approach 3 (Async State Machine)
+    - Why?
+  - Implementation Plan
+    - Phase 1: MIR Yield Analysis
+    - Phase 2: State Machine Transformation
+    - Phase 3: Runtime Support
+    - Phase 4: Codegen Updates
+  - Example Transformation
+    - Source
+    - MIR Before
+    - MIR After (State Machine)
+  - Testing Strategy
+    - Unit Tests
+    - Integration Tests
+  - Implementation Order
+  - Estimated Effort
+  - Dependencies
+  - Future Enhancements
+
+## doc/plans/20_codegen_body_outlining.md
+- lines: 54
+- headings:
+- Plan 20: Codegen Body Outlining for Actors/Generators/Futures
+  - Goal
+  - Current State
+  - Target Design (Rust ABI, Erlang isolation)
+  - Steps
+  - Risks/Decisions
+  - Done Criteria
+
+## doc/plans/21_codegen_generator_state_machine.md
+- lines: 28
+- headings:
+- Plan 21: Generator State Machine Codegen (Yield Implementation)
+  - Goal
+  - Current State
+  - Target Design
+  - Steps
+  - Decisions
+
+## doc/plans/22_codegen_future_execution.md
+- lines: 25
+- headings:
+- Plan 22: Future Execution in Codegen
+  - Goal
+  - Current State
+  - Target Design
+  - Steps
+  - Decisions
+
+## doc/plans/23_llvm_backend_support.md
+- lines: 51
+- headings:
+- Plan 23: LLVM Backend for 64-bit and 32-bit Targets
+  - Goal
+  - Context
+  - Constraints and Principles
+  - Plan
+  - Risks and follow-ups
+
+## doc/plans/24_ui_dynamic_structure_and_hydration.md
+- lines: 58
+- headings:
+- Plan 24: UI Dynamic Structure, Keyed Diffing, and SSR/Hydration
+  - Goals
+  - Scope
+  - Dependencies and Reuse
+  - Workplan
+  - Risks and Mitigations
+  - Out of Scope (later)
+
+## doc/plans/25_diff5_remaining.md
+- lines: 28
+- headings:
+- Plan 25: Remaining Difficulty-5 Features
+  - Suggested sequencing
+
+## doc/plans/26_gpu_kernels.md
+- lines: 59
+- headings:
+- Plan 26: GPU Kernels (`#[gpu]`) and SPIR-V Codegen
+  - Goal
+  - Scope
+  - Design Principles
+  - Workplan
+  - Milestones and acceptance
+  - Acceptance criteria
+  - Risks
+
+## doc/plans/27_jj_integration.md
+- lines: 303
+- headings:
+- JJ Version Control Integration Plan
+  - Overview
+  - Completed (8/12 Tasks)
+    - 1. ✅ Core State Management
+    - 2. ✅ Unit Tests (2 passing)
+    - 3. ✅ Integration Tests (15/15 passing)
+    - 4. ✅ Event System Infrastructure (12 tests passing)
+    - 5. ✅ CLI Integration
+- Compiled app.spl -> app.smf
+- 📸 Updated JJ change description with build state (commit: abc123...)
+  - Remaining (4/12 Tasks)
+    - 6. ⏳ Wire Test Success Tracking
+    - 7. ⏳ System Tests
+    - 8. ⏳ Documentation
+    - 9. 🔒 Test State Storage
+  - Implementation Details
+    - Build State Tracking
+    - JJ CLI Integration
+    - State Persistence
+  - CLI Usage
+    - Current (Implemented)
+- Compile with snapshot
+- Cross-compile with snapshot
+    - Future (Planned)
+- Run tests with snapshot
+- Run tests with coverage and snapshot
+- Check last working state
+- Rollback to last working build
+  - Architecture
+  - Testing Strategy
+    - Unit Tests (2 passing)
+    - Integration Tests (15 passing)
+    - System Tests (Planned)
+  - Dependencies
+  - Timeline
+  - Benefits
+    - For Developers
+    - For Teams
+    - For CI/CD
+  - Future Enhancements
+  - See Also
+
+## doc/plans/28_bdd_spec.md
+- lines: 358
+- headings:
+- BDD Spec Framework Implementation Plan
+  - Overview
+  - Specification
+  - Sprint 1: Core DSL & Registry ✅ COMPLETE
+    - Completed (10/10 tasks)
+    - Example Usage
+  - Sprint 1 Remaining (30% of Sprint 1)
+    - 1. ⏳ Unit Tests for DSL and Matchers
+    - 2. ⏳ Test Registry Functionality
+  - Sprint 2: Runner & Formatters (Planned)
+    - 1. Runner Implementation
+    - 2. Formatters
+    - 3. Integration Tests
+  - Sprint 3: Coverage Infrastructure (Planned)
+    - 1. Compiler Coverage Instrumentation
+    - 2. Public API Coverage Calculation
+    - 3. Coverage Reports
+  - Sprint 4: Test Environment & Polish (Planned)
+    - 1. Test Environment Setup
+- simple.toml
+    - 2. Migration Guide
+    - 3. Documentation
+  - Progress Summary
+  - Dependencies
+    - External
+    - Internal
+  - Timeline
+  - Integration with Doctest
+- Run all tests (BDD + Doctest)
+- Run only BDD specs
+- Run only doctests
+- Run with coverage
+  - See Also
+
+## doc/plans/29_doctest.md
+- lines: 414
+- headings:
+- Simple Doctest (sdoctest) Framework Implementation Plan
+  - Overview
+  - Specification
+  - Features
+  - Sprint 1: Core Parser and Runner ✅ COMPLETE
+    - Completed (8/8 tasks)
+  - Sprint 2: Discovery and Integration ✅ COMPLETE (Effective)
+    - Completed (9/9 non-blocked tasks)
+    - Blocked Tasks (3/12 total)
+  - Sprint 3: Advanced Features (Planned)
+    - 1. Wildcard Matching Enhancement
+    - 2. Setup/Teardown Isolation
+    - 3. Tag Filtering
+    - 4. REPL Recording Mode
+  - Sprint 4: Coverage and Polish (Planned)
+    - 1. Coverage Integration
+    - 2. Configuration
+    - 3. Migration Guide
+    - 4. Example Library
+  - Progress Summary
+  - File Structure
+  - Example Usage
+    - Docstring Doctest
+    - Markdown Doctest
+- Calculator Tutorial
+  - Addition
+    - Dedicated File (.sdt)
+- calculator_tests.sdt
+  - Integration with BDD Spec
+  - Dependencies
+    - External
+    - Internal
+  - Timeline
+  - Migration Notes
+  - See Also
+
+## doc/plans/30_pending_features.md
+- lines: 322
+- headings:
+- Pending Features - Future Development
+  - Developer Tooling
+    - 1. Language Server Protocol (LSP)
+    - 2. Debugger (DAP)
+  - AI/LLM Integration
+    - 3. Model Context Protocol (MCP) for LLMs
+  - Language Features
+    - 4. Convention Over Configuration
+  - GUI/UI Support
+    - 5. Ruby on Rails-Style Web Framework
+- routes.spl
+- controllers/home.spl
+- models/user.spl
+    - 6. Terminal UI (TUI) Framework
+    - 7. GUI Framework
+  - Infrastructure
+    - 8. Test Infrastructure Enhancements
+    - 9. Build System Enhancements
+    - 10. Package Registry
+  - Priority Matrix
+  - Recommendation
+  - See Also
+
+## doc/plans/llm_friendly.md
+- lines: 534
+- headings:
+- LLM-Friendly Development Plan
+  - Overview
+  - Phase 1: Language Core - Contract System (HIGH PRIORITY)
+    - Feature: Contract Blocks (requires/ensures/invariant)
+  - Phase 2: Language Core - Effect System Extension (HIGH PRIORITY)
+    - Feature: Capability-Based Imports
+- Module declares required capabilities
+- Only pure functions allowed - no I/O, network, filesystem
+- Functions declare required effects
+  - Phase 3: Tooling - AST/IR Export (MEDIUM PRIORITY)
+    - Feature: Machine-Readable Output Formats
+  - Phase 4: Tooling - Context Pack Generator (MEDIUM PRIORITY)
+    - Feature: Minimal Context Extraction
+- Context for app.service
+  - Dependencies
+    - crate.core.Result[T, E]
+    - crate.net.http.HttpClient
+  - Current Module Interface
+  - Phase 5: Testing Infrastructure (MEDIUM PRIORITY)
+    - Feature: Property-Based Testing + Golden Tests
+- Property: sorting twice gives same result as sorting once
+- Property: reversing twice gives original
+- First run: creates snapshots/test_render_user_json.json
+- Subsequent runs: compares output to snapshot
+  - Phase 6: Linting - Forbidden Patterns (LOW PRIORITY)
+    - Feature: Configurable Lint Rules
+- Error levels: allow, warn, deny
+  - Phase 7: Documentation
+    - Feature: Comprehensive LLM-Friendly Docs
+  - Implementation Priority
+    - Sprint 1: Contracts (2 weeks)
+    - Sprint 2: Effects (2 weeks)
+    - Sprint 3: Tooling (2 weeks)
+    - Sprint 4: Testing (2 weeks)
+    - Sprint 5: Polish (1 week)
+  - Total Effort Estimate
+  - Success Metrics
+  - Dependencies
+  - Notes
+
+## doc/plans/settlement_and_executable_packaging.md
+- lines: 481
+- headings:
+- Settlement and Executable Packaging
+  - Overview
+  - Features
+    - Feature 1: Settlement Container (Core)
+    - Feature 2: Extended SMF Format (Settlement SMF)
+    - Feature 3: Native Library Support
+    - Feature 4: Startup-Only Loader (.exe)
+    - Feature 5: Settlement Builder
+    - Feature 6: Slot-Based Memory Allocator
+    - Feature 7: Indirection Tables
+  - File Structure
+  - CLI Commands
+- Build settlement from project
+- Build executable settlement
+- Build with native libs
+- Run settlement directly
+- or
+  - Implementation Phases
+    - Phase 1: Core Infrastructure
+    - Phase 2: Settlement SMF Format
+    - Phase 3: Native Library Support
+    - Phase 4: Executable Packaging
+    - Phase 5: Tooling
+  - Compatibility
+  - Executable Packaging Format
+    - Layout
+    - File Extension
+    - Loading Process
+    - Creating Executables
+  - Testing Strategy
+
+## doc/research/NEOVIM_TOOLING_RESEARCH.md
+- lines: 0
+- headings: (none)
+
+## doc/research/WASM_VSCODE_RESEARCH.md
+- lines: 0
+- headings: (none)
+
+## doc/research/actor_runtime_policy.md
+- lines: 42
+- headings:
+- Actor Runtime Policy: Erlang-Style vs Rust-Style
+  - Context
+  - Comparison
+  - Direction for Simple
+  - Next Steps
+
+## doc/research/aop.md
+- lines: 558
+- headings: (none)
+
+## doc/research/api_design/best_practices.md
+- lines: 5
+- headings:
+- Best Practices
+
+## doc/research/api_design/collections.md
+- lines: 5
+- headings:
+- Collections
+
+## doc/research/api_design/concurrency.md
+- lines: 5
+- headings:
+- Concurrency
+
+## doc/research/api_design/documentation.md
+- lines: 5
+- headings:
+- Documentation
+
+## doc/research/api_design/errors.md
+- lines: 5
+- headings:
+- Errors
+
+## doc/research/api_design/io.md
+- lines: 5
+- headings:
+- Io
+
+## doc/research/api_design/naming.md
+- lines: 5
+- headings:
+- Naming
+
+## doc/research/api_design/numerics.md
+- lines: 5
+- headings:
+- Numerics
+
+## doc/research/api_design/option_result.md
+- lines: 5
+- headings:
+- Option Result
+
+## doc/research/api_design/principles.md
+- lines: 5
+- headings:
+- Principles
+
+## doc/research/api_design/python_features.md
+- lines: 5
+- headings:
+- Python Features
+
+## doc/research/api_design/ruby_features.md
+- lines: 5
+- headings:
+- Ruby Features
+
+## doc/research/api_design/strings.md
+- lines: 5
+- headings:
+- Strings
+
+## doc/research/api_design/testing.md
+- lines: 5
+- headings:
+- Testing
+
+## doc/research/api_design_index.md
+- lines: 38
+- headings:
+- Simple Standard Library API Design
+  - Documentation Structure
+  - Quick Reference
+    - Core Principles
+    - Common Patterns
+
+## doc/research/api_design_regrets.md
+- lines: 364
+- headings:
+- API Design Regrets from Major Languages
+  - 1. Null References - "The Billion Dollar Mistake"
+  - 2. String Types Complexity
+    - 2.1 Rust: String vs &str
+    - 2.2 Python 2→3: Unicode vs Bytes
+  - 3. Error Handling
+    - 3.1 Java: Checked Exceptions
+    - 3.2 Rust: unwrap() Encourages Panics
+    - 3.3 Go: Verbose Error Handling + Nil Interface Pitfall
+  - 4. Implicit Conversions
+    - 4.1 Scala: Implicit Conversions
+    - 4.2 Numeric Widening
+  - 5. Collections API Issues
+    - 5.1 Scala: Collections Complexity ("Second System Syndrome")
+    - 5.2 Python: append() vs extend()
+    - 5.3 Rust: Iterator collect() Turbofish
+  - 6. Concurrency Design
+    - 6.1 Python/Ruby: GIL (Global Interpreter Lock)
+    - 6.2 Async/Await: Function Coloring
+  - 7. Symbol vs String Confusion (Ruby)
+  - 8. Mutability Defaults
+    - 8.1 Most Languages: Mutable by Default
+  - 9. Standard Library Scope
+    - 9.1 Rust: Minimal stdlib
+    - 9.2 Ruby: stdlib Quality Issues
+  - 10. API Naming Conventions
+    - 10.1 Inconsistent Method Names
+    - 10.2 Mutable vs Immutable Method Naming
+  - Summary: Top Recommendations for Simple
+    - Must Have (Critical)
+    - Should Have (Important)
+    - Nice to Have (Future)
+  - Sources
+
+## doc/research/codegen_backend_comparison.md
+- lines: 286
+- headings:
+- Codegen Backend Comparison: Cranelift vs LLVM
+  - Executive Summary
+  - Current State
+    - Cranelift Supported Architectures
+    - Why No 32-bit in Cranelift?
+  - Option 1: Implement Cranelift 32-bit Backend
+    - Effort Estimate
+    - Skills Required
+    - Timeline
+    - Risks
+    - References
+  - Option 2: Add LLVM Backend (Recommended)
+    - Overview
+    - LLVM Supported Architectures
+    - Effort Estimate
+    - Inkwell vs llvm-sys
+    - Timeline
+    - Dependencies
+- OR for raw bindings:
+- llvm-sys = "180"
+    - Pros
+    - Cons
+    - References
+  - Performance Comparison
+    - Compilation Speed
+    - Generated Code Quality
+    - Binary Size
+  - Proposed Architecture
+    - Backend Selection Strategy
+  - Implementation Plan
+    - Phase 1: LLVM Backend Foundation (Week 1-2)
+    - Phase 2: Complete MIR Coverage (Week 2-3)
+    - Phase 3: Runtime Integration (Week 3-4)
+    - Phase 4: Testing and Optimization (Week 4-5)
+  - Conclusion
+  - Appendix: Cranelift Version Info
+
+## doc/research/codegen_body_outlining.md
+- lines: 42
+- headings:
+- Codegen Body Outlining Plan (Actors/Generators/Futures)
+  - Interpreter Baseline (already works)
+  - Current Codegen/Runtime State
+  - Target ABI (Rust-style function pointer, Erlang-style isolation)
+  - Implementation Steps
+  - Complex Item: Live Capture Encoding
+  - Decision Notes (Rust vs Erlang)
+
+## doc/research/cpu_simd_scheduling.md
+- lines: 8
+- headings:
+- CPU SIMD Scheduling (Index)
+  - Parts
+
+## doc/research/cpu_simd_scheduling_part1.md
+- lines: 554
+- headings:
+- CPU Scheduling for @simd Kernels (TBB-Style)
+  - 1. Overview
+    - Key Insight: No Source Code Generation
+    - Execution Backends
+    - Design Goals
+  - 2. Why Rayon Instead of TBB?
+    - The Problem with TBB
+    - The Rayon Solution
+    - Comparison
+  - 3. Complete Pipeline: Simple @simd to CPU Execution
+    - 3.1 Pipeline Overview
+    - 3.2 Backend Options
+    - 3.3 MIR Instruction to FFI Call
+    - 3.4 Kernel Launch Generation
+    - 3.5 Runtime Execution
+    - 3.6 Summary: What Changes vs Existing GPU Path
+  - 4. Programming Model Equivalence
+    - GPU vs CPU Parallel Mapping
+    - Thread Identity Mapping
+  - 3. Architecture
+    - 3.1 Runtime Structure
+    - 3.2 Kernel Context
+    - 3.3 Parallel Executor
+
+## doc/research/cpu_simd_scheduling_part2.md
+- lines: 480
+- headings:
+- CPU SIMD Scheduling - Part 2: Implementation Details
+    - 3.4 Barrier Synchronization
+    - 3.5 Shared Memory
+  - 4. FFI Interface
+    - 4.1 Runtime FFI Functions
+    - 4.2 Codegen FFI Mapping
+  - 5. Codegen Integration
+    - 5.1 Backend Selection
+    - 5.2 MIR to FFI Lowering
+    - 5.3 Kernel Launch Generation
+  - 6. Example Transformations
+    - 6.1 Simple Vector Add
+    - 6.2 Reduction with Shared Memory
+- Parallel reduction
+    - 6.3 2D Matrix Operation
+  - 7. Performance Characteristics
+    - 7.1 Comparison: GPU vs CPU Parallel
+    - 7.2 Optimization Guidelines
+  - 8. Implementation Phases
+    - Phase 1: Core Infrastructure
+    - Phase 2: FFI Integration
+    - Phase 3: Synchronization
+    - Phase 4: Testing
+  - 9. Dependencies
+    - Cargo.toml Addition
+    - Why Rayon Instead of TBB?
+  - 10. Related Documents
+
+## doc/research/cuda_tbb_entry_compare.md
+- lines: 637
+- headings:
+- CUDA vs TBB: Programming Model Comparison
+  - The Core Difference
+  - Visual Comparison
+  - Creating CUDA-like Interface for TBB
+    - Basic CUDA-style Wrapper
+    - Usage: CUDA-style Code on CPU
+  - Advanced CUDA-like Interface
+    - Full Implementation with Shared Memory Simulation
+    - Example: Vector Addition (CUDA-style)
+    - Example: Matrix Multiplication (2D Launch)
+    - Example: Reduction with Shared Memory
+  - Comparison: Same Algorithm in Both Styles
+    - CUDA Original
+    - TBB Traditional
+    - TBB with CUDA-like Interface
+  - Why Would You Want This?
+  - Unified CPU/GPU Interface
+  - Performance Considerations
+  - Libraries That Already Do This
+    - 1. SYCL / DPC++
+    - 2. Kokkos
+    - 3. RAJA
+    - 4. Thrust (CUDA's STL)
+  - Summary
+    - Recommendation
+
+## doc/research/high_performance_concurrent_runtime.md
+- lines: 10
+- headings:
+- High-Performance Concurrent Runtime Stack (Index)
+  - Parts
+
+## doc/research/high_performance_concurrent_runtime_part1.md
+- lines: 211
+- headings:
+- High-Performance Concurrent Runtime Stack
+  - Complete Reference (TBB + moodycamel + libcuckoo + libcds + mimalloc)
+  - Stack Overview
+  - Architecture
+  - Compatibility Matrix
+  - Platform Support
+  - Project Setup
+    - Directory Structure
+    - CMakeLists.txt
+- ============ Dependencies ============
+- TBB
+- mimalloc
+- libcds
+- Header-only: moodycamel, libcuckoo
+- ============ Library ============
+- Do NOT link TBB malloc - use mimalloc instead
+- target_link_libraries(concurrent_runtime TBB::tbbmalloc)  # WRONG
+- ============ Executable ============
+- ============ Shared library for Rust FFI ============
+
+## doc/research/high_performance_concurrent_runtime_part2.md
+- lines: 835
+- headings:
+- High-Performance Concurrent Runtime Stack - Part 2: Runtime Implementation
+  - Complete Runtime Implementation
+    - include/runtime/allocator.hpp
+    - include/runtime/queue.hpp
+    - include/runtime/hashmap.hpp
+    - include/runtime/scheduler.hpp
+    - include/runtime/runtime.hpp
+
+## doc/research/high_performance_concurrent_runtime_part3.md
+- lines: 995
+- headings:
+- High-Performance Concurrent Runtime Stack - Part 3: Usage & Rust Considerations
+  - Usage Example
+    - src/main.cpp
+  - Rust Wrapper Considerations
+    - Two Approaches
+    - Native Rust Equivalents
+    - Native Rust Stack (Recommended)
+- Cargo.toml
+    - FFI Wrapper (If Needed)
+
+## doc/research/high_performance_concurrent_runtime_part4.md
+- lines: 59
+- headings:
+- High-Performance Concurrent Runtime Stack - Part 4: Recommendations & Summary
+  - Recommendation Summary
+    - Native Rust vs FFI Trade-offs
+  - Final Summary
+    - What Works Together
+    - When to Use What
+
+## doc/research/immutable_interface_design.md
+- lines: 221
+- headings:
+- Immutable Interface Design Research
+  - Overview
+  - Current Implementation Analysis
+    - Mutable Pattern (core_nogc)
+- Mutates in-place, returns success indicator
+- Mutates in-place, returns removed value
+    - Immutable Pattern (core_nogc_immut)
+- Returns new vector with element appended
+- Returns tuple of (extracted value, new vector)
+    - Persistent Pattern (core_immut)
+  - Design Guidelines
+    - 1. Return Type Conventions
+    - 2. Naming Conventions
+    - 3. Self Parameter Conventions
+- Mutable: takes &mut self or self (mutable)
+- Immutable: takes self (by value, consumes) or &self (borrows)
+    - 4. Error Handling
+- Mutable: returns bool or mutates + returns Result
+- Immutable: returns Option[NewType] or Result[NewType, Error]
+  - Variant Organization
+    - Module Naming
+    - Host Variants
+  - Immutable + GC Benefits
+  - Implementation Recommendations
+    - 1. Trait-Based Abstraction
+    - 2. Builder Pattern for Immutable Types
+    - 3. Copy-on-Write for Hybrid APIs
+- Unique reference, mutate in place
+- Shared reference, copy first
+  - References
+
+## doc/research/improve_api.md
+- lines: 203
+- headings:
+- Simple Standard Library API Design
+  - Overview
+  - Documentation Structure
+  - Quick Reference
+    - Core Design Principles
+    - Common Patterns
+- Error handling
+- Safe access
+- Functional style
+- Ruby style
+- Python style
+  - Implementation Status
+  - Key Lessons from Other Languages
+    - From Rust
+    - From Python
+    - From Ruby
+    - From Scala
+    - From Go
+    - From Java
+  - Design Process
+  - See Also
+
+## doc/research/interpreter_vs_codegen.md
+- lines: 27
+- headings:
+- Interpreter vs Codegen: Concurrency/Generators/Futures
+  - Overview
+  - Interpreter Implementation (works today)
+  - Codegen/Runtime Status (after recent wiring)
+  - What the Compiler Still Needs
+  - Complex Item: Body Outlining + Captures (design direction)
+
+## doc/research/mold_linker_analysis.md
+- lines: 9
+- headings:
+- Mold Linker Analysis (Index)
+  - Parts
+
+## doc/research/mold_linker_analysis_part1.md
+- lines: 604
+- headings:
+- Mold Linker Analysis for Simple Language Compiler
+  - Executive Summary
+  - 1. Overview
+    - What is mold?
+    - Performance Comparison
+  - 2. Architecture & Design
+    - Core Design Principles
+    - Supported Platforms
+  - 3. Symbol Analysis Capabilities
+    - Map File Generation
+- Generate map during native executable compilation
+    - Symbol Tracing
+- Trace how 'main' symbol is resolved
+    - Cross-Reference Table
+- Generate cross-reference for symbol analysis
+    - Dependency Analysis
+- Debug why certain modules are linked
+    - Relocation Preservation
+  - 4. Integration with Simple Compiler
+    - Current Simple Compilation Pipeline
+    - Where mold Fits
+- Trace why symbol is undefined
+- Find duplicate definitions
+- Print unused symbols (requires --gc-sections)
+- .cargo/config.toml
+- Makefile
+- Install RISC-V 32-bit cross-compiler
+- Configure Simple to use mold for RISC-V target
+  - 5. Comparative Analysis
+    - mold vs. GNU ld
+    - mold vs. LLVM lld
+    - mold vs. Simple SMF Loader
+  - 6. Recommendations for Simple
+    - ✅ Recommended Use Cases
+    - ⚠️ Limited Use Cases
+    - ❌ Not Recommended
+  - 7. Implementation Plan
+    - Phase 1: Optional Native Backend (1-2 days)
+    - Phase 2: Symbol Analysis Integration (2-3 days)
+- Analyze undefined symbols in build
+    - Phase 3: CI/CD Integration (1 day)
+  - 8. Performance Projections for Simple
+    - Current Simple Build Times (Estimated)
+    - With mold Integration
+  - 9. Alternatives Considered
+    - 1. GNU Gold
+    - 2. LLVM lld
+    - 3. Custom Linker for Simple
+    - 4. Cranelift JIT (No Linking)
+  - 10. Risks & Mitigations
+
+## doc/research/mold_linker_analysis_part2.md
+- lines: 610
+- headings:
+- Mold Linker Analysis - Part 2: Implementation & Conclusion
+    - Risk 1: Platform Support
+    - Risk 2: Linker Script Compatibility
+    - Risk 3: Build Reproducibility
+    - Risk 4: Debugging Experience
+  - 11. Conclusion
+    - Summary
+    - Recommended Action
+  - 12. References
+    - Primary Sources
+    - Secondary Sources
+    - Related Tools
+  - Appendix A: mold Flag Reference
+    - Symbol Analysis Flags
+    - Performance Flags
+    - Compatibility Flags
+  - Appendix B: Integration Code Example
+    - Complete Implementation (Proof of Concept)
+    - CLI Integration
+  - Appendix C: Design Patterns for Resource Management
+    - Overview
+    - Pattern 1: RAII Process Handle
+    - Pattern 2: Builder Pattern for Linker Configuration
+    - Pattern 3: Strategy Pattern for Linker Selection
+
+## doc/research/mold_linker_analysis_part3.md
+- lines: 595
+- headings:
+- Mold Linker Analysis - Part 3: Detailed Appendices
+    - Pattern 4: Result Type with Rich Error Context
+    - Pattern 5: Temporary File Guard
+  - Appendix D: Coding and Design Style Guidelines
+    - Overview
+    - 1. Module Organization
+    - 2. Naming Conventions
+    - 3. Error Handling Style
+    - 4. Documentation Style
+    - 5. Testing Conventions
+    - 6. Configuration Style
+    - 7. Logging Style
+    - 8. Performance Considerations
+    - 9. Cross-Platform Compatibility
+    - 10. API Stability
+
+## doc/research/python_interpreter_comparison.md
+- lines: 0
+- headings: (none)
+
+## doc/research/sdn_self_hosting.md
+- lines: 315
+- headings:
+- SDN Self-Hosting and Missing Language Features
+  - Part 1: SDN Self-Hosting
+    - Current State
+- Current: simple.toml
+    - Proposed: SDN Format
+- Proposed: simple.sdn
+    - Benefits of SDN Self-Hosting
+    - Migration Path
+    - SDN Manifest Schema
+- simple.sdn schema
+- Short form
+- Long form
+- Same as dependencies
+- Optional: profiles for build configuration
+  - Part 2: Missing Language Features
+    - Metaprogramming Features (#1061-1080)
+    - Pattern Matching Enhancements (#1083-1090)
+    - Context Managers & Closures (#1091-1093)
+    - Error Handling (#1094-1095)
+    - Memory Model (#1096-1100)
+    - Interior Mutability (#1101-1103)
+  - Summary
+    - New Feature Ranges
+    - Implementation Priority
+    - Related Documents
+
+## doc/research/simd_to_tbb_transformation.md
+- lines: 8
+- headings:
+- SIMD to TBB Transformation (Index)
+  - Parts
+
+## doc/research/simd_to_tbb_transformation_part1.md
+- lines: 604
+- headings:
+- Simple @simd to TBB Transformation Pipeline
+  - 1. Overview
+  - 2. Source Language Constructs
+    - 2.1 Basic @simd Kernel
+    - 2.2 With Bounds Policy
+    - 2.3 With Shared Memory
+- Reduction...
+    - 2.4 With User-Defined Indexer
+    - 2.5 With @indexer Field Forwarding
+    - 2.6 With Neighbor Accessors
+  - 3. Parser Stage
+    - 3.1 @simd Annotation Detection
+    - 3.2 Intrinsic Recognition
+    - 3.3 Indexer Declaration Parsing
+  - 4. HIR Stage
+    - 4.1 Kernel Function Representation
+    - 4.2 Indexer Lowering
+    - 4.3 Neighbor Accessor Lowering
+  - 5. MIR Stage
+    - 5.1 GPU/SIMD Instructions
+    - 5.2 Example MIR for vector_add
+    - 5.3 Example MIR for Matrix with Indexer
+- a[i, j] -> a.get(i, j)
+- b[i, j] -> b.get(i, j)
+- out[i, j] = sum -> out.set(i, j, sum)
+    - 5.4 Example MIR for Neighbor Accessors
+- Bounds check for i-1 (left_neighbor)
+- Bounds check for i+1 (right_neighbor)
+  - 6. TBB Backend Code Generation
+    - 6.1 Generated C++ Structure
+    - 6.2 Generated Kernel Body
+    - 6.3 Generated Kernel with Indexer
+
+## doc/research/simd_to_tbb_transformation_part2.md
+- lines: 477
+- headings:
+- SIMD to TBB Transformation - Part 2: Code Generation
+    - 6.4 Generated Kernel with Neighbor Accessors
+    - 6.5 Generated Kernel with Shared Memory
+  - 7. TBB Launcher Generation
+    - 7.1 1D Launcher
+    - 7.2 2D Launcher (for Matrix operations)
+    - 7.3 Launcher with Shared Memory
+  - 8. Runtime FFI Bridge
+    - 8.1 Rust FFI Definitions
+    - 8.2 C++ Runtime Implementation
+  - 9. Complete Transformation Summary
+    - 9.1 Construct Mapping Table
+    - 9.2 Launch Mapping
+    - 9.3 Performance Characteristics
+  - 10. Integration with Parallel Module
+- Auto-selects backend
+- Uses TBB when GPU disabled
+- Or use parallel iterators (auto-uses TBB)
+  - Related Documents
+
+## doc/research/src_to_bin_optimization.md
+- lines: 9
+- headings:
+- Source-to-Binary Optimization (Index)
+  - Parts
+
+## doc/research/src_to_bin_optimization_part1.md
+- lines: 954
+- headings:
+- Source-to-Binary Optimization: Mold-Inspired Strategies for Simple Compiler
+  - Executive Summary
+  - Table of Contents
+  - 1. Mold's Core Strategies
+    - 1.1 Parallelization First
+    - 1.2 String Interning
+    - 1.3 Memory Efficiency
+    - 1.4 Atomic Synchronization
+  - 2. Simple's Current Architecture
+    - 2.1 Compilation Pipeline
+    - 2.2 Current Performance Characteristics
+    - 2.3 Multi-File Compilation
+  - 3. Optimization Opportunities by Stage
+    - 3.1 PARSER Stage (200ms → 80ms target)
+    - 3.2 HIR LOWERING Stage (180ms → 100ms target)
+    - 3.3 MONOMORPHIZATION Stage (250ms → 120ms target)
+    - 3.4 MIR LOWERING Stage (300ms → 150ms target)
+    - 3.5 CODEGEN Stage (700ms → 400ms target)
+    - 3.6 SMF LINKER Stage (200ms → 60ms target)
+  - 4. Parallelization Strategy
+    - 4.1 Parallelism Levels
+    - 4.2 Implementation with Rayon
+    - 4.3 Shared State Management
+  - 5. String Interning Strategy
+    - 5.1 Why String Interning?
+    - 5.2 Interning Scope
+    - 5.3 Implementation Plan
+
+## doc/research/src_to_bin_optimization_part2.md
+- lines: 749
+- headings:
+- Source-to-Binary Optimization - Part 2: Implementation
+  - 6. Memory Management Strategy
+    - 6.1 Current Memory Usage
+    - 6.2 Arena Allocation Strategy
+    - 6.3 Buffer Pooling Strategy
+  - 7. Implementation Roadmap
+    - Phase 1: Foundation (2 weeks)
+    - Phase 2: Parser & HIR (3 weeks)
+    - Phase 3: MIR & Monomorphization (3 weeks)
+    - Phase 4: Codegen & Linking (2 weeks)
+    - Phase 5: Integration & Tuning (2 weeks)
+  - 8. Performance Projections
+    - 8.1 Single-File Compilation
+    - 8.2 Multi-File Compilation (10 files)
+    - 8.3 Comparison with Mold
+  - 9. Comparison: Simple vs Mold Design
+    - 9.1 Architecture Comparison
+    - 9.2 Key Differences
+    - 9.3 What Can Be Directly Adopted from Mold
+    - 9.4 What Simple Can Do That Mold Cannot
+  - 10. Refactoring Proposals
+    - 10.1 Refactor Parser to Mold-Like Design
+    - 10.2 Refactor SMF Linker to Mold-Like Design
+    - 10.3 Refactor Type Checker to Parallel Design
+  - Appendix A: Optimization Checklist
+    - Parser Stage
+    - HIR Lowering Stage
+    - Monomorphization Stage
+    - MIR Lowering Stage
+    - Codegen Stage
+    - SMF Linking Stage
+    - Cross-Cutting
+  - Appendix B: Performance Measurement
+    - Benchmark Setup
+    - Profiling Commands
+- Flamegraph (CPU profiling)
+- Perf (Linux perf_events)
+- Time per stage
+- Memory profiling
+  - Appendix C: Feature List for Implementation
+    - Feature IDs (New Features)
+  - Appendix D: Grammar for Optimization Directives
+    - D.1 Compiler Hints (EBNF)
+    - D.2 Optimization Directive Examples
+- Rarely called, don't bloat call sites
+- Compiler: parallelize with rayon, chunk size 1000
+- Compiler: do NOT parallelize, even if heuristics suggest it
+- Compiler: cache results for 1 hour
+- Compiler: aggressive optimization, assume called frequently
+- Compiler: minimal optimization, optimize for size
+    - D.3 CLI Flags Grammar
+- Optimization level
+- Parallelization control
+- String interning
+- Memory management
+- Profiling
+- Cache control
+- Debug
+
+## doc/research/src_to_bin_optimization_part3.md
+- lines: 986
+- headings:
+- Source-to-Binary Optimization - Part 3: Appendices
+  - Appendix E: Detailed Implementation Guide
+    - E.1 Feature #651: Parallel File Parsing
+- simple-parser/Cargo.toml
+    - E.2 Feature #652: String Interning (Global)
+- Cargo.toml (workspace)
+    - E.3 Feature #658: Parallel Monomorphization
+  - Appendix F: SQP Integration & Query Optimization
+    - F.1 Overview
+    - F.2 Feature #671: Query Compilation to Native Code
+- High-level SQP
+- Compiled to MIR (pseudo-code)
+- Parallel table scan
+- SIMD filter (active == true)
+- Parallel sort (created_at desc)
+- Limit
+    - F.3 Feature #672: Connection Pooling
+    - F.4 Feature #673: ORM Code Generation
+    - F.5 Performance Projections (SQP Features)
+  - Appendix G: Feature Implementation Checklist (Expanded)
+    - G.1 Phase 1: Foundation (Weeks 1-2)
+    - G.2 Phase 2: Parser & HIR (Weeks 3-5)
+    - G.3 Phase 3: MIR & Monomorphization (Weeks 6-8)
+    - G.4 Phase 4: Codegen & Linking (Weeks 9-10)
+    - G.5 Phase 5: Integration (Weeks 11-12)
+  - Conclusion
+
+## doc/research/trait_based_stdlib.md
+- lines: 287
+- headings:
+- Trait-Based Standard Library Design
+  - Overview
+  - Key Rust Trait Patterns to Apply
+    - 1. I/O Traits
+- Default implementations
+- Read until buf is filled or error
+- Read until EOF
+- Read UTF-8 to string
+- Default implementations
+- Write until all bytes written
+- Write formatted string
+- Default implementations
+- Default implementations
+    - 2. Collection Traits
+    - 3. Conversion Traits (Enhance Existing)
+    - 4. Error Handling Traits
+    - 5. String Traits
+  - Implementation Plan
+    - Phase 1: Core I/O Traits
+    - Phase 2: Collection Traits
+    - Phase 3: Enhanced Conversion Traits
+    - Phase 4: Iterator Enhancements
+  - Trait Implementation Examples
+    - File implementing Read/Write/Seek
+- In async_nogc_mut/io/fs.spl
+    - Vec implementing Extend
+    - StaticVec implementing AsSlice
+    - String implementing Borrow
+  - Benefits of Trait-Based Design
+  - Blanket Implementations
+- Any Read can be buffered
+- Any Iterator can collect
+- Any Display can be converted to String
+- format via Display
+  - Comparison: Existing vs Enhanced
+  - Migration Notes
+
+## doc/research/type_inference_generics_gc.md
+- lines: 38
+- headings:
+- Research Notes — Features #13 (Type Inference), #14 (Generics), #24 (GC-Managed Default)
+  - References
+  - Type Inference (Feature #13)
+  - Generics (Feature #14)
+  - GC-Managed Default (Feature #24)
+  - Rollout strategy (shared)
+
+## doc/research/unified_coverage_plan.md
+- lines: 8
+- headings:
+- Unified Coverage Plan (Index)
+  - Parts
+
+## doc/research/unified_coverage_plan_part1.md
+- lines: 654
+- headings:
+- Unified Coverage Plan: Merging Rust and Simple Test Coverage
+  - Executive Summary
+  - Table of Contents
+  - 1. Current State
+    - 1.1 Rust Test Coverage
+    - 1.2 Simple Test Coverage
+    - 1.3 Coverage Blind Spots
+- simple/std_lib/src/core/array.spl
+- Calls simple_array_push via FFI
+- simple/std_lib/test/unit/core/array_spec.spl
+  - 2. Problem Statement
+    - 2.1 Separate Coverage Islands
+    - 2.2 Key Questions We Can't Answer
+    - 2.3 Business Impact
+  - 3. Proposed Architecture
+    - 3.1 Coverage Collection Strategy
+- Run Rust tests with LLVM coverage
+- Produces:
+- - rust_coverage.json (LLVM coverage format)
+- - Tracks: src/runtime/src/value/collections.rs:142-156
+- Run Simple tests with instrumented interpreter
+- Produces:
+- - simple_coverage.json (custom format)
+- - Tracks: simple/std_lib/src/core/array.spl:15-23
+    - 3.2 Coverage Instrumentation for Simple
+    - 3.3 Coverage Merger
+- Merge Rust + Simple coverage
+- Produces unified report with cross-references
+  - 4. Coverage Data Flow
+    - 4.1 End-to-End Flow
+    - 4.2 Data Formats
+  - 5. Implementation Plan
+    - Phase 1: Simple Coverage Instrumentation (Week 1)
+    - Phase 2: Coverage Merger (Week 2)
+
+## doc/research/unified_coverage_plan_part2.md
+- lines: 500
+- headings:
+- Unified Coverage Plan - Part 2: Implementation & Integration
+    - Phase 3: HTML Dashboard (Week 3)
+    - Phase 4: Makefile Integration (Week 3)
+- Unified coverage (Rust + Simple)
+- Run Rust tests with coverage
+- Convert to JSON
+- Run Simple tests with coverage
+- Merge coverage
+- Generate HTML
+- Coverage check with thresholds
+    - Phase 5: CI Integration (Week 4)
+- .github/workflows/coverage.yml
+  - Coverage Report
+    - Gaps Detected
+  - 6. Coverage Report Format
+    - 6.1 Dashboard Overview
+    - 6.2 Feature Coverage View
+  - 7. CI Integration
+    - 7.1 Coverage Enforcement
+    - 7.2 Coverage Diff
+  - 8. Feature Tracking
+    - 8.1 Per-Feature Coverage Matrix
+    - 8.2 Feature Coverage Report
+- Feature Coverage Report
+  - Collections (#15) - ⚠️ Gaps Detected
+    - Rust Implementation
+    - Simple Stdlib
+    - System Tests
+    - FFI Bindings
+    - Recommendations
+  - 9. Appendix A: New Feature IDs
+  - 10. Appendix B: Migration Path
+    - Current State → Unified Coverage
+- Old commands still work
+- New command available
+- Optional: Enable Simple coverage for specific tests
+- CI runs unified coverage (non-blocking warnings)
+- CI fails on coverage gaps
+  - Conclusion
+
+## doc/spec/basic_mcp.md
+- lines: 548
+- headings:
+- Minimal Code Preview (MCP) Specification
+  - Overview
+  - 1. Design Principles
+    - 1.1 Token Minimization
+    - 1.2 Semantic Preservation
+    - 1.3 Progressive Disclosure
+  - 2. Output Format
+    - 2.1 Default JSON Structure (LLM Mode)
+    - 2.2 Optional Metadata (Non-Default)
+  - 3. Text Block Format
+    - 3.1 Line Structure
+    - 3.2 Code Column Syntax
+- Implementation
+  - 4. Folding and Shrinking Rules
+    - 4.1 Default View (Public API Only)
+    - 4.2 Class/Struct Member Shrinking
+    - 4.3 Function Signature Shrinking
+- Implementation
+    - 4.4 No Inline Expand Hints
+  - 5. Virtual Information (V• Lines)
+    - 5.1 Implicit Traits
+    - 5.2 AOP Pointcuts
+    - 5.3 Coverage Overlays (Optional)
+    - 5.4 Block Guides (Optional)
+  - 6. Markdown Document Folding
+    - 6.1 Heading-Based Folding
+- Language Basics
+  - Functions { … }
+  - Classes { … }
+- Simple Language Reference
+  - 1. Types { … }
+  - 2. Functions { … }
+  - 3. Classes { … }
+  - 7. Logs and Diagnostics
+    - 7.1 Collapsible Log Groups
+    - 7.2 Log Level Filtering
+  - 8. MCP Tool API (Behavioral)
+    - 8.1 Core Tools
+    - 8.2 Task Tools
+  - 9. Example: Default MCP Read
+    - 9.1 Source Code (Simple)
+- Implementation
+    - 9.2 MCP Output (JSON)
+    - 9.3 Expanded Class (On Demand)
+  - 10. Implementation Notes
+    - 10.1 For Compiler Authors
+    - 10.2 For Tool Authors
+    - 10.3 For LLM Integration
+  - 11. Formal Grammar (EBNF)
+    - 11.1 MCP Text Block
+    - 11.2 JSON Schema
+  - 12. Comparison with Alternatives
+  - 13. Future Extensions
+    - 13.1 Planned
+    - 13.2 Considered
+  - Appendix A: CLI Integration
+    - A.1 Simple Compiler Flags
+- Generate MCP outline for file
+- Generate MCP with coverage overlay
+- Generate MCP with metadata
+- Expand specific symbol
+    - A.2 Context Pack Integration
+- Extract minimal context (MCP + dependencies)
+- Impact: 90% token reduction vs. full source
+  - Appendix B: References
+  - Changelog
+
+## doc/spec/bdd_spec.md
+- lines: 441
+- headings:
+- Simple BDD Spec Framework
+  - Contents
+  - 1. Folder Layout
+    - 1.1 test/ (root)
+    - 1.2 test/environment/
+    - 1.3 test/unit/
+    - 1.4 test/integration/
+    - 1.5 test/system/
+  - 2. Default Imports
+    - 2.1 test/__init__.spl
+    - 2.2 Per-layer __init__.spl
+- test/system/__init__.spl
+  - 3. BDD DSL
+    - 3.1 Example Groups
+    - 3.2 Hooks
+    - 3.3 Fixtures
+    - 3.4 Expectations
+    - 3.5 Shared Examples
+    - 3.6 Context Sharing
+- Given: initial state
+- When: action
+- Then: verify
+- x=10, y=15, z=30
+  - 4. Runner & CLI
+    - 4.1 Discovery
+    - 4.2 Filtering
+    - 4.3 Output Formatters
+    - 4.4 Exit Codes
+  - 5. Coverage Policy
+    - 5.1 Definitions
+    - 5.2 Thresholds
+    - 5.3 Implementation
+  - 6. Environment Helpers
+    - 6.1 bootstrap.spl
+- test/environment/bootstrap.spl
+    - 6.2 Fixtures
+    - 6.3 Timeouts
+  - 7. Examples by Layer
+    - 7.1 Unit Test
+    - 7.2 Integration Test
+    - 7.3 System Test
+  - See Also
+
+## doc/spec/concurrency.md
+- lines: 626
+- headings:
+- Simple Language Concurrency
+  - Overview
+  - Actors (Processes)
+    - Key Primitives
+    - Example: Ping-Pong
+    - Immutability in Concurrency
+  - Async Effects and Stackless Coroutine Actors
+    - The Async Effect
+- guaranteed non-blocking
+- OK: constant-bounded range
+- OK: fixed-size array iteration
+    - Effect Classification
+    - Stackless Coroutine Actors
+    - Stackless and Run-to-Completion
+  - Isolated Threads
+    - Core Principles
+    - Spawning Isolated Threads
+    - Data Access Rules
+    - Channel Communication
+- Producer thread
+- Consumer thread
+    - Comparison: Actors vs Isolated Threads
+  - Futures and Promises
+    - Execution Modes
+- Futures run in background automatically
+- await blocks until the future completes
+- Set manual mode before creating any futures
+- Create futures - they don't execute yet
+- In your main loop, poll futures explicitly
+- Poll individual futures
+- Or poll all pending futures
+- Check results
+    - Future Type
+    - Creating Futures
+- Create a future that computes a value
+- Create an already-resolved future
+- Create an already-rejected future
+- Check if a future is ready
+    - Async/Await Syntax
+    - Future Combinators
+    - Integration with Actors
+    - Request-Response Pattern
+  - Runtime Guards
+    - TLS Context Flag
+    - Stack Depth Counter
+    - Time Slice Watchdog
+  - Failure Handling
+- Link processes (crash propagation)
+- Monitor process (receive notification on crash)
+- Restart the worker
+  - Summary
+  - Note on Semantic Types
+- Message types with semantic fields
+  - Runtime Implementation Status
+    - Actor FFI Functions
+    - Channel FFI Functions
+    - Future FFI Functions
+    - Generator FFI Functions
+    - Executor FFI Functions
+    - Isolated Thread FFI Functions
+    - Pending Work
+  - Related Specifications
+
+## doc/spec/data_structures.md
+- lines: 690
+- headings:
+- Simple Language Data Structures
+  - Structs and Classes Overview
+  - Structs (Value Types)
+    - Basic Struct
+- a.x = 5          # Error: Point is immutable by default
+    - Mutable Structs
+    - Struct Characteristics
+  - Classes (Reference Types)
+    - Basic Class
+    - Immutable Classes
+- Fields cannot be changed after construction
+    - Class Characteristics
+    - Reference Semantics
+  - Auto-Forwarding Properties (get/set/is)
+    - Basic Syntax
+- These methods auto-create private backing field '_name'
+- 'is_' prefix for boolean properties
+    - Auto-Generated Backing Fields
+    - Read-Only Properties
+- c.set_count(100)   # Error: no setter defined
+    - Write-Only Properties
+- print s.get_password()  # Error: no getter defined
+    - Default Values
+  - Enums (Algebraic Data Types)
+    - Defining an Enum
+    - Using Enums
+    - Enum Characteristics
+    - Impl Blocks for Enums
+- Associated function (no self)
+- Usage
+    - Trait Implementations for Enums
+- Common traits can be derived
+  - Strong Enums
+    - Basic Strong Enum
+- No _ allowed - all cases must be explicit
+    - Why Strong Enums?
+- Without #[strong] - wildcard hides missing cases
+- With #[strong] - compiler catches missing cases
+- ERROR: missing case 'Pending', wildcards not allowed
+    - Strong Enum Use Cases
+    - Opt-Out for Specific Matches
+  - Union Types
+    - Anonymous Union Types
+    - Tagged vs Untagged Unions
+  - Option Type
+- ERROR: Implicit nullable return
+- CORRECT: Explicit Option
+  - Visibility and Access
+  - Result Type
+    - Error Propagation Operator (`?`)
+- Equivalent to:
+    - Result Methods
+    - Shorthand Syntax
+- These are equivalent:
+  - Bitfields
+    - Defining a Bitfield
+    - Using Bitfields
+    - Multi-Bit Fields
+    - Bitfield Characteristics
+    - Named Constants
+    - Unit Types in Bitfields
+- Literals still use underscore prefix
+- Range inference - compiler calculates minimum bits
+- Explicit repr + overflow behavior
+- Combined constraints
+- In type positions, use bare suffix (no underscore): cm, deg, pct
+- In literals, use underscore: 100_cm, 180_deg, 50_pct
+- One-pass parsing (LL(2)):
+- After IDENT, if ":" followed by repr_type → unit_with_repr
+- Otherwise → simple unit type
+- pos.x = 50_m      # ERROR: cannot assign m to cm field
+- pos.x = 50        # ERROR: cannot assign bare integer to cm field
+- Arithmetic preserves unit type
+- let w2 = Wide(dist: c.dist)         # OK: implicit widening allowed
+- t.value = 256_cm            # Debug: panic! Release: undefined behavior
+- s.value = 256_cm            # Always panic (debug and release)
+  - Related Specifications
+
+## doc/spec/ffi_abi.md
+- lines: 520
+- headings:
+- Simple Language FFI/ABI Specification
+  - 1. Overview
+  - 2. Extern Function Declarations
+    - 2.1 Importing C Functions
+- Import C function with explicit signature
+- With library specification
+    - 2.2 Importing Rust Functions
+- Import Rust function (uses Rust ABI)
+- From specific crate
+    - 2.3 Exporting Simple Functions
+  - 3. ABI Conventions
+    - 3.1 Calling Conventions
+    - 3.2 Platform-Specific ABIs
+- Windows-specific
+- System V (Linux/macOS)
+  - 4. Data Layout and repr
+    - 4.1 repr Attributes
+- C-compatible layout (stable, predictable)
+- Packed layout (no padding)
+- Aligned layout
+    - 4.2 Layout Rules
+    - 4.3 Primitive Type Mapping
+    - 4.4 Pointer Type Mapping
+  - 5. String Conventions
+    - 5.1 C Strings
+- Borrowing a C string (null-terminated)
+- Creating a C string
+- Converting between Simple string and C string
+    - 5.2 Buffer Conventions
+- Slice as pointer + length (common C pattern)
+- Output buffer pattern
+  - 6. Ownership Conventions
+    - 6.1 Ownership Attributes
+- Caller retains ownership, callee borrows
+- Caller transfers ownership to callee
+- Callee returns owned memory (caller must free)
+- Callee returns borrowed reference (valid until X)
+    - 6.2 Memory Management Contracts
+    - 6.3 Allocator Conventions
+- Use specific allocator for FFI memory
+- Custom allocator interface
+  - 7. Callback Support
+    - 7.1 Function Pointers
+- C function pointer type
+- Register callback with C library
+- Create callback from Simple closure (no captures)
+    - 7.2 Callbacks with Context
+- C callback with user data
+- Wrapper for Simple closure with captures
+  - 8. Struct and Enum FFI
+    - 8.1 C-Compatible Structs
+    - 8.2 C-Compatible Enums
+- Integer-based enum (C-compatible)
+- With explicit discriminant type
+    - 8.3 Tagged Unions (Rust-style)
+- Not directly C-compatible, but can be made so
+  - 9. Error Handling
+    - 9.1 C-Style Error Codes
+- Return code convention
+    - 9.2 Error Output Parameters
+    - 9.3 Panic Safety
+- Catch panics at FFI boundary
+- If this panics, returns -1 instead of unwinding
+  - 10. Platform-Specific Declarations
+    - 10.1 Conditional Compilation
+    - 10.2 Library Linking
+- Link against specific library
+- Static vs dynamic linking
+  - 11. Safety Rules
+    - 11.1 Unsafe Boundary
+- Module-level unsafe
+- Block-level unsafe
+    - 11.2 Invariants
+    - 11.3 Forbidden Operations
+- These are NEVER safe, even in unsafe blocks:
+- - Dereferencing null pointers without check
+- - Creating references to unaligned memory
+- - Calling C functions with wrong types
+- - Returning borrowed pointers to freed memory
+  - 12. Diagnostics
+    - 12.1 FFI Lints
+    - 12.2 Error Messages
+  - 13. Implementation Checklist
+  - Related Documents
+
+## doc/spec/formatting_lints.md
+- lines: 528
+- headings:
+- Simple Language Formatting and Semantic Lints
+  - 1. Overview
+  - 2. Canonical Formatter
+    - 2.1 Design Principles
+    - 2.2 Indentation Rules
+- Indentation: 4 spaces (always, no tabs)
+- Continuation indent: 8 spaces (2 × 4)
+- No trailing whitespace
+- No multiple blank lines (max 1)
+    - 2.3 Line Length
+- Maximum line length: 100 characters
+- Exception: Strings that would break are kept intact
+- Break before operators for long expressions
+- Break after opening for calls/collections
+    - 2.4 Spacing Rules
+- Binary operators: space on both sides
+- Unary operators: no space
+- Colons in types: space after
+- Colons in dicts/structs: space after
+- Commas: space after, not before
+- No space inside parentheses/brackets
+    - 2.5 Blank Line Rules
+- Two blank lines between top-level definitions
+- One blank line between methods in class/impl
+- No blank lines at start/end of blocks
+    - 2.6 Import Formatting
+- Imports sorted alphabetically
+- Standard library first, then third-party, then local
+    - 2.7 Comment Formatting
+- Single-line comments: space after #
+- This is a comment
+- Block comments: aligned, no trailing spaces
+- Multi-line comment block
+- continues here
+- Doc comments: triple quotes, first line summary
+  - 3. Semantic Lint Categories
+    - 3.1 Lint Severity Levels
+    - 3.2 Safety Lints (Default: error)
+- Example: unsafe_without_context
+    - 3.3 Correctness Lints (Default: error)
+- Example: non_exhaustive_match
+- ERROR: non-exhaustive match, missing: Pending
+    - 3.4 Warning Lints (Default: warn)
+- Example: unused_mut
+- Fixed:
+    - 3.5 Style Lints (Default: info)
+- Example: naming_convention
+    - 3.6 Concurrency Lints (Default varies by mode)
+- Example: shared_mut_state in actor mode
+  - 4. Lint Control Attributes
+    - 4.1 Allow/Deny/Warn
+- Allow specific lint
+- Deny lint (upgrade to error)
+- Warn (downgrade from error)
+- Warning instead of error
+    - 4.2 Scope of Lint Attributes
+- Module-level
+- Function-level
+- Expression-level
+    - 4.3 Lint Groups
+- Predefined groups
+- Custom group in config
+- simple.sdn
+  - 5. Fix-it Hints
+    - 5.1 Actionable Suggestions
+    - 5.2 Auto-fix Support
+- Apply all auto-fixable suggestions
+- Apply specific lint fixes
+- Preview fixes without applying
+    - 5.3 Fix Categories
+  - 6. Diagnostic Contracts
+    - 6.1 Diagnostic Structure
+    - 6.2 Error Codes
+    - 6.3 Diagnostic Stability
+  - 7. Configuration
+    - 7.1 Project Configuration (simple.sdn)
+- Global settings
+- Per-lint overrides
+- Per-path overrides
+- No options - deterministic
+    - 7.2 Command Line
+- Format
+- Lint
+  - 8. LLM-Friendly Features
+    - 8.1 Predictable Output
+    - 8.2 Clear Error Messages
+    - 8.3 Semantic Constraints as Guardrails
+  - 9. Implementation Checklist
+  - Related Documents
+
+## doc/spec/functions.md
+- lines: 412
+- headings:
+- Simple Language Functions and Pattern Matching
+  - Functions
+    - Basic Function Definition
+    - First-Class Functions
+  - Lambdas and Closures
+    - Lambda Syntax
+- With explicit type annotations
+    - Multiple Parameters
+- With types
+    - Closures
+    - Trailing Block Syntax
+- Filtering
+- Mapping
+  - Pattern Matching
+    - Basic Pattern Matching
+    - Pattern Types
+    - Struct Destructuring
+    - Tuple Destructuring
+    - Exhaustiveness
+- Error: missing case Blue
+  - Constructor Polymorphism
+    - Constructor Type
+- Constructor[T] - type for constructors producing T or subtypes
+    - Basic Usage
+- Pass constructor as parameter
+    - Compatibility Rules
+- OK: has parent params + extra with default
+- ERROR: extra param without default
+    - Compatibility Table
+    - Factory Patterns
+- Generic factory function
+- Factory selector
+    - Storing Constructors
+- In variables
+- In collections
+- In dictionaries
+    - Constructor Constraints
+- Constructor that takes exactly (str, i32)
+- Constructor that takes no parameters
+    - Dependency Injection
+- Production
+- Testing
+    - Abstract Constructors
+  - Semantic Types in Function Signatures
+- WARNING: Bare primitives in public API
+- GOOD: Semantic types (no warning)
+- GOOD: Enums instead of bool
+- GOOD: Option for nullable returns
+  - Related Specifications
+
+## doc/spec/gherkin_dsl.md
+- lines: 470
+- headings:
+- file: calculator_system_test.simple
+- Calculator System Test
+  - Overview
+  - Test Data
+    - Addition Examples
+    - Operation Examples
+    - Identity Examples
+  - Features
+  - Examples
+  - Context Definitions
+  - Features
+  - Syntax Reference
+    - Keywords
+    - Table Kind Types (SDN Integration)
+    - Two-Space Delimiter
+  - Grammar (EBNF)
+    - One-Pass LL(2) Parser
+    - Parse Decision Tree (LL(2))
+    - Lookahead Requirements
+  - Relationship to Other Specs
+  - Implementation Status
+    - Files
+
+## doc/spec/gpu_simd.md
+- lines: 782
+- headings:
+- GPU and SIMD Specification
+  - Design Philosophy
+  - Part 1: SIMD Vector Types
+    - Vector Type Syntax
+- Vector type syntax: vec[N, T] where N is lane count, T is element type
+- Type aliases for common sizes
+    - Supported Lane Counts
+    - Vector Operations
+- Named swizzle (for vec[2-4])
+- Index shuffle (for any size)
+- Cross-vector shuffle
+- Load from array (aligned)
+- Store to array
+- Gather (indexed load)
+- Scatter (indexed store)
+- Fused multiply-add (a * b + c)
+- Select: mask ? a : b
+- Masked load (load only where mask is true)
+- Masked store (store only where mask is true)
+    - SIMD Best Practices
+- Prefer wider vectors when hardware supports it
+- Process arrays in chunks
+- Handle remainder with scalar code
+  - Part 2: GPU Compute
+    - Execution Model (SIMT)
+    - Device and Context
+- Query available devices
+- Create compute context
+- Or use default device
+    - GPU Buffers
+- Allocate device buffer
+- Upload data to GPU
+- Download data from GPU
+- Map buffer for direct access (advanced)
+    - Compute Kernels
+    - Launching Kernels
+- Create buffers
+- Launch kernel
+- Wait for completion
+- Get results
+    - Work Item Intrinsics
+- Alternative @simd style
+    - Shared Memory
+- Shared memory declaration
+- Load to shared memory
+- Synchronize work group
+- Parallel reduction in shared memory
+- Write result
+    - Thread Groups and Barriers
+- Within kernels, thread_group is an implicit object
+- Or use gpu.* functions
+    - Atomic Operations
+- Available atomics:
+  - Part 3: Kernel Bounds Policy
+    - 3.1 Terms
+    - 3.2 Default Rule
+    - 3.3 `@bounds(...)` Attribute
+    - 3.4 `bounds:` Clause (Pattern-Based Handlers)
+    - 3.5 Interaction with `@skip_index_range_check`
+  - Part 4: Indexer Trait and Neighbor Accessors
+    - 4.1 User-Defined Indexers
+    - 4.2 Indexer Forwarding (`@indexer` field)
+    - 4.3 Neighbor Accessors
+  - Part 5: Data Parallel Operations
+    - Parallel Iterators
+- Parallel map (auto-selects SIMD or GPU)
+- Parallel reduce
+- Parallel filter
+- Parallel for_each
+    - Parallel Configuration
+- Configure parallelism
+- Force specific backend
+    - Tensor Operations (Preview)
+- Create tensors
+- Operations (auto-parallelized)
+  - Part 6: Hardware Detection and Fallbacks
+    - Feature Detection
+- Check CPU SIMD support
+- Use 512-bit vectors
+- Use 256-bit vectors
+- Fallback to 128-bit
+- Query preferred width
+    - GPU Feature Detection
+- Check capabilities
+- Use double precision
+- Use larger shared memory tiles
+- Use atomic operations
+    - Graceful Fallbacks
+- Automatic fallback: GPU -> SIMD -> Scalar
+- Or use the parallel module which handles this automatically
+  - Part 7: Feature Mapping
+  - Part 8: Implementation Notes
+    - SIMD Codegen
+    - GPU Backend
+    - Current Implementation
+    - Safety Guarantees
+    - Performance Considerations
+  - Part 9: Diagnostics Summary (Normative)
+  - Related Specifications
+
+## doc/spec/invariant.md
+- lines: 587
+- headings:
+    - 11.1 Function Preconditions
+    - 11.2 Postconditions with Return Value
+    - 11.3 Union Return with Success/Error Postconditions
+    - 11.4 Class with Invariant
+    - 11.5 old() Expression Usage
+    - 11.6 Routine Invariant
+
+## doc/spec/language.md
+- lines: 143
+- headings:
+- Simple Language Specification
+  - Specification Documents
+    - Core Language
+    - Advanced Features
+    - Parser & Lexer
+    - Module System
+    - Data Formats
+  - Quick Reference
+    - Execution Modes
+    - Key Language Features
+    - Type Overview
+    - Mutability Summary
+    - Concurrency Models
+  - Document Organization
+  - Project Directory Structure
+  - Version History
+
+## doc/spec/language_enhancement.md
+- lines: 521
+- headings:
+- Default: actor mode (safe, no shared state)
+- Now mut T, Mutex, etc. are available
+- guard dropped, lock released
+- GC objects work in concurrent collections
+- GC-managed User objects stored in concurrent map
+- Safe concurrent access with GC
+- Module-level mode
+- Function-level override
+- Unsafe code here
+- Block-level unsafe
+- Unsafe block
+
+## doc/spec/lexer_parser.md
+- lines: 12
+- headings:
+- Lexer and Parser Specification (Index)
+  - Parts
+
+## doc/spec/memory.md
+- lines: 383
+- headings:
+- Simple Language Memory and Ownership
+  - Overview
+  - Reference and Pointer Kinds
+    - GC-Managed Reference: `T`
+    - Unique Pointer: `&T`
+- u is the sole owner
+- u is now unusable (compile error if accessed)
+    - Shared Pointer: `*T`
+- Object freed when both s1 and s2 go out of scope
+    - Weak Pointer: `-T`
+- Later...
+    - Handle Pointer: `+T`
+- h is a lightweight handle into the global Enemy pool
+  - Pointer Type Summary
+  - Allocation Forms (`new` Variants)
+    - Unique Allocation: `new(&) T(...) → &T`
+    - Shared Allocation: `new* T(...) → *T`
+    - Weak Allocation: `new- T(...) → -T`
+    - Handle Allocation: `new+ T(...) → +T`
+  - Global Handle Pools
+    - Declaration Syntax
+    - Pool Rules
+    - Using Handles at Runtime
+- Mutable access
+- Read-only access
+  - Borrowing
+- e cannot escape this scope
+  - Compile-Time Checks
+    - For `+T` / `new+`
+  - Choosing the Right Pointer Type
+  - Example: Game Entity System with Handles
+- Update projectiles
+- Compact lists (remove freed handles)
+  - Note on Option Types
+- Option enforces safe access patterns
+  - Related Specifications
+
+## doc/spec/metaprogramming.md
+- lines: 473
+- headings:
+- Simple Language Metaprogramming
+  - Macros
+    - Key Characteristics
+    - Defining Macros
+    - Macro Capabilities
+    - Invocation
+    - Example: Property Generation
+    - Safety and Limits
+  - DSL Features
+    - Context Blocks
+    - Method Missing
+    - DSL Support Summary
+  - Decorators and Attributes
+    - Decorators
+- ...
+    - Attributes
+- ...
+    - Lint Control Attributes
+- Directory-level (in __init__.spl, inherits to all children)
+- Item-level
+    - Decorators vs Attributes
+  - Comprehensions
+    - List Comprehension
+- Basic
+- With filter
+- Nested
+- Complex
+    - Dict Comprehension
+  - Slicing and Indexing
+    - Negative Indexing
+    - Slicing
+    - Tuple Unpacking
+- first = 1, rest = [2, 3, 4, 5]
+    - Spread Operators
+  - Enhanced Pattern Matching
+    - Match Guards
+    - Or Patterns
+    - Range Patterns
+    - If Let / While Let
+    - Chained Comparisons
+  - Context Managers
+- file is automatically closed
+    - Implementing Context Managers
+  - Move Closures
+  - Error Handling
+    - Result Type
+    - The `?` Operator
+  - Related Specifications
+
+## doc/spec/mock.md
+- lines: 228
+- headings: (none)
+
+## doc/spec/modules.md
+- lines: 337
+- headings:
+- Module System Specification
+  - 1. Module Structure
+    - 1.1 File-Based Modules
+    - 1.2 Package Definition with `__init__.spl`
+  - 2. Module Privacy
+    - 2.1 Privacy Rules
+    - 2.2 Private-by-Default Behavior
+- mypackage/__init__.spl exists
+- From external code:
+    - 2.3 Explicit Proxying
+- mypackage/__init__.spl
+- Public exports (explicit proxy)
+- Private (no pub keyword)
+- From external code:
+  - 3. Export Syntax
+    - 3.1 Export Modifiers
+    - 3.2 Export Statements
+- Direct export
+- Re-export from child
+- Re-export with rename
+- Re-export all public items
+- Selective re-export
+    - 3.3 Common Export Patterns
+- Export prelude pattern
+- Common use pattern (available to all children)
+- Conditional export (platform-specific)
+  - 4. Import Syntax
+    - 4.1 Import Statements
+- Import specific item
+- Import multiple items
+- Import all public items
+- Import with alias
+- Import and re-export
+    - 4.2 Module Path Resolution
+- Absolute path (from crate root)
+- Relative path (from current module)
+- External crate
+  - 5. `__init__.spl` Specification
+    - 5.1 Purpose
+    - 5.2 Required Content
+- Minimum required content
+- Optional: exports, initialization, etc.
+    - 5.3 Complete Example
+- mylib/__init__.spl
+- Lint configuration for package
+- Prelude - auto-imported by users of this package
+- Common imports for all child modules
+- Public API (explicit proxy)
+- Internal (not exported)
+    - 5.4 Child Access Prevention
+  - 6. Visibility Inheritance
+    - 6.1 Rules
+    - 6.2 Example
+- pkg/__init__.spl
+- pkg/child.spl
+  - 7. Circular Import Prevention
+    - 7.1 Rules
+    - 7.2 Error Example
+  - 8. Best Practices
+    - 8.1 Package Organization
+    - 8.2 `__init__.spl` Guidelines
+    - 8.3 Import Guidelines
+  - 9. See Also
+
+## doc/spec/old_gpu_simd.md
+- lines: 589
+- headings:
+- GPU and SIMD Specification
+  - Design Philosophy
+  - Part 1: SIMD Vector Types
+    - Vector Type Syntax
+- Vector type syntax: vec[N, T] where N is lane count, T is element type
+- Type aliases for common sizes
+    - Supported Lane Counts
+    - Vector Operations
+- Named swizzle (for vec[2-4])
+- Index shuffle (for any size)
+- Cross-vector shuffle
+- Load from array (aligned)
+- Store to array
+- Gather (indexed load)
+- Scatter (indexed store)
+- Fused multiply-add (a * b + c)
+- Select: mask ? a : b
+- Masked load (load only where mask is true)
+- Masked store (store only where mask is true)
+    - SIMD Best Practices
+- Prefer wider vectors when hardware supports it
+- Process arrays in chunks
+- Handle remainder with scalar code
+  - Part 2: GPU Compute
+    - Device and Context
+- Query available devices
+- Create compute context
+- Or use default device
+    - GPU Buffers
+- Allocate device buffer
+- Upload data to GPU
+- Download data from GPU
+- Map buffer for direct access (advanced)
+    - Compute Kernels
+    - Launching Kernels
+- Create buffers
+- Launch kernel
+- Wait for completion
+- Get results
+    - Work Item Intrinsics
+    - Shared Memory
+- Shared memory declaration
+- Load to shared memory
+- Synchronize work group
+- Parallel reduction in shared memory
+- Write result
+    - Synchronization
+    - Atomic Operations
+- Available atomics:
+    - Async GPU Operations
+- Async upload
+- Async kernel launch (returns immediately)
+- Do other work while GPU computes...
+- Wait for specific operation
+- Async download
+    - Multi-GPU
+- Distribute work across GPUs
+- Gather results
+  - Part 3: Data Parallel Operations
+    - Parallel Iterators
+- Parallel map (auto-selects SIMD or GPU)
+- Parallel reduce
+- Parallel filter
+- Parallel for_each
+    - Parallel Configuration
+- Configure parallelism
+- Force specific backend
+    - Tensor Operations (Preview)
+- Create tensors
+- Operations (auto-parallelized)
+  - Part 4: Hardware Detection and Fallbacks
+    - Feature Detection
+- Check CPU SIMD support
+- Use 512-bit vectors
+- Use 256-bit vectors
+- Fallback to 128-bit
+- Query preferred width
+    - GPU Feature Detection
+- Check capabilities
+- Use double precision
+- Use larger shared memory tiles
+- Use atomic operations
+    - Graceful Fallbacks
+- Automatic fallback: GPU -> SIMD -> Scalar
+- Or use the parallel module which handles this automatically
+  - Implementation Notes
+    - SIMD Codegen
+    - GPU Backend
+    - Current Implementation
+    - Safety Guarantees
+    - Performance Considerations
+  - Related Specifications
+
+## doc/spec/parser/lexer_parser.md
+- lines: 3
+- headings:
+- Lexer & Parser Spec (Alias)
+
+## doc/spec/parser/lexer_parser_grammar.md
+- lines: 52
+- headings:
+- Simple Language Grammar
+  - Contents
+  - Grammar Overview
+    - Section Summary
+
+## doc/spec/parser/lexer_parser_grammar_definitions.md
+- lines: 698
+- headings:
+- Simple Language Grammar - Part 1: Definitions
+  - Tree-sitter Grammar - Definitions (`grammar.js`)
+
+## doc/spec/parser/lexer_parser_grammar_expressions.md
+- lines: 803
+- headings:
+- Simple Language Grammar - Part 2: Statements & Expressions
+  - Tree-sitter Grammar - Statements & Expressions (`grammar.js`)
+
+## doc/spec/parser/lexer_parser_integration.md
+- lines: 941
+- headings:
+- Simple Language Parser Integration and Queries
+  - Parser Integration Module (`src/parser.rs`)
+  - AST Visitor Module (`src/visitor.rs`)
+  - Syntax Highlighting Queries (`queries/highlights.scm`)
+  - Local Variables Queries (`queries/locals.scm`)
+  - Indentation Queries (`queries/indents.scm`)
+  - Example Usage
+    - Basic Parsing
+    - Function Extraction
+    - Handle Pool Analysis
+  - GLR Parsing Notes
+    - Why GLR?
+    - Conflict Resolution
+    - Performance Characteristics
+  - File Structure
+  - Building and Testing
+- Generate parser from grammar.js
+- Build Rust library
+- Run tests
+- Run Tree-sitter tests
+- Parse a file
+- Generate highlighting
+
+## doc/spec/parser/lexer_parser_scanner.md
+- lines: 744
+- headings:
+- Simple Language External Scanner and Rust Bindings
+  - External Scanner (`scanner.c`)
+  - Rust Bindings
+    - Cargo.toml
+    - build.rs
+    - src/lib.rs
+
+## doc/spec/parser/overview.md
+- lines: 151
+- headings:
+- Simple Language Lexer and Parser Specification
+  - Overview
+  - Token Specification
+    - Reserved Keywords
+- Type & Structure Keywords
+- Control Flow
+- Memory & Ownership
+- Concurrency
+- Effects & Modifiers
+- Logical & Values
+- Special
+- Module System
+    - Operators and Punctuation
+- Arithmetic
+- Comparison
+- Assignment & Update
+- Logical (symbolic alternatives)
+- Bitwise
+- Punctuation
+- Pointer Type Prefixes (in type context)
+    - Literals
+    - Identifiers
+- Regular identifier
+- Type identifier (starts with uppercase by convention)
+    - Comments
+- Line comment - extends to end of line
+- This is a comment
+- Block comment (if supported)
+    - Whitespace and Indentation
+  - Summary
+
+## doc/spec/primitive_as_obj.md
+- lines: 899
+- headings:
+- Primitive as Object: C#-Style Type Promotion
+  - Overview
+  - 1. Collection Type Promotion
+    - 1.1 `[]` → `List[T]` (Dynamic List)
+- Syntax
+- Equivalent explicit form
+    - 1.2 `[T; N]` → `Array[T, N]` (Fixed-Size Array)
+- Syntax
+- Equivalent explicit form
+- Size must be compile-time constant
+    - 1.3 Comparison: List vs Array
+  - 2. Immutable Collections
+    - 2.1 Immutable List → Linked List
+- All operations return new lists
+- Efficient prepend (O(1))
+- Internal structure (simplified)
+    - 2.2 Immutable Array → Copy-on-Write or New Copy
+- All operations return new arrays
+- coords is unchanged
+  - 3. String Type Promotion
+    - 3.1 `str` → `String` (String Object)
+- Syntax
+- Equivalent explicit form
+- String literals are always String objects
+    - 3.2 `str` vs `String` Unification
+- In Rust (confusing)
+- In Simple (unified)
+- Functions accept str (which is String)
+    - 3.3 String vs Bytes
+- Text (UTF-8, always valid)
+- Binary data
+- Conversion
+  - 4. Array Unsafe/Danger Operations
+    - 4.1 Safe Default
+    - 4.2 `danger` Block for Unsafe Operations
+- Safe access
+- Unchecked access (C-like) - must be in danger block
+- Danger block required for:
+- - get_unchecked / set_unchecked
+- - Raw pointer operations
+- - Unsafe memory access
+    - 4.3 Danger Operations List
+    - 4.4 Copy-on-Update (Immutable Context)
+- These return new arrays (no danger needed)
+- Original unchanged
+  - 5. Numeric Type Promotion
+    - 5.1 Integer Literals → Int Object
+- Integer literals are Int objects
+- Methods available on literals
+- Ruby-style convenience
+    - 5.2 Float Literals → Float Object
+- Float literals are Float objects
+- Methods available on literals
+    - 5.3 Boolean Literals → Bool Object
+- Boolean literals are Bool objects
+- Methods
+  - 6. Type Aliases and Internal Representation
+    - 6.1 Primitive Syntax to Object Mapping
+- These are equivalent (syntax sugar)
+    - 6.2 Internal Implementation
+- Compiler transformation (conceptual)
+- Source code
+- Lowered to
+- Source code
+- Lowered to
+  - 7. Shared Collection Traits
+    - 7.1 Trait Hierarchy
+    - 7.2 Core Traits Definition
+- ============================================
+- Iterable - Base iteration trait
+- ============================================
+- ============================================
+- Collection - Sized container
+- ============================================
+- ============================================
+- Sequence - Indexed read access
+- ============================================
+- Safe indexed access
+- First/last element
+- Search
+- Slicing
+- Iteration with index
+- ============================================
+- MutSequence - Mutable indexed access
+- ============================================
+- Mutable access
+- Set value at index
+- Swap two elements
+- Fill all elements
+- In-place sort
+- In-place reverse
+- In-place filter (mutable only for List)
+- ============================================
+- ImmutSequence - Functional update operations
+- ============================================
+- Return new sequence with updated index
+- Return new sorted sequence
+- Return new reversed sequence
+- Return new filtered sequence
+- Return new mapped sequence
+- ============================================
+- Growable - Can add/remove elements
+- ============================================
+- Add to end
+- Remove from end
+- Add to front
+- Remove from front
+- Insert at index
+- Remove at index
+- Remove all elements
+- Extend with iterator
+- Append another collection
+- ============================================
+- Sliceable - Can create slice views
+- ============================================
+    - 7.3 Trait Implementations
+- List implements all mutable traits
+- Array implements fixed-size traits
+- Note: Array does NOT implement Growable (fixed size)
+- Slice implements read-only traits
+- Slice is borrowed, no ownership for mutation
+- String implements sequence traits for chars
+    - 7.4 Generic Functions Over Collections
+- Works with List, Array, Slice, String
+- Works with List and Array
+- Works with any mutable sequence
+- Works with any growable collection
+    - 7.5 Usage Examples
+- Generic function accepts both List and Array
+- Type constraint ensures only sequences with get()
+- Only List (Growable) can use push
+    - 7.6 Trait Summary Table
+  - 8. Collection Object APIs
+    - 8.1 List[T] API (Dynamic)
+- Constructors
+- Size
+- Access (safe)
+- Mutation (mutable context)
+- Immutable operations (return new)
+- Iteration
+- Slicing
+    - 8.2 Array[T, N] API (Fixed)
+- Implements: Iterable, Collection, Sequence, MutSequence, ImmutSequence, Sliceable
+- Does NOT implement: Growable (fixed size)
+- Constructors
+- From Collection trait (compile-time known)
+- From Sequence trait
+- From MutSequence trait
+- From ImmutSequence trait
+- From Iterable trait
+- From Sliceable trait
+- Danger operations (require danger block)
+- Conversion
+    - 8.3 String API
+- Constructors
+- Size
+- Access
+- Search
+- Transformation (return new strings)
+- Mutation (mutable context)
+- Conversion
+  - 9. Summary
+    - 9.1 Type Mapping Table
+    - 9.2 Shared Traits Summary
+    - 9.3 Design Principles
+    - 9.4 When to Use Each
+  - Related Specifications
+
+## doc/spec/sdn.md
+- lines: 635
+- headings:
+- SDN - Simple Data Notation
+  - Overview
+    - Design Goals
+    - Comparison with Other Formats
+  - Syntax
+    - Assignment Rules
+    - Values
+- Simple values (colon)
+- Quote-free strings (identifier-like)
+- Quoted strings (spaces/special chars)
+    - Dict (Object)
+- Nested blocks
+    - Array (List)
+- Array of objects
+    - Table
+- Type declaration with inline values
+- Single row
+- Type declaration with block values
+- Field names with |...|
+- Complex values in tables
+- Single row inline
+  - Short Form vs Long Form Summary
+  - Complete Examples
+    - Configuration File
+- Application configuration
+    - Data File
+- Employee directory
+    - Embedded in Simple Code
+- SDN data embedded in Simple source
+  - Grammar (EBNF)
+  - Parsing
+    - One-Pass LL(2) Parser
+  - SDN Crate Structure
+    - Crate Layout
+    - Library API
+    - Value Types
+    - Document Update API
+    - CLI Usage
+- Parse and validate
+- Parse and output as JSON
+- Parse JSON and output as SDN
+- Query value at path
+- Set value at path
+- Pretty print
+  - Embedding in Simple
+    - Data Block Syntax
+- Inline SDN block
+- Access like normal struct
+    - File Loading
+- Load external SDN file
+- Update and save
+  - TOON vs SDN Comparison
+    - Key Differences
+  - Related Specifications
+  - Implementation Status
+
+## doc/spec/sdoctest.md
+- lines: 707
+- headings:
+- Simple Doctest (sdoctest)
+  - 1. Doctest Syntax
+    - 1.1 Basic Format (Python-style docstrings)
+- Style 1: Block before function
+- Style 2: Block after function header (no empty line)
+    - 1.2 Multi-line Statements
+    - 1.3 Expected Exceptions
+    - 1.4 Wildcard Matching
+    - 1.5 Setup/Teardown Blocks
+  - 2. Discovery and Execution
+    - 2.1 Discovery Locations
+    - 2.2 File Patterns
+    - 2.3 Execution Modes
+  - 3. Integration with BDD Spec Framework
+    - 3.1 Runner Integration
+    - 3.2 Execution
+- Run all tests (specs + doctests)
+- Run only doctests
+- Run doctests for specific module
+- Run doctests with specific tag
+    - 3.3 Coverage Integration
+    - 3.4 BDD-Style Reporting
+  - 4. Implementation Architecture
+    - 4.1 Component Structure
+    - 4.2 Parser Module
+    - 4.3 Runner Module
+    - 4.4 Matcher Module
+    - 4.5 Discovery Module
+    - 4.6 Integration with spec.runner
+- Internally, doctest integration creates:
+  - 5. CLI and Configuration
+    - 5.1 CLI Commands
+- Discover and list doctests
+- Run all doctests
+- Run doctests for specific file
+- Run with filter
+- Record interactive session
+- Verify doctests in CI
+    - 5.2 Configuration (simple.toml)
+    - 5.3 Metadata Attributes
+  - 6. Examples by Use Case
+    - 6.1 API Documentation
+    - 6.2 Tutorial (Markdown)
+- Simple Collections Tutorial
+  - Stacks
+    - 6.3 Error Handling
+    - 6.4 Stateful Examples
+    - 6.5 Standalone Test Suite (.sdt)
+- test/doctest/collections/stack_examples.sdt
+- Basic operations
+- Empty stack error
+- Multiple pushes
+  - 7. Implementation Plan
+    - Phase 1: Core Parser and Runner (Sprint 1)
+    - Phase 2: Discovery and Integration (Sprint 2)
+    - Phase 3: Advanced Features (Sprint 3)
+    - Phase 4: Coverage and Polish (Sprint 4)
+  - 8. Success Criteria
+  - 9. Comparison with Python doctest
+  - 10. Related Documents
+  - 11. Open Questions
+
+## doc/spec/spec_framework_guide.md
+- lines: 486
+- headings:
+- Simple BDD Spec Framework - Guide
+  - Contents
+  - Quick Start
+  - Core Concepts
+    - 1. Test Groups
+    - 2. Test Cases
+    - 3. Fixtures
+    - 4. Hooks
+    - 5. Assertions
+  - Context Sharing
+    - Define
+    - Reference
+    - Compose Multiple
+    - Sequential Setup
+  - BDD Given-When-Then Pattern
+- Given: initial state
+- When: action
+- Then: verify
+- When: action
+- Then: verify
+  - Test Organization
+    - File Structure
+    - Naming Conventions
+    - Test Levels
+  - Best Practices
+    - Do
+    - Don't
+  - Common Patterns
+    - Setup Once, Use Multiple Times
+    - Test Data Variants
+    - Composed Setup
+  - Troubleshooting
+    - Fixture not available
+    - Context not found
+    - State leaking between tests
+  - See Also
+
+## doc/spec/spec_matchers_reference.md
+- lines: 334
+- headings:
+- Spec Framework - Matchers Reference
+  - Contents
+  - Equality & Identity
+    - eq - Equality
+    - be - Identity/Equality
+    - be_nil - Nil Check
+  - Comparison
+    - gt - Greater Than
+    - lt - Less Than
+    - gte - Greater Than or Equal
+    - lte - Less Than or Equal
+  - Collection Matchers
+    - include - Contains Element
+    - have_length / have_size - Collection Length
+    - be_empty - Empty Collection
+  - String Matchers
+    - include_string - Contains Substring
+    - start_with - String Prefix
+    - end_with - String Suffix
+    - be_blank - Blank/Empty String
+  - Error Matchers
+    - expect_raises - Exception Handling
+  - Negation
+  - Direct Assertions
+  - Syntax Summary
+- Equality
+- Comparison
+- Collections
+- Strings
+- Negation
+  - Common Patterns
+    - Testing Collections
+    - Testing Strings
+    - Testing Exceptions
+  - Custom Matchers
+- Usage
+  - Matcher Summary
+  - See Also
+
+## doc/spec/stdlib.md
+- lines: 753
+- headings:
+- Simple Standard Library Specification
+  - 1. Goals and Scope
+    - Type Safety Policy
+- std/__init__.spl
+- ... all child modules inherit the deny settings
+  - 2. Variant Model
+    - 2.1 Axes
+    - 2.2 Effective Variant
+    - 2.3 Attributes
+- Mutates in-place, returns success indicator
+- Returns new vector with element appended
+    - 2.4 Profiles (simple.toml)
+- Default: async + no_gc for predictable performance
+- Server applications: async + no_gc (no GC pauses)
+- Desktop/GUI applications: async + gc (convenience)
+- Functional programming: async + gc + immutable
+- Baremetal: async + no_gc (cooperative scheduling, no OS)
+- Baremetal with blocking execution
+- GPU kernels: async + no_gc + immutable (default)
+- GPU kernels with sync execution
+- GPU host-side: async + no_gc (default)
+- GPU host-side with GC (convenience)
+  - 3. Project Directory Structure
+    - Directory Naming Conventions
+    - Stdlib Directory Layout (`lib/std/`)
+    - Native Library (`native_lib/`)
+- lib/std/host/async_gc/io/fs.spl
+    - 3.1 lib/std/core - Common Backbone
+    - 3.2 lib/std/core_nogc - Strict no-GC Core
+    - 3.3 lib/std/simd - SIMD / Vector Math
+  - 4. Variants by Platform
+    - 4.1 lib/std/host - OS-based Stdlib
+    - 4.2 lib/std/bare - Baremetal Stdlib
+    - 4.3 lib/std/gpu - GPU Kernel + Host GPU Control
+  - 5. Variant-Aware Import Resolution
+    - 5.1 Logical Module Names vs Filesystem
+    - 5.2 Resolution Order
+    - 5.3 Module #[variant] Attribute
+  - 6. Command-line, Environment, and Configuration
+    - 6.1 std.sys.args - Command-line Arguments
+    - 6.2 std.sys.env - Environment Variables
+    - 6.3 std.config - Configuration Management
+  - 7. Invariants & Errors
+  - Related Specifications
+
+## doc/spec/syntax.md
+- lines: 367
+- headings:
+- Simple Language Syntax Specification
+  - Execution Modes
+    - Compiler Mode (Native Codegen)
+    - Interpreter Mode
+  - Syntax Overview
+- An if/else example with indentation
+    - Trailing Blocks
+- Iterating with a trailing block (using backslash for lambda params)
+- Multiple parameters
+  - Literals
+    - Numbers
+    - Numeric Literal Formats
+- Decimal (default)
+- Hexadecimal (0x prefix)
+- Binary (0b prefix)
+- Octal (0o prefix)
+    - Floating Point Literals
+    - Type Suffixes
+    - Unit Type Suffixes
+- Physical units
+- Semantic IDs
+- Percentages
+  - String Literals
+    - Interpolated Strings (default)
+- Result: "Hello, world! Count is 43"
+    - Raw Strings
+    - Legacy f-string prefix
+    - String Unit Suffixes
+- File paths (supports mingw-style with drive letters)
+- Network addresses
+- Socket addresses
+- URLs and components
+- ERROR: postfix not allowed on interpolated strings
+- OK: explicit conversion
+  - Operators
+  - Functional Update Syntax (`->`)
+    - Basic Usage
+    - Chaining
+    - Use Cases
+- list is now [4, 3, 2, 1]
+    - Requirements
+  - Line Continuation
+  - Parsing Design Rationale
+- Valid: outermost call drops parens
+- Invalid: nested no-paren call is ambiguous
+- print format "value: {x}"  # Error: use parens for nested calls
+- Clear lambda syntax
+- Multiple parameters
+  - Grammar Summary
+  - Related Specifications
+
+## doc/spec/traits.md
+- lines: 592
+- headings:
+- Simple Language Traits and Implementations
+  - Overview
+  - Defining a Trait
+- default implementation
+    - Trait with Multiple Methods
+  - Implementing a Trait
+- print_self uses the trait's default implementation
+    - Implementing Multiple Traits
+  - Dispatch
+    - Static Dispatch (Default)
+    - Dynamic Dispatch
+  - Trait Bounds and Generics
+    - Multiple Trait Bounds
+    - Where Clauses
+  - Trait Inheritance
+- Any Drawable must also be Printable
+- drawing code
+  - Associated Types
+  - Trait Objects and Collections
+  - Common Standard Traits
+    - Deriving Traits
+  - Polymorphism Summary
+  - Note on Semantic Types
+- GOOD: Use semantic types in public trait methods
+- Standard library traits use Option/Result
+  - Collection Traits
+    - Trait Hierarchy
+    - Collection Trait Summary
+    - Implementations
+    - Generic Programming Example
+- Works with List, Array, Slice, String
+- Works with List and Array
+- Works with any mutable sequence
+- Only List (Growable) can use push
+  - Inherent Impl Blocks
+- Usage
+    - Impl Block Features
+    - Extension Methods (Planned)
+- In your module
+- implementation
+- Now all Strings have to_title_case()
+  - Trait Coherence Rules
+    - The Orphan Rule
+- ALLOWED: Implementing your trait for any type
+- (trait is local)
+- ALLOWED: Implementing any trait for your type
+- (type is local)
+- FORBIDDEN: Implementing foreign trait for foreign type
+    - Overlap and Ambiguity
+- Overlapping implementations - ERROR
+    - Specialization (Planned)
+- With specialization enabled
+    - Blanket Implementations
+- Blanket impl: all types implementing Debug also get Printable
+    - Associated Type Coherence
+- Each implementation fixes the associated type
+- Cannot have multiple impls with different Item for same type
+    - Negative Trait Bounds (Planned)
+- Not yet implemented
+- deep clone for non-Copy types
+    - Coherence Error Messages
+    - Coherence Summary
+    - Workarounds for Coherence Restrictions
+- Wrap foreign type in local newtype
+- Now allowed - MyString is local
+- Define local trait with desired methods
+- implementation
+  - Related Specifications
+
+## doc/spec/types.md
+- lines: 443
+- headings:
+- Simple Language Type System
+  - Type System Overview
+  - Built-in Types
+    - Primitive Types
+    - Compound Types
+  - Mutability Rules
+    - Structs (Value Types)
+    - Classes (Reference Types)
+    - Variables
+    - Mutability Summary
+  - Unit Types and Literal Suffixes
+    - Basic Unit Families
+- Syntax: unit name(base: BaseType): suffix = factor, ...
+    - Using Unit Literals
+- Access value in specific unit
+- Operations within same family (auto-converts)
+- Comparisons work across units
+    - Composite Unit Types
+    - Composite Type Inference
+- Compiler infers: length / time = velocity
+- Compiler infers: velocity * time = length
+    - Standalone Unit Types
+- Syntax: unit Name: BaseType as suffix [= factor]
+- Usage
+    - Type Safety
+- ERROR: different unit families
+- OK: same family
+    - Unit Type Summary
+  - Primitive Type Warnings (Public APIs)
+    - Warning Rules
+    - Examples
+- WARNING: Bare primitives in public API
+- RECOMMENDED: Use semantic types (no warnings)
+    - Semantic Boolean Replacement
+- WARNING: What does true/false mean?
+- GOOD: Clear meaning (no warning)
+- Call site is now self-documenting
+    - Option for Nullable Values
+- ERROR: Implicit nullable return (always an error)
+- CORRECT: Explicit Option
+    - Private Code Exception
+- OK: private function - no warning
+- Public wrapper uses semantic types
+    - Warning Control Attributes
+- Directory-level (in __init__.spl)
+- Item-level - suppress warning
+- Item-level - treat as error
+    - Project-Level Warning Control
+- primitive_api = "deny"  # Treat as error
+- primitive_api = "allow" # Suppress entirely
+    - Standard Library Policy
+- std/__init__.spl
+- ... all child modules inherit the deny setting
+    - Type Rules Summary
+  - Type Inference
+- Type inferred as Point (immutable)
+- p.x = 5          # Error: Point is immutable
+- Type inferred as Cursor (mutable)
+    - Unit Type Inference
+  - Related Specifications
+
+## doc/spec/units.md
+- lines: 21
+- headings:
+- Unit Types Specification (Index)
+  - Parts
+  - Scope
+  - Related Documents
+
+## doc/spec/units_part1.md
+- lines: 804
+- headings:
+- Simple Language Unit Types Specification
+  - Design Philosophy
+  - 1. Primitive Type Warnings
+    - 1.1 Public API Rules
+    - 1.2 Compiler Enforcement
+- WARNING: Bare primitive in public function
+- OK: Unit type (no warning)
+- WARNING: Bare bool parameter
+- OK: Semantic enum (no warning)
+- WARNING: Bare string in public function
+- OK: String unit type (no warning)
+- WARNING: Bare string return type
+- OK: Semantic string type (no warning)
+- ERROR: Nullable without Option (always an error)
+- OK: Explicit Option
+    - 1.3 Private Code Allowance
+- OK in private scope
+- Public wrapper must use semantic types
+    - 1.4 Explicit Override
+- Low-level byte manipulation
+- FFI boundaries
+  - 2. Unit Type Definitions
+    - 2.1 Basic Unit Types (Newtypes)
+- Syntax: unit Name: BaseType as suffix
+- Usage
+- Type safety - compile error:
+- let bad: UserId = 100_oid  # Error: OrderId ≠ UserId
+    - 2.2 Multi-Base Unit Types
+- Syntax: unit Name: Type1 | Type2 as suffix
+- Usage - both forms create the same type
+- All three are equivalent IpAddr values
+    - 2.3 Physical Unit Families
+- Syntax: unit family_name(base: BaseType): suffix = factor, ...
+- Celsius and Fahrenheit need conversion functions
+    - 2.4 Composite Units
+- Syntax: unit name(base: BaseType) = family1 op family2: ...
+    - 2.5 Percentage and Ratio Units
+- Usage
+    - 2.6 Currency Units
+- Usage
+  - 3. Semantic Boolean Types
+    - 3.1 Replace bool with Enums
+- BAD: What does true/false mean?
+- GOOD: Clear meaning
+    - 3.2 Standard Boolean Enums
+- std.types.flags
+    - 3.3 Flag Sets
+- Usage
+  - 4. Option and Result Types
+    - 4.1 No Bare nil
+- ERROR: Implicit nullable
+- OK: Explicit Option
+    - 4.2 Option Type
+- Methods
+    - 4.3 Result Type
+- Methods
+    - 4.4 The `?` Operator
+  - 5. Standard Library Unit Modules
+    - 5.1 Module Structure
+    - 5.2 std.units.core
+- Base traits for unit types
+    - 5.3 std.units.ids
+- Common ID types
+- UUID-based IDs
+- String-based IDs
+    - 5.4 std.units.file - File System Units
+- File path unit - supports mingw-style drive letters
+- File path components
+- Usage
+    - 5.5 std.units.net - Network Units
+- IP addresses - multi-base unit (str or u32)
+- Port number
+- Socket address (IP + port)
+- MAC address - multi-base (str or u64)
+- Usage - String format (human-readable)
+- Usage - Numeric format (efficient, no parsing)
+    - 5.6 std.units.url - URL Units
+- Generic URL
+- Protocol-specific URLs
+- URL components
+- HTTP-specific
+- Usage
+    - 5.7 std.units.size - Data Size Units
+- Shorthand aliases
+- Usage
+    - 5.8 Creating Custom Unit Types
+- Define your domain-specific units
+- With validation
+  - 6. Type Conversion and Operations
+    - 6.1 Automatic Unit Conversion
+    - 6.2 Composite Type Inference
+- Compiler infers: length / time = velocity
+    - 6.3 Explicit Conversion
+- Between incompatible types - explicit conversion required
+- Or using conversion factor
+    - 6.4 Arithmetic Rules
+  - 7. Type-Safe Unit Arithmetic
+    - 7.1 Overview
+    - 7.2 Arithmetic Rules Grammar
+    - 7.3 Unit Family with Arithmetic Rules
+- Type-safe: length + length -> length
+- Scaling: length * number -> length
+- Unary operations
+- Custom operations (return raw value, loses unit)
+    - 7.4 Default Arithmetic Behavior
+- user_id + user_id -> ERROR (no rules defined)
+
+## doc/spec/units_part2.md
+- lines: 635
+- headings:
+- Unit Types Specification - Part 2: Advanced Features
+    - 7.5 Compound Units
+- Velocity = length / time
+- velocity * time -> length
+- Acceleration = velocity / time = length / time²
+- acceleration * time -> velocity
+- Force = mass * acceleration (Newton's second law)
+    - 7.6 Arithmetic Type Checking
+    - 7.7 Automatic Unit Conversion in Operations
+- Result is in base unit; convert as needed
+    - 7.8 Compound Unit Resolution
+- These operations become valid:
+    - 7.9 Custom Unit Functions
+- Logarithm of length (returns raw value - dimensionless)
+- Exponential (returns raw value)
+- Square root (could return length^0.5, but simplified to f64)
+- Custom conversion with unit transformation
+- Usage
+    - 7.10 Error Messages
+  - 8. Bit-Limited Unit Representations
+    - 8.1 Overview
+    - 8.2 Grammar
+- Unit family with repr block (lib level)
+- Type with repr constraint (app level)
+- In type position, use bare suffix (no underscore): cm, km, deg
+- In literal position, use underscore: 100_cm, 50_km, 360_deg
+- One-pass parsing (LL(2))
+- In type position after IDENT:
+- 1. Lookahead(1): is next token ":"?
+- - No: simple type (cm, UserId)
+- - Yes: check lookahead(2)
+- 2. Lookahead(2): is token after ":" a repr_type?
+- - Yes: unit_with_repr (cm:u8)
+- - No: end of type (":" belongs to outer construct)
+    - 8.3 Library-Level: Repr Block
+- Arithmetic rules
+- Allowed representations
+    - 8.4 App-Level: Compact Syntax
+- Type aliases - bare suffix in type position
+- Variable declarations - bare suffix:repr
+- Default repr (uses family base type)
+- Note: Literals still use underscore: 100_km, 50_cm
+- Types use bare suffix: km, cm:u8, deg:u9
+    - 8.5 App-Level: Where Clause
+- Range constraint (compiler infers bit width)
+- Range with signed values
+- Explicit repr + debug checking
+- Overflow behavior options
+- Combined constraints
+    - 8.6 Overflow Behavior
+    - 8.7 Range Inference
+- Compiler calculates: ceil(log2(1001)) = 10 bits needed
+- Compiler calculates: ceil(log2(1001)) + 1 sign bit = 11 bits
+    - 8.8 Conversions Between Representations
+- Implicit widening is allowed
+- Implicit narrowing is NOT allowed
+- let e: cm:u8 = b               # ERROR: use .narrow() or .saturate()
+- Safe narrowing options
+    - 8.9 Arithmetic with Different Representations
+    - 8.10 Usage in Bitfields
+  - 9. Lint Attributes and Enforcement
+    - 9.1 The `primitive_api` Lint
+    - 9.2 The `bare_string` Lint
+- WARNING: Bare string
+- OK: Semantic type
+- Exemption for logging
+    - 9.3 Attribute Syntax
+- Directory-level (in __init__.spl, applies to entire directory tree)
+- Module-level (in __init__.spl)
+- Item-level (in any .spl file)
+    - 9.4 Project Configuration (simple.toml)
+- Strict mode
+- primitive_api = "deny"
+- bare_string = "deny"
+- bare_bool = "deny"
+    - 9.5 Standard Library Policy
+- std/__init__.spl
+- ... all child modules inherit the deny settings
+    - 9.6 Recommended Project Settings
+    - 9.7 Related Lints Summary
+- simple.toml - strict mode (recommended for new projects)
+  - 10. Migration Guide
+    - 10.1 From Bare Primitives
+- Before
+- After
+- Define the types
+    - 10.2 From Bare Strings
+- Before
+- After
+- Call site with unit suffixes
+    - 10.3 From Nullable Returns
+- Before
+- After
+    - 10.4 From Boolean Parameters
+- Before
+- After
+- Call site - much clearer!
+  - Related Specifications
+
+## doc/spec/web.md
+- lines: 712
+- headings:
+- Web Framework Specification
+  - Overview
+  - Architecture
+  - Module Structure
+  - HTTP Types
+    - HttpMethod
+    - HttpRequest
+- Parse from TCP stream
+- Accessors
+- Body parsing
+    - StatusCode
+- 2xx Success
+- 3xx Redirect
+- 4xx Client Error
+- 5xx Server Error
+    - HttpResponse
+- Constructors
+- Redirects
+- Builder methods (fluent)
+- Body setters
+- Serialization
+    - HttpError
+- Parsing errors
+- Body errors
+- Connection errors
+- Other
+  - HTTP Server
+    - ServerConfig
+- Builder methods
+    - HttpServer
+  - Routing
+    - Route
+    - RouteMatch
+    - Router
+- Add routes
+- Route groups
+- Fallback
+- Matching
+    - Path Pattern Syntax
+  - Middleware
+    - Middleware Trait
+    - Built-in Middleware
+  - Handler Context
+    - Context
+- Request access
+- Route parameters
+- Query parameters
+- Headers
+- Body
+- State
+  - SSR (Server-Side Rendering)
+    - RenderOptions
+    - SsrRenderer
+    - Convenience Functions
+- Render UI tree to HTML string
+- Render UI tree to HTTP response
+  - Static File Serving
+    - StaticFileServer
+    - MIME Type Detection
+  - WebApp Builder
+    - WebApp
+- Constructor
+- Configuration
+- Middleware
+- Routes
+- Route groups
+- Static files
+- Run server
+  - Example Application
+- Data model
+- Home page handler
+- User list page
+- User detail page
+- Fetch user (placeholder)
+- API: Get users as JSON
+- Main entry point
+- HTML pages
+- API endpoints
+- Static files
+  - Feature IDs
+  - Dependencies
+  - Related Documents
+
+## doc/status/README.md
+- lines: 145
+- headings:
+- Simple Language Implementation Status
+  - Overview
+  - Component Status
+  - Execution Model
+  - Test Summary
+  - Feature Status Summary
+  - Features by Implementation Level
+    - Fully Working (Interpreter)
+    - Partially Working (19 failing tests)
+    - Not Yet Implemented (Features 49-98)
+  - Native Compilation Pipeline (TODO)
+  - Concurrency Support (Interpreter)
+  - Pointer/Memory Support (Interpreter)
+  - Architecture
+  - Individual Feature Status Files
+
+## doc/status/actors.md
+- lines: 73
+- headings:
+- Feature #30: Actors
+  - Summary
+  - Current Implementation
+  - Working Syntax
+- Actor definition (parsed)
+- Spawn works
+  - Remaining Work
+  - Why Difficulty Reduced (5→3)
+  - Tests
+    - Working
+  - Files
+  - Related
+
+## doc/status/array_types.md
+- lines: 94
+- headings:
+- Feature: Array Types (#41)
+  - Goal
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - Implementation Details
+  - What Now Works
+  - Notes
+
+## doc/status/async_effects.md
+- lines: 83
+- headings:
+- Feature #32: Async Effects
+  - Summary
+  - Implemented Syntax
+- Cannot call blocking operations
+- Can call blocking operations
+- Can call async functions
+- Can also do blocking operations
+  - Features Implemented
+  - Implementation Details
+    - Parser Changes
+    - Runtime Effect Checking
+    - Blocking Operations
+    - Error Messages
+  - Tests
+  - Related
+
+## doc/status/basic_types_integer_literals.md
+- lines: 70
+- headings:
+- Feature #1: Basic Types
+  - Summary
+  - Supported Types
+  - Implementation
+    - Interpreter (`src/compiler/src/interpreter.rs`)
+    - Native Pipeline (TODO)
+  - Tests
+- Interpreter tests for basic types
+  - Next Steps
+
+## doc/status/borrowing.md
+- lines: 142
+- headings:
+- Feature #29: Borrowing
+  - Summary
+  - Implemented Syntax
+- Immutable borrow with & operator
+- Mutable borrow with &mut operator
+- Multiple immutable borrows allowed
+- Pass borrows to functions
+- Nested borrows
+  - Features Implemented
+  - Future Enhancements
+  - Why Difficulty Remains 5
+  - Dependencies
+  - Complexity
+  - Alternative Approach
+  - Related
+  - Split Into Smaller Deliverables
+  - Current Blockers
+
+## doc/status/capture_buffer_vreg_remapping.md
+- lines: 16
+- headings:
+- Feature 100: Capture Buffer & VReg Remapping
+  - Goal
+  - Current State
+
+## doc/status/classes.md
+- lines: 14
+- headings:
+- Feature: Classes & Methods — Feature #10
+  - What was added
+  - Files touched
+
+## doc/status/code_quality_tools.md
+- lines: 87
+- headings:
+- Feature: Code Quality Tools (Coverage & Duplication)
+  - Goal
+  - Tools Configured
+    - Coverage: `cargo-llvm-cov`
+    - Duplication: `jscpd`
+    - Linting: `cargo clippy`
+  - Files Created
+  - Makefile Targets
+- Testing
+- Coverage
+- Duplication
+- Linting
+- Combined
+- Setup
+  - Initial Duplication Analysis
+  - Usage
+- Quick check before commit
+- Full analysis for code review
+- Install all tools first time
+
+## doc/status/codegen_parity_completion.md
+- lines: 134
+- headings:
+- Feature 103: Codegen Parity Completion
+  - Goal
+  - Completion Summary (2025-12-16)
+    - Completed Features
+    - Codegen Coverage
+    - Runtime FFI Functions
+  - Test Coverage
+    - Parity Tests (22 tests in runner_async_tests.rs)
+    - Validation Method
+  - Architecture
+    - Compilation Pipeline
+    - Hybrid Execution Flow
+  - Related Files
+
+## doc/status/comments.md
+- lines: 31
+- headings:
+- Feature #22: Comments
+  - Summary
+  - Syntax
+- This is a comment
+- Multi-line comments use multiple #
+- Line 1
+- Line 2
+  - Features
+  - Implementation
+
+## doc/status/concurrency_primitives.md
+- lines: 61
+- headings:
+- Feature #31: Concurrency Primitives
+  - Summary
+  - Current Implementation
+  - Working Syntax
+- Spawn is implemented
+  - Remaining Work
+  - Why Difficulty Reduced (5→3)
+  - Tests
+  - Implementation Notes
+  - Files
+  - Related
+
+## doc/status/config_env.md
+- lines: 108
+- headings:
+- Feature: ConfigEnv - Configuration Environment
+  - Goal
+  - API Implemented
+  - TDD Approach
+    - Phase 1: Unit Tests - DONE
+    - Phase 2: Implementation - DONE
+    - Phase 3: Verify - DONE
+  - Files Created/Modified
+  - Progress
+  - Usage Examples
+
+## doc/status/context_blocks.md
+- lines: 53
+- headings:
+- Feature #35: Context Blocks
+  - Summary
+  - Syntax
+- b.value is now 18
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/control_flow_if_else.md
+- lines: 17
+- headings:
+- Feature: Control Flow (if/elif/else) — Feature #5
+  - What was added
+  - Notes
+  - Files touched
+
+## doc/status/dictionary_types.md
+- lines: 116
+- headings:
+- Feature: Dictionary Types (#42)
+  - Goal
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - Implementation Details
+    - Value::Str Added
+    - to_key_string() Method
+    - Dict Index Lookup
+  - What Now Works
+- String keys
+- Integer keys
+- Value arithmetic
+- Variable key lookup
+- Empty dict
+  - Notes
+
+## doc/status/enums.md
+- lines: 62
+- headings:
+- Feature: Enums (#11)
+  - Goal
+  - Implementation Plan
+    - Parser
+    - Compiler
+  - Test Case
+  - Progress
+
+## doc/status/extern_functions.md
+- lines: 57
+- headings:
+- Feature #46: Extern Functions (FFI)
+  - Summary
+  - Syntax
+- Usage
+  - Built-in Extern Functions
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/functional_update.md
+- lines: 45
+- headings:
+- Feature #20: Functional Update Operator
+  - Summary
+  - Syntax
+- target->method(args) desugars to: target = target.method(args)
+- Chaining
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/functions.md
+- lines: 89
+- headings:
+- Feature #7: Functions
+  - Summary
+  - Syntax
+- With default parameters
+- Async function
+  - Implementation
+    - Parser (`src/parser/src/parser.rs`)
+    - Interpreter (`src/compiler/src/interpreter.rs`)
+    - Native Pipeline (TODO)
+  - Features Supported
+  - Tests
+  - Files
+  - Known Issues
+  - Next Steps
+
+## doc/status/future_body_execution.md
+- lines: 37
+- headings:
+- Feature 102: Future Body Execution (Compiled)
+  - Goal
+  - Current State
+  - Completed System Tests (runner_tests.rs)
+  - Gaps (future work)
+  - Next Steps
+
+## doc/status/futures_promises.md
+- lines: 65
+- headings:
+- Feature #48: Futures and Promises
+  - Summary
+  - Current Implementation
+  - Parsed Syntax
+- Currently parsed but not fully executed
+  - Remaining Work
+  - Why Difficulty Reduced (4→3)
+  - Tests
+  - Dependencies
+  - Files
+  - Related
+
+## doc/status/gc_managed_default.md
+- lines: 70
+- headings:
+- Feature #24: GC-Managed Memory
+  - Summary
+  - Features
+  - Tests
+    - Runtime Tests (src/runtime/tests/)
+    - Runner Tests (src/driver/tests/)
+  - Usage
+- CLI with GC logging
+  - Implementation
+  - Log Format
+  - Future Work
+
+## doc/status/generator_state_machine_codegen.md
+- lines: 57
+- headings:
+- Feature 101: Generator State Machine Codegen
+  - Goal
+  - Current State
+  - Gaps
+  - Completed System Tests (runner_tests.rs)
+  - Next Steps
+  - Breakdown (difficulty-5)
+
+## doc/status/generics.md
+- lines: 87
+- headings:
+- Feature: Generics (Feature #14)
+  - Summary
+  - Implementation
+  - Working Syntax
+- Generic function
+- Multiple type parameters
+- Generic struct
+- Generic enum
+- Note: Generic type arguments in type positions use [] not <>
+  - Tests
+  - Files
+  - Future Work
+  - Why Difficulty Reduced (5→4)
+
+## doc/status/gpu_kernels.md
+- lines: 18
+- headings:
+- Feature #126: GPU Kernels (`#[gpu]`)
+  - Summary
+  - Current State
+  - Next Steps
+
+## doc/status/handle_pointers.md
+- lines: 66
+- headings:
+- Feature #28: Handle Pointers
+  - Summary
+  - Syntax
+- Access through handle (automatically resolved)
+- Arithmetic works through handles
+- Struct access
+  - Features
+  - Tests
+    - Runtime Tests (src/common/tests/manual_unique.rs)
+    - Interpreter Tests (src/driver/tests/interpreter_tests.rs)
+  - Implementation
+  - Related
+
+## doc/status/impl_blocks.md
+- lines: 93
+- headings:
+- Feature: Impl Blocks (#16)
+  - Goal
+  - Implementation
+    - Parser Changes
+    - Compiler Changes
+  - Files Modified
+  - Test Cases
+  - Progress
+
+## doc/status/indentation_blocks.md
+- lines: 46
+- headings:
+- Feature #8: Indentation-Based Blocks
+  - Summary
+  - Syntax
+  - Features
+  - Implementation
+  - Tests
+
+## doc/status/interpreter_interface.md
+- lines: 76
+- headings:
+- Feature: Interpreter Interface
+  - Goal
+  - API
+  - Files Created
+  - Tests (21 total)
+  - Progress
+  - Future Enhancements
+
+## doc/status/lambdas_closures.md
+- lines: 51
+- headings:
+- Feature #17: Lambdas/Closures
+  - Summary
+  - Syntax
+- Basic lambda
+- Multiple parameters
+- No parameters
+- Immediate call
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/line_continuation.md
+- lines: 35
+- headings:
+- Feature #23: Line Continuation
+  - Summary
+  - Syntax
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/llvm_backend.md
+- lines: 188
+- headings:
+- LLVM Backend Implementation Status
+  - Progress Tracking
+    - Phase 1: Dependencies and Scaffolding ✅ COMPLETE
+    - Phase 2: Type System ✅ COMPLETE
+    - Phase 3: Backend Trait Interface ✅ COMPLETE
+    - Phase 4: Function Compilation ✅ COMPLETE
+    - Phase 5: Object Emission ✅ COMPLETE
+  - MIR Instruction Coverage
+  - Build Instructions
+    - With LLVM Backend (optional)
+- Requires LLVM 18 development libraries
+    - Without LLVM Backend (default)
+- Uses Cranelift only (64-bit targets)
+    - Installing LLVM 18
+  - Test Coverage
+  - Decisions & Notes
+  - Blocked Items
+  - Related Documentation
+
+## doc/status/loops.md
+- lines: 14
+- headings:
+- Feature: Loops (for/while/loop/break/continue) — Feature #6
+  - What was added
+  - Files touched
+
+## doc/status/macros.md
+- lines: 79
+- headings:
+- Feature #34: Macros
+  - Summary
+  - Planned Syntax
+- Definition
+- Usage
+- Expands to: print(f"DEBUG: some_value = {some_value}")
+- Pattern matching macros
+  - Features Implemented
+  - Why Difficulty Reduced (5→4)
+  - Dependencies
+  - Implementation Approach
+  - Complexity
+  - Simplification Option
+  - Related
+
+## doc/status/method_missing.md
+- lines: 45
+- headings:
+- Feature #36: Method Missing
+  - Summary
+  - Syntax
+- name: string - method name that was called
+- args: array - arguments passed
+- block: optional lambda block
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/mutability_control.md
+- lines: 123
+- headings:
+- Feature: Mutability Control (#3)
+  - Goal
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - Implementation Details
+    - Parser: parse_mut_let()
+    - Env Type Change
+    - Assignment Check
+  - What Now Works
+- Immutable by default
+- x = 20  # Error: cannot assign to immutable variable 'x'
+- Mutable with mut let
+- Loops require mut let for counters
+  - Notes
+
+## doc/status/named_arguments.md
+- lines: 50
+- headings:
+- Feature #18: Named Arguments
+  - Summary
+  - Syntax
+- Positional
+- Named
+- Mixed (positional first, then named)
+- Reordered with named
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/no_paren_calls.md
+- lines: 49
+- headings:
+- Feature #47: No-Parentheses Calls
+  - Summary
+  - Syntax
+- With parentheses
+- Without parentheses (statement level)
+- With multiple arguments
+  - Features
+  - Tests
+  - Implementation
+  - Limitations
+
+## doc/status/operators_arithmetic.md
+- lines: 80
+- headings:
+- Feature: Operators - Arithmetic
+  - Goal
+  - Operators Implemented
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - Implementation Details
+  - Next Features
+
+## doc/status/option_type.md
+- lines: 129
+- headings:
+- Feature: Option Type (#38)
+  - Goal
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - Implementation Details
+    - Value::Enum Updated
+    - Enum Constructor in Expr::Call
+    - Pattern Matching with Payload
+  - What Now Works
+- Construction
+- Pattern matching with extraction
+- In functions
+  - Notes
+
+## doc/status/pattern_matching.md
+- lines: 122
+- headings:
+- Feature: Pattern Matching (#12)
+  - Goal
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - Patterns Supported
+  - What Now Works
+- Literal patterns
+- result = 20
+- Enum patterns
+- result = 1
+- Guards
+- result = 1
+- In functions
+  - Notes
+
+## doc/status/pipeline_components.md
+- lines: 186
+- headings:
+- Compiler Pipeline Component Status
+  - Overview
+  - Current Execution Flow
+  - Native Pipeline (TODO)
+  - Component Details
+    - Lexer (`src/parser/src/lexer.rs`)
+    - Parser (`src/parser/src/parser.rs`)
+    - Type Checker (`src/type/src/lib.rs`)
+    - Interpreter (`src/compiler/src/interpreter.rs`)
+    - HIR (`src/compiler/src/hir/`)
+    - MIR (`src/compiler/src/mir/`)
+    - Cranelift Codegen (`src/compiler/src/codegen/`)
+    - SMF Loader (`src/loader/`)
+    - Runtime (`src/runtime/`)
+  - Test Distribution
+  - Next Steps for Native Codegen
+
+## doc/status/sdoctest.md
+- lines: 226
+- headings:
+- Simple Doctest (sdoctest) Implementation Status
+  - Current Status
+    - Sprint 1: Core Parser and Runner ✅ COMPLETE
+    - Sprint 2: Discovery and Integration ✅ COMPLETE (Effective)
+    - Sprint 3: Advanced Features 📋 PLANNED
+    - Sprint 4: Coverage and Polish 📋 PLANNED
+  - File Structure
+  - Example Usage
+    - Docstring Doctest
+    - Markdown Doctest
+- Calculator Tutorial
+  - Addition
+    - Dedicated File (.sdt)
+- calculator_tests.sdt
+  - Timeline
+  - Implementation Notes
+    - FFI Bridge (Temporary)
+    - Blocked Items
+  - Integration with BDD Spec
+  - See Also
+  - Historical Progress
+
+## doc/status/shared_pointers.md
+- lines: 57
+- headings:
+- Feature #26: Shared Pointers
+  - Summary
+  - Syntax
+- When all references dropped, object is freed
+- Arithmetic works through pointers
+  - Features
+  - Tests
+    - Runtime Tests (src/common/tests/manual_unique.rs)
+    - Interpreter Tests (src/driver/tests/interpreter_tests.rs)
+  - Implementation
+  - Related
+
+## doc/status/stackless_coroutines.md
+- lines: 87
+- headings:
+- Feature #33: Stackless Coroutine Actors
+  - Summary
+  - Implemented Syntax
+- Create a generator using a lambda with yield expressions
+- Get values one at a time
+- Collect all remaining values into an array
+  - Features Implemented
+  - Implementation Details
+    - Parser Changes
+    - Runtime Implementation
+    - Built-in Functions
+    - How It Works
+  - Tests
+  - Limitations
+  - Related
+
+## doc/status/static_const_declarations.md
+- lines: 161
+- headings:
+- Feature: Static/Const Declarations (#45)
+  - Goal
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - Implementation Details
+    - TokenKind
+    - AST Types
+    - Parser
+    - Compiler exec_node
+  - What Now Works
+- Compile-time constants
+- Const with type annotation
+- Const cannot be reassigned
+- Static variables (immutable by default)
+- Static mut variables
+- Static (non-mut) cannot be reassigned
+- Public const/static
+  - Notes
+
+## doc/status/string_interpolation.md
+- lines: 61
+- headings:
+- Feature #21: String Interpolation
+  - Summary
+  - Syntax
+- Interpolated strings (double quotes - default)
+- Escaped braces
+- Raw strings (single quotes - no interpolation)
+- Legacy f-string prefix (optional)
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/structs.md
+- lines: 65
+- headings:
+- Feature: Structs (#9)
+  - Goal
+  - Implementation Plan
+    - Parser Changes
+    - Compiler Changes
+  - Files to Modify
+  - Test Case
+  - Progress
+
+## doc/status/symbols_atoms.md
+- lines: 45
+- headings:
+- Feature #39: Symbols/Atoms
+  - Summary
+  - Syntax
+- Comparison
+- Use in match
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/trailing_blocks.md
+- lines: 44
+- headings:
+- Feature #19: Trailing Blocks
+  - Summary
+  - Syntax
+- Instead of: items.map(\x: x * 2)
+- With multiple parameters
+- Method chains
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/traits.md
+- lines: 150
+- headings:
+- Feature: Traits (#15)
+  - Goal
+  - Implementation
+    - Parser (Already Existed)
+    - Compiler Changes
+    - Type Checker Changes
+  - Files Modified
+  - Test Cases
+  - Progress
+  - Future Enhancements
+
+## doc/status/tuple_types.md
+- lines: 67
+- headings:
+- Feature: Tuple Types (#40)
+  - Goal
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - What Now Works
+  - Notes
+
+## doc/status/type_aliases.md
+- lines: 40
+- headings:
+- Feature #43: Type Aliases
+  - Summary
+  - Syntax
+  - Features
+  - Tests
+  - Implementation
+
+## doc/status/type_inference.md
+- lines: 88
+- headings:
+- Feature #13: Type Inference
+  - Summary
+  - Implementation
+  - Architecture
+  - Key Components
+    - Substitution
+    - Unification
+    - Occurs Check
+  - Example
+  - Tests
+  - Files
+  - Future Work
+  - Why Difficulty Reduced (5→4)
+
+## doc/status/ui.md
+- lines: 57
+- headings:
+- UI Feature Status
+  - Feature #510: UI Dynamic Structure
+    - Summary
+    - Current State
+    - Next Steps
+  - Feature #511: UI Structural PatchSet/Diff
+    - Summary
+    - Current State
+    - Next Steps
+  - Feature #512: UI SSR + Hydration
+    - Summary
+    - Current State
+    - Next Steps
+
+## doc/status/union_types.md
+- lines: 67
+- headings:
+- Feature #37: Union Types
+  - Summary
+  - Implementation
+  - Working Syntax
+- Union type annotation in function parameters
+- Function accepts either int or string
+- Pattern matching with type discrimination
+- Each branch matches the specific type
+  - Tests
+  - Files
+  - Future Work
+
+## doc/status/unique_pointers.md
+- lines: 58
+- headings:
+- Feature #25: Unique Pointers
+  - Summary
+  - Syntax
+- Create a unique pointer
+- Access value (implicit deref)
+  - Features
+  - Tests
+    - Runtime Tests (src/common/tests/manual_unique.rs)
+    - Language Tests (src/driver/tests/)
+  - Implementation
+  - Related
+  - Future Work
+
+## doc/status/variables_let_bindings.md
+- lines: 110
+- headings:
+- Feature: Variables & Let Bindings
+  - Goal
+  - TDD Approach
+    - Phase 1: System Test (Red) - DONE
+    - Phase 2: Implementation (Green) - DONE
+    - Phase 3: Verify - DONE
+  - Files Modified
+  - Progress
+  - Implementation Details
+  - What Now Works
+  - Next Features
+
+## doc/status/visibility_modifiers.md
+- lines: 61
+- headings:
+- Feature #44: Visibility Modifiers
+  - Summary
+  - Syntax
+  - Features
+  - Implementation
+  - Future Work
+
+## doc/status/weak_pointers.md
+- lines: 50
+- headings:
+- Feature #27: Weak Pointers
+  - Summary
+  - Syntax
+- Weak pointers don't prevent deallocation
+- Must upgrade to access (returns Option)
+  - Features
+  - Tests
+    - Runtime Tests (src/common/tests/manual_unique.rs)
+    - Interpreter Tests (src/driver/tests/interpreter_tests.rs)
+  - Implementation
+  - Related
+

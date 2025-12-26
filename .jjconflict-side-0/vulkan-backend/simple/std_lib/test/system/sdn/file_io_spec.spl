@@ -1,0 +1,368 @@
+///
+SDN File I/O System Tests
+
+End-to-end tests for SDN document file operations.
+Tests real file reading, writing, and modification.
+
+No mocks - tests the entire stack:
+- File I/O (read/write)
+- Document parsing and serialization
+- Path-based mutations
+- Modification tracking
+- Error handling with real files
+///
+
+import std.spec
+import std.fs
+import std.random
+import sdn.document.SdnDocument
+import sdn.value.SdnValue
+
+describe "SDN File I/O System Tests":
+    context "file loading":
+        it "loads and parses SDN file":
+            let content = "name: Alice\nage: 30\nenabled: true"
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(doc):
+                    expect doc.get("name").flatmap(|v| v.as_str()) == Some("Alice")
+                    expect doc.get("age").flatmap(|v| v.as_i64()) == Some(30)
+                    expect doc.get("enabled").flatmap(|v| v.as_bool()) == Some(True)
+                case Err(e):
+                    fail("Failed to load file: ${e}")
+
+            cleanup_file(path)
+
+        it "loads nested structures from file":
+            let content = """
+server:
+    host: localhost
+    port: 8080
+    config:
+        debug: true
+        workers: 4
+"""
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(doc):
+                    expect doc.get("server.host").flatmap(|v| v.as_str()) == Some("localhost")
+                    expect doc.get("server.port").flatmap(|v| v.as_i64()) == Some(8080)
+                    expect doc.get("server.config.debug").flatmap(|v| v.as_bool()) == Some(True)
+                    expect doc.get("server.config.workers").flatmap(|v| v.as_i64()) == Some(4)
+                case Err(e):
+                    fail("Failed to load file: ${e}")
+
+            cleanup_file(path)
+
+        it "loads arrays and dicts from file":
+            let content = """
+items = [1, 2, 3, 4, 5]
+config = {x: 10, y: 20, z: 30}
+nested:
+    data = [a, b, c]
+"""
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(doc):
+                    match doc.get("items"):
+                        case Some(arr):
+                            expect arr.is_array() == True
+                        case None:
+                            fail("Expected items array")
+
+                    match doc.get("config"):
+                        case Some(dict):
+                            expect dict.is_dict() == True
+                        case None:
+                            fail("Expected config dict")
+                case Err(e):
+                    fail("Failed to load file: ${e}")
+
+            cleanup_file(path)
+
+        it "handles missing file":
+            match SdnDocument.from_file("/nonexistent/path/file.sdn"):
+                case Ok(_):
+                    fail("Should have failed for missing file")
+                case Err(e):
+                    pass  # Expected
+
+        it "handles malformed SDN file":
+            let content = "name: Alice\n  bad indent\n    worse indent"
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(_):
+                    fail("Should have failed for malformed SDN")
+                case Err(e):
+                    pass  # Expected
+
+            cleanup_file(path)
+
+    context "file writing":
+        it "writes document to file":
+            let content = "name: Alice\nage: 30"
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(mut doc):
+                    # Modify document
+                    doc.set("name", SdnValue.String("Bob"))
+                    doc.set("age", SdnValue.Int(35))
+
+                    # Write to new file
+                    let new_path = "${path}.new"
+                    match doc.write_file(new_path):
+                        case Ok(_):
+                            # Verify new file
+                            match fs.read_to_string(new_path):
+                                case Ok(new_content):
+                                    expect new_content.contains("Bob")
+                                    expect new_content.contains("35")
+                                case Err(e):
+                                    fail("Failed to read new file: ${e}")
+
+                            cleanup_file(new_path)
+                        case Err(e):
+                            fail("Failed to write file: ${e}")
+                case Err(e):
+                    fail("Failed to load file: ${e}")
+
+            cleanup_file(path)
+
+        it "preserves structure when writing":
+            let content = """
+app:
+    name: MyService
+    version: 2.1.0
+
+server:
+    host: 0.0.0.0
+    port: 8080
+"""
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(doc):
+                    let output_path = "${path}.out"
+
+                    match doc.write_file(output_path):
+                        case Ok(_):
+                            # Re-load and verify
+                            match SdnDocument.from_file(output_path):
+                                case Ok(reloaded):
+                                    expect reloaded.get("app.name").flatmap(|v| v.as_str()) == Some("MyService")
+                                    expect reloaded.get("server.port").flatmap(|v| v.as_i64()) == Some(8080)
+                                case Err(e):
+                                    fail("Failed to reload file: ${e}")
+
+                            cleanup_file(output_path)
+                        case Err(e):
+                            fail("Failed to write file: ${e}")
+                case Err(e):
+                    fail("Failed to load file: ${e}")
+
+            cleanup_file(path)
+
+        it "handles write errors (invalid path)":
+            let content = "name: Alice"
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(doc):
+                    # Try to write to invalid path
+                    match doc.write_file("/invalid/path/that/does/not/exist.sdn"):
+                        case Ok(_):
+                            fail("Should have failed for invalid path")
+                        case Err(e):
+                            pass  # Expected
+                case Err(e):
+                    fail("Failed to load file: ${e}")
+
+            cleanup_file(path)
+
+    context "modification and persistence":
+        it "modifies and persists changes":
+            let content = "name: Alice\nage: 30\ncity: NYC"
+            let path = create_test_file(content)
+
+            # Load, modify, save
+            match SdnDocument.from_file(path):
+                case Ok(mut doc):
+                    expect doc.is_modified() == False
+
+                    doc.set("name", SdnValue.String("Bob"))
+                    doc.set("age", SdnValue.Int(35))
+
+                    expect doc.is_modified() == True
+
+                    match doc.write_file(path):
+                        case Ok(_):
+                            pass
+                        case Err(e):
+                            fail("Failed to write: ${e}")
+                case Err(e):
+                    fail("Failed to load: ${e}")
+
+            # Reload and verify changes
+            match SdnDocument.from_file(path):
+                case Ok(doc):
+                    expect doc.get("name").flatmap(|v| v.as_str()) == Some("Bob")
+                    expect doc.get("age").flatmap(|v| v.as_i64()) == Some(35)
+                    expect doc.get("city").flatmap(|v| v.as_str()) == Some("NYC")
+                case Err(e):
+                    fail("Failed to reload: ${e}")
+
+            cleanup_file(path)
+
+        it "handles delete and persist":
+            let content = "a: 1\nb: 2\nc: 3"
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(mut doc):
+                    doc.delete("b")
+
+                    match doc.write_file(path):
+                        case Ok(_):
+                            pass
+                        case Err(e):
+                            fail("Failed to write: ${e}")
+                case Err(e):
+                    fail("Failed to load: ${e}")
+
+            # Reload and verify deletion
+            match SdnDocument.from_file(path):
+                case Ok(doc):
+                    expect doc.get("a").flatmap(|v| v.as_i64()) == Some(1)
+                    expect doc.get("b") == None
+                    expect doc.get("c").flatmap(|v| v.as_i64()) == Some(3)
+                case Err(e):
+                    fail("Failed to reload: ${e}")
+
+            cleanup_file(path)
+
+        it "handles array push and persist":
+            let content = "items = [1, 2, 3]"
+            let path = create_test_file(content)
+
+            match SdnDocument.from_file(path):
+                case Ok(mut doc):
+                    doc.push("items", SdnValue.Int(4))
+                    doc.push("items", SdnValue.Int(5))
+
+                    match doc.write_file(path):
+                        case Ok(_):
+                            pass
+                        case Err(e):
+                            fail("Failed to write: ${e}")
+                case Err(e):
+                    fail("Failed to load: ${e}")
+
+            # Reload and verify pushes
+            match SdnDocument.from_file(path):
+                case Ok(doc):
+                    match doc.get("items"):
+                        case Some(arr):
+                            match arr.as_array():
+                                case Some(list):
+                                    expect list.len == 5
+                                case None:
+                                    fail("Expected array")
+                        case None:
+                            fail("Expected items")
+                case Err(e):
+                    fail("Failed to reload: ${e}")
+
+            cleanup_file(path)
+
+    context "concurrent file operations":
+        it "handles multiple documents from same file":
+            let content = "counter: 0"
+            let path = create_test_file(content)
+
+            # Load multiple documents
+            let doc1 = SdnDocument.from_file(path)
+            let doc2 = SdnDocument.from_file(path)
+
+            match (doc1, doc2):
+                case (Ok(mut d1), Ok(mut d2)):
+                    # Both should read same initial value
+                    expect d1.get("counter").flatmap(|v| v.as_i64()) == Some(0)
+                    expect d2.get("counter").flatmap(|v| v.as_i64()) == Some(0)
+
+                    # Modify both
+                    d1.set("counter", SdnValue.Int(1))
+                    d2.set("counter", SdnValue.Int(2))
+
+                    # Last write wins
+                    d1.write_file(path)
+                    d2.write_file(path)
+
+                    # Verify final state
+                    match SdnDocument.from_file(path):
+                        case Ok(final):
+                            expect final.get("counter").flatmap(|v| v.as_i64()) == Some(2)
+                        case Err(e):
+                            fail("Failed to reload: ${e}")
+                case _:
+                    fail("Failed to load documents")
+
+            cleanup_file(path)
+
+        it "handles large file operations":
+            # Create large SDN file
+            let mut large_content = ""
+            for i in 0..100:
+                large_content += "key_${i}: value_${i}\n"
+
+            let path = create_test_file(large_content)
+
+            match SdnDocument.from_file(path):
+                case Ok(mut doc):
+                    # Modify multiple values
+                    for i in 0..10:
+                        doc.set("key_${i}", SdnValue.String("modified_${i}"))
+
+                    match doc.write_file(path):
+                        case Ok(_):
+                            pass
+                        case Err(e):
+                            fail("Failed to write large file: ${e}")
+
+                    # Verify modifications
+                    match SdnDocument.from_file(path):
+                        case Ok(reloaded):
+                            expect reloaded.get("key_0").flatmap(|v| v.as_str()) == Some("modified_0")
+                            expect reloaded.get("key_9").flatmap(|v| v.as_str()) == Some("modified_9")
+                            expect reloaded.get("key_50").flatmap(|v| v.as_str()) == Some("value_50")
+                        case Err(e):
+                            fail("Failed to reload large file: ${e}")
+                case Err(e):
+                    fail("Failed to load large file: ${e}")
+
+            cleanup_file(path)
+
+### Helper Functions
+
+fn create_test_file(content: String) -> String:
+    """Create temporary test file with content"""
+    let temp_dir = "/tmp/sdn_file_io_test"
+    fs.create_dir_all(temp_dir)
+
+    let random_id = random.random_int(10000, 99999)
+    let pid = process.pid()
+    let file_path = "${temp_dir}/test_${pid}_${random_id}.sdn"
+
+    match fs.write(file_path, content):
+        case Ok(_):
+            return file_path
+        case Err(e):
+            fail("Failed to create test file: ${e}")
+
+fn cleanup_file(path: String):
+    """Remove test file"""
+    fs.remove(path)

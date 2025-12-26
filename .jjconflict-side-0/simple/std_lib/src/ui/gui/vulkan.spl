@@ -1,0 +1,784 @@
+# Vulkan Renderer - GPU-Accelerated UI Backend
+#
+# High-performance UI rendering using Vulkan for GPU acceleration.
+# Implements the RenderBackend trait with Vulkan-specific optimizations.
+#
+# Architecture:
+#   CPU Layer: Layout, element processing, command recording
+#   GPU Layer: Vertex shading, rasterization, fragment shading, composition
+#
+# Key Features:
+#   - SDF (Signed Distance Field) text rendering
+#   - Rounded corners and shadows via shaders
+#   - Draw call batching and instancing
+#   - Triple buffering for smooth rendering
+#   - Dirty rectangle tracking for incremental updates
+
+use core.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+use ui.renderer.*
+
+# =============================================================================
+# Main Vulkan Renderer
+# =============================================================================
+
+pub struct VulkanRenderer:
+    # Core Vulkan components
+    device: VulkanDevice
+    swapchain: Swapchain
+    render_pass: RenderPass
+
+    # CPU-side processing
+    layout_engine: LayoutEngine
+    element_processor: ElementProcessor
+    resource_manager: ResourceManager
+
+    # GPU-side management
+    buffer_manager: BufferManager
+    text_renderer: TextRenderer
+
+    # Frame management (triple buffering)
+    frame_data: Array[FrameData]  # Size 3
+    frame_index: usize
+
+    # State
+    initialized: bool
+    window_width: u32
+    window_height: u32
+
+impl VulkanRenderer:
+    # Create a new Vulkan renderer
+    pub fn new(window_title: &str, width: u32, height: u32) -> Result[VulkanRenderer, RenderError]:
+        # TODO: Create window handle (platform-specific)
+        let window_handle = vulkan_create_window(window_title, width, height)
+        if window_handle == 0:
+            return Err(RenderError::IoError("Failed to create window".to_string()))
+
+        # TODO: Initialize Vulkan device
+        let device = match VulkanDevice::new(window_handle):
+            case Ok(dev): dev
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # TODO: Create swapchain
+        let swapchain = match Swapchain::new(&device, width, height):
+            case Ok(sc): sc
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # TODO: Create render pass
+        let render_pass = match RenderPass::new(&device, &swapchain):
+            case Ok(rp): rp
+            case Err(e): return Err(RenderError::IoError(e))
+
+        # Initialize CPU-side components
+        let layout_engine = LayoutEngine::new()
+        let element_processor = ElementProcessor::new()
+        let resource_manager = ResourceManager::new(&device)
+
+        # Initialize GPU-side components
+        let buffer_manager = BufferManager::new(&device)
+        let text_renderer = TextRenderer::new(&device)
+
+        # Create frame data for triple buffering
+        let mut frame_data: Array[FrameData] = []
+        for _ in 0..3:
+            frame_data.push(FrameData::new(&device))
+
+        return Ok(VulkanRenderer {
+            device: device,
+            swapchain: swapchain,
+            render_pass: render_pass,
+            layout_engine: layout_engine,
+            element_processor: element_processor,
+            resource_manager: resource_manager,
+            buffer_manager: buffer_manager,
+            text_renderer: text_renderer,
+            frame_data: frame_data,
+            frame_index: 0,
+            initialized: false,
+            window_width: width,
+            window_height: height
+        })
+
+impl RenderBackend for VulkanRenderer:
+    fn init(self) -> Result[(), RenderError]:
+        if self.initialized:
+            return Err(RenderError::AlreadyInitialized)
+
+        # TODO: Initialize Vulkan resources
+        # - Create descriptor pools
+        # - Compile shaders
+        # - Create graphics pipelines
+        # - Load default font atlas
+
+        self.initialized = true
+        return Ok(())
+
+    fn shutdown(self) -> Result[(), RenderError]:
+        if not self.initialized:
+            return Err(RenderError::NotInitialized)
+
+        # TODO: Cleanup Vulkan resources
+        # - Wait for device idle
+        # - Destroy pipelines
+        # - Destroy descriptor pools
+        # - Destroy frame resources
+        # - Destroy render pass
+        # - Destroy swapchain
+        # - Destroy device
+
+        self.initialized = false
+        return Ok(())
+
+    fn dimensions(self) -> (u16, u16):
+        return (self.window_width as u16, self.window_height as u16)
+
+    fn render(self, tree: &ElementTree) -> Result[(), RenderError]:
+        if not self.initialized:
+            return Err(RenderError::NotInitialized)
+
+        # 1. Begin frame
+        let frame = match self.begin_frame():
+            case Ok(f): f
+            case Err(e): return Err(e)
+
+        # 2. Compute layout (CPU)
+        let constraints = BoxConstraints::new(
+            0, 0,
+            self.window_width, self.window_height
+        )
+        let layout_result = self.layout_engine.compute_layout(
+            tree.root(),
+            constraints
+        )
+
+        # 3. Process elements into draw list (CPU)
+        let draw_list = self.element_processor.process_tree(
+            tree,
+            &layout_result
+        )
+
+        # 4. Upload geometry to GPU
+        self.buffer_manager.upload_draw_list(&draw_list, frame.buffer_index)
+
+        # 5. Record rendering commands (CPU → GPU)
+        self.record_commands(&frame, &draw_list)
+
+        # 6. End frame and present
+        return self.end_frame(frame)
+
+    fn apply_patches(self, patches: &PatchSet) -> Result[(), RenderError]:
+        if not self.initialized:
+            return Err(RenderError::NotInitialized)
+
+        # TODO: Implement incremental updates
+        # For now, just re-render the whole tree
+        # Future optimization:
+        #   - Identify affected elements from patches
+        #   - Mark dirty regions
+        #   - Recompute layout only for affected subtrees
+        #   - Regenerate draw list only for dirty regions
+        #   - Use scissor rects to update only changed areas
+
+        return Ok(())
+
+    fn clear(self) -> Result[(), RenderError]:
+        if not self.initialized:
+            return Err(RenderError::NotInitialized)
+
+        # Begin frame and clear to background color
+        let frame = match self.begin_frame():
+            case Ok(f): f
+            case Err(e): return Err(e)
+
+        # TODO: Clear framebuffer
+        # - Begin render pass with clear color
+        # - End render pass
+        # - Submit command buffer
+
+        return self.end_frame(frame)
+
+    fn flush(self) -> Result[(), RenderError]:
+        if not self.initialized:
+            return Err(RenderError::NotInitialized)
+
+        # TODO: Wait for GPU to finish pending work
+        # vkDeviceWaitIdle(device)
+
+        return Ok(())
+
+    fn poll_event(self, timeout_ms: u64) -> Result[Option[Event], RenderError]:
+        if not self.initialized:
+            return Err(RenderError::NotInitialized)
+
+        # TODO: Poll window events (platform-specific)
+        # - Check for window resize
+        # - Check for input events (keyboard, mouse)
+        # - Return None if no events within timeout
+
+        return Ok(None)
+
+    fn read_event(self) -> Result[Event, RenderError]:
+        if not self.initialized:
+            return Err(RenderError::NotInitialized)
+
+        # TODO: Block until next event arrives
+        loop:
+            match self.poll_event(1000):
+                case Ok(Some(event)): return Ok(event)
+                case Ok(None): pass  # Continue waiting
+                case Err(e): return Err(e)
+
+impl VulkanRenderer:
+    # Begin a new frame
+    fn begin_frame(self) -> Result[Frame, RenderError]:
+        # TODO: Acquire next swapchain image
+        # - Call vkAcquireNextImageKHR
+        # - Wait for frame fence (triple buffering)
+        # - Reset command buffer
+        # - Begin command buffer recording
+
+        let image_index = 0  # TODO: Get from vkAcquireNextImageKHR
+
+        return Ok(Frame {
+            image_index: image_index,
+            buffer_index: self.frame_index,
+            command_buffer: self.frame_data[self.frame_index].command_buffer
+        })
+
+    # Record rendering commands
+    fn record_commands(self, frame: &Frame, draw_list: &DrawList):
+        let cmd_buf = frame.command_buffer
+
+        # TODO: Begin render pass
+        # vkCmdBeginRenderPass(cmd_buf, &render_pass_begin_info, ...)
+
+        # TODO: Set viewport and scissor
+        # vkCmdSetViewport(cmd_buf, 0, 1, &viewport)
+        # vkCmdSetScissor(cmd_buf, 0, 1, &scissor)
+
+        # Process each draw call
+        for draw_call in draw_list.draw_calls:
+            # TODO: Bind pipeline for this draw call type
+            # let pipeline = self.resource_manager.get_pipeline(draw_call.pipeline_type)
+            # vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline)
+
+            # TODO: Bind descriptor sets (textures, uniforms)
+            # vkCmdBindDescriptorSets(cmd_buf, ...)
+
+            # TODO: Push constants (transforms, colors)
+            # vkCmdPushConstants(cmd_buf, pipeline_layout, ...)
+
+            # TODO: Bind vertex/index buffers
+            # vkCmdBindVertexBuffers(cmd_buf, 0, 1, &vertex_buffer, &offset)
+            # vkCmdBindIndexBuffer(cmd_buf, index_buffer, 0, VK_INDEX_TYPE_UINT32)
+
+            # TODO: Set scissor if specified
+            # if let Some(scissor) = draw_call.scissor:
+            #     vkCmdSetScissor(cmd_buf, 0, 1, &scissor)
+
+            # TODO: Draw
+            # vkCmdDrawIndexed(cmd_buf, draw_call.index_count, 1,
+            #                  draw_call.index_offset, draw_call.vertex_offset, 0)
+
+        # TODO: End render pass
+        # vkCmdEndRenderPass(cmd_buf)
+
+    # End frame and present
+    fn end_frame(self, frame: Frame) -> Result[(), RenderError]:
+        # TODO: End command buffer recording
+        # vkEndCommandBuffer(frame.command_buffer)
+
+        # TODO: Submit command buffer to queue
+        # vkQueueSubmit(graphics_queue, &submit_info, frame_fence)
+
+        # TODO: Present swapchain image
+        # vkQueuePresentKHR(present_queue, &present_info)
+
+        # Advance frame index for triple buffering
+        self.frame_index = (self.frame_index + 1) % 3
+
+        return Ok(())
+
+# =============================================================================
+# Vulkan Device Management
+# =============================================================================
+
+struct VulkanDevice:
+    instance: i64          # VkInstance
+    physical_device: i64   # VkPhysicalDevice
+    device: i64            # VkDevice
+    graphics_queue: i64    # VkQueue
+    present_queue: i64     # VkQueue
+    command_pool: i64      # VkCommandPool
+    allocator: i64         # VmaAllocator
+
+impl VulkanDevice:
+    fn new(window_handle: i64) -> Result[VulkanDevice, String]:
+        # TODO: Create Vulkan instance
+        # - vkCreateInstance with validation layers (debug builds)
+        # - vkCreateSurface for window
+
+        # TODO: Select physical device
+        # - vkEnumeratePhysicalDevices
+        # - Pick discrete GPU if available, otherwise integrated
+
+        # TODO: Find queue families
+        # - Graphics queue family
+        # - Present queue family (may be same as graphics)
+
+        # TODO: Create logical device
+        # - vkCreateDevice with required extensions (VK_KHR_swapchain)
+
+        # TODO: Get queues
+        # - vkGetDeviceQueue for graphics and present
+
+        # TODO: Create command pool
+        # - vkCreateCommandPool with VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+
+        # TODO: Create VMA allocator
+        # - vmaCreateAllocator for efficient memory management
+
+        return Ok(VulkanDevice {
+            instance: 0,          # TODO: Set from vkCreateInstance
+            physical_device: 0,   # TODO: Set from physical device selection
+            device: 0,            # TODO: Set from vkCreateDevice
+            graphics_queue: 0,    # TODO: Set from vkGetDeviceQueue
+            present_queue: 0,     # TODO: Set from vkGetDeviceQueue
+            command_pool: 0,      # TODO: Set from vkCreateCommandPool
+            allocator: 0          # TODO: Set from vmaCreateAllocator
+        })
+
+    fn create_buffer(self, size: u64, usage: u32, memory_usage: u32) -> Result[Buffer, String]:
+        # TODO: Create buffer using VMA
+        # vmaCreateBuffer(allocator, &buffer_info, &alloc_info, &buffer, &allocation)
+
+        return Ok(Buffer {
+            handle: 0,         # TODO: VkBuffer handle
+            allocation: 0,     # TODO: VmaAllocation handle
+            size: size
+        })
+
+    fn create_image(self, width: u32, height: u32, format: u32, usage: u32) -> Result[Image, String]:
+        # TODO: Create image using VMA
+        # vmaCreateImage(allocator, &image_info, &alloc_info, &image, &allocation)
+
+        # TODO: Create image view
+        # vkCreateImageView(device, &view_info, nullptr, &image_view)
+
+        return Ok(Image {
+            handle: 0,         # TODO: VkImage handle
+            view: 0,           # TODO: VkImageView handle
+            allocation: 0,     # TODO: VmaAllocation handle
+            width: width,
+            height: height,
+            format: format
+        })
+
+# =============================================================================
+# Swapchain Management
+# =============================================================================
+
+struct Swapchain:
+    swapchain: i64             # VkSwapchainKHR
+    images: Array[Image]       # Swapchain images
+    extent: (u32, u32)         # Width, height
+    format: u32                # VkFormat
+
+impl Swapchain:
+    fn new(device: &VulkanDevice, width: u32, height: u32) -> Result[Swapchain, String]:
+        # TODO: Query surface capabilities
+        # vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+
+        # TODO: Query surface formats
+        # vkGetPhysicalDeviceSurfaceFormatsKHR
+        # Prefer VK_FORMAT_B8G8R8A8_SRGB
+
+        # TODO: Query present modes
+        # vkGetPhysicalDeviceSurfacePresentModesKHR
+        # Prefer VK_PRESENT_MODE_MAILBOX_KHR (triple buffering)
+
+        # TODO: Create swapchain
+        # vkCreateSwapchainKHR
+
+        # TODO: Get swapchain images
+        # vkGetSwapchainImagesKHR
+        # Create image views for each image
+
+        let mut images: Array[Image] = []
+        # TODO: Populate images array
+
+        return Ok(Swapchain {
+            swapchain: 0,      # TODO: Set from vkCreateSwapchainKHR
+            images: images,
+            extent: (width, height),
+            format: 0          # TODO: Set from chosen surface format
+        })
+
+# =============================================================================
+# Render Pass
+# =============================================================================
+
+struct RenderPass:
+    render_pass: i64               # VkRenderPass
+    framebuffers: Array[i64]       # VkFramebuffer for each swapchain image
+
+impl RenderPass:
+    fn new(device: &VulkanDevice, swapchain: &Swapchain) -> Result[RenderPass, String]:
+        # TODO: Create render pass
+        # - Color attachment with swapchain format
+        # - Load op: CLEAR, Store op: STORE
+        # - Initial layout: UNDEFINED, Final layout: PRESENT_SRC_KHR
+        # vkCreateRenderPass
+
+        # TODO: Create framebuffer for each swapchain image
+        # vkCreateFramebuffer with swapchain image views
+
+        let mut framebuffers: Array[i64] = []
+        # TODO: Populate framebuffers array
+
+        return Ok(RenderPass {
+            render_pass: 0,        # TODO: Set from vkCreateRenderPass
+            framebuffers: framebuffers
+        })
+
+# =============================================================================
+# Layout Engine (CPU)
+# =============================================================================
+
+struct LayoutEngine:
+    cache: LayoutCache
+
+impl LayoutEngine:
+    fn new() -> LayoutEngine:
+        return LayoutEngine {
+            cache: LayoutCache::new()
+        }
+
+    fn compute_layout(self, elem: &Element, constraints: BoxConstraints) -> LayoutResult:
+        # Check cache first
+        if let Some(cached) = self.cache.get(elem.id):
+            if cached.constraints == constraints:
+                return cached.result
+
+        # Compute layout based on element type
+        let result = match elem.kind:
+            case ElementKind::Row | ElementKind::Column:
+                self.layout_flexbox(elem, constraints)
+            case ElementKind::Grid:
+                self.layout_grid(elem, constraints)
+            case _:
+                self.layout_block(elem, constraints)
+
+        # Cache result
+        self.cache.set(elem.id, constraints, result)
+
+        return result
+
+    fn layout_flexbox(self, elem: &Element, constraints: BoxConstraints) -> LayoutResult:
+        # TODO: Implement flexbox layout algorithm
+        # - Determine main axis (row/column)
+        # - Calculate flex item sizes
+        # - Handle flex-grow, flex-shrink
+        # - Apply justify-content, align-items
+
+        return LayoutResult::default()
+
+    fn layout_grid(self, elem: &Element, constraints: BoxConstraints) -> LayoutResult:
+        # TODO: Implement CSS grid layout algorithm
+        # - Parse grid-template-columns, grid-template-rows
+        # - Place items in grid cells
+        # - Handle grid gaps
+
+        return LayoutResult::default()
+
+    fn layout_block(self, elem: &Element, constraints: BoxConstraints) -> LayoutResult:
+        # TODO: Implement block layout
+        # - Stack children vertically
+        # - Apply width, height constraints
+        # - Measure text if text element
+
+        return LayoutResult::default()
+
+# =============================================================================
+# Element Processor (CPU → GPU Data)
+# =============================================================================
+
+struct ElementProcessor:
+    vertex_builder: VertexBuilder
+    draw_list: DrawList
+
+impl ElementProcessor:
+    fn new() -> ElementProcessor:
+        return ElementProcessor {
+            vertex_builder: VertexBuilder::new(),
+            draw_list: DrawList::new()
+        }
+
+    fn process_tree(self, tree: &ElementTree, layout: &LayoutResult) -> DrawList:
+        # Clear previous frame's data
+        self.draw_list.clear()
+        self.vertex_builder.clear()
+
+        # Traverse tree and generate geometry
+        self.process_element(tree.root(), layout)
+
+        # Finalize draw list
+        self.draw_list.vertices = self.vertex_builder.vertices
+        self.draw_list.indices = self.vertex_builder.indices
+
+        return self.draw_list
+
+    fn process_element(self, elem: &Element, layout: &LayoutResult):
+        # Get layout for this element
+        let bounds = layout.get_bounds(elem.id)
+
+        # Generate geometry based on element type
+        match elem.kind:
+            case ElementKind::Box:
+                self.emit_rounded_rect(bounds, 4.0, elem)
+            case ElementKind::Button:
+                self.emit_button(bounds, elem)
+            case ElementKind::Text:
+                self.emit_text(bounds, elem)
+            case _:
+                # Default: just background if specified
+                if self.has_background(elem):
+                    self.emit_rect(bounds, self.get_bg_color(elem))
+
+        # Process children
+        for child in &elem.children:
+            self.process_element(child, layout)
+
+    fn emit_rect(self, bounds: Rect, color: Color):
+        # TODO: Generate quad vertices (2 triangles)
+        # - Add 4 vertices with positions and color
+        # - Add 6 indices (0,1,2, 2,3,0)
+        # - Add draw call with SolidColorPipeline
+        pass
+
+    fn emit_rounded_rect(self, bounds: Rect, radius: f32, elem: &Element):
+        # TODO: Generate quad with UVs for SDF shader
+        # - Add vertices with UVs (0,0) to (1,1)
+        # - Add draw call with RoundedRectPipeline
+        # - Store radius in push constants
+        pass
+
+    fn emit_text(self, bounds: Rect, elem: &Element):
+        # TODO: Generate quads for each glyph
+        # - Shape text using font metrics
+        # - For each glyph:
+        #   - Get glyph rect from font atlas
+        #   - Generate quad with UVs pointing to atlas
+        # - Add draw call with TextPipeline
+        pass
+
+    fn emit_button(self, bounds: Rect, elem: &Element):
+        # Emit background
+        self.emit_rounded_rect(bounds, 4.0, elem)
+
+        # Emit label text if present
+        if let Some(text) = &elem.text:
+            # TODO: Center text in button
+            self.emit_text(bounds, elem)
+
+# =============================================================================
+# Supporting Types
+# =============================================================================
+
+struct Frame:
+    image_index: u32           # Swapchain image index
+    buffer_index: usize        # Frame buffer index (0-2)
+    command_buffer: i64        # VkCommandBuffer
+
+struct FrameData:
+    command_buffer: i64        # VkCommandBuffer
+    fence: i64                 # VkFence
+    image_available: i64       # VkSemaphore
+    render_finished: i64       # VkSemaphore
+
+impl FrameData:
+    fn new(device: &VulkanDevice) -> FrameData:
+        # TODO: Allocate command buffer
+        # TODO: Create fence (signaled initially)
+        # TODO: Create semaphores
+
+        return FrameData {
+            command_buffer: 0,
+            fence: 0,
+            image_available: 0,
+            render_finished: 0
+        }
+
+struct Buffer:
+    handle: i64                # VkBuffer
+    allocation: i64            # VmaAllocation
+    size: u64
+
+struct Image:
+    handle: i64                # VkImage
+    view: i64                  # VkImageView
+    allocation: i64            # VmaAllocation
+    width: u32
+    height: u32
+    format: u32
+
+struct BoxConstraints:
+    min_width: u32
+    min_height: u32
+    max_width: u32
+    max_height: u32
+
+impl BoxConstraints:
+    fn new(min_w: u32, min_h: u32, max_w: u32, max_h: u32) -> BoxConstraints:
+        return BoxConstraints {
+            min_width: min_w,
+            min_height: min_h,
+            max_width: max_w,
+            max_height: max_h
+        }
+
+struct LayoutResult:
+    bounds: Dict[u64, Rect]    # NodeId -> Rect
+
+impl LayoutResult:
+    fn default() -> LayoutResult:
+        return LayoutResult {
+            bounds: Dict::new()
+        }
+
+    fn get_bounds(self, node_id: NodeId) -> Rect:
+        match self.bounds.get(&node_id.value()):
+            case Some(rect): return rect
+            case None: return Rect::zero()
+
+struct Rect:
+    x: f32
+    y: f32
+    width: f32
+    height: f32
+
+impl Rect:
+    fn zero() -> Rect:
+        return Rect { x: 0.0, y: 0.0, width: 0.0, height: 0.0 }
+
+struct DrawList:
+    vertices: Array[Vertex]
+    indices: Array[u32]
+    draw_calls: Array[DrawCall]
+
+impl DrawList:
+    fn new() -> DrawList:
+        return DrawList {
+            vertices: [],
+            indices: [],
+            draw_calls: []
+        }
+
+    fn clear(self):
+        self.vertices.clear()
+        self.indices.clear()
+        self.draw_calls.clear()
+
+struct Vertex:
+    position: (f32, f32)
+    uv: (f32, f32)
+    color: u32                 # RGBA packed
+
+struct DrawCall:
+    pipeline_type: PipelineType
+    vertex_offset: u32
+    vertex_count: u32
+    index_offset: u32
+    index_count: u32
+    texture_id: Option[u64]
+    scissor: Option[Rect]
+
+enum PipelineType:
+    SolidColor
+    RoundedRect
+    Text
+    Textured
+    Gradient
+    Shadow
+
+struct VertexBuilder:
+    vertices: Array[Vertex]
+    indices: Array[u32]
+
+impl VertexBuilder:
+    fn new() -> VertexBuilder:
+        return VertexBuilder {
+            vertices: [],
+            indices: []
+        }
+
+    fn clear(self):
+        self.vertices.clear()
+        self.indices.clear()
+
+struct ResourceManager:
+    textures: Dict[u64, Image]
+    font_atlas: Option[Image]
+    pipelines: Dict[u64, Pipeline]
+
+impl ResourceManager:
+    fn new(device: &VulkanDevice) -> ResourceManager:
+        return ResourceManager {
+            textures: Dict::new(),
+            font_atlas: None,
+            pipelines: Dict::new()
+        }
+
+struct BufferManager:
+    vertex_buffers: Array[Buffer]
+    index_buffers: Array[Buffer]
+    uniform_buffers: Array[Buffer]
+
+impl BufferManager:
+    fn new(device: &VulkanDevice) -> BufferManager:
+        return BufferManager {
+            vertex_buffers: [],
+            index_buffers: [],
+            uniform_buffers: []
+        }
+
+    fn upload_draw_list(self, draw_list: &DrawList, frame_index: usize):
+        # TODO: Upload vertex data to GPU buffer
+        # TODO: Upload index data to GPU buffer
+        # TODO: Upload uniform data (projection matrix)
+        pass
+
+struct TextRenderer:
+    font_atlas: Option[Image]
+    glyph_cache: Dict[u64, Rect]
+
+impl TextRenderer:
+    fn new(device: &VulkanDevice) -> TextRenderer:
+        return TextRenderer {
+            font_atlas: None,
+            glyph_cache: Dict::new()
+        }
+
+struct Pipeline:
+    handle: i64                # VkPipeline
+    layout: i64                # VkPipelineLayout
+    type: PipelineType
+
+# =============================================================================
+# FFI Declarations (Platform-specific)
+# =============================================================================
+
+# Window management (platform-specific: Win32, X11, Wayland, etc.)
+extern fn vulkan_create_window(title_ptr: *const u8, title_len: u64, width: u32, height: u32) -> i64
+
+# These would be implemented in Rust/C using actual Vulkan API
+# extern fn vk_create_instance(...) -> i64
+# extern fn vk_create_device(...) -> i64
+# extern fn vk_create_swapchain(...) -> i64
+# extern fn vk_create_render_pass(...) -> i64
+# extern fn vk_create_pipeline(...) -> i64
+# extern fn vk_cmd_begin_render_pass(...) -> ()
+# extern fn vk_cmd_draw_indexed(...) -> ()
+# ... etc.

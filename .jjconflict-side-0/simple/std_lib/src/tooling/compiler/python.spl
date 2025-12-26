@@ -1,0 +1,275 @@
+# Python Compiler Adapter
+# Integrates Python compilation (bytecode + type checking) with tooling framework
+
+use tooling.core.project.{Language, LanguageConfig}
+use tooling.compiler.interface.{
+    LanguageCompiler,
+    CompilationMode,
+    CompilationResult,
+    Artifact,
+    ArtifactType,
+    CompilationError,
+    ErrorSeverity
+}
+
+# Python compiler adapter (uses py_compile + mypy)
+pub class PythonCompiler:
+    pub python_path: String
+    pub mypy_path: String
+    pub run_type_checker: bool
+    pub byte_compile: bool
+
+    pub fn new(): PythonCompiler =
+        """Create Python compiler adapter.
+
+        Returns:
+            Compiler with default settings
+
+        Example:
+            let compiler = PythonCompiler.new()
+            compiler.set_type_checking(true)
+            let result = compiler.compile(config, CompilationMode::Release, false)
+        """
+        PythonCompiler {
+            python_path: "python3",  # Use 'python3' from PATH
+            mypy_path: "mypy",
+            run_type_checker: true,
+            byte_compile: true
+        }
+
+    pub fn set_python_path(self, path: String):
+        """Set path to Python interpreter.
+
+        Args:
+            path: Path to python3
+        """
+        self.python_path = path
+
+    pub fn set_type_checking(self, enabled: bool):
+        """Enable/disable mypy type checking.
+
+        Args:
+            enabled: True to run mypy
+        """
+        self.run_type_checker = enabled
+
+    pub fn set_byte_compile(self, enabled: bool):
+        """Enable/disable byte compilation.
+
+        Args:
+            enabled: True to compile .py to .pyc
+        """
+        self.byte_compile = enabled
+
+impl LanguageCompiler for PythonCompiler:
+    fn compile(
+        self,
+        config: LanguageConfig,
+        mode: CompilationMode,
+        incremental: bool
+    ): CompilationResult =
+        """Compile Python code.
+
+        Args:
+            config: Language configuration
+            mode: Compilation mode (Debug/Release/Profile)
+            incremental: Enable incremental compilation
+
+        Returns:
+            Compilation result
+
+        Compilation steps:
+        1. Run mypy type checker (if enabled)
+        2. Byte-compile .py files (if enabled)
+        3. Return artifacts (.pyc files)
+        """
+        let result = CompilationResult.new()
+        let start_time = 0  # TODO: Get current time
+
+        # Step 1: Type checking with mypy
+        if self.run_type_checker:
+            let type_errors = self.run_mypy(config.root)
+            for error in type_errors:
+                result.add_error(error)
+
+        # Step 2: Byte compilation (if no type errors)
+        if result.is_ok() and self.byte_compile:
+            let artifacts = self.byte_compile_directory(config.root)
+            for artifact in artifacts:
+                result.add_artifact(artifact)
+
+        let end_time = 0  # TODO: Get current time
+        result.duration_ms = end_time - start_time
+
+        result
+
+    fn get_language(self): Language =
+        """Get language type.
+
+        Returns:
+            Language::Python
+        """
+        Language::Python
+
+    fn supports_incremental(self): bool =
+        """Check if incremental compilation is supported.
+
+        Returns:
+            True (only recompile changed .py files)
+        """
+        true
+
+    fn get_executable_extension(self): String =
+        """Get executable file extension.
+
+        Returns:
+            ".py" (Python scripts)
+        """
+        ".py"
+
+    fn get_library_extension(self): String =
+        """Get library file extension.
+
+        Returns:
+            ".pyc" (bytecode) or ".so" (C extensions)
+        """
+        ".pyc"
+
+# Helper class for process execution
+class ProcessOutput:
+    pub exit_code: i32
+    pub stdout: String
+    pub stderr: String
+
+    pub fn new(exit_code: i32, stdout: String, stderr: String): ProcessOutput =
+        ProcessOutput {
+            exit_code: exit_code,
+            stdout: stdout,
+            stderr: stderr
+        }
+
+# Helper methods
+impl PythonCompiler:
+    fn run_mypy(self, root: String): List[CompilationError] =
+        """Run mypy type checker.
+
+        Args:
+            root: Project root directory
+
+        Returns:
+            List of type errors
+        """
+        let errors: List[CompilationError] = []
+
+        # Build mypy command
+        let mut args: List[String] = []
+        args.append(root)
+        args.append("--no-color-output")
+        args.append("--no-error-summary")
+
+        # Execute mypy
+        let output = self.execute_mypy(args)
+
+        if output.exit_code != 0:
+            # Parse mypy error output
+            errors.extend(self.parse_mypy_errors(output.stdout))
+
+        errors
+
+    fn byte_compile_directory(self, root: String): List[Artifact] =
+        """Byte-compile all .py files in directory.
+
+        Args:
+            root: Directory to compile
+
+        Returns:
+            List of .pyc artifacts
+        """
+        let artifacts: List[Artifact] = []
+
+        # TODO: Recursively find .py files and compile them
+        # For now, return empty list
+        artifacts
+
+    fn execute_mypy(self, args: List[String]): ProcessOutput =
+        """Execute mypy command.
+
+        Args:
+            args: Mypy arguments
+
+        Returns:
+            Process output
+        """
+        # TODO: Implement actual process execution
+        ProcessOutput.new(0, "", "")
+
+    fn parse_mypy_errors(self, output: String): List[CompilationError] =
+        """Parse mypy error output.
+
+        Args:
+            output: Mypy stdout
+
+        Returns:
+            List of type errors
+
+        Mypy format: file:line: error: message
+        Example: app.py:10: error: Incompatible types in assignment
+        """
+        let errors: List[CompilationError] = []
+
+        let lines = output.split("\n")
+        for line in lines:
+            if line.trim().is_empty():
+                continue
+
+            # Parse error line
+            let parts = line.split(":")
+            if parts.len() >= 3:
+                let file = parts[0].trim()
+                let line_num = self.parse_int(parts[1].trim())
+                let severity_and_msg = parts[2..].join(":").trim()
+
+                # Extract severity (error/warning/note)
+                let (severity, message) = self.parse_severity(severity_and_msg)
+
+                let error = CompilationError.new(
+                    file: file,
+                    line: line_num,
+                    column: 0,  # mypy doesn't always provide column
+                    message: message,
+                    severity: severity,
+                    language: Language::Python
+                )
+                errors.append(error)
+
+        errors
+
+    fn parse_severity(self, text: String): (ErrorSeverity, String) =
+        """Parse severity from mypy message.
+
+        Args:
+            text: Message with severity prefix
+
+        Returns:
+            (severity, message) tuple
+        """
+        if text.starts_with("error:"):
+            (ErrorSeverity::Error, text[6..].trim())
+        else if text.starts_with("warning:"):
+            (ErrorSeverity::Warning, text[8..].trim())
+        else if text.starts_with("note:"):
+            (ErrorSeverity::Info, text[5..].trim())
+        else:
+            (ErrorSeverity::Error, text)
+
+    fn parse_int(self, s: String): i32 =
+        """Parse integer from string.
+
+        Args:
+            s: String to parse
+
+        Returns:
+            Parsed integer or 0
+        """
+        # TODO: Implement proper integer parsing
+        0

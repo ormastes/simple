@@ -1,0 +1,319 @@
+# Authentication & Authorization for LMS
+# Supports API keys, OAuth tokens, and role-based access control
+
+import sys
+import error
+
+# Authentication method
+pub enum AuthMethod:
+    ApiKey(String)           # API key authentication
+    BearerToken(String)      # OAuth/JWT bearer token
+    Basic(String, String)    # Basic auth (username, password)
+    None                     # No authentication
+
+# Permission levels
+pub enum Permission:
+    Read                     # Read-only access
+    Write                    # Read and write access
+    Execute                  # Can execute tools and commands
+    Admin                    # Full administrative access
+
+# User role
+pub class Role:
+    name: String
+    permissions: Set[Permission]
+    description: String
+
+    pub fn new(name: String, permissions: Set[Permission], description: String) -> Role:
+        Role {
+            name: name,
+            permissions: permissions,
+            description: description
+        }
+
+    pub fn has_permission(self, permission: Permission) -> Bool:
+        self.permissions.contains(permission)
+
+# Authenticated user
+pub class User:
+    id: String
+    username: String
+    roles: List[Role]
+    auth_method: AuthMethod
+    created_at: Int
+    last_access: Int
+
+    pub fn new(id: String, username: String, auth_method: AuthMethod) -> User:
+        let now = sys.time.now_ms()
+        User {
+            id: id,
+            username: username,
+            roles: [],
+            auth_method: auth_method,
+            created_at: now,
+            last_access: now
+        }
+
+    pub fn add_role(mut self, role: Role):
+        self.roles.push(role)
+
+    pub fn has_permission(self, permission: Permission) -> Bool:
+        for role in self.roles:
+            if role.has_permission(permission):
+                return true
+        false
+
+    pub fn touch(mut self):
+        self.last_access = sys.time.now_ms()
+
+# API key record
+pub class ApiKey:
+    key: String
+    user_id: String
+    description: String
+    created_at: Int
+    expires_at: Option[Int]
+    last_used: Option[Int]
+    revoked: Bool
+
+    pub fn new(key: String, user_id: String, description: String, ttl_ms: Option[Int]) -> ApiKey:
+        let now = sys.time.now_ms()
+        let expires = match ttl_ms:
+            Some(ttl) ->
+                Some(now + ttl)
+            None ->
+                None
+
+        ApiKey {
+            key: key,
+            user_id: user_id,
+            description: description,
+            created_at: now,
+            expires_at: expires,
+            last_used: None,
+            revoked: false
+        }
+
+    pub fn is_valid(self) -> Bool:
+        if self.revoked:
+            return false
+
+        match self.expires_at:
+            Some(expires) ->
+                let now = sys.time.now_ms()
+                now < expires
+            None ->
+                true
+
+    pub fn mark_used(mut self):
+        self.last_used = Some(sys.time.now_ms())
+
+    pub fn revoke(mut self):
+        self.revoked = true
+
+# Authentication manager
+pub class AuthManager:
+    users: Dict[String, User]            # user_id -> User
+    api_keys: Dict[String, ApiKey]       # key -> ApiKey
+    roles: Dict[String, Role]            # role_name -> Role
+    enabled: Bool
+
+    pub fn new(enabled: Bool) -> AuthManager:
+        let mut manager = AuthManager {
+            users: {},
+            api_keys: {},
+            roles: {},
+            enabled: enabled
+        }
+
+        # Create default roles
+        manager.create_default_roles()
+        manager
+
+    # Create default role definitions
+    fn create_default_roles(mut self):
+        # Read-only role
+        let mut read_perms = Set.new()
+        read_perms.insert(Permission.Read)
+        self.roles["reader"] = Role.new(
+            "reader",
+            read_perms,
+            "Read-only access to workspace"
+        )
+
+        # Developer role
+        let mut dev_perms = Set.new()
+        dev_perms.insert(Permission.Read)
+        dev_perms.insert(Permission.Write)
+        dev_perms.insert(Permission.Execute)
+        self.roles["developer"] = Role.new(
+            "developer",
+            dev_perms,
+            "Full development access"
+        )
+
+        # Admin role
+        let mut admin_perms = Set.new()
+        admin_perms.insert(Permission.Read)
+        admin_perms.insert(Permission.Write)
+        admin_perms.insert(Permission.Execute)
+        admin_perms.insert(Permission.Admin)
+        self.roles["admin"] = Role.new(
+            "admin",
+            admin_perms,
+            "Full administrative access"
+        )
+
+    # Authenticate a request
+    pub fn authenticate(mut self, auth_header: Option[String]) -> Result[User, error.LmsError]:
+        # If auth is disabled, return default admin user
+        if not self.enabled:
+            return Ok(self.get_default_user())
+
+        # Parse authentication header
+        let auth_method = match auth_header:
+            Some(header) ->
+                self.parse_auth_header(header)?
+            None ->
+                return Err(error.LmsError.PermissionDenied("Missing authentication"))
+
+        # Authenticate based on method
+        match auth_method:
+            AuthMethod.ApiKey(key) ->
+                self.authenticate_api_key(key)
+            AuthMethod.BearerToken(token) ->
+                self.authenticate_bearer_token(token)
+            AuthMethod.Basic(username, password) ->
+                self.authenticate_basic(username, password)
+            AuthMethod.None ->
+                Err(error.LmsError.PermissionDenied("Authentication required"))
+
+    # Parse Authorization header
+    fn parse_auth_header(self, header: String) -> Result[AuthMethod, error.LmsError]:
+        if header.starts_with("Bearer "):
+            let token = header.substring(7, header.len())
+            Ok(AuthMethod.BearerToken(token))
+        else if header.starts_with("ApiKey "):
+            let key = header.substring(7, header.len())
+            Ok(AuthMethod.ApiKey(key))
+        else if header.starts_with("Basic "):
+            let credentials = header.substring(6, header.len())
+            # In real implementation, would decode base64
+            # For now, expect "username:password"
+            let parts = credentials.split(":")
+            if parts.len() >= 2:
+                Ok(AuthMethod.Basic(parts[0], parts[1]))
+            else:
+                Err(error.LmsError.InvalidParams("Invalid Basic auth format"))
+        else:
+            Err(error.LmsError.InvalidParams("Unknown authentication method"))
+
+    # Authenticate with API key
+    fn authenticate_api_key(mut self, key: String) -> Result[User, error.LmsError]:
+        match self.api_keys.get_mut(key):
+            Some(api_key) ->
+                if not api_key.is_valid():
+                    return Err(error.LmsError.PermissionDenied("API key expired or revoked"))
+
+                api_key.mark_used()
+
+                match self.users.get_mut(api_key.user_id):
+                    Some(user) ->
+                        user.touch()
+                        Ok(user)
+                    None ->
+                        Err(error.LmsError.InternalError("User not found for API key"))
+            None ->
+                Err(error.LmsError.PermissionDenied("Invalid API key"))
+
+    # Authenticate with bearer token (OAuth/JWT)
+    fn authenticate_bearer_token(self, token: String) -> Result[User, error.LmsError]:
+        # In real implementation, would validate JWT signature and claims
+        # For now, treat as simple token lookup
+        Err(error.LmsError.InternalError("Bearer token authentication not yet implemented"))
+
+    # Authenticate with username/password
+    fn authenticate_basic(self, username: String, password: String) -> Result[User, error.LmsError]:
+        # In real implementation, would check password hash
+        Err(error.LmsError.InternalError("Basic authentication not yet implemented"))
+
+    # Get default user for non-authenticated mode
+    fn get_default_user(self) -> User:
+        let mut user = User.new("default", "default", AuthMethod.None)
+        match self.roles.get("admin"):
+            Some(admin_role) ->
+                user.add_role(admin_role)
+            None ->
+                pass
+        user
+
+    # Create a new API key
+    pub fn create_api_key(mut self, user_id: String, description: String, ttl_ms: Option[Int]) -> Result[String, error.LmsError]:
+        # Verify user exists
+        if not self.users.contains_key(user_id):
+            return Err(error.LmsError.InvalidParams(f"User not found: {user_id}"))
+
+        # Generate API key
+        let key = self.generate_api_key()
+
+        # Store API key
+        self.api_keys[key] = ApiKey.new(key, user_id, description, ttl_ms)
+
+        Ok(key)
+
+    # Revoke an API key
+    pub fn revoke_api_key(mut self, key: String) -> Result[Nil, error.LmsError]:
+        match self.api_keys.get_mut(key):
+            Some(api_key) ->
+                api_key.revoke()
+                Ok(nil)
+            None ->
+                Err(error.LmsError.InvalidParams(f"API key not found: {key}"))
+
+    # Create a new user
+    pub fn create_user(mut self, username: String, role_names: List[String]) -> Result[String, error.LmsError]:
+        # Generate user ID
+        let user_id = self.generate_user_id()
+
+        # Create user
+        let mut user = User.new(user_id, username, AuthMethod.None)
+
+        # Assign roles
+        for role_name in role_names:
+            match self.roles.get(role_name):
+                Some(role) ->
+                    user.add_role(role)
+                None ->
+                    return Err(error.LmsError.InvalidParams(f"Role not found: {role_name}"))
+
+        # Store user
+        self.users[user_id] = user
+
+        Ok(user_id)
+
+    # Check if user has permission
+    pub fn check_permission(self, user: User, permission: Permission) -> Result[Nil, error.LmsError]:
+        if user.has_permission(permission):
+            Ok(nil)
+        else:
+            Err(error.LmsError.PermissionDenied(f"Missing permission: {permission}"))
+
+    # Generate a random API key
+    fn generate_api_key(self) -> String:
+        # In real implementation, would use crypto-secure random
+        let timestamp = sys.time.now_ms()
+        let random = sys.random.random_int()
+        f"lms_{timestamp}_{random}"
+
+    # Generate a unique user ID
+    fn generate_user_id(self) -> String:
+        let timestamp = sys.time.now_ms()
+        let random = sys.random.random_int()
+        f"user_{timestamp}_{random}"
+
+# Authorization guard for method handlers
+pub fn require_permission(user: User, permission: Permission) -> Result[Nil, error.LmsError]:
+    if not user.has_permission(permission):
+        Err(error.LmsError.PermissionDenied(f"Requires {permission} permission"))
+    else:
+        Ok(nil)

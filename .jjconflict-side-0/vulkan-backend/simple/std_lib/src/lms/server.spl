@@ -1,0 +1,439 @@
+# Language Model Server (MCP) Main Server
+
+import transport
+import protocol
+import error
+import session
+import workspace
+import incremental
+import auth
+
+# Server states
+pub enum ServerState:
+    Uninitialized
+    Initialized
+    ShuttingDown
+
+# Main server class
+pub class LmsServer:
+    state: ServerState
+    session: session.Session
+    capabilities: protocol.ServerCapabilities
+    tool_registry: Dict[String, protocol.Tool]
+    resource_cache: Dict[String, String]  # URI -> content
+    workspace_manager: Option[workspace.WorkspaceManager]  # Multi-file workspace
+    incremental_manager: Option[incremental.IncrementalUpdateManager]  # Incremental updates
+    auth_manager: auth.AuthManager  # Authentication & authorization
+    current_user: Option[auth.User]  # Currently authenticated user
+
+    # Create a new server instance
+    pub fn new() -> LmsServer:
+        LmsServer {
+            state: ServerState.Uninitialized,
+            session: session.Session.new(),
+            capabilities: create_default_capabilities(),
+            tool_registry: create_default_tools(),
+            resource_cache: {},
+            workspace_manager: None,
+            incremental_manager: None,
+            auth_manager: auth.AuthManager.new(false),  # Auth disabled by default
+            current_user: None
+        }
+
+    # Create a new server instance with authentication enabled
+    pub fn new_with_auth() -> LmsServer:
+        let mut server = LmsServer.new()
+        server.auth_manager = auth.AuthManager.new(true)
+        server
+
+    # Main server loop
+    pub fn run(mut self) -> Result[Nil, String]:
+        transport.log_debug("LMS Server starting...")
+
+        loop:
+            # Read JSON-RPC message from stdin
+            match transport.read_message():
+                Err(e) ->
+                    # Check for EOF (client disconnected)
+                    if e.contains("EOF") or e.contains("end of file"):
+                        transport.log_debug("Client disconnected (EOF)")
+                        break
+                    transport.log_error(f"Transport error: {e}")
+                    continue
+
+                Ok(message) ->
+                    # Update session activity
+                    self.session.touch()
+
+                    # Handle message and send response if needed
+                    match self.handle_message(message):
+                        Ok(response_opt) ->
+                            match response_opt:
+                                Some(response) ->
+                                    match transport.write_message(response):
+                                        Ok(_) ->
+                                            pass
+                                        Err(e) ->
+                                            transport.log_error(f"Failed to write response: {e}")
+                                None ->
+                                    pass  # No response needed (notification)
+                        Err(e) ->
+                            transport.log_error(f"Handler error: {e}")
+
+        transport.log_debug("LMS Server stopped")
+        Ok(nil)
+
+    # Handle incoming message
+    fn handle_message(mut self, message: Dict) -> Result[Option[Dict], String]:
+        # Check if message has an ID (request) or not (notification)
+        let has_id = message.contains_key("id")
+
+        # Get method name
+        let method = match message.get("method"):
+            Some(m) ->
+                match m:
+                    String(s) ->
+                        s
+                    _ ->
+                        return Err("Method must be a string")
+            None ->
+                return Err("Missing 'method' field")
+
+        transport.log_debug(f"Received method: {method}")
+
+        if has_id:
+            # Request - needs response
+            self.handle_request(message)
+        else:
+            # Notification - no response
+            self.handle_notification(message)
+            Ok(None)
+
+    # Handle request (expects response)
+    fn handle_request(mut self, request: Dict) -> Result[Option[Dict], String]:
+        let id = match request.get("id"):
+            Some(id_val) ->
+                match id_val:
+                    Int(i) ->
+                        i
+                    _ ->
+                        return Ok(Some(error.error_response(0, error.LmsError.InvalidRequest("ID must be an integer"))))
+            None ->
+                return Ok(Some(error.error_response(0, error.LmsError.InvalidRequest("Missing 'id' field"))))
+
+        let method = request.get("method")?.as_string()?
+
+        # Dispatch to handler
+        let result = match method:
+            "initialize" ->
+                self.handle_initialize(request)
+            "shutdown" ->
+                self.handle_shutdown(request)
+            "tools/list" ->
+                self.handle_tools_list(request)
+            "tools/call" ->
+                self.handle_tool_call(request)
+            "resources/list" ->
+                self.handle_resources_list(request)
+            "resources/read" ->
+                self.handle_resource_read(request)
+            _ ->
+                Err(error.LmsError.MethodNotFound(method))
+
+        # Build response
+        match result:
+            Ok(value) ->
+                Ok(Some(error.success_response(id, value)))
+            Err(err) ->
+                Ok(Some(error.error_response(id, err)))
+
+    # Handle notification (no response)
+    fn handle_notification(mut self, notification: Dict) -> Result[Nil, String]:
+        let method = notification.get("method")?.as_string()?
+
+        match method:
+            "exit" ->
+                transport.log_debug("Received exit notification")
+                # Exit will happen when stdin closes
+            "initialized" ->
+                transport.log_debug("Client confirmed initialization")
+            _ ->
+                transport.log_debug(f"Ignoring unknown notification: {method}")
+
+        Ok(nil)
+
+    # Handler stubs (will be implemented in handlers/ modules)
+
+    fn handle_initialize(mut self, request: Dict) -> Result[Dict, error.LmsError]:
+        # Check already initialized
+        match self.state:
+            ServerState.Initialized ->
+                return Err(error.LmsError.AlreadyInitialized)
+            _ ->
+                pass
+
+        # Parse params
+        let params = match request.get("params"):
+            Some(p) ->
+                match p:
+                    Dict(d) ->
+                        d
+                    _ ->
+                        return Err(error.LmsError.InvalidParams("Params must be an object"))
+            None ->
+                return Err(error.LmsError.InvalidParams("Missing 'params' field"))
+
+        # Get protocol version
+        let protocol_version = match params.get("protocolVersion"):
+            Some(v) ->
+                match v:
+                    String(s) ->
+                        s
+                    _ ->
+                        return Err(error.LmsError.InvalidParams("protocolVersion must be a string"))
+            None ->
+                return Err(error.LmsError.InvalidParams("Missing 'protocolVersion'"))
+
+        # Validate protocol version
+        if protocol_version != "2024-11-05":
+            return Err(error.LmsError.ProtocolError(f"Unsupported protocol version: {protocol_version}"))
+
+        # Get client info if provided
+        match params.get("clientInfo"):
+            Some(info) ->
+                match info:
+                    Dict(info_dict) ->
+                        let name = info_dict.get("name")?.as_string()?
+                        let version = info_dict.get("version")?.as_string()?
+                        self.session.set_client_info(protocol.ClientInfo { name, version })
+                    _ ->
+                        pass
+            None ->
+                pass
+
+        # Update state
+        self.state = ServerState.Initialized
+
+        # Build response
+        let server_info = protocol.ServerInfo {
+            name: "simple-lms",
+            version: "0.1.0"
+        }
+
+        Ok(protocol.create_initialize_response(server_info, self.capabilities))
+
+    fn handle_shutdown(mut self, request: Dict) -> Result[Dict, error.LmsError]:
+        self.state = ServerState.ShuttingDown
+        Ok({})  # Empty result
+
+    fn handle_tools_list(mut self, request: Dict) -> Result[Dict, error.LmsError]:
+        # Check initialized
+        match self.state:
+            ServerState.Uninitialized ->
+                return Err(error.LmsError.NotInitialized)
+            _ ->
+                pass
+
+        # Build tools list
+        let mut tools = []
+        for (name, tool) in self.tool_registry:
+            tools.push(protocol.tool_to_dict(tool))
+
+        Ok({ "tools": tools })
+
+    fn handle_tool_call(mut self, request: Dict) -> Result[Dict, error.LmsError]:
+        # Check initialized
+        match self.state:
+            ServerState.Uninitialized ->
+                return Err(error.LmsError.NotInitialized)
+            _ ->
+                pass
+
+        # Parse params
+        let params = match request.get("params"):
+            Some(p) ->
+                match p:
+                    Dict(d) ->
+                        d
+                    _ ->
+                        return Err(error.LmsError.InvalidParams("Params must be an object"))
+            None ->
+                return Err(error.LmsError.InvalidParams("Missing 'params'"))
+
+        # Get tool name
+        let tool_name = match params.get("name"):
+            Some(n) ->
+                match n:
+                    String(s) ->
+                        s
+                    _ ->
+                        return Err(error.LmsError.InvalidParams("Tool name must be a string"))
+            None ->
+                return Err(error.LmsError.InvalidParams("Missing 'name'"))
+
+        # Get arguments (optional)
+        let arguments = match params.get("arguments"):
+            Some(a) ->
+                match a:
+                    Dict(d) ->
+                        Some(d)
+                    _ ->
+                        None
+            None ->
+                None
+
+        # Execute tool
+        self.execute_tool(tool_name, arguments)
+
+    fn handle_resources_list(mut self, request: Dict) -> Result[Dict, error.LmsError]:
+        # Check initialized
+        match self.state:
+            ServerState.Uninitialized ->
+                return Err(error.LmsError.NotInitialized)
+            _ ->
+                pass
+
+        # Return empty list for now
+        Ok({ "resources": [] })
+
+    fn handle_resource_read(mut self, request: Dict) -> Result[Dict, error.LmsError]:
+        # Check initialized
+        match self.state:
+            ServerState.Uninitialized ->
+                return Err(error.LmsError.NotInitialized)
+            _ ->
+                pass
+
+        # TODO: Implement resource reading
+        Err(error.LmsError.InternalError("Resource reading not yet implemented"))
+
+    # Execute a tool
+    fn execute_tool(mut self, tool_name: String, arguments: Option[Dict]) -> Result[Dict, error.LmsError]:
+        match tool_name:
+            "read_file" ->
+                self.tool_read_file(arguments)
+            "list_directory" ->
+                self.tool_list_directory(arguments)
+            _ ->
+                Err(error.LmsError.MethodNotFound(f"Unknown tool: {tool_name}"))
+
+    # Tool: read_file
+    fn tool_read_file(mut self, arguments: Option[Dict]) -> Result[Dict, error.LmsError]:
+        let args = match arguments:
+            Some(a) ->
+                a
+            None ->
+                return Err(error.LmsError.InvalidParams("Missing arguments for read_file"))
+
+        let path = match args.get("path"):
+            Some(p) ->
+                match p:
+                    String(s) ->
+                        s
+                    _ ->
+                        return Err(error.LmsError.InvalidParams("path must be a string"))
+            None ->
+                return Err(error.LmsError.InvalidParams("Missing 'path' argument"))
+
+        # Read file
+        match sys.fs.read_file(path):
+            Ok(content) ->
+                Ok({
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": content
+                        }
+                    ]
+                })
+            Err(e) ->
+                if e.contains("not found"):
+                    Err(error.LmsError.FileNotFound(path))
+                else if e.contains("permission"):
+                    Err(error.LmsError.PermissionDenied(path))
+                else:
+                    Err(error.LmsError.InternalError(f"Failed to read file: {e}"))
+
+    # Tool: list_directory
+    fn tool_list_directory(mut self, arguments: Option[Dict]) -> Result[Dict, error.LmsError]:
+        let args = match arguments:
+            Some(a) ->
+                a
+            None ->
+                return Err(error.LmsError.InvalidParams("Missing arguments for list_directory"))
+
+        let path = match args.get("path"):
+            Some(p) ->
+                match p:
+                    String(s) ->
+                        s
+                    _ ->
+                        return Err(error.LmsError.InvalidParams("path must be a string"))
+            None ->
+                return Err(error.LmsError.InvalidParams("Missing 'path' argument"))
+
+        # List directory
+        match sys.fs.list_directory(path):
+            Ok(entries) ->
+                let entries_text = entries.join("\n")
+                Ok({
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": entries_text
+                        }
+                    ]
+                })
+            Err(e) ->
+                Err(error.LmsError.InternalError(f"Failed to list directory: {e}"))
+
+# Create default server capabilities
+fn create_default_capabilities() -> protocol.ServerCapabilities:
+    protocol.ServerCapabilities {
+        tools: Some(protocol.ToolsCapability {
+            list_changed: Some(false)
+        }),
+        resources: Some(protocol.ResourcesCapability {
+            subscribe: Some(false),
+            list_changed: Some(false)
+        }),
+        prompts: None
+    }
+
+# Create default tool registry
+fn create_default_tools() -> Dict[String, protocol.Tool]:
+    let mut tools = {}
+
+    # read_file tool
+    tools["read_file"] = protocol.Tool {
+        name: "read_file",
+        description: "Read the contents of a file",
+        input_schema: {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file to read"
+                }
+            },
+            "required": ["path"]
+        }
+    }
+
+    # list_directory tool
+    tools["list_directory"] = protocol.Tool {
+        name: "list_directory",
+        description: "List contents of a directory",
+        input_schema: {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the directory to list"
+                }
+            },
+            "required": ["path"]
+        }
+    }
+
+    tools

@@ -1,0 +1,105 @@
+# BDD DSL - RSpec-style describe/context/it blocks
+# Implements example group registration and hook management
+
+import registry.{ExampleGroup, Example, Hook}
+
+# Current execution context (stack of groups)
+let group_stack: List[ExampleGroup] = []
+let current_group: Option[ExampleGroup] = None
+
+# Shared example definitions
+let shared_example_defs: Dict[String, Fn() -> Void] = {}
+
+# describe: Create a top-level example group
+# Usage: describe "MyClass": ...
+export fn describe(description: String, block: Fn() -> Void) -> Void:
+    group = ExampleGroup.new(description, parent=None)
+    group_stack.push(group)
+    current_group = Some(group)
+    
+    # Execute block to collect nested specs
+    block()
+    
+    # Register with global registry
+    registry.register_group(group)
+    
+    group_stack.pop()
+    current_group = if group_stack.is_empty():
+        None
+    else:
+        Some(group_stack.last())
+
+# context: Create a nested example group (alias for describe)
+# Usage: context "when logged in": ...
+export fn context(description: String, block: Fn() -> Void) -> Void:
+    match current_group:
+        case Some(parent):
+            group = ExampleGroup.new(description, parent=Some(parent))
+            parent.add_child(group)
+            group_stack.push(group)
+            current_group = Some(group)
+            
+            block()
+            
+            group_stack.pop()
+            current_group = Some(parent)
+        case None:
+            # If no parent, treat as top-level describe
+            describe(description, block)
+
+# it: Define a single test example
+# Usage: it "does something": ...
+export fn it(description: String, block: Fn() -> Void) -> Void:
+    match current_group:
+        case Some(group):
+            example = Example.new(description, block)
+            group.add_example(example)
+        case None:
+            panic("it() must be called within a describe or context block")
+
+# let: Define memoized per-example state
+# Usage: let user = User.new("test")
+# Note: This is a compile-time macro that transforms to before_each
+export macro let(name: Str const, value: Any) -> ():
+    emit result:
+        return nil
+
+# Hook definitions
+export fn before_each(block: Fn() -> Void) -> Void:
+    match current_group:
+        case Some(group):
+            group.add_hook(Hook.BeforeEach(block))
+        case None:
+            panic("before_each() must be called within a describe or context block")
+
+export fn after_each(block: Fn() -> Void) -> Void:
+    match current_group:
+        case Some(group):
+            group.add_hook(Hook.AfterEach(block))
+        case None:
+            panic("after_each() must be called within a describe or context block")
+
+export fn before_all(block: Fn() -> Void) -> Void:
+    match current_group:
+        case Some(group):
+            group.add_hook(Hook.BeforeAll(block))
+        case None:
+            panic("before_all() must be called within a describe or context block")
+
+export fn after_all(block: Fn() -> Void) -> Void:
+    match current_group:
+        case Some(group):
+            group.add_hook(Hook.AfterAll(block))
+        case None:
+            panic("after_all() must be called within a describe or context block")
+
+# Shared examples
+export fn shared_examples(name: String, block: Fn() -> Void) -> Void:
+    shared_example_defs[name] = block
+
+export fn it_behaves_like(name: String) -> Void:
+    match shared_example_defs.get(name):
+        case Some(block):
+            block()
+        case None:
+            panic("Shared example '${name}' not found")

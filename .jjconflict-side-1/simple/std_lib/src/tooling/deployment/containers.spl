@@ -1,0 +1,347 @@
+# Container Image Generation
+# Generate Docker/OCI container images
+
+use tooling.core.project.Language
+use core.result.{Result, Ok, Err}
+
+# Base image selection
+pub enum BaseImage:
+    Alpine(String)      # Alpine Linux version
+    Debian(String)      # Debian version
+    Ubuntu(String)      # Ubuntu version
+    Scratch             # Empty base image
+    Custom(String)      # Custom base image
+
+# Platform target
+pub enum Platform:
+    LinuxAmd64
+    LinuxArm64
+    LinuxArm
+    LinuxS390x
+
+# Dockerfile instruction
+pub class DockerInstruction:
+    pub instruction: String
+    pub args: List[String]
+
+    pub fn new(instruction: String, args: List[String]): DockerInstruction =
+        """Create Dockerfile instruction.
+
+        Args:
+            instruction: Instruction name (FROM, RUN, COPY, etc.)
+            args: Instruction arguments
+
+        Returns:
+            Dockerfile instruction
+        """
+        DockerInstruction {
+            instruction: instruction,
+            args: args
+        }
+
+    pub fn to_string(self): String =
+        """Convert to Dockerfile line.
+
+        Returns:
+            Dockerfile line
+
+        Example:
+            DockerInstruction.new("FROM", ["alpine:3.18"]).to_string()
+            # → "FROM alpine:3.18"
+        """
+        f"{self.instruction} {self.args.join(' ')}"
+
+# Dockerfile builder
+pub class DockerfileBuilder:
+    pub instructions: List[DockerInstruction]
+    pub multi_stage: bool
+
+    pub fn new(): DockerfileBuilder =
+        """Create Dockerfile builder.
+
+        Returns:
+            Empty builder
+        """
+        DockerfileBuilder {
+            instructions: [],
+            multi_stage: false
+        }
+
+    pub fn from_base(self, base: BaseImage):
+        """Add FROM instruction.
+
+        Args:
+            base: Base image
+        """
+        let base_str = match base:
+            BaseImage::Alpine(version): f"alpine:{version}"
+            BaseImage::Debian(version): f"debian:{version}"
+            BaseImage::Ubuntu(version): f"ubuntu:{version}"
+            BaseImage::Scratch: "scratch"
+            BaseImage::Custom(image): image
+
+        self.add_instruction("FROM", [base_str])
+
+    pub fn add_instruction(self, instruction: String, args: List[String]):
+        """Add instruction.
+
+        Args:
+            instruction: Instruction name
+            args: Arguments
+        """
+        let instr = DockerInstruction.new(instruction, args)
+        self.instructions.append(instr)
+
+    pub fn run(self, command: String):
+        """Add RUN instruction.
+
+        Args:
+            command: Command to run
+        """
+        self.add_instruction("RUN", [command])
+
+    pub fn copy(self, source: String, dest: String):
+        """Add COPY instruction.
+
+        Args:
+            source: Source path
+            dest: Destination path
+        """
+        self.add_instruction("COPY", [source, dest])
+
+    pub fn workdir(self, dir: String):
+        """Add WORKDIR instruction.
+
+        Args:
+            dir: Working directory
+        """
+        self.add_instruction("WORKDIR", [dir])
+
+    pub fn entrypoint(self, cmd: List[String]):
+        """Add ENTRYPOINT instruction.
+
+        Args:
+            cmd: Entrypoint command
+        """
+        let json_array = f"[{cmd.map(fn(s): f'\"{s}\"').join(', ')}]"
+        self.add_instruction("ENTRYPOINT", [json_array])
+
+    pub fn env(self, key: String, value: String):
+        """Add ENV instruction.
+
+        Args:
+            key: Environment variable name
+            value: Environment variable value
+        """
+        self.add_instruction("ENV", [f"{key}={value}"])
+
+    pub fn generate(self): String =
+        """Generate Dockerfile content.
+
+        Returns:
+            Dockerfile as string
+
+        Example:
+            let dockerfile = builder.generate()
+            # Write to file
+        """
+        let mut content = ""
+
+        for instr in self.instructions:
+            content += instr.to_string() + "\n"
+
+        content
+
+# Container builder
+pub class ContainerBuilder:
+    pub dockerfile_builder: DockerfileBuilder
+    pub base_image: BaseImage
+    pub platforms: List[Platform]
+    pub tags: List[String]
+    pub verbose: bool
+
+    pub fn new(): ContainerBuilder =
+        """Create container builder.
+
+        Returns:
+            Container builder
+
+        Example:
+            let container = ContainerBuilder.new()
+
+            # Auto-generate Dockerfile
+            container.detect_runtime()  # → :simple_native, :rust, :python
+            container.set_base_image(BaseImage::Alpine("3.18"))
+            container.add_artifacts("target/release/app")
+            container.set_entrypoint("/app/app")
+
+            # Build image
+            let image = container.build(
+                tag: "my-app:1.0.0",
+                platform: [Platform::LinuxAmd64, Platform::LinuxArm64]
+            )
+
+            # Push to registry
+            image.push("docker.io/user/my-app:1.0.0")
+        """
+        ContainerBuilder {
+            dockerfile_builder: DockerfileBuilder.new(),
+            base_image: BaseImage::Alpine("3.18"),
+            platforms: [Platform::LinuxAmd64],
+            tags: [],
+            verbose: false
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging."""
+        self.verbose = enabled
+
+    pub fn set_base_image(self, base: BaseImage):
+        """Set base image.
+
+        Args:
+            base: Base image
+        """
+        self.base_image = base
+
+    pub fn add_platform(self, platform: Platform):
+        """Add target platform.
+
+        Args:
+            platform: Platform target
+        """
+        self.platforms.append(platform)
+
+    pub fn detect_runtime(self): List[Language] =
+        """Detect runtime languages.
+
+        Returns:
+            Detected languages
+
+        Auto-detects:
+        - Simple native binaries
+        - Rust binaries
+        - Python applications
+        - Node.js applications
+        """
+        # TODO: Scan project for language markers
+        []
+
+    pub fn add_artifacts(self, artifact_path: String):
+        """Add artifacts to image.
+
+        Args:
+            artifact_path: Path to artifacts
+        """
+        self.dockerfile_builder.copy(artifact_path, "/app/")
+
+    pub fn set_entrypoint(self, entrypoint: String):
+        """Set container entrypoint.
+
+        Args:
+            entrypoint: Entrypoint command
+        """
+        self.dockerfile_builder.entrypoint([entrypoint])
+
+    pub fn generate_dockerfile(self): String =
+        """Generate Dockerfile.
+
+        Returns:
+            Dockerfile content
+
+        Example:
+            let dockerfile = container.generate_dockerfile()
+            # Writes multi-stage Dockerfile
+        """
+        # Start from base
+        self.dockerfile_builder.from_base(self.base_image)
+
+        # TODO: Add runtime-specific instructions
+
+        self.dockerfile_builder.generate()
+
+    pub fn build(
+        self,
+        tag: String,
+        platforms: List[Platform]
+    ): ContainerImage =
+        """Build container image.
+
+        Args:
+            tag: Image tag
+            platforms: Target platforms
+
+        Returns:
+            Built image
+
+        Example:
+            let image = container.build(
+                tag: "my-app:1.0.0",
+                platforms: [Platform::LinuxAmd64, Platform::LinuxArm64]
+            )
+        """
+        if self.verbose:
+            print(f"Building container image: {tag}")
+
+        # Generate Dockerfile
+        let dockerfile = self.generate_dockerfile()
+
+        # TODO: Write Dockerfile to temp file
+        # TODO: Execute docker build
+        # For multi-platform: docker buildx build --platform linux/amd64,linux/arm64
+
+        ContainerImage.new(tag, platforms)
+
+# Container image
+pub class ContainerImage:
+    pub tag: String
+    pub platforms: List[Platform]
+    pub size_mb: f64
+
+    pub fn new(tag: String, platforms: List[Platform]): ContainerImage =
+        """Create container image.
+
+        Args:
+            tag: Image tag
+            platforms: Platforms
+
+        Returns:
+            Container image
+        """
+        ContainerImage {
+            tag: tag,
+            platforms: platforms,
+            size_mb: 0.0  # TODO: Get actual size
+        }
+
+    pub fn push(self, registry: String): Result[(), String] =
+        """Push image to registry.
+
+        Args:
+            registry: Registry URL
+
+        Returns:
+            Ok if successful
+
+        Example:
+            image.push("docker.io/user/my-app:1.0.0")
+            # or
+            image.push("ghcr.io/org/my-app:1.0.0")
+        """
+        # TODO: Execute docker push
+        Ok(())
+
+    pub fn save(self, output_path: String): Result[(), String] =
+        """Save image to tarball.
+
+        Args:
+            output_path: Output tar file
+
+        Returns:
+            Ok if successful
+
+        Example:
+            image.save("my-app-1.0.0-image.tar")
+        """
+        # TODO: Execute docker save
+        Ok(())

@@ -1,0 +1,389 @@
+# Unit tests for grammar compilation pipeline
+
+import spec.{describe, it, expect}
+import parser.treesitter.grammar_compile as compile
+import parser.treesitter.{Grammar}
+
+describe("CompiledGrammar"):
+    it("creates compiled grammar"):
+        let grammar = compile.CompiledGrammar.new("test", "source_file")
+
+        expect(grammar.name).to_equal("test")
+        expect(grammar.entry_point).to_equal("source_file")
+        expect(grammar.rules.len()).to_equal(0)
+
+    it("stores rules"):
+        let mut grammar = compile.CompiledGrammar.new("test", "source_file")
+
+        let rule = compile.CompiledRule.new("test_rule", compile.RulePattern.Token("Identifier"))
+        grammar.rules["test_rule"] = rule
+
+        expect(grammar.rules.len()).to_equal(1)
+        expect(grammar.get_rule("test_rule").is_some()).to_be(true)
+
+    it("checks nullable rules"):
+        let mut grammar = compile.CompiledGrammar.new("test", "source_file")
+        grammar.nullable_rules.insert("optional_rule")
+
+        expect(grammar.is_nullable("optional_rule")).to_be(true)
+        expect(grammar.is_nullable("required_rule")).to_be(false)
+
+    it("gets first sets"):
+        let mut grammar = compile.CompiledGrammar.new("test", "source_file")
+        let mut first_set = Set()
+        first_set.insert("Identifier")
+        first_set.insert("Number")
+        grammar.first_sets["expr"] = first_set
+
+        let result = grammar.get_first_set("expr")
+
+        expect(result.contains("Identifier")).to_be(true)
+        expect(result.contains("Number")).to_be(true)
+
+    it("gets follow sets"):
+        let mut grammar = compile.CompiledGrammar.new("test", "source_file")
+        let mut follow_set = Set()
+        follow_set.insert("Semicolon")
+        grammar.follow_sets["statement"] = follow_set
+
+        let result = grammar.get_follow_set("statement")
+
+        expect(result.contains("Semicolon")).to_be(true)
+
+describe("CompiledRule"):
+    it("creates compiled rule"):
+        let pattern = compile.RulePattern.Token("Identifier")
+        let rule = compile.CompiledRule.new("identifier", pattern)
+
+        expect(rule.name).to_equal("identifier")
+        expect(rule.is_terminal).to_be(false)
+        expect(rule.is_nullable).to_be(false)
+
+describe("RulePattern"):
+    it("creates token pattern"):
+        let pattern = compile.RulePattern.Token("Identifier")
+
+        match pattern:
+            case Token(token_type):
+                expect(token_type).to_equal("Identifier")
+            case _:
+                fail("Expected Token pattern")
+
+    it("creates sequence pattern"):
+        let patterns = [
+            compile.RulePattern.Token("Fn"),
+            compile.RulePattern.Token("Identifier")
+        ]
+        let pattern = compile.RulePattern.Sequence(patterns)
+
+        match pattern:
+            case Sequence(ps):
+                expect(ps.len()).to_equal(2)
+            case _:
+                fail("Expected Sequence pattern")
+
+    it("creates choice pattern"):
+        let patterns = [
+            compile.RulePattern.Token("Int"),
+            compile.RulePattern.Token("Float")
+        ]
+        let pattern = compile.RulePattern.Choice(patterns)
+
+        match pattern:
+            case Choice(ps):
+                expect(ps.len()).to_equal(2)
+            case _:
+                fail("Expected Choice pattern")
+
+    it("creates repeat pattern"):
+        let inner = compile.RulePattern.Token("Identifier")
+        let pattern = compile.RulePattern.Repeat(inner)
+
+        match pattern:
+            case Repeat(p):
+                match p:
+                    case Token(t):
+                        expect(t).to_equal("Identifier")
+                    case _:
+                        fail("Expected Token inside Repeat")
+            case _:
+                fail("Expected Repeat pattern")
+
+    it("creates optional pattern"):
+        let inner = compile.RulePattern.Token("Comma")
+        let pattern = compile.RulePattern.Optional(inner)
+
+        match pattern:
+            case Optional(p):
+                match p:
+                    case Token(t):
+                        expect(t).to_equal("Comma")
+                    case _:
+                        fail("Expected Token inside Optional")
+            case _:
+                fail("Expected Optional pattern")
+
+    it("creates reference pattern"):
+        let pattern = compile.RulePattern.Reference("expression")
+
+        match pattern:
+            case Reference(name):
+                expect(name).to_equal("expression")
+            case _:
+                fail("Expected Reference pattern")
+
+describe("GrammarCompiler"):
+    it("creates compiler"):
+        let compiler = compile.GrammarCompiler.new()
+
+        # Compiler created successfully
+        expect(true).to_be(true)
+
+    it("compiles simple grammar"):
+        let compiler = compile.GrammarCompiler.new()
+        let grammar = Grammar.new("test")
+
+        let compiled = compiler.compile(grammar).unwrap()
+
+        expect(compiled.name).to_equal("test")
+
+describe("Nullable rules"):
+    it("detects token as not nullable"):
+        let compiler = compile.GrammarCompiler.new()
+        let mut compiled = compile.CompiledGrammar.new("test", "source_file")
+
+        let pattern = compile.RulePattern.Token("Identifier")
+        let is_nullable = compiler.is_pattern_nullable(pattern, &compiled)
+
+        expect(is_nullable).to_be(false)
+
+    it("detects repeat as nullable"):
+        let compiler = compile.GrammarCompiler.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+
+        let inner = compile.RulePattern.Token("Identifier")
+        let pattern = compile.RulePattern.Repeat(inner)
+        let is_nullable = compiler.is_pattern_nullable(pattern, &compiled)
+
+        expect(is_nullable).to_be(true)
+
+    it("detects optional as nullable"):
+        let compiler = compile.GrammarCompiler.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+
+        let inner = compile.RulePattern.Token("Identifier")
+        let pattern = compile.RulePattern.Optional(inner)
+        let is_nullable = compiler.is_pattern_nullable(pattern, &compiled)
+
+        expect(is_nullable).to_be(true)
+
+    it("detects sequence with all nullable as nullable"):
+        let compiler = compile.GrammarCompiler.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+
+        let patterns = [
+            compile.RulePattern.Optional(compile.RulePattern.Token("A")),
+            compile.RulePattern.Repeat(compile.RulePattern.Token("B"))
+        ]
+        let pattern = compile.RulePattern.Sequence(patterns)
+        let is_nullable = compiler.is_pattern_nullable(pattern, &compiled)
+
+        expect(is_nullable).to_be(true)
+
+    it("detects sequence with non-nullable as not nullable"):
+        let compiler = compile.GrammarCompiler.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+
+        let patterns = [
+            compile.RulePattern.Token("A"),
+            compile.RulePattern.Optional(compile.RulePattern.Token("B"))
+        ]
+        let pattern = compile.RulePattern.Sequence(patterns)
+        let is_nullable = compiler.is_pattern_nullable(pattern, &compiled)
+
+        expect(is_nullable).to_be(false)
+
+    it("detects choice with any nullable as nullable"):
+        let compiler = compile.GrammarCompiler.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+
+        let patterns = [
+            compile.RulePattern.Token("A"),
+            compile.RulePattern.Optional(compile.RulePattern.Token("B"))
+        ]
+        let pattern = compile.RulePattern.Choice(patterns)
+        let is_nullable = compiler.is_pattern_nullable(pattern, &compiled)
+
+        expect(is_nullable).to_be(true)
+
+describe("First sets"):
+    it("adds token to first set"):
+        let compiler = compile.GrammarCompiler.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+        let mut first_set = Set()
+
+        let pattern = compile.RulePattern.Token("Identifier")
+        compiler.add_first_tokens(pattern, &compiled, &mut first_set)
+
+        expect(first_set.contains("Identifier")).to_be(true)
+
+    it("adds first token from sequence"):
+        let compiler = compile.GrammarCompiler.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+        let mut first_set = Set()
+
+        let patterns = [
+            compile.RulePattern.Token("Fn"),
+            compile.RulePattern.Token("Identifier")
+        ]
+        let pattern = compile.RulePattern.Sequence(patterns)
+        compiler.add_first_tokens(pattern, &compiled, &mut first_set)
+
+        # Should contain first token
+        expect(first_set.contains("Fn")).to_be(true)
+
+    it("adds all choices to first set"):
+        let compiler = compile.GrammarCompiler.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+        let mut first_set = Set()
+
+        let patterns = [
+            compile.RulePattern.Token("Int"),
+            compile.RulePattern.Token("Float")
+        ]
+        let pattern = compile.RulePattern.Choice(patterns)
+        compiler.add_first_tokens(pattern, &compiled, &mut first_set)
+
+        expect(first_set.contains("Int")).to_be(true)
+        expect(first_set.contains("Float")).to_be(true)
+
+describe("GrammarCache"):
+    it("creates cache"):
+        let cache = compile.GrammarCache.new()
+
+        expect(cache.size()).to_equal(0)
+
+    it("adds and gets compiled grammar"):
+        let mut cache = compile.GrammarCache.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+
+        cache.add("test", compiled)
+
+        expect(cache.contains("test")).to_be(true)
+        expect(cache.size()).to_equal(1)
+
+        let retrieved = cache.get("test").unwrap()
+        expect(retrieved.name).to_equal("test")
+
+    it("returns None for missing language"):
+        let cache = compile.GrammarCache.new()
+
+        let result = cache.get("nonexistent")
+
+        expect(result.is_none()).to_be(true)
+
+    it("clears cache"):
+        let mut cache = compile.GrammarCache.new()
+        let compiled = compile.CompiledGrammar.new("test", "source_file")
+        cache.add("test", compiled)
+
+        expect(cache.size()).to_equal(1)
+
+        cache.clear()
+
+        expect(cache.size()).to_equal(0)
+        expect(cache.contains("test")).to_be(false)
+
+describe("GrammarPipeline"):
+    it("creates pipeline"):
+        let pipeline = compile.GrammarPipeline.new()
+
+        expect(pipeline.cache.size()).to_equal(0)
+
+    it("compiles grammar"):
+        let mut pipeline = compile.GrammarPipeline.new()
+        let grammar = Grammar.new("test")
+
+        let compiled = pipeline.compile(grammar).unwrap()
+
+        expect(compiled.name).to_equal("test")
+
+    it("caches compiled grammar"):
+        let mut pipeline = compile.GrammarPipeline.new()
+        let grammar = Grammar.new("test")
+
+        # First compilation
+        pipeline.compile(grammar).unwrap()
+        expect(pipeline.cache.size()).to_equal(1)
+
+        # Second compilation (should use cache)
+        let compiled = pipeline.compile(grammar).unwrap()
+        expect(compiled.name).to_equal("test")
+
+    it("clears pipeline cache"):
+        let mut pipeline = compile.GrammarPipeline.new()
+        let grammar = Grammar.new("test")
+        pipeline.compile(grammar).unwrap()
+
+        expect(pipeline.cache.size()).to_equal(1)
+
+        pipeline.clear_cache()
+
+        expect(pipeline.cache.size()).to_equal(0)
+
+describe("Convenience functions"):
+    it("compiles grammar"):
+        let grammar = Grammar.new("test")
+
+        let compiled = compile.compile_grammar(grammar).unwrap()
+
+        expect(compiled.name).to_equal("test")
+
+describe("Token extraction"):
+    it("extracts token types from grammar"):
+        let compiler = compile.GrammarCompiler.new()
+        let mut token_set = Set()
+
+        let pattern = compile.RulePattern.Token("Identifier")
+        compiler.collect_token_types(pattern, &mut token_set)
+
+        expect(token_set.contains("Identifier")).to_be(true)
+
+    it("extracts tokens from sequence"):
+        let compiler = compile.GrammarCompiler.new()
+        let mut token_set = Set()
+
+        let patterns = [
+            compile.RulePattern.Token("Fn"),
+            compile.RulePattern.Token("Identifier")
+        ]
+        let pattern = compile.RulePattern.Sequence(patterns)
+        compiler.collect_token_types(pattern, &mut token_set)
+
+        expect(token_set.contains("Fn")).to_be(true)
+        expect(token_set.contains("Identifier")).to_be(true)
+
+    it("extracts tokens from nested patterns"):
+        let compiler = compile.GrammarCompiler.new()
+        let mut token_set = Set()
+
+        let inner = compile.RulePattern.Token("Number")
+        let pattern = compile.RulePattern.Repeat(inner)
+        compiler.collect_token_types(pattern, &mut token_set)
+
+        expect(token_set.contains("Number")).to_be(true)
+
+describe("Integration"):
+    it("compiles and caches grammar"):
+        let mut pipeline = compile.GrammarPipeline.new()
+        let grammar = Grammar.new("simple")
+
+        # Compile
+        let compiled = pipeline.compile(grammar).unwrap()
+
+        expect(compiled.name).to_equal("simple")
+        expect(pipeline.cache.contains("simple")).to_be(true)
+
+        # Use cache
+        let cached = pipeline.compile(grammar).unwrap()
+        expect(cached.name).to_equal("simple")

@@ -1,0 +1,277 @@
+# Renderer - Abstract Rendering Backend Trait
+#
+# This module defines the RenderBackend trait that abstracts
+# rendering for different platforms (TUI, GUI, etc.). Each
+# platform provides its own implementation.
+
+use core.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+
+# Abstract renderer trait (Async API)
+# Implementations: TUI (terminal), GUI (windowed), HTML (SSR), Vulkan (GPU)
+#
+# All rendering operations are async to enable:
+#   - Non-blocking UI updates
+#   - Parallel CPU and GPU work
+#   - Better responsiveness
+#   - JavaScript-like async/await patterns
+trait RenderBackend:
+    # Initialize the renderer (async - may load resources, compile shaders)
+    async fn init(self) -> Future[Result[(), RenderError]]
+
+    # Shutdown the renderer (async - may wait for GPU idle)
+    async fn shutdown(self) -> Future[Result[(), RenderError]]
+
+    # Get screen/window dimensions (sync - just reading state)
+    fn dimensions(self) -> (u16, u16)
+
+    # Render an element tree (async - GPU work happens in parallel)
+    async fn render(self, tree: &ElementTree) -> Future[Result[(), RenderError]]
+
+    # Apply a patch set to the current view (async - incremental GPU updates)
+    async fn apply_patches(self, patches: &PatchSet) -> Future[Result[(), RenderError]]
+
+    # Clear the screen/window (async - GPU clear operation)
+    async fn clear(self) -> Future[Result[(), RenderError]]
+
+    # Flush pending changes to display (async - wait for GPU completion)
+    async fn flush(self) -> Future[Result[(), RenderError]]
+
+    # Check if an event is available (async - may wait on I/O)
+    async fn poll_event(self, timeout_ms: u64) -> Future[Result[Option[Event], RenderError]]
+
+    # Read the next event (async - blocks until event arrives)
+    async fn read_event(self) -> Future[Result[Event, RenderError]]
+
+# Rendering error types
+pub enum RenderError:
+    NotInitialized
+    AlreadyInitialized
+    IoError(String)
+    InvalidElement(String)
+    OutOfBounds
+    UnsupportedFeature(String)
+
+impl RenderError:
+    pub fn message(self) -> &str:
+        match self:
+            case NotInitialized: return "renderer not initialized"
+            case AlreadyInitialized: return "renderer already initialized"
+            case IoError(msg): return f"I/O error: {msg}"
+            case InvalidElement(msg): return f"invalid element: {msg}"
+            case OutOfBounds: return "coordinates out of bounds"
+            case UnsupportedFeature(msg): return f"unsupported feature: {msg}"
+
+# UI Event types
+pub enum Event:
+    # Keyboard events
+    Key(KeyEvent)
+    # Mouse events
+    Mouse(MouseEvent)
+    # Window/terminal resize
+    Resize { width: u16, height: u16 }
+    # Focus change
+    FocusGained
+    FocusLost
+    # Paste from clipboard
+    Paste(String)
+
+# Keyboard event
+pub struct KeyEvent:
+    code: KeyCode
+    modifiers: KeyModifiers
+
+pub enum KeyCode:
+    Char(char)
+    Enter
+    Escape
+    Backspace
+    Tab
+    Delete
+    Insert
+    Home
+    End
+    PageUp
+    PageDown
+    Up
+    Down
+    Left
+    Right
+    F(u8)  # F1-F12
+    Null
+
+pub struct KeyModifiers:
+    shift: bool
+    ctrl: bool
+    alt: bool
+
+impl KeyModifiers:
+    pub fn none() -> KeyModifiers:
+        return KeyModifiers { shift: false, ctrl: false, alt: false }
+
+    pub fn shift() -> KeyModifiers:
+        return KeyModifiers { shift: true, ctrl: false, alt: false }
+
+    pub fn ctrl() -> KeyModifiers:
+        return KeyModifiers { shift: false, ctrl: true, alt: false }
+
+    pub fn alt() -> KeyModifiers:
+        return KeyModifiers { shift: false, ctrl: false, alt: true }
+
+    pub fn has_shift(self) -> bool:
+        return self.shift
+
+    pub fn has_ctrl(self) -> bool:
+        return self.ctrl
+
+    pub fn has_alt(self) -> bool:
+        return self.alt
+
+impl KeyEvent:
+    pub fn new(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent:
+        return KeyEvent { code: code, modifiers: modifiers }
+
+    # Check if this is a character key
+    pub fn is_char(self) -> bool:
+        match self.code:
+            case Char(_): return true
+            case _: return false
+
+    # Get the character if this is a char key
+    pub fn char(self) -> Option[char]:
+        match self.code:
+            case Char(c): return Some(c)
+            case _: return None
+
+    # Common key checks
+    pub fn is_enter(self) -> bool:
+        return self.code == KeyCode::Enter
+
+    pub fn is_escape(self) -> bool:
+        return self.code == KeyCode::Escape
+
+    pub fn is_tab(self) -> bool:
+        return self.code == KeyCode::Tab
+
+    pub fn is_backspace(self) -> bool:
+        return self.code == KeyCode::Backspace
+
+# Mouse event
+pub struct MouseEvent:
+    kind: MouseEventKind
+    column: u16
+    row: u16
+    modifiers: KeyModifiers
+
+pub enum MouseEventKind:
+    Down(MouseButton)
+    Up(MouseButton)
+    Drag(MouseButton)
+    Moved
+    ScrollDown
+    ScrollUp
+    ScrollLeft
+    ScrollRight
+
+pub enum MouseButton:
+    Left
+    Right
+    Middle
+
+impl MouseEvent:
+    pub fn new(kind: MouseEventKind, col: u16, row: u16) -> MouseEvent:
+        return MouseEvent {
+            kind: kind,
+            column: col,
+            row: row,
+            modifiers: KeyModifiers::none()
+        }
+
+    pub fn position(self) -> (u16, u16):
+        return (self.column, self.row)
+
+    pub fn is_click(self) -> bool:
+        match self.kind:
+            case Down(_): return true
+            case _: return false
+
+    pub fn is_scroll(self) -> bool:
+        match self.kind:
+            case ScrollDown | ScrollUp | ScrollLeft | ScrollRight:
+                return true
+            case _:
+                return false
+
+# Computed layout for an element
+pub struct Layout:
+    # Position relative to parent
+    x: u16
+    y: u16
+    # Actual dimensions after layout
+    width: u16
+    height: u16
+    # Content area (after border/padding)
+    content_x: u16
+    content_y: u16
+    content_width: u16
+    content_height: u16
+
+impl Layout:
+    pub fn new(x: u16, y: u16, width: u16, height: u16) -> Layout:
+        return Layout {
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            content_x: x,
+            content_y: y,
+            content_width: width,
+            content_height: height
+        }
+
+    # Apply padding to compute content area
+    pub fn with_padding(self, top: u16, right: u16, bottom: u16, left: u16) -> Layout:
+        self.content_x = self.x + left
+        self.content_y = self.y + top
+        self.content_width = if self.width > left + right { self.width - left - right } else { 0 }
+        self.content_height = if self.height > top + bottom { self.height - top - bottom } else { 0 }
+        return self
+
+    # Check if point is inside layout
+    pub fn contains(self, px: u16, py: u16) -> bool:
+        return px >= self.x and px < self.x + self.width
+            and py >= self.y and py < self.y + self.height
+
+    # Check if point is inside content area
+    pub fn contains_content(self, px: u16, py: u16) -> bool:
+        return px >= self.content_x and px < self.content_x + self.content_width
+            and py >= self.content_y and py < self.content_y + self.content_height
+
+# Layout cache for efficient hit testing and rendering
+pub struct LayoutCache:
+    layouts: Dict[u64, Layout]
+
+impl LayoutCache:
+    pub fn new() -> LayoutCache:
+        return LayoutCache { layouts: Dict::new() }
+
+    pub fn set(self, node_id: NodeId, layout: Layout):
+        self.layouts.set(node_id.value(), layout)
+
+    pub fn get(self, node_id: NodeId) -> Option[&Layout]:
+        return self.layouts.get(&node_id.value())
+
+    pub fn clear(self):
+        self.layouts.clear()
+
+    # Find element at position
+    pub fn hit_test(self, x: u16, y: u16) -> Option[NodeId]:
+        # Note: This returns first match, should be called with
+        # elements in z-order (children after parents)
+        let mut hit: Option[NodeId] = None
+        for (id, layout) in &self.layouts:
+            if layout.contains(x, y):
+                hit = Some(NodeId::new(id))
+        return hit

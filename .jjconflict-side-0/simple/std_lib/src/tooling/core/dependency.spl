@@ -1,0 +1,454 @@
+# Dependency Tracking
+# Track dependencies within and across languages
+
+use tooling.core.project.{Language, ProjectContext}
+use core.result.{Result, Ok, Err}
+
+# Dependency edge in the graph
+pub class Dependency:
+    pub source: String
+    pub target: String
+    pub dep_type: DependencyType
+
+    pub fn new(source: String, target: String, dep_type: DependencyType): Dependency =
+        """Create dependency edge.
+
+        Args:
+            source: Source file
+            target: Dependency file
+            dep_type: Type of dependency
+
+        Returns:
+            Dependency edge
+        """
+        Dependency {
+            source: source,
+            target: target,
+            dep_type: dep_type
+        }
+
+# Dependency type
+pub enum DependencyType:
+    Import       # Language import/include
+    FFI          # Foreign function interface
+    Resource     # Resource file dependency
+    Test         # Test dependency
+
+# Dependency graph
+pub class DependencyGraph:
+    pub edges: List[Dependency]
+    pub nodes: Dict[String, DependencyNode]
+
+    pub fn new(): DependencyGraph =
+        """Create empty dependency graph."""
+        DependencyGraph {
+            edges: [],
+            nodes: {}
+        }
+
+    pub fn add_node(self, file: String, language: Language):
+        """Add node to graph.
+
+        Args:
+            file: File path
+            language: Source language
+        """
+        if not self.nodes.contains_key(file):
+            self.nodes[file] = DependencyNode.new(file, language)
+
+    pub fn add_edge(
+        self,
+        source: String,
+        target: String,
+        dep_type: DependencyType
+    ):
+        """Add dependency edge.
+
+        Args:
+            source: Source file
+            target: Target file
+            dep_type: Dependency type
+
+        Example:
+            graph.add_node("app.spl", Language::Simple)
+            graph.add_node("lib.spl", Language::Simple)
+            graph.add_edge("app.spl", "lib.spl", DependencyType::Import)
+        """
+        let dep = Dependency.new(source, target, dep_type)
+        self.edges.append(dep)
+
+        # Add to node adjacency lists
+        if self.nodes.contains_key(source):
+            self.nodes[source].dependencies.append(target)
+
+        if self.nodes.contains_key(target):
+            self.nodes[target].dependents.append(source)
+
+    pub fn get_dependencies(self, file: String): List[String] =
+        """Get direct dependencies of file.
+
+        Args:
+            file: File to get dependencies for
+
+        Returns:
+            List of dependency files
+
+        Example:
+            let deps = graph.get_dependencies("app.spl")
+            # → ["lib.spl", "core.spl"]
+        """
+        match self.nodes.get(file):
+            some(node):
+                node.dependencies.clone()
+            none:
+                []
+
+    pub fn get_transitive_dependencies(self, file: String): List[String] =
+        """Get all transitive dependencies of file.
+
+        Args:
+            file: File to get dependencies for
+
+        Returns:
+            List of all dependency files (recursive)
+
+        Example:
+            let deps = graph.get_transitive_dependencies("app.spl")
+            # → ["lib.spl", "core.spl", "utils.spl"]
+        """
+        let visited: Dict[String, bool] = {}
+        let result: List[String] = []
+
+        self.collect_dependencies_recursive(file, visited, result)
+
+        result
+
+    fn collect_dependencies_recursive(
+        self,
+        file: String,
+        visited: Dict[String, bool],
+        result: List[String]
+    ):
+        """Recursively collect dependencies.
+
+        Args:
+            file: Current file
+            visited: Set of visited files
+            result: Accumulated dependencies (output)
+        """
+        if visited.contains_key(file):
+            return
+
+        visited[file] = true
+
+        let deps = self.get_dependencies(file)
+        for dep in deps:
+            result.append(dep)
+            self.collect_dependencies_recursive(dep, visited, result)
+
+    pub fn get_reverse_dependencies(self, file: String): List[String] =
+        """Get files that depend on given file.
+
+        Args:
+            file: File to find dependents of
+
+        Returns:
+            List of dependent files
+
+        Example:
+            let rdeps = graph.get_reverse_dependencies("lib.spl")
+            # → ["app.spl", "test.spl"]
+        """
+        match self.nodes.get(file):
+            some(node):
+                node.dependents.clone()
+            none:
+                []
+
+    pub fn detect_cycles(self): List[List[String]] =
+        """Detect circular dependencies.
+
+        Returns:
+            List of dependency cycles
+
+        Algorithm: Tarjan's strongly connected components
+
+        Example:
+            let cycles = graph.detect_cycles()
+            if cycles.len() > 0:
+                print("Circular dependencies found!")
+                for cycle in cycles:
+                    print(f"  {cycle.join(' → ')}")
+        """
+        let cycles: List[List[String]] = []
+        let visited: Dict[String, bool] = {}
+        let stack: List[String] = []
+        let in_stack: Dict[String, bool] = {}
+
+        for (file, _) in self.nodes.items():
+            if not visited.contains_key(file):
+                self.find_cycles_dfs(
+                    file,
+                    visited,
+                    stack,
+                    in_stack,
+                    cycles
+                )
+
+        cycles
+
+    fn find_cycles_dfs(
+        self,
+        file: String,
+        visited: Dict[String, bool],
+        stack: List[String],
+        in_stack: Dict[String, bool],
+        cycles: List[List[String]]
+    ):
+        """DFS for cycle detection.
+
+        Args:
+            file: Current file
+            visited: Visited set
+            stack: DFS stack
+            in_stack: Files in current DFS path
+            cycles: Found cycles (output)
+        """
+        visited[file] = true
+        stack.append(file)
+        in_stack[file] = true
+
+        let deps = self.get_dependencies(file)
+        for dep in deps:
+            if not visited.contains_key(dep):
+                self.find_cycles_dfs(dep, visited, stack, in_stack, cycles)
+            else if in_stack.contains_key(dep):
+                # Cycle found - extract cycle from stack
+                let cycle = self.extract_cycle(stack, dep)
+                cycles.append(cycle)
+
+        stack.pop()
+        in_stack.remove(file)
+
+    fn extract_cycle(self, stack: List[String], start: String): List[String] =
+        """Extract cycle from DFS stack.
+
+        Args:
+            stack: DFS stack
+            start: Start of cycle
+
+        Returns:
+            Files in cycle
+        """
+        let cycle: List[String] = []
+        let found_start = false
+
+        # Find start in stack and collect cycle
+        for file in stack.iter().rev():
+            cycle.insert(0, file)
+            if file == start:
+                found_start = true
+                break
+
+        cycle
+
+    pub fn topological_sort(self): Result[List[String], String] =
+        """Compute topological ordering of files.
+
+        Returns:
+            Ok with ordered file list, or Err if cycle detected
+
+        Example:
+            match graph.topological_sort():
+                Ok(order):
+                    print("Build order: {order}")
+                Err(msg):
+                    print("Error: {msg}")
+        """
+        # Check for cycles first
+        let cycles = self.detect_cycles()
+        if cycles.len() > 0:
+            return Err("Circular dependencies detected")
+
+        # Kahn's algorithm
+        let in_degree: Dict[String, i32] = {}
+        let queue: List[String] = []
+        let result: List[String] = []
+
+        # Initialize in-degrees
+        for (file, _) in self.nodes.items():
+            in_degree[file] = 0
+
+        for edge in self.edges:
+            in_degree[edge.target] += 1
+
+        # Find nodes with no incoming edges
+        for (file, degree) in in_degree.items():
+            if degree == 0:
+                queue.append(file)
+
+        # Process queue
+        while queue.len() > 0:
+            let file = queue.remove(0)
+            result.append(file)
+
+            let deps = self.get_dependencies(file)
+            for dep in deps:
+                in_degree[dep] -= 1
+                if in_degree[dep] == 0:
+                    queue.append(dep)
+
+        Ok(result)
+
+# Dependency node
+pub class DependencyNode:
+    pub file: String
+    pub language: Language
+    pub dependencies: List[String]    # Files this file depends on
+    pub dependents: List[String]      # Files that depend on this file
+
+    pub fn new(file: String, language: Language): DependencyNode =
+        """Create dependency node.
+
+        Args:
+            file: File path
+            language: Source language
+
+        Returns:
+            Dependency node
+        """
+        DependencyNode {
+            file: file,
+            language: language,
+            dependencies: [],
+            dependents: []
+        }
+
+# Dependency tracker - builds and analyzes dependency graph
+pub class DependencyTracker:
+    pub root: String
+    pub graph: DependencyGraph
+    pub verbose: bool
+
+    pub fn new(root: String): DependencyTracker =
+        """Create dependency tracker.
+
+        Args:
+            root: Project root directory
+
+        Returns:
+            Tracker with empty graph
+
+        Example:
+            let tracker = DependencyTracker.new(".")
+            tracker.analyze_all_languages()
+
+            let deps = tracker.get_dependencies("app.spl")
+            print(f"Dependencies: {deps}")
+        """
+        DependencyTracker {
+            root: root,
+            graph: DependencyGraph.new(),
+            verbose: false
+        }
+
+    pub fn set_verbose(self, enabled: bool):
+        """Enable verbose logging.
+
+        Args:
+            enabled: True for detailed logs
+        """
+        self.verbose = enabled
+
+    pub fn analyze_all_languages(self):
+        """Analyze dependencies for all languages in project.
+
+        Builds complete dependency graph by parsing all source files.
+        """
+        # TODO: Implement language-specific dependency extraction
+        # - Simple: Parse import statements with Tree-sitter
+        # - Rust: Parse use/mod statements
+        # - Python: Parse import/from statements
+        # - JavaScript: Parse import/require statements
+
+        if self.verbose:
+            print("Analyzing dependencies...")
+
+    pub fn analyze_file(self, file: String, language: Language):
+        """Analyze dependencies for single file.
+
+        Args:
+            file: File to analyze
+            language: Source language
+        """
+        # Add node
+        self.graph.add_node(file, language)
+
+        # TODO: Parse file and extract dependencies
+        # For now, this is a stub
+        let deps = self.extract_dependencies(file, language)
+
+        for dep in deps:
+            self.graph.add_node(dep, language)
+            self.graph.add_edge(file, dep, DependencyType::Import)
+
+    fn extract_dependencies(self, file: String, language: Language): List[String] =
+        """Extract dependencies from source file.
+
+        Args:
+            file: File to parse
+            language: Source language
+
+        Returns:
+            List of dependency files
+        """
+        # TODO: Use Tree-sitter to parse imports/includes
+        []
+
+    pub fn get_dependencies(self, file: String): List[String] =
+        """Get dependencies of file.
+
+        Args:
+            file: File path
+
+        Returns:
+            Direct dependencies
+        """
+        self.graph.get_dependencies(file)
+
+    pub fn get_reverse_dependencies(self, file: String): List[String] =
+        """Get reverse dependencies of file.
+
+        Args:
+            file: File path
+
+        Returns:
+            Files that depend on this file
+        """
+        self.graph.get_reverse_dependencies(file)
+
+    pub fn detect_cycles(self): List[List[String]] =
+        """Detect circular dependencies.
+
+        Returns:
+            List of dependency cycles
+        """
+        self.graph.detect_cycles()
+
+    pub fn visualize(self): String =
+        """Generate DOT graph visualization.
+
+        Returns:
+            DOT format graph
+
+        Example:
+            let dot = tracker.visualize()
+            # Save to file for rendering with Graphviz
+        """
+        let mut output = "digraph dependencies {\n"
+
+        for edge in self.graph.edges:
+            output += f"  \"{edge.source}\" -> \"{edge.target}\";\n"
+
+        output += "}\n"
+        output

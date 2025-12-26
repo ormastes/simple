@@ -1,0 +1,307 @@
+# Test Filtering & Selection
+# Run subset of tests based on filters
+
+use tooling.core.project.Language
+use tooling.testing.discovery.TestSuite
+
+# Test filter criteria
+pub class TestFilter:
+    pub pattern: String
+    pub language: Language?
+    pub file_patterns: List[String]
+    pub tag_filters: List[String]
+    pub changed_files_only: bool
+
+    pub fn new(): TestFilter =
+        """Create empty test filter.
+
+        Returns:
+            Empty filter (matches all tests)
+
+        Example:
+            let filter = TestFilter.new()
+
+            filter.by_pattern("integration")
+            filter.by_language(Language::Rust)
+
+            let filtered_tests = filter.apply(all_tests)
+            print(f"Running {filtered_tests.len()} filtered tests")
+        """
+        TestFilter {
+            pattern: "",
+            language: none,
+            file_patterns: [],
+            tag_filters: [],
+            changed_files_only: false
+        }
+
+    pub fn by_pattern(self, pattern: String):
+        """Filter by test name pattern.
+
+        Args:
+            pattern: Substring or regex pattern
+
+        Example:
+            filter.by_pattern("integration")
+            # Matches: test_integration_api, integration_db_spec, etc.
+        """
+        self.pattern = pattern
+
+    pub fn by_language(self, language: Language):
+        """Filter by language.
+
+        Args:
+            language: Language to filter by
+
+        Example:
+            filter.by_language(Language::Rust)
+            # Only run Rust tests
+        """
+        self.language = some(language)
+
+    pub fn by_file(self, file_pattern: String):
+        """Filter by file pattern.
+
+        Args:
+            file_pattern: Glob pattern for files
+
+        Example:
+            filter.by_file("api/**/*_spec.spl")
+            # Only run tests in api directory
+        """
+        self.file_patterns.append(file_pattern)
+
+    pub fn by_tag(self, tag: String):
+        """Filter by test tag/marker.
+
+        Args:
+            tag: Tag to filter by
+
+        Example:
+            filter.by_tag("slow")
+            # Only run tests marked as @slow
+        """
+        self.tag_filters.append(tag)
+
+    pub fn by_changed_files(self, changed_files: List[String]):
+        """Filter to tests affected by changed files.
+
+        Args:
+            changed_files: Files that changed
+
+        Example:
+            let changed = git.get_changed_files("HEAD~1")
+            filter.by_changed_files(changed)
+            # Only run tests covering changed code
+        """
+        self.changed_files_only = true
+        # TODO: Use dependency graph to find affected tests
+
+    pub fn apply(self, suites: List[TestSuite]): List[TestSuite] =
+        """Apply filter to test suites.
+
+        Args:
+            suites: All test suites
+
+        Returns:
+            Filtered test suites
+
+        Example:
+            let filter = TestFilter.new()
+            filter.by_pattern("unit")
+            filter.by_language(Language::Simple)
+
+            let filtered = filter.apply(all_suites)
+            # Only Simple unit tests
+        """
+        let mut filtered = suites
+
+        # Apply language filter
+        match self.language:
+            some(lang):
+                filtered = self.filter_by_language(filtered, lang)
+            none:
+                pass
+
+        # Apply pattern filter
+        if not self.pattern.is_empty():
+            filtered = self.filter_by_pattern(filtered, self.pattern)
+
+        # Apply file pattern filter
+        if self.file_patterns.len() > 0:
+            filtered = self.filter_by_file_patterns(filtered, self.file_patterns)
+
+        filtered
+
+    fn filter_by_language(
+        self,
+        suites: List[TestSuite],
+        language: Language
+    ): List[TestSuite] =
+        """Filter suites by language.
+
+        Args:
+            suites: Test suites
+            language: Language to match
+
+        Returns:
+            Filtered suites
+        """
+        let filtered: List[TestSuite] = []
+
+        for suite in suites:
+            if suite.language == language:
+                filtered.append(suite)
+
+        filtered
+
+    fn filter_by_pattern(
+        self,
+        suites: List[TestSuite],
+        pattern: String
+    ): List[TestSuite] =
+        """Filter suites by name pattern.
+
+        Args:
+            suites: Test suites
+            pattern: Pattern to match
+
+        Returns:
+            Filtered suites
+        """
+        let filtered: List[TestSuite] = []
+
+        for suite in suites:
+            if self.matches_pattern(suite, pattern):
+                filtered.append(suite)
+
+        filtered
+
+    fn filter_by_file_patterns(
+        self,
+        suites: List[TestSuite],
+        patterns: List[String]
+    ): List[TestSuite] =
+        """Filter suites by file patterns.
+
+        Args:
+            suites: Test suites
+            patterns: Glob patterns
+
+        Returns:
+            Filtered suites
+        """
+        let filtered: List[TestSuite] = []
+
+        for suite in suites:
+            for pattern in patterns:
+                if self.matches_file_pattern(suite, pattern):
+                    filtered.append(suite)
+                    break
+
+        filtered
+
+    fn matches_pattern(self, suite: TestSuite, pattern: String): bool =
+        """Check if suite matches pattern.
+
+        Args:
+            suite: Test suite
+            pattern: Pattern to match
+
+        Returns:
+            True if matches
+        """
+        # TODO: Implement regex matching
+        # For now, simple substring match
+        suite.path.contains(pattern)
+
+    fn matches_file_pattern(self, suite: TestSuite, pattern: String): bool =
+        """Check if suite matches file pattern.
+
+        Args:
+            suite: Test suite
+            pattern: Glob pattern
+
+        Returns:
+            True if matches
+        """
+        # TODO: Implement glob matching
+        suite.path.contains(pattern)
+
+# Smart test selection - select tests based on code changes
+pub class SmartTestSelector:
+    pub dependency_graph: Dict[String, List[String]]
+    pub test_coverage: Dict[String, List[String]]
+
+    pub fn new(): SmartTestSelector =
+        """Create smart test selector.
+
+        Returns:
+            Smart selector
+
+        Example:
+            let selector = SmartTestSelector.new()
+            selector.analyze_project(".")
+
+            let changed_files = ["app.spl", "lib.spl"]
+            let affected_tests = selector.select_tests(changed_files)
+
+            print(f"Running {affected_tests.len()} affected tests")
+            # 10x faster CI for small changes
+        """
+        SmartTestSelector {
+            dependency_graph: {},
+            test_coverage: {}
+        }
+
+    pub fn analyze_project(self, root: String):
+        """Analyze project to build dependency graph and coverage.
+
+        Args:
+            root: Project root
+        """
+        # TODO: Build dependency graph
+        # TODO: Analyze test coverage (which tests cover which files)
+        pass
+
+    pub fn select_tests(self, changed_files: List[String]): List[String] =
+        """Select tests affected by changed files.
+
+        Args:
+            changed_files: Files that changed
+
+        Returns:
+            Test files to run
+
+        Algorithm:
+        1. Find files that directly changed
+        2. Find files that depend on changed files (transitive)
+        3. Find tests that cover those files
+        4. Return unique set of tests
+        """
+        let affected: List[String] = []
+
+        # Find tests covering changed files directly
+        for file in changed_files:
+            match self.test_coverage.get(file):
+                some(tests):
+                    affected.extend(tests)
+                none:
+                    pass
+
+        # TODO: Find tests covering transitive dependencies
+
+        # Deduplicate
+        self.deduplicate(affected)
+
+    fn deduplicate(self, list: List[String]): List[String] =
+        """Remove duplicates from list.
+
+        Args:
+            list: List with possible duplicates
+
+        Returns:
+            Unique list
+        """
+        # TODO: Implement deduplication
+        list

@@ -1,0 +1,237 @@
+///
+SDN Value Tests
+
+Tests for SdnValue enum and operations.
+
+Covers:
+- Type checking (is_null, is_bool, is_int, etc.)
+- Type conversions (as_i64, as_str, etc.)
+- Dict operations (insert, get)
+- Path navigation (get_path)
+- Display formatting
+///
+
+import std.spec
+import sdn.value.SdnValue
+
+describe "SDN Value":
+    context "type checking":
+        it "identifies null values":
+            let val = SdnValue.null()
+            expect val.is_null() == True
+            expect val.is_bool() == False
+            expect val.is_int() == False
+
+        it "identifies boolean values":
+            let val = SdnValue.bool_val(True)
+            expect val.is_bool() == True
+            expect val.is_null() == False
+            expect val.is_int() == False
+
+        it "identifies integer values":
+            let val = SdnValue.int_val(42)
+            expect val.is_int() == True
+            expect val.is_number() == True
+            expect val.is_string() == False
+
+        it "identifies float values":
+            let val = SdnValue.float_val(3.14)
+            expect val.is_float() == True
+            expect val.is_number() == True
+            expect val.is_int() == False
+
+        it "identifies string values":
+            let val = SdnValue.string_val("hello")
+            expect val.is_string() == True
+            expect val.is_null() == False
+
+        it "identifies array values":
+            let val = SdnValue.array_val([])
+            expect val.is_array() == True
+            expect val.is_dict() == False
+
+        it "identifies dict values":
+            let val = SdnValue.dict_val()
+            expect val.is_dict() == True
+            expect val.is_array() == False
+
+        it "identifies table values":
+            let val = SdnValue.named_table(["id", "name"], [])
+            expect val.is_table() == True
+            expect val.is_dict() == False
+
+    context "type coercion":
+        it "extracts boolean values":
+            let val = SdnValue.bool_val(True)
+            match val.as_bool():
+                case Some(b):
+                    expect b == True
+                case None:
+                    fail("Expected Some(True)")
+
+        it "extracts integer values":
+            let val = SdnValue.int_val(42)
+            match val.as_i64():
+                case Some(i):
+                    expect i == 42
+                case None:
+                    fail("Expected Some(42)")
+
+        it "extracts float values":
+            let val = SdnValue.float_val(3.14)
+            match val.as_f64():
+                case Some(f):
+                    expect f > 3.13 and f < 3.15
+                case None:
+                    fail("Expected Some(3.14)")
+
+        it "coerces int to float":
+            let val = SdnValue.int_val(42)
+            match val.as_f64():
+                case Some(f):
+                    expect f == 42.0
+                case None:
+                    fail("Expected Some(42.0)")
+
+        it "extracts string values":
+            let val = SdnValue.string_val("hello")
+            match val.as_str():
+                case Some(s):
+                    expect s == "hello"
+                case None:
+                    fail("Expected Some(\"hello\")")
+
+        it "returns None for invalid coercions":
+            let val = SdnValue.null()
+            expect val.as_bool() == None
+            expect val.as_i64() == None
+            expect val.as_str() == None
+
+    context "dict operations":
+        it "inserts and retrieves values":
+            let mut val = SdnValue.dict_val()
+
+            # Insert values
+            val.insert("name", SdnValue.string_val("Alice"))
+            val.insert("age", SdnValue.int_val(30))
+
+            # Retrieve values
+            match val.get("name"):
+                case Some(name):
+                    expect name.as_str() == Some("Alice")
+                case None:
+                    fail("Expected name to exist")
+
+            match val.get("age"):
+                case Some(age):
+                    expect age.as_i64() == Some(30)
+                case None:
+                    fail("Expected age to exist")
+
+        it "returns None for missing keys":
+            let val = SdnValue.dict_val()
+            expect val.get("nonexistent") == None
+
+        it "handles array index access":
+            let val = SdnValue.array_val([
+                SdnValue.int_val(10),
+                SdnValue.int_val(20),
+                SdnValue.int_val(30)
+            ])
+
+            match val.get("0"):
+                case Some(first):
+                    expect first.as_i64() == Some(10)
+                case None:
+                    fail("Expected index 0 to exist")
+
+            match val.get("2"):
+                case Some(third):
+                    expect third.as_i64() == Some(30)
+                case None:
+                    fail("Expected index 2 to exist")
+
+            expect val.get("5") == None  # Out of bounds
+
+    context "path access":
+        it "navigates nested paths":
+            let mut server = SdnValue.dict_val()
+            server.insert("host", SdnValue.string_val("localhost"))
+            server.insert("port", SdnValue.int_val(8080))
+
+            let mut config = SdnValue.dict_val()
+            config.insert("server", server)
+
+            # Test path navigation
+            match config.get_path("server.host"):
+                case Some(host):
+                    expect host.as_str() == Some("localhost")
+                case None:
+                    fail("Expected server.host to exist")
+
+            match config.get_path("server.port"):
+                case Some(port):
+                    expect port.as_i64() == Some(8080)
+                case None:
+                    fail("Expected server.port to exist")
+
+        it "returns None for invalid paths":
+            let mut val = SdnValue.dict_val()
+            val.insert("key", SdnValue.string_val("value"))
+
+            expect val.get_path("nonexistent") == None
+            expect val.get_path("key.nested") == None  # Can't navigate into string
+
+    context "display formatting":
+        it "formats null values":
+            let val = SdnValue.null()
+            expect val.to_string() == "null"
+
+        it "formats boolean values":
+            expect SdnValue.bool_val(True).to_string() == "true"
+            expect SdnValue.bool_val(False).to_string() == "false"
+
+        it "formats integer values":
+            let val = SdnValue.int_val(42)
+            expect val.to_string() == "42"
+
+        it "formats float values":
+            let val = SdnValue.float_val(3.14)
+            let s = val.to_string()
+            expect s.contains("3.14")
+
+        it "formats string values without quotes":
+            let val = SdnValue.string_val("hello")
+            expect val.to_string() == "hello"
+
+        it "quotes strings with spaces":
+            let val = SdnValue.string_val("hello world")
+            expect val.to_string().contains("\"")
+
+        it "formats arrays":
+            let val = SdnValue.array_val([
+                SdnValue.int_val(1),
+                SdnValue.int_val(2),
+                SdnValue.int_val(3)
+            ])
+            let s = val.to_string()
+            expect s == "[1, 2, 3]"
+
+        it "formats dicts":
+            let mut val = SdnValue.dict_val()
+            val.insert("x", SdnValue.int_val(10))
+            val.insert("y", SdnValue.int_val(20))
+            let s = val.to_string()
+            expect s.contains("x: 10")
+            expect s.contains("y: 20")
+
+    context "type names":
+        it "returns correct type names":
+            expect SdnValue.null().type_name() == "null"
+            expect SdnValue.bool_val(True).type_name() == "bool"
+            expect SdnValue.int_val(42).type_name() == "int"
+            expect SdnValue.float_val(3.14).type_name() == "float"
+            expect SdnValue.string_val("hello").type_name() == "string"
+            expect SdnValue.array_val([]).type_name() == "array"
+            expect SdnValue.dict_val().type_name() == "dict"
+            expect SdnValue.named_table([], []).type_name() == "table"

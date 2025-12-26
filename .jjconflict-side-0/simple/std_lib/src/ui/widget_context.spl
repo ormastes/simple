@@ -1,0 +1,276 @@
+# Widget Context - Widget Rendering and Lifecycle Management
+#
+# Manages widget tree rendering, state updates, and event handling.
+# Bridges between Widget API and Element tree (pre-renderer).
+# Based on: doc/research/ui_framework_unified.md
+
+use core.*
+use ui.element.*
+use ui.widget.*
+use ui.events.*
+use ui.event_bridge.*
+use ui.state.*
+use ui.gui.theme.*
+
+# Widget rendering context - manages the widget → element pipeline
+pub struct WidgetContext:
+    # Build context for widget tree construction
+    build_ctx: BuildContext
+    # Current element tree
+    element_tree: Option[ElementTree]
+    # Event manager
+    event_manager: EventManager
+    # Theme
+    theme: Theme
+    # State store
+    state_store: StateStore
+    # Mounted widgets (for lifecycle management)
+    mounted: Dict[NodeId, Box[dyn Widget]]
+    # Dirty flags (widgets that need re-rendering)
+    dirty: Set[NodeId]
+
+impl WidgetContext:
+    # Create a new widget context
+    pub fn new(platform: Platform, theme: Theme) -> WidgetContext:
+        return WidgetContext {
+            build_ctx: BuildContext::new(),
+            element_tree: None,
+            event_manager: EventManager::new(platform),
+            theme: theme,
+            state_store: StateStore::new(),
+            mounted: Dict::new(),
+            dirty: Set::new()
+        }
+
+    # Get the build context
+    pub fn build_context(self) -> &mut BuildContext:
+        return &mut self.build_ctx
+
+    # Get the theme
+    pub fn theme(self) -> &Theme:
+        return &self.theme
+
+    # Set the theme
+    pub fn set_theme(self, theme: Theme):
+        self.theme = theme
+        self.mark_all_dirty()
+
+    # Get the state store
+    pub fn state_store(self) -> &mut StateStore:
+        return &mut self.state_store
+
+    # Mount a widget tree (initial render)
+    pub fn mount(self, widget: impl Widget) -> NodeId:
+        # Build widget tree
+        let widget_node = widget.build(&mut self.build_ctx)
+        let root_elem = widget_node.to_element()
+
+        # Create element tree
+        let tree = ElementTree::new(ElementKind::Main)
+        let root_id = tree.root().id
+
+        # Add built element to tree
+        tree.root_mut().children.push(root_elem)
+
+        self.element_tree = Some(tree)
+
+        # Store mounted widget
+        self.mounted.insert(root_id, Box::new(widget))
+
+        # Start event system
+        self.event_manager.start()
+
+        return root_id
+
+    # Update a mounted widget (re-render)
+    pub fn update(self, widget_id: NodeId, widget: impl Widget):
+        # Mark widget as dirty
+        self.dirty.insert(widget_id)
+
+        # Store updated widget
+        self.mounted.insert(widget_id, Box::new(widget))
+
+        # Schedule re-render
+        self.schedule_render()
+
+    # Mark a widget as needing re-render
+    pub fn mark_dirty(self, widget_id: NodeId):
+        self.dirty.insert(widget_id)
+
+    # Mark all widgets as dirty
+    pub fn mark_all_dirty(self):
+        for (id, _) in &self.mounted:
+            self.dirty.insert(*id)
+
+    # Schedule a render pass
+    pub fn schedule_render(self):
+        # In real implementation, would use requestAnimationFrame or similar
+        self.render()
+
+    # Render dirty widgets
+    pub fn render(self):
+        if self.dirty.is_empty():
+            return
+
+        # Re-build dirty widgets
+        for widget_id in &self.dirty:
+            if let Some(widget) = self.mounted.get(widget_id):
+                let widget_node = widget.build(&mut self.build_ctx)
+                let new_elem = widget_node.to_element()
+
+                # Update element tree
+                # In real implementation, would compute diff and apply patches
+                if let Some(tree) = &mut self.element_tree:
+                    # Placeholder: replace entire element
+                    # Real implementation would use ui/diff.spl
+                    pass
+            }
+
+        # Clear dirty flags
+        self.dirty.clear()
+
+    # Unmount a widget
+    pub fn unmount(self, widget_id: NodeId):
+        # Remove from mounted widgets
+        self.mounted.remove(&widget_id)
+
+        # Remove from dirty set
+        self.dirty.remove(&widget_id)
+
+        # Clean up event handlers
+        # In real implementation, would remove all handlers for this widget
+
+    # Get the current element tree
+    pub fn element_tree(self) -> Option[&ElementTree]:
+        return self.element_tree.as_ref()
+
+    # Register an event handler
+    pub fn on(self, target_id: NodeId, event_type: &str, handler: EventHandler):
+        self.event_manager.on(target_id, event_type, handler)
+
+    # Handle a platform event
+    pub fn handle_event(self, event: Event):
+        # Dispatch through element tree
+        if let Some(tree) = &self.element_tree:
+            # Create event registry and dispatch
+            # In real implementation, would use EventRegistry::dispatch_event
+            pass
+
+    # Run effects
+    pub fn run_effects(self):
+        self.state_store.run_effects()
+
+# Application context - top-level widget app management
+pub struct AppContext:
+    widget_ctx: WidgetContext
+    root_widget: Option[Box[dyn Widget]]
+    running: bool
+
+impl AppContext:
+    # Create a new application context
+    pub fn new(platform: Platform) -> AppContext:
+        return AppContext {
+            widget_ctx: WidgetContext::new(platform, Theme::light()),
+            root_widget: None,
+            running: false
+        }
+
+    # Create with custom theme
+    pub fn with_theme(platform: Platform, theme: Theme) -> AppContext:
+        return AppContext {
+            widget_ctx: WidgetContext::new(platform, theme),
+            root_widget: None,
+            running: false
+        }
+
+    # Set the root widget
+    pub fn set_root(self, widget: impl Widget):
+        let widget_id = self.widget_ctx.mount(widget)
+        self.root_widget = Some(Box::new(widget))
+
+    # Get widget context
+    pub fn widget_context(self) -> &mut WidgetContext:
+        return &mut self.widget_ctx
+
+    # Start the application event loop
+    pub fn run(self):
+        self.running = true
+
+        # Initial render
+        self.widget_ctx.render()
+
+        # Event loop (platform-specific)
+        # For browser: handled by browser event loop
+        # For terminal: blocking event polling
+        # For Vulkan: window event loop
+
+    # Stop the application
+    pub fn stop(self):
+        self.running = false
+        self.widget_ctx.event_manager.stop()
+
+    # Check if running
+    pub fn is_running(self) -> bool:
+        return self.running
+
+# Widget builder - fluent API for widget context operations
+pub struct WidgetBuilder:
+    ctx: WidgetContext
+
+impl WidgetBuilder:
+    pub fn new(platform: Platform) -> WidgetBuilder:
+        return WidgetBuilder {
+            ctx: WidgetContext::new(platform, Theme::light())
+        }
+
+    # Set theme
+    pub fn theme(self, theme: Theme) -> WidgetBuilder:
+        self.ctx.set_theme(theme)
+        return self
+
+    # Build and mount a widget
+    pub fn build(self, widget: impl Widget) -> BuiltWidget:
+        let widget_id = self.ctx.mount(widget)
+        return BuiltWidget {
+            id: widget_id,
+            ctx: self.ctx
+        }
+
+# Built widget - represents a mounted widget
+pub struct BuiltWidget:
+    id: NodeId
+    ctx: WidgetContext
+
+impl BuiltWidget:
+    # Get the widget ID
+    pub fn id(self) -> NodeId:
+        return self.id
+
+    # Get the element tree
+    pub fn element_tree(self) -> Option[&ElementTree]:
+        return self.ctx.element_tree()
+
+    # Update this widget
+    pub fn update(self, widget: impl Widget):
+        self.ctx.update(self.id, widget)
+
+    # Unmount this widget
+    pub fn unmount(self):
+        self.ctx.unmount(self.id)
+
+    # Register event handler
+    pub fn on(self, event_type: &str, handler: EventHandler):
+        self.ctx.on(self.id, event_type, handler)
+
+# Example usage:
+#
+# let app = AppContext::new(Platform::Browser)
+#     .with_theme(Theme::dark())
+#
+# app.set_root(
+#     Column::new()
+#         .child(Text::new("Hello World"))
+#         .child(Button::new("Click Me").on_click(|| print("Clicked!")))
+# )
+#
+# app.run()

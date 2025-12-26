@@ -1,0 +1,237 @@
+# Dependency Symbol Extraction for Simple Language
+# Extracts import/use statements and tracks symbol dependencies
+
+use core.*
+use mcp.simple_lang.types.*
+
+# Dependency type
+pub enum DependencyType:
+    Import       # import foo
+    Use          # use foo.*
+    From         # from foo use bar
+
+# Dependency entry
+pub class Dependency:
+    pub dep_type: DependencyType
+    pub module_path: String
+    pub imported_symbols: List[String]
+    pub line_number: i64
+    pub is_public: bool
+
+# Dependency graph
+pub class DependencyGraph:
+    pub dependencies: List[Dependency]
+    pub internal_deps: List[Dependency]   # Dependencies within project
+    pub external_deps: List[Dependency]   # Dependencies from stdlib/packages
+    pub symbol_usage: Dict[String, List[String]]  # Symbol -> used in functions
+
+# Parse dependencies from Simple source code
+pub fn extract_dependencies(source: String) -> DependencyGraph:
+    lines = source.split("\n")
+    dependencies = []
+
+    for i in range(lines.len()):
+        line = lines[i]
+        stripped = line.strip()
+
+        # Parse import statements
+        if stripped.starts_with("import ") or stripped.starts_with("pub import "):
+            dep = parse_import(stripped, i + 1)
+            dependencies.append(dep)
+
+        # Parse use statements
+        elif stripped.starts_with("use ") or stripped.starts_with("pub use "):
+            dep = parse_use(stripped, i + 1)
+            dependencies.append(dep)
+
+        # Parse from...use statements
+        elif stripped.starts_with("from "):
+            dep = parse_from_use(stripped, i + 1)
+            dependencies.append(dep)
+
+    # Classify dependencies
+    internal_deps = []
+    external_deps = []
+
+    for dep in dependencies:
+        if is_internal_module(dep.module_path):
+            internal_deps.append(dep)
+        else:
+            external_deps.append(dep)
+
+    # Extract symbol usage (simplified)
+    symbol_usage = {}  # TODO: Implement symbol usage tracking
+
+    return DependencyGraph:
+        dependencies: dependencies
+        internal_deps: internal_deps
+        external_deps: external_deps
+        symbol_usage: symbol_usage
+
+# Parse import statement
+fn parse_import(line: String, line_num: i64) -> Dependency:
+    is_public = line.starts_with("pub ")
+    module_part = line
+
+    if is_public:
+        module_part = line[11:]  # Remove "pub import "
+    else:
+        module_part = line[7:]   # Remove "import "
+
+    # Handle "import foo as bar"
+    module_path = module_part
+    if module_part.contains(" as "):
+        idx = module_part.find(" as ")
+        module_path = module_part[0:idx].strip()
+
+    return Dependency:
+        dep_type: DependencyType.Import
+        module_path: module_path.strip()
+        imported_symbols: []
+        line_number: line_num
+        is_public: is_public
+
+# Parse use statement
+fn parse_use(line: String, line_num: i64) -> Dependency:
+    is_public = line.starts_with("pub ")
+    module_part = line
+
+    if is_public:
+        module_part = line[8:]  # Remove "pub use "
+    else:
+        module_part = line[4:]   # Remove "use "
+
+    # Handle "use foo.*" or "use foo.{bar, baz}"
+    imported_symbols = []
+
+    if module_part.ends_with(".*"):
+        # Wildcard import
+        module_path = module_part[0:-2]  # Remove .*
+    elif module_part.contains(".{"):
+        # Selective import: use foo.{bar, baz}
+        idx = module_part.find(".{")
+        module_path = module_part[0:idx]
+
+        # Extract symbols between { }
+        symbol_part = module_part[idx+2:]
+        if symbol_part.ends_with("}"):
+            symbol_part = symbol_part[0:-1]
+        imported_symbols = symbol_part.split(",")
+        # Trim each symbol
+        for i in range(imported_symbols.len()):
+            imported_symbols[i] = imported_symbols[i].strip()
+    else:
+        module_path = module_part
+
+    return Dependency:
+        dep_type: DependencyType.Use
+        module_path: module_path.strip()
+        imported_symbols: imported_symbols
+        line_number: line_num
+        is_public: is_public
+
+# Parse from...use statement
+fn parse_from_use(line: String, line_num: i64) -> Dependency:
+    # Format: from foo use bar, baz
+
+    # Extract module path
+    use_idx = line.find(" use ")
+    if use_idx < 0:
+        # Invalid format
+        return Dependency:
+            dep_type: DependencyType.From
+            module_path: ""
+            imported_symbols: []
+            line_number: line_num
+            is_public: false
+
+    module_path = line[5:use_idx].strip()  # Between "from " and " use "
+
+    # Extract symbols
+    symbol_part = line[use_idx + 5:].strip()
+    imported_symbols = symbol_part.split(",")
+
+    # Trim each symbol
+    for i in range(imported_symbols.len()):
+        imported_symbols[i] = imported_symbols[i].strip()
+
+    return Dependency:
+        dep_type: DependencyType.From
+        module_path: module_path
+        imported_symbols: imported_symbols
+        line_number: line_num
+        is_public: false
+
+# Check if module is internal to project
+fn is_internal_module(module_path: String) -> bool:
+    # Check for common stdlib/external prefixes
+    if module_path.starts_with("std."):
+        return false
+    elif module_path.starts_with("core."):
+        return false
+    elif module_path.starts_with("mcp."):
+        return false
+
+    # If starts with project name or relative path, it's internal
+    if module_path.starts_with("./") or module_path.starts_with("../"):
+        return true
+
+    # Otherwise, check if it looks like a package name
+    # Simple heuristic: if no dots, probably internal module
+    return not module_path.contains(".")
+
+# Format dependency graph for MCP
+pub fn format_dependency_graph(graph: DependencyGraph) -> String:
+    result = "DEP> Dependency Graph {\n"
+
+    result = result + "  Total dependencies: " + graph.dependencies.len().to_string() + "\n"
+    result = result + "  Internal: " + graph.internal_deps.len().to_string() + "\n"
+    result = result + "  External: " + graph.external_deps.len().to_string() + "\n"
+
+    result = result + "\n  External Dependencies:\n"
+    for dep in graph.external_deps:
+        result = result + "    " + format_dependency_entry(dep) + "\n"
+
+    result = result + "\n  Internal Dependencies:\n"
+    for dep in graph.internal_deps:
+        result = result + "    " + format_dependency_entry(dep) + "\n"
+
+    result = result + "}\n"
+    return result
+
+# Format single dependency entry
+fn format_dependency_entry(dep: Dependency) -> String:
+    dep_type_str = ""
+    if dep.dep_type == DependencyType.Import:
+        dep_type_str = "import"
+    elif dep.dep_type == DependencyType.Use:
+        dep_type_str = "use"
+    else:
+        dep_type_str = "from"
+
+    result = dep_type_str + " " + dep.module_path
+
+    if dep.imported_symbols.len() > 0:
+        symbols_str = ", ".join(dep.imported_symbols)
+        result = result + " {" + symbols_str + "}"
+
+    if dep.is_public:
+        result = result + " (pub)"
+
+    return result
+
+# Get direct dependencies for a module
+pub fn get_direct_dependencies(graph: DependencyGraph) -> List[String]:
+    modules = []
+
+    for dep in graph.dependencies:
+        if not modules.contains(dep.module_path):
+            modules.append(dep.module_path)
+
+    return modules
+
+# Check for circular dependencies (simplified)
+pub fn detect_circular_dependencies(graph: DependencyGraph) -> List[String]:
+    # TODO: Implement proper cycle detection
+    # This is a stub for now
+    return []
