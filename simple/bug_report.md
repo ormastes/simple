@@ -160,3 +160,110 @@ Blocked on parser bug. Source code is complete and ready for compilation once pa
 ### Workaround
 
 None currently. Formatter and linter functionality is implemented but cannot be compiled/tested.
+
+## Missing File I/O in Standard Library
+
+**Type:** Bug
+**Priority:** High
+**Discovered:** 2025-12-26
+**Component:** Standard Library (`simple/std_lib/src/host/`)
+
+### Description
+
+The Simple standard library lacks basic file I/O operations needed for practical applications. While the framework exists (`host.async_nogc_mut.io.fs`), core file reading/writing functions are not implemented or not accessible.
+
+### Expected
+
+Should be able to:
+- Read file contents: `fs.read_file(path: String) -> Result[String, IoError]`
+- Write file contents: `fs.write_file(path: String, content: String) -> Result[(), IoError]`
+- Check file existence: `fs.exists(path: String) -> bool`
+- List directory contents: `fs.list_dir(path: String) -> Result[List[String], IoError]`
+
+### Actual
+
+File I/O operations are either:
+1. Not defined in the standard library
+2. Defined but not accessible from Simple code
+3. Only available through FFI/runtime (not exposed to Simple)
+
+### Reproduction
+
+```simple
+use host.async_nogc_mut.io.fs.*
+
+fn main():
+    # This should work but doesn't
+    content = read_file("test.spl")  # Error: undefined function
+```
+
+### Impact
+
+- Blocks MCP tool implementation (needs to read source files)
+- Blocks formatter/linter (need to read/write files)
+- Blocks any practical application that needs file I/O
+- Forces workarounds with hardcoded example data
+
+### Files Involved
+
+- `simple/std_lib/src/host/async_nogc_mut/io/` - Missing file I/O implementations
+- `simple/app/mcp/main.spl` - Workaround using example data (line 101)
+- `simple/app/formatter/main.spl` - Same issue
+- `simple/app/lint/main.spl` - Same issue
+
+### Workaround
+
+Use hardcoded example data or implement file I/O as runtime FFI calls. Not sustainable for real applications.
+
+### Status
+
+Critical blocker for self-hosted tooling. Needs immediate implementation.
+
+## Missing String Methods in Core Library
+
+**Type:** Bug
+**Priority:** Medium
+**Discovered:** 2025-12-26
+**Component:** Core Library (`simple/std_lib/src/core/string.spl`)
+
+### Description
+
+String type lacks several essential methods needed for text processing:
+- `substring(start: i64, end: i64) -> String` - Extract substring
+- `char_at(index: i64) -> String` - Get character at position
+- `find(pattern: String) -> i64` - Find substring position (returns -1 if not found)
+- `strip() -> String` - Remove leading/trailing whitespace
+- `to_string()` conversion for primitive types
+
+### Expected
+
+```simple
+text = "  hello world  "
+trimmed = text.strip()  # "hello world"
+pos = text.find("world")  # 8
+ch = text.char_at(2)  # "h"
+sub = text.substring(2, 7)  # "hello"
+```
+
+### Actual
+
+These methods don't exist, forcing manual character iteration or workarounds.
+
+### Impact
+
+- MCP parser needs `substring()` and `find()` for symbol extraction
+- Blocks many stdlib features
+- Makes string processing unnecessarily complex
+
+### Files Involved
+
+- `simple/std_lib/src/core/string.spl` - Missing methods
+- `simple/std_lib/src/mcp/parser.spl` - Needs these methods (lines 35, 60, 88, etc.)
+
+### Workaround
+
+Implement manual character iteration, but very inefficient and error-prone.
+
+### Status
+
+Needs implementation in core library.
