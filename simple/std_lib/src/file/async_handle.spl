@@ -1,0 +1,123 @@
+# Async File Handle - Background File Loading
+#
+# Provides async file loading with JavaScript-style async/await.
+# Files load in background (worker thread/process) while code continues.
+
+use file.mmap
+
+# File loading state
+pub enum FileState:
+    Pending             # Not yet started loading
+    Loading             # Currently loading in background
+    Ready(MmapRegion)   # Successfully loaded
+    Failed(FileError)   # Loading failed
+
+# Async file handle - represents a file being loaded asynchronously
+pub struct AsyncFileHandle:
+    path: String        # File path
+    state: FileState    # Current loading state
+    options: OpenOptions # Opening options
+
+    # Create a new async handle (doesn't start loading)
+    pub fn new(path: String) -> AsyncFileHandle:
+        return AsyncFileHandle {
+            path: path,
+            state: FileState::Pending,
+            options: OpenOptions::new()
+        }
+
+    # Create handle with custom options
+    pub fn with_options(path: String, opts: OpenOptions) -> AsyncFileHandle:
+        return AsyncFileHandle {
+            path: path,
+            state: FileState::Pending,
+            options: opts
+        }
+
+    # Start loading the file in background
+    pub fn start_loading(mut self):
+        # TODO: Spawn background worker to load file
+        # For now, mark as Loading
+        self.state = FileState::Loading
+        pass
+
+    # Check if file is ready (non-blocking)
+    pub fn is_ready(self) -> bool:
+        match self.state:
+            case FileState::Ready(_):
+                return true
+            case _:
+                return false
+
+    # Check if loading failed
+    pub fn is_failed(self) -> bool:
+        match self.state:
+            case FileState::Failed(_):
+                return true
+            case _:
+                return false
+
+    # Get the current state
+    pub fn get_state(self) -> FileState:
+        return self.state
+
+    # Wait for file to load (async, blocks until ready)
+    pub async fn wait(self) -> Result[MmapRegion, FileError]:
+        # TODO: Implement actual async waiting
+        # For now, check state
+        match self.state:
+            case FileState::Ready(region):
+                return Ok(region)
+            case FileState::Failed(error):
+                return Err(error)
+            case FileState::Loading:
+                # TODO: Actually wait for completion
+                return Err(FileError::IoError("Still loading"))
+            case FileState::Pending:
+                return Err(FileError::IoError("Not started"))
+
+    # Get the loaded region (blocks if not ready)
+    pub fn get(self) -> Result[MmapRegion, FileError]:
+        match self.state:
+            case FileState::Ready(region):
+                return Ok(region)
+            case FileState::Failed(error):
+                return Err(error)
+            case FileState::Loading:
+                # TODO: Block until ready
+                return Err(FileError::IoError("Still loading"))
+            case FileState::Pending:
+                return Err(FileError::IoError("Not started"))
+
+    # Try to get the region without blocking
+    pub fn try_get(self) -> Option[MmapRegion]:
+        match self.state:
+            case FileState::Ready(region):
+                return Some(region)
+            case _:
+                return None
+
+    # Cancel loading (if still in progress)
+    pub fn cancel(mut self):
+        # TODO: Cancel background worker
+        match self.state:
+            case FileState::Loading:
+                self.state = FileState::Failed(FileError::IoError("Cancelled"))
+            case _:
+                pass
+
+# Helper function to wait for multiple handles in parallel
+pub async fn wait_all(handles: Array[AsyncFileHandle]) -> Result[Array[MmapRegion], FileError]:
+    let regions = []
+    for handle in handles:
+        let region = await handle.wait()?
+        regions.push(region)
+    return Ok(regions)
+
+# Helper function to get all ready handles (non-blocking)
+pub fn ready_handles(handles: Array[AsyncFileHandle]) -> Array[AsyncFileHandle]:
+    let ready = []
+    for handle in handles:
+        if handle.is_ready():
+            ready.push(handle)
+    return ready

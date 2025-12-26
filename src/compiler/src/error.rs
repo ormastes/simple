@@ -536,6 +536,14 @@ impl From<&str> for CompileError {
     }
 }
 
+// SPIR-V error conversion (for Vulkan backend)
+#[cfg(feature = "vulkan")]
+impl From<rspirv::dr::Error> for CompileError {
+    fn from(e: rspirv::dr::Error) -> Self {
+        Self::Codegen(format!("SPIR-V error: {}", e))
+    }
+}
+
 // Helper macro for creating errors with context at call site
 #[macro_export]
 macro_rules! semantic_error {

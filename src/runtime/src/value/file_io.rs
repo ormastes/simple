@@ -696,6 +696,237 @@ pub extern "C" fn native_process_is_alive(pid: i64) -> RuntimeValue {
     }
 }
 
+// =============================================================================
+// Low-Level System Call Wrappers (for Simple stdlib)
+// =============================================================================
+
+/// Low-level mmap system call wrapper
+///
+/// # Arguments
+/// * `addr` - Preferred address (0 for kernel choice)
+/// * `length` - Size of mapping in bytes
+/// * `prot` - Protection flags (PROT_READ=1, PROT_WRITE=2, PROT_EXEC=4)
+/// * `flags` - Mapping flags (MAP_SHARED=1, MAP_PRIVATE=2, MAP_ANONYMOUS=32)
+/// * `fd` - File descriptor (-1 for anonymous)
+/// * `offset` - Offset in file
+///
+/// # Returns
+/// Pointer to mapped region as i64, or -1 on error
+#[no_mangle]
+pub extern "C" fn sys_mmap(
+    addr: i64,
+    length: u64,
+    prot: i32,
+    flags: i32,
+    fd: i32,
+    offset: u64,
+) -> i64 {
+    #[cfg(target_family = "unix")]
+    {
+        use libc::mmap;
+
+        unsafe {
+            let ptr = mmap(
+                if addr == 0 { std::ptr::null_mut() } else { addr as *mut libc::c_void },
+                length as libc::size_t,
+                prot,
+                flags,
+                fd,
+                offset as libc::off_t,
+            );
+
+            if ptr == libc::MAP_FAILED {
+                -1
+            } else {
+                ptr as i64
+            }
+        }
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        // Windows: would use MapViewOfFile here
+        -1
+    }
+}
+
+/// Low-level munmap system call wrapper
+///
+/// # Arguments
+/// * `addr` - Address of mapped region
+/// * `length` - Size of mapping
+///
+/// # Returns
+/// 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn sys_munmap(addr: i64, length: u64) -> i32 {
+    #[cfg(target_family = "unix")]
+    {
+        use libc::munmap;
+
+        unsafe {
+            munmap(addr as *mut libc::c_void, length as libc::size_t)
+        }
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        -1
+    }
+}
+
+/// Low-level madvise system call wrapper
+///
+/// # Arguments
+/// * `addr` - Address of mapped region
+/// * `length` - Size of region
+/// * `advice` - Advice constant (MADV_NORMAL=0, MADV_RANDOM=1, MADV_SEQUENTIAL=2,
+///              MADV_WILLNEED=3, MADV_DONTNEED=4)
+///
+/// # Returns
+/// 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
+    #[cfg(target_os = "linux")]
+    {
+        use libc::madvise;
+
+        unsafe {
+            madvise(addr as *mut libc::c_void, length as libc::size_t, advice)
+        }
+    }
+
+    #[cfg(all(target_family = "unix", not(target_os = "linux")))]
+    {
+        use libc::madvise;
+
+        unsafe {
+            madvise(addr as *mut libc::c_void, length as libc::size_t, advice)
+        }
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        -1
+    }
+}
+
+/// Low-level open system call wrapper
+///
+/// # Arguments
+/// * `path_ptr` - Pointer to null-terminated path string
+/// * `flags` - Open flags (O_RDONLY=0, O_WRONLY=1, O_RDWR=2, O_CREAT=64, O_TRUNC=512, O_APPEND=1024)
+/// * `mode` - Permission mode (0644 for regular files)
+///
+/// # Returns
+/// File descriptor on success, -1 on error
+#[no_mangle]
+pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
+    #[cfg(target_family = "unix")]
+    {
+        use libc::open;
+        use std::ffi::CStr;
+
+        unsafe {
+            let path_cstr = CStr::from_ptr(path_ptr as *const libc::c_char);
+            open(path_cstr.as_ptr(), flags, mode)
+        }
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        -1
+    }
+}
+
+/// Low-level close system call wrapper
+///
+/// # Arguments
+/// * `fd` - File descriptor
+///
+/// # Returns
+/// 0 on success, -1 on error
+#[no_mangle]
+pub extern "C" fn sys_close(fd: i32) -> i32 {
+    #[cfg(target_family = "unix")]
+    {
+        use libc::close;
+
+        unsafe {
+            close(fd)
+        }
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        -1
+    }
+}
+
+/// Get file size via fstat
+///
+/// # Arguments
+/// * `fd` - File descriptor
+///
+/// # Returns
+/// File size in bytes, or -1 on error
+#[no_mangle]
+pub extern "C" fn sys_file_size(fd: i32) -> i64 {
+    #[cfg(target_family = "unix")]
+    {
+        use libc::fstat;
+        use std::mem::MaybeUninit;
+
+        unsafe {
+            let mut stat_buf = MaybeUninit::<libc::stat>::uninit();
+            let result = fstat(fd, stat_buf.as_mut_ptr());
+
+            if result == 0 {
+                let stat = stat_buf.assume_init();
+                stat.st_size as i64
+            } else {
+                -1
+            }
+        }
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        -1
+    }
+}
+
+/// Check if file exists
+///
+/// # Arguments
+/// * `path_ptr` - Pointer to null-terminated path string
+///
+/// # Returns
+/// 1 if file exists, 0 otherwise
+#[no_mangle]
+pub extern "C" fn sys_file_exists(path_ptr: i64) -> i32 {
+    #[cfg(target_family = "unix")]
+    {
+        use libc::access;
+        use libc::F_OK;
+        use std::ffi::CStr;
+
+        unsafe {
+            let path_cstr = CStr::from_ptr(path_ptr as *const libc::c_char);
+            if access(path_cstr.as_ptr(), F_OK) == 0 {
+                1
+            } else {
+                0
+            }
+        }
+    }
+
+    #[cfg(not(target_family = "unix"))]
+    {
+        0
+    }
+}
+
 /// Kill/terminate process
 ///
 /// # Arguments

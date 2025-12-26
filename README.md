@@ -8,6 +8,7 @@ A statically typed programming language with Python-like syntax and modern safet
 - **Static typing with inference** - Type safety without verbosity
 - **Multiple memory modes** - GC-managed (default), manual, or reference-counted
 - **Actor-based concurrency** - Safe concurrent programming
+- **GPU computing** - Cross-platform Vulkan backend for GPU kernels
 - **SMF binary format** - Compile once, run anywhere
 
 ## Quick Start
@@ -242,6 +243,59 @@ let evens = nums.filter \x: x % 2 == 0
 let doubled = nums.map \x: x * 2
 ```
 
+### GPU Computing
+
+Simple supports GPU computing via the Vulkan backend for high-performance parallel computation.
+
+```simple
+import std.gpu
+
+# GPU kernel - runs on device
+#[gpu]
+fn vector_add_kernel(a: []f32, b: []f32, result: []f32):
+    # Get global thread ID
+    idx = gpu.global_id(0)
+    if idx < len(result):
+        result[idx] = a[idx] + b[idx]
+
+# Host function - runs on CPU
+fn main():
+    # Create GPU device
+    device = gpu.Device()
+
+    # Allocate and upload data
+    a = [1.0, 2.0, 3.0, 4.0]
+    b = [5.0, 6.0, 7.0, 8.0]
+
+    buf_a = device.alloc_buffer(a)
+    buf_b = device.alloc_buffer(b)
+    buf_result = device.alloc_buffer<f32>(4)
+
+    # Launch kernel
+    device.launch_1d(vector_add_kernel, [buf_a, buf_b, buf_result], 4)
+
+    # Download results
+    device.sync()
+    result = device.download(buf_result)
+    # result = [6.0, 8.0, 10.0, 12.0]
+```
+
+**Build with GPU support:**
+```bash
+cargo build --release --features vulkan
+```
+
+**Examples:**
+- [Vector Addition](examples/gpu/vulkan/vector_add.spl) - Basic GPU kernel
+- [Matrix Multiplication](examples/gpu/vulkan/matrix_multiply.spl) - 2D work groups
+- [Parallel Reduction](examples/gpu/vulkan/reduction.spl) - Advanced patterns
+- [Image Blur](examples/gpu/vulkan/image_blur.spl) - Image processing
+
+**Documentation:**
+- [User Guide](doc/guides/vulkan_backend.md) - Getting started with GPU computing
+- [API Reference](doc/api/vulkan_ffi.md) - Complete FFI documentation
+- [Architecture](doc/architecture/vulkan_backend.md) - Implementation details
+
 ### Functional Update (`->`)
 
 ```simple
@@ -282,10 +336,17 @@ simple/
 
 ## Documentation
 
+### Language & Compiler
 - [Language Specification](doc/spec/language.md)
 - [Architecture Overview](doc/architecture/overview.md)
 - [Feature Roadmap](doc/features/feature.md)
 - [Test Policy](doc/guides/test.md)
+
+### GPU Computing
+- [Vulkan Backend User Guide](doc/guides/vulkan_backend.md) - Getting started with GPU kernels
+- [Vulkan FFI API Reference](doc/api/vulkan_ffi.md) - Complete function reference
+- [Vulkan Architecture](doc/architecture/vulkan_backend.md) - Implementation details
+- [GPU Examples](examples/gpu/vulkan/) - Example programs (vector add, matrix multiply, reduction, blur)
 
 ## License
 

@@ -1,0 +1,143 @@
+# File I/O Library - Async Memory-Mapped File Access
+#
+# High-performance async file I/O using memory-mapped files.
+# Default mode is ASYNC with background loading.
+#
+# Quick Start:
+#   use file
+#
+#   # Async loading (default)
+#   async with await file.open("data.txt") as mmap:
+#       let content = mmap.as_str()?
+#       process(content)
+#
+#   # Sync loading (blocks until ready)
+#   with file.open_sync("data.txt") as mmap:
+#       let content = mmap.as_str()?
+#       process(content)
+#
+# See also: cli.file for sync-only file validation
+
+# Re-export public API
+pub use file.mmap.*
+pub use file.async_handle.*
+pub use file.context.*
+
+# Public API functions
+
+# Async file opening (default) - returns immediately, loads in background
+pub async fn open(path: String) -> Result[AsyncFileHandle, FileError]:
+    let handle = AsyncFileHandle::new(path)
+    handle.start_loading()
+    return Ok(handle)
+
+# Async file opening with options
+pub async fn open_with(path: String, opts: OpenOptions) -> Result[AsyncFileHandle, FileError]:
+    let handle = AsyncFileHandle::with_options(path, opts)
+    handle.start_loading()
+    return Ok(handle)
+
+# Sync file opening - blocks until file is loaded
+pub fn open_sync(path: String) -> Result[MmapRegion, FileError]:
+    let opts = OpenOptions::new()
+    return open_sync_with(path, opts)
+
+# Sync file opening with options
+pub fn open_sync_with(path: String, opts: OpenOptions) -> Result[MmapRegion, FileError]:
+    # Validate path
+    if not file_exists(path):
+        return Err(FileError::NotFound(path))
+
+    # Open file and mmap
+    let fd = sys_open(path, OpenMode::ReadOnly)?
+    let file_size = sys_file_size(fd)?
+
+    # Create mmap
+    let mmap_ptr = sys_mmap(
+        addr: null,
+        length: file_size,
+        prot: opts.get_prot_flags(),
+        flags: opts.get_map_flags(),
+        fd: fd,
+        offset: 0
+    )?
+
+    if mmap_ptr == null:
+        sys_close(fd)
+        return Err(FileError::MmapFailed("mmap returned null"))
+
+    # Create region
+    let region = MmapRegion {
+        data: mmap_ptr,
+        length: file_size,
+        mode: opts.mode,
+        fd: fd,
+        path: path
+    }
+
+    # Apply advice if specified
+    if opts.advice != MmapAdvice::Normal:
+        region.advise(opts.advice)
+
+    return Ok(region)
+
+# Check if file exists (sync)
+pub fn exists(path: String) -> bool:
+    return file_exists(path)
+
+# Get file size (sync)
+pub fn size(path: String) -> Result[usize, FileError]:
+    if not file_exists(path):
+        return Err(FileError::NotFound(path))
+
+    let fd = sys_open(path, OpenMode::ReadOnly)?
+    let size = sys_file_size(fd)?
+    sys_close(fd)
+    return Ok(size)
+
+# FFI Placeholders (to be implemented in Rust runtime)
+
+# Check if file exists
+fn file_exists(path: String) -> bool:
+    # TODO: Implement via FFI
+    # For now, always return true as placeholder
+    return true
+
+# Open file and return file descriptor
+fn sys_open(path: String, mode: OpenMode) -> Result[i32, FileError]:
+    # TODO: Implement via FFI
+    # Placeholder: return fake fd
+    return Ok(3)
+
+# Get file size
+fn sys_file_size(fd: i32) -> Result[usize, FileError]:
+    # TODO: Implement via FFI
+    # Placeholder: return dummy size
+    return Ok(1024)
+
+# Close file descriptor
+fn sys_close(fd: i32):
+    # TODO: Implement via FFI
+    pass
+
+# Memory map a file
+fn sys_mmap(addr: *void, length: usize, prot: i32, flags: i32, fd: i32, offset: usize) -> Result[*u8, FileError]:
+    # TODO: Implement via FFI - actual mmap system call
+    # Placeholder: return fake pointer
+    return Ok(null)
+
+# Unmap memory region
+fn sys_munmap(addr: *u8, length: usize) -> Result[void, FileError]:
+    # TODO: Implement via FFI
+    return Ok(void)
+
+# Advise kernel on memory access pattern
+fn sys_madvise(addr: *u8, length: usize, advice: i32) -> Result[void, FileError]:
+    # TODO: Implement via FFI
+    return Ok(void)
+
+# File opening mode
+enum OpenMode:
+    ReadOnly
+    ReadWrite
+    WriteOnly

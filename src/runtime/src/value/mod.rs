@@ -215,6 +215,9 @@ pub use net::{
 
 // Re-export file I/O FFI functions - Mold-inspired optimizations
 pub use file_io::{
+    // Low-level system calls
+    sys_mmap, sys_munmap, sys_madvise,
+    sys_open, sys_close, sys_file_size, sys_file_exists,
     // Memory-mapped file operations
     native_mmap_create, native_mmap_create_shared, native_mmap_read, native_mmap_unmap,
     // File I/O hints

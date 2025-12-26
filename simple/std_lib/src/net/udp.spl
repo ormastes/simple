@@ -1,0 +1,195 @@
+# UDP networking for Simple language using monoio
+# Provides async UDP socket capabilities
+# Feature: #1754 (Simple Language UDP API)
+
+import core.result
+import core.option
+import net::{NetError, error_from_code}
+
+# External UDP functions
+extern fn monoio_udp_bind(addr: String) -> i64
+extern fn monoio_udp_connect(socket_handle: i64, addr: String) -> i64
+extern fn monoio_udp_send_to(socket_handle: i64, buffer: any, addr: String) -> i64
+extern fn monoio_udp_recv_from(socket_handle: i64, buffer: any, max_len: i64) -> Option[(i64, String)]
+extern fn monoio_udp_send(socket_handle: i64, buffer: any) -> i64
+extern fn monoio_udp_recv(socket_handle: i64, buffer: any, max_len: i64) -> i64
+extern fn monoio_udp_close(socket_handle: i64) -> i64
+extern fn monoio_udp_local_addr(socket_handle: i64) -> Option[String]
+extern fn monoio_udp_set_broadcast(socket_handle: i64, broadcast: i64) -> i64
+extern fn monoio_udp_set_multicast_ttl(socket_handle: i64, ttl: i64) -> i64
+extern fn monoio_udp_join_multicast(socket_handle: i64, multicast_addr: String, interface_addr: String) -> i64
+extern fn monoio_udp_leave_multicast(socket_handle: i64, multicast_addr: String, interface_addr: String) -> i64
+
+# UDP socket for sending and receiving datagrams
+pub struct UdpSocket:
+    handle: i64
+    local_addr: Option[String]
+    is_connected: bool
+
+    # Bind a UDP socket to an address
+    # Feature #1745: UDP socket implementation
+    #
+    # Example:
+    #   let socket = await UdpSocket::bind("0.0.0.0:0")?  # Bind to any port
+    pub async fn bind(addr: String) -> Result[UdpSocket, NetError]:
+        let handle = monoio_udp_bind(addr)
+        if handle < 0:
+            return Err(error_from_code(handle))
+
+        let local = monoio_udp_local_addr(handle)
+
+        return Ok(UdpSocket {
+            handle: handle,
+            local_addr: local,
+            is_connected: false
+        })
+
+    # Send data to a specific address
+    # Feature #1746: UDP send operations
+    #
+    # Returns number of bytes sent
+    #
+    # Example:
+    #   let data = "Hello, UDP!".as_bytes()
+    #   let n = await socket.send_to(data, "127.0.0.1:8080")?
+    pub async fn send_to(self, buffer: any, addr: String) -> Result[i64, NetError]:
+        let n = monoio_udp_send_to(self.handle, buffer, addr)
+        if n < 0:
+            return Err(error_from_code(n))
+        return Ok(n)
+
+    # Receive data from any sender
+    # Feature #1747: UDP receive operations
+    #
+    # Returns (bytes_received, sender_address)
+    #
+    # Example:
+    #   let mut buffer = Bytes::with_capacity(1024)
+    #   let (n, peer) = await socket.recv_from(&mut buffer, 1024)?
+    pub async fn recv_from(self, buffer: &mut any, max_len: i64) -> Result[(i64, String), NetError]:
+        let result = monoio_udp_recv_from(self.handle, buffer, max_len)
+
+        match result:
+            case Some((n, addr)):
+                if n < 0:
+                    return Err(error_from_code(n))
+                return Ok((n, addr))
+            case None:
+                return Err(NetError::IoError("recv_from failed"))
+
+    # Connect the socket to a specific peer
+    # After connecting, can use send() and recv() instead of send_to() and recv_from()
+    # Feature #1748: UDP connected sockets
+    #
+    # Example:
+    #   await socket.connect("127.0.0.1:8080")?
+    #   await socket.send(data)?  # Now can use send() directly
+    pub async fn connect(self, addr: String) -> Result[(), NetError]:
+        let result = monoio_udp_connect(self.handle, addr)
+        if result < 0:
+            return Err(error_from_code(result))
+
+        self.is_connected = true
+        return Ok(())
+
+    # Send data to connected peer
+    # Socket must be connected first via connect()
+    #
+    # Example:
+    #   await socket.connect("127.0.0.1:8080")?
+    #   let n = await socket.send(data)?
+    pub async fn send(self, buffer: any) -> Result[i64, NetError]:
+        if not self.is_connected:
+            return Err(NetError::NotConnected)
+
+        let n = monoio_udp_send(self.handle, buffer)
+        if n < 0:
+            return Err(error_from_code(n))
+        return Ok(n)
+
+    # Receive data from connected peer
+    # Socket must be connected first via connect()
+    #
+    # Example:
+    #   await socket.connect("127.0.0.1:8080")?
+    #   let n = await socket.recv(&mut buffer, 1024)?
+    pub async fn recv(self, buffer: &mut any, max_len: i64) -> Result[i64, NetError]:
+        if not self.is_connected:
+            return Err(NetError::NotConnected)
+
+        let n = monoio_udp_recv(self.handle, buffer, max_len)
+        if n < 0:
+            return Err(error_from_code(n))
+        return Ok(n)
+
+    # Get local address the socket is bound to
+    pub fn local_addr(self) -> Option[String]:
+        return self.local_addr
+
+    # Check if socket is connected to a peer
+    pub fn is_connected(self) -> bool:
+        return self.is_connected
+
+    # Close the socket
+    # Feature #1749: UDP socket management
+    pub fn close(self) -> Result[(), NetError]:
+        let result = monoio_udp_close(self.handle)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Set broadcast option
+    # When enabled, allows sending to broadcast addresses
+    # Feature #1749: UDP socket management
+    #
+    # Example:
+    #   socket.set_broadcast(true)?
+    #   await socket.send_to(data, "255.255.255.255:8080")?
+    pub fn set_broadcast(self, enabled: bool) -> Result[(), NetError]:
+        let value = if enabled: 1 else: 0
+        let result = monoio_udp_set_broadcast(self.handle, value)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Set multicast TTL (time-to-live)
+    # Controls how many routers multicast packets can traverse
+    #
+    # Example:
+    #   socket.set_multicast_ttl(32)?  # TTL of 32 hops
+    pub fn set_multicast_ttl(self, ttl: i64) -> Result[(), NetError]:
+        if ttl < 0 or ttl > 255:
+            return Err(NetError::IoError("TTL must be 0-255"))
+
+        let result = monoio_udp_set_multicast_ttl(self.handle, ttl)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Join a multicast group
+    # After joining, will receive packets sent to the multicast address
+    #
+    # Example:
+    #   # Join multicast group 239.255.0.1 on interface 0.0.0.0 (any)
+    #   socket.join_multicast("239.255.0.1", "0.0.0.0")?
+    pub fn join_multicast(self, multicast_addr: String, interface_addr: String) -> Result[(), NetError]:
+        let result = monoio_udp_join_multicast(self.handle, multicast_addr, interface_addr)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+    # Leave a multicast group
+    # Stops receiving packets sent to the multicast address
+    #
+    # Example:
+    #   socket.leave_multicast("239.255.0.1", "0.0.0.0")?
+    pub fn leave_multicast(self, multicast_addr: String, interface_addr: String) -> Result[(), NetError]:
+        let result = monoio_udp_leave_multicast(self.handle, multicast_addr, interface_addr)
+        if result < 0:
+            return Err(error_from_code(result))
+        return Ok(())
+
+# Common multicast addresses for reference:
+# - 224.0.0.0 - 224.0.0.255: Local network control
+# - 224.0.1.0 - 238.255.255.255: Internetwork control
+# - 239.0.0.0 - 239.255.255.255: Organization-local scope

@@ -121,17 +121,18 @@ class Linter:
         
         Linter(lints: lints, results: [])
     
-    fn lint_file(self, path: String) -> Result[List[LintResult], String]:
-        # Read file
-        let content = fs.read_to_string(path)?
-        
+    async fn lint_file(self, path: String) -> Result[List[LintResult], String]:
+        # Read file using new io.fs API
+        let path_fp = FilePath::from(path)
+        let content = await fs.read_text(path_fp)?
+
         # Run simple pattern-based lints
         # TODO: Use AST-based linting when compiler integration is available
         let lines = content.split("\n")
-        
+
         for (line_num, line) in lines.enumerate():
             self.check_line(path, line_num + 1, line)
-        
+
         Ok(self.results)
     
     fn check_line(self, path: String, line_num: Int, line: String):
@@ -198,9 +199,9 @@ class Linter:
         # Convert to snake_case (simplified)
         name.to_lowercase()
 
-fn main():
+async fn main():
     let args = sys.args()
-    
+
     if args.len() < 2:
         print("Usage: simple_lint <file.spl> [options]")
         print("")
@@ -216,19 +217,20 @@ fn main():
         print("  Style (ST): Code style")
         print("  Concurrency (CC): Thread safety")
         sys.exit(1)
-    
+
     let file_path = args[1]
     let deny_all = args.contains("--deny-all")
-    
+
     # Verify file exists
-    if not fs.exists(file_path):
+    let file_path_fp = FilePath::from(file_path)
+    if not await fs.exists(file_path_fp):
         print(f"Error: File not found: {file_path}")
         sys.exit(1)
     
     # Run linter
     let linter = Linter.new()
-    
-    match linter.lint_file(file_path):
+
+    match await linter.lint_file(file_path):
         case Ok(results):
             if results.is_empty():
                 print(f"✓ No issues found in {file_path}")
@@ -236,26 +238,26 @@ fn main():
             else:
                 let mut error_count = 0
                 let mut warning_count = 0
-                
+
                 for result in results:
                     print(result.format())
-                    
+
                     match result.lint.level:
                         case Deny: error_count = error_count + 1
-                        case Warn: 
+                        case Warn:
                             warning_count = warning_count + 1
                             if deny_all:
                                 error_count = error_count + 1
                         case Allow: pass
-                
+
                 print("")
                 print(f"Found {error_count} error(s) and {warning_count} warning(s)")
-                
+
                 if error_count > 0:
                     sys.exit(1)
                 else:
                     sys.exit(0)
-        
+
         case Err(error):
             print(f"Error: {error}")
             sys.exit(1)

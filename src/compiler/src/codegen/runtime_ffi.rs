@@ -368,6 +368,21 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_gpu_launch", &[I64, I32, I32, I32, I32, I32, I32], &[I32]), // kernel, gx,gy,gz, lx,ly,lz -> status
     RuntimeFuncSpec::new("rt_gpu_launch_1d", &[I64, I32, I32], &[I32]), // kernel, global, local -> status
     // =========================================================================
+    // Vulkan GPU backend operations
+    // =========================================================================
+    RuntimeFuncSpec::new("rt_vk_available", &[], &[I32]),                  // () -> available (1=yes, 0=no)
+    RuntimeFuncSpec::new("rt_vk_device_create", &[], &[I64]),              // () -> device_handle
+    RuntimeFuncSpec::new("rt_vk_device_free", &[I64], &[I32]),             // device_handle -> status
+    RuntimeFuncSpec::new("rt_vk_device_sync", &[I64], &[I32]),             // device_handle -> status
+    RuntimeFuncSpec::new("rt_vk_buffer_alloc", &[I64, I64], &[I64]),       // device_handle, size -> buffer_handle
+    RuntimeFuncSpec::new("rt_vk_buffer_free", &[I64], &[I32]),             // buffer_handle -> status
+    RuntimeFuncSpec::new("rt_vk_buffer_upload", &[I64, I64, I64], &[I32]), // buffer_handle, data_ptr, size -> status
+    RuntimeFuncSpec::new("rt_vk_buffer_download", &[I64, I64, I64], &[I32]), // buffer_handle, data_ptr, size -> status
+    RuntimeFuncSpec::new("rt_vk_kernel_compile", &[I64, I64, I64], &[I64]), // device_handle, spirv_ptr, spirv_len -> pipeline_handle
+    RuntimeFuncSpec::new("rt_vk_kernel_free", &[I64], &[I32]),             // pipeline_handle -> status
+    RuntimeFuncSpec::new("rt_vk_kernel_launch", &[I64, I64, I64, I32, I32, I32, I32, I32, I32], &[I32]), // pipeline, buffers_ptr, count, gx,gy,gz, lx,ly,lz -> status
+    RuntimeFuncSpec::new("rt_vk_kernel_launch_1d", &[I64, I64, I64, I32], &[I32]), // pipeline, buffers_ptr, count, global_size -> status
+    // =========================================================================
     // Parallel iterator operations (#415)
     // =========================================================================
     // rt_par_map(input_ptr, input_len, closure_ptr, backend) -> result_ptr

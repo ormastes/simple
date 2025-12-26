@@ -7,6 +7,12 @@ pub mod vulkan;
 pub mod executor;
 pub mod aop;
 pub mod memory;
+#[cfg(feature = "monoio-net")]
+pub mod monoio_runtime;
+#[cfg(feature = "monoio-net")]
+pub mod monoio_tcp;
+#[cfg(feature = "monoio-net")]
+pub mod monoio_udp;
 pub mod parallel;
 pub mod sandbox;
 pub mod value;
@@ -318,4 +324,51 @@ pub use concurrent::{
 pub use sandbox::{
     apply_sandbox, FilesystemIsolation, FilesystemMode, NetworkIsolation, NetworkMode,
     ResourceLimits, SandboxConfig, SandboxError, SandboxResult,
+};
+
+// Re-export monoio runtime types and functions (#1730-1759)
+#[cfg(feature = "monoio-net")]
+pub use monoio_runtime::{
+    // Runtime lifecycle
+    monoio_runtime_init, monoio_runtime_init_global,
+    monoio_runtime_shutdown, monoio_runtime_shutdown_global,
+    // Task management
+    monoio_spawn_local, monoio_block_on,
+    // Configuration
+    monoio_get_num_cores, monoio_configure_entries,
+    // Statistics
+    monoio_get_stats, monoio_reset_stats,
+};
+
+// Re-export monoio TCP functions (#1745-1749)
+#[cfg(feature = "monoio-net")]
+pub use monoio_tcp::{
+    // Server operations
+    monoio_tcp_listen, monoio_tcp_accept, monoio_tcp_listener_close,
+    // Client operations
+    monoio_tcp_connect,
+    // I/O operations
+    monoio_tcp_read, monoio_tcp_write, monoio_tcp_flush,
+    // Connection management
+    monoio_tcp_shutdown, monoio_tcp_close,
+    monoio_tcp_local_addr, monoio_tcp_peer_addr,
+    // Socket options
+    monoio_tcp_set_nodelay, monoio_tcp_set_keepalive,
+};
+
+// Re-export monoio UDP functions (#1745-1749)
+#[cfg(feature = "monoio-net")]
+pub use monoio_udp::{
+    // Socket operations
+    monoio_udp_bind, monoio_udp_connect, monoio_udp_close,
+    // Unconnected I/O
+    monoio_udp_send_to, monoio_udp_recv_from,
+    // Connected I/O
+    monoio_udp_send, monoio_udp_recv,
+    // Socket info
+    monoio_udp_local_addr,
+    // Socket options
+    monoio_udp_set_broadcast, monoio_udp_set_multicast_ttl,
+    // Multicast
+    monoio_udp_join_multicast, monoio_udp_leave_multicast,
 };
