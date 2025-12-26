@@ -1,0 +1,447 @@
+# JSON - JSON parsing and serialization
+# Simple JSON support for data interchange
+
+# JSON value type
+pub enum JsonValue:
+    Null
+    Bool(bool)
+    Number(f64)
+    Integer(i64)
+    String(String)
+    Array(List[JsonValue])
+    Object(Dict[String, JsonValue])
+
+# JSON Parser state
+class JsonParser:
+    input: String
+    pos: i64
+    len: i64
+
+    fn new(input: String) -> JsonParser:
+        return JsonParser:
+            input: input
+            pos: 0
+            len: input.len()
+
+    fn peek(self) -> Option[String]:
+        if self.pos >= self.len:
+            return None
+        return Some(self.input.char_at(self.pos))
+
+    fn advance(self) -> Option[String]:
+        if self.pos >= self.len:
+            return None
+        ch = self.input.char_at(self.pos)
+        self.pos = self.pos + 1
+        return Some(ch)
+
+    fn skip_whitespace(self):
+        while self.pos < self.len:
+            ch = self.input.char_at(self.pos)
+            if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+                self.pos = self.pos + 1
+            else:
+                break
+
+    fn parse_value(self) -> Result[JsonValue, String]:
+        self.skip_whitespace()
+
+        ch_opt = self.peek()
+        if ch_opt.is_none():
+            return Err("Unexpected end of input")
+
+        ch = ch_opt.unwrap()
+
+        if ch == "\"":
+            return self.parse_string()
+        elif ch == "{":
+            return self.parse_object()
+        elif ch == "[":
+            return self.parse_array()
+        elif ch == "t":
+            return self.parse_true()
+        elif ch == "f":
+            return self.parse_false()
+        elif ch == "n":
+            return self.parse_null()
+        elif ch == "-" or (ch >= "0" and ch <= "9"):
+            return self.parse_number()
+        else:
+            return Err("Unexpected character: " + ch)
+
+    fn parse_string(self) -> Result[JsonValue, String]:
+        self.advance()  # Skip opening quote
+
+        result = ""
+        while self.pos < self.len:
+            ch = self.advance().unwrap()
+
+            if ch == "\"":
+                return Ok(JsonValue.String(result))
+            elif ch == "\\":
+                # Escape sequence
+                if self.pos >= self.len:
+                    return Err("Unexpected end of string")
+
+                esc = self.advance().unwrap()
+                if esc == "\"":
+                    result = result + "\""
+                elif esc == "\\":
+                    result = result + "\\"
+                elif esc == "/":
+                    result = result + "/"
+                elif esc == "n":
+                    result = result + "\n"
+                elif esc == "r":
+                    result = result + "\r"
+                elif esc == "t":
+                    result = result + "\t"
+                elif esc == "b":
+                    result = result + "\b"
+                elif esc == "f":
+                    result = result + "\f"
+                elif esc == "u":
+                    # Unicode escape - skip 4 hex digits for now
+                    for _ in 0..4:
+                        if self.pos < self.len:
+                            self.advance()
+                    result = result + "?"  # Placeholder
+                else:
+                    result = result + esc
+            else:
+                result = result + ch
+
+        return Err("Unterminated string")
+
+    fn parse_object(self) -> Result[JsonValue, String]:
+        self.advance()  # Skip {
+        self.skip_whitespace()
+
+        obj = Dict[String, JsonValue]()
+
+        if self.peek() == Some("}"):
+            self.advance()
+            return Ok(JsonValue.Object(obj))
+
+        while true:
+            self.skip_whitespace()
+
+            # Parse key
+            if self.peek() != Some("\""):
+                return Err("Expected string key in object")
+
+            key_result = self.parse_string()
+            if key_result.is_err():
+                return key_result
+
+            key = ""
+            match key_result.unwrap():
+                case JsonValue.String(s):
+                    key = s
+                case _:
+                    return Err("Key must be string")
+
+            self.skip_whitespace()
+
+            # Expect colon
+            if self.peek() != Some(":"):
+                return Err("Expected ':' after object key")
+            self.advance()
+
+            # Parse value
+            value_result = self.parse_value()
+            if value_result.is_err():
+                return value_result
+
+            obj.set(key, value_result.unwrap())
+
+            self.skip_whitespace()
+
+            ch_opt = self.peek()
+            if ch_opt == Some("}"):
+                self.advance()
+                return Ok(JsonValue.Object(obj))
+            elif ch_opt == Some(","):
+                self.advance()
+            else:
+                return Err("Expected ',' or '}' in object")
+
+    fn parse_array(self) -> Result[JsonValue, String]:
+        self.advance()  # Skip [
+        self.skip_whitespace()
+
+        arr = []
+
+        if self.peek() == Some("]"):
+            self.advance()
+            return Ok(JsonValue.Array(arr))
+
+        while true:
+            value_result = self.parse_value()
+            if value_result.is_err():
+                return value_result
+
+            arr.append(value_result.unwrap())
+
+            self.skip_whitespace()
+
+            ch_opt = self.peek()
+            if ch_opt == Some("]"):
+                self.advance()
+                return Ok(JsonValue.Array(arr))
+            elif ch_opt == Some(","):
+                self.advance()
+            else:
+                return Err("Expected ',' or ']' in array")
+
+    fn parse_true(self) -> Result[JsonValue, String]:
+        if self.input.substring(self.pos, self.pos + 4) == "true":
+            self.pos = self.pos + 4
+            return Ok(JsonValue.Bool(true))
+        return Err("Expected 'true'")
+
+    fn parse_false(self) -> Result[JsonValue, String]:
+        if self.input.substring(self.pos, self.pos + 5) == "false":
+            self.pos = self.pos + 5
+            return Ok(JsonValue.Bool(false))
+        return Err("Expected 'false'")
+
+    fn parse_null(self) -> Result[JsonValue, String]:
+        if self.input.substring(self.pos, self.pos + 4) == "null":
+            self.pos = self.pos + 4
+            return Ok(JsonValue.Null)
+        return Err("Expected 'null'")
+
+    fn parse_number(self) -> Result[JsonValue, String]:
+        start = self.pos
+        has_dot = false
+        has_exp = false
+
+        # Optional negative sign
+        if self.peek() == Some("-"):
+            self.advance()
+
+        # Integer part
+        while self.pos < self.len:
+            ch = self.input.char_at(self.pos)
+            if ch >= "0" and ch <= "9":
+                self.advance()
+            elif ch == "." and not has_dot:
+                has_dot = true
+                self.advance()
+            elif (ch == "e" or ch == "E") and not has_exp:
+                has_exp = true
+                self.advance()
+                # Optional sign after exponent
+                if self.peek() == Some("+") or self.peek() == Some("-"):
+                    self.advance()
+            else:
+                break
+
+        num_str = self.input.substring(start, self.pos)
+
+        if has_dot or has_exp:
+            # Parse as float
+            # TODO: Implement proper float parsing
+            return Ok(JsonValue.Number(0.0))
+        else:
+            # Parse as integer
+            value = parse_int(num_str)
+            return Ok(JsonValue.Integer(value))
+
+# Helper function to parse integer
+fn parse_int(s: String) -> i64:
+    result = 0
+    negative = false
+    start = 0
+
+    if s.len() > 0 and s.char_at(0) == "-":
+        negative = true
+        start = 1
+
+    for i in start..s.len():
+        ch = s.char_at(i)
+        if ch >= "0" and ch <= "9":
+            digit = ch.ord() - "0".ord()
+            result = result * 10 + digit
+
+    if negative:
+        return -result
+    return result
+
+# Parse JSON string into a value
+pub fn parse(input: String) -> Result[JsonValue, String]:
+    parser = JsonParser.new(input)
+    return parser.parse_value()
+
+# Escape string for JSON output
+fn escape_string(s: String) -> String:
+    result = ""
+    for i in 0..s.len():
+        ch = s.char_at(i)
+        if ch == "\"":
+            result = result + "\\\""
+        elif ch == "\\":
+            result = result + "\\\\"
+        elif ch == "\n":
+            result = result + "\\n"
+        elif ch == "\r":
+            result = result + "\\r"
+        elif ch == "\t":
+            result = result + "\\t"
+        else:
+            result = result + ch
+    return result
+
+# Serialize JSON value to string
+pub fn stringify(value: JsonValue) -> String:
+    match value:
+        case JsonValue.Null:
+            return "null"
+        case JsonValue.Bool(b):
+            if b:
+                return "true"
+            else:
+                return "false"
+        case JsonValue.Number(n):
+            return n.to_string()
+        case JsonValue.Integer(i):
+            return i.to_string()
+        case JsonValue.String(s):
+            return "\"" + escape_string(s) + "\""
+        case JsonValue.Array(arr):
+            parts = []
+            for item in arr:
+                parts.append(stringify(item))
+            return "[" + ", ".join(parts) + "]"
+        case JsonValue.Object(obj):
+            parts = []
+            for key in obj.keys():
+                val = obj.get(key)
+                parts.append("\"" + escape_string(key) + "\": " + stringify(val))
+            return "{" + ", ".join(parts) + "}"
+
+# Pretty print JSON with indentation
+pub fn stringify_pretty(value: JsonValue, indent: i64) -> String:
+    return stringify_indent(value, indent, 0)
+
+fn stringify_indent(value: JsonValue, indent: i64, level: i64) -> String:
+    spaces = " ".repeat(indent * level)
+    next_spaces = " ".repeat(indent * (level + 1))
+
+    match value:
+        case JsonValue.Null:
+            return "null"
+        case JsonValue.Bool(b):
+            if b:
+                return "true"
+            else:
+                return "false"
+        case JsonValue.Number(n):
+            return n.to_string()
+        case JsonValue.Integer(i):
+            return i.to_string()
+        case JsonValue.String(s):
+            return "\"" + escape_string(s) + "\""
+        case JsonValue.Array(arr):
+            if arr.len() == 0:
+                return "[]"
+            parts = []
+            for item in arr:
+                parts.append(next_spaces + stringify_indent(item, indent, level + 1))
+            return "[\n" + ",\n".join(parts) + "\n" + spaces + "]"
+        case JsonValue.Object(obj):
+            keys = obj.keys()
+            if keys.len() == 0:
+                return "{}"
+            parts = []
+            for key in keys:
+                val = obj.get(key)
+                parts.append(next_spaces + "\"" + escape_string(key) + "\": " + stringify_indent(val, indent, level + 1))
+            return "{\n" + ",\n".join(parts) + "\n" + spaces + "}"
+
+# Parse JSON string into a Dict (convenience function)
+pub fn parse_object(input: String) -> Result[Dict[String, JsonValue], String]:
+    match parse(input):
+        case Ok(JsonValue.Object(obj)):
+            Ok(obj)
+        case Ok(_):
+            Err("JSON value is not an object")
+        case Err(e):
+            Err(e)
+
+# Helper to get string from JsonValue
+pub fn get_string(value: JsonValue) -> Option[String]:
+    match value:
+        case JsonValue.String(s):
+            return Some(s)
+        case _:
+            return None
+
+# Helper to get integer from JsonValue
+pub fn get_int(value: JsonValue) -> Option[i64]:
+    match value:
+        case JsonValue.Integer(i):
+            return Some(i)
+        case JsonValue.Number(n):
+            return Some(n as i64)
+        case _:
+            return None
+
+# Helper to get object from JsonValue
+pub fn get_object(value: JsonValue) -> Option[Dict[String, JsonValue]]:
+    match value:
+        case JsonValue.Object(obj):
+            return Some(obj)
+        case _:
+            return None
+
+# Helper to get array from JsonValue
+pub fn get_array(value: JsonValue) -> Option[List[JsonValue]]:
+    match value:
+        case JsonValue.Array(arr):
+            return Some(arr)
+        case _:
+            return None
+
+# Builder for creating JSON objects
+pub class JsonBuilder:
+    obj: Dict[String, JsonValue]
+
+    pub fn new() -> JsonBuilder:
+        return JsonBuilder:
+            obj: {}
+
+    pub fn set_string(self, key: String, value: String) -> JsonBuilder:
+        self.obj.set(key, JsonValue.String(value))
+        return self
+
+    pub fn set_int(self, key: String, value: i64) -> JsonBuilder:
+        self.obj.set(key, JsonValue.Integer(value))
+        return self
+
+    pub fn set_bool(self, key: String, value: bool) -> JsonBuilder:
+        self.obj.set(key, JsonValue.Bool(value))
+        return self
+
+    pub fn set_null(self, key: String) -> JsonBuilder:
+        self.obj.set(key, JsonValue.Null)
+        return self
+
+    pub fn set_object(self, key: String, value: Dict[String, JsonValue]) -> JsonBuilder:
+        self.obj.set(key, JsonValue.Object(value))
+        return self
+
+    pub fn set_array(self, key: String, value: List[JsonValue]) -> JsonBuilder:
+        self.obj.set(key, JsonValue.Array(value))
+        return self
+
+    pub fn set(self, key: String, value: JsonValue) -> JsonBuilder:
+        self.obj.set(key, value)
+        return self
+
+    pub fn build(self) -> JsonValue:
+        return JsonValue.Object(self.obj)
+
+    pub fn to_string(self) -> String:
+        return stringify(self.build())

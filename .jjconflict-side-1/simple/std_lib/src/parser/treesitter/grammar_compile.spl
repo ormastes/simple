@@ -1,0 +1,371 @@
+# Grammar Compilation Pipeline
+# Compiles grammar definitions into optimized runtime structures
+
+import parser.treesitter.{Grammar, GrammarRule, Token}
+import parser.treesitter.language_detect as detect
+import core.collections as collections
+
+# Compiled grammar with optimizations
+class CompiledGrammar:
+    name: String
+    rules: Dict<String, CompiledRule>
+    entry_point: String
+    token_types: List<String>
+    # Optimizations
+    first_sets: Dict<String, Set<String>>   # First tokens for each rule
+    follow_sets: Dict<String, Set<String>>  # Follow tokens for each rule
+    nullable_rules: Set<String>             # Rules that can match empty
+
+    fn new(name: String, entry_point: String) -> CompiledGrammar:
+        CompiledGrammar(
+            name: name,
+            rules: {},
+            entry_point: entry_point,
+            token_types: [],
+            first_sets: {},
+            follow_sets: {},
+            nullable_rules: Set()
+        )
+
+    # Get rule by name
+    fn get_rule(self, name: String) -> Option<CompiledRule>:
+        self.rules.get(name)
+
+    # Check if rule is nullable (can match empty)
+    fn is_nullable(self, rule_name: String) -> Bool:
+        self.nullable_rules.contains(rule_name)
+
+    # Get first tokens for a rule
+    fn get_first_set(self, rule_name: String) -> Set<String>:
+        match self.first_sets.get(rule_name):
+            case Some(set):
+                return set
+            case None:
+                return Set()
+
+    # Get follow tokens for a rule
+    fn get_follow_set(self, rule_name: String) -> Set<String>:
+        match self.follow_sets.get(rule_name):
+            case Some(set):
+                return set
+            case None:
+                return Set()
+
+# Compiled grammar rule with optimizations
+class CompiledRule:
+    name: String
+    pattern: RulePattern
+    is_terminal: Bool
+    is_nullable: Bool
+
+    fn new(name: String, pattern: RulePattern) -> CompiledRule:
+        CompiledRule(
+            name: name,
+            pattern: pattern,
+            is_terminal: false,
+            is_nullable: false
+        )
+
+# Rule pattern (simplified for compilation)
+enum RulePattern:
+    Token(token_type: String)
+    Sequence(patterns: List<RulePattern>)
+    Choice(patterns: List<RulePattern>)
+    Repeat(pattern: RulePattern)
+    Optional(pattern: RulePattern)
+    Reference(rule_name: String)
+
+# Grammar compiler
+class GrammarCompiler:
+    fn new() -> GrammarCompiler:
+        GrammarCompiler()
+
+    # Compile a grammar
+    fn compile(self, grammar: Grammar) -> Result<CompiledGrammar, String>:
+        let mut compiled = CompiledGrammar.new(grammar.name, grammar.entry_point)
+
+        # Step 1: Convert rules to compiled format
+        for (name, rule) in grammar.rules.items():
+            let compiled_rule = self.compile_rule(name, rule)?
+            compiled.rules[name] = compiled_rule
+
+        # Step 2: Compute nullable rules
+        self.compute_nullable_rules(&mut compiled)?
+
+        # Step 3: Compute first sets
+        self.compute_first_sets(&mut compiled)?
+
+        # Step 4: Compute follow sets
+        self.compute_follow_sets(&mut compiled)?
+
+        # Step 5: Extract token types
+        self.extract_token_types(&mut compiled)?
+
+        Ok(compiled)
+
+    # Compile a single rule
+    fn compile_rule(self, name: String, rule: GrammarRule) -> Result<CompiledRule, String>:
+        # Simplified compilation - just wrap the rule for now
+        # In real implementation, would analyze and optimize the pattern
+        let pattern = RulePattern.Reference(name)  # Placeholder
+        Ok(CompiledRule.new(name, pattern))
+
+    # Compute which rules can match empty
+    fn compute_nullable_rules(self, compiled: &mut CompiledGrammar) -> Result<Nil, String>:
+        # Fixed-point iteration
+        let mut changed = true
+        while changed:
+            changed = false
+
+            for (name, rule) in compiled.rules.items():
+                if not compiled.nullable_rules.contains(name):
+                    if self.is_pattern_nullable(rule.pattern, compiled):
+                        compiled.nullable_rules.insert(name)
+                        changed = true
+
+        Ok(nil)
+
+    # Check if pattern is nullable
+    fn is_pattern_nullable(self, pattern: RulePattern, compiled: &CompiledGrammar) -> Bool:
+        match pattern:
+            case Token(_):
+                return false
+            case Sequence(patterns):
+                # All must be nullable
+                for p in patterns:
+                    if not self.is_pattern_nullable(p, compiled):
+                        return false
+                return true
+            case Choice(patterns):
+                # Any can be nullable
+                for p in patterns:
+                    if self.is_pattern_nullable(p, compiled):
+                        return true
+                return false
+            case Repeat(_):
+                return true  # Can match zero times
+            case Optional(_):
+                return true  # Can be absent
+            case Reference(rule_name):
+                return compiled.nullable_rules.contains(rule_name)
+
+    # Compute first sets (which tokens can start each rule)
+    fn compute_first_sets(self, compiled: &mut CompiledGrammar) -> Result<Nil, String>:
+        # Initialize empty sets
+        for (name, _) in compiled.rules.items():
+            compiled.first_sets[name] = Set()
+
+        # Fixed-point iteration
+        let mut changed = true
+        while changed:
+            changed = false
+
+            for (name, rule) in compiled.rules.items():
+                let old_size = compiled.first_sets[name].size()
+                self.add_first_tokens(rule.pattern, compiled, &mut compiled.first_sets[name])
+                if compiled.first_sets[name].size() > old_size:
+                    changed = true
+
+        Ok(nil)
+
+    # Add first tokens from pattern to set
+    fn add_first_tokens(
+        self,
+        pattern: RulePattern,
+        compiled: &CompiledGrammar,
+        first_set: &mut Set<String>
+    ):
+        match pattern:
+            case Token(token_type):
+                first_set.insert(token_type)
+            case Sequence(patterns):
+                for p in patterns:
+                    self.add_first_tokens(p, compiled, first_set)
+                    if not self.is_pattern_nullable(p, compiled):
+                        break
+            case Choice(patterns):
+                for p in patterns:
+                    self.add_first_tokens(p, compiled, first_set)
+            case Repeat(p):
+                self.add_first_tokens(p, compiled, first_set)
+            case Optional(p):
+                self.add_first_tokens(p, compiled, first_set)
+            case Reference(rule_name):
+                match compiled.first_sets.get(rule_name):
+                    case Some(set):
+                        first_set.union(set)
+                    case None:
+                        pass
+
+    # Compute follow sets (which tokens can follow each rule)
+    fn compute_follow_sets(self, compiled: &mut CompiledGrammar) -> Result<Nil, String>:
+        # Initialize empty sets
+        for (name, _) in compiled.rules.items():
+            compiled.follow_sets[name] = Set()
+
+        # Entry point can be followed by EOF
+        compiled.follow_sets[compiled.entry_point].insert("EOF")
+
+        # Fixed-point iteration
+        let mut changed = true
+        while changed:
+            changed = false
+
+            for (name, rule) in compiled.rules.items():
+                let old_sizes = self.get_total_follow_set_size(compiled)
+                self.propagate_follow_sets(name, rule.pattern, compiled)
+                if self.get_total_follow_set_size(compiled) > old_sizes:
+                    changed = true
+
+        Ok(nil)
+
+    # Get total size of all follow sets (for change detection)
+    fn get_total_follow_set_size(self, compiled: &CompiledGrammar) -> Int:
+        let mut total = 0
+        for (_, set) in compiled.follow_sets.items():
+            total = total + set.size()
+        total
+
+    # Propagate follow sets through pattern
+    fn propagate_follow_sets(
+        self,
+        rule_name: String,
+        pattern: RulePattern,
+        compiled: &mut CompiledGrammar
+    ):
+        match pattern:
+            case Token(_):
+                pass  # Terminals don't have follow sets
+            case Sequence(patterns):
+                # Each element's follow includes first of next (if not nullable)
+                for i in 0..patterns.len():
+                    if i + 1 < patterns.len():
+                        # TODO: Propagate follow sets through sequence
+                        pass
+            case Choice(patterns):
+                for p in patterns:
+                    self.propagate_follow_sets(rule_name, p, compiled)
+            case Repeat(p):
+                self.propagate_follow_sets(rule_name, p, compiled)
+            case Optional(p):
+                self.propagate_follow_sets(rule_name, p, compiled)
+            case Reference(ref_name):
+                # Propagate this rule's follow to referenced rule
+                match compiled.follow_sets.get(rule_name):
+                    case Some(follow):
+                        compiled.follow_sets[ref_name].union(follow)
+                    case None:
+                        pass
+
+    # Extract all token types used in grammar
+    fn extract_token_types(self, compiled: &mut CompiledGrammar) -> Result<Nil, String>:
+        let mut token_set: Set<String> = Set()
+
+        for (_, rule) in compiled.rules.items():
+            self.collect_token_types(rule.pattern, &mut token_set)
+
+        compiled.token_types = token_set.to_list()
+
+        Ok(nil)
+
+    # Collect token types from pattern
+    fn collect_token_types(self, pattern: RulePattern, token_set: &mut Set<String>):
+        match pattern:
+            case Token(token_type):
+                token_set.insert(token_type)
+            case Sequence(patterns):
+                for p in patterns:
+                    self.collect_token_types(p, token_set)
+            case Choice(patterns):
+                for p in patterns:
+                    self.collect_token_types(p, token_set)
+            case Repeat(p):
+                self.collect_token_types(p, token_set)
+            case Optional(p):
+                self.collect_token_types(p, token_set)
+            case Reference(_):
+                pass  # References don't contain tokens directly
+
+# Grammar cache for compiled grammars
+class GrammarCache:
+    cache: Dict<String, CompiledGrammar>
+
+    fn new() -> GrammarCache:
+        GrammarCache(cache: {})
+
+    # Get compiled grammar from cache
+    fn get(self, language: String) -> Option<CompiledGrammar>:
+        self.cache.get(language)
+
+    # Add compiled grammar to cache
+    fn add(mut self, language: String, compiled: CompiledGrammar):
+        self.cache[language] = compiled
+
+    # Check if language is cached
+    fn contains(self, language: String) -> Bool:
+        self.cache.contains_key(language)
+
+    # Clear cache
+    fn clear(mut self):
+        self.cache = {}
+
+    # Get cache size
+    fn size(self) -> Int:
+        self.cache.len()
+
+# Grammar compilation pipeline
+class GrammarPipeline:
+    compiler: GrammarCompiler
+    cache: GrammarCache
+
+    fn new() -> GrammarPipeline:
+        GrammarPipeline(
+            compiler: GrammarCompiler.new(),
+            cache: GrammarCache.new()
+        )
+
+    # Compile grammar with caching
+    fn compile(mut self, grammar: Grammar) -> Result<CompiledGrammar, String>:
+        # Check cache first
+        match self.cache.get(grammar.name):
+            case Some(compiled):
+                return Ok(compiled)
+            case None:
+                pass
+
+        # Compile grammar
+        let compiled = self.compiler.compile(grammar)?
+
+        # Add to cache
+        self.cache.add(grammar.name, compiled)
+
+        Ok(compiled)
+
+    # Compile grammar for language name
+    fn compile_language(mut self, language: String) -> Result<CompiledGrammar, String>:
+        # Check cache first
+        match self.cache.get(language):
+            case Some(compiled):
+                return Ok(compiled)
+            case None:
+                pass
+
+        # Load grammar for language
+        # TODO: Implement grammar loading
+        Err(f"Grammar for language '{language}' not found")
+
+    # Clear compilation cache
+    fn clear_cache(mut self):
+        self.cache.clear()
+
+# Convenience functions
+
+# Compile a grammar
+fn compile_grammar(grammar: Grammar) -> Result<CompiledGrammar, String>:
+    let compiler = GrammarCompiler.new()
+    compiler.compile(grammar)
+
+# Compile grammar for a language
+fn compile_language(language: String) -> Result<CompiledGrammar, String>:
+    let mut pipeline = GrammarPipeline.new()
+    pipeline.compile_language(language)

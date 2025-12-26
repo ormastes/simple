@@ -1,0 +1,282 @@
+// Helper functions for expression parsing - lambdas, colon blocks, if expressions, and arguments
+
+impl<'a> Parser<'a> {
+    fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>) -> Result<(), ParseError> {
+        while self.check(&TokenKind::Comma) {
+            self.advance();
+            let name = self.expect_identifier()?;
+            params.push(LambdaParam { name, ty: None });
+        }
+        Ok(())
+    }
+
+    /// Try to parse a colon-block as a trailing lambda.
+    ///
+    /// Syntax:
+    /// ```text
+    /// func arg:
+    ///     statement1
+    ///     statement2
+    /// ```
+    ///
+    /// This is parsed as `func(arg, fn(): statement1; statement2)`.
+    ///
+    /// Returns `Some(lambda)` if we see `:` followed by newline and indent,
+    /// `None` if this doesn't look like a colon-block.
+    fn try_parse_colon_block(&mut self) -> Result<Option<Expr>, ParseError> {
+        // Must be at a colon
+        if !self.check(&TokenKind::Colon) {
+            return Ok(None);
+        }
+
+        // Peek ahead to see if this is a colon-block
+        // We need: colon, newline, indent
+        // Since we can't easily peek multiple tokens, we'll consume and check
+        self.advance(); // consume ':'
+
+        // Skip any newlines after the colon
+        while self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        // Must have indent for a block
+        if !self.check(&TokenKind::Indent) {
+            // Not a colon-block, but we already consumed the colon
+            // This is an error state - colon without proper block
+            return Err(ParseError::unexpected_token(
+                "indented block after ':'",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        }
+
+        self.advance(); // consume Indent
+
+        // Parse statements until dedent
+        let mut statements = Vec::new();
+        while !self.check(&TokenKind::Dedent) && !self.check(&TokenKind::Eof) {
+            // Skip newlines between statements
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+
+            if self.check(&TokenKind::Dedent) || self.check(&TokenKind::Eof) {
+                break;
+            }
+
+            let stmt = self.parse_item()?;
+            statements.push(stmt);
+
+            // Skip trailing newlines
+            while self.check(&TokenKind::Newline) {
+                self.advance();
+            }
+        }
+
+        // Consume dedent if present
+        if self.check(&TokenKind::Dedent) {
+            self.advance();
+        }
+
+        // Wrap statements in a DoBlock expression, then in a Lambda
+        let block_expr = Expr::DoBlock(statements);
+
+        Ok(Some(Expr::Lambda {
+            params: vec![],
+            body: Box::new(block_expr),
+            move_mode: MoveMode::Copy,
+        }))
+    }
+
+    /// Parse an if/elif expression (shared logic)
+    pub(crate) fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        let condition = self.parse_expression()?;
+        self.expect(&TokenKind::Colon)?;
+        let then_branch = self.parse_expression()?;
+        let else_branch = if self.check(&TokenKind::Elif) {
+            self.advance();
+            Some(Box::new(self.parse_if_expr()?))
+        } else if self.check(&TokenKind::Else) {
+            self.advance();
+            self.expect(&TokenKind::Colon)?;
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+        Ok(Expr::If {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch,
+        })
+    }
+
+    pub(crate) fn parse_arguments(&mut self) -> Result<Vec<Argument>, ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        let mut args = Vec::new();
+
+        // Skip newlines and indent after opening paren (for multi-line argument lists)
+        while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
+            self.advance();
+        }
+
+        while !self.check(&TokenKind::RParen) && !self.check(&TokenKind::Eof) {
+            // Skip any stray whitespace tokens at the start of each argument
+            while self.check(&TokenKind::Newline)
+                || self.check(&TokenKind::Indent)
+                || self.check(&TokenKind::Dedent)
+            {
+                self.advance();
+            }
+            if self.check(&TokenKind::RParen) {
+                break;
+            }
+
+            // Check for named argument with '=' or ':' syntax
+            let mut name = None;
+            if let TokenKind::Identifier(id) = &self.current.kind {
+                let id_clone = id.clone();
+                // Peek ahead for '=' or ':' without consuming the stream
+                let next = self
+                    .pending_token
+                    .clone()
+                    .unwrap_or_else(|| self.lexer.next_token());
+                self.pending_token = Some(next.clone());
+                if next.kind == TokenKind::Assign {
+                    name = Some(id_clone);
+                    self.advance(); // consume identifier
+                    self.expect(&TokenKind::Assign)?; // consume '='
+                } else if next.kind == TokenKind::Colon {
+                    // Support colon syntax: name: value
+                    name = Some(id_clone);
+                    self.advance(); // consume identifier
+                    self.expect(&TokenKind::Colon)?; // consume ':'
+                } else {
+                    // leave current untouched; pending_token already holds the peeked token
+                }
+            }
+
+            let value = self.parse_expression()?;
+            args.push(Argument { name, value });
+
+            // Skip newlines, indent, dedent after argument (for multi-line argument lists)
+            while self.check(&TokenKind::Newline)
+                || self.check(&TokenKind::Indent)
+                || self.check(&TokenKind::Dedent)
+            {
+                self.advance();
+            }
+
+            if !self.check(&TokenKind::RParen) {
+                self.expect(&TokenKind::Comma)?;
+                // Skip newlines, indent, dedent after comma
+                while self.check(&TokenKind::Newline)
+                    || self.check(&TokenKind::Indent)
+                    || self.check(&TokenKind::Dedent)
+                {
+                    self.advance();
+                }
+            }
+        }
+
+        self.expect(&TokenKind::RParen)?;
+        Ok(args)
+    }
+
+    /// Parse macro invocation arguments: !(args) or !{args} or ![args]
+    pub(crate) fn parse_macro_args(&mut self) -> Result<Vec<MacroArg>, ParseError> {
+        // Macros can use (), {}, or [] for their arguments
+        let (_open, close) = if self.check(&TokenKind::LParen) {
+            (TokenKind::LParen, TokenKind::RParen)
+        } else if self.check(&TokenKind::LBrace) {
+            (TokenKind::LBrace, TokenKind::RBrace)
+        } else if self.check(&TokenKind::LBracket) {
+            (TokenKind::LBracket, TokenKind::RBracket)
+        } else {
+            return Err(ParseError::unexpected_token(
+                "'(', '{', or '['",
+                format!("{:?}", self.current.kind),
+                self.current.span,
+            ));
+        };
+
+        self.advance(); // consume opening delimiter
+        let mut args = Vec::new();
+
+        while !self.check(&close) {
+            // Try to parse as expression
+            let expr = self.parse_expression()?;
+            args.push(MacroArg::Expr(expr));
+
+            if !self.check(&close) {
+                // Allow comma or semicolon as separator
+                if self.check(&TokenKind::Comma) || self.check(&TokenKind::Semicolon) {
+                    self.advance();
+                }
+            }
+        }
+
+        self.expect(&close)?;
+        Ok(args)
+    }
+
+    /// Parse comprehension clause: `for pattern in iterable [if condition]`
+    /// Returns (pattern, iterable, condition)
+    fn parse_comprehension_clause(
+        &mut self,
+    ) -> Result<(Pattern, Expr, Option<Box<Expr>>), ParseError> {
+        let pattern = self.parse_pattern()?;
+        self.expect(&TokenKind::In)?;
+        let iterable = self.parse_expression()?;
+        let condition = if self.check(&TokenKind::If) {
+            self.advance();
+            Some(Box::new(self.parse_expression()?))
+        } else {
+            None
+        };
+        Ok((pattern, iterable, condition))
+    }
+
+    /// Parse lambda body (params, colon, expression or block) with given move mode
+    fn parse_lambda_body(&mut self, move_mode: MoveMode) -> Result<Expr, ParseError> {
+        let params = self.parse_lambda_params()?;
+        self.expect(&TokenKind::Colon)?;
+
+        // Check if body is an indented block or inline expression
+        let body = if self.check(&TokenKind::Newline) {
+            // Peek ahead to see if we have a newline + indent (block body)
+            if self.peek_is(&TokenKind::Indent) {
+                // Parse as block
+                let block = self.parse_block()?;
+                Expr::DoBlock(block.statements)
+            } else {
+                // Just a newline, parse next expression
+                self.parse_expression()?
+            }
+        } else {
+            // Inline expression
+            self.parse_expression()?
+        };
+
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
+            move_mode,
+        })
+    }
+
+    /// Create a slice expression with the given components
+    #[allow(dead_code)]
+    fn make_slice(
+        receiver: Expr,
+        start: Option<Expr>,
+        end: Option<Expr>,
+        step: Option<Box<Expr>>,
+    ) -> Expr {
+        Expr::Slice {
+            receiver: Box::new(receiver),
+            start: start.map(Box::new),
+            end: end.map(Box::new),
+            step,
+        }
+    }
+}

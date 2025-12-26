@@ -1,0 +1,352 @@
+# Gherkin-Style System Test DSL Runtime
+# Implements feature/scenario/given/when/then for BDD-style tests
+#
+# See doc/spec/gherkin_dsl.md for specification
+#
+# This module transforms Gherkin DSL constructs into executable tests
+# that integrate with the existing BDD spec framework (dsl.spl).
+#
+# Architecture:
+# - Parser transforms Gherkin syntax into function calls (see gherkin.rs)
+# - This runtime provides those functions which map to describe/context/it
+# - Step definitions are registered and matched by pattern
+# - Examples tables drive parameterized scenario outlines
+
+import registry.{ExampleGroup, Example}
+import dsl.{describe, context, it, before_each}
+
+# ============================================================================
+# Step Definition Registry
+# ============================================================================
+
+# StepKind enum for classifying step types
+enum StepKind:
+    Given
+    When
+    Then
+    AndThen
+
+# StepDefinition holds a pattern and its implementation
+struct StepDefinition:
+    pattern: String           # Pattern with placeholders like "add <n>"
+    kind: StepKind            # Step type (Given/When/Then)
+    block: Fn(Dict[String, Any]) -> Void  # Implementation with captured params
+
+# Global step definition registry
+let step_definitions: List[StepDefinition] = []
+
+# Examples table registry (name -> rows)
+let examples_registry: Dict[String, List[List[Any]]] = {}
+
+# Current scenario context for step execution
+struct ScenarioContext:
+    variables: Dict[String, Any]    # Variables set during execution
+    current_examples: Option[String]  # Current examples table being used
+    example_row_index: i64            # Current row in examples table
+
+let current_context: Option[ScenarioContext] = None
+
+# ============================================================================
+# Step Definition Functions (for context blocks)
+# ============================================================================
+
+# Register a step definition pattern
+# Usage in parsed Gherkin: `context fresh calculator: ...` becomes
+# step_def("fresh calculator", StepKind::Given, block)
+fn step_def(pattern: String, kind: StepKind, block: Fn(Dict[String, Any]) -> Void) -> Void:
+    let def = StepDefinition(
+        pattern: pattern,
+        kind: kind,
+        block: block
+    )
+    step_definitions.push(def)
+
+# ============================================================================
+# Examples Table Functions
+# ============================================================================
+
+# Register an examples table
+# Parser transforms `examples addition:` block into this call
+export fn examples(name: String, rows: List[List[Any]]) -> Void:
+    examples_registry.insert(name, rows)
+
+# Get examples table by name
+fn get_examples(name: String) -> Option[List[List[Any]]]:
+    return examples_registry.get(name)
+
+# Parse header row from examples table
+fn get_examples_headers(rows: List[List[Any]]) -> List[String]:
+    if rows.is_empty():
+        return []
+    # First row is headers
+    let header_row = rows[0]
+    let headers: List[String] = []
+    for cell in header_row:
+        headers.push(cell.to_string())
+    return headers
+
+# Get data rows (skip header)
+fn get_examples_data(rows: List[List[Any]]) -> List[List[Any]]:
+    if rows.len() <= 1:
+        return []
+    return rows.slice(1, rows.len())
+
+# ============================================================================
+# Pattern Matching Engine
+# ============================================================================
+
+# Match a step pattern against a definition pattern
+# Returns captured placeholder values if match succeeds
+# e.g., "add 5" matches "add <n>" with captures {"n": 5}
+fn match_pattern(step_text: String, def_pattern: String) -> Option[Dict[String, Any]]:
+    let captures: Dict[String, Any] = {}
+
+    # Split both into parts
+    let step_parts = step_text.split(" ")
+    let pattern_parts = def_pattern.split(" ")
+
+    if step_parts.len() != pattern_parts.len():
+        return None
+
+    for i in 0..step_parts.len():
+        let step_part = step_parts[i]
+        let pattern_part = pattern_parts[i]
+
+        if pattern_part.starts_with("<") and pattern_part.ends_with(">"):
+            # This is a placeholder - capture the value
+            let placeholder_name = pattern_part.slice(1, pattern_part.len() - 1)
+            # Try to parse as number, otherwise keep as string
+            match step_part.parse_i64():
+                case Ok(n):
+                    captures.insert(placeholder_name, n)
+                case Err(_):
+                    captures.insert(placeholder_name, step_part)
+        else:
+            # Literal match required
+            if step_part != pattern_part:
+                return None
+
+    return Some(captures)
+
+# Find and execute a step definition
+fn execute_step(kind: StepKind, pattern: String, inline_block: Option[Fn() -> Void]) -> Void:
+    # First, try to substitute placeholders from current examples row
+    let substituted_pattern = substitute_placeholders(pattern)
+
+    # Try to find matching step definition
+    for def in step_definitions:
+        if def.kind != kind:
+            continue
+        match match_pattern(substituted_pattern, def.pattern):
+            case Some(captures):
+                def.block(captures)
+                return
+            case None:
+                continue
+
+    # No definition found - check for inline block
+    match inline_block:
+        case Some(block):
+            block()
+        case None:
+            # No definition and no inline block - use pattern as assertion context
+            # This allows simple assertions like `then value is 5:` to work
+            pass
+
+# Substitute <placeholder> values from current examples row
+fn substitute_placeholders(pattern: String) -> String:
+    match current_context:
+        case Some(ctx):
+            let result = pattern
+            for key, value in ctx.variables:
+                let placeholder = f"<{key}>"
+                result = result.replace(placeholder, value.to_string())
+            return result
+        case None:
+            return pattern
+
+# ============================================================================
+# Feature / Scenario / Step Functions
+# ============================================================================
+
+# Feature block - maps to describe
+# Parser transforms: `feature Calculator:` -> `feature("Calculator", do_block)`
+export fn feature(name: String, block: Fn() -> Void) -> Void:
+    describe(f"Feature: {name}", block)
+
+# Scenario block - maps to context + it
+# Parser transforms: `scenario Add numbers:` -> `scenario("Add numbers", do_block)`
+export fn scenario(name: String, block: Fn() -> Void) -> Void:
+    context(f"Scenario: {name}", fn():
+        # Initialize fresh context for this scenario
+        current_context = Some(ScenarioContext(
+            variables: {},
+            current_examples: None,
+            example_row_index: 0
+        ))
+
+        # Run the scenario steps
+        block()
+
+        # Clean up
+        current_context = None
+    )
+
+# Scenario Outline - parameterized scenario with examples
+# Parser transforms: `scenario outline Add:` -> `scenario_outline("Add", do_block)`
+export fn scenario_outline(name: String, block: Fn() -> Void) -> Void:
+    context(f"Scenario Outline: {name}", fn():
+        # The block will register steps and examples references
+        # We need to collect them first, then run for each examples row
+        block()
+    )
+
+# Given step - setup
+# Parser transforms: `given fresh calculator:` -> `given("fresh calculator", nil)`
+export fn given(pattern: String, inline_block: Any) -> Void:
+    execute_step(StepKind::Given, pattern, wrap_block(inline_block))
+
+# When step - action
+# Parser transforms: `when add 5:` -> `when("add 5", nil)`
+export fn when(pattern: String, inline_block: Any) -> Void:
+    execute_step(StepKind::When, pattern, wrap_block(inline_block))
+
+# Then step - assertion
+# Parser transforms: `then value is 5:` -> `then("value is 5", nil)`
+export fn then(pattern: String, inline_block: Any) -> Void:
+    execute_step(StepKind::Then, pattern, wrap_block(inline_block))
+
+# And-then step - chained assertion
+# Parser transforms: `and_then history has 1 entries:` -> `and_then("history has 1 entries", nil)`
+export fn and_then(pattern: String, inline_block: Any) -> Void:
+    execute_step(StepKind::AndThen, pattern, wrap_block(inline_block))
+
+# Helper to wrap block parameter
+fn wrap_block(inline_block: Any) -> Option[Fn() -> Void]:
+    if inline_block is Nil:
+        return None
+    # Assume it's a callable do-block
+    return Some(inline_block as Fn() -> Void)
+
+# ============================================================================
+# Context Definition Function
+# ============================================================================
+
+# Context definition - reusable step definition
+# Parser transforms: `context fresh calculator:` -> this function
+export fn context_def_step(pattern: String, kind_hint: String, block: Fn() -> Void) -> Void:
+    let kind = match kind_hint:
+        case "given":
+            StepKind::Given
+        case "when":
+            StepKind::When
+        case "then":
+            StepKind::Then
+        case _:
+            StepKind::Given  # Default to Given
+
+    step_def(pattern, kind, fn(params: Dict[String, Any]):
+        # Store params in context
+        match current_context:
+            case Some(ctx):
+                for key, value in params:
+                    ctx.variables.insert(key, value)
+            case None:
+                pass
+        block()
+    )
+
+# ============================================================================
+# Scenario Outline Execution
+# ============================================================================
+
+# Run a scenario outline with examples
+export fn run_scenario_outline_with_examples(
+    scenario_name: String,
+    steps_block: Fn() -> Void,
+    examples_name: String
+) -> Void:
+    match get_examples(examples_name):
+        case Some(rows):
+            let headers = get_examples_headers(rows)
+            let data_rows = get_examples_data(rows)
+
+            for row_idx in 0..data_rows.len():
+                let row = data_rows[row_idx]
+
+                # Create context with example values
+                let ctx = ScenarioContext(
+                    variables: {},
+                    current_examples: Some(examples_name),
+                    example_row_index: row_idx
+                )
+
+                # Map headers to values
+                for i in 0..headers.len():
+                    if i < row.len():
+                        ctx.variables.insert(headers[i], row[i])
+
+                current_context = Some(ctx)
+
+                # Run scenario steps with this row's values
+                let row_desc = format_row(headers, row)
+                it(f"{scenario_name} ({row_desc})", fn():
+                    steps_block()
+                )
+
+                current_context = None
+
+        case None:
+            panic(f"Examples table '{examples_name}' not found")
+
+# Format a row for test description
+fn format_row(headers: List[String], row: List[Any]) -> String:
+    let parts: List[String] = []
+    for i in 0..headers.len():
+        if i < row.len():
+            parts.push(f"{headers[i]}={row[i]}")
+    return parts.join(", ")
+
+# ============================================================================
+# Variable Access
+# ============================================================================
+
+# Get a variable from the current scenario context
+export fn get_var(name: String) -> Any:
+    match current_context:
+        case Some(ctx):
+            match ctx.variables.get(name):
+                case Some(value):
+                    return value
+                case None:
+                    panic(f"Variable '{name}' not found in scenario context")
+        case None:
+            panic("No active scenario context")
+
+# Set a variable in the current scenario context
+export fn set_var(name: String, value: Any) -> Void:
+    match current_context:
+        case Some(ctx):
+            ctx.variables.insert(name, value)
+        case None:
+            panic("No active scenario context")
+
+# ============================================================================
+# Macros for Natural Language Step Definitions
+# ============================================================================
+
+# Macro to define a Given step
+# Usage: define_given "fresh calculator": Calculator.new()
+export macro define_given(pattern_str: Str const, body: Any) -> ():
+    emit result:
+        return nil
+
+# Macro to define a When step
+export macro define_when(pattern_str: Str const, body: Any) -> ():
+    emit result:
+        return nil
+
+# Macro to define a Then step
+export macro define_then(pattern_str: Str const, body: Any) -> ():
+    emit result:
+        return nil

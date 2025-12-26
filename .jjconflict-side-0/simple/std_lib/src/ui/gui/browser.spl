@@ -1,0 +1,430 @@
+# Browser Renderer - WebAssembly DOM Backend
+#
+# Renders UI elements directly to the browser DOM using async JavaScript interop.
+# Demonstrates that the same Element/PatchSet API works across different backends.
+#
+# Key Features:
+#   - Direct DOM manipulation via WASM bindings
+#   - Event handling through DOM events
+#   - Async rendering with requestAnimationFrame
+#   - CSS styling integration
+#   - Zero dependencies (pure DOM API)
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.attrs.*
+use ui.patchset.*
+use ui.renderer.*
+
+# =============================================================================
+# Browser Async Renderer (DOM-based)
+# =============================================================================
+
+pub struct BrowserRenderer:
+    # Root DOM element
+    root_element_id: String
+
+    # Element tracking
+    dom_node_map: Dict[u64, DomNodeHandle]  # NodeId -> DOM element
+    event_handlers: Dict[u64, EventCallback]
+
+    # State
+    initialized: bool
+    window_width: u32
+    window_height: u32
+
+    # Current tree (for diffing)
+    current_tree: Option[ElementTree]
+
+impl BrowserRenderer:
+    # Create a new browser renderer
+    pub fn new(root_element_id: &str) -> Result[BrowserRenderer, RenderError]:
+        return Ok(BrowserRenderer {
+            root_element_id: root_element_id.to_string(),
+            dom_node_map: Dict::new(),
+            event_handlers: Dict::new(),
+            initialized: false,
+            window_width: 0,
+            window_height: 0,
+            current_tree: None
+        })
+
+# =============================================================================
+# Async RenderBackend Implementation
+# =============================================================================
+
+impl RenderBackend for BrowserRenderer:
+    async fn init(self) -> Future[Result[(), RenderError]]:
+        if self.initialized:
+            return Future::ready(Err(RenderError::AlreadyInitialized))
+
+        # Get root element from DOM
+        let root_exists = await browser_element_exists(&self.root_element_id)
+        if not root_exists:
+            return Future::ready(Err(RenderError::IoError(
+                f"Root element '#{self.root_element_id}' not found in DOM"
+            )))
+
+        # Get initial window dimensions
+        let (width, height) = await browser_get_window_size()
+        self.window_width = width
+        self.window_height = height
+
+        # Set up resize listener
+        await browser_add_resize_listener(|w, h| {
+            self.window_width = w
+            self.window_height = h
+        })
+
+        self.initialized = true
+        return Future::ready(Ok(()))
+
+    async fn shutdown(self) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # Clear DOM
+        await browser_clear_element(&self.root_element_id)
+
+        # Remove event listeners
+        for (_, callback) in &self.event_handlers:
+            # TODO: Remove DOM event listeners
+            pass
+
+        self.dom_node_map.clear()
+        self.event_handlers.clear()
+        self.initialized = false
+
+        return Future::ready(Ok(()))
+
+    fn dimensions(self) -> (u16, u16):
+        return (self.window_width as u16, self.window_height as u16)
+
+    # Render element tree to DOM
+    async fn render(self, tree: &ElementTree) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # Check if we have a previous tree for diffing
+        match &self.current_tree:
+            case Some(old_tree):
+                # Incremental update via patches
+                let patches = diff(old_tree.root(), tree.root())
+                await self.apply_patches_internal(&patches)
+            case None:
+                # Initial render - build entire DOM tree
+                await self.render_initial(tree)
+
+        # Store current tree for next diff
+        self.current_tree = Some(tree.clone())
+
+        return Future::ready(Ok(()))
+
+    # Apply patches incrementally
+    async fn apply_patches(self, patches: &PatchSet) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        await self.apply_patches_internal(patches)
+
+        return Future::ready(Ok(()))
+
+    async fn clear(self) -> Future[Result[(), RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # Clear root element in DOM
+        await browser_clear_element(&self.root_element_id)
+        self.dom_node_map.clear()
+        self.current_tree = None
+
+        return Future::ready(Ok(()))
+
+    async fn flush(self) -> Future[Result[(), RenderError]]:
+        # Browser automatically flushes on requestAnimationFrame
+        # Nothing to do here
+        return Future::ready(Ok(()))
+
+    # Poll DOM events
+    async fn poll_event(self, timeout_ms: u64) -> Future[Result[Option[Event], RenderError]]:
+        if not self.initialized:
+            return Future::ready(Err(RenderError::NotInitialized))
+
+        # Browser events are async via callbacks
+        # This is a stub - real implementation would use event queue
+        await sleep_async(timeout_ms)
+        return Future::ready(Ok(None))
+
+    async fn read_event(self) -> Future[Result[Event, RenderError]]:
+        # Block until event arrives
+        loop:
+            match await self.poll_event(1000):
+                case Ok(Some(event)): return Future::ready(Ok(event))
+                case Ok(None): pass
+                case Err(e): return Future::ready(Err(e))
+
+# =============================================================================
+# Internal Implementation
+# =============================================================================
+
+impl BrowserRenderer:
+    # Initial render - build entire DOM tree
+    async fn render_initial(self, tree: &ElementTree) -> Future[()]:
+        # Clear root
+        await browser_clear_element(&self.root_element_id)
+
+        # Render root element and children
+        let root_dom = await self.render_element_to_dom(tree.root(), None)
+
+        # Append to root container
+        await browser_append_child(&self.root_element_id, root_dom)
+
+        return Future::ready(())
+
+    # Render single element to DOM node
+    async fn render_element_to_dom(self, elem: &Element, parent_handle: Option[DomNodeHandle])
+        -> Future[DomNodeHandle]:
+        # Create DOM element
+        let tag_name = elem.kind.tag_name()
+        let dom_handle = await browser_create_element(tag_name)
+
+        # Store mapping
+        self.dom_node_map.set(elem.id.value(), dom_handle)
+
+        # Set ID attribute
+        await browser_set_attribute(dom_handle, "id", &f"sui-{elem.id.value()}")
+
+        # Set data attribute for tracking
+        await browser_set_attribute(dom_handle, "data-sui-id", &elem.id.value().to_string())
+
+        # Set key if present
+        if let Some(key) = &elem.key:
+            await browser_set_attribute(dom_handle, "data-key", key)
+
+        # Set classes
+        if not elem.classes.is_empty():
+            await browser_set_attribute(dom_handle, "class", &elem.classes.join(" "))
+
+        # Set attributes
+        for (name, value) in &elem.attrs:
+            await browser_set_attribute(dom_handle, name, value)
+
+        # Set inline styles
+        if not elem.styles.is_empty():
+            let style_str = elem.styles.iter()
+                .map(|(k, v)| f"{k}: {v}")
+                .join("; ")
+            await browser_set_attribute(dom_handle, "style", &style_str)
+
+        # Set text content
+        if let Some(text) = &elem.text:
+            await browser_set_text_content(dom_handle, text)
+
+        # Set tab index
+        if let Some(idx) = elem.tab_index:
+            await browser_set_attribute(dom_handle, "tabindex", &idx.to_string())
+
+        # Add event listeners
+        for (event_name, handler_id) in &elem.events:
+            await self.add_event_listener(dom_handle, elem.id, event_name, handler_id)
+
+        # Render children
+        for child in &elem.children:
+            let child_dom = await self.render_element_to_dom(child, Some(dom_handle))
+            await browser_append_child_handle(dom_handle, child_dom)
+
+        return Future::ready(dom_handle)
+
+    # Apply patch set to DOM
+    async fn apply_patches_internal(self, patches: &PatchSet) -> Future[()]:
+        for patch in patches.iter():
+            match patch:
+                case PatchOp::SetText { node_id, text }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_set_text_content(handle, &text)
+
+                case PatchOp::SetAttr { node_id, name, value }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_set_attribute(handle, &name, &value)
+
+                case PatchOp::RemoveAttr { node_id, name }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_remove_attribute(handle, &name)
+
+                case PatchOp::AddClass { node_id, class }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_add_class(handle, &class)
+
+                case PatchOp::RemoveClass { node_id, class }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_remove_class(handle, &class)
+
+                case PatchOp::SetStyle { node_id, property, value }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_set_style(handle, &property, &value)
+
+                case PatchOp::RemoveStyle { node_id, property }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_remove_style(handle, &property)
+
+                case PatchOp::InsertChild { parent_id, index, element }:
+                    if let Some(parent_handle) = self.dom_node_map.get(&parent_id.value()):
+                        let child_dom = await self.render_element_to_dom(&element, Some(parent_handle))
+                        await browser_insert_child_at(parent_handle, child_dom, index)
+
+                case PatchOp::RemoveChild { parent_id, child_id }:
+                    if let Some(child_handle) = self.dom_node_map.get(&child_id.value()):
+                        await browser_remove_child(child_handle)
+                        self.dom_node_map.remove(&child_id.value())
+
+                case PatchOp::ReplaceSubtree { node_id, element }:
+                    if let Some(old_handle) = self.dom_node_map.get(&node_id.value()):
+                        let new_handle = await self.render_element_to_dom(&element, None)
+                        await browser_replace_node(old_handle, new_handle)
+                        self.dom_node_map.remove(&node_id.value())
+
+                case PatchOp::SetFocus { node_id }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_focus_element(handle)
+
+                case PatchOp::ClearFocus { node_id }:
+                    if let Some(handle) = self.dom_node_map.get(&node_id.value()):
+                        await browser_blur_element(handle)
+
+                case _:
+                    # Other patch operations
+                    pass
+
+        return Future::ready(())
+
+    # Add event listener to DOM element
+    async fn add_event_listener(self, dom_handle: DomNodeHandle, node_id: NodeId,
+                                 event_name: &str, handler_id: u64) -> Future[()]:
+        # Create callback that converts DOM event to UI Event
+        let callback = |dom_event: DomEvent| {
+            # TODO: Convert DOM event to UI Event
+            # TODO: Dispatch to application event handler
+            let ui_event = self.convert_dom_event(dom_event)
+            self.dispatch_event(node_id, handler_id, ui_event)
+        }
+
+        # Register with DOM
+        await browser_add_event_listener(dom_handle, event_name, callback)
+
+        # Store callback for cleanup
+        self.event_handlers.set(handler_id, callback)
+
+        return Future::ready(())
+
+    fn convert_dom_event(self, dom_event: DomEvent) -> Event:
+        # TODO: Convert DOM event to UI event
+        match dom_event.event_type:
+            case "keydown" | "keyup":
+                return Event::Key(KeyEvent {
+                    code: parse_key_code(dom_event.key),
+                    modifiers: KeyModifiers {
+                        shift: dom_event.shift_key,
+                        ctrl: dom_event.ctrl_key,
+                        alt: dom_event.alt_key
+                    }
+                })
+            case "click" | "mousedown" | "mouseup":
+                return Event::Mouse(MouseEvent {
+                    kind: parse_mouse_event_kind(dom_event.event_type),
+                    column: dom_event.client_x as u16,
+                    row: dom_event.client_y as u16,
+                    modifiers: KeyModifiers::none()
+                })
+            case "resize":
+                return Event::Resize {
+                    width: dom_event.width as u16,
+                    height: dom_event.height as u16
+                }
+            case _:
+                return Event::Key(KeyEvent { code: KeyCode::Null, modifiers: KeyModifiers::none() })
+
+    fn dispatch_event(self, node_id: NodeId, handler_id: u64, event: Event):
+        # TODO: Dispatch to application event handler
+        # This would call the application's event callback
+        pass
+
+# =============================================================================
+# Browser DOM API (WASM FFI)
+# =============================================================================
+
+# DOM node handle (opaque pointer to JavaScript object)
+type DomNodeHandle = i64
+
+struct DomEvent:
+    event_type: String
+    key: String
+    shift_key: bool
+    ctrl_key: bool
+    alt_key: bool
+    client_x: i32
+    client_y: i32
+    width: u32
+    height: u32
+
+type EventCallback = fn(DomEvent) -> ()
+
+# Browser API functions (implemented via WASM imports)
+# These would be implemented in JavaScript and imported
+
+# Element queries
+extern async fn browser_element_exists(id: &str) -> Future[bool]
+extern async fn browser_get_window_size() -> Future[(u32, u32)]
+
+# Element creation and manipulation
+extern async fn browser_create_element(tag_name: &str) -> Future[DomNodeHandle]
+extern async fn browser_clear_element(id: &str) -> Future[()]
+extern async fn browser_append_child(parent_id: &str, child_handle: DomNodeHandle) -> Future[()]
+extern async fn browser_append_child_handle(parent_handle: DomNodeHandle, child_handle: DomNodeHandle) -> Future[()]
+extern async fn browser_insert_child_at(parent_handle: DomNodeHandle, child_handle: DomNodeHandle, index: u64) -> Future[()]
+extern async fn browser_remove_child(child_handle: DomNodeHandle) -> Future[()]
+extern async fn browser_replace_node(old_handle: DomNodeHandle, new_handle: DomNodeHandle) -> Future[()]
+
+# Attributes and properties
+extern async fn browser_set_attribute(handle: DomNodeHandle, name: &str, value: &str) -> Future[()]
+extern async fn browser_remove_attribute(handle: DomNodeHandle, name: &str) -> Future[()]
+extern async fn browser_set_text_content(handle: DomNodeHandle, text: &str) -> Future[()]
+
+# Classes
+extern async fn browser_add_class(handle: DomNodeHandle, class: &str) -> Future[()]
+extern async fn browser_remove_class(handle: DomNodeHandle, class: &str) -> Future[()]
+
+# Styles
+extern async fn browser_set_style(handle: DomNodeHandle, property: &str, value: &str) -> Future[()]
+extern async fn browser_remove_style(handle: DomNodeHandle, property: &str) -> Future[()]
+
+# Focus
+extern async fn browser_focus_element(handle: DomNodeHandle) -> Future[()]
+extern async fn browser_blur_element(handle: DomNodeHandle) -> Future[()]
+
+# Events
+extern async fn browser_add_event_listener(handle: DomNodeHandle, event_name: &str, callback: EventCallback) -> Future[()]
+extern async fn browser_add_resize_listener(callback: fn(u32, u32) -> ()) -> Future[()]
+
+# Utilities
+fn parse_key_code(key: &str) -> KeyCode:
+    match key:
+        case "Enter": return KeyCode::Enter
+        case "Escape": return KeyCode::Escape
+        case "Backspace": return KeyCode::Backspace
+        case "Tab": return KeyCode::Tab
+        case "ArrowUp": return KeyCode::Up
+        case "ArrowDown": return KeyCode::Down
+        case "ArrowLeft": return KeyCode::Left
+        case "ArrowRight": return KeyCode::Right
+        case _:
+            if key.len() == 1:
+                return KeyCode::Char(key.chars().next().unwrap())
+            return KeyCode::Null
+
+fn parse_mouse_event_kind(event_type: &str) -> MouseEventKind:
+    match event_type:
+        case "mousedown": return MouseEventKind::Down(MouseButton::Left)
+        case "mouseup": return MouseEventKind::Up(MouseButton::Left)
+        case "click": return MouseEventKind::Down(MouseButton::Left)
+        case _: return MouseEventKind::Moved

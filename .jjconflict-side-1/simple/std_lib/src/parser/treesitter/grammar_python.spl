@@ -1,0 +1,781 @@
+# Python Language Grammar for Tree-sitter
+# Complete Python 3 grammar implementation
+
+import parser.treesitter.{Grammar, Token}
+
+class PythonGrammar:
+    grammar: Grammar
+
+    fn new() -> PythonGrammar:
+        let mut grammar = Grammar.new("python")
+
+        # Set entry point
+        grammar.entry_point = "module"
+
+        # Build all grammar rules
+        let mut builder = PythonGrammarBuilder(grammar: grammar)
+        builder.build_grammar()
+
+        PythonGrammar(grammar: builder.grammar)
+
+class PythonGrammarBuilder:
+    grammar: Grammar
+
+    fn build_grammar(mut self):
+        # Entry point
+        self.add_module()
+
+        # Statements
+        self.add_statements()
+        self.add_compound_statements()
+
+        # Expressions
+        self.add_expressions()
+        self.add_literals()
+
+        # Patterns (Python 3.10+)
+        self.add_patterns()
+
+        # Types
+        self.add_types()
+
+        # Common elements
+        self.add_common()
+
+    # Module (entry point)
+    fn add_module(mut self):
+        self.grammar.add_rule("module", repeat(choice([
+            ref("statement"),
+            ref("expression_statement"),
+            token(Newline)
+        ])))
+
+    # Statements
+    fn add_statements(mut self):
+        self.grammar.add_rule("statement", choice([
+            ref("simple_statement"),
+            ref("compound_statement")
+        ]))
+
+        # Simple statements
+        self.grammar.add_rule("simple_statement", choice([
+            ref("import_statement"),
+            ref("from_import_statement"),
+            ref("assignment"),
+            ref("augmented_assignment"),
+            ref("return_statement"),
+            ref("raise_statement"),
+            ref("pass_statement"),
+            ref("break_statement"),
+            ref("continue_statement"),
+            ref("global_statement"),
+            ref("nonlocal_statement"),
+            ref("assert_statement"),
+            ref("del_statement"),
+            ref("yield_statement")
+        ]))
+
+        # Import
+        self.grammar.add_rule("import_statement", seq([
+            token(Import),
+            ref("dotted_name"),
+            optional(seq([token(As), ref("identifier")]))
+        ]))
+
+        self.grammar.add_rule("from_import_statement", seq([
+            token(From),
+            ref("dotted_name"),
+            token(Import),
+            choice([
+                token(Star),
+                seq([
+                    ref("identifier"),
+                    optional(seq([token(As), ref("identifier")]))
+                ])
+            ])
+        ]))
+
+        # Assignment
+        self.grammar.add_rule("assignment", seq([
+            ref("assignment_target"),
+            token(Equals),
+            ref("expression")
+        ]))
+
+        self.grammar.add_rule("augmented_assignment", seq([
+            ref("identifier"),
+            choice([
+                token(PlusEquals), token(MinusEquals), token(StarEquals),
+                token(SlashEquals), token(DoubleSlashEquals), token(PercentEquals),
+                token(StarStarEquals), token(AndEquals), token(OrEquals),
+                token(XorEquals), token(LShiftEquals), token(RShiftEquals)
+            ]),
+            ref("expression")
+        ]))
+
+        # Control flow
+        self.grammar.add_rule("return_statement", seq([
+            token(Return),
+            optional(ref("expression"))
+        ]))
+
+        self.grammar.add_rule("raise_statement", seq([
+            token(Raise),
+            optional(seq([
+                ref("expression"),
+                optional(seq([token(From), ref("expression")]))
+            ]))
+        ]))
+
+        self.grammar.add_rule("pass_statement", token(Pass))
+        self.grammar.add_rule("break_statement", token(Break))
+        self.grammar.add_rule("continue_statement", token(Continue))
+
+        # Scope
+        self.grammar.add_rule("global_statement", seq([
+            token(Global),
+            ref("identifier"),
+            repeat(seq([token(Comma), ref("identifier")]))
+        ]))
+
+        self.grammar.add_rule("nonlocal_statement", seq([
+            token(Nonlocal),
+            ref("identifier"),
+            repeat(seq([token(Comma), ref("identifier")]))
+        ]))
+
+        # Assert
+        self.grammar.add_rule("assert_statement", seq([
+            token(Assert),
+            ref("expression"),
+            optional(seq([token(Comma), ref("expression")]))
+        ]))
+
+        # Delete
+        self.grammar.add_rule("del_statement", seq([
+            token(Del),
+            ref("expression")
+        ]))
+
+        # Yield
+        self.grammar.add_rule("yield_statement", choice([
+            seq([token(Yield), ref("expression")]),
+            seq([token(Yield), token(From), ref("expression")])
+        ]))
+
+    # Compound statements
+    fn add_compound_statements(mut self):
+        self.grammar.add_rule("compound_statement", choice([
+            ref("function_def"),
+            ref("class_def"),
+            ref("if_statement"),
+            ref("for_statement"),
+            ref("while_statement"),
+            ref("try_statement"),
+            ref("with_statement"),
+            ref("match_statement"),
+            ref("async_function_def"),
+            ref("async_for_statement"),
+            ref("async_with_statement")
+        ]))
+
+        # Function definition
+        self.grammar.add_rule("function_def", seq([
+            optional(ref("decorators")),
+            token(Def),
+            field("name", ref("identifier")),
+            token(LParen),
+            optional(ref("parameters")),
+            token(RParen),
+            optional(seq([token(Arrow), field("return_type", ref("type"))])),
+            token(Colon),
+            ref("block")
+        ]))
+
+        self.grammar.add_rule("async_function_def", seq([
+            optional(ref("decorators")),
+            token(Async),
+            token(Def),
+            field("name", ref("identifier")),
+            token(LParen),
+            optional(ref("parameters")),
+            token(RParen),
+            optional(seq([token(Arrow), field("return_type", ref("type"))])),
+            token(Colon),
+            ref("block")
+        ]))
+
+        # Class definition
+        self.grammar.add_rule("class_def", seq([
+            optional(ref("decorators")),
+            token(Class),
+            field("name", ref("identifier")),
+            optional(seq([
+                token(LParen),
+                optional(ref("argument_list")),
+                token(RParen)
+            ])),
+            token(Colon),
+            ref("block")
+        ]))
+
+        # If statement
+        self.grammar.add_rule("if_statement", seq([
+            token(If),
+            field("condition", ref("expression")),
+            token(Colon),
+            ref("block"),
+            repeat(ref("elif_clause")),
+            optional(ref("else_clause"))
+        ]))
+
+        self.grammar.add_rule("elif_clause", seq([
+            token(Elif),
+            ref("expression"),
+            token(Colon),
+            ref("block")
+        ]))
+
+        self.grammar.add_rule("else_clause", seq([
+            token(Else),
+            token(Colon),
+            ref("block")
+        ]))
+
+        # For loop
+        self.grammar.add_rule("for_statement", seq([
+            token(For),
+            ref("identifier"),
+            token(In),
+            ref("expression"),
+            token(Colon),
+            ref("block"),
+            optional(ref("else_clause"))
+        ]))
+
+        self.grammar.add_rule("async_for_statement", seq([
+            token(Async),
+            token(For),
+            ref("identifier"),
+            token(In),
+            ref("expression"),
+            token(Colon),
+            ref("block"),
+            optional(ref("else_clause"))
+        ]))
+
+        # While loop
+        self.grammar.add_rule("while_statement", seq([
+            token(While),
+            ref("expression"),
+            token(Colon),
+            ref("block"),
+            optional(ref("else_clause"))
+        ]))
+
+        # Try/except
+        self.grammar.add_rule("try_statement", seq([
+            token(Try),
+            token(Colon),
+            ref("block"),
+            choice([
+                seq([
+                    repeat(ref("except_clause")),
+                    optional(ref("else_clause")),
+                    optional(ref("finally_clause"))
+                ]),
+                ref("finally_clause")
+            ])
+        ]))
+
+        self.grammar.add_rule("except_clause", seq([
+            token(Except),
+            optional(seq([
+                ref("expression"),
+                optional(seq([token(As), ref("identifier")]))
+            ])),
+            token(Colon),
+            ref("block")
+        ]))
+
+        self.grammar.add_rule("finally_clause", seq([
+            token(Finally),
+            token(Colon),
+            ref("block")
+        ]))
+
+        # With statement
+        self.grammar.add_rule("with_statement", seq([
+            token(With),
+            ref("with_item"),
+            repeat(seq([token(Comma), ref("with_item")])),
+            token(Colon),
+            ref("block")
+        ]))
+
+        self.grammar.add_rule("async_with_statement", seq([
+            token(Async),
+            token(With),
+            ref("with_item"),
+            repeat(seq([token(Comma), ref("with_item")])),
+            token(Colon),
+            ref("block")
+        ]))
+
+        self.grammar.add_rule("with_item", seq([
+            ref("expression"),
+            optional(seq([token(As), ref("identifier")]))
+        ]))
+
+        # Match statement (Python 3.10+)
+        self.grammar.add_rule("match_statement", seq([
+            token(Match),
+            ref("expression"),
+            token(Colon),
+            token(Newline),
+            token(Indent),
+            repeat(ref("case_clause")),
+            token(Dedent)
+        ]))
+
+        self.grammar.add_rule("case_clause", seq([
+            token(Case),
+            ref("pattern"),
+            optional(seq([token(If), ref("expression")])),  # guard
+            token(Colon),
+            ref("block")
+        ]))
+
+    # Expressions
+    fn add_expressions(mut self):
+        self.grammar.add_rule("expression", ref("or_expression"))
+
+        # Binary expressions (precedence order)
+        self.grammar.add_rule("or_expression", binary_op(
+            ref("and_expression"),
+            token(Or)
+        ))
+
+        self.grammar.add_rule("and_expression", binary_op(
+            ref("not_expression"),
+            token(And)
+        ))
+
+        self.grammar.add_rule("not_expression", choice([
+            seq([token(Not), ref("comparison")]),
+            ref("comparison")
+        ]))
+
+        self.grammar.add_rule("comparison", binary_op(
+            ref("bitwise_or"),
+            choice([
+                token(Less), token(Greater), token(LessEquals),
+                token(GreaterEquals), token(EqualsEquals), token(NotEquals),
+                token(In), token(Is), seq([token(Is), token(Not)]),
+                seq([token(Not), token(In)])
+            ])
+        ))
+
+        self.grammar.add_rule("bitwise_or", binary_op(
+            ref("bitwise_xor"),
+            token(Pipe)
+        ))
+
+        self.grammar.add_rule("bitwise_xor", binary_op(
+            ref("bitwise_and"),
+            token(Caret)
+        ))
+
+        self.grammar.add_rule("bitwise_and", binary_op(
+            ref("shift_expression"),
+            token(Ampersand)
+        ))
+
+        self.grammar.add_rule("shift_expression", binary_op(
+            ref("additive_expression"),
+            choice([token(LShift), token(RShift)])
+        ))
+
+        self.grammar.add_rule("additive_expression", binary_op(
+            ref("multiplicative_expression"),
+            choice([token(Plus), token(Minus)])
+        ))
+
+        self.grammar.add_rule("multiplicative_expression", binary_op(
+            ref("unary_expression"),
+            choice([token(Star), token(Slash), token(DoubleSlash), token(Percent), token(At)])
+        ))
+
+        self.grammar.add_rule("unary_expression", choice([
+            seq([choice([token(Plus), token(Minus), token(Tilde)]), ref("power_expression")]),
+            ref("power_expression")
+        ]))
+
+        self.grammar.add_rule("power_expression", binary_op(
+            ref("primary_expression"),
+            token(StarStar)
+        ))
+
+        # Primary expressions
+        self.grammar.add_rule("primary_expression", choice([
+            ref("atom"),
+            ref("attribute_ref"),
+            ref("subscription"),
+            ref("call"),
+            ref("await_expression")
+        ]))
+
+        self.grammar.add_rule("atom", choice([
+            ref("identifier"),
+            ref("literal"),
+            ref("list_literal"),
+            ref("dict_literal"),
+            ref("set_literal"),
+            ref("tuple_literal"),
+            ref("lambda"),
+            ref("conditional_expression"),
+            ref("parenthesized_expression"),
+            ref("list_comprehension"),
+            ref("dict_comprehension"),
+            ref("set_comprehension"),
+            ref("generator_expression")
+        ]))
+
+        # Attribute/subscription/call
+        self.grammar.add_rule("attribute_ref", seq([
+            ref("primary_expression"),
+            token(Dot),
+            ref("identifier")
+        ]))
+
+        self.grammar.add_rule("subscription", seq([
+            ref("primary_expression"),
+            token(LBracket),
+            ref("expression"),
+            token(RBracket)
+        ]))
+
+        self.grammar.add_rule("call", seq([
+            ref("primary_expression"),
+            token(LParen),
+            optional(ref("argument_list")),
+            token(RParen)
+        ]))
+
+        self.grammar.add_rule("await_expression", seq([
+            token(Await),
+            ref("primary_expression")
+        ]))
+
+        # Lambda
+        self.grammar.add_rule("lambda", seq([
+            token(Lambda),
+            optional(ref("parameters")),
+            token(Colon),
+            ref("expression")
+        ]))
+
+        # Conditional expression
+        self.grammar.add_rule("conditional_expression", seq([
+            ref("expression"),
+            token(If),
+            ref("expression"),
+            token(Else),
+            ref("expression")
+        ]))
+
+        # Comprehensions
+        self.grammar.add_rule("list_comprehension", seq([
+            token(LBracket),
+            ref("expression"),
+            ref("for_in_clause"),
+            repeat(choice([ref("for_in_clause"), ref("if_clause")])),
+            token(RBracket)
+        ]))
+
+        self.grammar.add_rule("dict_comprehension", seq([
+            token(LBrace),
+            ref("expression"),
+            token(Colon),
+            ref("expression"),
+            ref("for_in_clause"),
+            repeat(choice([ref("for_in_clause"), ref("if_clause")])),
+            token(RBrace)
+        ]))
+
+        self.grammar.add_rule("set_comprehension", seq([
+            token(LBrace),
+            ref("expression"),
+            ref("for_in_clause"),
+            repeat(choice([ref("for_in_clause"), ref("if_clause")])),
+            token(RBrace)
+        ]))
+
+        self.grammar.add_rule("generator_expression", seq([
+            token(LParen),
+            ref("expression"),
+            ref("for_in_clause"),
+            repeat(choice([ref("for_in_clause"), ref("if_clause")])),
+            token(RParen)
+        ]))
+
+        self.grammar.add_rule("for_in_clause", seq([
+            token(For),
+            ref("identifier"),
+            token(In),
+            ref("expression")
+        ]))
+
+        self.grammar.add_rule("if_clause", seq([
+            token(If),
+            ref("expression")
+        ]))
+
+    # Literals
+    fn add_literals(mut self):
+        self.grammar.add_rule("literal", choice([
+            token(Integer),
+            token(Float),
+            token(String),
+            token(FString),
+            token(True),
+            token(False),
+            token(None)
+        ]))
+
+        self.grammar.add_rule("list_literal", seq([
+            token(LBracket),
+            optional(ref("expression_list")),
+            token(RBracket)
+        ]))
+
+        self.grammar.add_rule("dict_literal", seq([
+            token(LBrace),
+            optional(ref("key_value_pairs")),
+            token(RBrace)
+        ]))
+
+        self.grammar.add_rule("set_literal", seq([
+            token(LBrace),
+            ref("expression_list"),
+            token(RBrace)
+        ]))
+
+        self.grammar.add_rule("tuple_literal", seq([
+            token(LParen),
+            optional(ref("expression_list")),
+            optional(token(Comma)),  # Trailing comma
+            token(RParen)
+        ]))
+
+        self.grammar.add_rule("key_value_pairs", seq([
+            ref("key_value_pair"),
+            repeat(seq([token(Comma), ref("key_value_pair")])),
+            optional(token(Comma))
+        ]))
+
+        self.grammar.add_rule("key_value_pair", seq([
+            ref("expression"),
+            token(Colon),
+            ref("expression")
+        ]))
+
+    # Patterns (Python 3.10+ match statement)
+    fn add_patterns(mut self):
+        self.grammar.add_rule("pattern", choice([
+            ref("literal_pattern"),
+            ref("capture_pattern"),
+            ref("wildcard_pattern"),
+            ref("sequence_pattern"),
+            ref("mapping_pattern"),
+            ref("class_pattern"),
+            ref("or_pattern")
+        ]))
+
+        self.grammar.add_rule("literal_pattern", ref("literal"))
+        self.grammar.add_rule("capture_pattern", ref("identifier"))
+        self.grammar.add_rule("wildcard_pattern", token(Underscore))
+
+        self.grammar.add_rule("sequence_pattern", choice([
+            seq([
+                token(LBracket),
+                optional(ref("pattern_list")),
+                token(RBracket)
+            ]),
+            seq([
+                token(LParen),
+                optional(ref("pattern_list")),
+                token(RParen)
+            ])
+        ]))
+
+        self.grammar.add_rule("mapping_pattern", seq([
+            token(LBrace),
+            optional(ref("key_pattern_pairs")),
+            token(RBrace)
+        ]))
+
+        self.grammar.add_rule("class_pattern", seq([
+            ref("dotted_name"),
+            token(LParen),
+            optional(ref("pattern_list")),
+            token(RParen)
+        ]))
+
+        self.grammar.add_rule("or_pattern", binary_op(
+            ref("pattern"),
+            token(Pipe)
+        ))
+
+    # Types (type annotations)
+    fn add_types(mut self):
+        self.grammar.add_rule("type", choice([
+            ref("simple_type"),
+            ref("generic_type"),
+            ref("union_type"),
+            ref("optional_type"),
+            ref("callable_type")
+        ]))
+
+        self.grammar.add_rule("simple_type", ref("dotted_name"))
+
+        self.grammar.add_rule("generic_type", seq([
+            ref("dotted_name"),
+            token(LBracket),
+            ref("type_list"),
+            token(RBracket)
+        ]))
+
+        self.grammar.add_rule("union_type", binary_op(
+            ref("type"),
+            token(Pipe)
+        ))
+
+        self.grammar.add_rule("optional_type", seq([
+            ref("type"),
+            token(QuestionMark)
+        ]))
+
+        self.grammar.add_rule("callable_type", seq([
+            token(Callable),
+            token(LBracket),
+            token(LBracket),
+            optional(ref("type_list")),
+            token(RBracket),
+            token(Comma),
+            ref("type"),
+            token(RBracket)
+        ]))
+
+    # Common elements
+    fn add_common(mut self):
+        self.grammar.add_rule("identifier", token(Identifier))
+        self.grammar.add_rule("dotted_name", seq([
+            ref("identifier"),
+            repeat(seq([token(Dot), ref("identifier")]))
+        ]))
+
+        self.grammar.add_rule("parameters", seq([
+            ref("parameter"),
+            repeat(seq([token(Comma), ref("parameter")])),
+            optional(token(Comma))
+        ]))
+
+        self.grammar.add_rule("parameter", seq([
+            ref("identifier"),
+            optional(seq([token(Colon), ref("type")])),
+            optional(seq([token(Equals), ref("expression")]))
+        ]))
+
+        self.grammar.add_rule("argument_list", seq([
+            ref("argument"),
+            repeat(seq([token(Comma), ref("argument")])),
+            optional(token(Comma))
+        ]))
+
+        self.grammar.add_rule("argument", choice([
+            seq([ref("identifier"), token(Equals), ref("expression")]),  # Keyword arg
+            seq([token(StarStar), ref("expression")]),  # **kwargs
+            seq([token(Star), ref("expression")]),  # *args
+            ref("expression")  # Positional arg
+        ]))
+
+        self.grammar.add_rule("assignment_target", choice([
+            ref("identifier"),
+            ref("tuple_assignment"),
+            ref("list_assignment"),
+            ref("attribute_ref"),
+            ref("subscription")
+        ]))
+
+        self.grammar.add_rule("tuple_assignment", seq([
+            token(LParen),
+            ref("assignment_target"),
+            repeat(seq([token(Comma), ref("assignment_target")])),
+            token(RParen)
+        ]))
+
+        self.grammar.add_rule("list_assignment", seq([
+            token(LBracket),
+            ref("assignment_target"),
+            repeat(seq([token(Comma), ref("assignment_target")])),
+            token(RBracket)
+        ]))
+
+        self.grammar.add_rule("expression_list", seq([
+            ref("expression"),
+            repeat(seq([token(Comma), ref("expression")])),
+            optional(token(Comma))
+        ]))
+
+        self.grammar.add_rule("pattern_list", seq([
+            ref("pattern"),
+            repeat(seq([token(Comma), ref("pattern")])),
+            optional(token(Comma))
+        ]))
+
+        self.grammar.add_rule("key_pattern_pairs", seq([
+            ref("key_pattern_pair"),
+            repeat(seq([token(Comma), ref("key_pattern_pair")])),
+            optional(token(Comma))
+        ]))
+
+        self.grammar.add_rule("key_pattern_pair", seq([
+            ref("literal"),
+            token(Colon),
+            ref("pattern")
+        ]))
+
+        self.grammar.add_rule("type_list", seq([
+            ref("type"),
+            repeat(seq([token(Comma), ref("type")])),
+            optional(token(Comma))
+        ]))
+
+        self.grammar.add_rule("block", seq([
+            token(Newline),
+            token(Indent),
+            repeat(ref("statement")),
+            token(Dedent)
+        ]))
+
+        self.grammar.add_rule("decorators", repeat(ref("decorator")))
+
+        self.grammar.add_rule("decorator", seq([
+            token(At),
+            ref("dotted_name"),
+            optional(seq([
+                token(LParen),
+                optional(ref("argument_list")),
+                token(RParen)
+            ])),
+            token(Newline)
+        ]))
+
+        self.grammar.add_rule("parenthesized_expression", seq([
+            token(LParen),
+            ref("expression"),
+            token(RParen)
+        ]))
+
+        self.grammar.add_rule("expression_statement", ref("expression"))

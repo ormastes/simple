@@ -1,0 +1,285 @@
+# VscodeRenderer - VSCode Webview Renderer
+#
+# Renders widgets to VSCode webview using VSCode Toolkit components.
+# Implements the RenderBackend trait for VSCode platform.
+# Based on: doc/research/ui_framework_unified.md
+
+use core.*
+use ui.element.*
+use ui.widget.*
+use ui.render_backend.*
+use ui.viewport.*
+use vscode.*
+
+# VSCode Renderer implementation
+pub struct VscodeRenderer:
+    viewport: Viewport
+    webview_id: String
+    dom_cache: Dict[NodeId, DomElement]
+    vscode_api: Option[VscodeApi]
+    initialized: bool
+
+impl VscodeRenderer:
+    pub fn new() -> VscodeRenderer:
+        return VscodeRenderer {
+            viewport: Viewport::new(1920, 1080, 1.0),
+            webview_id: "vscode-webview".to_string(),
+            dom_cache: Dict::new(),
+            vscode_api: None,
+            initialized: false
+        }
+
+    # Render element using VSCode Toolkit components
+    fn render_element_vscode(self, elem: &Element) -> DomElement:
+        let tag = self.get_vscode_tag(elem.kind)
+        let dom_elem = document.create_element(&tag)
+
+        # Set attributes
+        for (name, value) in &elem.attrs:
+            dom_elem.set_attribute(name, value)
+
+        # Apply VSCode-specific attributes
+        self.apply_vscode_attributes(&dom_elem, elem)
+
+        # Set text content
+        if let Some(text) = &elem.text:
+            dom_elem.set_text_content(text)
+
+        # Render children
+        for child in &elem.children:
+            let child_elem = self.render_element_vscode(child)
+            dom_elem.append_child(&child_elem)
+
+        return dom_elem
+
+    # Map Element kind to VSCode Toolkit component
+    fn get_vscode_tag(self, kind: ElementKind) -> String:
+        match kind:
+            case ElementKind::Button: return "vscode-button"
+            case ElementKind::Input: return "vscode-text-field"
+            case ElementKind::Checkbox: return "vscode-checkbox"
+            case ElementKind::Radio: return "vscode-radio"
+            case ElementKind::Select: return "vscode-dropdown"
+            case ElementKind::Box: return "vscode-panels"
+            case ElementKind::Div: return "div"
+            case ElementKind::Text: return "span"
+            case _: return "div"
+
+    # Apply VSCode-specific styling
+    fn apply_vscode_attributes(self, dom_elem: &DomElement, elem: &Element):
+        match elem.kind:
+            case ElementKind::Button:
+                self.apply_button_style(dom_elem, elem)
+            case ElementKind::Input:
+                self.apply_input_style(dom_elem, elem)
+            case ElementKind::Checkbox:
+                self.apply_checkbox_style(dom_elem, elem)
+            case ElementKind::Select:
+                self.apply_select_style(dom_elem, elem)
+            case _: pass
+
+    fn apply_button_style(self, dom_elem: &DomElement, elem: &Element):
+        # VSCode button appearance
+        if elem.classes.contains(&"btn-primary".to_string()):
+            dom_elem.set_attribute("appearance", "primary")
+        else if elem.classes.contains(&"btn-secondary".to_string()):
+            dom_elem.set_attribute("appearance", "secondary")
+        else if elem.classes.contains(&"btn-icon".to_string()):
+            dom_elem.set_attribute("appearance", "icon")
+
+        # Disabled state
+        if elem.attrs.contains_key("disabled"):
+            dom_elem.set_attribute("disabled", "")
+
+    fn apply_input_style(self, dom_elem: &DomElement, elem: &Element):
+        # Value
+        if let Some(value) = elem.attrs.get("value"):
+            dom_elem.set_attribute("value", value)
+
+        # Placeholder
+        if let Some(placeholder) = elem.attrs.get("placeholder"):
+            dom_elem.set_attribute("placeholder", placeholder)
+
+        # Multiline → use vscode-text-area
+        if elem.attrs.get("type") == Some(&"textarea".to_string()):
+            # Would recreate as vscode-text-area
+            pass
+
+    fn apply_checkbox_style(self, dom_elem: &DomElement, elem: &Element):
+        if elem.attrs.contains_key("checked"):
+            dom_elem.set_attribute("checked", "")
+
+    fn apply_select_style(self, dom_elem: &DomElement, elem: &Element):
+        # VSCode dropdown requires special handling for options
+        pass
+
+    # Setup message passing with extension host
+    fn setup_message_bridge(self):
+        # Listen for messages from extension host
+        window.add_event_listener("message", |event|:
+            let message = event.data
+            self.handle_extension_message(message)
+        )
+
+    fn handle_extension_message(self, message: Any):
+        # Handle messages from extension host
+        # Example: { type: "update_state", data: {...} }
+        pass
+
+    # Post message to extension host
+    fn post_to_extension(self, message: Any):
+        if let Some(vscode) = &self.vscode_api:
+            vscode.postMessage(message)
+
+impl RenderBackend for VscodeRenderer:
+    fn init(self, viewport: Viewport) -> Result[(), String]:
+        self.viewport = viewport
+
+        # Acquire VSCode API
+        self.vscode_api = window.acquireVsCodeApi()
+        if self.vscode_api.is_none():
+            return Err("VSCode API not available".to_string())
+
+        # Setup message bridge
+        self.setup_message_bridge()
+
+        self.initialized = true
+        return Ok(())
+
+    fn render(self, tree: &ElementTree, ctx: &RenderContext) -> RenderResult:
+        if not self.initialized:
+            return RenderResult::Error("Renderer not initialized".to_string())
+
+        let start_time = performance.now()
+
+        # Get webview root
+        let root = document.get_element_by_id(&self.webview_id)
+        if root.is_none():
+            return RenderResult::Error("Webview root not found".to_string())
+
+        let root_elem = root.unwrap()
+        root_elem.clear()
+
+        # Render using VSCode components
+        let rendered = self.render_element_vscode(tree.root())
+        root_elem.append_child(&rendered)
+
+        let render_time = performance.now() - start_time
+
+        let metrics = RenderMetrics {
+            render_time_ms: render_time,
+            element_count: self.count_elements(tree.root()),
+            draw_calls: 1
+        }
+
+        return RenderResult::Success(RenderOutput {
+            data: String::new(),
+            metrics: metrics
+        })
+
+    fn resize(self, viewport: Viewport):
+        self.viewport = viewport
+
+    fn clear(self):
+        if let Some(root) = document.get_element_by_id(&self.webview_id):
+            root.clear()
+        self.dom_cache.clear()
+
+    fn present(self):
+        # Webview handles presentation
+        pass
+
+    fn shutdown(self):
+        self.clear()
+        self.vscode_api = None
+        self.initialized = false
+
+    fn capabilities(self) -> RendererCapabilities:
+        return RendererCapabilities {
+            supports_transparency: true,
+            supports_shadows: true,
+            supports_blur: false,
+            supports_animations: true,
+            supports_custom_fonts: false,  # Uses VSCode fonts
+            supports_images: true,
+            supports_video: false,
+            max_texture_size: 2048
+        }
+
+impl VscodeRenderer:
+    fn count_elements(self, elem: &Element) -> u32:
+        let mut count = 1u32
+        for child in &elem.children:
+            count += self.count_elements(child)
+        return count
+
+# VSCode Toolkit component wrapper
+pub struct VscodeComponent:
+    pass
+
+impl VscodeComponent:
+    # Generate VSCode Toolkit HTML
+    pub fn button(label: &str, appearance: &str) -> String:
+        return f"<vscode-button appearance=\"{appearance}\">{label}</vscode-button>"
+
+    pub fn text_field(placeholder: &str) -> String:
+        return f"<vscode-text-field placeholder=\"{placeholder}\"></vscode-text-field>"
+
+    pub fn checkbox(label: &str, checked: bool) -> String:
+        let checked_attr = if checked { " checked" } else { "" }
+        return f"<vscode-checkbox{checked_attr}>{label}</vscode-checkbox>"
+
+    pub fn dropdown(options: &[(String, String)]) -> String:
+        let mut html = "<vscode-dropdown>\n"
+        for (value, label) in options:
+            html.push_str(&f"  <vscode-option value=\"{value}\">{label}</vscode-option>\n")
+        html.push_str("</vscode-dropdown>")
+        return html
+
+    pub fn panels(tabs: &[(String, String)]) -> String:
+        let mut html = "<vscode-panels>\n"
+        for (id, label) in tabs:
+            html.push_str(&f"  <vscode-panel-tab id=\"{id}\">{label}</vscode-panel-tab>\n")
+        html.push_str("</vscode-panels>")
+        return html
+
+# VSCode CSS integration
+pub struct VscodeCssInjector:
+    pass
+
+impl VscodeCssInjector:
+    # Inject CSS using VSCode CSS variables
+    pub fn inject_theme_css() -> String:
+        return r#"
+:root {
+  --button-primary-background: var(--vscode-button-background);
+  --button-primary-foreground: var(--vscode-button-foreground);
+  --button-hover-background: var(--vscode-button-hoverBackground);
+  --input-background: var(--vscode-input-background);
+  --input-foreground: var(--vscode-input-foreground);
+  --input-border: var(--vscode-input-border);
+}
+"#.to_string()
+
+# Example usage:
+#
+# # In extension activation:
+# let panel = vscode.window.createWebviewPanel(
+#     "simpleUI",
+#     "Simple UI",
+#     vscode.ViewColumn.One,
+#     { enableScripts: true }
+# )
+#
+# panel.webview.html = get_webview_html()
+#
+# # In webview:
+# let renderer = VscodeRenderer::new()
+# renderer.init(viewport)?
+# renderer.render(&element_tree, &ctx)?
+#
+# # Handle events via message passing:
+# renderer.post_to_extension({
+#     type: "button_clicked",
+#     button_id: "submit"
+# })

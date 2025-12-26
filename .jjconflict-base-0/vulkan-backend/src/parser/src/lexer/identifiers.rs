@@ -1,0 +1,182 @@
+use crate::token::TokenKind;
+
+impl<'a> super::Lexer<'a> {
+    pub(super) fn scan_identifier(&mut self, first: char) -> TokenKind {
+        // Check for f-string: f"..."
+        if first == 'f' && self.check('"') {
+            self.advance(); // consume the opening "
+            return self.scan_fstring();
+        }
+
+        // Check for pc{...} pointcut syntax
+        if first == 'p' && self.peek() == Some('c') {
+            // Peek ahead to see if this is followed by {
+            if self.peek_ahead(1) == Some('{') {
+                self.advance(); // consume 'c'
+                self.advance(); // consume '{'
+                return self.scan_pointcut();
+            }
+        }
+
+        let mut name = String::from(first);
+
+        while let Some(ch) = self.peek() {
+            if ch.is_alphanumeric() || ch == '_' {
+                name.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        // Check for keywords
+        match name.as_str() {
+            "fn" => TokenKind::Fn,
+            "let" => TokenKind::Let,
+            "mut" => TokenKind::Mut,
+            "if" => TokenKind::If,
+            "elif" => TokenKind::Elif,
+            "else" => TokenKind::Else,
+            "for" => TokenKind::For,
+            "while" => TokenKind::While,
+            "loop" => TokenKind::Loop,
+            "break" => TokenKind::Break,
+            "continue" => TokenKind::Continue,
+            "return" => TokenKind::Return,
+            "match" => TokenKind::Match,
+            "case" => TokenKind::Case,
+            "struct" => TokenKind::Struct,
+            "class" => TokenKind::Class,
+            "enum" => TokenKind::Enum,
+            "union" => TokenKind::Union,
+            "trait" => TokenKind::Trait,
+            "impl" => TokenKind::Impl,
+            "actor" => TokenKind::Actor,
+            "pub" => TokenKind::Pub,
+            "priv" => TokenKind::Priv,
+            "import" => TokenKind::Import,
+            "from" => TokenKind::From,
+            "as" => TokenKind::As,
+            "mod" => TokenKind::Mod,
+            "use" => TokenKind::Use,
+            "export" => TokenKind::Export,
+            "common" => TokenKind::Common,
+            "auto" => TokenKind::Auto,
+            "crate" => TokenKind::Crate,
+            "in" => TokenKind::In,
+            "is" => TokenKind::Is,
+            "not" => TokenKind::Not,
+            "and" => TokenKind::And,
+            "or" => TokenKind::Or,
+            "true" => TokenKind::Bool(true),
+            "false" => TokenKind::Bool(false),
+            "nil" => TokenKind::Nil,
+            "spawn" => TokenKind::Spawn,
+            "new" => TokenKind::New,
+            "self" => TokenKind::Self_,
+            "super" => TokenKind::Super,
+            "async" => TokenKind::Async,
+            "await" => TokenKind::Await,
+            "yield" => TokenKind::Yield,
+            "move" => TokenKind::Move,
+            "const" => TokenKind::Const,
+            "static" => TokenKind::Static,
+            "type" => TokenKind::Type,
+            "unit" => TokenKind::Unit,
+            "extern" => TokenKind::Extern,
+            "context" => TokenKind::Context,
+            "with" => TokenKind::With,
+            "macro" => TokenKind::Macro,
+            "vec" => TokenKind::Vec,
+            "shared" => TokenKind::Shared,
+            "gpu" => TokenKind::Gpu,
+            "bounds" => TokenKind::Bounds,
+            "dyn" => TokenKind::Dyn,
+            "repr" => TokenKind::Repr,
+            // Note: "allow" is NOT a keyword - it's parsed contextually in unit definitions
+            // to avoid conflicts with #[allow(...)] attributes
+            // Contract keywords (new spec)
+            "out" => TokenKind::Out,
+            "out_err" => TokenKind::OutErr,
+            "where" => TokenKind::Where,
+            // Contract keywords (legacy)
+            "requires" => TokenKind::Requires,
+            "ensures" => TokenKind::Ensures,
+            // Contract keywords (shared)
+            "invariant" => TokenKind::Invariant,
+            "old" => TokenKind::Old,
+            "result" => TokenKind::Result,
+            // Infix keywords (for BDD spec framework)
+            "to" => TokenKind::To,
+            "not_to" => TokenKind::NotTo,
+            // Gherkin-style system test DSL keywords
+            "feature" => TokenKind::Feature,
+            "scenario" => TokenKind::Scenario,
+            "outline" => TokenKind::Outline,
+            "examples" => TokenKind::Examples,
+            "given" => TokenKind::Given,
+            "when" => TokenKind::When,
+            "then" => TokenKind::Then,
+            "and_then" => TokenKind::AndThen,
+            // Memory management keywords
+            "handle_pool" => TokenKind::HandlePool,
+            "_" => TokenKind::Underscore,
+            // AOP keywords
+            "on" => TokenKind::On,
+            "bind" => TokenKind::Bind,
+            "forbid" => TokenKind::Forbid,
+            "allow" => TokenKind::Allow,
+            "mock" => TokenKind::Mock,
+            _ => TokenKind::Identifier(name),
+        }
+    }
+
+    /// Scan a pointcut predicate expression: pc{...}
+    /// Returns the content between { and } as a Pointcut token
+    pub(super) fn scan_pointcut(&mut self) -> TokenKind {
+        let mut content = String::new();
+        let mut depth = 1; // We've already consumed the opening {
+
+        while let Some(ch) = self.peek() {
+            if ch == '{' {
+                depth += 1;
+                content.push(ch);
+                self.advance();
+            } else if ch == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    self.advance(); // consume the closing }
+                    return TokenKind::Pointcut(content);
+                } else {
+                    content.push(ch);
+                    self.advance();
+                }
+            } else {
+                content.push(ch);
+                self.advance();
+            }
+        }
+
+        // Unclosed pointcut - return error
+        TokenKind::Error("Unclosed pointcut expression (missing '}')".to_string())
+    }
+
+    pub(super) fn scan_symbol(&mut self) -> TokenKind {
+        let mut name = String::new();
+
+        while let Some(ch) = self.peek() {
+            if ch.is_alphanumeric() || ch == '_' {
+                name.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if name.is_empty() {
+            TokenKind::Colon
+        } else {
+            TokenKind::Symbol(name)
+        }
+    }
+}

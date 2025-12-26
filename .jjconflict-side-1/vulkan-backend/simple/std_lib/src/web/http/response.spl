@@ -1,0 +1,291 @@
+# HTTP Response Builder
+#
+# Fluent API for building HTTP responses.
+
+use units.net.*
+use units.size.*
+use host.async_nogc_mut.net.tcp.TcpStream
+use host.common.io.error.IoError
+use web.http.request.HttpError
+
+# HTTP Status Codes
+pub enum StatusCode:
+    # 2xx Success
+    Ok
+    Created
+    Accepted
+    NoContent
+
+    # 3xx Redirect
+    MovedPermanently
+    Found
+    SeeOther
+    NotModified
+    TemporaryRedirect
+    PermanentRedirect
+
+    # 4xx Client Error
+    BadRequest
+    Unauthorized
+    Forbidden
+    NotFound
+    MethodNotAllowed
+    Conflict
+    Gone
+    UnprocessableEntity
+    TooManyRequests
+
+    # 5xx Server Error
+    InternalServerError
+    NotImplemented
+    BadGateway
+    ServiceUnavailable
+    GatewayTimeout
+
+impl StatusCode:
+    pub fn code(self) -> u16:
+        match self:
+            case Ok: 200
+            case Created: 201
+            case Accepted: 202
+            case NoContent: 204
+            case MovedPermanently: 301
+            case Found: 302
+            case SeeOther: 303
+            case NotModified: 304
+            case TemporaryRedirect: 307
+            case PermanentRedirect: 308
+            case BadRequest: 400
+            case Unauthorized: 401
+            case Forbidden: 403
+            case NotFound: 404
+            case MethodNotAllowed: 405
+            case Conflict: 409
+            case Gone: 410
+            case UnprocessableEntity: 422
+            case TooManyRequests: 429
+            case InternalServerError: 500
+            case NotImplemented: 501
+            case BadGateway: 502
+            case ServiceUnavailable: 503
+            case GatewayTimeout: 504
+
+    pub fn reason(self) -> &str:
+        match self:
+            case Ok: "OK"
+            case Created: "Created"
+            case Accepted: "Accepted"
+            case NoContent: "No Content"
+            case MovedPermanently: "Moved Permanently"
+            case Found: "Found"
+            case SeeOther: "See Other"
+            case NotModified: "Not Modified"
+            case TemporaryRedirect: "Temporary Redirect"
+            case PermanentRedirect: "Permanent Redirect"
+            case BadRequest: "Bad Request"
+            case Unauthorized: "Unauthorized"
+            case Forbidden: "Forbidden"
+            case NotFound: "Not Found"
+            case MethodNotAllowed: "Method Not Allowed"
+            case Conflict: "Conflict"
+            case Gone: "Gone"
+            case UnprocessableEntity: "Unprocessable Entity"
+            case TooManyRequests: "Too Many Requests"
+            case InternalServerError: "Internal Server Error"
+            case NotImplemented: "Not Implemented"
+            case BadGateway: "Bad Gateway"
+            case ServiceUnavailable: "Service Unavailable"
+            case GatewayTimeout: "Gateway Timeout"
+
+    pub fn is_success(self) -> bool:
+        let c = self.code()
+        return c >= 200 and c < 300
+
+    pub fn is_redirect(self) -> bool:
+        let c = self.code()
+        return c >= 300 and c < 400
+
+    pub fn is_client_error(self) -> bool:
+        let c = self.code()
+        return c >= 400 and c < 500
+
+    pub fn is_server_error(self) -> bool:
+        let c = self.code()
+        return c >= 500 and c < 600
+
+# HTTP Response
+pub struct HttpResponse:
+    status: StatusCode
+    headers: Dict[str, str]
+    body: Option[Bytes]
+
+impl HttpResponse:
+    # Create response with status
+    pub fn new(status: StatusCode) -> HttpResponse:
+        return HttpResponse {
+            status: status,
+            headers: Dict::new(),
+            body: None
+        }
+
+    # Common response constructors
+    pub fn ok() -> HttpResponse:
+        return HttpResponse::new(StatusCode::Ok)
+
+    pub fn created() -> HttpResponse:
+        return HttpResponse::new(StatusCode::Created)
+
+    pub fn accepted() -> HttpResponse:
+        return HttpResponse::new(StatusCode::Accepted)
+
+    pub fn no_content() -> HttpResponse:
+        return HttpResponse::new(StatusCode::NoContent)
+
+    pub fn bad_request() -> HttpResponse:
+        return HttpResponse::new(StatusCode::BadRequest)
+
+    pub fn unauthorized() -> HttpResponse:
+        return HttpResponse::new(StatusCode::Unauthorized)
+
+    pub fn forbidden() -> HttpResponse:
+        return HttpResponse::new(StatusCode::Forbidden)
+
+    pub fn not_found() -> HttpResponse:
+        return HttpResponse::new(StatusCode::NotFound)
+
+    pub fn method_not_allowed() -> HttpResponse:
+        return HttpResponse::new(StatusCode::MethodNotAllowed)
+
+    pub fn internal_error() -> HttpResponse:
+        return HttpResponse::new(StatusCode::InternalServerError)
+
+    # Redirect helpers
+    pub fn redirect(location: &str) -> HttpResponse:
+        return HttpResponse::new(StatusCode::Found)
+            .header("Location", location)
+
+    pub fn redirect_permanent(location: &str) -> HttpResponse:
+        return HttpResponse::new(StatusCode::MovedPermanently)
+            .header("Location", location)
+
+    pub fn redirect_see_other(location: &str) -> HttpResponse:
+        return HttpResponse::new(StatusCode::SeeOther)
+            .header("Location", location)
+
+    # Builder methods (fluent API)
+    pub fn status(self, status: StatusCode) -> HttpResponse:
+        self.status = status
+        return self
+
+    pub fn header(self, name: &str, value: &str) -> HttpResponse:
+        self.headers.insert(name.to_string(), value.to_string())
+        return self
+
+    pub fn content_type(self, mime: &str) -> HttpResponse:
+        return self.header("Content-Type", mime)
+
+    pub fn cache_control(self, value: &str) -> HttpResponse:
+        return self.header("Cache-Control", value)
+
+    pub fn no_cache(self) -> HttpResponse:
+        return self.cache_control("no-cache, no-store, must-revalidate")
+
+    # Body setters
+    pub fn body(self, data: Bytes) -> HttpResponse:
+        self.body = Some(data)
+        return self
+
+    pub fn text(self, text: &str) -> HttpResponse:
+        return self
+            .content_type("text/plain; charset=utf-8")
+            .body(text.as_bytes().to_vec())
+
+    pub fn html(self, html: &str) -> HttpResponse:
+        return self
+            .content_type("text/html; charset=utf-8")
+            .body(html.as_bytes().to_vec())
+
+    pub fn json_str(self, json: &str) -> HttpResponse:
+        return self
+            .content_type("application/json")
+            .body(json.as_bytes().to_vec())
+
+    pub fn css(self, css: &str) -> HttpResponse:
+        return self
+            .content_type("text/css; charset=utf-8")
+            .body(css.as_bytes().to_vec())
+
+    pub fn js(self, js: &str) -> HttpResponse:
+        return self
+            .content_type("application/javascript; charset=utf-8")
+            .body(js.as_bytes().to_vec())
+
+    # Accessors
+    pub fn get_status(self) -> StatusCode:
+        return self.status
+
+    pub fn get_header(self, name: &str) -> Option[&str]:
+        return self.headers.get(name)
+
+    pub fn get_body(self) -> Option[&Bytes]:
+        return self.body.as_ref()
+
+    # Serialize response to bytes
+    pub fn to_bytes(self) -> Bytes:
+        let mut buf = String::new()
+
+        # Status line
+        buf.push_str(&f"HTTP/1.1 {self.status.code()} {self.status.reason()}\r\n")
+
+        # Headers
+        for (name, value) in &self.headers:
+            buf.push_str(&f"{name}: {value}\r\n")
+
+        # Content-Length if body present
+        if let Some(body) = &self.body:
+            buf.push_str(&f"Content-Length: {body.len()}\r\n")
+        else:
+            buf.push_str("Content-Length: 0\r\n")
+
+        # End headers
+        buf.push_str("\r\n")
+
+        # Convert header to bytes
+        let mut result = buf.as_bytes().to_vec()
+
+        # Append body
+        if let Some(body) = &self.body:
+            result.extend(body)
+
+        return result
+
+    # Send response to TCP stream
+    pub async fn send(self, stream: &TcpStream) -> Result[(), IoError]:
+        let bytes = self.to_bytes()
+        await stream.write_all(&bytes)?
+        await stream.flush()?
+        return Ok(())
+
+# Error response helpers
+pub fn error_response(status: StatusCode, message: &str) -> HttpResponse:
+    let html = f"""<!DOCTYPE html>
+<html>
+<head>
+    <title>{status.code()} {status.reason()}</title>
+    <style>
+        body {{ font-family: system-ui, sans-serif; padding: 40px; text-align: center; }}
+        h1 {{ color: #c00; }}
+    </style>
+</head>
+<body>
+    <h1>{status.code()} {status.reason()}</h1>
+    <p>{message}</p>
+</body>
+</html>"""
+    return HttpResponse::new(status).html(&html)
+
+pub fn not_found_page(path: &str) -> HttpResponse:
+    return error_response(StatusCode::NotFound, &f"The page '{path}' was not found.")
+
+pub fn server_error_page(message: &str) -> HttpResponse:
+    return error_response(StatusCode::InternalServerError, message)

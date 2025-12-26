@@ -1,0 +1,228 @@
+# Log Collapsing for MCP
+# Collapses log output with INFO/WARN/ERROR counts
+
+use core.*
+
+# Log level
+pub enum LogLevel:
+    Trace
+    Debug
+    Info
+    Warn
+    Error
+    Fatal
+
+# Log entry
+pub class LogEntry:
+    pub level: LogLevel
+    pub message: String
+    pub timestamp: String
+    pub line_number: i64
+
+# Log summary
+pub class LogSummary:
+    pub trace_count: i64
+    pub debug_count: i64
+    pub info_count: i64
+    pub warn_count: i64
+    pub error_count: i64
+    pub fatal_count: i64
+    pub total_lines: i64
+    pub entries: List[LogEntry]
+
+# Parse log file
+pub fn parse_logs(source: String) -> LogSummary:
+    lines = source.split("\n")
+    entries = []
+
+    trace_count = 0
+    debug_count = 0
+    info_count = 0
+    warn_count = 0
+    error_count = 0
+    fatal_count = 0
+
+    for i in range(lines.len()):
+        line = lines[i]
+
+        # Detect log level
+        level = detect_log_level(line)
+        timestamp = extract_timestamp(line)
+        message = extract_message(line)
+
+        entry = LogEntry:
+            level: level
+            message: message
+            timestamp: timestamp
+            line_number: i + 1
+
+        entries.append(entry)
+
+        # Count by level
+        if level == LogLevel.Trace:
+            trace_count = trace_count + 1
+        elif level == LogLevel.Debug:
+            debug_count = debug_count + 1
+        elif level == LogLevel.Info:
+            info_count = info_count + 1
+        elif level == LogLevel.Warn:
+            warn_count = warn_count + 1
+        elif level == LogLevel.Error:
+            error_count = error_count + 1
+        elif level == LogLevel.Fatal:
+            fatal_count = fatal_count + 1
+
+    return LogSummary:
+        trace_count: trace_count
+        debug_count: debug_count
+        info_count: info_count
+        warn_count: warn_count
+        error_count: error_count
+        fatal_count: fatal_count
+        total_lines: lines.len()
+        entries: entries
+
+# Detect log level from line
+fn detect_log_level(line: String) -> LogLevel:
+    line_upper = line.to_upper()
+
+    if line_upper.contains("FATAL"):
+        return LogLevel.Fatal
+    elif line_upper.contains("ERROR"):
+        return LogLevel.Error
+    elif line_upper.contains("WARN"):
+        return LogLevel.Warn
+    elif line_upper.contains("INFO"):
+        return LogLevel.Info
+    elif line_upper.contains("DEBUG"):
+        return LogLevel.Debug
+    elif line_upper.contains("TRACE"):
+        return LogLevel.Trace
+    else:
+        return LogLevel.Info
+
+# Extract timestamp from log line
+fn extract_timestamp(line: String) -> String:
+    # Simple extraction - look for common timestamp patterns
+    # [2025-12-26 12:34:56]
+    # 2025-12-26T12:34:56Z
+    # etc.
+
+    if line.contains("["):
+        start = line.find("[")
+        end = line.find("]")
+        if start >= 0 and end > start:
+            return line[start+1:end]
+
+    # Try ISO 8601 format
+    if line.len() >= 19:
+        # Check if starts with date-like pattern
+        if line[0].is_digit() and line[4] == "-":
+            return line[0:19]
+
+    return ""
+
+# Extract message from log line
+fn extract_message(line: String) -> String:
+    # Remove timestamp and level
+    msg = line
+
+    # Remove timestamp if present
+    if msg.contains("]"):
+        idx = msg.find("]")
+        if idx >= 0:
+            msg = msg[idx+1:].strip()
+
+    # Remove level prefix
+    for level in ["TRACE:", "DEBUG:", "INFO:", "WARN:", "ERROR:", "FATAL:"]:
+        if msg.starts_with(level):
+            msg = msg[level.len():].strip()
+            break
+
+    return msg
+
+# Format log summary for MCP
+pub fn format_log_summary(summary: LogSummary, show_errors_only: bool) -> String:
+    result = "LOG> Log Summary {\n"
+    result = result + "  Total lines: " + summary.total_lines.to_string() + "\n"
+
+    if summary.fatal_count > 0:
+        result = result + "  FATAL: " + summary.fatal_count.to_string() + "\n"
+    if summary.error_count > 0:
+        result = result + "  ERROR: " + summary.error_count.to_string() + "\n"
+    if summary.warn_count > 0:
+        result = result + "  WARN:  " + summary.warn_count.to_string() + "\n"
+    if summary.info_count > 0 and not show_errors_only:
+        result = result + "  INFO:  " + summary.info_count.to_string() + "\n"
+    if summary.debug_count > 0 and not show_errors_only:
+        result = result + "  DEBUG: " + summary.debug_count.to_string() + "\n"
+    if summary.trace_count > 0 and not show_errors_only:
+        result = result + "  TRACE: " + summary.trace_count.to_string() + "\n"
+
+    result = result + "}"
+    return result
+
+# Format with sample entries
+pub fn format_log_with_samples(summary: LogSummary, max_samples: i64) -> String:
+    result = format_log_summary(summary, false) + "\n\n"
+
+    # Show sample error/warn entries
+    result = result + "Sample entries:\n"
+
+    samples_shown = 0
+    for entry in summary.entries:
+        if entry.level == LogLevel.Fatal or entry.level == LogLevel.Error or entry.level == LogLevel.Warn:
+            if samples_shown >= max_samples:
+                break
+
+            level_str = log_level_to_string(entry.level)
+            result = result + "  [" + entry.timestamp + "] " + level_str + ": " + entry.message + "\n"
+            samples_shown = samples_shown + 1
+
+    return result
+
+# Convert log level to string
+fn log_level_to_string(level: LogLevel) -> String:
+    if level == LogLevel.Trace:
+        return "TRACE"
+    elif level == LogLevel.Debug:
+        return "DEBUG"
+    elif level == LogLevel.Info:
+        return "INFO"
+    elif level == LogLevel.Warn:
+        return "WARN"
+    elif level == LogLevel.Error:
+        return "ERROR"
+    else:
+        return "FATAL"
+
+# Filter logs by level
+pub fn filter_logs_by_level(summary: LogSummary, min_level: LogLevel) -> List[LogEntry]:
+    filtered = []
+
+    for entry in summary.entries:
+        if is_level_above(entry.level, min_level):
+            filtered.append(entry)
+
+    return filtered
+
+# Check if level is above minimum
+fn is_level_above(level: LogLevel, min_level: LogLevel) -> bool:
+    level_value = get_level_value(level)
+    min_value = get_level_value(min_level)
+    return level_value >= min_value
+
+# Get numeric value for level
+fn get_level_value(level: LogLevel) -> i64:
+    if level == LogLevel.Trace:
+        return 0
+    elif level == LogLevel.Debug:
+        return 1
+    elif level == LogLevel.Info:
+        return 2
+    elif level == LogLevel.Warn:
+        return 3
+    elif level == LogLevel.Error:
+        return 4
+    else:
+        return 5  # Fatal

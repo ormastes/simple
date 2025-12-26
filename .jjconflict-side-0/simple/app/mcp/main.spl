@@ -1,0 +1,357 @@
+# MCP (Model Context Protocol) Server for Simple Language
+# Provides LLM-friendly code representation via the MCP protocol
+#
+# Usage:
+#   simple mcp server              # Start MCP server (stdio mode)
+#   simple mcp server --debug      # Start with debug logging
+#   simple mcp <file.spl>          # Generate MCP preview (CLI mode)
+#   simple mcp read <file.spl>     # Read file in MCP mode
+#   simple mcp expand <file> <sym> # Expand specific symbol
+#   simple mcp json <file.spl>     # Generate JSON output
+
+use core.*
+use core.json.*
+use host.async_nogc_mut.io.fs.*
+use host.async_nogc_mut.sys.*
+use mcp.*
+use mcp.core.*
+use mcp.core.server.*
+use mcp.core.transport.*
+use mcp.simple_lang.*
+
+# Main entry point
+fn main():
+    args = sys_get_args()
+
+    if args.len() < 2:
+        print_usage()
+        sys_exit(1)
+
+    command = args[1]
+
+    if command == "--help" or command == "-h":
+        print_usage()
+        sys_exit(0)
+
+    elif command == "server":
+        # Start MCP server mode
+        debug_mode = has_flag(args, "--debug")
+        start_server(debug_mode)
+
+    elif command == "read":
+        # Read file in MCP mode
+        handle_read(args)
+
+    elif command == "expand":
+        # Expand specific symbol
+        handle_expand(args)
+
+    elif command == "search":
+        # Search for symbols
+        handle_search(args)
+
+    elif command == "json":
+        # Generate JSON output
+        handle_json(args)
+
+    else:
+        # Default: treat as file path for reading
+        handle_default_read(args)
+
+# Print usage information
+fn print_usage():
+    println("MCP (Model Context Protocol) Server for Simple Language")
+    println("")
+    println("Usage:")
+    println("  simple mcp server [--debug]          # Start MCP server (stdio)")
+    println("  simple mcp <file.spl>                # Generate MCP outline")
+    println("  simple mcp read <file.spl>           # Read file in MCP mode")
+    println("  simple mcp expand <file.spl> <sym>   # Expand specific symbol")
+    println("  simple mcp search <query>            # Search for symbols")
+    println("  simple mcp json <file.spl> [--meta]  # Generate JSON output")
+    println("")
+    println("Server Mode:")
+    println("  The server mode implements the Model Context Protocol over stdio.")
+    println("  It can be used with MCP-compatible clients like Claude Code.")
+    println("")
+    println("Options:")
+    println("  --help, -h          Show this help message")
+    println("  --debug             Enable debug logging (server mode)")
+    println("  --all               Show private symbols too")
+    println("  --public            Filter to public symbols only (default)")
+    println("  --meta              Include metadata in JSON output")
+    println("  --expand=<what>     What to expand: signature|body|all")
+    println("  --show-coverage     Display test coverage overlays")
+    println("")
+    println("Examples:")
+    println("  simple mcp server                    # Start MCP server")
+    println("  simple mcp user.spl")
+    println("  simple mcp expand user.spl User")
+    println("  simple mcp json user.spl --meta")
+
+# Start MCP server
+fn start_server(debug_mode: bool):
+    # Create provider for Simple language files
+    provider = SimpleLangProvider.new(".")
+
+    # Create MCP server
+    server = McpServer.new("simple-mcp", "1.0.0", provider)
+
+    if debug_mode:
+        server.enable_debug()
+
+    # Register tools for Simple language operations
+    register_tools(server, provider)
+
+    # Run the server (blocks until shutdown)
+    server.run_stdio()
+
+# Register MCP tools
+fn register_tools(server: McpServer, provider: SimpleLangProvider):
+    # Tool: Read code file in MCP format
+    server.register_simple_tool(
+        "read_code",
+        "Read a Simple language source file in MCP format (token-efficient preview with block marks)",
+        fn(args: Dict[String, Any]) -> String:
+            path = args.get("path", "") as String
+            show_all = args.get("show_all", false) as bool
+
+            # Read and parse file
+            match fs_read_text(path):
+                case Ok(source):
+                    provider.register_simple_file(path, source)
+                    uri = "file://" + path
+                    return provider.get_file_mcp(uri, show_all)
+                case Err(e):
+                    return "Error reading file: " + e
+    )
+
+    # Tool: Expand symbol
+    server.register_simple_tool(
+        "expand_symbol",
+        "Expand a specific symbol to show its full implementation details",
+        fn(args: Dict[String, Any]) -> String:
+            path = args.get("path", "") as String
+            symbol_name = args.get("symbol", "") as String
+            what = args.get("what", "all") as String
+
+            match fs_read_text(path):
+                case Ok(source):
+                    symbols = parse_file(source)
+                    symbol_opt = find_symbol(symbols, symbol_name)
+
+                    match symbol_opt:
+                        case Some(symbol):
+                            return format_single_symbol(symbol, what)
+                        case None:
+                            return "Symbol not found: " + symbol_name
+                case Err(e):
+                    return "Error reading file: " + e
+    )
+
+    # Tool: Search symbols
+    server.register_simple_tool(
+        "search_symbols",
+        "Search for symbols across Simple language files",
+        fn(args: Dict[String, Any]) -> String:
+            query = args.get("query", "") as String
+            path = args.get("path", ".") as String
+
+            # Search in provider
+            resources = provider.search_resources(query)
+
+            result = "Found " + resources.len().to_string() + " symbols:\n"
+            for res in resources:
+                result = result + "- " + res.name + " (" + res.uri + ")\n"
+
+            return result
+    )
+
+    # Tool: List files
+    server.register_simple_tool(
+        "list_files",
+        "List Simple language files in a directory",
+        fn(args: Dict[String, Any]) -> String:
+            path = args.get("path", ".") as String
+
+            match fs_read_dir(path):
+                case Ok(entries):
+                    result = "Simple files in " + path + ":\n"
+                    for entry in entries.entries:
+                        if entry.name.ends_with(".spl"):
+                            result = result + "- " + entry.name + "\n"
+                    return result
+                case Err(e):
+                    return "Error listing directory: " + e
+    )
+
+    # Tool: Get file info
+    server.register_simple_tool(
+        "file_info",
+        "Get information about a Simple language file (symbol count, etc.)",
+        fn(args: Dict[String, Any]) -> String:
+            path = args.get("path", "") as String
+
+            match fs_read_text(path):
+                case Ok(source):
+                    symbols = parse_file(source)
+                    pub_symbols = filter_public_symbols(symbols)
+
+                    lines = source.split("\n").len()
+
+                    result = "File: " + path + "\n"
+                    result = result + "Lines: " + lines.to_string() + "\n"
+                    result = result + "Total symbols: " + symbols.len().to_string() + "\n"
+                    result = result + "Public symbols: " + pub_symbols.len().to_string() + "\n"
+
+                    # Count by type
+                    classes = 0
+                    functions = 0
+                    traits = 0
+                    for sym in symbols:
+                        match sym.kind:
+                            case SymbolKind.Class:
+                                classes = classes + 1
+                            case SymbolKind.Struct:
+                                classes = classes + 1
+                            case SymbolKind.Function:
+                                functions = functions + 1
+                            case SymbolKind.Method:
+                                functions = functions + 1
+                            case SymbolKind.Trait:
+                                traits = traits + 1
+                            case _:
+                                pass
+
+                    result = result + "Classes/Structs: " + classes.to_string() + "\n"
+                    result = result + "Functions/Methods: " + functions.to_string() + "\n"
+                    result = result + "Traits: " + traits.to_string() + "\n"
+
+                    return result
+                case Err(e):
+                    return "Error reading file: " + e
+    )
+
+# Handle read command (CLI mode)
+fn handle_read(args: List[String]):
+    if args.len() < 3:
+        println("Error: Missing file path")
+        println("Usage: simple mcp read <file.spl>")
+        sys_exit(1)
+
+    file_path = args[2]
+    show_all = has_flag(args, "--all")
+    show_coverage = has_flag(args, "--show-coverage")
+
+    match fs_read_text(file_path):
+        case Ok(source):
+            if show_coverage:
+                symbols = parse_file(source)
+                coverage = parse_coverage_data("")
+                text = format_coverage_overlay(symbols, coverage)
+                println(text)
+            else:
+                text = mcp_from_source(source, show_all)
+                println(text)
+        case Err(e):
+            println("Error reading file: " + e)
+            sys_exit(1)
+
+# Handle expand command
+fn handle_expand(args: List[String]):
+    if args.len() < 4:
+        println("Error: Missing file path or symbol name")
+        println("Usage: simple mcp expand <file.spl> <symbol> [--expand=<what>]")
+        sys_exit(1)
+
+    file_path = args[2]
+    symbol_name = args[3]
+    what = get_flag_value(args, "--expand", "all")
+
+    match fs_read_text(file_path):
+        case Ok(source):
+            symbols = parse_file(source)
+            symbol_opt = find_symbol(symbols, symbol_name)
+
+            match symbol_opt:
+                case Some(symbol):
+                    text = format_single_symbol(symbol, what)
+                    println(text)
+                case None:
+                    println("Error: Symbol not found: " + symbol_name)
+                    sys_exit(1)
+        case Err(e):
+            println("Error reading file: " + e)
+            sys_exit(1)
+
+# Handle search command
+fn handle_search(args: List[String]):
+    if args.len() < 3:
+        println("Error: Missing search query")
+        println("Usage: simple mcp search <query> [--public]")
+        sys_exit(1)
+
+    query = args[2]
+    filter = "all"
+    if has_flag(args, "--public"):
+        filter = "public"
+
+    results = search(query, filter)
+    for result in results:
+        println(result)
+
+# Handle JSON output command
+fn handle_json(args: List[String]):
+    if args.len() < 3:
+        println("Error: Missing file path")
+        println("Usage: simple mcp json <file.spl> [--meta] [--all]")
+        sys_exit(1)
+
+    file_path = args[2]
+    show_all = has_flag(args, "--all")
+    include_meta = has_flag(args, "--meta")
+
+    match fs_read_text(file_path):
+        case Ok(source):
+            json_output = mcp_json_from_source(source, show_all, include_meta)
+            println(json_output)
+        case Err(e):
+            println("Error reading file: " + e)
+            sys_exit(1)
+
+# Handle default read (just file path)
+fn handle_default_read(args: List[String]):
+    file_path = args[1]
+    show_all = has_flag(args, "--all")
+
+    match fs_read_text(file_path):
+        case Ok(source):
+            text = mcp_from_source(source, show_all)
+            println(text)
+        case Err(e):
+            println("Error reading file: " + e)
+            sys_exit(1)
+
+# Check if a flag is present in args
+fn has_flag(args: List[String], flag: String) -> bool:
+    for arg in args:
+        if arg == flag:
+            return true
+    return false
+
+# Get value of a flag like --expand=all
+fn get_flag_value(args: List[String], flag_prefix: String, default: String) -> String:
+    for arg in args:
+        if arg.starts_with(flag_prefix + "="):
+            parts = arg.split("=")
+            if parts.len() >= 2:
+                return parts[1]
+    return default
+
+# Search function (placeholder)
+fn search(query: String, filter: String) -> List[String]:
+    # TODO: Implement actual search across files
+    return ["Search not yet implemented"]
+
+# Entry point
+main()

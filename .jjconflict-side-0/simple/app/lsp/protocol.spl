@@ -1,0 +1,327 @@
+# LSP Protocol Types
+# Language Server Protocol message definitions
+# Based on LSP Specification 3.17
+
+import core.json as json
+
+# LSP Message Types
+enum MessageType:
+    Request
+    Response
+    Notification
+
+# Position in a text document (zero-based line, zero-based character)
+class Position:
+    line: Int
+    character: Int
+
+    fn new(line: Int, character: Int) -> Position:
+        Position(line: line, character: character)
+
+    fn to_json(self) -> Dict:
+        {
+            "line": self.line,
+            "character": self.character
+        }
+
+    fn from_json(data: Dict) -> Result<Position, String>:
+        let line = data.get("line")?
+        let character = data.get("character")?
+        Ok(Position.new(line, character))
+
+# Range in a text document
+class Range:
+    start: Position
+    end: Position
+
+    fn new(start: Position, end: Position) -> Range:
+        Range(start: start, end: end)
+
+    fn to_json(self) -> Dict:
+        {
+            "start": self.start.to_json(),
+            "end": self.end.to_json()
+        }
+
+    fn from_json(data: Dict) -> Result<Range, String>:
+        let start_data = data.get("start")?
+        let end_data = data.get("end")?
+        let start = Position.from_json(start_data)?
+        let end = Position.from_json(end_data)?
+        Ok(Range.new(start, end))
+
+# Diagnostic severity
+enum DiagnosticSeverity:
+    Error      # 1
+    Warning    # 2
+    Information # 3
+    Hint       # 4
+
+    fn to_int(self) -> Int:
+        match self:
+            case Error: 1
+            case Warning: 2
+            case Information: 3
+            case Hint: 4
+
+# Diagnostic message
+class Diagnostic:
+    range: Range
+    severity: DiagnosticSeverity
+    message: String
+    source: Option<String>
+    code: Option<String>
+
+    fn new(range: Range, severity: DiagnosticSeverity, message: String) -> Diagnostic:
+        Diagnostic(
+            range: range,
+            severity: severity,
+            message: message,
+            source: None,
+            code: None
+        )
+
+    fn with_source(self, source: String) -> Diagnostic:
+        Diagnostic(
+            range: self.range,
+            severity: self.severity,
+            message: self.message,
+            source: Some(source),
+            code: self.code
+        )
+
+    fn to_json(self) -> Dict:
+        let mut result = {
+            "range": self.range.to_json(),
+            "severity": self.severity.to_int(),
+            "message": self.message
+        }
+
+        match self.source:
+            case Some(src):
+                result["source"] = src
+            case None:
+                pass
+
+        match self.code:
+            case Some(c):
+                result["code"] = c
+            case None:
+                pass
+
+        result
+
+# Text document identifier
+class TextDocumentIdentifier:
+    uri: String
+
+    fn new(uri: String) -> TextDocumentIdentifier:
+        TextDocumentIdentifier(uri: uri)
+
+    fn from_json(data: Dict) -> Result<TextDocumentIdentifier, String>:
+        let uri = data.get("uri")?
+        Ok(TextDocumentIdentifier.new(uri))
+
+# Versioned text document identifier
+class VersionedTextDocumentIdentifier:
+    uri: String
+    version: Int
+
+    fn new(uri: String, version: Int) -> VersionedTextDocumentIdentifier:
+        VersionedTextDocumentIdentifier(uri: uri, version: version)
+
+    fn from_json(data: Dict) -> Result<VersionedTextDocumentIdentifier, String>:
+        let uri = data.get("uri")?
+        let version = data.get("version")?
+        Ok(VersionedTextDocumentIdentifier.new(uri, version))
+
+# Text document item
+class TextDocumentItem:
+    uri: String
+    language_id: String
+    version: Int
+    text: String
+
+    fn new(uri: String, language_id: String, version: Int, text: String) -> TextDocumentItem:
+        TextDocumentItem(
+            uri: uri,
+            language_id: language_id,
+            version: version,
+            text: text
+        )
+
+    fn from_json(data: Dict) -> Result<TextDocumentItem, String>:
+        let uri = data.get("uri")?
+        let language_id = data.get("languageId")?
+        let version = data.get("version")?
+        let text = data.get("text")?
+        Ok(TextDocumentItem.new(uri, language_id, version, text))
+
+# Text document content change event
+class TextDocumentContentChangeEvent:
+    text: String  # Full document text (we use full sync)
+
+    fn new(text: String) -> TextDocumentContentChangeEvent:
+        TextDocumentContentChangeEvent(text: text)
+
+    fn from_json(data: Dict) -> Result<TextDocumentContentChangeEvent, String>:
+        let text = data.get("text")?
+        Ok(TextDocumentContentChangeEvent.new(text))
+
+# Server capabilities
+class ServerCapabilities:
+    fn default() -> Dict:
+        {
+            "textDocumentSync": {
+                "openClose": true,
+                "change": 1  # Full sync (1 = Full, 2 = Incremental)
+            },
+            "diagnosticProvider": {
+                "interFileDependencies": false,
+                "workspaceDiagnostics": false
+            },
+            "semanticTokensProvider": {
+                "legend": {
+                    "tokenTypes": [
+                        "keyword",
+                        "function",
+                        "type",
+                        "variable",
+                        "parameter",
+                        "property",
+                        "number",
+                        "string",
+                        "comment",
+                        "operator",
+                        "namespace"
+                    ],
+                    "tokenModifiers": [
+                        "declaration",
+                        "definition",
+                        "readonly",
+                        "static",
+                        "deprecated",
+                        "abstract",
+                        "async",
+                        "modification",
+                        "documentation"
+                    ]
+                },
+                "range": true,
+                "full": true
+            },
+            "hoverProvider": true,
+            "definitionProvider": true,
+            "referencesProvider": true,
+            "completionProvider": {
+                "triggerCharacters": [".", ":", " "],
+                "resolveProvider": false
+            }
+        }
+
+# Initialize result
+class InitializeResult:
+    capabilities: Dict
+    server_info: Dict
+
+    fn new() -> InitializeResult:
+        InitializeResult(
+            capabilities: ServerCapabilities.default(),
+            server_info: {
+                "name": "simple-lsp",
+                "version": "0.1.0"
+            }
+        )
+
+    fn to_json(self) -> Dict:
+        {
+            "capabilities": self.capabilities,
+            "serverInfo": self.server_info
+        }
+
+# JSON-RPC Request
+class JsonRpcRequest:
+    id: Int
+    method: String
+    params: Option<Dict>
+
+    fn new(id: Int, method: String, params: Option<Dict>) -> JsonRpcRequest:
+        JsonRpcRequest(id: id, method: method, params: params)
+
+    fn from_json(data: Dict) -> Result<JsonRpcRequest, String>:
+        let id = data.get("id")?
+        let method = data.get("method")?
+        let params = data.get_optional("params")
+        Ok(JsonRpcRequest.new(id, method, params))
+
+# JSON-RPC Response
+class JsonRpcResponse:
+    id: Int
+    result: Option<Dict>
+    error: Option<Dict>
+
+    fn new_result(id: Int, result: Dict) -> JsonRpcResponse:
+        JsonRpcResponse(id: id, result: Some(result), error: None)
+
+    fn new_error(id: Int, code: Int, message: String) -> JsonRpcResponse:
+        let error_data = {
+            "code": code,
+            "message": message
+        }
+        JsonRpcResponse(id: id, result: None, error: Some(error_data))
+
+    fn to_json(self) -> Dict:
+        let mut response = {
+            "jsonrpc": "2.0",
+            "id": self.id
+        }
+
+        match self.result:
+            case Some(res):
+                response["result"] = res
+            case None:
+                pass
+
+        match self.error:
+            case Some(err):
+                response["error"] = err
+            case None:
+                pass
+
+        response
+
+# JSON-RPC Notification
+class JsonRpcNotification:
+    method: String
+    params: Option<Dict>
+
+    fn new(method: String, params: Option<Dict>) -> JsonRpcNotification:
+        JsonRpcNotification(method: method, params: params)
+
+    fn from_json(data: Dict) -> Result<JsonRpcNotification, String>:
+        let method = data.get("method")?
+        let params = data.get_optional("params")
+        Ok(JsonRpcNotification.new(method, params))
+
+    fn to_json(self) -> Dict:
+        let mut notification = {
+            "jsonrpc": "2.0",
+            "method": self.method
+        }
+
+        match self.params:
+            case Some(p):
+                notification["params"] = p
+            case None:
+                pass
+
+        notification
+
+# LSP Error Codes
+const ERROR_PARSE_ERROR = -32700
+const ERROR_INVALID_REQUEST = -32600
+const ERROR_METHOD_NOT_FOUND = -32601
+const ERROR_INVALID_PARAMS = -32602
+const ERROR_INTERNAL_ERROR = -32603
+const ERROR_SERVER_NOT_INITIALIZED = -32002
+const ERROR_REQUEST_CANCELLED = -32800

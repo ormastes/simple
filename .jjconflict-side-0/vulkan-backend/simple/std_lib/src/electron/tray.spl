@@ -1,0 +1,194 @@
+# Electron System Tray API
+# Create and manage system tray icons
+
+# External FFI declarations
+extern fn electron_tray_create(title: String): i64
+extern fn electron_tray_destroy(tray_id: i64): void
+extern fn electron_tray_set_icon(tray_id: i64, icon_path: String): void
+extern fn electron_tray_set_title(tray_id: i64, title: String): void
+extern fn electron_tray_set_tooltip(tray_id: i64, tooltip: String): void
+extern fn electron_tray_set_menu(tray_id: i64, menu_json: String): void
+extern fn electron_tray_display_balloon(tray_id: i64, title: String, content: String): void
+
+# Tray instance tracker
+let next_tray_id: i64 = 0
+let active_trays: Dict[i64, Tray] = {}
+
+# Menu item type
+pub class MenuItem:
+    pub label: String
+    pub type: String  # "normal", "separator", "checkbox", "radio"
+    pub enabled: bool
+    pub visible: bool
+    pub checked: bool
+    pub callback_id: i64
+
+    pub fn new(label: String, on_click: fn(): void?): MenuItem =
+        """Create a new menu item.
+
+        Example:
+            item = MenuItem.new("Open", fn():
+                print("Clicked Open")
+            )
+        """
+        let callback_id = 0
+        if on_click != none:
+            callback_id = _register_menu_callback(on_click!)
+
+        MenuItem {
+            label: label,
+            type: "normal",
+            enabled: true,
+            visible: true,
+            checked: false,
+            callback_id: callback_id
+        }
+
+    pub fn set_enabled(self, enabled: bool): MenuItem =
+        """Set whether menu item is enabled."""
+        self.enabled = enabled
+        self
+
+    pub fn set_visible(self, visible: bool): MenuItem =
+        """Set whether menu item is visible."""
+        self.visible = visible
+        self
+
+    pub fn set_checked(self, checked: bool): MenuItem =
+        """Set checked state (for checkbox/radio items)."""
+        self.checked = checked
+        self
+
+# Menu separator
+pub class MenuSeparator:
+    pub type: String = "separator"
+
+    pub fn new(): MenuSeparator =
+        """Create menu separator."""
+        MenuSeparator {}
+
+# System Tray
+pub class Tray:
+    pub id: i64
+    pub title: String
+    pub icon: String
+    pub tooltip: String
+    pub menu: List[MenuItem]
+
+    pub fn new(title: String): Tray =
+        """Create a new system tray icon.
+
+        Example:
+            tray = Tray.new("My App")
+            tray.set_icon("icon.png")
+            tray.set_tooltip("App is running")
+        """
+        let tray_id = electron_tray_create(title)
+
+        let tray = Tray {
+            id: tray_id,
+            title: title,
+            icon: "",
+            tooltip: "",
+            menu: []
+        }
+
+        active_trays[tray_id] = tray
+        tray
+
+    pub fn destroy(self):
+        """Destroy the tray icon."""
+        electron_tray_destroy(self.id)
+        active_trays.remove(self.id)
+
+    pub fn set_icon(self, icon_path: String):
+        """Set tray icon image.
+
+        Args:
+            icon_path: Path to image file (PNG recommended)
+
+        Example:
+            tray.set_icon("icon.png")
+            tray.set_icon("/absolute/path/to/icon.png")
+        """
+        self.icon = icon_path
+        electron_tray_set_icon(self.id, icon_path)
+
+    pub fn set_title(self, title: String):
+        """Set tray title (shown next to icon on macOS)."""
+        self.title = title
+        electron_tray_set_title(self.id, title)
+
+    pub fn set_tooltip(self, tooltip: String):
+        """Set tooltip shown on hover."""
+        self.tooltip = tooltip
+        electron_tray_set_tooltip(self.id, tooltip)
+
+    pub fn set_context_menu(self, items: List[MenuItem]):
+        """Set right-click context menu.
+
+        Example:
+            tray.set_context_menu([
+                MenuItem.new("Open", on_open),
+                MenuSeparator.new(),
+                MenuItem.new("Quit", on_quit)
+            ])
+        """
+        self.menu = items
+
+        # Convert menu to JSON
+        menu_json = _serialize_menu(items)
+        electron_tray_set_menu(self.id, menu_json)
+
+    pub fn get_context_menu(self): List[MenuItem] =
+        """Get current context menu."""
+        self.menu
+
+    pub fn display_balloon(self, title: String, content: String):
+        """Display balloon notification (Windows only).
+
+        Args:
+            title: Notification title
+            content: Notification content
+
+        Example:
+            tray.display_balloon("Alert", "Task completed")
+        """
+        electron_tray_display_balloon(self.id, title, content)
+
+# Menu callback registry
+let menu_callbacks: Dict[i64, fn(): void] = {}
+let next_menu_callback_id: i64 = 0
+
+fn _register_menu_callback(callback: fn(): void): i64 =
+    """Register a menu item callback."""
+    let id = next_menu_callback_id
+    next_menu_callback_id = next_menu_callback_id + 1
+    menu_callbacks[id] = callback
+    id
+
+# Called by FFI when menu item clicked
+pub fn _trigger_menu_callback(callback_id: i64):
+    """Internal: Triggered by FFI when menu item clicked."""
+    if menu_callbacks.has_key(callback_id):
+        callback = menu_callbacks[callback_id]
+        callback()
+
+# Serialize menu to JSON
+fn _serialize_menu(items: List[MenuItem]): String =
+    """Convert menu items to JSON for Electron."""
+    let parts: List[String] = []
+
+    for item in items:
+        if item.type == "separator":
+            parts.append('{"type":"separator"}')
+        else:
+            let json = '{"label":"' + item.label + '",'
+            json = json + '"type":"' + item.type + '",'
+            json = json + '"enabled":' + item.enabled.to_string() + ','
+            json = json + '"visible":' + item.visible.to_string() + ','
+            json = json + '"checked":' + item.checked.to_string() + ','
+            json = json + '"callback_id":' + item.callback_id.to_string() + '}'
+            parts.append(json)
+
+    "[" + parts.join(",") + "]"
