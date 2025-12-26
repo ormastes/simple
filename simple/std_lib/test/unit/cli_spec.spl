@@ -1,0 +1,289 @@
+# CLI Library - Unit Tests
+# Tests for command-line argument parsing functionality
+
+use spec
+use cli
+
+describe("CLI Library"):
+    describe("ArgParser"):
+        it("creates a parser with program name and description"):
+            let parser = cli.ArgParser::new("testapp", "Test application")
+            expect(parser.program_name).to(equal("testapp"))
+            expect(parser.description).to(equal("Test application"))
+
+        it("adds flags to the parser"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Enable verbose output")
+            expect(parser.args.len()).to(equal(1))
+
+        it("adds options to the parser"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_option("output", "o", "Output file")
+            expect(parser.args.len()).to(equal(1))
+
+        it("adds positional arguments to the parser"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_positional("input", "Input file")
+            expect(parser.args.len()).to(equal(1))
+
+        it("chains multiple argument definitions"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Verbose output")
+                .required_option("output", "o", "Output file")
+                .required_positional("input", "Input file")
+            expect(parser.args.len()).to(equal(3))
+
+    describe("Parsing Flags"):
+        it("parses long-form flags"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Verbose output")
+
+            match parser.parse(["--verbose"]):
+                case Ok(args):
+                    expect(args.get_flag("verbose")).to(equal(true))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("parses short-form flags"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Verbose output")
+
+            match parser.parse(["-v"]):
+                case Ok(args):
+                    expect(args.get_flag("verbose")).to(equal(true))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("returns false for absent flags"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Verbose output")
+
+            match parser.parse([]):
+                case Ok(args):
+                    expect(args.get_flag("verbose")).to(equal(false))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("handles multiple flags"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Verbose output")
+                .flag("debug", "d", "Debug mode")
+
+            match parser.parse(["-v", "-d"]):
+                case Ok(args):
+                    expect(args.get_flag("verbose")).to(equal(true))
+                    expect(args.get_flag("debug")).to(equal(true))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+    describe("Parsing Options"):
+        it("parses long-form options with space"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_option("output", "o", "Output file")
+
+            match parser.parse(["--output", "file.txt"]):
+                case Ok(args):
+                    expect(args.get_option("output")).to(equal(Some("file.txt")))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("parses long-form options with equals"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_option("output", "o", "Output file")
+
+            match parser.parse(["--output=file.txt"]):
+                case Ok(args):
+                    expect(args.get_option("output")).to(equal(Some("file.txt")))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("parses short-form options"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_option("output", "o", "Output file")
+
+            match parser.parse(["-o", "file.txt"]):
+                case Ok(args):
+                    expect(args.get_option("output")).to(equal(Some("file.txt")))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("applies default values for optional options"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .optional_option("format", "f", "Output format", "json")
+
+            match parser.parse([]):
+                case Ok(args):
+                    expect(args.get_option_or("format", "json")).to(equal("json"))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("fails for missing required options"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_option("output", "o", "Output file")
+
+            match parser.parse([]):
+                case Ok(args):
+                    expect(false).to(equal(true))  # Should fail
+                case Err(e):
+                    expect(e).to(contain("Required option"))
+
+    describe("Parsing Positional Arguments"):
+        it("parses single positional argument"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_positional("input", "Input file")
+
+            match parser.parse(["input.txt"]):
+                case Ok(args):
+                    expect(args.get_positional_at(0)).to(equal(Some("input.txt")))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("parses multiple positional arguments"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_positional("input", "Input file")
+                .required_positional("output", "Output file")
+
+            match parser.parse(["input.txt", "output.txt"]):
+                case Ok(args):
+                    expect(args.get_positional_at(0)).to(equal(Some("input.txt")))
+                    expect(args.get_positional_at(1)).to(equal(Some("output.txt")))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("fails for missing required positional"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_positional("input", "Input file")
+
+            match parser.parse([]):
+                case Ok(args):
+                    expect(false).to(equal(true))  # Should fail
+                case Err(e):
+                    expect(e).to(contain("positional"))
+
+    describe("Mixed Arguments"):
+        it("parses flags, options, and positionals together"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Verbose output")
+                .required_option("output", "o", "Output file")
+                .required_positional("input", "Input file")
+
+            match parser.parse(["-v", "--output", "out.txt", "in.txt"]):
+                case Ok(args):
+                    expect(args.get_flag("verbose")).to(equal(true))
+                    expect(args.get_option("output")).to(equal(Some("out.txt")))
+                    expect(args.get_positional_at(0)).to(equal(Some("in.txt")))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("handles arguments in any order"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Verbose output")
+                .required_option("output", "o", "Output file")
+                .required_positional("input", "Input file")
+
+            match parser.parse(["in.txt", "-v", "--output", "out.txt"]):
+                case Ok(args):
+                    expect(args.get_flag("verbose")).to(equal(true))
+                    expect(args.get_option("output")).to(equal(Some("out.txt")))
+                    expect(args.get_positional_at(0)).to(equal(Some("in.txt")))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+    describe("ParsedArgs"):
+        it("provides get_option_or with default"):
+            let args = cli.ParsedArgs {
+                flags: {},
+                options: {},
+                positionals: []
+            }
+            expect(args.get_option_or("missing", "default")).to(equal("default"))
+
+        it("provides get_all_positionals"):
+            let args = cli.ParsedArgs {
+                flags: {},
+                options: {},
+                positionals: ["arg1", "arg2", "arg3"]
+            }
+            expect(args.get_all_positionals().len()).to(equal(3))
+
+        it("provides has_flag for checking flag presence"):
+            let mut flags = {}
+            flags.insert("verbose", true)
+            let args = cli.ParsedArgs {
+                flags: flags,
+                options: {},
+                positionals: []
+            }
+            expect(args.has_flag("verbose")).to(equal(true))
+            expect(args.has_flag("missing")).to(equal(false))
+
+    describe("Error Handling"):
+        it("returns error for unknown flag"):
+            let parser = cli.ArgParser::new("test", "Test")
+
+            match parser.parse(["--unknown"]):
+                case Ok(args):
+                    expect(false).to(equal(true))  # Should fail
+                case Err(e):
+                    expect(e).to(contain("Unknown option"))
+
+        it("returns error for unknown short option"):
+            let parser = cli.ArgParser::new("test", "Test")
+
+            match parser.parse(["-x"]):
+                case Ok(args):
+                    expect(false).to(equal(true))  # Should fail
+                case Err(e):
+                    expect(e).to(contain("Unknown option"))
+
+        it("returns error for option without value"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .required_option("output", "o", "Output file")
+
+            match parser.parse(["--output"]):
+                case Ok(args):
+                    expect(false).to(equal(true))  # Should fail
+                case Err(e):
+                    expect(e).to(contain("requires a value"))
+
+        it("returns error for flag with value"):
+            let parser = cli.ArgParser::new("test", "Test")
+                .flag("verbose", "v", "Verbose output")
+
+            match parser.parse(["--verbose=true"]):
+                case Ok(args):
+                    expect(false).to(equal(true))  # Should fail
+                case Err(e):
+                    expect(e).to(contain("does not take a value"))
+
+    describe("Help Generation"):
+        it("generates help message"):
+            let parser = cli.ArgParser::new("testapp", "Test application description")
+                .flag("verbose", "v", "Enable verbose output")
+                .required_option("output", "o", "Output file path")
+                .required_positional("input", "Input file path")
+
+            # Help generation prints to stdout
+            # This is a basic test to ensure it doesn't crash
+            parser.print_help()
+            expect(true).to(equal(true))
+
+        it("handles --help flag"):
+            let parser = cli.ArgParser::new("test", "Test")
+
+            match parser.parse(["--help"]):
+                case Ok(args):
+                    # Help flag returns Ok with empty args
+                    expect(true).to(equal(true))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail
+
+        it("handles -h flag"):
+            let parser = cli.ArgParser::new("test", "Test")
+
+            match parser.parse(["-h"]):
+                case Ok(args):
+                    # Help flag returns Ok with empty args
+                    expect(true).to(equal(true))
+                case Err(e):
+                    expect(false).to(equal(true))  # Should not fail

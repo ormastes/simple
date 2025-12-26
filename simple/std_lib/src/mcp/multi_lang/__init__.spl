@@ -1,0 +1,283 @@
+# Multi-Language MCP-MCP Support
+#
+# Provides MCP-MCP folding for multiple programming languages using Tree-sitter.
+# Unified interface for language-agnostic code representation.
+#
+# Supported Languages:
+#   - Rust
+#   - Python
+#   - JavaScript/TypeScript
+#   - Go
+#   - C/C++
+#   - Ruby
+#   - Erlang
+#
+# Key Features:
+#   - Language auto-detection
+#   - Unified folding format
+#   - Cross-language workspace support
+#   - Language-specific virtual info overlays
+
+use core.*
+use mcp.core.protocol.*
+use mcp.core.provider.*
+
+# Re-export language providers
+pub use mcp.multi_lang.rust.*
+pub use mcp.multi_lang.python.*
+pub use mcp.multi_lang.javascript.*
+pub use mcp.multi_lang.go.*
+pub use mcp.multi_lang.c.*
+pub use mcp.multi_lang.ruby.*
+pub use mcp.multi_lang.erlang.*
+
+# Multi-language MCP-MCP manager
+pub struct MultiLangMcp:
+    providers: Dict[String, Box[LanguageProvider]]
+    auto_detect: bool
+    workspace_root: String
+
+# Language provider trait
+pub trait LanguageProvider:
+    fn name(self) -> String
+    fn extensions(self) -> Array[String]
+    fn fold(self, source: &str, opts: &FoldOptions) -> Result[McpOutput, McpError]
+    fn get_symbols(self, source: &str) -> Result[Array[Symbol], McpError]
+    fn get_diagnostics(self, source: &str) -> Result[Array[Diagnostic], McpError]
+
+# Language type enumeration
+pub enum Language:
+    Simple
+    Rust
+    Python
+    JavaScript
+    TypeScript
+    Go
+    C
+    Cpp
+    Ruby
+    Erlang
+    Unknown
+
+impl Language:
+    pub fn from_extension(ext: &str) -> Language:
+        match ext:
+            case "spl": return Language::Simple
+            case "rs": return Language::Rust
+            case "py" | "pyi": return Language::Python
+            case "js" | "mjs" | "cjs": return Language::JavaScript
+            case "ts" | "tsx": return Language::TypeScript
+            case "go": return Language::Go
+            case "c" | "h": return Language::C
+            case "cpp" | "cc" | "cxx" | "hpp": return Language::Cpp
+            case "rb": return Language::Ruby
+            case "erl" | "hrl": return Language::Erlang
+            case _: return Language::Unknown
+
+    pub fn to_string(self) -> String:
+        match self:
+            case Language::Simple: return "simple".to_string()
+            case Language::Rust: return "rust".to_string()
+            case Language::Python: return "python".to_string()
+            case Language::JavaScript: return "javascript".to_string()
+            case Language::TypeScript: return "typescript".to_string()
+            case Language::Go: return "go".to_string()
+            case Language::C: return "c".to_string()
+            case Language::Cpp: return "cpp".to_string()
+            case Language::Ruby: return "ruby".to_string()
+            case Language::Erlang: return "erlang".to_string()
+            case Language::Unknown: return "unknown".to_string()
+
+# Symbol information
+pub struct Symbol:
+    pub name: String
+    pub kind: SymbolKind
+    pub range: Range
+    pub signature: Option[String]
+    pub visibility: Visibility
+
+pub enum SymbolKind:
+    Function
+    Class
+    Struct
+    Enum
+    Trait
+    Method
+    Field
+    Variable
+    Constant
+    Module
+
+pub enum Visibility:
+    Public
+    Private
+    Protected
+    Internal
+
+# Diagnostic information
+pub struct Diagnostic:
+    pub severity: DiagnosticSeverity
+    pub range: Range
+    pub message: String
+    pub code: Option[String]
+
+pub enum DiagnosticSeverity:
+    Error
+    Warning
+    Info
+    Hint
+
+# Source code range
+pub struct Range:
+    pub start: Position
+    pub end: Position
+
+pub struct Position:
+    pub line: u32
+    pub column: u32
+
+# =============================================================================
+# MultiLangMcp Implementation
+# =============================================================================
+
+impl MultiLangMcp:
+    # Create new multi-language MCP manager
+    pub fn new(workspace_root: &str) -> MultiLangMcp:
+        let mut providers: Dict[String, Box[LanguageProvider]] = Dict::new()
+
+        # Register language providers
+        providers.insert("rust".to_string(), Box::new(RustProvider::new()))
+        providers.insert("python".to_string(), Box::new(PythonProvider::new()))
+        providers.insert("javascript".to_string(), Box::new(JavaScriptProvider::new()))
+        providers.insert("typescript".to_string(), Box::new(JavaScriptProvider::new()))  # Reuse JS provider
+        providers.insert("go".to_string(), Box::new(GoProvider::new()))
+        providers.insert("c".to_string(), Box::new(CProvider::new()))
+        providers.insert("cpp".to_string(), Box::new(CProvider::new()))  # Reuse C provider
+        providers.insert("ruby".to_string(), Box::new(RubyProvider::new()))
+        providers.insert("erlang".to_string(), Box::new(ErlangProvider::new()))
+
+        return MultiLangMcp {
+            providers: providers,
+            auto_detect: true,
+            workspace_root: workspace_root.to_string()
+        }
+
+    # Fold source code with language auto-detection
+    pub fn fold_auto(self, file_path: &str, source: &str, opts: &FoldOptions)
+        -> Result[McpOutput, McpError]:
+
+        let lang = self.detect_language(file_path)
+        return self.fold_with_language(lang, source, opts)
+
+    # Fold source code with explicit language
+    pub fn fold_with_language(self, lang: Language, source: &str, opts: &FoldOptions)
+        -> Result[McpOutput, McpError]:
+
+        let lang_name = lang.to_string()
+
+        if let Some(provider) = self.providers.get(&lang_name):
+            return provider.fold(source, opts)
+
+        return Err(McpError::UnsupportedLanguage(lang_name))
+
+    # Detect language from file path
+    pub fn detect_language(self, file_path: &str) -> Language:
+        if not self.auto_detect:
+            return Language::Unknown
+
+        # Extract extension
+        if let Some(dot_pos) = file_path.rfind('.'):
+            let ext = &file_path[dot_pos + 1..]
+            return Language::from_extension(ext)
+
+        return Language::Unknown
+
+    # Get all symbols from source
+    pub fn get_symbols(self, file_path: &str, source: &str)
+        -> Result[Array[Symbol], McpError]:
+
+        let lang = self.detect_language(file_path)
+        let lang_name = lang.to_string()
+
+        if let Some(provider) = self.providers.get(&lang_name):
+            return provider.get_symbols(source)
+
+        return Err(McpError::UnsupportedLanguage(lang_name))
+
+    # Get diagnostics from source
+    pub fn get_diagnostics(self, file_path: &str, source: &str)
+        -> Result[Array[Diagnostic], McpError]:
+
+        let lang = self.detect_language(file_path)
+        let lang_name = lang.to_string()
+
+        if let Some(provider) = self.providers.get(&lang_name):
+            return provider.get_diagnostics(source)
+
+        return Ok([])  # Default: no diagnostics
+
+    # Fold entire workspace (multi-language)
+    pub fn fold_workspace(self, paths: &Array[String], opts: &FoldOptions)
+        -> Result[McpOutput, McpError]:
+
+        let mut combined_output = McpOutput::new()
+
+        for path in paths:
+            # Read file
+            let source = read_file_to_string(path)?
+
+            # Fold with auto-detection
+            let output = self.fold_auto(path, &source, opts)?
+
+            # Merge into combined output
+            combined_output.merge(output)
+
+        return Ok(combined_output)
+
+    # Search across multiple languages
+    pub fn multi_language_search(self, query: &str, paths: &Array[String])
+        -> Result[Array[SearchResult], McpError]:
+
+        let mut results: Array[SearchResult] = []
+
+        for path in paths:
+            let source = read_file_to_string(path)?
+            let symbols = self.get_symbols(path, &source)?
+
+            # Filter symbols matching query
+            for symbol in symbols:
+                if symbol.name.contains(query):
+                    results.push(SearchResult {
+                        file_path: path.clone(),
+                        symbol: symbol,
+                        language: self.detect_language(path)
+                    })
+
+        return Ok(results)
+
+# Search result
+pub struct SearchResult:
+    pub file_path: String
+    pub symbol: Symbol
+    pub language: Language
+
+# Helper: Read file to string
+fn read_file_to_string(path: &str) -> Result[String, McpError]:
+    # TODO: Implement file reading
+    return Err(McpError::IoError("File reading not implemented".to_string()))
+
+# MCP Error types
+pub enum McpError:
+    UnsupportedLanguage(String)
+    ParseError(String)
+    IoError(String)
+
+impl McpError:
+    pub fn to_string(self) -> String:
+        match self:
+            case McpError::UnsupportedLanguage(lang):
+                return format("Unsupported language: {}", lang)
+            case McpError::ParseError(msg):
+                return format("Parse error: {}", msg)
+            case McpError::IoError(msg):
+                return format("IO error: {}", msg)

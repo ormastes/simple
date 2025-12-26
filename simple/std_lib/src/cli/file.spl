@@ -1,0 +1,327 @@
+# CLI File Validation - File argument validation and staging utilities
+#
+# Provides Python argparse-style file validation for CLI arguments:
+# - Check if files exist (relative or absolute paths)
+# - Validate file types and permissions
+# - Stage multiple files for processing
+# - Normalize file paths
+#
+# Example:
+#   let parser = ArgParser::new("myapp", "File processor")
+#       .file_arg("input", "i", "Input file", required: true, must_exist: true)
+#       .file_arg("output", "o", "Output file", required: false, must_exist: false)
+#
+#   match parser.parse_and_validate_files(sys_get_args()):
+#       case Ok((args, files)):
+#           for file in files.staged:
+#               process_file(file)
+
+# File validation result
+pub enum FileValidation:
+    Exists(path: String)
+    NotFound(path: String)
+    NotFile(path: String)
+    NotReadable(path: String)
+    NotWritable(path: String)
+
+# File metadata
+pub struct FileInfo:
+    path: String
+    absolute_path: String
+    exists: bool
+    is_file: bool
+    is_dir: bool
+    is_readable: bool
+    is_writable: bool
+
+# Staged files for processing
+pub struct StagedFiles:
+    files: Array[FileInfo]
+    errors: Array[String]
+
+    # Get all successfully staged files
+    pub fn staged(self) -> Array[FileInfo]:
+        let mut result = []
+        for file in self.files:
+            if file.exists and file.is_file:
+                result.push(file)
+        return result
+
+    # Get all errors
+    pub fn get_errors(self) -> Array[String]:
+        return self.errors
+
+    # Check if any files have errors
+    pub fn has_errors(self) -> bool:
+        return self.errors.len() > 0
+
+    # Get count of successfully staged files
+    pub fn count(self) -> i32:
+        return self.staged().len()
+
+# File argument validator
+pub struct FileValidator:
+    must_exist: bool
+    must_be_file: bool
+    must_be_readable: bool
+    must_be_writable: bool
+    allowed_extensions: Array[String]
+
+    # Create a new file validator
+    pub fn new() -> FileValidator:
+        return FileValidator {
+            must_exist: false,
+            must_be_file: true,
+            must_be_readable: false,
+            must_be_writable: false,
+            allowed_extensions: []
+        }
+
+    # Require file to exist
+    pub fn require_exists(mut self) -> FileValidator:
+        self.must_exist = true
+        return self
+
+    # Require file to be readable
+    pub fn require_readable(mut self) -> FileValidator:
+        self.must_be_readable = true
+        return self
+
+    # Require file to be writable
+    pub fn require_writable(mut self) -> FileValidator:
+        self.must_be_writable = true
+        return self
+
+    # Allow only specific extensions
+    pub fn with_extensions(mut self, extensions: Array[String]) -> FileValidator:
+        self.allowed_extensions = extensions
+        return self
+
+    # Validate a file path
+    pub fn validate(self, path: String) -> Result[FileInfo, String]:
+        # Check if file exists (using file_exists FFI)
+        let exists = file_exists(path)
+
+        # Get file info
+        let info = get_file_info(path)
+
+        # Validate existence
+        if self.must_exist and not exists:
+            return Err(f"File does not exist: {path}")
+
+        # Validate it's a file (not directory)
+        if self.must_be_file and exists and info.is_dir:
+            return Err(f"Path is a directory, not a file: {path}")
+
+        # Validate readable
+        if self.must_be_readable and exists and not info.is_readable:
+            return Err(f"File is not readable: {path}")
+
+        # Validate writable
+        if self.must_be_writable and exists and not info.is_writable:
+            return Err(f"File is not writable: {path}")
+
+        # Validate extension
+        if self.allowed_extensions.len() > 0:
+            let ext = get_file_extension(path)
+            let mut valid_ext = false
+            for allowed in self.allowed_extensions:
+                if ext == allowed:
+                    valid_ext = true
+
+            if not valid_ext:
+                return Err(f"Invalid file extension: {ext} (allowed: {self.allowed_extensions})")
+
+        return Ok(info)
+
+# File staging manager
+pub struct FileStager:
+    validators: Dict[String, FileValidator]
+
+    # Create a new file stager
+    pub fn new() -> FileStager:
+        return FileStager {
+            validators: {}
+        }
+
+    # Add a file validator for an argument
+    pub fn add_validator(mut self, arg_name: String, validator: FileValidator) -> FileStager:
+        self.validators.insert(arg_name, validator)
+        return self
+
+    # Stage files from parsed arguments
+    pub fn stage_files(self, args: ParsedArgs) -> StagedFiles:
+        let mut files: Array[FileInfo] = []
+        let mut errors: Array[String] = []
+
+        # Validate options with validators
+        for (name, validator) in self.validators:
+            let value = args.get_option(name)
+            match value:
+                case Some(path):
+                    match validator.validate(path):
+                        case Ok(info):
+                            files.push(info)
+                        case Err(error):
+                            errors.push(f"{name}: {error}")
+                case None:
+                    # Option not provided - skip if optional
+                    pass
+
+        # Validate positional files
+        let positionals = args.get_all_positionals()
+        for path in positionals:
+            # Use default validator for positionals
+            let default_validator = FileValidator::new().require_exists()
+            match default_validator.validate(path):
+                case Ok(info):
+                    files.push(info)
+                case Err(error):
+                    errors.push(f"positional: {error}")
+
+        return StagedFiles {
+            files: files,
+            errors: errors
+        }
+
+# File utility functions
+
+# Check if a file exists (FFI placeholder)
+fn file_exists(path: String) -> bool:
+    # TODO: Implement actual file existence check via FFI
+    # For now, return true as placeholder
+    return true
+
+# Get file information (FFI placeholder)
+fn get_file_info(path: String) -> FileInfo:
+    # TODO: Implement actual file stat via FFI
+    # For now, return placeholder info
+    return FileInfo {
+        path: path,
+        absolute_path: normalize_path(path),
+        exists: true,
+        is_file: not path.ends_with("/"),
+        is_dir: path.ends_with("/"),
+        is_readable: true,
+        is_writable: true
+    }
+
+# Normalize file path (handle relative/absolute)
+pub fn normalize_path(path: String) -> String:
+    # TODO: Implement actual path normalization
+    # For now, just return the path
+    # Should handle:
+    # - Convert relative to absolute
+    # - Resolve . and ..
+    # - Normalize separators
+    if path.starts_with("/"):
+        # Already absolute
+        return path
+    else:
+        # Make absolute from current directory
+        # TODO: Get current working directory
+        return f"/current/dir/{path}"
+
+# Get file extension
+pub fn get_file_extension(path: String) -> String:
+    let parts = path.split(".")
+    if parts.len() > 1:
+        return parts[parts.len() - 1]
+    return ""
+
+# Check if path is absolute
+pub fn is_absolute_path(path: String) -> bool:
+    return path.starts_with("/") or path.starts_with("C:") or path.starts_with("D:")
+
+# Check if path is relative
+pub fn is_relative_path(path: String) -> bool:
+    return not is_absolute_path(path)
+
+# Join path components
+pub fn join_paths(base: String, relative: String) -> String:
+    if base.ends_with("/"):
+        return f"{base}{relative}"
+    else:
+        return f"{base}/{relative}"
+
+# Get directory from path
+pub fn get_directory(path: String) -> String:
+    let parts = path.split("/")
+    if parts.len() > 1:
+        # Remove last component
+        let mut dir = ""
+        let mut i = 0
+        while i < parts.len() - 1:
+            if i > 0:
+                dir = f"{dir}/"
+            dir = f"{dir}{parts[i]}"
+            i = i + 1
+        return dir
+    return "."
+
+# Get filename from path
+pub fn get_filename(path: String) -> String:
+    let parts = path.split("/")
+    if parts.len() > 0:
+        return parts[parts.len() - 1]
+    return path
+
+# Get filename without extension
+pub fn get_basename(path: String) -> String:
+    let filename = get_filename(path)
+    let parts = filename.split(".")
+    if parts.len() > 1:
+        # Return everything except last part (extension)
+        let mut base = ""
+        let mut i = 0
+        while i < parts.len() - 1:
+            if i > 0:
+                base = f"{base}."
+            base = f"{base}{parts[i]}"
+            i = i + 1
+        return base
+    return filename
+
+# Validate multiple files at once
+pub fn validate_files(paths: Array[String], validator: FileValidator) -> Result[Array[FileInfo], Array[String]]:
+    let mut files: Array[FileInfo] = []
+    let mut errors: Array[String] = []
+
+    for path in paths:
+        match validator.validate(path):
+            case Ok(info):
+                files.push(info)
+            case Err(error):
+                errors.push(error)
+
+    if errors.len() > 0:
+        return Err(errors)
+
+    return Ok(files)
+
+# Create file validator for common cases
+
+# Validator for input files (must exist, readable)
+pub fn input_file_validator() -> FileValidator:
+    return FileValidator::new()
+        .require_exists()
+        .require_readable()
+
+# Validator for output files (can be created, writable)
+pub fn output_file_validator() -> FileValidator:
+    return FileValidator::new()
+        .require_writable()
+
+# Validator for config files (must exist, readable, specific extensions)
+pub fn config_file_validator() -> FileValidator:
+    return FileValidator::new()
+        .require_exists()
+        .require_readable()
+        .with_extensions(["json", "toml", "yaml", "yml", "conf"])
+
+# Validator for source code files
+pub fn source_file_validator() -> FileValidator:
+    return FileValidator::new()
+        .require_exists()
+        .require_readable()
+        .with_extensions(["spl", "rs", "py", "js", "ts"])
