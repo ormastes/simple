@@ -1,5 +1,5 @@
-use simple_runtime::aop::{rt_aop_invoke_around, rt_aop_proceed, ProceedContext};
-use simple_runtime::RuntimeValue;
+use crate::aop::{rt_aop_invoke_around, rt_aop_proceed, ProceedContext};
+use crate::RuntimeValue;
 
 extern "C" fn target_sum(argc: u64, argv: *const RuntimeValue) -> RuntimeValue {
     if argc == 0 || argv.is_null() {

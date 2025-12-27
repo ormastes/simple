@@ -372,3 +372,17 @@ pub use monoio_udp::{
     // Multicast
     monoio_udp_join_multicast, monoio_udp_leave_multicast,
 };
+
+// Unit tests
+#[cfg(test)]
+#[path = "../tests"]
+mod tests {
+    mod gc_allocator;
+    mod gc_logging;
+    mod no_gc_allocator;
+    mod concurrency_tests;
+    mod aop_around_tests;
+
+    #[cfg(feature = "vulkan")]
+    mod vulkan_ffi_tests;
+}
