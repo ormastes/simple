@@ -1,7 +1,7 @@
 # Simple Language Features
 
 **Last Updated:** 2025-12-27
-**Recent Update:** Vulkan Compute Backend Complete (57/60, 95%) - Code audit revealed 5 additional complete features: gpu-allocator integration, SPIR-V compilation (935 lines), compute pipeline creation, shader dispatch, and queue management. Added 22 FFI unit tests (59 total tests). Only 3 graphics features remain. (See [VULKAN_PHASE6_COMPLETE_2025-12-26.md](../report/VULKAN_PHASE6_COMPLETE_2025-12-26.md))
+**Recent Update:** Async Memory-Mapped File I/O Complete (20/20, 100%) - Completed CLI integration with background file loading: StagedFiles with AsyncFileHandle support, ArgParser.with_async_loading(), and automatic background loading during argument parsing. Combined with earlier Vulkan completion (57/60, 95%).
 
 ## Feature Table Format
 
@@ -66,15 +66,15 @@ All feature tables use this standardized 8-column format:
 | #1590-#1649 | Physics Engine Integration (Isaac Lab/Genesis) | 📋 Planned (0/60) |
 | #1650-#1729 | ML/PyTorch Integration | 📋 Planned (0/80) |
 | #1730-#1759 | Monoio Async Runtime | 🔄 In Progress (19/30, 63%) → [MONOIO_ASYNC_NETWORK_2025-12-26.md](../report/MONOIO_ASYNC_NETWORK_2025-12-26.md) |
-| #1760-#1779 | Async Memory-Mapped File I/O | 🔄 In Progress (18/20, 90%) - Core FFI, Async Loading, Context Managers & Full Platform Support Complete |
+| #1760-#1779 | Async Memory-Mapped File I/O | ✅ Complete (20/20, 100%) - All features complete: Core FFI, Async Loading, Context Managers, CLI Integration & Platform Support |
 
 ---
 
 ## Summary Statistics
 
-**Overall Progress:** 60% (581/976 active features complete, 169 archived in feature_done_*.md, 60 Vulkan + 240 new features added)
+**Overall Progress:** 60% (583/976 active features complete, 169 archived in feature_done_*.md, 60 Vulkan + 240 new features added)
 
-**Recent Gains:** +66 features verified (Multi-Lang: +7, MCP-MCP: +25, Vulkan: +34) from comprehensive code audit + 22 FFI tests
+**Recent Gains:** +68 features (Multi-Lang: +7, MCP-MCP: +25, Vulkan: +34, Async mmap CLI: +2) from comprehensive code audit + async mmap completion
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -689,9 +689,9 @@ Complete PyTorch integration for machine learning in Simple. Uses LibTorch C++ A
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1773 | StagedFiles with AsyncFileHandle | 3 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/cli/` | - |
-| #1774 | ArgParser.with_async_loading() | 2 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/cli/` | - |
-| #1775 | Background file loading during parse | 4 | 📋 | S | [file_io.md](../spec/file_io.md) | `std_lib/test/unit/cli/` | - |
+| #1773 | StagedFiles with AsyncFileHandle | 3 | ✅ | S | [file.spl:69-112](../simple/std_lib/src/cli/file.spl) | `std_lib/test/unit/cli/` | - |
+| #1774 | ArgParser.with_async_loading() | 2 | ✅ | S | [__init__.spl:146-166](../simple/std_lib/src/cli/__init__.spl) | `std_lib/test/unit/cli/` | - |
+| #1775 | Background file loading during parse | 4 | ✅ | S | [__init__.spl:497-526](../simple/std_lib/src/cli/__init__.spl) | `std_lib/test/unit/cli/` | - |
 
 ### Platform Support (#1776-#1779)
 

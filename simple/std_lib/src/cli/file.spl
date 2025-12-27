@@ -1,31 +1,51 @@
 # CLI File Validation - File argument validation and staging utilities
 #
-# **SYNC MODE ONLY** - For CLI argument parsing and validation
+# **Supports both sync and async modes:**
+# - Sync mode (default): Validates paths only, no file loading
+# - Async mode (via ArgParser.with_async_loading): Starts background loading during parse
 #
 # This module provides SYNCHRONOUS file validation for CLI arguments.
 # It is designed for use during argument parsing (pre-execution validation).
 #
-# **For file I/O operations, use the `file` module instead:**
+# **For file I/O operations, use the `file` module:**
 # - `file` module: Async memory-mapped file I/O (default for applications)
-# - `cli.file` module: Sync validation only (for CLI argument parsing)
+# - `cli.file` module: Path validation + optional async loading
 #
 # This module provides Python argparse-style file validation for CLI arguments:
 # - Check if files exist (relative or absolute paths)
 # - Validate file types and permissions
 # - Stage multiple files for processing
 # - Normalize file paths
+# - Optionally start async loading in background
 #
-# Example:
+# Example (sync mode):
 #   let parser = ArgParser::new("myapp", "File processor")
 #       .file_arg("input", "i", "Input file", required: true, must_exist: true)
 #       .file_arg("output", "o", "Output file", required: false, must_exist: false)
 #
-#   match parser.parse_and_validate_files(sys_get_args()):
-#       case Ok((args, files)):
-#           # Use the async `file` module to actually read the files
-#           for file_info in files.staged:
+#   match parser.parse(sys_get_args()):
+#       case Ok(args):
+#           # Use the async `file` module to load files
+#           for file_info in args.files.staged():
 #               async with await file.open(file_info.path) as mmap:
 #                   process_file(mmap.as_bytes())
+#
+# Example (async mode - background loading):
+#   let parser = ArgParser::new("myapp", "File processor")
+#       .file_arg("input", "i", "Input file", required: true, must_exist: true)
+#       .with_async_loading(true)  # Enable background loading
+#
+#   match parser.parse(sys_get_args()):
+#       case Ok(args):
+#           # Files already loading in background!
+#           let regions = await args.files.wait_all()?
+#           for region in regions:
+#               process_file(region.as_bytes())
+
+# Import async file handle for background loading
+use file.async_handle::{AsyncFileHandle, FileState}
+use file.mmap::{MmapRegion, OpenOptions}
+use file::{FileError}
 
 # File validation result
 pub enum FileValidation:
@@ -47,10 +67,28 @@ pub struct FileInfo:
 
 # Staged files for processing
 #
-# **NOTE:** This only validates file paths - it does NOT load file contents.
-# To actually read the files, use the `file` module's async mmap operations.
+# **Supports two modes:**
+# 1. Sync validation only (default) - validates paths, no file loading
+# 2. Async loading (via ArgParser.with_async_loading) - starts loading files in background
+#
+# **Usage:**
+#   # Sync mode (validation only)
+#   let staged = stage_files(args)
+#   for file in staged.staged():
+#       # Use file module to load
+#       async with await file.open(file.path) as mmap:
+#           process(mmap)
+#
+#   # Async mode (background loading)
+#   let staged = stage_files_async(args)  # Files start loading
+#   # Wait for all files
+#   let regions = await staged.wait_all()?
+#   # Or process as ready
+#   for handle in staged.ready_handles():
+#       let mmap = handle.get()?
 pub struct StagedFiles:
     files: Array[FileInfo]
+    handles: Array[AsyncFileHandle]  # Async file handles (if async loading enabled)
     errors: Array[String]
 
     # Get all successfully staged files
@@ -60,6 +98,26 @@ pub struct StagedFiles:
             if file.exists and file.is_file:
                 result.push(file)
         return result
+
+    # Get async file handles (if async loading enabled)
+    pub fn handles(self) -> Array[AsyncFileHandle]:
+        return self.handles
+
+    # Wait for all files to load (async)
+    pub async fn wait_all(self) -> Result[Array[MmapRegion], Error]:
+        let mut regions = []
+        for handle in self.handles:
+            let region = await handle.wait()?
+            regions.push(region)
+        return Ok(regions)
+
+    # Get files that are already ready (non-blocking)
+    pub fn ready_handles(self) -> Array[AsyncFileHandle]:
+        let mut ready = []
+        for handle in self.handles:
+            if handle.is_ready():
+                ready.push(handle)
+        return ready
 
     # Get all errors
     pub fn get_errors(self) -> Array[String]:
@@ -166,7 +224,7 @@ pub struct FileStager:
         self.validators.insert(arg_name, validator)
         return self
 
-    # Stage files from parsed arguments
+    # Stage files from parsed arguments (sync mode - no background loading)
     pub fn stage_files(self, args: ParsedArgs) -> StagedFiles:
         let mut files: Array[FileInfo] = []
         let mut errors: Array[String] = []
@@ -198,6 +256,52 @@ pub struct FileStager:
 
         return StagedFiles {
             files: files,
+            handles: [],  # No async handles in sync mode
+            errors: errors
+        }
+
+    # Stage files with async loading (background loading)
+    pub fn stage_files_async(self, args: ParsedArgs, options: OpenOptions) -> StagedFiles:
+        let mut files: Array[FileInfo] = []
+        let mut handles: Array[AsyncFileHandle] = []
+        let mut errors: Array[String] = []
+
+        # Validate options with validators
+        for (name, validator) in self.validators:
+            let value = args.get_option(name)
+            match value:
+                case Some(path):
+                    match validator.validate(path):
+                        case Ok(info):
+                            files.push(info)
+                            # Start loading file in background
+                            let handle = AsyncFileHandle::with_options(info.path, options)
+                            handle.start_loading()
+                            handles.push(handle)
+                        case Err(error):
+                            errors.push(f"{name}: {error}")
+                case None:
+                    # Option not provided - skip if optional
+                    pass
+
+        # Validate positional files
+        let positionals = args.get_all_positionals()
+        for path in positionals:
+            # Use default validator for positionals
+            let default_validator = FileValidator::new().require_exists()
+            match default_validator.validate(path):
+                case Ok(info):
+                    files.push(info)
+                    # Start loading file in background
+                    let handle = AsyncFileHandle::with_options(info.path, options)
+                    handle.start_loading()
+                    handles.push(handle)
+                case Err(error):
+                    errors.push(f"positional: {error}")
+
+        return StagedFiles {
+            files: files,
+            handles: handles,
             errors: errors
         }
 
