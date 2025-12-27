@@ -5,12 +5,47 @@ use simple_runtime::value::{
     rt_is_stdout_capturing, rt_is_stderr_capturing,
 };
 
+// TuiEvent struct matches the C ABI struct in ratatui_tui.rs
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+struct TuiEvent {
+    event_type: u32,
+    key_code: u32,
+    key_mods: u32,
+    char_value: u32,
+}
+
+// Extern declarations for Ratatui FFI functions
+extern "C" {
+    fn ratatui_terminal_new() -> u64;
+    fn ratatui_terminal_cleanup(terminal: u64);
+    fn ratatui_terminal_clear(terminal: u64);
+    fn ratatui_textbuffer_new() -> u64;
+    fn ratatui_textbuffer_insert_char(buffer: u64, code: u32);
+    fn ratatui_textbuffer_backspace(buffer: u64);
+    fn ratatui_textbuffer_newline(buffer: u64);
+    fn ratatui_textbuffer_get_text(buffer: u64, buf_ptr: *mut u8, buf_len: usize) -> usize;
+    fn ratatui_textbuffer_set_text(buffer: u64, text_ptr: *const u8, text_len: usize);
+    fn ratatui_render_textbuffer(terminal: u64, buffer: u64, prompt_ptr: *const u8, prompt_len: usize);
+    fn ratatui_read_event_timeout(timeout_ms: u64) -> TuiEvent;
+    fn ratatui_object_destroy(handle: u64);
+}
+
+// Extern declarations for REPL runner FFI functions (from driver crate)
+extern "C" {
+    fn simple_repl_runner_init() -> bool;
+    fn simple_repl_runner_cleanup();
+    fn simple_repl_runner_execute(code_ptr: *const u8, code_len: usize, result_buffer: *mut u8, result_capacity: usize) -> i32;
+    fn simple_repl_runner_clear_prelude() -> bool;
+    fn simple_repl_runner_get_prelude(buffer: *mut u8, capacity: usize) -> usize;
+}
+
 fn call_extern_function(
     name: &str,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -415,6 +450,75 @@ fn call_extern_function(
                 .transpose()?
                 .unwrap_or(0) as i32;
             std::process::exit(code);
+        }
+
+        // =====================================================================
+        // Ratatui TUI Functions (simple/std_lib/src/ui/tui/backend/ratatui.spl)
+        // =====================================================================
+        "ratatui_terminal_new" => {
+            let handle = unsafe { ratatui_terminal_new() };
+            Ok(Value::Int(handle as i64))
+        }
+        "ratatui_terminal_cleanup" => {
+            let terminal = evaluated.first()
+                .ok_or_else(|| CompileError::Semantic("ratatui_terminal_cleanup expects 1 argument".into()))?
+                .as_int()? as u64;
+            unsafe { ratatui_terminal_cleanup(terminal); }
+            Ok(Value::Nil)
+        }
+        "ratatui_terminal_clear" => {
+            let terminal = evaluated.first()
+                .ok_or_else(|| CompileError::Semantic("ratatui_terminal_clear expects 1 argument".into()))?
+                .as_int()? as u64;
+            unsafe { ratatui_terminal_clear(terminal); }
+            Ok(Value::Nil)
+        }
+        "ratatui_textbuffer_new" => {
+            let handle = unsafe { ratatui_textbuffer_new() };
+            Ok(Value::Int(handle as i64))
+        }
+        "ratatui_textbuffer_insert_char" => {
+            let buffer = evaluated.get(0)
+                .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_insert_char expects 2 arguments".into()))?
+                .as_int()? as u64;
+            let code = evaluated.get(1)
+                .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_insert_char expects 2 arguments".into()))?
+                .as_int()? as u32;
+            unsafe { ratatui_textbuffer_insert_char(buffer, code); }
+            Ok(Value::Nil)
+        }
+        "ratatui_textbuffer_backspace" => {
+            let buffer = evaluated.first()
+                .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_backspace expects 1 argument".into()))?
+                .as_int()? as u64;
+            unsafe { ratatui_textbuffer_backspace(buffer); }
+            Ok(Value::Nil)
+        }
+        "ratatui_textbuffer_newline" => {
+            let buffer = evaluated.first()
+                .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_newline expects 1 argument".into()))?
+                .as_int()? as u64;
+            unsafe { ratatui_textbuffer_newline(buffer); }
+            Ok(Value::Nil)
+        }
+        "ratatui_object_destroy" => {
+            let handle = evaluated.first()
+                .ok_or_else(|| CompileError::Semantic("ratatui_object_destroy expects 1 argument".into()))?
+                .as_int()? as u64;
+            unsafe { ratatui_object_destroy(handle); }
+            Ok(Value::Nil)
+        }
+
+        // =====================================================================
+        // REPL Runner Functions (simple/std_lib/src/repl/__init__.spl)
+        // =====================================================================
+        "simple_repl_runner_init" => {
+            let success = unsafe { simple_repl_runner_init() };
+            Ok(Value::Bool(success))
+        }
+        "simple_repl_runner_cleanup" => {
+            unsafe { simple_repl_runner_cleanup(); }
+            Ok(Value::Nil)
         }
 
         // Unknown extern function
