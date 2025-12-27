@@ -10,9 +10,18 @@ pub mod memory;
 #[cfg(feature = "monoio-net")]
 pub mod monoio_runtime;
 #[cfg(feature = "monoio-net")]
-pub mod monoio_tcp;
+pub mod monoio_thread;
 #[cfg(feature = "monoio-net")]
-pub mod monoio_udp;
+pub mod monoio_tcp_v2;
+#[cfg(feature = "monoio-net")]
+pub mod monoio_udp_v2;
+
+// Initialize runtime thread on first use
+#[cfg(feature = "monoio-net")]
+#[ctor::ctor]
+fn init_monoio() {
+    monoio_thread::init_runtime_thread();
+}
 pub mod parallel;
 pub mod sandbox;
 pub mod value;
@@ -342,7 +351,7 @@ pub use monoio_runtime::{
 
 // Re-export monoio TCP functions (#1745-1749)
 #[cfg(feature = "monoio-net")]
-pub use monoio_tcp::{
+pub use monoio_tcp_v2::{
     // Server operations
     monoio_tcp_listen, monoio_tcp_accept, monoio_tcp_listener_close,
     // Client operations
@@ -358,7 +367,7 @@ pub use monoio_tcp::{
 
 // Re-export monoio UDP functions (#1745-1749)
 #[cfg(feature = "monoio-net")]
-pub use monoio_udp::{
+pub use monoio_udp_v2::{
     // Socket operations
     monoio_udp_bind, monoio_udp_connect, monoio_udp_close,
     // Unconnected I/O

@@ -52,6 +52,18 @@ pub enum VulkanError {
 
     /// Feature not supported
     NotSupported(String),
+
+    /// Window creation or management failed
+    WindowError(String),
+
+    /// Surface creation failed
+    SurfaceError(String),
+
+    /// Swapchain is out of date and needs recreation
+    SwapchainOutOfDate,
+
+    /// Shader module compilation failed
+    ShaderError(String),
 }
 
 impl fmt::Display for VulkanError {
@@ -73,6 +85,10 @@ impl fmt::Display for VulkanError {
             Self::SyncError(msg) => write!(f, "Synchronization error: {}", msg),
             Self::InvalidHandle => write!(f, "Invalid handle"),
             Self::NotSupported(msg) => write!(f, "Feature not supported: {}", msg),
+            Self::WindowError(msg) => write!(f, "Window error: {}", msg),
+            Self::SurfaceError(msg) => write!(f, "Surface error: {}", msg),
+            Self::SwapchainOutOfDate => write!(f, "Swapchain is out of date and needs recreation"),
+            Self::ShaderError(msg) => write!(f, "Shader error: {}", msg),
         }
     }
 }
