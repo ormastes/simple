@@ -1,7 +1,7 @@
 # Simple Language Features
 
 **Last Updated:** 2025-12-27
-**Recent Update:** Vulkan GPU Backend Phase 6 Complete (52/60, 87%) - Production-ready implementation with 811-line FFI bridge, 37 passing tests, 4 example programs, and 3,600+ lines of documentation. Multi-language tooling expanded to 8 languages (991 lines). MCP-MCP core substantially complete (60/90, 67%) with 6,305 lines including LMS integration. (See [VULKAN_PHASE6_COMPLETE_2025-12-26.md](../report/VULKAN_PHASE6_COMPLETE_2025-12-26.md))
+**Recent Update:** Vulkan Compute Backend Complete (57/60, 95%) - Code audit revealed 5 additional complete features: gpu-allocator integration, SPIR-V compilation (935 lines), compute pipeline creation, shader dispatch, and queue management. Added 22 FFI unit tests (59 total tests). Only 3 graphics features remain. (See [VULKAN_PHASE6_COMPLETE_2025-12-26.md](../report/VULKAN_PHASE6_COMPLETE_2025-12-26.md))
 
 ## Feature Table Format
 
@@ -60,7 +60,7 @@ All feature tables use this standardized 8-column format:
 | #1404-#1420 | Electron Desktop Apps | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1421-#1440 | VSCode Extension Support | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
 | #1441-#1450 | LSP Tree-sitter Integration | ✅ Complete → [feature_done_18.md](feature_done_18.md) |
-| #1450-#1509 | Vulkan GPU Backend | 🔄 Near Complete (52/60, 87%) - Phase 1-6 Complete: FFI bridge, 37 tests, 4 examples, 3,600+ doc lines → [VULKAN_PHASE6_COMPLETE_2025-12-26.md](../report/VULKAN_PHASE6_COMPLETE_2025-12-26.md) |
+| #1450-#1509 | Vulkan GPU Backend | 🔄 Near Complete (57/60, 95%) - Compute backend complete: gpu-allocator, SPIR-V compiler, pipelines, queues, 59 tests → [VULKAN_PHASE6_COMPLETE_2025-12-26.md](../report/VULKAN_PHASE6_COMPLETE_2025-12-26.md) |
 | #1510 | While-With Context Manager Loop | ✅ Complete (1/1) |
 | #1520-#1589 | 3D Game Engine Integration (Godot/Unreal) | 📋 Planned (0/70) |
 | #1590-#1649 | Physics Engine Integration (Isaac Lab/Genesis) | 📋 Planned (0/60) |
@@ -72,9 +72,9 @@ All feature tables use this standardized 8-column format:
 
 ## Summary Statistics
 
-**Overall Progress:** 59% (576/976 active features complete, 169 archived in feature_done_*.md, 60 Vulkan + 240 new features added)
+**Overall Progress:** 60% (581/976 active features complete, 169 archived in feature_done_*.md, 60 Vulkan + 240 new features added)
 
-**Recent Gains:** +61 features verified (Multi-Lang: +7, MCP-MCP: +25, Vulkan: +29) from comprehensive code audit
+**Recent Gains:** +66 features verified (Multi-Lang: +7, MCP-MCP: +25, Vulkan: +34) from comprehensive code audit + 22 FFI tests
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -117,7 +117,7 @@ All feature tables use this standardized 8-column format:
 | **Electron Desktop** | 3 | 3 | 0 |
 | **VSCode Extension Support** | 20 | 20 | 0 |
 | **VSCode Extension Tests** | 4 | 4 | 0 |
-| **Vulkan GPU Backend** | 60 | 52 | 8 |
+| **Vulkan GPU Backend** | 60 | 57 | 3 |
 | **3D Game Engine Integration** | 70 | 0 | 70 |
 | **Physics Engine Integration** | 60 | 0 | 60 |
 | **ML/PyTorch Integration** | 80 | 0 | 80 |
@@ -179,12 +179,12 @@ Add Vulkan as a GPU backend alongside CUDA, providing both compute and graphics 
 | #1450 | Vulkan instance and device management | 3 | ✅ | S+R | [VULKAN_PHASE_1_PROGRESS.md](../report/VULKAN_PHASE_1_PROGRESS.md) | `std_lib/test/system/ui/vulkan_phase1_validation.spl` | `src/runtime/tests/vulkan/` |
 | #1451 | Device enumeration and selection | 2 | ✅ | S+R | [VULKAN_PHASE_1_PROGRESS.md](../report/VULKAN_PHASE_1_PROGRESS.md) | `std_lib/test/system/ui/vulkan_phase1_validation.spl` | `src/runtime/tests/vulkan/` |
 | #1452 | Vulkan buffer allocation and transfers | 3 | ✅ | S+R | [VULKAN_PHASE_2_PROGRESS.md](../report/VULKAN_PHASE_2_PROGRESS.md) | `std_lib/examples/vulkan_triangle.spl` | `src/runtime/tests/vulkan/` |
-| #1453 | Memory allocator (VMA/gpu-allocator) | 4 | 📋 | R | [spec/gpu_simd.md](../spec/gpu_simd.md#95-memory-management) | - | `src/runtime/tests/vulkan/` |
-| #1454 | SPIR-V shader compilation | 4 | 📋 | S+R | [spec/gpu_simd.md](../spec/gpu_simd.md#92-vulkan-graphics-pipeline) | `std_lib/test/unit/gpu/vulkan/` | `src/compiler/tests/spirv/` |
-| #1455 | Compute pipeline creation | 3 | 📋 | S+R | [spec/gpu_simd.md](../spec/gpu_simd.md#91-vulkan-compute-backend) | `std_lib/test/unit/gpu/vulkan/` | `src/runtime/tests/vulkan/` |
-| #1456 | Compute shader dispatch | 3 | 📋 | S+R | [spec/gpu_simd.md](../spec/gpu_simd.md#91-vulkan-compute-backend) | `std_lib/test/unit/gpu/vulkan/` | `src/runtime/tests/vulkan/` |
+| #1453 | Memory allocator (VMA/gpu-allocator) | 4 | ✅ | R | [spec/gpu_simd.md](../spec/gpu_simd.md#95-memory-management) | - | `src/runtime/tests/vulkan/` |
+| #1454 | SPIR-V shader compilation | 4 | ✅ | S+R | [spec/gpu_simd.md](../spec/gpu_simd.md#92-vulkan-graphics-pipeline) | `std_lib/test/unit/gpu/vulkan/` | `src/compiler/tests/spirv/` |
+| #1455 | Compute pipeline creation | 3 | ✅ | S+R | [spec/gpu_simd.md](../spec/gpu_simd.md#91-vulkan-compute-backend) | `std_lib/test/unit/gpu/vulkan/` | `src/runtime/tests/vulkan/` |
+| #1456 | Compute shader dispatch | 3 | ✅ | S+R | [spec/gpu_simd.md](../spec/gpu_simd.md#91-vulkan-compute-backend) | `std_lib/test/unit/gpu/vulkan/` | `src/runtime/tests/vulkan/` |
 | #1457 | Command buffer recording and submission | 3 | ✅ | S+R | [VULKAN_PHASE_2_PROGRESS.md](../report/VULKAN_PHASE_2_PROGRESS.md) | `std_lib/examples/vulkan_triangle.spl` | `src/runtime/tests/vulkan/` |
-| #1458 | Queue management (graphics/compute/transfer) | 3 | 📋 | S+R | [spec/gpu_simd.md](../spec/gpu_simd.md#96-synchronization) | `std_lib/test/unit/gpu/vulkan/` | `src/runtime/tests/vulkan/` |
+| #1458 | Queue management (graphics/compute/transfer) | 3 | ✅ | S+R | [spec/gpu_simd.md](../spec/gpu_simd.md#96-synchronization) | `std_lib/test/unit/gpu/vulkan/` | `src/runtime/tests/vulkan/` |
 | #1459 | Synchronization (fences, semaphores) | 3 | ✅ | S+R | [VULKAN_PHASE_2_PROGRESS.md](../report/VULKAN_PHASE_2_PROGRESS.md) | `std_lib/examples/vulkan_triangle.spl` | `src/runtime/tests/vulkan/` |
 
 #### Graphics Pipeline (#1460-#1469)
