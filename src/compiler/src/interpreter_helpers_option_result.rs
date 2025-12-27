@@ -18,8 +18,8 @@ fn message_to_value(msg: Message) -> Value {
 fn apply_lambda_to_value(
     val: &Value,
     lambda_arg: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -42,15 +42,15 @@ fn handle_option_operation<F, W>(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     _mapper: F,
     wrap_result: W,
 ) -> Result<Value, CompileError>
 where
-    F: Fn(&Value, Value, &HashMap<String, FunctionDef>, &HashMap<String, ClassDef>, &Enums, &ImplMethods) -> Result<Value, CompileError>,
+    F: Fn(&Value, Value, &mut HashMap<String, FunctionDef>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> Result<Value, CompileError>,
     W: Fn(Value) -> Value,
 {
     if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
@@ -71,8 +71,8 @@ fn handle_result_map_operation<WOk, WErr>(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     check_ok: bool,
@@ -103,8 +103,8 @@ fn eval_option_map(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -121,8 +121,8 @@ fn eval_option_and_then(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -139,8 +139,8 @@ fn eval_option_or_else(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -166,8 +166,8 @@ fn eval_option_filter(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -195,8 +195,8 @@ fn eval_result_map(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -223,8 +223,8 @@ fn eval_result_map_err(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -251,8 +251,8 @@ fn eval_result_and_then(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -277,8 +277,8 @@ fn eval_result_or_else(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

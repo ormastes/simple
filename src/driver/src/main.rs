@@ -30,6 +30,8 @@ use cli::llm_tools::{run_context, run_diff, run_mcp};
 use cli::repl::run_repl;
 use cli::sandbox::{apply_sandbox, parse_sandbox_config};
 use cli::test_runner;
+#[cfg(feature = "tui")]
+use cli::tui::run_tui_repl;
 use cli::web::{web_build, web_features, web_init, web_serve, WebBuildOptions, WebServeOptions};
 
 
@@ -44,6 +46,7 @@ fn main() {
     // Parse global flags
     let gc_log = args.iter().any(|a| a == "--gc-log");
     let gc_off = args.iter().any(|a| a == "--gc=off" || a == "--gc=OFF");
+    let use_notui = args.iter().any(|a| a == "--notui");
 
     // Parse and apply sandbox configuration before running code (#916-919)
     if let Some(sandbox_config) = parse_sandbox_config(&args) {
@@ -63,6 +66,10 @@ fn main() {
         }
 
         if arg.starts_with("--gc") {
+            continue;
+        }
+
+        if arg == "--notui" {
             continue;
         }
 
@@ -88,9 +95,17 @@ fn main() {
     }
     let args = filtered_args;
 
-    // No arguments -> REPL
+    // No arguments -> REPL (TUI by default if feature enabled)
     if args.is_empty() {
         let runner = create_runner(gc_log, gc_off);
+
+        #[cfg(feature = "tui")]
+        if !use_notui {
+            // TUI is default when feature is enabled
+            std::process::exit(run_tui_repl(version(), runner));
+        }
+
+        // Use Normal mode if --notui flag is set or TUI feature is disabled
         std::process::exit(run_repl(version(), runner));
     }
 

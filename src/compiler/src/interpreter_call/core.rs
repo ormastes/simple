@@ -23,8 +23,8 @@ pub(crate) fn bind_args(
     params: &[Parameter],
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -46,8 +46,8 @@ pub(crate) fn bind_args_with_injected(
     params: &[Parameter],
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -143,8 +143,8 @@ fn bind_args_with_values(
     params: &[Parameter],
     args: &[Value],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -196,8 +196,8 @@ pub(crate) fn exec_lambda(
     args: &[Argument],
     call_env: &Env,
     captured_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -237,8 +237,8 @@ pub(crate) fn exec_function(
     func: &FunctionDef,
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
@@ -254,8 +254,8 @@ pub(crate) fn exec_function_with_values(
     func: &FunctionDef,
     args: &[Value],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -271,8 +271,8 @@ pub(crate) fn exec_function_with_captured_env(
     args: &[Argument],
     outer_env: &Env,
     captured_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -311,8 +311,8 @@ fn exec_function_inner(
     func: &FunctionDef,
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
@@ -374,8 +374,8 @@ fn exec_function_with_values_inner(
     func: &FunctionDef,
     args: &[Value],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -422,12 +422,12 @@ pub(crate) fn instantiate_class(
     class_name: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    let class_def = classes.get(class_name).ok_or_else(|| {
+    let class_def = classes.get(class_name).cloned().ok_or_else(|| {
         semantic_err!("unknown class: {}", class_name)
     })?;
 
@@ -535,8 +535,8 @@ fn resolve_injected_args(
     args: &[Argument],
     class_name: &str,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -612,8 +612,8 @@ fn resolve_binding_instance(
     impl_type: &str,
     scope: DiScope,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -722,12 +722,14 @@ fn invoke_runtime_around_chain(
     ctx: Arc<ProceedContext>,
 ) -> Result<Value, CompileError> {
     if idx >= advices.len() {
+        let mut functions_clone = (*ctx.functions).clone();
+        let mut classes_clone = (*ctx.classes).clone();
         return instantiate_class(
             impl_type,
             &[],
             ctx.env.as_ref(),
-            ctx.functions.as_ref(),
-            ctx.classes.as_ref(),
+            &mut functions_clone,
+            &mut classes_clone,
             ctx.enums.as_ref(),
             ctx.impl_methods.as_ref(),
         );
@@ -768,12 +770,14 @@ fn invoke_runtime_around_chain(
         }),
     });
 
+    let mut functions_clone = (*ctx.functions).clone();
+    let mut classes_clone = (*ctx.classes).clone();
     let result = exec_function_with_values(
         func,
         &[proceed],
         ctx.env.as_ref(),
-        ctx.functions.as_ref(),
-        ctx.classes.as_ref(),
+        &mut functions_clone,
+        &mut classes_clone,
         ctx.enums.as_ref(),
         ctx.impl_methods.as_ref(),
     )?;

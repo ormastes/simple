@@ -1,0 +1,272 @@
+# Actor Model for Game Logic
+#
+# Engine-agnostic game logic using Simple's actor model
+# Provides concurrent, message-passing game entities
+#
+# Features:
+# - Game entity actors
+# - Message-based communication
+# - Concurrent game logic
+# - Actor lifecycle management
+# - Integration with engine update loops
+
+import sys.ffi
+
+mod actor_model
+
+# GameMessage
+# Standard messages for game actors
+pub enum GameMessage:
+    Update(f32)                    # Delta time
+    Spawn((f32, f32, f32))        # Position
+    Despawn
+    SetPosition((f32, f32, f32))
+    GetPosition
+    Damage(i32)
+    Heal(i32)
+    Custom(String, ffi.VoidPtr)   # Custom message type + data
+
+impl GameMessage:
+    pub fn is_update(self) -> bool:
+        if self is GameMessage::Update(_):
+            return true
+        else:
+            return false
+
+    pub fn get_delta(self) -> f32:
+        if self is GameMessage::Update(delta):
+            return delta
+        else:
+            return 0.0
+
+
+# GameEntity trait
+# Common interface for game entities using actors
+pub trait GameEntity:
+    # Lifecycle
+    fn on_spawn(mut self)
+    fn on_despawn(mut self)
+    fn on_update(mut self, delta: f32)
+
+    # Message handling
+    fn handle_message(mut self, message: GameMessage) -> Option[GameMessage]
+
+    # State queries
+    fn is_alive(self) -> bool
+    fn get_entity_id(self) -> i32
+
+
+# EntityActor
+# Simple actor wrapper for game entities
+pub struct EntityActor:
+    entity_id: i32
+    position: (f32, f32, f32)
+    health: i32
+    max_health: i32
+    alive: bool
+    engine_object_ptr: ffi.VoidPtr  # Godot Node or Unreal AActor
+
+impl EntityActor:
+    pub fn new(entity_id: i32, engine_object_ptr: ffi.VoidPtr) -> EntityActor:
+        return EntityActor(
+            entity_id: entity_id,
+            position: (0.0, 0.0, 0.0),
+            health: 100,
+            max_health: 100,
+            alive: true,
+            engine_object_ptr: engine_object_ptr,
+        )
+
+impl GameEntity for EntityActor:
+    fn on_spawn(mut self):
+        self.alive = true
+        # Sync with engine
+        sync_entity_to_engine(self.engine_object_ptr, self.position)
+
+    fn on_despawn(mut self):
+        self.alive = false
+        # Notify engine
+        despawn_engine_object(self.engine_object_ptr)
+
+    fn on_update(mut self, delta: f32):
+        # Update logic here
+        pass
+
+    fn handle_message(mut self, message: GameMessage) -> Option[GameMessage]:
+        if message is GameMessage::Update(delta):
+            self.on_update(delta)
+            return None
+
+        elif message is GameMessage::SetPosition((x, y, z)):
+            self.position = (x, y, z)
+            sync_entity_to_engine(self.engine_object_ptr, self.position)
+            return None
+
+        elif message is GameMessage::GetPosition:
+            return Some(GameMessage::SetPosition(self.position))
+
+        elif message is GameMessage::Damage(amount):
+            self.health = self.health - amount
+            if self.health <= 0:
+                self.health = 0
+                self.alive = false
+                self.on_despawn()
+            return None
+
+        elif message is GameMessage::Heal(amount):
+            self.health = self.health + amount
+            if self.health > self.max_health:
+                self.health = self.max_health
+            return None
+
+        elif message is GameMessage::Despawn:
+            self.on_despawn()
+            return None
+
+        else:
+            return None
+
+    fn is_alive(self) -> bool:
+        return self.alive
+
+    fn get_entity_id(self) -> i32:
+        return self.entity_id
+
+
+# EntityManager
+# Manages collection of game entity actors
+pub struct EntityManager:
+    entities: Vec[(i32, EntityActor)]  # entity_id -> actor
+    next_id: i32
+
+impl EntityManager:
+    pub fn new() -> EntityManager:
+        return EntityManager(
+            entities: [],
+            next_id: 1,
+        )
+
+    # Spawn new entity
+    pub fn spawn_entity(mut self, engine_object_ptr: ffi.VoidPtr) -> i32:
+        let entity_id = self.next_id
+        self.next_id = self.next_id + 1
+
+        let mut entity = EntityActor::new(entity_id, engine_object_ptr)
+        entity.on_spawn()
+
+        self.entities.push((entity_id, entity))
+        return entity_id
+
+    # Despawn entity
+    pub fn despawn_entity(mut self, entity_id: i32):
+        let mut new_entities = Vec::new()
+        for (id, mut entity) in self.entities:
+            if id == entity_id:
+                entity.on_despawn()
+            else:
+                new_entities.push((id, entity))
+        self.entities = new_entities
+
+    # Send message to entity
+    pub fn send_message(mut self, entity_id: i32, message: GameMessage) -> Option[GameMessage]:
+        for (id, mut entity) in self.entities:
+            if id == entity_id:
+                return entity.handle_message(message)
+        return None
+
+    # Broadcast message to all entities
+    pub fn broadcast_message(mut self, message: GameMessage):
+        for (id, mut entity) in self.entities:
+            entity.handle_message(message)
+
+    # Update all entities
+    pub fn update_all(mut self, delta: f32):
+        self.broadcast_message(GameMessage::Update(delta))
+
+    # Get entity count
+    pub fn get_entity_count(self) -> i32:
+        return self.entities.len()
+
+
+# Global entity manager
+let mut ENTITY_MANAGER: Option[EntityManager] = None
+
+# Get global entity manager
+pub fn get_entity_manager() -> EntityManager:
+    if ENTITY_MANAGER.is_none():
+        ENTITY_MANAGER = Some(EntityManager::new())
+
+    return ENTITY_MANAGER.unwrap()
+
+
+# Utility functions
+
+# Spawn entity
+pub fn spawn_game_entity(engine_object_ptr: ffi.VoidPtr) -> i32:
+    let mut manager = get_entity_manager()
+    return manager.spawn_entity(engine_object_ptr)
+
+# Despawn entity
+pub fn despawn_game_entity(entity_id: i32):
+    let mut manager = get_entity_manager()
+    manager.despawn_entity(entity_id)
+
+# Send message to entity
+pub fn send_entity_message(entity_id: i32, message: GameMessage) -> Option[GameMessage]:
+    let mut manager = get_entity_manager()
+    return manager.send_message(entity_id, message)
+
+# Update all game entities
+pub fn update_game_entities(delta: f32):
+    let mut manager = get_entity_manager()
+    manager.update_all(delta)
+
+
+# Engine synchronization (internal)
+fn sync_entity_to_engine(engine_object_ptr: ffi.VoidPtr, position: (f32, f32, f32)):
+    let (x, y, z) = position
+    # Detect engine type and sync accordingly
+    if is_godot_object(engine_object_ptr):
+        godot_set_position(engine_object_ptr, x, y, z)
+    else:
+        unreal_set_position(engine_object_ptr, x, y, z)
+
+fn despawn_engine_object(engine_object_ptr: ffi.VoidPtr):
+    if is_godot_object(engine_object_ptr):
+        godot_queue_free(engine_object_ptr)
+    else:
+        unreal_destroy_actor(engine_object_ptr)
+
+fn is_godot_object(object_ptr: ffi.VoidPtr) -> bool:
+    # Stub - would check object type
+    return false
+
+
+# FFI declarations
+extern "C":
+    fn godot_set_position(node: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn godot_queue_free(node: ffi.VoidPtr)
+    fn unreal_set_position(actor: ffi.VoidPtr, x: f32, y: f32, z: f32)
+    fn unreal_destroy_actor(actor: ffi.VoidPtr)
+
+
+# Example usage:
+#
+# # Spawn game entity
+# let entity_id = spawn_game_entity(godot_node_ptr)
+#
+# # Send messages
+# send_entity_message(entity_id, GameMessage::SetPosition((10.0, 0.0, 5.0)))
+# send_entity_message(entity_id, GameMessage::Damage(25))
+#
+# # Update all entities (call from game loop)
+# update_game_entities(0.016)  # 60 FPS
+#
+# # Check entity position
+# let response = send_entity_message(entity_id, GameMessage::GetPosition)
+# if response.is_some():
+#     if response.unwrap() is GameMessage::SetPosition((x, y, z)):
+#         print(f"Entity at {x}, {y}, {z}")
+#
+# # Despawn entity
+# despawn_game_entity(entity_id)

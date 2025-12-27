@@ -200,8 +200,8 @@ fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Value, Compil
 pub(crate) fn evaluate_expr(
     expr: &Expr,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -303,7 +303,7 @@ pub(crate) fn evaluate_expr(
             }
             // Then check functions for top-level function definitions
             // Return as Value::Function for first-class function usage
-            if let Some(func) = functions.get(name) {
+            if let Some(func) = functions.get(name).cloned() {
                 return Ok(Value::Function {
                     name: name.clone(),
                     def: Box::new(func.clone()),
@@ -739,7 +739,7 @@ pub(crate) fn evaluate_expr(
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {
                 if env.get(module_name).is_none() {
-                    if let Some(func) = functions.get(field) {
+                    if let Some(func) = functions.get(field).cloned() {
                         return Ok(Value::Function {
                             name: field.clone(),
                             def: Box::new(func.clone()),
@@ -770,7 +770,7 @@ pub(crate) fn evaluate_expr(
                     let getter_name = format!("get_{}", field);
                     let is_getter_name = format!("is_{}", field);
 
-                    if let Some(class_def) = classes.get(class) {
+                    if let Some(class_def) = classes.get(class).cloned() {
                         // Try get_<field>
                         if let Some(method) = class_def.methods.iter().find(|m| m.name == getter_name) {
                             // Call the getter method with self
@@ -793,7 +793,7 @@ pub(crate) fn evaluate_expr(
                 }
                 Value::Constructor { ref class_name } => {
                     // Look up static method on class
-                    if let Some(class_def) = classes.get(class_name) {
+                    if let Some(class_def) = classes.get(class_name).cloned() {
                         if let Some(method) = class_def.methods.iter().find(|m| &m.name == field) {
                             // Return as a function value for call
                             Ok(Value::Function {
@@ -893,7 +893,7 @@ pub(crate) fn evaluate_expr(
                             "unknown variant {variant} for enum {enum_name}"
                         )))
                     }
-                } else if let Some(func) = functions.get(variant) {
+                } else if let Some(func) = functions.get(variant).cloned() {
                     Ok(Value::Function {
                         name: variant.clone(),
                         def: Box::new(func.clone()),
@@ -1236,15 +1236,34 @@ pub(crate) fn evaluate_expr(
         Expr::MacroInvocation {
             name,
             args: macro_args,
-        } => evaluate_macro_invocation(
-            name,
-            macro_args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        ),
+        } => {
+            let result = evaluate_macro_invocation(
+                name,
+                macro_args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+
+            // Register symbols introduced by macro contracts (#1303)
+            if let Some(introduced) = take_macro_introduced_symbols() {
+                // Register introduced functions
+                for (func_name, func_def) in introduced.introduced_functions {
+                    functions.insert(func_name, func_def);
+                }
+
+                // Register introduced classes
+                for (class_name, class_def) in introduced.introduced_classes {
+                    classes.insert(class_name, class_def);
+                }
+
+                // TODO: Register types, variables when those contract types are implemented
+            }
+
+            Ok(result)
+        },
         Expr::Try(inner) => {
             // Try operator: expr? - unwrap Ok or propagate Err
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;

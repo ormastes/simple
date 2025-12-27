@@ -1,0 +1,341 @@
+# Electron Vulkan Backend - GPU-Accelerated Desktop Rendering
+#
+# Integrates Vulkan renderer with Electron for hardware-accelerated
+# desktop applications. Provides native window management with GPU rendering.
+#
+# Key Features:
+#   - Vulkan rendering in Electron windows
+#   - Hardware acceleration for UI
+#   - Native window controls (minimize, maximize, close)
+#   - Multiple windows with Vulkan rendering
+#   - IPC integration for main/renderer communication
+#   - Hot reload support for development
+#
+# Architecture:
+#   ┌─────────────────────────────────────┐
+#   │     Electron Main Process           │
+#   │  ┌──────────────────────────────┐   │
+#   │  │  Window Manager              │   │
+#   │  │  • Create/destroy windows    │   │
+#   │  │  • IPC message routing       │   │
+#   │  └──────────────────────────────┘   │
+#   └─────────────────────────────────────┘
+#              │
+#              │ IPC
+#              ▼
+#   ┌─────────────────────────────────────┐
+#   │   Electron Renderer Process         │
+#   │  ┌──────────────────────────────┐   │
+#   │  │  VulkanElectronRenderer      │   │
+#   │  │  • Vulkan window surface     │   │
+#   │  │  • GPU rendering pipeline    │   │
+#   │  │  • Event handling            │   │
+#   │  └──────────────────────────────┘   │
+#   └─────────────────────────────────────┘
+#
+# Usage:
+#   import ui.gui.electron_vulkan.*
+#
+#   # Main process
+#   fn main():
+#       let app = ElectronVulkanApp::new()
+#       let window = app.create_window(800, 600, "My App")
+#       app.run()
+#
+#   # Renderer process
+#   async fn render():
+#       let renderer = VulkanElectronRenderer::new()?
+#       await renderer.init()
+#
+#       # Use Vulkan renderer
+#       await renderer.render(my_element)
+
+use core.*
+use concurrency.*
+use ui.element.*
+use ui.renderer.*
+use ui.gui.vulkan_types.*
+use ui.gui.vulkan_renderer.*
+use ui.gui.vulkan_window.*
+use ui.gui.electron.*
+
+# =============================================================================
+# Vulkan Electron Renderer
+# =============================================================================
+
+pub struct VulkanElectronRenderer:
+    # Vulkan rendering backend
+    vulkan_renderer: VulkanAsyncRenderer
+
+    # Electron integration
+    window_id: u32
+    ipc_handlers: Dict[String, IpcCallback]
+
+    # Window state
+    window: Window
+    width: u32
+    height: u32
+
+    # Settings
+    enable_vsync: bool
+    enable_msaa: bool
+    msaa_samples: u32
+
+impl VulkanElectronRenderer:
+    # Create a new Vulkan Electron renderer
+    #
+    # Example:
+    #   let renderer = VulkanElectronRenderer::new(1, 800, 600)?
+    pub fn new(window_id: u32, width: u32, height: u32) -> Result[VulkanElectronRenderer, RenderError]:
+        # Create Vulkan window
+        let window = match Window::new(width, height, "Electron Vulkan Window"):
+            case Ok(w): w
+            case Err(e):
+                return Err(RenderError::IoError(f"Failed to create Vulkan window: {e}"))
+
+        # Create Vulkan renderer
+        let vulkan_renderer = VulkanAsyncRenderer::new(&window)?
+
+        return Ok(VulkanElectronRenderer {
+            vulkan_renderer: vulkan_renderer,
+            window_id: window_id,
+            ipc_handlers: Dict::new(),
+            window: window,
+            width: width,
+            height: height,
+            enable_vsync: true,
+            enable_msaa: true,
+            msaa_samples: 4
+        })
+
+    # Initialize the renderer
+    pub async fn init(self) -> Result[(), RenderError]:
+        # Initialize Vulkan renderer
+        await self.vulkan_renderer.init()
+
+        # Set up Electron IPC
+        await self.setup_electron_ipc()
+
+        return Ok(())
+
+    # Set up Electron IPC handlers
+    async fn setup_electron_ipc(self) -> Result[(), RenderError]:
+        # Register IPC handlers for Electron integration
+        self.register_ipc_handler("resize", |data| {
+            # Handle window resize
+            let width = data.get("width")?.as_u32()?
+            let height = data.get("height")?.as_u32()?
+            self.handle_resize(width, height)
+        })
+
+        self.register_ipc_handler("reload", |_| {
+            # Handle hot reload
+            self.reload()
+        })
+
+        return Ok(())
+
+    # Register an IPC handler
+    pub fn register_ipc_handler(self, channel: &str, handler: IpcCallback):
+        self.ipc_handlers.insert(channel.to_string(), handler)
+
+    # Handle window resize
+    fn handle_resize(self, width: u32, height: u32) -> Result[(), RenderError]:
+        self.width = width
+        self.height = height
+
+        # Recreate Vulkan swapchain for new size
+        # This is handled automatically by the window resize event
+        return Ok(())
+
+    # Reload the renderer (for hot reload)
+    fn reload(self) -> Result[(), RenderError]:
+        # Clear caches and reload shaders
+        return self.vulkan_renderer.reload()
+
+    # Send IPC message to main process
+    pub fn send_ipc(self, channel: &str, data: IpcData):
+        # Send message via Electron IPC
+        electron_ipc_send(self.window_id, channel, data)
+
+    # Enable/disable VSync
+    pub fn set_vsync(self, enabled: bool):
+        self.enable_vsync = enabled
+        # Update Vulkan present mode
+        self.vulkan_renderer.set_vsync(enabled)
+
+    # Enable/disable MSAA
+    pub fn set_msaa(self, enabled: bool, samples: u32):
+        self.enable_msaa = enabled
+        self.msaa_samples = samples
+        # Update Vulkan pipeline
+        self.vulkan_renderer.set_msaa(enabled, samples)
+
+# =============================================================================
+# RenderBackend Implementation
+# =============================================================================
+
+impl RenderBackend for VulkanElectronRenderer:
+    async fn init(self) -> Future[Result[(), RenderError]]:
+        return Future::ready(self.init().await)
+
+    async fn render(self, root: &Element) -> Future[Result[(), RenderError]]:
+        # Delegate to Vulkan renderer
+        return self.vulkan_renderer.render(root)
+
+    async fn shutdown(self) -> Future[Result[(), RenderError]]:
+        # Clean up Vulkan resources
+        return self.vulkan_renderer.shutdown()
+
+# =============================================================================
+# Electron Vulkan Application
+# =============================================================================
+
+pub struct ElectronVulkanApp:
+    windows: Dict[u32, VulkanElectronRenderer]
+    next_window_id: u32
+
+impl ElectronVulkanApp:
+    # Create a new Electron Vulkan application
+    pub fn new() -> ElectronVulkanApp:
+        return ElectronVulkanApp {
+            windows: Dict::new(),
+            next_window_id: 1
+        }
+
+    # Create a new Vulkan-rendered window
+    #
+    # Example:
+    #   let window = app.create_window(1024, 768, "My App")?
+    pub fn create_window(self, width: u32, height: u32, title: &str) -> Result[u32, RenderError]:
+        let window_id = self.next_window_id
+        self.next_window_id += 1
+
+        # Create renderer for this window
+        let renderer = VulkanElectronRenderer::new(window_id, width, height)?
+        self.windows.insert(window_id, renderer)
+
+        return Ok(window_id)
+
+    # Close a window
+    pub fn close_window(self, window_id: u32) -> Result[(), RenderError]:
+        if let Some(renderer) = self.windows.remove(&window_id):
+            # Clean up resources
+            # (Drop will handle Vulkan cleanup)
+            return Ok(())
+        return Err(RenderError::IoError(f"Window {window_id} not found"))
+
+    # Get a renderer by window ID
+    pub fn get_renderer(self, window_id: u32) -> Option[&VulkanElectronRenderer]:
+        return self.windows.get(&window_id)
+
+    # Run the application event loop
+    pub async fn run(self):
+        # Process Electron events
+        loop:
+            # Poll events from all windows
+            for (window_id, renderer) in self.windows:
+                while let Some(event) = renderer.window.poll_event():
+                    match event:
+                        case WindowEvent::CloseRequested:
+                            self.close_window(window_id)?
+                        case WindowEvent::Resized(w, h):
+                            renderer.handle_resize(w, h)?
+                        case _:
+                            # Handle other events
+                            pass
+
+            # Break if no windows remain
+            if self.windows.is_empty():
+                break
+
+            # Sleep briefly to avoid busy waiting
+            await Future::delay(16)  # ~60 FPS
+
+# =============================================================================
+# IPC Types
+# =============================================================================
+
+type IpcCallback = fn(IpcData) -> Result[(), RenderError]
+
+pub struct IpcData:
+    values: Dict[String, IpcValue]
+
+impl IpcData:
+    pub fn new() -> IpcData:
+        return IpcData { values: Dict::new() }
+
+    pub fn set(self, key: &str, value: IpcValue):
+        self.values.insert(key.to_string(), value)
+
+    pub fn get(self, key: &str) -> Option[&IpcValue]:
+        return self.values.get(key)
+
+pub enum IpcValue:
+    String(String)
+    U32(u32)
+    I32(i32)
+    F64(f64)
+    Bool(bool)
+
+impl IpcValue:
+    pub fn as_u32(self) -> Result[u32, &str]:
+        match self:
+            case IpcValue::U32(v): return Ok(v)
+            case _: return Err("Expected u32")
+
+    pub fn as_string(self) -> Result[&String, &str]:
+        match self:
+            case IpcValue::String(v): return Ok(v)
+            case _: return Err("Expected string")
+
+# =============================================================================
+# FFI Stubs (would call actual Electron IPC in real implementation)
+# =============================================================================
+
+fn electron_ipc_send(window_id: u32, channel: &str, data: IpcData):
+    # In real implementation, would call Electron's ipcRenderer.send()
+    # For now, just log
+    print(f"IPC send [{window_id}] {channel}")
+
+async fn electron_is_available() -> bool:
+    # Check if running in Electron environment
+    # In real implementation: window?.process?.type === 'renderer'
+    return true
+
+# =============================================================================
+# Example Usage
+# =============================================================================
+
+# Example: Basic Electron + Vulkan application
+#
+# // main.js (Electron main process)
+# const { app, BrowserWindow } = require('electron')
+#
+# app.whenReady().then(() => {
+#   const win = new BrowserWindow({
+#     width: 800,
+#     height: 600,
+#     webPreferences: {
+#       nodeIntegration: true,
+#       contextIsolation: false
+#     }
+#   })
+#   win.loadFile('index.html')
+# })
+#
+# // app.spl (Simple renderer)
+# import ui.gui.electron_vulkan.*
+# import ui.element.*
+#
+# async fn main():
+#     let renderer = VulkanElectronRenderer::new(1, 800, 600)?
+#     await renderer.init()
+#
+#     let root = div([], [
+#         h1([], ["Vulkan + Electron"]),
+#         p([], ["Hardware-accelerated rendering!"])
+#     ])
+#
+#     loop:
+#         await renderer.render(&root)

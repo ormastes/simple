@@ -271,43 +271,73 @@ All 51 AOP & Unified Predicates features have been successfully implemented, tes
 
 ---
 
-## Metaprogramming (#1300-1324) ✅
+## Metaprogramming (#1300-1324) 🔄
 
-**Status:** 25/25 Complete (100%) - All features implemented! 🎉
+**Status:** 20/25 Complete (80%) - Core features working, contract integration pending
 
 **NOTE:** Features #1308-1324 are duplicates of #1069-1088 (completed Dec 2025). This range was created for organization but inadvertently duplicated existing feature IDs.
 
 Advanced metaprogramming features including contract-first macros, DSL support, decorators, comprehensions, and pattern matching enhancements.
 
 **Documentation:**
-- [spec/macro.md](../spec/macro.md) - Contract-first macro specification
+- [spec/macro.md](../spec/macro.md) - Contract-first macro specification (target design)
+- [status/macros.md](../status/macros.md) - Current implementation status (60% complete)
+- [contracts/macro_contracts.md](../contracts/macro_contracts.md) - Integration status
 - [spec/metaprogramming.md](../spec/metaprogramming.md) - DSL, decorators, comprehensions
 
-### Contract-First Macros (#1300-1304) ✅
+**Examples:**
+- `simple/examples/macros_basic.spl` - Working examples (tested ✅)
+- `simple/examples/macros_showcase.spl` - Comprehensive showcase
+
+### Contract-First Macros (#1300-1304) 🔄
+
+**Overall Status:** 3/5 Complete (60%) - Core expansion working, symbol integration pending
 
 | Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
 |------------|---------|------------|--------|------|-----|--------|--------|
-| #1300 | `macro` keyword with contract syntax | 4 | ✅ | R | [macro.md](../spec/macro.md) | - | `src/parser/tests/` |
-| #1301 | `const_eval:` and `emit:` blocks | 3 | ✅ | R | [macro.md](../spec/macro.md) | - | `src/compiler/tests/` |
+| #1300 | `macro` keyword with contract syntax | 4 | ✅ | R | [macro.md](../spec/macro.md) | `simple/examples/macros_basic.spl` | `src/parser/tests/` |
+| #1301 | `const_eval:` and `emit:` blocks | 3 | ✅ | R | [macro.md](../spec/macro.md) | `simple/examples/macros_basic.spl` | `src/compiler/tests/` |
 | #1302 | Hygienic macro expansion | 5 | ✅ | R | [macro.md](../spec/macro.md) | - | `src/compiler/tests/` |
-| #1303 | `intro`/`inject`/`returns` contract items | 4 | ✅ | R | [macro.md](../spec/macro.md) | - | `src/compiler/tests/` |
-| #1304 | One-pass macro compilation (LL(1)) | 4 | ✅ | R | [macro.md](../spec/macro.md) | [one_pass_ll1_macros_status.md](../status/one_pass_ll1_macros_status.md) | `src/compiler/src/macro_validation.rs` |
+| #1303 | `intro`/`inject`/`returns` contract items | 4 | 🔄 | R | [macro.md](../spec/macro.md) | - | `src/compiler/src/macro_contracts.rs` |
+| #1304 | One-pass macro compilation (LL(1)) | 4 | 🔄 | R | [macro.md](../spec/macro.md) | [one_pass_ll1_macros_status.md](../status/one_pass_ll1_macros_status.md) | `src/compiler/src/macro_validation.rs` |
+
+**Legend:** ✅ Complete | 🔄 Partial (infrastructure ready) | ⏳ Pending
 
 **Description:** LL(1)-friendly macro system with compile-time symbol introduction. Macros declare effects in headers, enabling IDE autocomplete without expansion.
 
-**Implementation Status:**
-- ✅ Parser: Full macro syntax (`MacroDef`, contract items)
-- ✅ Basic Expansion: Template substitution with `const_eval`/`emit`
-- ✅ Hygienic Expansion: AST renaming via `MacroHygieneContext`
-- ✅ Contract Processing: Complete infrastructure (390 lines, #1303)
-- ✅ Integration: Wired into `expand_user_macro()` with thread-local registry (#1303)
-- ✅ Symbol Registration: Optional auto-registration of introduced symbols
-- ✅ **One-Pass Compilation**: Complete validation infrastructure (2025-12-23)
-  - ✅ Ordering validation (macros defined before use) - E1402
-  - ✅ Shadowing detection (intro symbols) - E1403
-  - ✅ QIDENT template variable validation - E1406
-  - ✅ Type annotation requirements - E1405
-  - ✅ 12 unit tests passing
+**✅ Working Today (60% Implementation):**
+- ✅ **Built-in Macros**: `println!`, `print!`, `vec!`, `assert!`, `assert_eq!`, `panic!`, `format!`, `dbg!`
+- ✅ **Parser**: Full macro syntax (`MacroDef`, contract items) - `src/parser/src/ast.rs`
+- ✅ **Basic Expansion**: Template substitution with `const_eval`/`emit` - 1270 lines
+- ✅ **Hygienic Expansion**: AST renaming via `MacroHygieneContext` - gensym-based
+- ✅ **Contract Processing Infrastructure**: Complete (390 lines, #1303)
+  - Processes `intro`, `inject`, `returns` contract items
+  - Const-eval engine (integers, arithmetic, conditions, ranges)
+  - Template substitution in stubs (`"{NAME}{i}"` → `"axis0"`)
+  - For-loop unrolling (`for i in 0..N`)
+  - Conditional introduction (`if condition`)
+- ✅ **Validation**: Complete infrastructure (488 lines, #1304)
+  - Ordering validation (macros defined before use) - E1402
+  - Shadowing detection (intro symbols) - E1403
+  - QIDENT template variable validation - E1406
+  - Type annotation requirements - E1405
+  - 12 unit tests passing
+
+**🔄 Partial Implementation (Infrastructure Ready, Integration Pending):**
+- 🔄 **#1303 Contract Integration**: Contract processing called but symbols not registered
+  - Infrastructure: `process_macro_contract()` works correctly
+  - Partial Wire-up: Called in `expand_user_macro()`, results in thread-local
+  - Missing: Symbol table mutation and registration (~2 hours work)
+- 🔄 **#1304 LL(1) Parser**: Validation infrastructure complete, parser integration pending
+  - Infrastructure: All validation rules implemented
+  - Missing: One-pass parser-driven expansion (~3 hours work)
+
+**⏳ Pending (40% Remaining):**
+- ⏳ Symbol table registration from `intro` contracts
+- ⏳ IDE autocomplete for introduced symbols
+- ⏳ Code injection at callsite (`inject` contracts)
+- ⏳ LL(1) parser integration with immediate symbol updates
+- ⏳ Cross-module macro imports
 
 **Example:**
 ```simple
@@ -334,7 +364,7 @@ class Vec3D:
 - `src/compiler/src/interpreter_macro.rs` - Pipeline integration
 - `src/compiler/src/interpreter.rs` - Macro definition order tracking
 - `src/compiler/src/error.rs` - E14xx error codes (E1401-E1406)
-- `doc/report/MACRO_CONTRACTS_IMPLEMENTATION.md`
+- `doc/contracts/macro_contracts.md`
 - `MACRO_CONTRACTS_COMPLETE.md`
 
 ### DSL Support (#1305-1307)
@@ -405,9 +435,9 @@ context html:
 
 ## Summary
 
-All 76 features in Archive 11 have been successfully implemented and tested:
+**Archive 11 Status: 71/76 features complete (93%)**
 
-**AOP & Unified Predicates (51 features):**
+**AOP & Unified Predicates (51/51 features - 100% ✅):**
 - Unified predicate grammar across all AOP contexts
 - Hybrid dependency injection with compile-time and runtime modes
 - Test mocking with trait-boundary support
@@ -415,13 +445,21 @@ All 76 features in Archive 11 have been successfully implemented and tested:
 - Compile-time weaving with multiple join points and advice types
 - Link-time and runtime backends for flexible aspect application
 
-**Metaprogramming (25 features):**
-- Contract-first macros with LL(1) compilation and IDE support
-- DSL support with context blocks and method_missing
-- Built-in decorators (@cached, @logged, @deprecated, @timeout)
-- Comprehensions for lists and dictionaries
-- Enhanced pattern matching (guards, or-patterns, ranges, if/while let)
-- Slicing and spread operators
+**Metaprogramming (20/25 features - 80% 🔄):**
+- ✅ **Complete**: Basic macros, hygiene, const-eval, validation infrastructure (3/5 macro features)
+- ✅ **Complete**: DSL support with context blocks and method_missing (3/3)
+- ✅ **Complete**: Built-in decorators (@cached, @logged, @deprecated, @timeout) (4/4)
+- ✅ **Complete**: Comprehensions for lists and dictionaries (2/2)
+- ✅ **Complete**: Enhanced pattern matching (guards, or-patterns, ranges, if/while let) (6/6)
+- ✅ **Complete**: Slicing and spread operators (5/5)
+- 🔄 **Partial**: Contract integration and LL(1) parser (2/5 macro features partially complete)
 
-**Completion Date:** 2025-12-23
-**Implementation Quality:** Production-ready with comprehensive test coverage
+**Macro Implementation Details:**
+- **Working (60%)**: Built-in macros, user-defined macros, hygiene, const-eval, template substitution
+- **Infrastructure Ready (30%)**: Contract processing, validation, const-eval engine
+- **Pending Integration (10%)**: Symbol table registration, IDE support, parser integration
+- **Remaining Work**: ~4-5 hours for full symbol integration
+
+**Last Updated:** 2025-12-27
+**Initial Completion Date:** 2025-12-23 (AOP)
+**Macro Status Updated:** 2025-12-27 (corrected to 60% from overclaimed 100%)

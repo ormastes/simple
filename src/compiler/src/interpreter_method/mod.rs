@@ -27,16 +27,16 @@ pub(crate) fn evaluate_method_call(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     // Support module-style dot calls (lib.func()) by resolving directly to imported functions/classes.
     if let Expr::Identifier(module_name) = receiver.as_ref() {
         if env.get(module_name).is_none() {
-            if let Some(func) = functions.get(method) {
-                return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+            if let Some(func) = functions.get(method).cloned() {
+                return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
             if classes.contains_key(method) {
                 return instantiate_class(method, args, env, functions, classes, enums, impl_methods);
@@ -205,8 +205,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<Value>), CompileError> {

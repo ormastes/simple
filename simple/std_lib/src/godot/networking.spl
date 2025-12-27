@@ -1,0 +1,287 @@
+# Godot Networking System
+#
+# Type-safe wrappers for Godot's multiplayer networking
+#
+# Features:
+# - MultiplayerAPI (high-level networking)
+# - RPC (Remote Procedure Calls)
+# - ENetConnection (low-level networking)
+# - SceneMultiplayer (scene replication)
+#
+# Based on: https://docs.godotengine.org/en/stable/classes/class_multiplayerapi.html
+
+import godot.ffi
+import godot.variant
+import godot.node
+
+mod networking
+
+# Multiplayer API
+# High-level multiplayer management
+pub struct MultiplayerAPI:
+    singleton_ptr: ffi.GDExtensionObjectPtr
+
+impl MultiplayerAPI:
+    # Get MultiplayerAPI singleton
+    pub fn get_singleton() -> MultiplayerAPI:
+        # TODO: Get from SceneTree
+        let ptr = ffi.godot_get_singleton("MultiplayerAPI")
+        return MultiplayerAPI(singleton_ptr: ptr)
+
+    # Check if server
+    pub fn is_server(self) -> bool:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("is_server")
+        return result.as_bool()
+
+    # Get unique peer ID
+    pub fn get_unique_id(self) -> i32:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("get_unique_id")
+        return result.as_int() as i32
+
+    # Get remote sender ID (in RPC context)
+    pub fn get_remote_sender_id(self) -> i32:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("get_remote_sender_id")
+        return result.as_int() as i32
+
+    # Get list of connected peer IDs
+    pub fn get_peers(self) -> Array[i32]:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("get_peers")
+        # TODO: Parse PackedInt32Array
+        return []  # Placeholder
+
+    # Poll for network events
+    pub fn poll(mut self):
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        obj.call0("poll")
+
+
+# ENet Peer Connection
+pub struct ENetConnection:
+    ptr: ffi.GDExtensionObjectPtr
+
+impl ENetConnection:
+    # Create new connection
+    pub fn new() -> ENetConnection:
+        let ptr = ffi.godot_new_object("ENetConnection")
+        return ENetConnection(ptr: ptr)
+
+    # Create server
+    pub fn create_host_bound(mut self, address: String, port: i32, max_peers: i32 = 32) -> Result[(), String]:
+        let obj = variant.Object::from_ptr(self.ptr)
+        let addr_var = variant.Variant::from_string(address)
+        let port_var = variant.Variant::from_int(port as i64)
+        let peers_var = variant.Variant::from_int(max_peers as i64)
+        let result = obj.call3("create_host_bound", addr_var, port_var, peers_var)
+
+        let error_code = result.as_int()
+        if error_code == 0:  # OK
+            return Ok(())
+        else:
+            return Err(f"Failed to create server: error {error_code}")
+
+    # Connect to server
+    pub fn connect_to_host(mut self, address: String, port: i32) -> Result[(), String]:
+        let obj = variant.Object::from_ptr(self.ptr)
+        let addr_var = variant.Variant::from_string(address)
+        let port_var = variant.Variant::from_int(port as i64)
+        let result = obj.call2("connect_to_host", addr_var, port_var)
+
+        let error_code = result.as_int()
+        if error_code == 0:
+            return Ok(())
+        else:
+            return Err(f"Failed to connect: error {error_code}")
+
+    # Service connection (poll for events)
+    pub fn service(mut self, timeout: i32 = 0) -> Array[ENetEvent]:
+        let obj = variant.Object::from_ptr(self.ptr)
+        let timeout_var = variant.Variant::from_int(timeout as i64)
+        let result = obj.call1("service", timeout_var)
+        # TODO: Parse events
+        return []  # Placeholder
+
+    # Close connection
+    pub fn destroy(mut self):
+        let obj = variant.Object::from_ptr(self.ptr)
+        obj.call0("destroy")
+
+
+# ENet Event
+pub struct ENetEvent:
+    event_type: ENetEventType
+    peer_id: i32
+    data: Array[u8]
+
+pub enum ENetEventType:
+    None = 0
+    Connect = 1
+    Disconnect = 2
+    Receive = 3
+
+
+# Scene Multiplayer
+# Automatic scene replication
+pub struct SceneMultiplayer:
+    ptr: ffi.GDExtensionObjectPtr
+
+impl SceneMultiplayer:
+    pub fn new() -> SceneMultiplayer:
+        let ptr = ffi.godot_new_object("SceneMultiplayer")
+        return SceneMultiplayer(ptr: ptr)
+
+    # Set root path for replication
+    pub fn set_root_path(mut self, path: String):
+        let obj = variant.Object::from_ptr(self.ptr)
+        let path_var = variant.Variant::from_string(path)
+        obj.call1("set_root_path", path_var)
+
+    # Clear all peers
+    pub fn clear(mut self):
+        let obj = variant.Object::from_ptr(self.ptr)
+        obj.call0("clear")
+
+
+# RPC Helper Trait
+# Add RPC capabilities to nodes
+pub trait Networked:
+    # Call RPC on all peers
+    fn rpc(mut self, method: String, args: Array[variant.Variant]):
+        # TODO: Call rpc method
+        pass
+
+    # Call RPC on specific peer
+    fn rpc_id(mut self, peer_id: i32, method: String, args: Array[variant.Variant]):
+        # TODO: Call rpc_id method
+        pass
+
+
+# Network Manager Helper
+# High-level networking API
+pub struct NetworkManager:
+    multiplayer_api: MultiplayerAPI
+    connection: Option[ENetConnection]
+    is_server: bool
+    peers: Array[i32]
+
+impl NetworkManager:
+    # Create new network manager
+    pub fn new() -> NetworkManager:
+        return NetworkManager(
+            multiplayer_api: MultiplayerAPI::get_singleton(),
+            connection: None,
+            is_server: false,
+            peers: []
+        )
+
+    # Host server
+    pub fn host_server(mut self, port: i32, max_peers: i32 = 32) -> Result[(), String]:
+        let mut conn = ENetConnection::new()
+        let result = conn.create_host_bound("*", port, max_peers)
+
+        if result.is_ok():
+            self.connection = Some(conn)
+            self.is_server = true
+            println(f"Server started on port {port}")
+            return Ok(())
+        else:
+            return Err(result.unwrap_err())
+
+    # Join server
+    pub fn join_server(mut self, address: String, port: i32) -> Result[(), String]:
+        let mut conn = ENetConnection::new()
+        let result = conn.connect_to_host(address, port)
+
+        if result.is_ok():
+            self.connection = Some(conn)
+            self.is_server = false
+            println(f"Connecting to {address}:{port}")
+            return Ok(())
+        else:
+            return Err(result.unwrap_err())
+
+    # Poll for network events
+    pub fn poll(mut self):
+        # Poll multiplayer API
+        self.multiplayer_api.poll()
+
+        # Service ENet connection if present
+        if self.connection.is_some():
+            let mut conn = self.connection.unwrap()
+            let events = conn.service(0)
+
+            for event in events:
+                self.handle_event(event)
+
+    # Handle network event
+    fn handle_event(mut self, event: ENetEvent):
+        if event.event_type == ENetEventType::Connect:
+            println(f"Peer {event.peer_id} connected")
+            self.peers.push(event.peer_id)
+
+        elif event.event_type == ENetEventType::Disconnect:
+            println(f"Peer {event.peer_id} disconnected")
+            self.remove_peer(event.peer_id)
+
+        elif event.event_type == ENetEventType::Receive:
+            println(f"Received data from peer {event.peer_id}")
+            self.handle_data(event.peer_id, event.data)
+
+    # Remove peer from list
+    fn remove_peer(mut self, peer_id: i32):
+        # TODO: Implement array remove
+        pass
+
+    # Handle received data
+    fn handle_data(mut self, peer_id: i32, data: Array[u8]):
+        # TODO: Deserialize and process data
+        pass
+
+    # Disconnect
+    pub fn disconnect(mut self):
+        if self.connection.is_some():
+            let mut conn = self.connection.unwrap()
+            conn.destroy()
+            self.connection = None
+
+        self.peers.clear()
+        println("Disconnected from network")
+
+    # Check if connected
+    pub fn is_connected(self) -> bool:
+        return self.connection.is_some()
+
+    # Get peer count
+    pub fn get_peer_count(self) -> i32:
+        return self.peers.len()
+
+
+# RPC Mode (for @rpc annotations)
+pub enum RPCMode:
+    Disabled = 0        # No RPC
+    AnyPeer = 1         # Any peer can call
+    Authority = 2       # Only authority can call
+
+# Transfer Mode
+pub enum TransferMode:
+    Unreliable = 0      # UDP-like
+    UnreliableOrdered = 1  # Ordered UDP
+    Reliable = 2        # TCP-like
+
+
+# Array placeholders
+pub struct Array[T]:
+    items: Vec[T]
+
+impl[T] Array[T]:
+    pub fn push(mut self, item: T):
+        pass
+
+    pub fn len(self) -> i32:
+        return 0
+
+    pub fn clear(mut self):
+        pass

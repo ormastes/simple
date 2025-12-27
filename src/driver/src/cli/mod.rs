@@ -11,5 +11,7 @@ pub mod llm_tools;
 pub mod repl;
 pub mod sandbox;
 pub mod test_runner;
+#[cfg(feature = "tui")]
+pub mod tui;
 pub mod vscode;
 pub mod web;

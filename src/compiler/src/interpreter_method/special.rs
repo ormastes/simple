@@ -30,8 +30,8 @@ pub fn handle_unit_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -149,8 +149,8 @@ pub fn handle_option_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -268,8 +268,8 @@ pub fn handle_result_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -409,8 +409,8 @@ pub fn handle_mock_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -552,8 +552,8 @@ pub fn handle_channel_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -592,8 +592,8 @@ pub fn handle_threadpool_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -617,8 +617,8 @@ pub fn handle_trait_object_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -645,12 +645,12 @@ pub fn handle_constructor_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
-    if let Some(class_def) = classes.get(class_name) {
+    if let Some(class_def) = classes.get(class_name).cloned() {
         // Find static method (no self parameter)
         if let Some(method_def) = class_def.methods.iter().find(|m| m.name == method) {
             // Execute without self
@@ -701,13 +701,13 @@ pub fn find_and_exec_method_with_self(
     class: &str,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<(Value, Value)>, CompileError> {
     // Check class methods
-    if let Some(class_def) = classes.get(class) {
+    if let Some(class_def) = classes.get(class).cloned() {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
             let (result, updated_self) = exec_function_with_self_return(func, args, env, functions, classes, enums, impl_methods, class, fields)?;
             return Ok(Some((result, updated_self)));
@@ -728,8 +728,8 @@ pub fn exec_function_with_self_return(
     func: &FunctionDef,
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     class_name: &str,

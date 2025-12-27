@@ -29,13 +29,13 @@ fn find_method_and_exec(
     class: &str,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     // Check class methods
-    if let Some(class_def) = classes.get(class) {
+    if let Some(class_def) = classes.get(class).cloned() {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method_name) {
             return Ok(Some(exec_function(func, args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
         }
@@ -58,8 +58,8 @@ fn find_and_exec_method<'a>(
     class: &str,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -74,8 +74,8 @@ fn try_method_missing<'a>(
     class: &str,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -101,22 +101,22 @@ fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Value {
 fn spawn_actor_with_expr(
     expr: &Expr,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Value {
     let expr_clone = expr.clone();
     let env_clone = env.clone();
-    let funcs = functions.clone();
-    let classes_clone = classes.clone();
+    let mut funcs = functions.clone();
+    let mut classes_clone = classes.clone();
     let enums_clone = enums.clone();
     let impls_clone = impl_methods.clone();
     let handle = ACTOR_SPAWNER.with(|s| s.spawn(move |inbox, outbox| {
         let inbox = Arc::new(Mutex::new(inbox));
         ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));
         ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = Some(outbox.clone()));
-        let _ = evaluate_expr(&expr_clone, &env_clone, &funcs, &classes_clone, &enums_clone, &impls_clone);
+        let _ = evaluate_expr(&expr_clone, &env_clone, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
         ACTOR_INBOX.with(|cell| *cell.borrow_mut() = None);
         ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
     }));
@@ -130,8 +130,8 @@ fn eval_arg(
     idx: usize,
     default: Value,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -147,8 +147,8 @@ fn eval_arg_int(
     idx: usize,
     default: i64,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<i64, CompileError> {
@@ -162,8 +162,8 @@ fn eval_arg_usize(
     idx: usize,
     default: usize,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<usize, CompileError> {
@@ -174,8 +174,8 @@ fn eval_arg_usize(
 fn apply_lambda_to_vec(
     arr: &[Value],
     lambda_val: &Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Value>, CompileError> {
@@ -199,8 +199,8 @@ fn apply_lambda_to_vec(
 fn eval_array_map(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -237,8 +237,8 @@ where
 fn eval_array_filter(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -259,8 +259,8 @@ fn eval_array_reduce(
     arr: &[Value],
     init: Value,
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -286,8 +286,8 @@ fn eval_array_reduce(
 fn eval_array_find(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -306,8 +306,8 @@ fn eval_array_find(
 fn eval_array_any(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -326,8 +326,8 @@ fn eval_array_any(
 fn eval_array_all(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -362,8 +362,8 @@ where
 fn eval_dict_map_values(
     map: &HashMap<String, Value>,
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -382,8 +382,8 @@ fn eval_dict_map_values(
 fn eval_dict_filter(
     map: &HashMap<String, Value>,
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -483,8 +483,8 @@ fn handle_functional_update(
     method: &str,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<(String, Value)>, CompileError> {
@@ -535,8 +535,8 @@ fn handle_functional_update(
 fn handle_method_call_with_self_update(
     value_expr: &Expr,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
@@ -674,8 +674,8 @@ fn comprehension_iterate(
     pattern: &Pattern,
     condition: &Option<Box<Expr>>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Env>, CompileError> {
@@ -751,8 +751,8 @@ struct ClonedContext {
 impl ClonedContext {
     /// Clone context from references
     fn from_refs(
-        functions: &HashMap<String, FunctionDef>,
-        classes: &HashMap<String, ClassDef>,
+        functions: &mut HashMap<String, FunctionDef>,
+        classes: &mut HashMap<String, ClassDef>,
         enums: &Enums,
         impl_methods: &ImplMethods,
     ) -> Self {
@@ -773,7 +773,7 @@ fn execute_callable_with_arg(
     callable: Value,
     arg: Value,
     base_env: Option<&Env>,
-    ctx: &ClonedContext,
+    ctx: &mut ClonedContext,
 ) -> Result<Value, String> {
     match callable {
         Value::Function { ref def, ref captured_env, .. } => {
@@ -782,7 +782,7 @@ fn execute_callable_with_arg(
             if let Some(first_param) = def.params.first() {
                 local_env.insert(first_param.name.clone(), arg);
             }
-            match exec_block(&def.body, &mut local_env, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods) {
+            match exec_block(&def.body, &mut local_env, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods) {
                 Ok(Control::Return(v)) => Ok(v),
                 Ok(_) => Ok(Value::Nil),
                 Err(e) => Err(format!("{:?}", e)),
@@ -794,7 +794,7 @@ fn execute_callable_with_arg(
             if let Some(first_param) = params.first() {
                 local_env.insert(first_param.clone(), arg);
             }
-            evaluate_expr(&body, &local_env, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods)
+            evaluate_expr(&body, &local_env, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods)
                 .map_err(|e| format!("{:?}", e))
         }
         _ => Err("expected a function or lambda".into()),
@@ -807,13 +807,13 @@ fn execute_callable_with_arg(
 fn spawn_future_with_callable(
     callable: Value,
     arg: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
-    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
-    FutureValue::new(move || execute_callable_with_arg(callable, arg, None, &ctx))
+    let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    FutureValue::new(move || execute_callable_with_arg(callable, arg, None, &mut ctx))
 }
 
 /// Create a FutureValue that executes a callable with an argument and outer environment.
@@ -823,14 +823,14 @@ fn spawn_future_with_callable_and_env(
     callable: Value,
     arg: Value,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
     let env_clone = env.clone();
-    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
-    FutureValue::new(move || execute_callable_with_arg(callable, arg, Some(&env_clone), &ctx))
+    let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    FutureValue::new(move || execute_callable_with_arg(callable, arg, Some(&env_clone), &mut ctx))
 }
 
 /// Create a FutureValue that evaluates an expression.
@@ -838,15 +838,15 @@ fn spawn_future_with_callable_and_env(
 fn spawn_future_with_expr(
     expr: Expr,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
     let env_clone = env.clone();
-    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
     FutureValue::new(move || {
-        evaluate_expr(&expr, &env_clone, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods)
+        evaluate_expr(&expr, &env_clone, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods)
             .map_err(|e| format!("{:?}", e))
     })
 }

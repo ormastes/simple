@@ -5,6 +5,7 @@ pub mod exec_core;
 pub mod interpreter;
 pub mod jj;
 pub mod jj_state;
+pub mod repl_runner_ffi;
 pub mod runner;
 pub mod simple_test;
 pub mod watcher;

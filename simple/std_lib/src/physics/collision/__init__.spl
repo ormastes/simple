@@ -1,0 +1,2008 @@
+# Physics Collision - Collision Detection and Response
+#
+# Collision detection and response for rigid bodies with material properties.
+#
+# ## Classes
+# - `AABB`: Axis-Aligned Bounding Box
+# - `OBB`: Oriented Bounding Box
+# - `Shape`: Collision shapes (Sphere, Box, Capsule)
+# - `Material`: Physical material properties (friction, restitution, density)
+# - `Contact`: Collision contact information
+# - `ContactResolver`: Impulse-based collision response
+# - `Detector`: Collision detection algorithms (sphere-sphere, AABB-AABB, sphere-AABB, OBB-OBB)
+#
+# ## Example
+# ```simple
+# import physics.collision as collision
+# import physics.dynamics as dynamics
+# import physics.core as core
+#
+# # AABB collision
+# let aabb1 = collision.AABB::from_center_size(core.Vector3(0, 0, 0), core.Vector3(1, 1, 1))
+# let aabb2 = collision.AABB::from_center_size(core.Vector3(0.5, 0, 0), core.Vector3(1, 1, 1))
+# if aabb1.intersects(aabb2):
+#     print("AABB collision detected!")
+#
+# # OBB collision (with rotation)
+# let box1 = collision.OBB(core.Vector3(0, 0, 0), core.Vector3(1, 1, 1))
+# let box2 = collision.OBB(
+#     core.Vector3(1.5, 0, 0),
+#     core.Vector3(1, 1, 1),
+#     core.Quaternion::from_axis_angle(core.Vector3(0, 1, 0), 0.785)  # 45 degrees
+# )
+# if collision.Detector::box_box(box1, box2):
+#     print("OBB collision detected!")
+#
+# # Collision response with materials
+# let body1 = dynamics.RigidBody(mass=1.0, position=core.Vector3(0, 0, 0))
+# let body2 = dynamics.RigidBody(mass=1.0, position=core.Vector3(1, 0, 0))
+# let rubber = collision.Material::rubber()
+# let metal = collision.Material::metal()
+# let contact = collision.Contact(
+#     point=core.Vector3(0.5, 0, 0),
+#     normal=core.Vector3(1, 0, 0),
+#     penetration=0.1,
+#     body1_index=0,
+#     body2_index=1
+# )
+# collision.ContactResolver::resolve_contact(body1, body2, contact, rubber, metal)
+# ```
+
+export AABB, OBB, Capsule, Shape, Material, Detector, Contact, ContactResolver, Ray, RayHit, SpatialHash, ConvexHull, GJK
+
+import ..core as core
+import ..dynamics as dynamics
+
+
+# ============================================================================
+# AABB - Axis-Aligned Bounding Box
+# ============================================================================
+
+class AABB:
+    """Axis-Aligned Bounding Box for broad-phase collision detection.
+
+    Attributes:
+        min: Minimum corner
+        max: Maximum corner
+    """
+    min: core.Vector3
+    max: core.Vector3
+
+    fn __init__(self, min: core.Vector3, max: core.Vector3):
+        """Initialize AABB.
+
+        Args:
+            min: Minimum corner
+            max: Maximum corner
+        """
+        self.min = min
+        self.max = max
+
+    @staticmethod
+    fn from_center_size(center: core.Vector3, size: core.Vector3) -> AABB:
+        """Create AABB from center and size.
+
+        Args:
+            center: Center point
+            size: Size (full width/height/depth)
+
+        Returns:
+            AABB
+        """
+        let half_size = size.scale(0.5)
+        return AABB(
+            center.sub(half_size),
+            center.add(half_size)
+        )
+
+    fn intersects(self, other: AABB) -> bool:
+        """Check if this AABB intersects another.
+
+        Uses separating axis theorem for AABBs.
+
+        Args:
+            other: Other AABB
+
+        Returns:
+            True if AABBs overlap
+        """
+        # Check for separation on each axis
+        if self.max.x < other.min.x or self.min.x > other.max.x:
+            return false
+        if self.max.y < other.min.y or self.min.y > other.max.y:
+            return false
+        if self.max.z < other.min.z or self.min.z > other.max.z:
+            return false
+
+        return true
+
+    fn contains_point(self, point: core.Vector3) -> bool:
+        """Check if point is inside AABB.
+
+        Args:
+            point: Point to test
+
+        Returns:
+            True if point is inside
+        """
+        return (
+            point.x >= self.min.x and point.x <= self.max.x and
+            point.y >= self.min.y and point.y <= self.max.y and
+            point.z >= self.min.z and point.z <= self.max.z
+        )
+
+    fn center(self) -> core.Vector3:
+        """Get center point of AABB.
+
+        Returns:
+            Center point
+        """
+        return core.Vector3(
+            (self.min.x + self.max.x) * 0.5,
+            (self.min.y + self.max.y) * 0.5,
+            (self.min.z + self.max.z) * 0.5
+        )
+
+    fn size(self) -> core.Vector3:
+        """Get size of AABB.
+
+        Returns:
+            Size vector
+        """
+        return self.max.sub(self.min)
+
+
+# ============================================================================
+# OBB - Oriented Bounding Box
+# ============================================================================
+
+class OBB:
+    """Oriented Bounding Box for narrow-phase collision detection.
+
+    Attributes:
+        center: Center position
+        half_extents: Half-extents along local axes
+        rotation: Orientation quaternion
+    """
+    center: core.Vector3
+    half_extents: core.Vector3
+    rotation: core.Quaternion
+
+    fn __init__(
+        self,
+        center: core.Vector3,
+        half_extents: core.Vector3,
+        rotation: core.Quaternion = core.Quaternion::identity()
+    ):
+        """Initialize OBB.
+
+        Args:
+            center: Center position
+            half_extents: Half-extents (half-width, half-height, half-depth)
+            rotation: Orientation (default: identity)
+        """
+        self.center = center
+        self.half_extents = half_extents
+        self.rotation = rotation
+
+    fn get_axes(self) -> [core.Vector3]:
+        """Get the three local axes of the box.
+
+        Returns:
+            List of 3 axis vectors (x, y, z)
+        """
+        # Transform standard axes by rotation quaternion
+        let x_axis = self.rotation.rotate_vector(core.Vector3(1.0, 0.0, 0.0))
+        let y_axis = self.rotation.rotate_vector(core.Vector3(0.0, 1.0, 0.0))
+        let z_axis = self.rotation.rotate_vector(core.Vector3(0.0, 0.0, 1.0))
+        return [x_axis, y_axis, z_axis]
+
+    fn get_corners(self) -> [core.Vector3]:
+        """Get all 8 corners of the box.
+
+        Returns:
+            List of 8 corner positions
+        """
+        let axes = self.get_axes()
+        let x_offset = axes[0].scale(self.half_extents.x)
+        let y_offset = axes[1].scale(self.half_extents.y)
+        let z_offset = axes[2].scale(self.half_extents.z)
+
+        # Generate all 8 combinations of +/- offsets
+        return [
+            self.center.add(x_offset).add(y_offset).add(z_offset),
+            self.center.add(x_offset).add(y_offset).sub(z_offset),
+            self.center.add(x_offset).sub(y_offset).add(z_offset),
+            self.center.add(x_offset).sub(y_offset).sub(z_offset),
+            self.center.sub(x_offset).add(y_offset).add(z_offset),
+            self.center.sub(x_offset).add(y_offset).sub(z_offset),
+            self.center.sub(x_offset).sub(y_offset).add(z_offset),
+            self.center.sub(x_offset).sub(y_offset).sub(z_offset),
+        ]
+
+    fn project_onto_axis(self, axis: core.Vector3) -> (f64, f64):
+        """Project OBB onto an axis and return min/max.
+
+        Args:
+            axis: Axis to project onto (should be normalized)
+
+        Returns:
+            Tuple of (min, max) projection values
+        """
+        let corners = self.get_corners()
+        let mut min_proj = corners[0].dot(axis)
+        let mut max_proj = min_proj
+
+        for i in range(1, 8):
+            let proj = corners[i].dot(axis)
+            if proj < min_proj:
+                min_proj = proj
+            if proj > max_proj:
+                max_proj = proj
+
+        return (min_proj, max_proj)
+
+    fn to_aabb(self) -> AABB:
+        """Convert to axis-aligned bounding box (conservative bounds).
+
+        Returns:
+            AABB that contains this OBB
+        """
+        let corners = self.get_corners()
+        let mut min = corners[0]
+        let mut max = corners[0]
+
+        for i in range(1, 8):
+            let corner = corners[i]
+            min = core.Vector3(
+                min.x.min(corner.x),
+                min.y.min(corner.y),
+                min.z.min(corner.z)
+            )
+            max = core.Vector3(
+                max.x.max(corner.x),
+                max.y.max(corner.y),
+                max.z.max(corner.z)
+            )
+
+        return AABB(min, max)
+
+
+# ============================================================================
+# Capsule - Cylinder with Hemispherical Ends
+# ============================================================================
+
+class Capsule:
+    """Capsule collision shape (cylinder with hemispherical ends).
+
+    Commonly used for character controllers in games due to smooth collision response.
+    Represented by a line segment (central axis) and radius.
+
+    Attributes:
+        start: Start point of central axis
+        end: End point of central axis
+        radius: Radius of capsule
+
+    Example:
+        ```simple
+        # Character controller capsule (height 2, radius 0.5)
+        let capsule = Capsule(
+            start=core.Vector3(0, 0, 0),
+            end=core.Vector3(0, 2, 0),
+            radius=0.5
+        )
+
+        # Test collision with sphere
+        if Detector::capsule_sphere(capsule, sphere_pos, sphere_radius):
+            print("Character hit obstacle!")
+        ```
+    """
+    start: core.Vector3
+    end: core.Vector3
+    radius: f64
+
+    fn __init__(self, start: core.Vector3, end: core.Vector3, radius: f64):
+        """Initialize capsule.
+
+        Args:
+            start: Start point of central axis
+            end: End point of central axis
+            radius: Radius
+        """
+        self.start = start
+        self.end = end
+        self.radius = radius
+
+    @staticmethod
+    fn from_center_height(center: core.Vector3, height: f64, radius: f64, axis: core.Vector3 = core.Vector3(0, 1, 0)) -> Capsule:
+        """Create capsule from center, height, and radius.
+
+        Args:
+            center: Center point
+            height: Total height (including hemispherical ends)
+            radius: Radius
+            axis: Up axis (default: Y-axis)
+
+        Returns:
+            Capsule
+        """
+        let half_height = (height - 2.0 * radius) * 0.5
+        let offset = axis.normalize().scale(half_height)
+        return Capsule(
+            center.sub(offset),
+            center.add(offset),
+            radius
+        )
+
+    fn center(self) -> core.Vector3:
+        """Get center point of capsule.
+
+        Returns:
+            Center point
+        """
+        return core.Vector3(
+            (self.start.x + self.end.x) * 0.5,
+            (self.start.y + self.end.y) * 0.5,
+            (self.start.z + self.end.z) * 0.5
+        )
+
+    fn height(self) -> f64:
+        """Get total height of capsule (including hemispherical ends).
+
+        Returns:
+            Total height
+        """
+        let axis_length = self.start.distance(self.end)
+        return axis_length + 2.0 * self.radius
+
+    fn closest_point_on_axis(self, point: core.Vector3) -> core.Vector3:
+        """Find closest point on central axis to given point.
+
+        Args:
+            point: Query point
+
+        Returns:
+            Closest point on line segment (start to end)
+        """
+        let axis = self.end.sub(self.start)
+        let axis_length_sq = axis.dot(axis)
+
+        if axis_length_sq < 0.0001:  # Degenerate case: start == end
+            return self.start
+
+        let t = (point.sub(self.start).dot(axis) / axis_length_sq).max(0.0).min(1.0)
+        return self.start.add(axis.scale(t))
+
+
+# ============================================================================
+# Shape - Collision Shapes
+# ============================================================================
+
+enum Shape:
+    """Collision shape variants."""
+    Sphere(radius: f64)
+    Box(half_extents: core.Vector3)
+    Capsule(radius: f64, height: f64)
+
+
+# ============================================================================
+# Material - Physical Material Properties
+# ============================================================================
+
+class Material:
+    """Physical material properties for collision response.
+
+    Attributes:
+        friction: Coefficient of friction (0 = frictionless, 1 = high friction)
+        restitution: Coefficient of restitution/bounciness (0 = no bounce, 1 = perfectly elastic)
+        density: Material density (kg/m³)
+    """
+    friction: f64
+    restitution: f64
+    density: f64
+
+    fn __init__(
+        self,
+        friction: f64 = 0.5,
+        restitution: f64 = 0.3,
+        density: f64 = 1000.0
+    ):
+        """Initialize material.
+
+        Args:
+            friction: Coefficient of friction (default: 0.5)
+            restitution: Coefficient of restitution (default: 0.3)
+            density: Density in kg/m³ (default: 1000.0)
+        """
+        self.friction = friction
+        self.restitution = restitution
+        self.density = density
+
+    @staticmethod
+    fn rubber() -> Material:
+        """Rubber material preset.
+
+        Returns:
+            Rubber material (high friction, high restitution)
+        """
+        return Material(friction=0.9, restitution=0.8, density=1100.0)
+
+    @staticmethod
+    fn wood() -> Material:
+        """Wood material preset.
+
+        Returns:
+            Wood material (medium friction, low restitution)
+        """
+        return Material(friction=0.6, restitution=0.4, density=700.0)
+
+    @staticmethod
+    fn metal() -> Material:
+        """Metal material preset.
+
+        Returns:
+            Metal material (low friction, medium restitution)
+        """
+        return Material(friction=0.3, restitution=0.5, density=7800.0)
+
+    @staticmethod
+    fn ice() -> Material:
+        """Ice material preset.
+
+        Returns:
+            Ice material (very low friction, low restitution)
+        """
+        return Material(friction=0.02, restitution=0.1, density=920.0)
+
+    @staticmethod
+    fn concrete() -> Material:
+        """Concrete material preset.
+
+        Returns:
+            Concrete material (medium friction, very low restitution)
+        """
+        return Material(friction=0.7, restitution=0.1, density=2400.0)
+
+
+# ============================================================================
+# Contact - Collision Contact Information
+# ============================================================================
+
+class Contact:
+    """Contact information from a collision.
+
+    Attributes:
+        point: Contact point in world space
+        normal: Contact normal (from body1 to body2)
+        penetration: Penetration depth
+        body1_index: Index of first body
+        body2_index: Index of second body
+    """
+    point: core.Vector3
+    normal: core.Vector3
+    penetration: f64
+    body1_index: i32
+    body2_index: i32
+
+    fn __init__(
+        self,
+        point: core.Vector3,
+        normal: core.Vector3,
+        penetration: f64,
+        body1_index: i32,
+        body2_index: i32
+    ):
+        """Initialize contact.
+
+        Args:
+            point: Contact point
+            normal: Contact normal
+            penetration: Penetration depth
+            body1_index: First body index
+            body2_index: Second body index
+        """
+        self.point = point
+        self.normal = normal
+        self.penetration = penetration
+        self.body1_index = body1_index
+        self.body2_index = body2_index
+
+
+# ============================================================================
+# ContactResolver - Collision Response
+# ============================================================================
+
+class ContactResolver:
+    """Resolves collisions with friction and restitution."""
+
+    @staticmethod
+    fn resolve_contact(
+        body1: dynamics.RigidBody,
+        body2: dynamics.RigidBody,
+        contact: Contact,
+        material1: Material,
+        material2: Material
+    ):
+        """Resolve a collision contact between two bodies.
+
+        Applies impulse-based collision response with friction and restitution.
+
+        Args:
+            body1: First rigid body
+            body2: Second rigid body
+            contact: Contact information
+            material1: Material of first body
+            material2: Material of second body
+        """
+        # Skip if both bodies are static
+        if body1.is_static() and body2.is_static():
+            return
+
+        # Calculate relative velocity at contact point
+        let rel_velocity = body2.velocity.sub(body1.velocity)
+        let velocity_along_normal = rel_velocity.dot(contact.normal)
+
+        # Don't resolve if bodies are separating
+        if velocity_along_normal > 0:
+            return
+
+        # Calculate combined restitution (min for more realistic behavior)
+        let restitution = material1.restitution.min(material2.restitution)
+
+        # Calculate impulse magnitude
+        let inv_mass1 = 0.0 if body1.is_static() else 1.0 / body1.mass
+        let inv_mass2 = 0.0 if body2.is_static() else 1.0 / body2.mass
+        let inv_mass_sum = inv_mass1 + inv_mass2
+
+        if inv_mass_sum == 0:
+            return
+
+        let impulse_magnitude = -(1.0 + restitution) * velocity_along_normal / inv_mass_sum
+
+        # Apply normal impulse
+        let impulse = contact.normal.scale(impulse_magnitude)
+        body1.apply_impulse(impulse.scale(-1.0))
+        body2.apply_impulse(impulse)
+
+        # Calculate friction
+        let friction = (material1.friction + material2.friction) * 0.5
+
+        # Get tangent direction (perpendicular to normal)
+        let tangent_velocity = rel_velocity.sub(
+            contact.normal.scale(velocity_along_normal)
+        )
+        let tangent_magnitude = tangent_velocity.magnitude()
+
+        if tangent_magnitude > 0.0001:
+            let tangent = tangent_velocity.scale(1.0 / tangent_magnitude)
+
+            # Friction impulse (Coulomb friction)
+            let friction_magnitude = -tangent_velocity.magnitude() / inv_mass_sum
+            let max_friction = impulse_magnitude.abs() * friction
+
+            # Clamp friction to Coulomb limit
+            if friction_magnitude.abs() > max_friction:
+                friction_magnitude = max_friction * friction_magnitude.sign()
+
+            let friction_impulse = tangent.scale(friction_magnitude)
+            body1.apply_impulse(friction_impulse.scale(-1.0))
+            body2.apply_impulse(friction_impulse)
+
+        # Position correction to resolve penetration
+        let correction_percent = 0.8  # How much to correct (0.2-0.8 typical)
+        let slop = 0.01  # Penetration allowance (prevent jitter)
+
+        if contact.penetration > slop:
+            let correction = contact.normal.scale(
+                (contact.penetration - slop) / inv_mass_sum * correction_percent
+            )
+            if not body1.is_static():
+                body1.position = body1.position.sub(correction.scale(inv_mass1))
+            if not body2.is_static():
+                body2.position = body2.position.add(correction.scale(inv_mass2))
+
+
+# ============================================================================
+# Detector - Collision Detection
+# ============================================================================
+
+class Detector:
+    """Collision detection algorithms."""
+
+    @staticmethod
+    fn sphere_sphere(
+        pos1: core.Vector3,
+        radius1: f64,
+        pos2: core.Vector3,
+        radius2: f64
+    ) -> bool:
+        """Detect sphere-sphere collision.
+
+        Args:
+            pos1: Position of first sphere
+            radius1: Radius of first sphere
+            pos2: Position of second sphere
+            radius2: Radius of second sphere
+
+        Returns:
+            True if spheres collide
+        """
+        let distance = pos1.distance(pos2)
+        let sum_radii = radius1 + radius2
+        return distance < sum_radii
+
+    @staticmethod
+    fn aabb_aabb(aabb1: AABB, aabb2: AABB) -> bool:
+        """Detect AABB-AABB collision.
+
+        Args:
+            aabb1: First AABB
+            aabb2: Second AABB
+
+        Returns:
+            True if AABBs collide
+        """
+        return aabb1.intersects(aabb2)
+
+    @staticmethod
+    fn sphere_aabb(
+        sphere_pos: core.Vector3,
+        sphere_radius: f64,
+        aabb: AABB
+    ) -> bool:
+        """Detect sphere-AABB collision.
+
+        Args:
+            sphere_pos: Sphere center
+            sphere_radius: Sphere radius
+            aabb: AABB
+
+        Returns:
+            True if sphere and AABB collide
+        """
+        # Find closest point on AABB to sphere center
+        let closest_x = sphere_pos.x.max(aabb.min.x).min(aabb.max.x)
+        let closest_y = sphere_pos.y.max(aabb.min.y).min(aabb.max.y)
+        let closest_z = sphere_pos.z.max(aabb.min.z).min(aabb.max.z)
+        let closest = core.Vector3(closest_x, closest_y, closest_z)
+
+        # Check if distance from sphere center to closest point is < radius
+        let distance = sphere_pos.distance(closest)
+        return distance < sphere_radius
+
+    @staticmethod
+    fn box_box(box1: OBB, box2: OBB) -> bool:
+        """Detect OBB-OBB collision using Separating Axis Theorem (SAT).
+
+        Tests 15 potential separating axes:
+        - 3 face normals from box1
+        - 3 face normals from box2
+        - 9 edge cross products
+
+        Args:
+            box1: First oriented bounding box
+            box2: Second oriented bounding box
+
+        Returns:
+            True if boxes collide
+        """
+        let axes1 = box1.get_axes()
+        let axes2 = box2.get_axes()
+
+        # Test face normals from box1 (3 axes)
+        for axis in axes1:
+            if Detector::_is_separating_axis(box1, box2, axis):
+                return false
+
+        # Test face normals from box2 (3 axes)
+        for axis in axes2:
+            if Detector::_is_separating_axis(box1, box2, axis):
+                return false
+
+        # Test edge cross products (9 axes)
+        for i in range(3):
+            for j in range(3):
+                let cross = axes1[i].cross(axes2[j])
+                let cross_length = cross.magnitude()
+
+                # Skip near-parallel edges (cross product near zero)
+                if cross_length > 0.0001:
+                    let axis = cross.scale(1.0 / cross_length)  # Normalize
+                    if Detector::_is_separating_axis(box1, box2, axis):
+                        return false
+
+        # No separating axis found, boxes must be colliding
+        return true
+
+    @staticmethod
+    fn _is_separating_axis(box1: OBB, box2: OBB, axis: core.Vector3) -> bool:
+        """Check if an axis separates two OBBs.
+
+        Args:
+            box1: First box
+            box2: Second box
+            axis: Potential separating axis (normalized)
+
+        Returns:
+            True if axis separates the boxes
+        """
+        let (min1, max1) = box1.project_onto_axis(axis)
+        let (min2, max2) = box2.project_onto_axis(axis)
+
+        # Check for gap between projections
+        return max1 < min2 or max2 < min1
+
+    @staticmethod
+    fn capsule_sphere(capsule: Capsule, sphere_pos: core.Vector3, sphere_radius: f64) -> bool:
+        """Detect capsule-sphere collision.
+
+        Reduces to sphere-sphere test using closest point on capsule's central axis.
+
+        Args:
+            capsule: Capsule
+            sphere_pos: Sphere center
+            sphere_radius: Sphere radius
+
+        Returns:
+            True if capsule and sphere collide
+
+        Example:
+            ```simple
+            let character = Capsule(start=core.Vector3(0, 0, 0), end=core.Vector3(0, 2, 0), radius=0.5)
+            let obstacle_pos = core.Vector3(1, 1, 0)
+            let obstacle_radius = 0.5
+
+            if Detector::capsule_sphere(character, obstacle_pos, obstacle_radius):
+                print("Character hit obstacle!")
+            ```
+        """
+        # Find closest point on capsule's central axis to sphere center
+        let closest_on_axis = capsule.closest_point_on_axis(sphere_pos)
+
+        # Distance from sphere center to closest point on axis
+        let distance = sphere_pos.distance(closest_on_axis)
+
+        # Collision if distance < sum of radii
+        return distance < (capsule.radius + sphere_radius)
+
+    @staticmethod
+    fn capsule_capsule(capsule1: Capsule, capsule2: Capsule) -> bool:
+        """Detect capsule-capsule collision.
+
+        Uses closest points between two line segments, then sphere-sphere test.
+
+        Args:
+            capsule1: First capsule
+            capsule2: Second capsule
+
+        Returns:
+            True if capsules collide
+
+        Example:
+            ```simple
+            let player = Capsule(start=core.Vector3(0, 0, 0), end=core.Vector3(0, 2, 0), radius=0.5)
+            let enemy = Capsule(start=core.Vector3(1, 0, 0), end=core.Vector3(1, 2, 0), radius=0.5)
+
+            if Detector::capsule_capsule(player, enemy):
+                print("Player collided with enemy!")
+            ```
+        """
+        # Find closest points between the two line segments (capsule axes)
+        let (point1, point2) = Detector::_closest_points_segments(
+            capsule1.start, capsule1.end,
+            capsule2.start, capsule2.end
+        )
+
+        # Distance between closest points
+        let distance = point1.distance(point2)
+
+        # Collision if distance < sum of radii
+        return distance < (capsule1.radius + capsule2.radius)
+
+    @staticmethod
+    fn capsule_aabb(capsule: Capsule, aabb: AABB) -> bool:
+        """Detect capsule-AABB collision.
+
+        Finds closest point on capsule axis, then uses sphere-AABB test.
+
+        Args:
+            capsule: Capsule
+            aabb: Axis-aligned bounding box
+
+        Returns:
+            True if capsule and AABB collide
+
+        Example:
+            ```simple
+            let character = Capsule(start=core.Vector3(0, 0, 0), end=core.Vector3(0, 2, 0), radius=0.5)
+            let wall = AABB::from_center_size(core.Vector3(2, 1, 0), core.Vector3(1, 3, 1))
+
+            if Detector::capsule_aabb(character, wall):
+                print("Character hit wall!")
+            ```
+        """
+        # Find closest point on AABB to capsule's central axis
+        # We test the capsule axis against the AABB to find the closest point on the axis
+        let aabb_center = aabb.center()
+        let closest_on_axis = capsule.closest_point_on_axis(aabb_center)
+
+        # Now do sphere-AABB test with the capsule radius
+        let closest_x = closest_on_axis.x.max(aabb.min.x).min(aabb.max.x)
+        let closest_y = closest_on_axis.y.max(aabb.min.y).min(aabb.max.y)
+        let closest_z = closest_on_axis.z.max(aabb.min.z).min(aabb.max.z)
+        let closest_on_aabb = core.Vector3(closest_x, closest_y, closest_z)
+
+        # Distance from closest point on axis to closest point on AABB
+        let distance = closest_on_axis.distance(closest_on_aabb)
+
+        return distance < capsule.radius
+
+    @staticmethod
+    fn _closest_points_segments(
+        a_start: core.Vector3,
+        a_end: core.Vector3,
+        b_start: core.Vector3,
+        b_end: core.Vector3
+    ) -> (core.Vector3, core.Vector3):
+        """Find closest points between two line segments.
+
+        Uses parametric line representation and minimizes distance.
+
+        Args:
+            a_start: Start of first segment
+            a_end: End of first segment
+            b_start: Start of second segment
+            b_end: End of second segment
+
+        Returns:
+            Tuple of (point on segment A, point on segment B)
+        """
+        let d1 = a_end.sub(a_start)
+        let d2 = b_end.sub(b_start)
+        let r = a_start.sub(b_start)
+
+        let a = d1.dot(d1)
+        let b = d1.dot(d2)
+        let c = d1.dot(r)
+        let e = d2.dot(d2)
+        let f = d2.dot(r)
+
+        let mut s = 0.0
+        let mut t = 0.0
+
+        # Handle degenerate cases
+        if a < 0.0001 and e < 0.0001:
+            # Both segments are points
+            return (a_start, b_start)
+
+        if a < 0.0001:
+            # Segment A is a point
+            s = 0.0
+            t = (f / e).max(0.0).min(1.0)
+        elif e < 0.0001:
+            # Segment B is a point
+            t = 0.0
+            s = (-c / a).max(0.0).min(1.0)
+        else:
+            # General case
+            let denom = a * e - b * b
+
+            if denom != 0.0:
+                s = ((b * f - c * e) / denom).max(0.0).min(1.0)
+            else:
+                s = 0.0
+
+            t = ((b * s + f) / e).max(0.0).min(1.0)
+
+            # Recompute s for the final t
+            s = ((-c + b * t) / a).max(0.0).min(1.0)
+
+        let point_a = a_start.add(d1.scale(s))
+        let point_b = b_start.add(d2.scale(t))
+
+        return (point_a, point_b)
+
+
+# ============================================================================
+# Ray Casting
+# ============================================================================
+
+class Ray:
+    """Ray for ray casting and intersection tests.
+
+    Represents a ray with origin and direction, commonly used for:
+    - Shooting/line-of-sight in games
+    - Object picking (mouse clicks)
+    - Pathfinding and navigation
+
+    Example:
+        ```simple
+        # Create ray from camera toward mouse click
+        let ray = Ray(
+            origin=camera_pos,
+            direction=click_direction.normalize()
+        )
+
+        # Test against sphere
+        let hit = ray.intersect_sphere(sphere_center, sphere_radius)
+        if hit is not None:
+            print(f"Hit at distance: {hit.distance}")
+        ```
+    """
+    origin: core.Vector3
+    direction: core.Vector3
+
+    fn __init__(self, origin: core.Vector3, direction: core.Vector3):
+        """Initialize ray.
+
+        Args:
+            origin: Ray starting point
+            direction: Ray direction (will be normalized)
+        """
+        self.origin = origin
+        self.direction = direction.normalize()
+
+    fn at(self, t: f64) -> core.Vector3:
+        """Get point along ray at distance t.
+
+        Args:
+            t: Distance along ray
+
+        Returns:
+            Point at origin + t * direction
+        """
+        return self.origin.add(self.direction.scale(t))
+
+    fn intersect_sphere(self, center: core.Vector3, radius: f64) -> RayHit:
+        """Ray-sphere intersection test.
+
+        Uses analytic solution to ray-sphere intersection equation.
+
+        Args:
+            center: Sphere center
+            radius: Sphere radius
+
+        Returns:
+            RayHit if intersection exists, None otherwise
+        """
+        let oc = self.origin.sub(center)
+        let a = self.direction.dot(self.direction)
+        let b = 2.0 * oc.dot(self.direction)
+        let c = oc.dot(oc) - radius * radius
+        let discriminant = b * b - 4.0 * a * c
+
+        if discriminant < 0.0:
+            return None  # No intersection
+
+        # Find nearest intersection point
+        let t = (-b - discriminant ** 0.5) / (2.0 * a)
+        if t < 0.0:
+            # Ray starts inside sphere, use far intersection
+            t = (-b + discriminant ** 0.5) / (2.0 * a)
+            if t < 0.0:
+                return None  # Both intersections behind ray
+
+        let point = self.at(t)
+        let normal = point.sub(center).normalize()
+
+        return RayHit(
+            hit=true,
+            distance=t,
+            point=point,
+            normal=normal
+        )
+
+    fn intersect_aabb(self, aabb: AABB) -> RayHit:
+        """Ray-AABB intersection test (slab method).
+
+        Args:
+            aabb: Axis-aligned bounding box
+
+        Returns:
+            RayHit if intersection exists, None otherwise
+        """
+        let mut tmin = 0.0
+        let mut tmax = 1e10  # Large number
+
+        # Test each axis
+        for i in range(3):
+            let axis_min = if i == 0: aabb.min.x elif i == 1: aabb.min.y else: aabb.min.z
+            let axis_max = if i == 0: aabb.max.x elif i == 1: aabb.max.y else: aabb.max.z
+            let origin_i = if i == 0: self.origin.x elif i == 1: self.origin.y else: self.origin.z
+            let dir_i = if i == 0: self.direction.x elif i == 1: self.direction.y else: self.direction.z
+
+            if dir_i.abs() > 0.0001:  # Not parallel
+                let t1 = (axis_min - origin_i) / dir_i
+                let t2 = (axis_max - origin_i) / dir_i
+
+                let tmin_axis = if t1 < t2: t1 else: t2
+                let tmax_axis = if t1 < t2: t2 else: t1
+
+                tmin = if tmin_axis > tmin: tmin_axis else: tmin
+                tmax = if tmax_axis < tmax: tmax_axis else: tmax
+
+                if tmax < tmin:
+                    return None  # No intersection
+            else:
+                # Ray parallel to axis - check if origin is within bounds
+                if origin_i < axis_min or origin_i > axis_max:
+                    return None
+
+        if tmin < 0.0:
+            tmin = tmax
+            if tmin < 0.0:
+                return None  # Box behind ray
+
+        let point = self.at(tmin)
+        # Compute normal (which face was hit)
+        let center = aabb.center()
+        let normal = point.sub(center).normalize()
+
+        return RayHit(
+            hit=true,
+            distance=tmin,
+            point=point,
+            normal=normal
+        )
+
+    fn intersect_plane(self, point_on_plane: core.Vector3, plane_normal: core.Vector3) -> RayHit:
+        """Ray-plane intersection test.
+
+        Args:
+            point_on_plane: Any point on the plane
+            plane_normal: Plane normal vector (will be normalized)
+
+        Returns:
+            RayHit if intersection exists, None otherwise
+        """
+        let n = plane_normal.normalize()
+        let denom = self.direction.dot(n)
+
+        if denom.abs() < 0.0001:
+            return None  # Ray parallel to plane
+
+        let t = point_on_plane.sub(self.origin).dot(n) / denom
+        if t < 0.0:
+            return None  # Intersection behind ray
+
+        let point = self.at(t)
+
+        return RayHit(
+            hit=true,
+            distance=t,
+            point=point,
+            normal=n
+        )
+
+
+class RayHit:
+    """Result of a ray intersection test.
+
+    Attributes:
+        hit: Whether ray hit something
+        distance: Distance from ray origin to hit point
+        point: 3D point where ray intersected
+        normal: Surface normal at hit point
+    """
+    hit: bool
+    distance: f64
+    point: core.Vector3
+    normal: core.Vector3
+
+    fn __init__(self, hit: bool, distance: f64, point: core.Vector3, normal: core.Vector3):
+        """Initialize ray hit result.
+
+        Args:
+            hit: True if ray hit something
+            distance: Distance to hit point
+            point: Hit point in 3D space
+            normal: Surface normal at hit point
+        """
+        self.hit = hit
+        self.distance = distance
+        self.point = point
+        self.normal = normal
+
+
+# ============================================================================
+# Spatial Hashing - Broad-Phase Collision Optimization
+# ============================================================================
+
+class SpatialHash:
+    """Spatial hashing for efficient broad-phase collision detection.
+
+    Divides space into a uniform grid and maps objects to grid cells.
+    Only objects in the same or nearby cells are tested for collision,
+    reducing collision checks from O(n²) to approximately O(n).
+
+    Attributes:
+        cell_size: Size of each grid cell
+        grid: Hash map from grid cell to list of object indices
+        object_positions: List of object positions
+        object_radii: List of object bounding radii
+
+    Example:
+        ```simple
+        # Create spatial hash with 2.0 unit cells
+        let spatial_hash = SpatialHash(cell_size=2.0)
+
+        # Insert objects
+        for i in range(bodies.len()):
+            spatial_hash.insert(i, bodies[i].position, bodies[i].radius)
+
+        # Get potential collision pairs (broad phase)
+        let pairs = spatial_hash.get_potential_pairs()
+
+        # Only test these pairs for actual collision (narrow phase)
+        for (i, j) in pairs:
+            if Detector::sphere_sphere(bodies[i], bodies[j]):
+                # Handle collision
+                pass
+
+        # Clear for next frame
+        spatial_hash.clear()
+        ```
+
+    Performance:
+        - Insert: O(1) average case
+        - Query: O(k) where k = objects per cell (typically << n)
+        - Total: O(n) instead of O(n²) for brute force
+    """
+    cell_size: f64
+    grid: {i64: [i64]}  # Hash of cell coords -> object indices
+    object_positions: [core.Vector3]
+    object_radii: [f64]
+
+    fn __init__(self, cell_size: f64 = 10.0):
+        """Initialize spatial hash.
+
+        Args:
+            cell_size: Size of each grid cell (default: 10.0)
+                      Should be ~2x the average object size for best performance
+        """
+        self.cell_size = cell_size
+        self.grid = {}
+        self.object_positions = []
+        self.object_radii = []
+
+    fn insert(self, object_id: i64, position: core.Vector3, radius: f64):
+        """Insert object into spatial hash.
+
+        Args:
+            object_id: Unique identifier for the object
+            position: Object position
+            radius: Object bounding radius (for multi-cell insertion)
+        """
+        # Store object data
+        if object_id >= self.object_positions.len() as i64:
+            # Expand arrays if needed
+            while self.object_positions.len() as i64 <= object_id:
+                self.object_positions.append(core.Vector3::zero())
+                self.object_radii.append(0.0)
+
+        self.object_positions[object_id as usize] = position
+        self.object_radii[object_id as usize] = radius
+
+        # Calculate which cells this object occupies
+        # Objects larger than a cell may span multiple cells
+        let min_cell = self._position_to_cell(position.sub(core.Vector3(radius, radius, radius)))
+        let max_cell = self._position_to_cell(position.add(core.Vector3(radius, radius, radius)))
+
+        # Insert into all occupied cells
+        for x in range(min_cell.x as i64, max_cell.x as i64 + 1):
+            for y in range(min_cell.y as i64, max_cell.y as i64 + 1):
+                for z in range(min_cell.z as i64, max_cell.z as i64 + 1):
+                    let cell_hash = self._hash_cell(x, y, z)
+
+                    # Add to cell's object list
+                    if cell_hash not in self.grid:
+                        self.grid[cell_hash] = []
+
+                    self.grid[cell_hash].append(object_id)
+
+    fn query_nearby(self, position: core.Vector3, radius: f64) -> [i64]:
+        """Query objects near a position.
+
+        Args:
+            position: Query position
+            radius: Query radius
+
+        Returns:
+            List of object IDs that might overlap with the query sphere
+        """
+        let result = []
+        let visited = {}  # Track already-added objects
+
+        # Get cells overlapping query sphere
+        let min_cell = self._position_to_cell(position.sub(core.Vector3(radius, radius, radius)))
+        let max_cell = self._position_to_cell(position.add(core.Vector3(radius, radius, radius)))
+
+        # Check all cells in range
+        for x in range(min_cell.x as i64, max_cell.x as i64 + 1):
+            for y in range(min_cell.y as i64, max_cell.y as i64 + 1):
+                for z in range(min_cell.z as i64, max_cell.z as i64 + 1):
+                    let cell_hash = self._hash_cell(x, y, z)
+
+                    if cell_hash in self.grid:
+                        for obj_id in self.grid[cell_hash]:
+                            if obj_id not in visited:
+                                visited[obj_id] = true
+                                result.append(obj_id)
+
+        return result
+
+    fn get_potential_pairs(self) -> [(i64, i64)]:
+        """Get all potential collision pairs.
+
+        Returns:
+            List of (object_id1, object_id2) pairs that might be colliding
+        """
+        let pairs = []
+        let tested = {}  # Track already-tested pairs
+
+        # Check each cell
+        for cell_hash in self.grid.keys():
+            let objects = self.grid[cell_hash]
+
+            # Test all pairs within this cell
+            for i in range(objects.len()):
+                for j in range(i + 1, objects.len()):
+                    let id1 = objects[i]
+                    let id2 = objects[j]
+
+                    # Create unique pair key (smaller ID first)
+                    let pair_key = if id1 < id2 {
+                        (id1, id2)
+                    } else {
+                        (id2, id1)
+                    }
+
+                    # Only add each pair once
+                    if pair_key not in tested:
+                        tested[pair_key] = true
+                        pairs.append(pair_key)
+
+        return pairs
+
+    fn clear(self):
+        """Clear all objects from the spatial hash.
+
+        Call this each frame before re-inserting objects.
+        """
+        self.grid = {}
+        # Keep object data arrays allocated for reuse
+
+    fn _position_to_cell(self, position: core.Vector3) -> core.Vector3:
+        """Convert world position to grid cell coordinates.
+
+        Args:
+            position: World position
+
+        Returns:
+            Grid cell coordinates (may have fractional parts)
+        """
+        return core.Vector3(
+            (position.x / self.cell_size).floor(),
+            (position.y / self.cell_size).floor(),
+            (position.z / self.cell_size).floor()
+        )
+
+    fn _hash_cell(self, x: i64, y: i64, z: i64) -> i64:
+        """Hash 3D cell coordinates to a single integer.
+
+        Uses a simple multiplicative hash for fast, reasonably distributed hashing.
+
+        Args:
+            x: Cell X coordinate
+            y: Cell Y coordinate
+            z: Cell Z coordinate
+
+        Returns:
+            Hash value
+        """
+        # Constants chosen for good distribution (large primes)
+        let h = (x * 73856093) ^ (y * 19349663) ^ (z * 83492791)
+        return h
+
+    fn get_cell_count(self) -> i64:
+        """Get number of occupied cells.
+
+        Returns:
+            Number of grid cells containing at least one object
+        """
+        return self.grid.keys().len() as i64
+
+    fn get_max_objects_per_cell(self) -> i64:
+        """Get maximum number of objects in any single cell.
+
+        Useful for debugging and performance tuning.
+        A very high value suggests cell_size is too large.
+
+        Returns:
+            Maximum objects in one cell
+        """
+        let max_count = 0
+
+        for cell_hash in self.grid.keys():
+            let count = self.grid[cell_hash].len() as i64
+            if count > max_count:
+                max_count = count
+
+        return max_count
+
+    fn get_average_objects_per_cell(self) -> f64:
+        """Get average number of objects per occupied cell.
+
+        Returns:
+            Average objects per cell
+        """
+        if self.grid.keys().len() == 0:
+            return 0.0
+
+        let total = 0
+        for cell_hash in self.grid.keys():
+            total += self.grid[cell_hash].len()
+
+        return total as f64 / self.grid.keys().len() as f64
+
+
+# ============================================================================
+# Convex Hull Generation
+# ============================================================================
+
+class ConvexHull:
+    """3D Convex Hull - smallest convex shape containing a set of points.
+
+    Uses QuickHull algorithm for efficient convex hull generation.
+    Useful for creating collision shapes from point clouds.
+
+    Attributes:
+        vertices: List of vertex positions on the hull
+        faces: List of triangular faces (each face = 3 vertex indices)
+        normals: List of face normals (outward-facing)
+
+    Example:
+        ```simple
+        # Generate hull from point cloud
+        let points = [
+            core.Vector3(0, 0, 0),
+            core.Vector3(1, 0, 0),
+            core.Vector3(0, 1, 0),
+            core.Vector3(0, 0, 1),
+            core.Vector3(0.5, 0.5, 0.5)
+        ]
+
+        let hull = ConvexHull::from_points(points)
+        print(f"Hull has {hull.vertices.len()} vertices")
+        print(f"Hull has {hull.faces.len()} faces")
+
+        # Use for collision detection
+        for face in hull.faces:
+            let v0 = hull.vertices[face[0]]
+            let v1 = hull.vertices[face[1]]
+            let v2 = hull.vertices[face[2]]
+            # Test collision with triangle...
+        ```
+    """
+    vertices: [core.Vector3]
+    faces: [[i64]]  # Each face is [v0_idx, v1_idx, v2_idx]
+    normals: [core.Vector3]
+
+    fn __init__(self, vertices: [core.Vector3], faces: [[i64]], normals: [core.Vector3]):
+        """Initialize convex hull.
+
+        Args:
+            vertices: Hull vertex positions
+            faces: Triangle face indices
+            normals: Face normals (outward-facing)
+        """
+        self.vertices = vertices
+        self.faces = faces
+        self.normals = normals
+
+    @staticmethod
+    fn from_points(points: [core.Vector3]) -> ConvexHull:
+        """Generate convex hull from point cloud using QuickHull algorithm.
+
+        Args:
+            points: Input point cloud
+
+        Returns:
+            Convex hull containing all points
+
+        Algorithm:
+            1. Find extremal points to form initial tetrahedron
+            2. For each face, find furthest point outside
+            3. Create new faces from that point
+            4. Remove faces no longer visible from new point
+            5. Repeat until no points remain outside
+        """
+        if points.len() < 4:
+            # Degenerate case - need at least 4 points for 3D hull
+            return ConvexHull::_build_degenerate_hull(points)
+
+        # Find extremal points for initial tetrahedron
+        let extremal = ConvexHull::_find_extremal_points(points)
+
+        if extremal.len() < 4:
+            return ConvexHull::_build_degenerate_hull(points)
+
+        # Build initial tetrahedron
+        let hull_vertices = [
+            points[extremal[0]],
+            points[extremal[1]],
+            points[extremal[2]],
+            points[extremal[3]]
+        ]
+
+        let hull_faces = [
+            [0, 1, 2],
+            [0, 2, 3],
+            [0, 3, 1],
+            [1, 3, 2]
+        ]
+
+        # Calculate initial normals
+        let hull_normals = []
+        for face in hull_faces:
+            let v0 = hull_vertices[face[0]]
+            let v1 = hull_vertices[face[1]]
+            let v2 = hull_vertices[face[2]]
+            let normal = ConvexHull::_compute_face_normal(v0, v1, v2)
+            hull_normals.append(normal)
+
+        # Track which points are inside/outside hull
+        let remaining_points = []
+        for i in range(points.len()):
+            if i not in extremal:
+                remaining_points.append(i)
+
+        # Iteratively expand hull
+        let mut changed = true
+        while changed and remaining_points.len() > 0:
+            changed = false
+
+            # Find furthest point outside any face
+            let furthest_point = -1
+            let furthest_face = -1
+            let max_distance = 0.0
+
+            for point_idx in remaining_points:
+                let point = points[point_idx]
+
+                for face_idx in range(hull_faces.len()):
+                    let face = hull_faces[face_idx]
+                    let v0 = hull_vertices[face[0]]
+                    let normal = hull_normals[face_idx]
+
+                    # Distance from point to face plane
+                    let distance = point.sub(v0).dot(normal)
+
+                    if distance > max_distance:
+                        max_distance = distance
+                        furthest_point = point_idx
+                        furthest_face = face_idx
+
+            # If found point outside hull
+            if furthest_point >= 0 and max_distance > 0.001:
+                changed = true
+
+                # Add new vertex
+                let new_vertex_idx = hull_vertices.len() as i64
+                hull_vertices.append(points[furthest_point])
+
+                # Remove visible faces and create new ones
+                let visible_faces = ConvexHull::_find_visible_faces(
+                    hull_vertices,
+                    hull_faces,
+                    hull_normals,
+                    points[furthest_point]
+                )
+
+                # Get horizon edges (boundary between visible and non-visible faces)
+                let horizon_edges = ConvexHull::_get_horizon_edges(hull_faces, visible_faces)
+
+                # Remove visible faces
+                let new_faces = []
+                let new_normals = []
+                for i in range(hull_faces.len()):
+                    if i not in visible_faces:
+                        new_faces.append(hull_faces[i])
+                        new_normals.append(hull_normals[i])
+
+                # Create new faces from horizon edges to new vertex
+                for edge in horizon_edges:
+                    let new_face = [edge[0], edge[1], new_vertex_idx]
+                    new_faces.append(new_face)
+
+                    let v0 = hull_vertices[edge[0]]
+                    let v1 = hull_vertices[edge[1]]
+                    let v2 = hull_vertices[new_vertex_idx]
+                    let normal = ConvexHull::_compute_face_normal(v0, v1, v2)
+                    new_normals.append(normal)
+
+                hull_faces = new_faces
+                hull_normals = new_normals
+
+                # Remove processed point
+                remaining_points.remove(furthest_point)
+
+        return ConvexHull(hull_vertices, hull_faces, hull_normals)
+
+    @staticmethod
+    fn _find_extremal_points(points: [core.Vector3]) -> [i64]:
+        """Find 4 extremal points to form initial tetrahedron.
+
+        Returns:
+            Indices of extremal points
+        """
+        if points.len() == 0:
+            return []
+
+        # Find min/max along each axis
+        let mut min_x = 0
+        let mut max_x = 0
+        let mut min_y = 0
+        let mut max_y = 0
+        let mut min_z = 0
+        let mut max_z = 0
+
+        for i in range(1, points.len()):
+            if points[i].x < points[min_x].x:
+                min_x = i
+            if points[i].x > points[max_x].x:
+                max_x = i
+            if points[i].y < points[min_y].y:
+                min_y = i
+            if points[i].y > points[max_y].y:
+                max_y = i
+            if points[i].z < points[min_z].z:
+                min_z = i
+            if points[i].z > points[max_z].z:
+                max_z = i
+
+        # Pick 4 most spread out points
+        # Simple heuristic: use extremal points along longest axis
+        let dx = points[max_x].x - points[min_x].x
+        let dy = points[max_y].y - points[min_y].y
+        let dz = points[max_z].z - points[min_z].z
+
+        if dx >= dy and dx >= dz:
+            return [min_x, max_x, min_y, max_y]
+        elif dy >= dz:
+            return [min_y, max_y, min_z, max_z]
+        else:
+            return [min_z, max_z, min_x, max_x]
+
+    @staticmethod
+    fn _compute_face_normal(v0: core.Vector3, v1: core.Vector3, v2: core.Vector3) -> core.Vector3:
+        """Compute outward-facing normal for a triangular face.
+
+        Args:
+            v0, v1, v2: Triangle vertices (counter-clockwise winding)
+
+        Returns:
+            Normalized face normal
+        """
+        let edge1 = v1.sub(v0)
+        let edge2 = v2.sub(v0)
+        let normal = edge1.cross(edge2)
+        return normal.normalize()
+
+    @staticmethod
+    fn _find_visible_faces(
+        vertices: [core.Vector3],
+        faces: [[i64]],
+        normals: [core.Vector3],
+        point: core.Vector3
+    ) -> [i64]:
+        """Find all faces visible from a point.
+
+        A face is visible if the point is in front of the face plane.
+
+        Returns:
+            List of visible face indices
+        """
+        let visible = []
+
+        for i in range(faces.len()):
+            let face = faces[i]
+            let v0 = vertices[face[0]]
+            let normal = normals[i]
+
+            # Point is visible if it's in front of face (positive distance)
+            let distance = point.sub(v0).dot(normal)
+            if distance > 0.001:
+                visible.append(i)
+
+        return visible
+
+    @staticmethod
+    fn _get_horizon_edges(faces: [[i64]], visible_faces: [i64]) -> [[i64]]:
+        """Get horizon edges between visible and non-visible faces.
+
+        Returns:
+            List of [v0_idx, v1_idx] edge pairs
+        """
+        let edges = []
+        let visible_set = {}
+
+        for idx in visible_faces:
+            visible_set[idx] = true
+
+        # For each visible face, check each edge
+        for face_idx in visible_faces:
+            let face = faces[face_idx]
+
+            # Check all 3 edges of the triangle
+            let edge_pairs = [
+                [face[0], face[1]],
+                [face[1], face[2]],
+                [face[2], face[0]]
+            ]
+
+            for edge in edge_pairs:
+                # Check if this edge is shared with a non-visible face
+                let is_horizon = ConvexHull::_is_horizon_edge(edge, faces, visible_set)
+                if is_horizon:
+                    edges.append(edge)
+
+        return edges
+
+    @staticmethod
+    fn _is_horizon_edge(edge: [i64], faces: [[i64]], visible_set: {i64: bool}) -> bool:
+        """Check if an edge is on the horizon (boundary between visible/non-visible).
+
+        Returns:
+            True if edge borders visible and non-visible faces
+        """
+        # Count how many visible faces share this edge
+        let visible_count = 0
+        let total_count = 0
+
+        for i in range(faces.len()):
+            let face = faces[i]
+
+            # Check if face contains this edge
+            let has_edge = (
+                (face[0] == edge[0] and face[1] == edge[1]) or
+                (face[1] == edge[0] and face[2] == edge[1]) or
+                (face[2] == edge[0] and face[0] == edge[1]) or
+                (face[0] == edge[1] and face[1] == edge[0]) or
+                (face[1] == edge[1] and face[2] == edge[0]) or
+                (face[2] == edge[1] and face[0] == edge[0])
+            )
+
+            if has_edge:
+                total_count += 1
+                if i in visible_set:
+                    visible_count += 1
+
+        # Horizon edge: shared by visible and non-visible face
+        return visible_count > 0 and visible_count < total_count
+
+    @staticmethod
+    fn _build_degenerate_hull(points: [core.Vector3]) -> ConvexHull:
+        """Build degenerate hull for < 4 points.
+
+        Returns:
+            Minimal hull (triangle, line, or point)
+        """
+        if points.len() == 0:
+            return ConvexHull([], [], [])
+
+        if points.len() == 1:
+            # Single point
+            return ConvexHull([points[0]], [], [])
+
+        if points.len() == 2:
+            # Line segment - create degenerate triangle
+            let midpoint = points[0].add(points[1]).scale(0.5)
+            return ConvexHull(
+                [points[0], points[1], midpoint],
+                [[0, 1, 2]],
+                [core.Vector3::zero()]
+            )
+
+        # 3 points - single triangle
+        let v0 = points[0]
+        let v1 = points[1]
+        let v2 = points[2]
+        let normal = ConvexHull::_compute_face_normal(v0, v1, v2)
+
+        return ConvexHull(
+            [v0, v1, v2],
+            [[0, 1, 2]],
+            [normal]
+        )
+
+
+# ============================================================================
+# GJK Algorithm - Convex Collision Detection
+# ============================================================================
+
+class GJK:
+    """Gilbert-Johnson-Keerthi algorithm for convex collision detection.
+
+    Detects collisions between arbitrary convex shapes by testing if the origin
+    is contained in the Minkowski difference of the two shapes.
+
+    Algorithm:
+        1. Build a simplex around the origin in Minkowski space
+        2. Iteratively refine the simplex to find closest point to origin
+        3. If origin is inside simplex, shapes are colliding
+        4. If origin cannot be enclosed, shapes are separated
+
+    Example:
+        ```simple
+        # Define support functions for two convex shapes
+        let shape1_support = fn(direction: Vector3) -> Vector3 {
+            # Return furthest point in shape1 along direction
+            ...
+        }
+
+        let shape2_support = fn(direction: Vector3) -> Vector3 {
+            # Return furthest point in shape2 along direction
+            ...
+        }
+
+        # Test collision
+        if GJK::test_collision(shape1_support, shape2_support):
+            print("Collision detected!")
+        ```
+
+    Performance:
+        - Typical iterations: 3-10
+        - Max iterations: 30-50
+        - Much faster than SAT for complex convex shapes
+    """
+
+    @staticmethod
+    fn test_collision(
+        support_a: fn(core.Vector3) -> core.Vector3,
+        support_b: fn(core.Vector3) -> core.Vector3,
+        max_iterations: i64 = 50
+    ) -> bool:
+        """Test if two convex shapes are colliding using GJK.
+
+        Args:
+            support_a: Support function for shape A (returns furthest point in direction)
+            support_b: Support function for shape B
+            max_iterations: Maximum GJK iterations (default: 50)
+
+        Returns:
+            True if shapes are colliding, False otherwise
+
+        Note:
+            Support function signature: fn(direction: Vector3) -> Vector3
+            Returns the furthest point in the shape along the given direction.
+        """
+        # Initial search direction
+        let mut direction = core.Vector3(1, 0, 0)
+
+        # Initial simplex (starts empty, will grow to 4 points max in 3D)
+        let mut simplex = []
+
+        # First support point
+        let support = GJK::_minkowski_support(support_a, support_b, direction)
+        simplex.append(support)
+
+        # New search direction: towards origin
+        direction = support.negate()
+
+        # GJK main loop
+        for iteration in range(max_iterations):
+            # Get next support point
+            let a = GJK::_minkowski_support(support_a, support_b, direction)
+
+            # If new point didn't pass the origin, no collision
+            if a.dot(direction) < 0.0:
+                return false
+
+            # Add to simplex
+            simplex.append(a)
+
+            # Check if simplex contains origin
+            let (contains_origin, new_direction) = GJK::_update_simplex(simplex)
+
+            if contains_origin:
+                return true
+
+            direction = new_direction
+
+        # Max iterations reached - likely edge case or numerical issue
+        return false
+
+    @staticmethod
+    fn _minkowski_support(
+        support_a: fn(core.Vector3) -> core.Vector3,
+        support_b: fn(core.Vector3) -> core.Vector3,
+        direction: core.Vector3
+    ) -> core.Vector3:
+        """Compute Minkowski difference support point.
+
+        Support(A - B, d) = Support(A, d) - Support(B, -d)
+
+        Args:
+            support_a: Support function for shape A
+            support_b: Support function for shape B
+            direction: Search direction
+
+        Returns:
+            Minkowski difference support point
+        """
+        let point_a = support_a(direction)
+        let point_b = support_b(direction.negate())
+        return point_a.sub(point_b)
+
+    @staticmethod
+    fn _update_simplex(simplex: [core.Vector3]) -> (bool, core.Vector3):
+        """Update simplex and determine if origin is contained.
+
+        Args:
+            simplex: Current simplex (1-4 points)
+
+        Returns:
+            (contains_origin, new_search_direction)
+        """
+        let size = simplex.len()
+
+        if size == 2:
+            # Line simplex
+            return GJK::_line_case(simplex)
+        elif size == 3:
+            # Triangle simplex
+            return GJK::_triangle_case(simplex)
+        elif size == 4:
+            # Tetrahedron simplex
+            return GJK::_tetrahedron_case(simplex)
+        else:
+            # Single point - shouldn't reach here
+            let direction = simplex[0].negate()
+            return (false, direction)
+
+    @staticmethod
+    fn _line_case(simplex: [core.Vector3]) -> (bool, core.Vector3):
+        """Handle line simplex case (2 points).
+
+        Args:
+            simplex: Line simplex [A, B]
+
+        Returns:
+            (contains_origin, new_direction)
+        """
+        let a = simplex[1]  # Most recent point
+        let b = simplex[0]
+
+        let ab = b.sub(a)
+        let ao = a.negate()  # Vector from A to origin
+
+        # Check which region origin is in
+        if ab.dot(ao) > 0.0:
+            # Origin is in direction of AB
+            # New direction: perpendicular to AB, towards origin
+            let direction = GJK::_triple_product(ab, ao, ab)
+            return (false, direction)
+        else:
+            # Origin is behind B, use only point A
+            simplex.clear()
+            simplex.append(a)
+            return (false, ao)
+
+    @staticmethod
+    fn _triangle_case(simplex: [core.Vector3]) -> (bool, core.Vector3):
+        """Handle triangle simplex case (3 points).
+
+        Args:
+            simplex: Triangle simplex [A, B, C]
+
+        Returns:
+            (contains_origin, new_direction)
+        """
+        let a = simplex[2]  # Most recent point
+        let b = simplex[1]
+        let c = simplex[0]
+
+        let ab = b.sub(a)
+        let ac = c.sub(a)
+        let ao = a.negate()
+
+        # Triangle normal
+        let abc = ab.cross(ac)
+
+        # Check which region origin is in
+        # Region outside AB edge
+        let ab_perp = abc.cross(ab)
+        if ab_perp.dot(ao) > 0.0:
+            # Origin outside AB edge
+            simplex.clear()
+            simplex.append(a)
+            simplex.append(b)
+            return (false, GJK::_triple_product(ab, ao, ab))
+
+        # Region outside AC edge
+        let ac_perp = ac.cross(abc)
+        if ac_perp.dot(ao) > 0.0:
+            # Origin outside AC edge
+            simplex.clear()
+            simplex.append(a)
+            simplex.append(c)
+            return (false, GJK::_triple_product(ac, ao, ac))
+
+        # Origin is either above or below triangle
+        if abc.dot(ao) > 0.0:
+            # Above triangle
+            return (false, abc)
+        else:
+            # Below triangle - reverse winding
+            simplex.clear()
+            simplex.append(a)
+            simplex.append(c)
+            simplex.append(b)
+            return (false, abc.negate())
+
+    @staticmethod
+    fn _tetrahedron_case(simplex: [core.Vector3]) -> (bool, core.Vector3):
+        """Handle tetrahedron simplex case (4 points).
+
+        Args:
+            simplex: Tetrahedron simplex [A, B, C, D]
+
+        Returns:
+            (contains_origin, new_direction)
+        """
+        let a = simplex[3]  # Most recent point
+        let b = simplex[2]
+        let c = simplex[1]
+        let d = simplex[0]
+
+        let ab = b.sub(a)
+        let ac = c.sub(a)
+        let ad = d.sub(a)
+        let ao = a.negate()
+
+        # Check each face of tetrahedron
+        let abc = ab.cross(ac)
+        let acd = ac.cross(ad)
+        let adb = ad.cross(ab)
+
+        # Check ABC face
+        if abc.dot(ao) > 0.0:
+            simplex.clear()
+            simplex.append(a)
+            simplex.append(b)
+            simplex.append(c)
+            return (false, abc)
+
+        # Check ACD face
+        if acd.dot(ao) > 0.0:
+            simplex.clear()
+            simplex.append(a)
+            simplex.append(c)
+            simplex.append(d)
+            return (false, acd)
+
+        # Check ADB face
+        if adb.dot(ao) > 0.0:
+            simplex.clear()
+            simplex.append(a)
+            simplex.append(d)
+            simplex.append(b)
+            return (false, adb)
+
+        # Origin is inside tetrahedron - collision!
+        return (true, core.Vector3::zero())
+
+    @staticmethod
+    fn _triple_product(a: core.Vector3, b: core.Vector3, c: core.Vector3) -> core.Vector3:
+        """Compute triple cross product: (A × B) × C
+
+        Useful for finding perpendicular direction in a plane.
+
+        Args:
+            a, b, c: Vectors
+
+        Returns:
+            (A × B) × C
+        """
+        return a.cross(b).cross(c)

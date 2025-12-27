@@ -16,8 +16,8 @@ fn handle_loop_control(ctrl: Control) -> Option<Result<Control, CompileError>> {
 fn exec_if(
     if_stmt: &IfStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -56,8 +56,8 @@ fn exec_if(
 fn exec_while(
     while_stmt: &simple_parser::ast::WhileStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -95,8 +95,8 @@ fn exec_while(
 fn exec_loop(
     loop_stmt: &simple_parser::ast::LoopStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -110,8 +110,8 @@ fn exec_loop(
 fn exec_context(
     ctx_stmt: &ContextStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -185,8 +185,8 @@ fn exec_context(
 fn exec_with(
     with_stmt: &WithStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -220,8 +220,8 @@ fn exec_method_body(
     receiver: &Value,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -240,16 +240,16 @@ fn call_method_if_exists(
     method_name: &str,
     _args: &[Value],
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     if let Value::Object { class, fields } = receiver {
         // Check if the class has the method
-        if let Some(class_def) = classes.get(class) {
-            if let Some(method) = class_def.methods.iter().find(|m| m.name == method_name) {
-                return Ok(Some(exec_method_body(method, receiver, fields, env, functions, classes, enums, impl_methods)?));
+        if let Some(class_def) = classes.get(class).cloned() {
+            if let Some(method) = class_def.methods.iter().find(|m| m.name == method_name).cloned() {
+                return Ok(Some(exec_method_body(&method, receiver, fields, env, functions, classes, enums, impl_methods)?));
             }
         }
         // Check impl_methods
@@ -265,8 +265,8 @@ fn call_method_if_exists(
 fn exec_for(
     for_stmt: &simple_parser::ast::ForStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -343,8 +343,8 @@ pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
 fn exec_match(
     match_stmt: &MatchStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {

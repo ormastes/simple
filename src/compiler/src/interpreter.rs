@@ -286,8 +286,8 @@ fn call_value_with_args(
     callee: &Value,
     args: Vec<Value>,
     _env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -450,8 +450,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                         let decorator_fn = evaluate_expr(
                             &decorator.name,
                             &env,
-                            &functions,
-                            &classes,
+                            &mut functions,
+                            &mut classes,
                             &enums,
                             &impl_methods,
                         )?;
@@ -463,8 +463,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                                 arg_values.push(evaluate_expr(
                                     &arg.value,
                                     &env,
-                                    &functions,
-                                    &classes,
+                                    &mut functions,
+                                    &mut classes,
                                     &enums,
                                     &impl_methods,
                                 )?);
@@ -473,8 +473,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                                 &decorator_fn,
                                 arg_values,
                                 &env,
-                                &functions,
-                                &classes,
+                                &mut functions,
+                                &mut classes,
                                 &enums,
                                 &impl_methods,
                             )?
@@ -487,8 +487,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                             &actual_decorator,
                             vec![decorated],
                             &env,
-                            &functions,
-                            &classes,
+                            &mut functions,
+                            &mut classes,
                             &enums,
                             &impl_methods,
                         )?;
@@ -753,7 +753,7 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
             | Node::Context(_)
             | Node::With(_) => {
                 if let Control::Return(val) =
-                    exec_node(item, &mut env, &functions, &classes, &enums, &impl_methods)?
+                    exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
                     return val.as_int().map(|v| v as i32);
                 }
@@ -761,7 +761,7 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
             Node::Return(ret) => {
                 if let Some(expr) = &ret.value {
                     let val =
-                        evaluate_expr(expr, &env, &functions, &classes, &enums, &impl_methods)?;
+                        evaluate_expr(expr, &env, &mut functions, &mut classes, &enums, &impl_methods)?;
                     return val.as_int().map(|v| v as i32);
                 }
                 return Ok(0);
@@ -778,8 +778,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                         method,
                         args,
                         &env,
-                        &functions,
-                        &classes,
+                        &mut functions,
+                        &mut classes,
                         &enums,
                         &impl_methods,
                     )? {
@@ -791,8 +791,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                 let (_, update) = handle_method_call_with_self_update(
                     expr,
                     &env,
-                    &functions,
-                    &classes,
+                    &mut functions,
+                    &mut classes,
                     &enums,
                     &impl_methods,
                 )?;
@@ -872,13 +872,13 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
     }
 
     // Check if main is defined as a function and call it
-    if let Some(main_func) = functions.get("main") {
+    if let Some(main_func) = functions.get("main").cloned() {
         let result = exec_function(
-            main_func,
+            &main_func,
             &[],  // No arguments
             &env,
-            &functions,
-            &classes,
+            &mut functions,
+            &mut classes,
             &enums,
             &impl_methods,
             None,  // No self context
@@ -972,8 +972,8 @@ fn register_trait_impl(
 pub(crate) fn exec_node(
     node: &Node,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -1281,8 +1281,8 @@ pub(crate) fn exec_node(
 pub(crate) fn exec_block(
     block: &Block,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -1300,8 +1300,8 @@ pub(crate) fn exec_block(
 pub(crate) fn exec_block_fn(
     block: &Block,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Control, Option<Value>), CompileError> {
@@ -1408,8 +1408,8 @@ fn exec_method_function(
     args: &[simple_parser::ast::Argument],
     self_val: &Value,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

@@ -1,0 +1,342 @@
+# PyTorch Data Loading - Dataset and DataLoader
+#
+# Provides data loading infrastructure for training neural networks.
+# Includes Dataset base class, DataLoader for batching, and samplers.
+#
+# ## Classes
+# - `Dataset`: Abstract base class for datasets
+# - `DataLoader`: Efficient batching and iteration over datasets
+# - `Sampler`: Base class for sampling strategies
+# - `SequentialSampler`: Sequential iteration
+# - `RandomSampler`: Random shuffling
+#
+# ## Example
+# ```simple
+# import ml.torch.data as data
+#
+# class MyDataset(data.Dataset):
+#     fn __len__(self) -> i64:
+#         return 1000
+#
+#     fn __getitem__(self, index: i64) -> (torch.Tensor, torch.Tensor):
+#         let x = torch.randn([10])
+#         let y = torch.tensor([index % 10])
+#         return (x, y)
+#
+# let dataset = MyDataset()
+# let loader = data.DataLoader(dataset, batch_size=32, shuffle=true)
+#
+# for batch in loader:
+#     let (inputs, labels) = batch
+#     # Train with batch
+# ```
+
+export Dataset, DataLoader, Sampler, SequentialSampler, RandomSampler
+
+import .. as torch
+
+
+# ============================================================================
+# Dataset Base Class
+# ============================================================================
+
+class Dataset:
+    """Abstract base class for datasets.
+
+    All datasets should inherit from this and implement __len__ and __getitem__.
+
+    Example:
+        ```simple
+        class ImageDataset(Dataset):
+            images: [str]
+            labels: [i32]
+
+            fn __init__(self, image_paths: [str], labels: [i32]):
+                self.images = image_paths
+                self.labels = labels
+
+            fn __len__(self) -> i64:
+                return self.images.len() as i64
+
+            fn __getitem__(self, index: i64) -> (torch.Tensor, i32):
+                let image = load_image(self.images[index as usize])
+                let label = self.labels[index as usize]
+                return (image, label)
+        ```
+    """
+
+    fn __len__(self) -> i64:
+        """Return the number of samples in the dataset.
+
+        Returns:
+            Number of samples
+
+        Note:
+            Subclasses must override this method.
+        """
+        panic("__len__ must be implemented by subclass")
+
+    fn __getitem__(self, index: i64) -> any:
+        """Get a sample by index.
+
+        Args:
+            index: Sample index
+
+        Returns:
+            Sample (can be tuple, tensor, or any type)
+
+        Note:
+            Subclasses must override this method.
+        """
+        panic("__getitem__ must be implemented by subclass")
+
+
+# ============================================================================
+# Samplers
+# ============================================================================
+
+class Sampler:
+    """Base class for sampling strategies.
+
+    Samplers determine the order in which dataset indices are accessed.
+    """
+    dataset_size: i64
+
+    fn __init__(self, dataset_size: i64):
+        """Initialize sampler.
+
+        Args:
+            dataset_size: Size of the dataset
+        """
+        self.dataset_size = dataset_size
+
+    fn __iter__(self) -> [i64]:
+        """Return list of indices.
+
+        Returns:
+            List of indices in sampling order
+
+        Note:
+            Subclasses must override this method.
+        """
+        panic("__iter__ must be implemented by subclass")
+
+
+class SequentialSampler(Sampler):
+    """Sequential sampler - iterates indices in order 0, 1, 2, ...
+
+    Example:
+        ```simple
+        let sampler = SequentialSampler(100)
+        let indices = sampler.__iter__()  # [0, 1, 2, ..., 99]
+        ```
+    """
+
+    fn __iter__(self) -> [i64]:
+        """Return sequential indices.
+
+        Returns:
+            List [0, 1, 2, ..., dataset_size-1]
+        """
+        let mut indices = []
+        for i in range(self.dataset_size):
+            indices.append(i)
+        return indices
+
+
+class RandomSampler(Sampler):
+    """Random sampler - shuffles indices for each epoch.
+
+    Example:
+        ```simple
+        let sampler = RandomSampler(100)
+        let indices = sampler.__iter__()  # Random permutation of [0..99]
+        ```
+    """
+
+    fn __iter__(self) -> [i64]:
+        """Return randomly shuffled indices.
+
+        Returns:
+            List of shuffled indices
+        """
+        # Create sequential indices
+        let mut indices = []
+        for i in range(self.dataset_size):
+            indices.append(i)
+
+        # Fisher-Yates shuffle
+        for i in range(self.dataset_size - 1, 0, -1):
+            let j = (rand() * (i + 1) as f64) as i64
+            # Swap
+            let temp = indices[i as usize]
+            indices[i as usize] = indices[j as usize]
+            indices[j as usize] = temp
+
+        return indices
+
+
+# ============================================================================
+# DataLoader
+# ============================================================================
+
+class DataLoader:
+    """DataLoader for batching and iterating over datasets.
+
+    Provides efficient batching, shuffling, and iteration over datasets.
+
+    Attributes:
+        dataset: Dataset to load from
+        batch_size: Number of samples per batch
+        shuffle: Whether to shuffle data each epoch
+        drop_last: Whether to drop incomplete final batch
+
+    Example:
+        ```simple
+        let dataset = MyDataset()
+        let loader = DataLoader(
+            dataset,
+            batch_size=32,
+            shuffle=true,
+            drop_last=false
+        )
+
+        for epoch in range(10):
+            for batch in loader:
+                let (inputs, targets) = batch
+                # Training code here
+        ```
+    """
+    dataset: Dataset
+    batch_size: i64
+    shuffle: bool
+    drop_last: bool
+    sampler: Sampler
+
+    fn __init__(
+        self,
+        dataset: Dataset,
+        batch_size: i64 = 1,
+        shuffle: bool = false,
+        drop_last: bool = false
+    ):
+        """Initialize DataLoader.
+
+        Args:
+            dataset: Dataset to load from
+            batch_size: Number of samples per batch (default: 1)
+            shuffle: Whether to shuffle data (default: false)
+            drop_last: Drop incomplete final batch (default: false)
+        """
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.drop_last = drop_last
+
+        # Create appropriate sampler
+        let dataset_size = dataset.__len__()
+        if shuffle:
+            self.sampler = RandomSampler(dataset_size)
+        else:
+            self.sampler = SequentialSampler(dataset_size)
+
+    fn __iter__(self) -> [[any]]:
+        """Iterate over batches.
+
+        Returns:
+            List of batches, where each batch is a list of samples
+
+        Example:
+            ```simple
+            let loader = DataLoader(dataset, batch_size=32)
+            for batch in loader:
+                # batch is a list of 32 samples (or fewer for last batch)
+                process_batch(batch)
+            ```
+        """
+        # Get shuffled/sequential indices
+        let indices = self.sampler.__iter__()
+        let dataset_size = indices.len() as i64
+
+        # Create batches
+        let mut batches = []
+        let mut current_batch = []
+
+        for i in range(dataset_size):
+            let index = indices[i as usize]
+            let sample = self.dataset.__getitem__(index)
+            current_batch.append(sample)
+
+            # Check if batch is full
+            if current_batch.len() as i64 >= self.batch_size:
+                batches.append(current_batch)
+                current_batch = []
+
+        # Handle remaining samples
+        if current_batch.len() > 0 and not self.drop_last:
+            batches.append(current_batch)
+
+        return batches
+
+    fn __len__(self) -> i64:
+        """Return number of batches.
+
+        Returns:
+            Number of batches in one epoch
+        """
+        let dataset_size = self.dataset.__len__()
+        if self.drop_last:
+            return dataset_size / self.batch_size
+        else:
+            return (dataset_size + self.batch_size - 1) / self.batch_size  # Ceiling division
+
+
+# ============================================================================
+# Utility Functions
+# ============================================================================
+
+fn collate_tensors(batch: [any]) -> (torch.Tensor, torch.Tensor):
+    """Collate a batch of (tensor, tensor) tuples into batched tensors.
+
+    Takes a list of (input, target) tuples and stacks them into batch tensors.
+
+    Args:
+        batch: List of (input_tensor, target_tensor) tuples
+
+    Returns:
+        Tuple of (batched_inputs, batched_targets)
+
+    Example:
+        ```simple
+        # Batch of individual samples
+        let batch = [
+            (torch.tensor([1, 2]), torch.tensor([0])),
+            (torch.tensor([3, 4]), torch.tensor([1])),
+            (torch.tensor([5, 6]), torch.tensor([0]))
+        ]
+
+        let (inputs, targets) = collate_tensors(batch)
+        # inputs: shape [3, 2] = [[1, 2], [3, 4], [5, 6]]
+        # targets: shape [3, 1] = [[0], [1], [0]]
+        ```
+
+    Note:
+        All tensors in the batch must have the same shape (except batch dimension).
+    """
+    if batch.len() == 0:
+        panic("Cannot collate empty batch")
+
+    # Extract inputs and targets
+    let mut inputs = []
+    let mut targets = []
+
+    for sample in batch:
+        let (input_tensor, target_tensor) = sample
+        inputs.append(input_tensor)
+        targets.append(target_tensor)
+
+    # Stack tensors (concatenate along new batch dimension)
+    let batched_inputs = torch.stack(inputs, dim=0)
+    let batched_targets = torch.stack(targets, dim=0)
+
+    return (batched_inputs, batched_targets)

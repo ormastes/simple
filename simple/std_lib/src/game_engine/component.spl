@@ -1,0 +1,299 @@
+# Common Component Trait
+#
+# Engine-agnostic component interface
+# Works with both Godot Node components and Unreal UActorComponent
+#
+# Features:
+# - Component lifecycle (init, update, destroy)
+# - Owner access
+# - Enable/disable state
+# - Component queries
+# - Engine-agnostic API
+
+import sys.ffi
+
+mod component
+
+# ComponentType
+# Standard component categories
+pub enum ComponentType:
+    Transform = 0
+    Render = 1
+    Physics = 2
+    Audio = 3
+    Script = 4
+    Custom = 5
+
+impl ComponentType:
+    pub fn to_string(self) -> String:
+        if self == ComponentType::Transform:
+            return "Transform"
+        elif self == ComponentType::Render:
+            return "Render"
+        elif self == ComponentType::Physics:
+            return "Physics"
+        elif self == ComponentType::Audio:
+            return "Audio"
+        elif self == ComponentType::Script:
+            return "Script"
+        else:
+            return "Custom"
+
+
+# Component trait
+# Common interface for all components
+pub trait Component:
+    # Lifecycle
+    fn init(mut self)
+    fn update(mut self, delta: f32)
+    fn destroy(mut self)
+
+    # State
+    fn is_enabled(self) -> bool
+    fn set_enabled(mut self, enabled: bool)
+    fn is_initialized(self) -> bool
+
+    # Owner
+    fn get_owner_ptr(self) -> ffi.VoidPtr
+    fn has_owner(self) -> bool
+
+    # Metadata
+    fn get_component_type(self) -> ComponentType
+    fn get_component_name(self) -> String
+
+
+# GodotComponentAdapter
+# Adapts Godot Node (used as component) to Component trait
+pub struct GodotComponentAdapter:
+    component_ptr: ffi.VoidPtr
+    component_type: ComponentType
+    initialized: bool
+
+impl GodotComponentAdapter:
+    pub fn new(component_ptr: ffi.VoidPtr, component_type: ComponentType) -> GodotComponentAdapter:
+        return GodotComponentAdapter(
+            component_ptr: component_ptr,
+            component_type: component_type,
+            initialized: false,
+        )
+
+impl Component for GodotComponentAdapter:
+    fn init(mut self):
+        if not self.initialized:
+            godot_component_init(self.component_ptr)
+            self.initialized = true
+
+    fn update(mut self, delta: f32):
+        godot_component_update(self.component_ptr, delta)
+
+    fn destroy(mut self):
+        godot_component_destroy(self.component_ptr)
+        self.initialized = false
+
+    fn is_enabled(self) -> bool:
+        return godot_component_is_enabled(self.component_ptr)
+
+    fn set_enabled(mut self, enabled: bool):
+        godot_component_set_enabled(self.component_ptr, enabled)
+
+    fn is_initialized(self) -> bool:
+        return self.initialized
+
+    fn get_owner_ptr(self) -> ffi.VoidPtr:
+        return godot_component_get_owner(self.component_ptr)
+
+    fn has_owner(self) -> bool:
+        let owner = self.get_owner_ptr()
+        return not ffi.is_null_ptr(owner)
+
+    fn get_component_type(self) -> ComponentType:
+        return self.component_type
+
+    fn get_component_name(self) -> String:
+        let name_ptr = godot_component_get_name(self.component_ptr)
+        return ffi.string_from_ptr(name_ptr)
+
+
+# UnrealComponentAdapter
+# Adapts Unreal UActorComponent to Component trait
+pub struct UnrealComponentAdapter:
+    component_ptr: ffi.VoidPtr
+    component_type: ComponentType
+    initialized: bool
+
+impl UnrealComponentAdapter:
+    pub fn new(component_ptr: ffi.VoidPtr, component_type: ComponentType) -> UnrealComponentAdapter:
+        return UnrealComponentAdapter(
+            component_ptr: component_ptr,
+            component_type: component_type,
+            initialized: false,
+        )
+
+impl Component for UnrealComponentAdapter:
+    fn init(mut self):
+        if not self.initialized:
+            unreal_component_init(self.component_ptr)
+            self.initialized = true
+
+    fn update(mut self, delta: f32):
+        unreal_component_tick(self.component_ptr, delta)
+
+    fn destroy(mut self):
+        unreal_component_destroy(self.component_ptr)
+        self.initialized = false
+
+    fn is_enabled(self) -> bool:
+        return unreal_component_is_active(self.component_ptr)
+
+    fn set_enabled(mut self, enabled: bool):
+        unreal_component_set_active(self.component_ptr, enabled)
+
+    fn is_initialized(self) -> bool:
+        return self.initialized
+
+    fn get_owner_ptr(self) -> ffi.VoidPtr:
+        return unreal_component_get_owner(self.component_ptr)
+
+    fn has_owner(self) -> bool:
+        let owner = self.get_owner_ptr()
+        return not ffi.is_null_ptr(owner)
+
+    fn get_component_type(self) -> ComponentType:
+        return self.component_type
+
+    fn get_component_name(self) -> String:
+        let name_ptr = unreal_component_get_name(self.component_ptr)
+        return ffi.string_from_ptr(name_ptr)
+
+
+# ComponentManager
+# Manages components on an entity
+pub struct ComponentManager:
+    components: Vec[Component]
+
+impl ComponentManager:
+    pub fn new() -> ComponentManager:
+        return ComponentManager(components: [])
+
+    # Add component
+    pub fn add_component(mut self, component: Component):
+        self.components.push(component)
+
+    # Remove component by index
+    pub fn remove_component(mut self, index: i32):
+        if index >= 0 and index < self.components.len():
+            let mut new_components = Vec::new()
+            for i in 0..self.components.len():
+                if i != index:
+                    new_components.push(self.components[i])
+            self.components = new_components
+
+    # Get component by type
+    pub fn get_component_by_type(self, component_type: ComponentType) -> Option[Component]:
+        for component in self.components:
+            if component.get_component_type() == component_type:
+                return Some(component)
+        return None
+
+    # Get all components
+    pub fn get_all_components(self) -> Vec[Component]:
+        return self.components
+
+    # Update all components
+    pub fn update_all(mut self, delta: f32):
+        for mut component in self.components:
+            if component.is_enabled():
+                component.update(delta)
+
+    # Initialize all components
+    pub fn init_all(mut self):
+        for mut component in self.components:
+            if not component.is_initialized():
+                component.init()
+
+    # Destroy all components
+    pub fn destroy_all(mut self):
+        for mut component in self.components:
+            component.destroy()
+        self.components = []
+
+
+# RenderComponent trait
+# Specialized component for rendering
+pub trait RenderComponent: Component:
+    fn get_mesh(self) -> ffi.VoidPtr
+    fn set_mesh(mut self, mesh_ptr: ffi.VoidPtr)
+    fn get_material(self) -> ffi.VoidPtr
+    fn set_material(mut self, material_ptr: ffi.VoidPtr)
+    fn is_visible(self) -> bool
+    fn set_visible(mut self, visible: bool)
+
+
+# PhysicsComponent trait
+# Specialized component for physics
+pub trait PhysicsComponent: Component:
+    fn get_mass(self) -> f32
+    fn set_mass(mut self, mass: f32)
+    fn get_velocity(self) -> (f32, f32, f32)
+    fn set_velocity(mut self, vx: f32, vy: f32, vz: f32)
+    fn apply_force(mut self, fx: f32, fy: f32, fz: f32)
+    fn apply_impulse(mut self, ix: f32, iy: f32, iz: f32)
+
+
+# AudioComponent trait
+# Specialized component for audio
+pub trait AudioComponent: Component:
+    fn play(mut self)
+    fn stop(mut self)
+    fn pause(mut self)
+    fn resume(mut self)
+    fn is_playing(self) -> bool
+    fn get_volume(self) -> f32
+    fn set_volume(mut self, volume: f32)
+    fn get_pitch(self) -> f32
+    fn set_pitch(mut self, pitch: f32)
+
+
+# FFI declarations for Godot components
+extern "C":
+    fn godot_component_init(component: ffi.VoidPtr)
+    fn godot_component_update(component: ffi.VoidPtr, delta: f32)
+    fn godot_component_destroy(component: ffi.VoidPtr)
+    fn godot_component_is_enabled(component: ffi.VoidPtr) -> bool
+    fn godot_component_set_enabled(component: ffi.VoidPtr, enabled: bool)
+    fn godot_component_get_owner(component: ffi.VoidPtr) -> ffi.VoidPtr
+    fn godot_component_get_name(component: ffi.VoidPtr) -> ffi.VoidPtr
+
+# FFI declarations for Unreal components
+extern "C":
+    fn unreal_component_init(component: ffi.VoidPtr)
+    fn unreal_component_tick(component: ffi.VoidPtr, delta: f32)
+    fn unreal_component_destroy(component: ffi.VoidPtr)
+    fn unreal_component_is_active(component: ffi.VoidPtr) -> bool
+    fn unreal_component_set_active(component: ffi.VoidPtr, active: bool)
+    fn unreal_component_get_owner(component: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_component_get_name(component: ffi.VoidPtr) -> ffi.VoidPtr
+
+
+# Example usage:
+#
+# # Create component manager
+# let mut manager = ComponentManager::new()
+#
+# # Add Godot component
+# let godot_comp = GodotComponentAdapter::new(godot_ptr, ComponentType::Render)
+# manager.add_component(godot_comp)
+#
+# # Add Unreal component
+# let unreal_comp = UnrealComponentAdapter::new(unreal_ptr, ComponentType::Physics)
+# manager.add_component(unreal_comp)
+#
+# # Initialize and update
+# manager.init_all()
+# manager.update_all(0.016)  # 60 FPS
+#
+# # Query by type
+# let render_comp = manager.get_component_by_type(ComponentType::Render)
+# if render_comp.is_some():
+#     let comp = render_comp.unwrap()
+#     comp.set_enabled(true)

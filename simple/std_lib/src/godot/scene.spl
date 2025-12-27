@@ -1,0 +1,295 @@
+# Godot Scene Management
+#
+# Type-safe wrappers for Godot's scene system
+#
+# Features:
+# - Scene loading and switching
+# - PackedScene resource management
+# - Node instancing and tree manipulation
+# - Scene preloading and caching
+#
+# Based on: https://docs.godotengine.org/en/stable/classes/class_scenetree.html
+
+import godot.ffi
+import godot.variant
+import godot.node
+import godot.resource
+
+mod scene
+
+# Packed Scene Resource
+# Represents a saved scene that can be instanced
+pub struct PackedScene:
+    resource: resource.Resource
+
+impl PackedScene:
+    # Create from resource
+    pub fn from_resource(res: resource.Resource) -> PackedScene:
+        return PackedScene(resource: res)
+
+    # Load a packed scene from file path
+    pub fn load(path: String) -> Result[PackedScene, String]:
+        let loader = resource.ResourceLoader::get_singleton()
+        let result = loader.load(path)
+        
+        if result.is_ok():
+            return Ok(PackedScene::from_resource(result.unwrap()))
+        else:
+            return Err(result.unwrap_err())
+
+    # Load asynchronously
+    pub async fn load_async(path: String) -> Result[PackedScene, String]:
+        let loader = resource.ResourceLoader::get_singleton()
+        let result = await loader.load_async(path)
+        
+        if result.is_ok():
+            return Ok(PackedScene::from_resource(result.unwrap()))
+        else:
+            return Err(result.unwrap_err())
+
+    # Instance the scene (create a copy)
+    pub fn instantiate(self) -> node.Node:
+        let obj = self.resource.as_object()
+        let result = obj.call0("instantiate")
+        let node_ptr = result.as_object().ptr()
+        return node.Node::from_ptr(node_ptr)
+
+    # Check if can instance
+    pub fn can_instantiate(self) -> bool:
+        let obj = self.resource.as_object()
+        let result = obj.call0("can_instantiate")
+        return result.as_bool()
+
+    # Get scene state
+    pub fn get_state(self) -> SceneState:
+        let obj = self.resource.as_object()
+        let result = obj.call0("get_state")
+        return SceneState::from_ptr(result.as_object().ptr())
+
+
+# Scene State
+# Represents the structure of a packed scene
+pub struct SceneState:
+    ptr: ffi.GDExtensionObjectPtr
+
+impl SceneState:
+    pub fn from_ptr(ptr: ffi.GDExtensionObjectPtr) -> SceneState:
+        return SceneState(ptr: ptr)
+
+    # Get number of nodes in scene
+    pub fn get_node_count(self) -> i32:
+        let obj = variant.Object::from_ptr(self.ptr)
+        let result = obj.call0("get_node_count")
+        return result.as_int() as i32
+
+    # Get node name by index
+    pub fn get_node_name(self, idx: i32) -> String:
+        let obj = variant.Object::from_ptr(self.ptr)
+        let idx_var = variant.Variant::from_int(idx as i64)
+        let result = obj.call1("get_node_name", idx_var)
+        return result.as_string()
+
+
+# Scene Tree
+# Manages the active scene hierarchy
+pub struct SceneTree:
+    singleton_ptr: ffi.GDExtensionObjectPtr
+
+impl SceneTree:
+    # Get SceneTree singleton
+    pub fn get_singleton() -> SceneTree:
+        let ptr = ffi.godot_get_singleton("SceneTree")
+        return SceneTree(singleton_ptr: ptr)
+
+    # Get root viewport node
+    pub fn get_root(self) -> node.Node:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("get_root")
+        return node.Node::from_ptr(result.as_object().ptr())
+
+    # Change to a new scene
+    pub fn change_scene_to_file(mut self, path: String) -> Result[(), String]:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let path_var = variant.Variant::from_string(path)
+        let result = obj.call1("change_scene_to_file", path_var)
+        
+        let error_code = result.as_int()
+        if error_code == 0:  # OK
+            return Ok(())
+        else:
+            return Err(f"Failed to change scene: error code {error_code}")
+
+    # Change to a packed scene
+    pub fn change_scene_to_packed(mut self, packed_scene: PackedScene) -> Result[(), String]:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let scene_var = variant.Variant::from_object(packed_scene.resource.as_object())
+        let result = obj.call1("change_scene_to_packed", scene_var)
+        
+        let error_code = result.as_int()
+        if error_code == 0:  # OK
+            return Ok(())
+        else:
+            return Err(f"Failed to change scene: error code {error_code}")
+
+    # Reload current scene
+    pub fn reload_current_scene(mut self) -> Result[(), String]:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("reload_current_scene")
+        
+        let error_code = result.as_int()
+        if error_code == 0:
+            return Ok(())
+        else:
+            return Err(f"Failed to reload scene: error code {error_code}")
+
+    # Get current scene root node
+    pub fn get_current_scene(self) -> Option[node.Node]:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("get_current_scene")
+        
+        if result.is_null():
+            return None
+        else:
+            return Some(node.Node::from_ptr(result.as_object().ptr()))
+
+    # Set current scene
+    pub fn set_current_scene(mut self, child_node: node.Node):
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let node_var = variant.Variant::from_object(child_node.as_object())
+        obj.call1("set_current_scene", node_var)
+
+    # Quit the application
+    pub fn quit(mut self, exit_code: i32 = 0):
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let code_var = variant.Variant::from_int(exit_code as i64)
+        obj.call1("quit", code_var)
+
+    # Get nodes in a group
+    pub fn get_nodes_in_group(self, group: String) -> Array[node.Node]:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let group_var = variant.Variant::from_string(group)
+        let result = obj.call1("get_nodes_in_group", group_var)
+        
+        # TODO: Convert Godot Array to Simple Array[node.Node]
+        # For now, return empty array
+        return []
+
+    # Get frame count
+    pub fn get_frame(self) -> i64:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("get_frame")
+        return result.as_int()
+
+    # Check if paused
+    pub fn is_paused(self) -> bool:
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let result = obj.call0("is_paused")
+        return result.as_bool()
+
+    # Set paused
+    pub fn set_paused(mut self, enable: bool):
+        let obj = variant.Object::from_ptr(self.singleton_ptr)
+        let pause_var = variant.Variant::from_bool(enable)
+        obj.call1("set_paused", pause_var)
+
+
+# Scene Manager Helper
+# Higher-level scene management API
+pub struct SceneManager:
+    tree: SceneTree
+    cache: Dict[String, PackedScene]  # Scene path -> PackedScene
+    loading: Dict[String, bool]        # Track async loads
+
+impl SceneManager:
+    # Create new scene manager
+    pub fn new() -> SceneManager:
+        return SceneManager(
+            tree: SceneTree::get_singleton(),
+            cache: {},
+            loading: {}
+        )
+
+    # Preload a scene into cache
+    pub fn preload_scene(mut self, path: String) -> Result[(), String]:
+        # Check if already cached
+        if self.cache.contains_key(path):
+            return Ok(())
+
+        # Load scene
+        let result = PackedScene::load(path)
+        if result.is_ok():
+            self.cache[path] = result.unwrap()
+            return Ok(())
+        else:
+            return Err(result.unwrap_err())
+
+    # Preload scene asynchronously
+    pub async fn preload_scene_async(mut self, path: String) -> Result[(), String]:
+        # Check if already loading or cached
+        if self.loading.get(path).unwrap_or(false):
+            # Already loading, wait
+            # TODO: Implement proper wait mechanism
+            return Err("Scene already loading")
+
+        if self.cache.contains_key(path):
+            return Ok(())
+
+        # Mark as loading
+        self.loading[path] = true
+
+        # Load scene
+        let result = await PackedScene::load_async(path)
+        
+        # Mark as done loading
+        self.loading[path] = false
+
+        if result.is_ok():
+            self.cache[path] = result.unwrap()
+            return Ok(())
+        else:
+            return Err(result.unwrap_err())
+
+    # Change to cached scene (instant if preloaded)
+    pub fn change_to_scene(mut self, path: String) -> Result[(), String]:
+        # Check cache first
+        if self.cache.contains_key(path):
+            let packed = self.cache[path]
+            return self.tree.change_scene_to_packed(packed)
+        else:
+            # Load and change immediately
+            return self.tree.change_scene_to_file(path)
+
+    # Clear scene cache
+    pub fn clear_cache(mut self):
+        self.cache.clear()
+
+    # Get cache size
+    pub fn get_cache_size(self) -> i32:
+        return self.cache.len()
+
+
+# Array placeholder (TODO: use actual Simple Array)
+pub struct Array[T]:
+    items: Vec[T]  # Placeholder
+
+impl[T] Array[T]:
+    pub fn new() -> Array[T]:
+        return Array(items: vec![])
+
+# Dict placeholder (TODO: use actual Simple Dict)
+pub struct Dict[K, V]:
+    # Placeholder implementation
+    dummy: i32
+
+impl[K, V] Dict[K, V]:
+    pub fn contains_key(self, key: K) -> bool:
+        return false
+
+    pub fn get(self, key: K) -> Option[V]:
+        return None
+
+    pub fn clear(mut self):
+        pass
+
+    pub fn len(self) -> i32:
+        return 0

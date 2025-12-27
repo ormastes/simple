@@ -334,7 +334,7 @@ class Vec3D:
 - `src/compiler/src/interpreter_macro.rs` - Pipeline integration
 - `src/compiler/src/interpreter.rs` - Macro definition order tracking
 - `src/compiler/src/error.rs` - E14xx error codes (E1401-E1406)
-- `doc/report/MACRO_CONTRACTS_IMPLEMENTATION.md`
+- `doc/contracts/macro_contracts.md`
 - `MACRO_CONTRACTS_COMPLETE.md`
 
 ### DSL Support (#1305-1307)

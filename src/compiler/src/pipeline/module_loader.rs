@@ -190,6 +190,17 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         return Some(resolved);
     }
 
+    // Try __init__.spl in directory (Python-style package imports)
+    let mut init_resolved = base.to_path_buf();
+    for part in &parts {
+        init_resolved = init_resolved.join(part);
+    }
+    init_resolved = init_resolved.join("__init__");
+    init_resolved.set_extension("spl");
+    if init_resolved.exists() {
+        return Some(init_resolved);
+    }
+
     // If not found, try stdlib location
     // Detect stdlib by walking up directory tree
     let mut current = base.to_path_buf();
@@ -204,6 +215,17 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             stdlib_path.set_extension("spl");
             if stdlib_path.exists() {
                 return Some(stdlib_path);
+            }
+
+            // Also try __init__.spl in stdlib
+            let mut stdlib_init_path = stdlib_candidate.clone();
+            for part in &parts {
+                stdlib_init_path = stdlib_init_path.join(part);
+            }
+            stdlib_init_path = stdlib_init_path.join("__init__");
+            stdlib_init_path.set_extension("spl");
+            if stdlib_init_path.exists() {
+                return Some(stdlib_init_path);
             }
         }
         if let Some(parent) = current.parent() {
