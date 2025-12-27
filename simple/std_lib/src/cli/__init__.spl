@@ -1,12 +1,13 @@
 # CLI - Command-Line Argument Parsing Library (Python argparse-style)
 #
-# Python argparse-like API with automatic file staging:
+# Python argparse-like API with automatic file staging and async loading:
 # - Define file arguments with .file() or .file_option()
 # - Files are automatically validated and staged during parse()
+# - Optionally enable async loading for background file loading
 # - File errors are reported clearly
 # - Can disable auto-staging per argument
 #
-# Example:
+# Example (sync mode):
 #   let parser = ArgParser::new("myapp", "Process files")
 #       .flag("verbose", "v", "Verbose output")
 #       .file_option("input", "i", "Input file", required: true, must_exist: true)
@@ -17,7 +18,23 @@
 #       case Ok(args):
 #           # Files are already validated and staged!
 #           for file in args.files.staged():
-#               process_file(file)
+#               async with await file.open(file.path) as mmap:
+#                   process_file(mmap)
+#
+# Example (async mode - background loading):
+#   let parser = ArgParser::new("myapp", "Process files")
+#       .file_option("input", "i", "Input file", required: true, must_exist: true)
+#       .with_async_loading(true)  # Enable background loading
+#
+#   match parser.parse(sys_get_args()):
+#       case Ok(args):
+#           # Files already loading in background!
+#           let regions = await args.files.wait_all()?
+#           for region in regions:
+#               process_file(region.as_bytes())
+
+# Import file I/O types for async loading support
+use file.mmap::{OpenOptions}
 #       case Err(error):
 #           print(f"Error: {error}")
 
@@ -109,6 +126,8 @@ pub struct ArgParser:
     description: String
     args: Array[ArgSpec]
     auto_stage_files: bool  # Global auto-staging toggle
+    async_loading: bool     # Enable background file loading during parse
+    mmap_options: OpenOptions  # Options for memory-mapped file I/O
 
     # Create a new argument parser
     pub fn new(program_name: String, description: String) -> ArgParser:
@@ -116,12 +135,51 @@ pub struct ArgParser:
             program_name: program_name,
             description: description,
             args: [],
-            auto_stage_files: true  # Default: auto-stage enabled
+            auto_stage_files: true,  # Default: auto-stage enabled
+            async_loading: false,    # Default: sync validation only
+            mmap_options: OpenOptions::new()  # Default options
         }
 
     # Disable automatic file staging globally
     pub fn no_auto_stage(mut self) -> ArgParser:
         self.auto_stage_files = false
+        return self
+
+    # Enable async file loading (starts loading during argument parsing)
+    #
+    # When enabled, files specified via file_option() or file_positional()
+    # will start loading in background as soon as arguments are parsed.
+    # This provides better performance for processing multiple large files.
+    #
+    # Example:
+    #   let parser = ArgParser::new("processor", "File processor")
+    #       .file_option("input", "i", "Input file", required: true, must_exist: true)
+    #       .with_async_loading(true)
+    #
+    #   match parser.parse(args):
+    #       case Ok(args):
+    #           # Files already loading in background!
+    #           let regions = await args.files.wait_all()?
+    pub fn with_async_loading(mut self, enable: bool) -> ArgParser:
+        self.async_loading = enable
+        return self
+
+    # Configure memory-mapped I/O options
+    #
+    # Allows customization of mmap behavior (mode, prefaulting, advice).
+    # Only applies when async_loading is enabled.
+    #
+    # Example:
+    #   let opts = OpenOptions::new()
+    #       .mode(MmapMode::ReadOnly)
+    #       .advice(MmapAdvice::Sequential)
+    #
+    #   let parser = ArgParser::new("processor", "File processor")
+    #       .file_option("input", "i", "Input file", required: true, must_exist: true)
+    #       .with_async_loading(true)
+    #       .with_mmap_options(opts)
+    pub fn with_mmap_options(mut self, opts: OpenOptions) -> ArgParser:
+        self.mmap_options = opts
         return self
 
     # Add a boolean flag
@@ -272,7 +330,7 @@ pub struct ArgParser:
                     flags: flags,
                     options: options,
                     positionals: positionals,
-                    files: file.StagedFiles { files: [], errors: [] }
+                    files: file.StagedFiles { files: [], handles: [], errors: [] }
                 })
 
             # Parse long-form options
@@ -432,8 +490,13 @@ pub struct ArgParser:
         })
 
     # Stage files with validation (called automatically during parse)
+    #
+    # Supports two modes:
+    # 1. Sync mode (default): Validates paths only, no file loading
+    # 2. Async mode (if async_loading enabled): Starts loading files in background
     fn stage_files(self, paths: Array[String]) -> file.StagedFiles:
         let mut all_files: Array[file.FileInfo] = []
+        let mut all_handles: Array[file.AsyncFileHandle] = []
         let mut all_errors: Array[String] = []
 
         for path in paths:
@@ -443,11 +506,22 @@ pub struct ArgParser:
             match validator.validate(path):
                 case Ok(info):
                     all_files.push(info)
+
+                    # If async loading enabled, start loading file in background
+                    if self.async_loading:
+                        let handle = file.AsyncFileHandle::with_options(
+                            info.path,
+                            self.mmap_options
+                        )
+                        handle.start_loading()
+                        all_handles.push(handle)
+
                 case Err(error):
                     all_errors.push(error)
 
         return file.StagedFiles {
             files: all_files,
+            handles: all_handles,  # Empty if sync mode, populated if async mode
             errors: all_errors
         }
 
