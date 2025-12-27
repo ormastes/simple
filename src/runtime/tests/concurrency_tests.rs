@@ -1,4 +1,4 @@
-use simple_runtime::concurrency::{join_actor, send_to, spawn_actor, Message};
+use crate::concurrency::{join_actor, send_to, spawn_actor, Message};
 use std::time::Duration;
 
 #[test]
