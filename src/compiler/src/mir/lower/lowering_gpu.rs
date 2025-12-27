@@ -7,63 +7,55 @@ use super::lowering_core::{MirLowerer, MirLowerError, MirLowerResult};
 use crate::hir::{GpuIntrinsicKind, HirExpr, HirExprKind, HirFunction, NeighborDirection};
 use crate::mir::instructions::{GpuAtomicOp, GpuMemoryScope, MirInst, VReg};
 
+/// Helper macro for GPU intrinsics with dimension argument
+macro_rules! gpu_dim_op {
+    ($self:expr, $args:expr, $inst:ident) => {{
+        let dim = $self.get_gpu_dim_arg($args)?;
+        $self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::$inst { dest, dim });
+            dest
+        })
+    }};
+}
+
+/// Helper macro for SIMD unary operations (single source argument)
+macro_rules! simd_unary_op {
+    ($self:expr, $args:expr, $inst:ident) => {{
+        let source = $self.lower_expr(&$args[0])?;
+        $self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::$inst { dest, source });
+            dest
+        })
+    }};
+}
+
+/// Helper macro for SIMD binary operations (two vector arguments)
+macro_rules! simd_binary_op {
+    ($self:expr, $args:expr, $inst:ident) => {{
+        let a = $self.lower_expr(&$args[0])?;
+        let b = $self.lower_expr(&$args[1])?;
+        $self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::$inst { dest, a, b });
+            dest
+        })
+    }};
+}
+
 impl<'a> MirLowerer<'a> {
     pub(super) fn lower_gpu_intrinsic(&mut self, intrinsic: GpuIntrinsicKind, args: &[HirExpr]) -> MirLowerResult<VReg> {
         match intrinsic {
-            GpuIntrinsicKind::GlobalId => {
-                let dim = self.get_gpu_dim_arg(args)?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuGlobalId { dest, dim });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::LocalId => {
-                let dim = self.get_gpu_dim_arg(args)?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuLocalId { dest, dim });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::GroupId => {
-                let dim = self.get_gpu_dim_arg(args)?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuGroupId { dest, dim });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::GlobalSize => {
-                let dim = self.get_gpu_dim_arg(args)?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuGlobalSize { dest, dim });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::LocalSize => {
-                let dim = self.get_gpu_dim_arg(args)?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuLocalSize { dest, dim });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::NumGroups => {
-                let dim = self.get_gpu_dim_arg(args)?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::GpuNumGroups { dest, dim });
-                    dest
-                })
-            }
+            GpuIntrinsicKind::GlobalId => gpu_dim_op!(self, args, GpuGlobalId),
+            GpuIntrinsicKind::LocalId => gpu_dim_op!(self, args, GpuLocalId),
+            GpuIntrinsicKind::GroupId => gpu_dim_op!(self, args, GpuGroupId),
+            GpuIntrinsicKind::GlobalSize => gpu_dim_op!(self, args, GpuGlobalSize),
+            GpuIntrinsicKind::LocalSize => gpu_dim_op!(self, args, GpuLocalSize),
+            GpuIntrinsicKind::NumGroups => gpu_dim_op!(self, args, GpuNumGroups),
             GpuIntrinsicKind::Barrier => {
                 // Barrier doesn't return a meaningful value, use dummy vreg
                 self.with_func(|func, current_block| {
@@ -109,60 +101,12 @@ impl<'a> MirLowerer<'a> {
                     dest
                 })
             }
-            GpuIntrinsicKind::SimdSum => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecSum { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdProduct => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecProduct { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdMin => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecMin { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdMax => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecMax { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdAll => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecAll { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdAny => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecAny { dest, source });
-                    dest
-                })
-            }
+            GpuIntrinsicKind::SimdSum => simd_unary_op!(self, args, VecSum),
+            GpuIntrinsicKind::SimdProduct => simd_unary_op!(self, args, VecProduct),
+            GpuIntrinsicKind::SimdMin => simd_unary_op!(self, args, VecMin),
+            GpuIntrinsicKind::SimdMax => simd_unary_op!(self, args, VecMax),
+            GpuIntrinsicKind::SimdAll => simd_unary_op!(self, args, VecAll),
+            GpuIntrinsicKind::SimdAny => simd_unary_op!(self, args, VecAny),
             GpuIntrinsicKind::SimdExtract => {
                 let vector = self.lower_expr(&args[0])?;
                 let index = self.lower_expr(&args[1])?;
@@ -191,51 +135,11 @@ impl<'a> MirLowerer<'a> {
                     dest
                 })
             }
-            GpuIntrinsicKind::SimdSqrt => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecSqrt { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdAbs => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecAbs { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdFloor => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecFloor { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdCeil => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecCeil { dest, source });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdRound => {
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecRound { dest, source });
-                    dest
-                })
-            }
+            GpuIntrinsicKind::SimdSqrt => simd_unary_op!(self, args, VecSqrt),
+            GpuIntrinsicKind::SimdAbs => simd_unary_op!(self, args, VecAbs),
+            GpuIntrinsicKind::SimdFloor => simd_unary_op!(self, args, VecFloor),
+            GpuIntrinsicKind::SimdCeil => simd_unary_op!(self, args, VecCeil),
+            GpuIntrinsicKind::SimdRound => simd_unary_op!(self, args, VecRound),
             GpuIntrinsicKind::SimdShuffle => {
                 // v.shuffle([3, 2, 1, 0]) - reorder lanes by indices
                 let source = self.lower_expr(&args[0])?;
@@ -357,16 +261,7 @@ impl<'a> MirLowerer<'a> {
                     dest
                 })
             }
-            GpuIntrinsicKind::SimdRecip => {
-                // v.recip() - reciprocal: 1.0 / v
-                let source = self.lower_expr(&args[0])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecRecip { dest, source });
-                    dest
-                })
-            }
+            GpuIntrinsicKind::SimdRecip => simd_unary_op!(self, args, VecRecip),
             GpuIntrinsicKind::SimdNeighborLeft | GpuIntrinsicKind::SimdNeighborRight => {
                 // x.left_neighbor / x.right_neighbor - neighbor access
                 let array = self.lower_expr(&args[0])?;
@@ -423,28 +318,8 @@ impl<'a> MirLowerer<'a> {
                     func.new_vreg()
                 })
             }
-            GpuIntrinsicKind::SimdMinVec => {
-                // a.min(b) - element-wise minimum of two vectors
-                let a = self.lower_expr(&args[0])?;
-                let b = self.lower_expr(&args[1])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecMinVec { dest, a, b });
-                    dest
-                })
-            }
-            GpuIntrinsicKind::SimdMaxVec => {
-                // a.max(b) - element-wise maximum of two vectors
-                let a = self.lower_expr(&args[0])?;
-                let b = self.lower_expr(&args[1])?;
-                self.with_func(|func, current_block| {
-                    let dest = func.new_vreg();
-                    let block = func.block_mut(current_block).unwrap();
-                    block.instructions.push(MirInst::VecMaxVec { dest, a, b });
-                    dest
-                })
-            }
+            GpuIntrinsicKind::SimdMinVec => simd_binary_op!(self, args, VecMinVec),
+            GpuIntrinsicKind::SimdMaxVec => simd_binary_op!(self, args, VecMaxVec),
             GpuIntrinsicKind::SimdClamp => {
                 // v.clamp(lo, hi) - element-wise clamp to range
                 let source = self.lower_expr(&args[0])?;

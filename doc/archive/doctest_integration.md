@@ -370,7 +370,7 @@ simple test --coverage --show-missing
 ## References
 
 - `doc/spec/sdoctest.md` - Full specification
-- `doc/spec/bdd_spec.md` - BDD framework spec
+- `doc/spec/testing/testing_bdd_framework.md` - BDD framework spec
 - `doc/guides/test.md` - Test policy and coverage rules
 - `lib/std/doctest/` - Implementation
 - `test/unit/doctest/` - Unit tests

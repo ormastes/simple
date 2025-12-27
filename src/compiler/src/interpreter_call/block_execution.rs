@@ -48,8 +48,8 @@ fn get_iterator_values(iterable: &Value) -> Result<Vec<Value>, CompileError> {
 pub(super) fn exec_block_closure(
     nodes: &[Node],
     captured_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -178,8 +178,8 @@ pub(super) fn exec_block_closure(
 fn exec_block_closure_mut(
     nodes: &[Node],
     local_env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

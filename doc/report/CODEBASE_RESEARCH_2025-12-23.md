@@ -5,7 +5,7 @@ This document consolidates findings from the repository regarding grammar specif
 ## Scope & Sources
 
 - Read: CLAUDE.md (development guide), simple.sdn (project config)
-- Specs: doc/spec/{sdn.md, language.md, syntax.md, lexer_parser.md, gherkin_dsl.md}
+- Specs: doc/spec/{sdn.md, language.md, syntax.md, lexer_parser.md, testing/testing_bdd_framework.md}
 - Research: doc/research/{aop.md, sdn_self_hosting.md}
 - Status/Features: doc/features/feature.md, doc/features/feature_done_*.md, doc/status/*, log/DOC_REFACTOR_MAP.md
 - Code: src/{parser, compiler, sdn, runtime, driver, ui}/
@@ -27,7 +27,7 @@ This document consolidates findings from the repository regarding grammar specif
   - doc/spec/parser/lexer_parser_grammar_definitions.md (contains `module.exports = grammar({ ... })` inlined)
   - doc/spec/parser/lexer_parser_grammar_expressions.md
   - doc/spec/parser/overview.md, lexer_parser_scanner.md (scanner/build.rs notes)
-- EBNF sections exist in multiple specs (sdn.md, gherkin_dsl.md, basic_mcp.md, invariant.md, syntax.md).
+- EBNF sections exist in multiple specs (sdn.md, testing/testing_bdd_framework.md, basic_mcp.md, invariant.md, syntax.md).
 
 ### Gaps & Inconsistencies
 - Docs repeatedly reference a Tree-sitter grammar and associated files (grammar.js, node-types.json, build.rs), but no actual runtime Tree-sitter project/code exists in the repository; it is documentation-only.

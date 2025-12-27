@@ -746,7 +746,7 @@ The `#[gpu]` / `@simd` attribute triggers special compilation:
   - GPU built-ins: global_id, local_id, group_id
   - Synchronization: Barriers (OpControlBarrier)
   - Atomics: Add, Sub, Min, Max, And, Or, Xor, Exchange
-- See `doc/report/VULKAN_BACKEND_IMPLEMENTATION_2025-12-26.md` for details
+- See `doc/gpu/vulkan_implementation.md` for details
 
 **Software Backend** (`src/runtime/src/value/gpu.rs`):
 - Thread-local work item state simulation

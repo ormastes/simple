@@ -39,11 +39,19 @@ pub struct LocalVar {
     pub mutability: Mutability,
     /// Per-parameter DI injection flag (#1013)
     pub inject: bool,
+    /// Ghost variable - only exists for verification, erased at runtime
+    /// Ghost variables can only be used in verified contexts
+    pub is_ghost: bool,
 }
 
 impl LocalVar {
     /// Check if this variable is mutable (helper for backwards compatibility)
     pub fn is_mutable(&self) -> bool {
         self.mutability.is_mutable()
+    }
+
+    /// Check if this is a ghost variable (verification-only)
+    pub fn is_ghost(&self) -> bool {
+        self.is_ghost
     }
 }

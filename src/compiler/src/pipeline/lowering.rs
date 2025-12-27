@@ -5,6 +5,7 @@ use simple_type::check as type_check;
 use super::core::CompilerPipeline;
 use crate::hir;
 use crate::mir;
+use crate::verification_checker::VerificationChecker;
 use crate::CompileError;
 
 impl CompilerPipeline {
@@ -13,9 +14,12 @@ impl CompilerPipeline {
     /// This is a common pipeline step extracted from compile_source_to_memory_native
     /// and compile_source_to_memory_native_for_target.
     pub(super) fn type_check_and_lower(
-        &self,
+        &mut self,
         ast_module: &simple_parser::ast::Module,
     ) -> Result<mir::MirModule, CompileError> {
+        // Clear previous verification violations
+        self.verification_violations.clear();
+
         // Type check
         type_check(&ast_module.items)
             .map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
@@ -47,10 +51,51 @@ impl CompilerPipeline {
             }
         }
 
+        // Check verification constraints (#1840-1909)
+        let mut verifier = VerificationChecker::new(self.verification_strict);
+        verifier.check_module(&hir_module);
+
+        if verifier.has_violations() {
+            self.verification_violations = verifier.violations().to_vec();
+
+            if self.verification_strict {
+                let msg = verifier
+                    .error_messages()
+                    .join("\n");
+                return Err(CompileError::Semantic(format!("Verification errors:\n{}", msg)));
+            } else {
+                // Log warnings but continue
+                for violation in verifier.violations() {
+                    tracing::warn!("{}", violation);
+                }
+            }
+        }
+
         // Lower HIR to MIR with contract mode (and DI config if available)
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
-        let mir_module = mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
+        let mut mir_module = mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
             .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+
+        // Ghost erasure pass: remove ghost variables before codegen
+        let (ghost_stats, ghost_errors) = mir::erase_ghost_from_module(&mut mir_module);
+
+        if !ghost_errors.is_empty() {
+            let msg = ghost_errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Err(CompileError::Semantic(format!("Ghost erasure errors:\n{}", msg)));
+        }
+
+        if ghost_stats.ghost_params_erased > 0 || ghost_stats.ghost_locals_erased > 0 {
+            tracing::debug!(
+                "Ghost erasure: {} params, {} locals, {} instructions erased",
+                ghost_stats.ghost_params_erased,
+                ghost_stats.ghost_locals_erased,
+                ghost_stats.instructions_erased
+            );
+        }
 
         // Emit MIR if requested (LLM-friendly #887)
         if let Some(path) = &self.emit_mir {

@@ -1,0 +1,405 @@
+# Light - 3D lighting system
+#
+# Provides DirectionalLight, PointLight, and SpotLight types
+# with attenuation calculations for realistic lighting.
+#
+# Based on: doc/plans/floating-booping-coral.md (3D Graphics Library)
+
+use core.*
+use graphics.math.*
+
+# Note: Color type is imported from graphics.math (color.spl)
+
+# =============================================================================
+# Attenuation - Light intensity falloff parameters
+# =============================================================================
+
+pub struct Attenuation:
+    constant: f32   # Constant attenuation
+    linear: f32     # Linear attenuation
+    quadratic: f32  # Quadratic attenuation
+
+impl Attenuation:
+    pub fn new(constant: f32, linear: f32, quadratic: f32) -> Attenuation:
+        return Attenuation {
+            constant: constant,
+            linear: linear,
+            quadratic: quadratic
+        }
+
+    # No attenuation (directional light)
+    pub fn none() -> Attenuation:
+        return Attenuation {
+            constant: 1.0,
+            linear: 0.0,
+            quadratic: 0.0
+        }
+
+    # Realistic attenuation presets (based on distance range)
+    pub fn for_range_7() -> Attenuation:
+        # Range: 7 units
+        return Attenuation { constant: 1.0, linear: 0.7, quadratic: 1.8 }
+
+    pub fn for_range_13() -> Attenuation:
+        # Range: 13 units
+        return Attenuation { constant: 1.0, linear: 0.35, quadratic: 0.44 }
+
+    pub fn for_range_20() -> Attenuation:
+        # Range: 20 units
+        return Attenuation { constant: 1.0, linear: 0.22, quadratic: 0.20 }
+
+    pub fn for_range_32() -> Attenuation:
+        # Range: 32 units
+        return Attenuation { constant: 1.0, linear: 0.14, quadratic: 0.07 }
+
+    pub fn for_range_50() -> Attenuation:
+        # Range: 50 units
+        return Attenuation { constant: 1.0, linear: 0.09, quadratic: 0.032 }
+
+    pub fn for_range_65() -> Attenuation:
+        # Range: 65 units
+        return Attenuation { constant: 1.0, linear: 0.07, quadratic: 0.017 }
+
+    pub fn for_range_100() -> Attenuation:
+        # Range: 100 units
+        return Attenuation { constant: 1.0, linear: 0.045, quadratic: 0.0075 }
+
+    pub fn for_range_160() -> Attenuation:
+        # Range: 160 units
+        return Attenuation { constant: 1.0, linear: 0.027, quadratic: 0.0028 }
+
+    pub fn for_range_200() -> Attenuation:
+        # Range: 200 units
+        return Attenuation { constant: 1.0, linear: 0.022, quadratic: 0.0019 }
+
+    pub fn for_range_325() -> Attenuation:
+        # Range: 325 units
+        return Attenuation { constant: 1.0, linear: 0.014, quadratic: 0.0007 }
+
+    pub fn for_range_600() -> Attenuation:
+        # Range: 600 units
+        return Attenuation { constant: 1.0, linear: 0.007, quadratic: 0.0002 }
+
+    pub fn for_range_3250() -> Attenuation:
+        # Range: 3250 units
+        return Attenuation { constant: 1.0, linear: 0.0014, quadratic: 0.000007 }
+
+    # Calculate attenuation factor for a given distance
+    pub fn calculate(self, distance: f32) -> f32:
+        let attenuation = 1.0 / (
+            self.constant +
+            self.linear * distance +
+            self.quadratic * distance * distance
+        )
+        return attenuation
+
+# =============================================================================
+# DirectionalLight - Infinite directional light (like the sun)
+# =============================================================================
+
+pub struct DirectionalLight:
+    direction: Vec3  # Direction the light is pointing (normalized)
+    color: Color
+    intensity: f32
+
+impl DirectionalLight:
+    pub fn new(direction: Vec3, color: Color, intensity: f32) -> DirectionalLight:
+        return DirectionalLight {
+            direction: direction.normalize(),
+            color: color,
+            intensity: intensity
+        }
+
+    pub fn default() -> DirectionalLight:
+        # Default: white light from above-front
+        return DirectionalLight::new(
+            Vec3::new(-1.0, -1.0, -0.5),
+            Color::white(),
+            1.0
+        )
+
+    # Getters/Setters
+    pub fn get_direction(self) -> Vec3:
+        return self.direction
+
+    pub fn set_direction(mut self, direction: Vec3):
+        self.direction = direction.normalize()
+
+    pub fn get_color(self) -> Color:
+        return self.color
+
+    pub fn set_color(mut self, color: Color):
+        self.color = color
+
+    pub fn get_intensity(self) -> f32:
+        return self.intensity
+
+    pub fn set_intensity(mut self, intensity: f32):
+        self.intensity = intensity
+
+    # Calculate light contribution
+    pub fn calculate_lighting(self, normal: Vec3) -> Color:
+        let diffuse_factor = max(0.0, -self.direction.dot(normal))
+        return self.color.mul_scalar(self.intensity * diffuse_factor)
+
+# =============================================================================
+# PointLight - Omnidirectional point light source
+# =============================================================================
+
+pub struct PointLight:
+    position: Vec3
+    color: Color
+    intensity: f32
+    attenuation: Attenuation
+
+impl PointLight:
+    pub fn new(position: Vec3, color: Color, intensity: f32, attenuation: Attenuation) -> PointLight:
+        return PointLight {
+            position: position,
+            color: color,
+            intensity: intensity,
+            attenuation: attenuation
+        }
+
+    pub fn with_range(position: Vec3, color: Color, intensity: f32, range: f32) -> PointLight:
+        # Choose appropriate attenuation based on range
+        let attenuation = if range <= 7.0:
+            Attenuation::for_range_7()
+        else if range <= 13.0:
+            Attenuation::for_range_13()
+        else if range <= 20.0:
+            Attenuation::for_range_20()
+        else if range <= 32.0:
+            Attenuation::for_range_32()
+        else if range <= 50.0:
+            Attenuation::for_range_50()
+        else if range <= 65.0:
+            Attenuation::for_range_65()
+        else if range <= 100.0:
+            Attenuation::for_range_100()
+        else if range <= 160.0:
+            Attenuation::for_range_160()
+        else if range <= 200.0:
+            Attenuation::for_range_200()
+        else if range <= 325.0:
+            Attenuation::for_range_325()
+        else if range <= 600.0:
+            Attenuation::for_range_600()
+        else:
+            Attenuation::for_range_3250()
+
+        return PointLight::new(position, color, intensity, attenuation)
+
+    pub fn default() -> PointLight:
+        # Default: white light at origin with 50-unit range
+        return PointLight::with_range(
+            Vec3::zero(),
+            Color::white(),
+            1.0,
+            50.0
+        )
+
+    # Getters/Setters
+    pub fn get_position(self) -> Vec3:
+        return self.position
+
+    pub fn set_position(mut self, position: Vec3):
+        self.position = position
+
+    pub fn get_color(self) -> Color:
+        return self.color
+
+    pub fn set_color(mut self, color: Color):
+        self.color = color
+
+    pub fn get_intensity(self) -> f32:
+        return self.intensity
+
+    pub fn set_intensity(mut self, intensity: f32):
+        self.intensity = intensity
+
+    pub fn get_attenuation(self) -> Attenuation:
+        return self.attenuation
+
+    pub fn set_attenuation(mut self, attenuation: Attenuation):
+        self.attenuation = attenuation
+
+    # Calculate light contribution at a point
+    pub fn calculate_lighting(self, surface_pos: Vec3, normal: Vec3) -> Color:
+        let light_dir = (self.position - surface_pos).normalize()
+        let distance = (self.position - surface_pos).length()
+
+        let diffuse_factor = max(0.0, light_dir.dot(normal))
+        let attenuation = self.attenuation.calculate(distance)
+
+        return self.color.mul_scalar(self.intensity * diffuse_factor * attenuation)
+
+# =============================================================================
+# SpotLight - Cone-shaped spotlight
+# =============================================================================
+
+pub struct SpotLight:
+    position: Vec3
+    direction: Vec3
+    color: Color
+    intensity: f32
+    attenuation: Attenuation
+    inner_cone_angle: f32  # Radians (full brightness)
+    outer_cone_angle: f32  # Radians (fade to zero)
+
+impl SpotLight:
+    pub fn new(
+        position: Vec3,
+        direction: Vec3,
+        color: Color,
+        intensity: f32,
+        attenuation: Attenuation,
+        inner_cone_angle: f32,
+        outer_cone_angle: f32
+    ) -> SpotLight:
+        return SpotLight {
+            position: position,
+            direction: direction.normalize(),
+            color: color,
+            intensity: intensity,
+            attenuation: attenuation,
+            inner_cone_angle: inner_cone_angle,
+            outer_cone_angle: outer_cone_angle
+        }
+
+    pub fn with_range(
+        position: Vec3,
+        direction: Vec3,
+        color: Color,
+        intensity: f32,
+        range: f32,
+        inner_cone_angle: f32,
+        outer_cone_angle: f32
+    ) -> SpotLight:
+        # Choose appropriate attenuation based on range
+        let attenuation = if range <= 20.0:
+            Attenuation::for_range_20()
+        else if range <= 50.0:
+            Attenuation::for_range_50()
+        else if range <= 100.0:
+            Attenuation::for_range_100()
+        else:
+            Attenuation::for_range_200()
+
+        return SpotLight::new(
+            position,
+            direction,
+            color,
+            intensity,
+            attenuation,
+            inner_cone_angle,
+            outer_cone_angle
+        )
+
+    pub fn default() -> SpotLight:
+        # Default: white spotlight pointing down with 30-degree cone
+        return SpotLight::with_range(
+            Vec3::zero(),
+            Vec3::new(0.0, -1.0, 0.0),
+            Color::white(),
+            1.0,
+            50.0,
+            0.436,  # 25 degrees
+            0.524   # 30 degrees
+        )
+
+    # Getters/Setters
+    pub fn get_position(self) -> Vec3:
+        return self.position
+
+    pub fn set_position(mut self, position: Vec3):
+        self.position = position
+
+    pub fn get_direction(self) -> Vec3:
+        return self.direction
+
+    pub fn set_direction(mut self, direction: Vec3):
+        self.direction = direction.normalize()
+
+    pub fn get_color(self) -> Color:
+        return self.color
+
+    pub fn set_color(mut self, color: Color):
+        self.color = color
+
+    pub fn get_intensity(self) -> f32:
+        return self.intensity
+
+    pub fn set_intensity(mut self, intensity: f32):
+        self.intensity = intensity
+
+    # Calculate light contribution at a point
+    pub fn calculate_lighting(self, surface_pos: Vec3, normal: Vec3) -> Color:
+        let light_dir = (self.position - surface_pos).normalize()
+        let distance = (self.position - surface_pos).length()
+
+        # Check if point is within spotlight cone
+        let theta = acos(light_dir.dot(-self.direction))
+
+        if theta > self.outer_cone_angle:
+            # Outside cone
+            return Color::black()
+
+        # Calculate cone falloff
+        let epsilon = self.outer_cone_angle - self.inner_cone_angle
+        let cone_factor = if epsilon > 0.0001:
+            clamp((self.outer_cone_angle - theta) / epsilon, 0.0, 1.0)
+        else:
+            1.0
+
+        # Standard diffuse lighting
+        let diffuse_factor = max(0.0, light_dir.dot(normal))
+        let attenuation = self.attenuation.calculate(distance)
+
+        return self.color.mul_scalar(
+            self.intensity * diffuse_factor * attenuation * cone_factor
+        )
+
+# =============================================================================
+# Light - Enum wrapper for all light types
+# =============================================================================
+
+pub enum Light:
+    Directional(light: DirectionalLight)
+    Point(light: PointLight)
+    Spot(light: SpotLight)
+
+impl Light:
+    pub fn is_directional(self) -> bool:
+        match self:
+            case Light::Directional(_):
+                return true
+            case _:
+                return false
+
+    pub fn is_point(self) -> bool:
+        match self:
+            case Light::Point(_):
+                return true
+            case _:
+                return false
+
+    pub fn is_spot(self) -> bool:
+        match self:
+            case Light::Spot(_):
+                return true
+            case _:
+                return false
+
+# Helper functions
+fn max(a: f32, b: f32) -> f32:
+    if a > b:
+        return a
+    return b
+
+fn clamp(value: f32, min: f32, max: f32) -> f32:
+    if value < min:
+        return min
+    if value > max:
+        return max
+    return value

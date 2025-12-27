@@ -12,7 +12,7 @@ impl Parser<'_> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Mut)?;
         self.expect(&TokenKind::Let)?;
-        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Auto)
+        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Auto, false)
     }
 
     pub(crate) fn parse_let(&mut self) -> Result<Node, ParseError> {
@@ -24,7 +24,7 @@ impl Parser<'_> {
         } else {
             Mutability::Immutable
         };
-        self.parse_let_impl(start_span, mutability, StorageClass::Auto)
+        self.parse_let_impl(start_span, mutability, StorageClass::Auto, false)
     }
 
     /// Parse shared let: `shared let name: [T; N]`
@@ -34,7 +34,22 @@ impl Parser<'_> {
         self.expect(&TokenKind::Shared)?;
         self.expect(&TokenKind::Let)?;
         // Shared memory is always mutable (work-group accessible)
-        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Shared)
+        self.parse_let_impl(start_span, Mutability::Mutable, StorageClass::Shared, false)
+    }
+
+    /// Parse ghost let: `ghost let name: Type = value`
+    /// Verification-only variable, erased at runtime
+    pub(crate) fn parse_ghost_let(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Ghost)?;
+        self.expect(&TokenKind::Let)?;
+        let mutability = if self.check(&TokenKind::Mut) {
+            self.advance();
+            Mutability::Mutable
+        } else {
+            Mutability::Immutable
+        };
+        self.parse_let_impl(start_span, mutability, StorageClass::Auto, true)
     }
 
     fn parse_let_impl(
@@ -42,6 +57,7 @@ impl Parser<'_> {
         start_span: Span,
         mutability: Mutability,
         storage_class: StorageClass,
+        is_ghost: bool,
     ) -> Result<Node, ParseError> {
         let pattern = self.parse_pattern()?;
         let ty = self.parse_optional_type_annotation()?;
@@ -59,6 +75,7 @@ impl Parser<'_> {
             value,
             mutability,
             storage_class,
+            is_ghost,
         }))
     }
 
@@ -119,7 +136,16 @@ impl Parser<'_> {
             let target = self.parse_import_target(None)?;
             Ok((path, target))
         } else {
-            let mut segments = path.segments;
+            let mut segments = path.segments.clone();
+
+            // Special case: bare module import (use core, import torch, etc.)
+            // If we have only one segment and we're at a statement boundary (newline/EOF),
+            // import everything from that module
+            if segments.len() == 1 && (self.check(&TokenKind::Newline) || self.is_at_end()) {
+                // Import entire module: use core -> import * from core
+                return Ok((path, ImportTarget::Glob));
+            }
+
             let last = segments.pop().unwrap_or_default();
             let target = self.parse_import_target(Some(last))?;
             Ok((ModulePath::new(segments), target))

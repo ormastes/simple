@@ -75,7 +75,7 @@ These features only need the **parser** (which builds fine):
 #### 7. Sandboxed Execution (#916-919) - 7 days
 **Can start:** ✅ NOW (runtime)  
 **Dependencies:** Runtime only  
-**Spec:** `doc/spec/sandboxed_execution.md` (12KB)
+**Spec:** `doc/spec/sandboxing.md` (12KB)
 
 ---
 

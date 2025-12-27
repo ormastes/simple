@@ -7,7 +7,7 @@
 - SC-DRF guarantee: Formally verified memory consistency model
 - Formatter/linter: Simple-based tools in `simple/app/`
 - AOP & Unified Predicates: Compile-time weaving, architecture rules (19/51 features, 611 tests)
-- See `doc/report/MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md`
+- See `doc/architecture/memory_model_implementation.md`
 - use jj version contoll rather git.
 
 ## Implementing Applications in Simple Language
@@ -216,8 +216,9 @@ simple/                            # Project root - Rust compiler implementation
 │   ├── import_export_and__init__.md  # Module system specification (v4)
 │   ├── test.md                    # Test policy (mock control, coverage, test levels)
 │   ├── system_test.md             # System test framework (SDN config, BDD patterns)
-│   ├── spec/                      # Language specifications
-│   │   ├── language.md            # Spec index with quick reference
+│   ├── spec/                      # Language specifications (53 specs total)
+│   │   ├── README.md              # Main specification index and navigation
+│   │   ├── language.md            # Spec index with quick reference (legacy)
 │   │   ├── syntax.md              # Lexical structure, literals, operators
 │   │   ├── types.md               # Type system, mutability, primitive warnings
 │   │   ├── units.md               # Unit types, semantic typing, lint policy
@@ -228,10 +229,28 @@ simple/                            # Project root - Rust compiler implementation
 │   │   ├── concurrency.md         # Actors, async/await, threads, futures
 │   │   ├── metaprogramming.md     # Macros, DSL, decorators, comprehensions
 │   │   ├── stdlib.md              # Standard library spec (lib/, native_lib/)
-│   │   ├── gpu_simd.md            # GPU and SIMD specification
-│   │   ├── bdd_spec.md            # BDD spec framework (describe/context/it)
+│   │   ├── sandboxing.md          # Runtime & environment isolation (#916-923)
 │   │   ├── sdn.md                 # SDN - Simple Data Notation format
-│   │   └── lexer_parser.md        # Parser/lexer specification
+│   │   ├── lexer_parser.md        # Parser/lexer specification
+│   │   ├── gpu_simd/              # GPU & SIMD specifications
+│   │   │   └── README.md          # GPU compute, SIMD overview
+│   │   ├── graphics_3d/           # 3D Graphics specifications
+│   │   │   └── README.md          # 3D rendering overview
+│   │   ├── parser/                # Parser implementation specs
+│   │   │   └── overview.md        # Parser architecture
+│   │   ├── testing/               # Testing framework specifications (6 files)
+│   │   │   ├── testing_bdd_framework.md  # BDD testing, matchers, Gherkin
+│   │   │   ├── sdoctest.md        # Documentation testing
+│   │   │   ├── mock.md            # Test doubles and mocking
+│   │   │   ├── property_testing.md  # Property-based testing
+│   │   │   ├── snapshot_testing.md  # Snapshot regression testing
+│   │   │   └── semantic_diff.md   # Semantic code comparison
+│   │   └── tooling/               # Development tool specifications (5 files)
+│   │       ├── formatter.md       # Code formatting
+│   │       ├── formatting_lints.md  # Linter rules
+│   │       ├── build_audit.md     # Build auditing
+│   │       ├── vscode_extension.md  # VSCode support
+│   │       └── basic_mcp.md       # Model Context Protocol
 │   ├── design/                    # Design documents
 │   │   ├── memory.md              # Memory management design
 │   │   ├── type_inference.md      # Type inference design
@@ -491,7 +510,7 @@ Supports `in:`, `out(ret):`, `out_err(err):`, `invariant:`, and `old()`. Checks:
 
 ## Feature Documentation
 
-Tracked in `doc/features/feature.md` and `feature_done_*.md`. Format: Feature ID (#NNN by category), Difficulty (1-5), Status (✅/📋), Impl (R/S/S+R), Doc, Tests.
+Tracked in `doc/features/feature.md` with archived features in `doc/features/done/feature_done_*.md`. Format: Feature ID (#NNN by category), Difficulty (1-5), Status (✅/📋), Impl (R/S/S+R), Doc, Tests.
 
 **ID Ranges:** #1-8 Infrastructure, #10-49 Core, #50-99 Extended, #100-199 Codegen, #200-299 Extended Features, #300-399 GPU/SIMD, #400-499 Contracts, #500-599 UI/Web, #600-699 SDN, #700-799 DB, #800-899 Build, #900-999 Verification.
 
@@ -719,5 +738,5 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 - 32-bit architecture support (needs LLVM)
 - Unit conversion methods
 
-See `TODO.md` and `doc/features/feature_done_*.md` for archived features.
+See `TODO.md` and `doc/features/done/feature_done_*.md` for archived features.
 

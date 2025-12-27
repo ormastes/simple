@@ -1,0 +1,324 @@
+# Texture - Vulkan texture management for 3D rendering
+#
+# Provides 2D texture and cubemap creation, loading,
+# and sampling for material textures.
+#
+# Based on: doc/plans/floating-booping-coral.md (3D Graphics Library)
+
+use core.*
+use graphics.scene.*
+
+# =============================================================================
+# TextureFormat - Supported texture formats
+# =============================================================================
+
+pub enum TextureFormat:
+    RGBA8         # 8-bit per channel RGBA
+    RGB8          # 8-bit per channel RGB
+    RG8           # 8-bit per channel RG
+    R8            # 8-bit single channel
+    RGBA16F       # 16-bit float per channel RGBA
+    RGB16F        # 16-bit float per channel RGB
+    RGBA32F       # 32-bit float per channel RGBA
+    Depth24Stencil8  # 24-bit depth + 8-bit stencil
+
+impl TextureFormat:
+    pub fn bytes_per_pixel(self) -> u32:
+        match self:
+            case TextureFormat::RGBA8:
+                return 4
+            case TextureFormat::RGB8:
+                return 3
+            case TextureFormat::RG8:
+                return 2
+            case TextureFormat::R8:
+                return 1
+            case TextureFormat::RGBA16F:
+                return 8
+            case TextureFormat::RGB16F:
+                return 6
+            case TextureFormat::RGBA32F:
+                return 16
+            case TextureFormat::Depth24Stencil8:
+                return 4
+
+    pub fn to_vulkan_format(self) -> u32:
+        match self:
+            case TextureFormat::RGBA8:
+                return VK_FORMAT_R8G8B8A8_UNORM
+            case TextureFormat::RGB8:
+                return VK_FORMAT_R8G8B8_UNORM
+            case TextureFormat::RG8:
+                return VK_FORMAT_R8G8_UNORM
+            case TextureFormat::R8:
+                return VK_FORMAT_R8_UNORM
+            case TextureFormat::RGBA16F:
+                return VK_FORMAT_R16G16B16A16_SFLOAT
+            case TextureFormat::RGB16F:
+                return VK_FORMAT_R16G16B16_SFLOAT
+            case TextureFormat::RGBA32F:
+                return VK_FORMAT_R32G32B32A32_SFLOAT
+            case TextureFormat::Depth24Stencil8:
+                return VK_FORMAT_D24_UNORM_S8_UINT
+
+# =============================================================================
+# TextureFilter - Texture filtering modes
+# =============================================================================
+
+pub enum TextureFilter:
+    Nearest       # Nearest neighbor (pixelated)
+    Linear        # Bilinear filtering (smooth)
+    Trilinear     # Trilinear with mipmaps
+
+# =============================================================================
+# TextureWrap - Texture wrapping modes
+# =============================================================================
+
+pub enum TextureWrap:
+    Repeat        # Repeat texture
+    MirroredRepeat  # Mirror and repeat
+    ClampToEdge   # Clamp to edge color
+    ClampToBorder  # Clamp to border color
+
+# =============================================================================
+# Texture2D - 2D texture
+# =============================================================================
+
+pub struct Texture2D:
+    handle: TextureHandle
+    image: u64           # Vulkan image handle
+    view: u64            # Vulkan image view handle
+    sampler: u64         # Vulkan sampler handle
+    memory: u64          # Vulkan memory handle
+    format: TextureFormat
+    width: u32
+    height: u32
+    mip_levels: u32
+
+impl Texture2D:
+    # Create empty texture
+    pub fn new(width: u32, height: u32, format: TextureFormat) -> Texture2D:
+        let mip_levels = calculate_mip_levels(width, height)
+        let vk_format = format.to_vulkan_format()
+
+        let (image, view, sampler, memory) = vk_create_texture_2d(
+            width,
+            height,
+            mip_levels,
+            vk_format
+        )
+
+        return Texture2D {
+            handle: TextureHandle::new(image),
+            image: image,
+            view: view,
+            sampler: sampler,
+            memory: memory,
+            format: format,
+            width: width,
+            height: height,
+            mip_levels: mip_levels
+        }
+
+    # Create from pixel data
+    pub fn from_pixels(
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        pixels: Array[u8]
+    ) -> Texture2D:
+        let mut texture = Texture2D::new(width, height, format)
+        texture.upload_pixels(pixels)
+        return texture
+
+    # Upload pixel data
+    pub fn upload_pixels(self, pixels: Array[u8]):
+        vk_upload_texture_pixels(self.image, pixels, self.width, self.height)
+
+    # Generate mipmaps
+    pub fn generate_mipmaps(self):
+        vk_generate_mipmaps(self.image, self.width, self.height, self.mip_levels)
+
+    # Set filtering mode
+    pub fn set_filter(mut self, filter: TextureFilter):
+        vk_set_texture_filter(self.sampler, filter)
+
+    # Set wrapping mode
+    pub fn set_wrap(mut self, wrap: TextureWrap):
+        vk_set_texture_wrap(self.sampler, wrap)
+
+    # Getters
+    pub fn get_handle(self) -> TextureHandle:
+        return self.handle
+
+    pub fn get_image(self) -> u64:
+        return self.image
+
+    pub fn get_view(self) -> u64:
+        return self.view
+
+    pub fn get_sampler(self) -> u64:
+        return self.sampler
+
+    pub fn get_width(self) -> u32:
+        return self.width
+
+    pub fn get_height(self) -> u32:
+        return self.height
+
+    pub fn get_format(self) -> TextureFormat:
+        return self.format
+
+    # Cleanup
+    pub fn destroy(self):
+        vk_destroy_texture(self.image, self.view, self.sampler, self.memory)
+
+# =============================================================================
+# CubemapTexture - Cubemap texture for skyboxes and reflections
+# =============================================================================
+
+pub struct CubemapTexture:
+    handle: TextureHandle
+    image: u64
+    view: u64
+    sampler: u64
+    memory: u64
+    format: TextureFormat
+    size: u32            # Width/height of each face
+    mip_levels: u32
+
+impl CubemapTexture:
+    # Create empty cubemap
+    pub fn new(size: u32, format: TextureFormat) -> CubemapTexture:
+        let mip_levels = calculate_mip_levels(size, size)
+        let vk_format = format.to_vulkan_format()
+
+        let (image, view, sampler, memory) = vk_create_texture_cubemap(
+            size,
+            mip_levels,
+            vk_format
+        )
+
+        return CubemapTexture {
+            handle: TextureHandle::new(image),
+            image: image,
+            view: view,
+            sampler: sampler,
+            memory: memory,
+            format: format,
+            size: size,
+            mip_levels: mip_levels
+        }
+
+    # Upload pixels for a specific face
+    # face: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
+    pub fn upload_face_pixels(self, face: u32, pixels: Array[u8]):
+        vk_upload_cubemap_face_pixels(self.image, face, pixels, self.size, self.size)
+
+    # Generate mipmaps
+    pub fn generate_mipmaps(self):
+        vk_generate_cubemap_mipmaps(self.image, self.size, self.mip_levels)
+
+    # Getters
+    pub fn get_handle(self) -> TextureHandle:
+        return self.handle
+
+    pub fn get_image(self) -> u64:
+        return self.image
+
+    pub fn get_view(self) -> u64:
+        return self.view
+
+    pub fn get_sampler(self) -> u64:
+        return self.sampler
+
+    pub fn get_size(self) -> u32:
+        return self.size
+
+    # Cleanup
+    pub fn destroy(self):
+        vk_destroy_texture(self.image, self.view, self.sampler, self.memory)
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+fn calculate_mip_levels(width: u32, height: u32) -> u32:
+    let max_dim = if width > height { width } else { height }
+    let mut mip_levels = 1
+    let mut size = max_dim
+
+    while size > 1:
+        size = size / 2
+        mip_levels = mip_levels + 1
+
+    return mip_levels
+
+# =============================================================================
+# FFI Function Declarations
+# =============================================================================
+
+# Vulkan format constants
+const VK_FORMAT_R8G8B8A8_UNORM: u32 = 37
+const VK_FORMAT_R8G8B8_UNORM: u32 = 23
+const VK_FORMAT_R8G8_UNORM: u32 = 16
+const VK_FORMAT_R8_UNORM: u32 = 9
+const VK_FORMAT_R16G16B16A16_SFLOAT: u32 = 97
+const VK_FORMAT_R16G16B16_SFLOAT: u32 = 90
+const VK_FORMAT_R32G32B32A32_SFLOAT: u32 = 109
+const VK_FORMAT_D24_UNORM_S8_UINT: u32 = 129
+
+# 2D texture FFI
+extern fn vk_create_texture_2d(
+    width: u32,
+    height: u32,
+    mip_levels: u32,
+    format: u32
+) -> (u64, u64, u64, u64)
+
+extern fn vk_upload_texture_pixels(
+    image: u64,
+    pixels: Array[u8],
+    width: u32,
+    height: u32
+)
+
+extern fn vk_generate_mipmaps(
+    image: u64,
+    width: u32,
+    height: u32,
+    mip_levels: u32
+)
+
+# Cubemap FFI
+extern fn vk_create_texture_cubemap(
+    size: u32,
+    mip_levels: u32,
+    format: u32
+) -> (u64, u64, u64, u64)
+
+extern fn vk_upload_cubemap_face_pixels(
+    image: u64,
+    face: u32,
+    pixels: Array[u8],
+    width: u32,
+    height: u32
+)
+
+extern fn vk_generate_cubemap_mipmaps(
+    image: u64,
+    size: u32,
+    mip_levels: u32
+)
+
+# Sampler configuration FFI
+extern fn vk_set_texture_filter(sampler: u64, filter: TextureFilter)
+extern fn vk_set_texture_wrap(sampler: u64, wrap: TextureWrap)
+
+# Cleanup FFI
+extern fn vk_destroy_texture(
+    image: u64,
+    view: u64,
+    sampler: u64,
+    memory: u64
+)

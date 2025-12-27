@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::Visibility;
 
-use crate::hir::TypeId;
+use crate::hir::{LayoutPhase, TypeId};
 
 use super::blocks::MirBlock;
 use super::effects::{EffectSet, LocalKind};
@@ -18,6 +18,8 @@ pub struct MirLocal {
     pub name: String,
     pub ty: TypeId,
     pub kind: LocalKind,
+    /// Ghost variable - only exists for verification, erased before codegen
+    pub is_ghost: bool,
 }
 
 impl MirLocal {
@@ -61,6 +63,11 @@ pub struct MirFunction {
     pub attributes: Vec<String>,
     /// Effects declared for this function (e.g., ["io", "async"])
     pub effects: Vec<String>,
+    /// Layout phase for code locality optimization.
+    /// Determines which 4KB page group this function belongs to.
+    pub layout_phase: LayoutPhase,
+    /// Whether this function is an event loop anchor point.
+    pub is_event_loop_anchor: bool,
     next_vreg: u32,
     next_block: u32,
 }
@@ -85,6 +92,8 @@ impl MirFunction {
             module_path: String::new(),
             attributes: Vec::new(),
             effects: Vec::new(),
+            layout_phase: LayoutPhase::default(),
+            is_event_loop_anchor: false,
             next_vreg: 0,
             next_block: 1,
         }

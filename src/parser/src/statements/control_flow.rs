@@ -270,7 +270,17 @@ impl<'a> Parser<'a> {
             }
         } else if self.check(&TokenKind::Colon) {
             self.advance();
-            self.parse_block()?
+            // Support inline match arm: `case X: return Y` or `case X: expr`
+            if self.check(&TokenKind::Newline) {
+                self.parse_block()?
+            } else {
+                // Parse inline statement (return, expression, etc.)
+                let stmt = self.parse_item()?;
+                Block {
+                    span: self.previous.span,
+                    statements: vec![stmt],
+                }
+            }
         } else {
             return Err(ParseError::unexpected_token(
                 "match arm",

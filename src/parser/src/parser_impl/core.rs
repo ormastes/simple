@@ -105,6 +105,7 @@ impl<'a> Parser<'a> {
             TokenKind::Const => self.parse_const(),
             TokenKind::Static => self.parse_static(),
             TokenKind::Shared => self.parse_shared_let(),
+            TokenKind::Ghost => self.parse_ghost_let(),
             TokenKind::Type => {
                 // Check if this is a type alias (type Name = ...) or expression (expect type to eq)
                 // Simple heuristic: type alias names are PascalCase (start with uppercase)
@@ -221,6 +222,9 @@ impl<'a> Parser<'a> {
 
         let mut params = Vec::new();
 
+        // Skip newlines after opening paren (allow multi-line parameter lists)
+        self.skip_newlines();
+
         while !self.check(&TokenKind::RParen) {
             let param_span = self.current.span;
 
@@ -278,8 +282,22 @@ impl<'a> Parser<'a> {
                 inject,
             });
 
+            // Handle comma or newline between parameters
             if !self.check(&TokenKind::RParen) {
-                self.expect(&TokenKind::Comma)?;
+                if self.check(&TokenKind::Comma) {
+                    self.advance();
+                    // Skip newlines after comma (allow multi-line parameter lists)
+                    self.skip_newlines();
+                } else if self.check(&TokenKind::Newline) {
+                    // Allow newline without comma in multi-line parameter lists
+                    self.skip_newlines();
+                } else {
+                    return Err(ParseError::unexpected_token(
+                        "comma or newline",
+                        format!("{:?}", self.current.kind),
+                        self.current.span,
+                    ));
+                }
             }
         }
 

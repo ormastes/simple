@@ -7,7 +7,7 @@
 - SC-DRF guarantee: Formally verified memory consistency model
 - Formatter/linter: Simple-based tools in `simple/app/`
 - AOP & Unified Predicates: Compile-time weaving, architecture rules (19/51 features, 611 tests)
-- See `doc/report/MEMORY_MODEL_IMPLEMENTATION_SUMMARY.md`
+- See `doc/architecture/memory_model_implementation.md`
 
 ## Implementing Applications in Simple Language
 
@@ -490,7 +490,7 @@ Supports `in:`, `out(ret):`, `out_err(err):`, `invariant:`, and `old()`. Checks:
 
 ## Feature Documentation
 
-Tracked in `doc/features/feature.md` and `feature_done_*.md`. Format: Feature ID (#NNN by category), Difficulty (1-5), Status (✅/📋), Impl (R/S/S+R), Doc, Tests.
+Tracked in `doc/features/feature.md` with archived features in `doc/features/done/feature_done_*.md`. Format: Feature ID (#NNN by category), Difficulty (1-5), Status (✅/📋), Impl (R/S/S+R), Doc, Tests.
 
 **ID Ranges:** #1-8 Infrastructure, #10-49 Core, #50-99 Extended, #100-199 Codegen, #200-299 Extended Features, #300-399 GPU/SIMD, #400-499 Contracts, #500-599 UI/Web, #600-699 SDN, #700-799 DB, #800-899 Build, #900-999 Verification.
 
@@ -718,5 +718,5 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 - 32-bit architecture support (needs LLVM)
 - Unit conversion methods
 
-See `TODO.md` and `doc/features/feature_done_*.md` for archived features.
+See `TODO.md` and `doc/features/done/feature_done_*.md` for archived features.
 

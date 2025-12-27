@@ -5,8 +5,10 @@
 //! - Lowering capabilities to HIR
 //! - Type checking with capability rules
 
-use simple_parser::Parser;
-use simple_compiler::hir::{Lowerer, CapabilityEnv};
+mod test_helpers;
+use test_helpers::*;
+
+use simple_compiler::hir::CapabilityEnv;
 use simple_parser::ast::ReferenceCapability;
 
 #[test]
@@ -16,8 +18,7 @@ fn update(x: mut Counter) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
     // Verify we have a function
     assert_eq!(module.items.len(), 1);
@@ -54,8 +55,7 @@ fn transfer(data: iso Data) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
     if let simple_parser::ast::Node::Function(func) = &module.items[0] {
         if let Some(param_ty) = &func.params[0].ty {
@@ -76,8 +76,7 @@ fn process(items: mut List[i64]) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
     if let simple_parser::ast::Node::Function(func) = &module.items[0] {
         if let Some(param_ty) = &func.params[0].ty {
@@ -173,8 +172,7 @@ fn test_nested_capabilities() {
     // mut mut T should parse (though semantically questionable)
     let source = "fn weird(x: mut mut Counter) -> i64:\n    return 0";
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
     if let simple_parser::ast::Node::Function(func) = &module.items[0] {
         if let Some(param_ty) = &func.params[0].ty {
@@ -214,8 +212,7 @@ fn test_default_capability_is_shared() {
     // A type without capability prefix should be treated as shared
     let source = "fn read(x: Counter) -> i64:\n    return 0";
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
     if let simple_parser::ast::Node::Function(func) = &module.items[0] {
         if let Some(param_ty) = &func.params[0].ty {
@@ -239,8 +236,7 @@ fn process(x: i64) -> i64:
     return x
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
     if let simple_parser::ast::Node::Function(func) = &module.items[0] {
         // No attribute means Actor mode (default)
@@ -257,8 +253,7 @@ fn update(x: mut Counter) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
     if let simple_parser::ast::Node::Function(func) = &module.items[0] {
         assert_eq!(func.attributes.len(), 1);
@@ -285,8 +280,7 @@ fn raw_ptr(x: i64) -> i64:
     return x
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
     if let simple_parser::ast::Node::Function(func) = &module.items[0] {
         assert_eq!(func.attributes.len(), 1);
@@ -315,12 +309,9 @@ fn update(x: mut Counter) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
-    use simple_compiler::hir::Lowerer;
-    let lowerer = Lowerer::new();
-    let result = lowerer.lower_module(&module);
+    let result = lower_module(&module);
 
     // Should fail with capability error
     assert!(result.is_err(), "Expected error for mut T in actor mode");
@@ -342,12 +333,9 @@ fn update(x: mut i64) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
-    use simple_compiler::hir::Lowerer;
-    let lowerer = Lowerer::new();
-    let result = lowerer.lower_module(&module);
+    let result = lower_module(&module);
 
     // Should succeed
     assert!(result.is_ok(), "mut T should be allowed in lock_base mode");
@@ -380,9 +368,7 @@ fn transfer(x: iso i64) -> i64:
         let mut parser = Parser::new(source);
         let module = parser.parse().expect("should parse");
 
-        use simple_compiler::hir::Lowerer;
-        let lowerer = Lowerer::new();
-        let result = lowerer.lower_module(&module);
+        let result = lower_module(&module);
 
         assert!(result.is_ok(), "iso T should be allowed in all modes");
     }
@@ -418,12 +404,9 @@ fn update(x: mut i64) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
-    use simple_compiler::hir::Lowerer;
-    let lowerer = Lowerer::new();
-    let result = lowerer.lower_module(&module);
+    let result = lower_module(&module);
 
     // Should fail with helpful error message
     assert!(result.is_err());
@@ -448,12 +431,9 @@ fn process(a: mut i64, b: iso i64, c: i64) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
-    use simple_compiler::hir::Lowerer;
-    let lowerer = Lowerer::new();
-    let result = lowerer.lower_module(&module);
+    let result = lower_module(&module);
 
     // Should succeed - lock_base mode allows mut and iso
     assert!(result.is_ok(), "Multiple capabilities should work in lock_base mode");
@@ -468,12 +448,9 @@ fn create() -> mut i64:
     return 42
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
-    use simple_compiler::hir::Lowerer;
-    let lowerer = Lowerer::new();
-    let result = lowerer.lower_module(&module);
+    let result = lower_module(&module);
 
     // Should succeed
     assert!(result.is_ok(), "Return types can have capabilities");
@@ -492,9 +469,7 @@ fn test_all_modes_with_shared_capability() {
         let mut parser = Parser::new(source);
         let module = parser.parse().expect("should parse");
 
-        use simple_compiler::hir::Lowerer;
-        let lowerer = Lowerer::new();
-        let result = lowerer.lower_module(&module);
+        let result = lower_module(&module);
 
         assert!(result.is_ok(), "Shared (T) should work in all modes");
     }
@@ -509,12 +484,9 @@ fn unsafe_process(a: mut i64, b: iso i64, c: i64) -> mut i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
-    use simple_compiler::hir::Lowerer;
-    let lowerer = Lowerer::new();
-    let result = lowerer.lower_module(&module);
+    let result = lower_module(&module);
 
     // Should succeed - unsafe mode allows everything
     assert!(result.is_ok(), "Unsafe mode should allow all capabilities");
@@ -532,9 +504,7 @@ fn test_actor_mode_rejects_mut_in_params() {
         let mut parser = Parser::new(source);
         let module = parser.parse().expect("should parse");
 
-        use simple_compiler::hir::Lowerer;
-        let lowerer = Lowerer::new();
-        let result = lowerer.lower_module(&module);
+        let result = lower_module(&module);
 
         assert!(result.is_err(), "Actor mode should reject mut in any parameter");
     }
@@ -552,12 +522,9 @@ class Counter:
         return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
-    use simple_compiler::hir::Lowerer;
-    let lowerer = Lowerer::new();
-    let result = lowerer.lower_module(&module);
+    let result = lower_module(&module);
 
     // Should fail - methods default to actor mode
     assert!(result.is_err(), "Class methods default to actor mode and reject mut T");
@@ -572,12 +539,9 @@ fn nested(x: mut mut i64) -> i64:
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let module = parser.parse().expect("should parse");
+    let module = parse_source(source);
 
-    use simple_compiler::hir::Lowerer;
-    let lowerer = Lowerer::new();
-    let result = lowerer.lower_module(&module);
+    let result = lower_module(&module);
 
     // Should succeed (though semantically unusual, parser accepts it)
     assert!(result.is_ok(), "Nested capabilities should parse and lower");

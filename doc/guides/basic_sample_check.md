@@ -18,7 +18,7 @@ Your `doc/README.md` also references `doc/spec/lexer_parser.md` and `doc/import_
 * **Concurrency** (`doc/spec/concurrency.md`) + design notes (`doc/design/concurrency.md`) → `70_actors_send_recv_reply_join.spl`, `71_async_await_skeleton.spl` ([GitHub][10])
 * **Metaprogramming** (`doc/spec/metaprogramming.md`) → `80_macro_define_counter.spl`, `81_dsl_trailing_blocks.spl` ([GitHub][11])
 * **Stdlib** (`doc/spec/stdlib.md`) → `90_stdlib_semantic_types_and_variants.spl` ([GitHub][12])
-* **GPU & SIMD** (`doc/spec/gpu_simd.md`) → `95_simd_vectors.spl`, `96_gpu_buffer_kernel_skeleton.spl` ([GitHub][13])
+* **GPU & SIMD** (`doc/spec/gpu_simd/README.md`) → `95_simd_vectors.spl`, `96_gpu_buffer_kernel_skeleton.spl` ([GitHub][13])
 
 ---
 
@@ -689,4 +689,4 @@ If you want, I can also reformat the above into an actual `samples/` directory l
 [10]: https://github.com/ormastes/simple/blob/main/doc/spec/concurrency.md?raw=1 "raw.githubusercontent.com"
 [11]: https://github.com/ormastes/simple/blob/main/doc/spec/metaprogramming.md?raw=1 "raw.githubusercontent.com"
 [12]: https://github.com/ormastes/simple/blob/main/doc/spec/stdlib.md?raw=1 "raw.githubusercontent.com"
-[13]: https://github.com/ormastes/simple/blob/main/doc/spec/gpu_simd.md?raw=1 "raw.githubusercontent.com"
+[13]: https://github.com/ormastes/simple/blob/main/doc/spec/gpu_simd/README.md?raw=1 "raw.githubusercontent.com"

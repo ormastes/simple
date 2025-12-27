@@ -7,6 +7,7 @@ pub mod codegen;
 pub mod compilability;
 pub mod coverage;
 pub mod effects;
+pub mod layout_recorder;
 pub mod effects_cache;
 pub mod aop_config;
 pub mod api_surface;
@@ -50,10 +51,12 @@ pub mod smf_builder;
 pub mod trait_coherence;
 pub mod value;
 pub mod value_bridge;
+pub mod verification_checker;
 pub mod web_compiler;
+pub mod runtime_profile;
 
 #[cfg(test)]
-mod test_helpers;
+pub mod test_helpers;
 
 // Re-export main types
 pub use coverage::{
@@ -80,7 +83,13 @@ pub use parallel::{
     ParallelParseCache, ParsedFile,
 };
 pub use pipeline::CompilerPipeline;
+pub use pipeline::{extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints};
 pub use project::ProjectContext;
+pub use layout_recorder::{
+    start_recording, stop_recording, is_recording, record_function_call,
+    record_function_return, record_layout_marker, export_layout_sdn,
+    export_layout_config, clear_recording, merge_with_config,
+};
 pub use trait_coherence::{CoherenceChecker, CoherenceError};
 pub use di::{
     create_di_match_context, parse_di_config, DependencyGraph, DiBindingRule, DiConfig,
@@ -93,6 +102,15 @@ pub use semantic_diff::{
 };
 pub use spec_coverage::{SpecCoverageReport, find_spec_file};
 pub use web_compiler::{WebCompiler, SuiCompilationResult};
+pub use runtime_profile::{
+    collect_global_metrics, generate_global_feedback, global_profiler, record_call,
+    start_profiling, stop_profiling, FunctionStats, LayoutFeedback, ProfileConfig,
+    RuntimeMetrics, RuntimeProfiler,
+};
+pub use verification_checker::{
+    can_call, has_unsafe_effect, is_pure_effects, VerificationChecker, VerificationRule,
+    VerificationViolation,
+};
 pub use value::{
     BorrowMutValue,
     BorrowValue,

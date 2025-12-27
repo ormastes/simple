@@ -3,8 +3,10 @@
 //! Tests verify that @sys.inject functions have their dependencies automatically resolved
 //! based on DI configuration from simple.toml.
 
-use simple_compiler::{di, hir, mir};
-use simple_parser::Parser;
+mod common;
+
+use common::*;
+use simple_compiler::{di, mir};
 
 #[test]
 fn test_di_basic_constructor_injection() {
@@ -28,17 +30,10 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Verify UserService.new is marked as inject
-    let user_service_new = hir_module
-        .functions
-        .iter()
-        .find(|f| f.name == "UserService.new")
-        .expect("Should have UserService.new");
-    assert!(user_service_new.inject, "UserService.new should be marked as @inject");
+    assert_inject(&hir_module, "UserService.new");
 
     // Create DI config
     let di_toml = r#"
@@ -51,37 +46,15 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
-
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
+    let di_config = parse_di_toml(di_toml);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // This should succeed - DI resolves Database dependency
-    let result = lowerer.lower_module(&hir_module);
+    let mir_module = assert_mir_success(result);
 
-    match result {
-        Ok(mir_module) => {
-            // Verify MIR was generated
-            assert!(!mir_module.functions.is_empty(), "Should have MIR functions");
-
-            // Find the main function
-            let main_func = mir_module
-                .functions
-                .iter()
-                .find(|f| f.name == "main")
-                .expect("Should have main function");
-
-            // Verify that UserService.new call was generated with injected Database
-            // (checking the MIR instructions would require more detailed inspection)
-            assert!(!main_func.blocks.is_empty(), "Main should have blocks");
-        }
-        Err(e) => {
-            panic!("DI injection should succeed, but got error: {:?}", e);
-        }
-    }
+    // Find the main function and verify it has blocks
+    let main_func = find_mir_function(&mir_module, "main").expect("Should have main function");
+    assert!(!main_func.blocks.is_empty(), "Main should have blocks");
 }
 
 #[test]
@@ -102,29 +75,12 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
-
-    // Create empty DI config (no bindings)
-    let di_config = di::DiConfig {
-        mode: di::DiMode::Hybrid,
-        profiles: std::collections::HashMap::new(),
-    };
-
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let hir_module = parse_and_lower(source);
+    let di_config = empty_di_config();
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should fail with "no DI binding" error
-    assert!(result.is_err(), "Should fail when DI binding is missing");
-
-    let err_msg = format!("{:?}", result.unwrap_err());
-    assert!(
-        err_msg.contains("no DI binding") || err_msg.contains("Logger"),
-        "Error should mention missing binding: {}",
-        err_msg
-    );
+    assert_mir_error_contains(result, "Logger");
 }
 
 #[test]
@@ -162,9 +118,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config with multiple bindings for Repository
     let di_toml = r#"
@@ -178,10 +132,7 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
     // Verify binding selection logic - higher priority should win
     let ctx = di::create_di_match_context("Repository", "", &[]);
@@ -212,8 +163,7 @@ class Service:
         return Self {}
 "#;
 
-    let mut parser = Parser::new(source);
-    let _ast = parser.parse().expect("Failed to parse");
+    // Test verifies DI scope configuration
 
     // Create DI config with Singleton scope
     let di_toml_singleton = r#"
@@ -226,10 +176,7 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml_singleton).expect("Failed to parse TOML");
-    let di_config_singleton = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config_singleton = parse_di_toml(di_toml_singleton);
 
     let ctx = di::create_di_match_context("Config", "", &[]);
     let binding = di_config_singleton
@@ -250,10 +197,7 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml_transient).expect("Failed to parse TOML");
-    let di_config_transient = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config_transient = parse_di_toml(di_toml_transient);
 
     let binding = di_config_transient
         .select_binding("default", &ctx)
@@ -294,9 +238,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config with Singleton scope
     let di_toml = r#"
@@ -309,14 +251,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     match result {
         Ok(mir_module) => {
@@ -378,9 +315,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config with Transient scope
     let di_toml = r#"
@@ -393,14 +328,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     match result {
         Ok(mir_module) => {
@@ -456,9 +386,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config with bindings that create circular dependency
     let di_toml = r#"
@@ -472,14 +400,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should fail with circular dependency error
     assert!(result.is_err(), "Should detect circular dependency");
@@ -517,9 +440,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config with bindings that create indirect circular dependency
     let di_toml = r#"
@@ -534,14 +455,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should fail with circular dependency error
     assert!(result.is_err(), "Should detect indirect circular dependency");
@@ -578,9 +494,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config with linear dependency chain
     let di_toml = r#"
@@ -595,14 +509,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should succeed - no circular dependency
     match result {
@@ -633,9 +542,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config
     let di_toml = r#"
@@ -648,14 +555,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should succeed - config is injected, manual_id is provided
     match result {
@@ -690,9 +592,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config
     let di_toml = r#"
@@ -706,14 +606,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should succeed - both parameters are injected
     match result {
@@ -744,9 +639,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config
     let di_toml = r#"
@@ -759,14 +652,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should succeed - config injected in middle position
     match result {
@@ -797,9 +685,7 @@ fn main():
     return 0
 "#;
 
-    let mut parser = Parser::new(source);
-    let ast = parser.parse().expect("Failed to parse");
-    let hir_module = hir::lower(&ast).expect("Failed to lower to HIR");
+    let hir_module = parse_and_lower(source);
 
     // Create DI config
     let di_toml = r#"
@@ -812,14 +698,9 @@ bindings = [
 ]
 "#;
 
-    let toml_value: toml::Value = toml::from_str(di_toml).expect("Failed to parse TOML");
-    let di_config = di::parse_di_config(&toml_value)
-        .expect("Failed to parse DI config")
-        .expect("Should have DI config");
+    let di_config = parse_di_toml(di_toml);
 
-    // Lower to MIR with DI config
-    let lowerer = mir::MirLowerer::new().with_di_config(Some(di_config));
-    let result = lowerer.lower_module(&hir_module);
+    let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should fail - manual_id is not provided
     assert!(result.is_err(), "Should fail when manual argument is missing");

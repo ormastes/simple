@@ -317,6 +317,6 @@ app = Gui():
 ## See Also
 
 - `doc/plans/llm_friendly.md` - LLM features (in progress)
-- `doc/plans/28_bdd_spec.md` - BDD framework
+- `doc/plans/28_testing/testing_bdd_framework.md` - BDD framework
 - `doc/plans/29_doctest.md` - Doctest framework
 - `doc/features/feature.md` - Complete feature list

@@ -1,0 +1,269 @@
+# Advanced 3D Graphics Demo
+#
+# Demonstrates:
+# - Frustum culling
+# - Draw call batching
+# - Many objects (stress test)
+# - Resource management
+# - Performance statistics
+#
+# Based on: doc/spec/graphics_3d.md
+
+use graphics.*
+use graphics.math.*
+use graphics.scene.*
+use graphics.render.*
+use ui.*
+
+# =============================================================================
+# Scene Setup
+# =============================================================================
+
+fn create_stress_test_scene() -> Scene:
+    let scene = Scene::new("Stress Test Scene")
+    let resources = ResourceManager::new()
+
+    # Initialize default primitives and materials
+    resources.init_defaults()
+
+    # Create a grid of objects (20x20 = 400 objects)
+    let grid_size = 20
+    let spacing = 3.0
+    let grid_offset = ((grid_size as f32) * spacing) / 2.0
+
+    # Get mesh and material handles
+    let cube_mesh = resources.meshes().register_cube()
+    let sphere_mesh = resources.meshes().register_sphere(32)
+    let cylinder_mesh = resources.meshes().register_cylinder(32)
+
+    let gold_mat = resources.materials().register_pbr_gold()
+    let silver_mat = resources.materials().register_pbr_silver()
+    let copper_mat = resources.materials().register_pbr_copper()
+
+    # Create grid of objects
+    for z in 0..grid_size:
+        for x in 0..grid_size:
+            let px = (x as f32) * spacing - grid_offset
+            let pz = (z as f32) * spacing - grid_offset
+            let py = 0.0
+
+            # Alternate between different meshes and materials
+            let mesh = match (x + z) % 3:
+                case 0: cube_mesh
+                case 1: sphere_mesh
+                case _: cylinder_mesh
+
+            let material = match (x + z) % 3:
+                case 0: gold_mat
+                case 1: silver_mat
+                case _: copper_mat
+
+            # Create node
+            let name = "Object_" + x.to_string() + "_" + z.to_string()
+            let node = SceneNode::new(name)
+            node.set_transform(
+                Transform::identity()
+                    .translate(Vec3::new(px, py, pz))
+                    .scale_uniform(0.5)
+            )
+
+            # Add mesh renderer component
+            node.add_component(Component::MeshRenderer(mesh, material))
+
+            # Add to scene
+            scene.add_node(node)
+
+    # Add ground plane
+    let ground_mesh = resources.meshes().register_plane(20)
+    let ground_mat = resources.materials().register_phong_emerald()
+
+    let ground = SceneNode::new("Ground")
+    ground.set_transform(
+        Transform::identity()
+            .translate(Vec3::new(0.0, -2.0, 0.0))
+            .scale_uniform(50.0)
+    )
+    ground.add_component(Component::MeshRenderer(ground_mesh, ground_mat))
+    scene.add_node(ground)
+
+    # Add directional light (sun)
+    let sun = DirectionalLight::new(
+        Vec3::new(-0.5, -1.0, -0.3).normalize(),
+        Color::from_rgb(1.0, 0.95, 0.8),
+        1.5
+    )
+    let sun_node = SceneNode::new("Sun")
+    sun_node.add_component(Component::Light(Light::Directional(sun)))
+    scene.add_node(sun_node)
+
+    # Add point light
+    let point_light = PointLight::new(
+        Vec3::new(0.0, 10.0, 0.0),
+        Color::from_rgb(0.3, 0.5, 1.0),
+        5.0
+    ).with_range(PointLight::Range64)
+
+    let light_node = SceneNode::new("PointLight")
+    light_node.add_component(Component::Light(Light::Point(point_light)))
+    scene.add_node(light_node)
+
+    return scene
+
+# =============================================================================
+# Rendering with Culling and Batching
+# =============================================================================
+
+fn render_scene_optimized(
+    scene: Scene,
+    camera: Camera,
+    renderer: Renderer3D
+):
+    # Create frustum from camera
+    let view_proj = camera.get_view_projection_matrix()
+    let frustum = Frustum::from_view_proj(view_proj)
+
+    # Culling statistics
+    let mut cull_stats = CullingStats::new()
+
+    # Batch collector
+    let mut batch_collector = BatchCollector::new()
+
+    # Traverse scene and collect visible objects
+    scene.traverse(\node_id, node, world_transform:
+        # Check if node has mesh renderer
+        if let Some(Component::MeshRenderer(mesh, material)) = node.get_component():
+            # Get mesh bounds
+            let mesh_data = scene.resources.meshes().get(mesh).unwrap()
+            let bounds = mesh_data.get_bounds()
+
+            # Transform bounds to world space
+            let world_center = world_transform.transform_point(bounds.center())
+            let world_radius = bounds.size().length() / 2.0
+
+            # Frustum culling test
+            let is_visible = frustum.contains_sphere(world_center, world_radius)
+            cull_stats.record_test(is_visible)
+
+            # If visible, add to batch
+            if is_visible:
+                batch_collector.add_draw_call(mesh, material, world_transform)
+    )
+
+    # Print statistics
+    cull_stats.print()
+    batch_collector.print_statistics()
+
+    # Render batches
+    let batches = batch_collector.get_sorted_batches()
+
+    io.println("Rendering " + batches.len().to_string() + " batches...")
+
+    for batch in batches:
+        # Bind pipeline and material
+        let pipeline = get_pipeline_for_material(batch.material_handle)
+        renderer.bind_pipeline(pipeline)
+        renderer.bind_material(batch.material_handle)
+
+        # Bind mesh buffers
+        let mesh = scene.resources.meshes().get(batch.mesh_handle).unwrap()
+        renderer.bind_mesh_buffers(mesh)
+
+        # Draw instances
+        if batch.get_instance_count() > 1:
+            # Use instancing
+            let instance_buffer = InstancingBuffer::new(batch.get_instance_count())
+            instance_buffer.upload(batch.instances)
+
+            renderer.draw_indexed_instanced(
+                mesh.get_index_count() as u32,
+                batch.get_instance_count() as u32
+            )
+
+            instance_buffer.destroy()
+        else:
+            # Single draw call
+            let instance = batch.instances[0]
+            renderer.set_model_matrix(instance.world_matrix)
+            renderer.draw_indexed(mesh.get_index_count() as u32)
+
+# =============================================================================
+# UI Layout
+# =============================================================================
+
+fn build_ui(tree: &mut ElementTree) -> Element:
+    # Create scene
+    let scene = create_stress_test_scene()
+
+    # Create camera (elevated and far back to see entire grid)
+    let camera = Camera::perspective_standard(16.0 / 9.0)
+        .with_position(Vec3::new(0.0, 30.0, 80.0))
+        .look_at(Vec3::new(0.0, 0.0, 0.0), Vec3::unit_y())
+
+    # Create Scene3D widget
+    let scene3d = Scene3D::new(tree.alloc_id(), 1280, 720)
+        .with_scene(scene)
+        .with_camera(camera)
+        .with_controls()
+        .with_clear_color(Color::from_hex(0x1E1E1E))
+        .with_camera_settings(10.0, 0.003)
+
+    # Build UI layout
+    return Column::new(tree.alloc_id())
+        .spacing(10.0)
+        .padding(EdgeInsets::all(20.0))
+        .child(
+            Text::new(tree.alloc_id(), "Advanced 3D Graphics - Culling & Batching Demo")
+                .size(28.0)
+                .weight(FontWeight::Bold)
+                .to_element()
+        )
+        .child(
+            Row::new(tree.alloc_id())
+                .spacing(20.0)
+                .child(Text::new(tree.alloc_id(), "Controls:").size(16.0).to_element())
+                .child(Text::new(tree.alloc_id(), "WASD - Move").size(14.0).to_element())
+                .child(Text::new(tree.alloc_id(), "Mouse - Look").size(14.0).to_element())
+                .child(Text::new(tree.alloc_id(), "Q/E - Up/Down").size(14.0).to_element())
+                .to_element()
+        )
+        .child(scene3d.to_element())
+        .child(
+            Row::new(tree.alloc_id())
+                .spacing(20.0)
+                .child(
+                    Text::new(tree.alloc_id(), "Grid: 20x20 = 400 objects")
+                        .size(14.0)
+                        .color(Color::from_hex(0xCCCCCC))
+                        .to_element()
+                )
+                .child(
+                    Text::new(tree.alloc_id(), "Frustum Culling: Enabled")
+                        .size(14.0)
+                        .color(Color::from_hex(0x00FF00))
+                        .to_element()
+                )
+                .child(
+                    Text::new(tree.alloc_id(), "Draw Call Batching: Enabled")
+                        .size(14.0)
+                        .color(Color::from_hex(0x00FF00))
+                        .to_element()
+                )
+                .to_element()
+        )
+        .to_element()
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+fn main():
+    # Create application
+    let mut app = Application::new("Advanced 3D Graphics Demo")
+        .window_size(1440, 900)
+        .title("Simple 3D Engine - Culling & Batching")
+
+    # Set root UI
+    app.set_root(build_ui(&mut app.element_tree))
+
+    # Run application
+    app.run()

@@ -112,6 +112,10 @@ fn compile_binop<M: Module>(
             builder.block_params(loop_exit)[0]
         }
         BinOp::FloorDiv => builder.ins().sdiv(lhs, rhs),
+        BinOp::MatMul => {
+            // Simple Math #1930-#1939: Matrix multiplication requires PyTorch runtime
+            return Err("Matrix multiplication (@) requires PyTorch runtime, use interpreter mode".to_string());
+        }
     };
     Ok(val)
 }

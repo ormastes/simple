@@ -320,6 +320,8 @@ pub struct EnumDef {
     /// Where clause for trait bounds: where T: Clone + Default
     pub where_clause: WhereClause,
     pub variants: Vec<EnumVariant>,
+    /// Methods defined inside the enum block
+    pub methods: Vec<FunctionDef>,
     pub visibility: Visibility,
     /// Attributes like #[strong]
     pub attributes: Vec<Attribute>,
@@ -452,7 +454,7 @@ pub enum EnclosingTarget {
     Trait,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MacroAnchor {
     Head,
     Tail,

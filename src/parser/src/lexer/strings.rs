@@ -91,6 +91,41 @@ impl<'a> super::Lexer<'a> {
         TokenKind::Error("Unterminated string".to_string())
     }
 
+    /// Scan a triple-quoted string (docstring): """..."""
+    /// These are raw strings that can span multiple lines and don't support interpolation
+    pub(super) fn scan_triple_quoted_string(&mut self) -> TokenKind {
+        let mut value = String::new();
+
+        // Consume the three opening quotes
+        self.advance(); // First "
+        self.advance(); // Second "
+        // Third " was already consumed in scan_token
+
+        // Read until we find three closing quotes
+        while let Some(ch) = self.peek() {
+            if ch == '"' {
+                // Check for potential closing """
+                if self.peek_ahead(1) == Some('"') && self.peek_ahead(2) == Some('"') {
+                    // Found closing """
+                    self.advance(); // First "
+                    self.advance(); // Second "
+                    self.advance(); // Third "
+                    return TokenKind::String(value);
+                } else {
+                    // Single " inside the string
+                    self.advance();
+                    value.push('"');
+                }
+            } else {
+                // Regular character (including newlines)
+                self.advance();
+                value.push(ch);
+            }
+        }
+
+        TokenKind::Error("Unterminated triple-quoted string".to_string())
+    }
+
     pub(super) fn scan_fstring(&mut self) -> TokenKind {
         use crate::token::FStringToken;
         let mut parts: Vec<FStringToken> = Vec::new();

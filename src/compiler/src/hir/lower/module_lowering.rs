@@ -31,10 +31,10 @@ impl Lowerer {
                         .variants
                         .iter()
                         .map(|v| {
-                            let fields = v.fields.as_ref().map(|types| {
-                                types
+                            let fields = v.fields.as_ref().map(|enum_fields| {
+                                enum_fields
                                     .iter()
-                                    .map(|t| self.resolve_type(t).unwrap_or(TypeId::VOID))
+                                    .map(|f| self.resolve_type(&f.ty).unwrap_or(TypeId::VOID))
                                     .collect()
                             });
                             (v.name.clone(), fields)
@@ -430,6 +430,79 @@ impl Lowerer {
         ) || f.name.starts_with("from_") || f.name.starts_with("with_")
     }
 
+    /// Extract layout hint from #[layout(...)] attributes.
+    ///
+    /// Supports:
+    /// - `#[layout(phase="startup")]` - layout phase annotation
+    /// - `#[layout(phase="first_frame")]`
+    /// - `#[layout(phase="steady")]`
+    /// - `#[layout(phase="cold")]`
+    /// - `#[layout(anchor="event_loop")]` - anchor annotation
+    /// - `#[layout(pin)]` - pinning flag
+    fn extract_layout_hint(&self, attributes: &[ast::Attribute]) -> Option<FunctionLayoutHint> {
+        for attr in attributes {
+            if attr.name != "layout" {
+                continue;
+            }
+
+            let mut hint = FunctionLayoutHint::default();
+            let mut found_layout = false;
+
+            // Parse attribute arguments like #[layout(phase="startup", pin)]
+            if let Some(args) = &attr.args {
+                for arg in args {
+                    match arg {
+                        // Handle named arguments like phase="startup"
+                        ast::Expr::Binary {
+                            op: ast::BinOp::Eq,
+                            left,
+                            right,
+                        } => {
+                            if let ast::Expr::Identifier(key) = left.as_ref() {
+                                if let ast::Expr::String(value) = right.as_ref() {
+                                    match key.as_str() {
+                                        "phase" => {
+                                            if let Some(phase) = LayoutPhase::from_str(value) {
+                                                hint.phase = phase;
+                                                found_layout = true;
+                                            }
+                                        }
+                                        "anchor" => {
+                                            if let Some(anchor) = LayoutAnchor::from_str(value) {
+                                                hint.anchor = Some(anchor);
+                                                found_layout = true;
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        // Handle flag like pin
+                        ast::Expr::Identifier(name) if name == "pin" => {
+                            hint.pinned = true;
+                            found_layout = true;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Also support #[layout = "phase_name"] shorthand
+            if let Some(ast::Expr::String(value)) = &attr.value {
+                if let Some(phase) = LayoutPhase::from_str(value) {
+                    hint.phase = phase;
+                    found_layout = true;
+                }
+            }
+
+            if found_layout {
+                return Some(hint);
+            }
+        }
+        None
+    }
+
     /// Lower a function, optionally injecting type invariants for methods
     /// `owner_type`: If this function is a method, the name of the owning type
     fn lower_function(
@@ -555,6 +628,9 @@ impl Lowerer {
             .map(|attr| attr.name.clone())
             .collect();
 
+        // Extract layout hint from #[layout(...)] attribute
+        let layout_hint = self.extract_layout_hint(&f.attributes);
+
         // Extract effects from decorators for AOP effect() selector
         let effects: Vec<String> = f
             .decorators
@@ -587,6 +663,9 @@ impl Lowerer {
             f.name.clone()
         };
 
+        // Determine verification mode from effects
+        let verification_mode = crate::hir::VerificationMode::from_effects(&f.effects);
+
         Ok(HirFunction {
             name,
             params,
@@ -601,6 +680,8 @@ impl Lowerer {
             module_path,
             attributes,
             effects,
+            layout_hint,
+            verification_mode,
         })
     }
 

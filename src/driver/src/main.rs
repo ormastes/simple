@@ -13,6 +13,14 @@ mod cli;
 use std::env;
 use std::path::PathBuf;
 
+// Helper to print startup metrics and exit
+fn exit_with_metrics(code: i32, metrics: &simple_driver::StartupMetrics) -> ! {
+    if simple_driver::metrics_enabled() {
+        metrics.print_report();
+    }
+    std::process::exit(code)
+}
+
 use simple_common::target::{Target, TargetArch};
 use simple_driver::runner::Runner;
 use simple_driver::watcher::watch;
@@ -25,32 +33,79 @@ use cli::audit::{run_replay, run_spec_coverage};
 use cli::basic::{create_runner, run_code, run_file, run_file_with_args, watch_file};
 use cli::code_quality::{run_fmt, run_lint};
 use cli::compile::{compile_file, list_linkers, list_targets};
+use cli::gen_lean::run_gen_lean;
 use cli::help::{print_help, print_version, version};
 use cli::llm_tools::{run_context, run_diff, run_mcp};
 use cli::repl::run_repl;
 use cli::sandbox::{apply_sandbox, parse_sandbox_config};
 use cli::test_runner;
+#[cfg(feature = "tui")]
+use cli::tui::run_tui_repl;
 use cli::web::{web_build, web_features, web_init, web_serve, WebBuildOptions, WebServeOptions};
 
 
 fn main() {
+    // Check for --startup-metrics flag early (#1997)
+    let enable_startup_metrics = env::args().any(|a| a == "--startup-metrics");
+    if enable_startup_metrics {
+        simple_driver::enable_metrics();
+    }
+
+    let mut metrics = simple_driver::StartupMetrics::new();
+    metrics.start();
+
+    // PHASE 1: Early startup - parse args and start prefetching before runtime init
+    let early_start = std::time::Instant::now();
+    let early_config = simple_driver::parse_early_args(env::args().skip(1));
+    metrics.record(simple_driver::StartupPhase::EarlyArgParse, early_start.elapsed());
+
+    // Start prefetching input files in background (if enabled)
+    let prefetch_start = std::time::Instant::now();
+    let prefetch_handle = if early_config.enable_prefetch && !early_config.input_files.is_empty() {
+        simple_driver::prefetch_files(&early_config.input_files).ok()
+    } else {
+        None
+    };
+    if prefetch_handle.is_some() {
+        metrics.record(simple_driver::StartupPhase::FilePrefetch, prefetch_start.elapsed());
+    }
+
+    // Pre-allocate resources based on app type
+    let resource_start = std::time::Instant::now();
+    let _resources = simple_driver::PreAllocatedResources::allocate(
+        early_config.app_type,
+        &early_config.window_hints,
+    ).ok();
+    metrics.record(simple_driver::StartupPhase::ResourceAllocation, resource_start.elapsed());
+
+    // PHASE 2: Normal initialization (happens in parallel with prefetching)
+    let log_start = std::time::Instant::now();
     simple_log::init();
+    metrics.record(simple_driver::StartupPhase::LoggingInit, log_start.elapsed());
 
     // Initialize interpreter handlers for hybrid execution
+    let handler_start = std::time::Instant::now();
     simple_compiler::interpreter_ffi::init_interpreter_handlers();
+    metrics.record(simple_driver::StartupPhase::HandlerInit, handler_start.elapsed());
 
-    let args: Vec<String> = env::args().skip(1).collect();
+    // Reconstruct args from early config for compatibility with existing code
+    let args: Vec<String> = early_config.remaining_args.iter()
+        .map(|s| s.to_string_lossy().to_string())
+        .collect();
 
     // Parse global flags
     let gc_log = args.iter().any(|a| a == "--gc-log");
     let gc_off = args.iter().any(|a| a == "--gc=off" || a == "--gc=OFF");
+    let use_notui = args.iter().any(|a| a == "--notui");
 
     // Parse and apply sandbox configuration before running code (#916-919)
+    let sandbox_start = std::time::Instant::now();
     if let Some(sandbox_config) = parse_sandbox_config(&args) {
         if let Err(e) = apply_sandbox(&sandbox_config) {
             eprintln!("warning: {}", e);
             eprintln!("Continuing without full sandboxing...");
         }
+        metrics.record(simple_driver::StartupPhase::SandboxSetup, sandbox_start.elapsed());
     }
 
     // Filter out flags (GC and sandbox flags) and their values
@@ -63,6 +118,14 @@ fn main() {
         }
 
         if arg.starts_with("--gc") {
+            continue;
+        }
+
+        if arg == "--notui" {
+            continue;
+        }
+
+        if arg == "--startup-metrics" {
             continue;
         }
 
@@ -88,9 +151,17 @@ fn main() {
     }
     let args = filtered_args;
 
-    // No arguments -> REPL
+    // No arguments -> REPL (TUI by default if feature enabled)
     if args.is_empty() {
         let runner = create_runner(gc_log, gc_off);
+
+        #[cfg(feature = "tui")]
+        if !use_notui {
+            // TUI is default when feature is enabled
+            std::process::exit(run_tui_repl(version(), runner));
+        }
+
+        // Use Normal mode if --notui flag is set or TUI feature is disabled
         std::process::exit(run_repl(version(), runner));
     }
 
@@ -377,6 +448,9 @@ fn main() {
         "spec-coverage" => {
             std::process::exit(run_spec_coverage(&args));
         }
+        "gen-lean" => {
+            std::process::exit(run_gen_lean(&args));
+        }
         "replay" => {
             std::process::exit(run_replay(&args));
         }
@@ -645,6 +719,13 @@ fn main() {
             std::process::exit(run_file(&path, gc_log, gc_off));
         }
         _ => {
+            // PHASE 3: Wait for prefetching to complete before using files
+            let prefetch_wait_start = std::time::Instant::now();
+            if let Some(handle) = prefetch_handle {
+                let _ = handle.wait(); // Ignore errors, prefetch is best-effort
+                metrics.record(simple_driver::StartupPhase::PrefetchWait, prefetch_wait_start.elapsed());
+            }
+
             // Assume it's a file to run
             let path = PathBuf::from(first);
             if path.exists() {
@@ -657,12 +738,17 @@ fn main() {
                 // Prepend the file path as argv[0]
                 let mut full_args = vec![path.to_string_lossy().to_string()];
                 full_args.extend(program_args);
-                std::process::exit(run_file_with_args(&path, gc_log, gc_off, full_args));
+
+                // Record file execution phase
+                let exec_start = std::time::Instant::now();
+                let exit_code = run_file_with_args(&path, gc_log, gc_off, full_args);
+                metrics.record(simple_driver::StartupPhase::FileExecution, exec_start.elapsed());
+                exit_with_metrics(exit_code, &metrics);
             } else {
                 eprintln!("error: file not found: {}", path.display());
                 eprintln!();
                 print_help();
-                std::process::exit(1);
+                exit_with_metrics(1, &metrics);
             }
         }
     }

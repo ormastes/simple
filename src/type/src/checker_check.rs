@@ -338,10 +338,8 @@ impl TypeChecker {
             }
             Node::For(for_stmt) => {
                 let _ = self.infer_expr(&for_stmt.iterable)?;
-                if let Pattern::Identifier(name) = &for_stmt.pattern {
-                    let ty = self.fresh_var();
-                    self.env.insert(name.clone(), ty);
-                }
+                // Bind all identifiers in the pattern (handles tuple, array, struct, etc.)
+                self.bind_pattern(&for_stmt.pattern);
                 self.check_block_with_macro_rules(&for_stmt.body)?;
                 Ok(())
             }

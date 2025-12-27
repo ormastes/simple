@@ -3,6 +3,10 @@
 use crate::macro_contracts::{process_macro_contract, MacroContractResult};
 use crate::macro_validation::validate_macro_defined_before_use;
 
+#[path = "interpreter_macro/helpers.rs"]
+mod helpers;
+use helpers::{build_macro_const_bindings, const_value_to_string};
+
 thread_local! {
     /// Accumulates symbols introduced by macro expansion
     /// These need to be registered by the caller after macro invocation
@@ -18,8 +22,8 @@ fn evaluate_macro_invocation(
     name: &str,
     macro_args: &[MacroArg],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -163,8 +167,8 @@ fn expand_user_macro(
     macro_def: &MacroDef,
     args: &[MacroArg],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -328,6 +332,7 @@ fn apply_macro_hygiene_node(
                 value,
                 mutability: let_stmt.mutability,
                 storage_class: let_stmt.storage_class,
+                is_ghost: let_stmt.is_ghost,
             })
         }
         Node::Const(const_stmt) => {
@@ -872,43 +877,6 @@ fn apply_macro_hygiene_pattern(
     }
 }
 
-fn build_macro_const_bindings(
-    macro_def: &MacroDef,
-    args: &[MacroArg],
-    env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
-    enums: &Enums,
-    impl_methods: &ImplMethods,
-) -> Result<HashMap<String, String>, CompileError> {
-    let mut bindings = HashMap::new();
-    for (idx, param) in macro_def.params.iter().enumerate() {
-        if !param.is_const {
-            continue;
-        }
-        let Some(MacroArg::Expr(expr)) = args.get(idx) else {
-            continue;
-        };
-        let value = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
-        if let Some(text) = const_value_to_string(&value) {
-            bindings.insert(param.name.clone(), text);
-        }
-    }
-    Ok(bindings)
-}
-
-fn const_value_to_string(value: &Value) -> Option<String> {
-    match value {
-        Value::Str(s) => Some(s.clone()),
-        Value::Symbol(s) => Some(s.clone()),
-        Value::Int(i) => Some(i.to_string()),
-        Value::Float(f) => Some(f.to_string()),
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Nil => Some("nil".to_string()),
-        _ => None,
-    }
-}
-
 fn substitute_block_templates(
     block: &Block,
     const_bindings: &HashMap<String, String>,
@@ -939,6 +907,7 @@ fn substitute_node_templates(
                 .map(|expr| substitute_expr_templates(expr, const_bindings)),
             mutability: let_stmt.mutability,
             storage_class: let_stmt.storage_class,
+            is_ghost: let_stmt.is_ghost,
         }),
         Node::Assignment(assign) => Node::Assignment(AssignmentStmt {
             span: assign.span,

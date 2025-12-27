@@ -28,6 +28,9 @@ mod execution;
 pub use core::CompilerPipeline;
 pub use execution::{generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object, generate_smf_from_object_for_target};
 
+// Re-export startup configuration types (#1979, #1986)
+pub use module_loader::{extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints};
+
 #[cfg(test)]
 mod tests {
     use super::*;

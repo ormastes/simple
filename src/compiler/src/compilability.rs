@@ -535,6 +535,27 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
         Expr::Cast { expr: inner, .. } => {
             analyze_expr(inner, reasons);
         }
+
+        // Simple Math: Grid and Tensor literals (#1920-#1929)
+        // These require PyTorch runtime and will be lowered to torch.tensor() calls
+        Expr::GridLiteral { rows, .. } => {
+            for row in rows {
+                for cell in row {
+                    analyze_expr(cell.as_ref(), reasons);
+                }
+            }
+            add_reason(
+                reasons,
+                FallbackReason::NotYetImplemented("grid literal (requires PyTorch)".into()),
+            );
+        }
+        Expr::TensorLiteral { .. } => {
+            // Tensor literals are complex and require PyTorch runtime
+            add_reason(
+                reasons,
+                FallbackReason::NotYetImplemented("tensor literal (requires PyTorch)".into()),
+            );
+        }
     }
 }
 

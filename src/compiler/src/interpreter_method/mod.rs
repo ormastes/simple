@@ -8,15 +8,14 @@ use crate::error::CompileError;
 use crate::value::{Value, Env};
 use simple_parser::ast::{Argument, FunctionDef, ClassDef, Expr};
 use std::collections::HashMap;
-use crate::interpreter::{
+use super::{
     evaluate_expr,
     eval_arg, eval_arg_usize,
     instantiate_class,
-    exec_function,
+    exec_function, exec_function_with_captured_env,
     find_and_exec_method, try_method_missing,
+    Enums, ImplMethods,
 };
-use super::Enums;
-use super::ImplMethods;
 
 // Re-export the with-self-update functions
 pub use special::{find_and_exec_method_with_self, exec_function_with_self_return};
@@ -27,16 +26,16 @@ pub(crate) fn evaluate_method_call(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     // Support module-style dot calls (lib.func()) by resolving directly to imported functions/classes.
     if let Expr::Identifier(module_name) = receiver.as_ref() {
         if env.get(module_name).is_none() {
-            if let Some(func) = functions.get(method) {
-                return exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+            if let Some(func) = functions.get(method).cloned() {
+                return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
             if classes.contains_key(method) {
                 return instantiate_class(method, args, env, functions, classes, enums, impl_methods);
@@ -45,6 +44,18 @@ pub(crate) fn evaluate_method_call(
     }
 
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
+
+    // Handle module (Dict) method calls - look up function in module and use its captured_env
+    if let Value::Dict(module_dict) = &recv_val {
+        if let Some(func_val) = module_dict.get(method) {
+            if let Value::Function { def, captured_env, .. } = func_val {
+                return exec_function_with_captured_env(def, args, env, captured_env, functions, classes, enums, impl_methods);
+            }
+            if let Value::Constructor { class_name } = func_val {
+                return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
+            }
+        }
+    }
 
     // BDD assertion methods: to(matcher) and not_to(matcher)
     // These work on any value type and are used with matchers like eq(5), gt(3), etc.
@@ -119,6 +130,18 @@ pub(crate) fn evaluate_method_call(
                     if m.name == method {
                         // For enum methods, we pass self as a special context
                         // Create a fields map with just "self" for the enum value
+                        let mut enum_fields = HashMap::new();
+                        enum_fields.insert("self".to_string(), recv_val.clone());
+                        return exec_function(m, args, env, functions, classes, enums, impl_methods, Some((enum_name, &enum_fields)));
+                    }
+                }
+            }
+
+            // Methods defined directly in the enum body
+            if let Some(enum_def) = enums.get(enum_name) {
+                for m in &enum_def.methods {
+                    if m.name == method {
+                        // For enum methods, we pass self as a special context
                         let mut enum_fields = HashMap::new();
                         enum_fields.insert("self".to_string(), recv_val.clone());
                         return exec_function(m, args, env, functions, classes, enums, impl_methods, Some((enum_name, &enum_fields)));
@@ -205,8 +228,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<Value>), CompileError> {

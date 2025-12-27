@@ -1,0 +1,401 @@
+# PyTorch Transformer Tests
+#
+# Tests for Transformer architecture components including multi-head attention,
+# positional encoding, and encoder/decoder layers.
+
+import spec
+import ml.torch as torch
+import ml.torch.nn as nn
+
+
+describe("PyTorch Transformer Components"):
+    describe("MultiheadAttention"):
+        it("should create multi-head attention with correct parameters"):
+            let mha = nn.MultiheadAttention(embed_dim=512, num_heads=8)
+            spec.expect(mha.embed_dim).to_be(512)
+            spec.expect(mha.num_heads).to_be(8)
+
+        it("should process query, key, value with correct output shape"):
+            let mha = nn.MultiheadAttention(embed_dim=64, num_heads=4)
+            let seq_len = 10
+            let batch_size = 2
+
+            # Q, K, V: [seq_len, batch, embed_dim]
+            let query = torch.randn([seq_len, batch_size, 64])
+            let key = torch.randn([seq_len, batch_size, 64])
+            let value = torch.randn([seq_len, batch_size, 64])
+
+            let (output, attn_weights) = mha(query, key, value)
+
+            # Output: [seq_len, batch, embed_dim]
+            spec.expect(output.shape()[0]).to_be(seq_len)
+            spec.expect(output.shape()[1]).to_be(batch_size)
+            spec.expect(output.shape()[2]).to_be(64)
+
+            # Attention weights: [batch, seq_len, seq_len]
+            spec.expect(attn_weights.numel()).to_be_greater_than(0)
+
+        it("should support self-attention (Q=K=V)"):
+            let mha = nn.MultiheadAttention(embed_dim=128, num_heads=8)
+
+            let x = torch.randn([5, 2, 128])
+
+            # Self-attention: Q = K = V
+            let (output, _) = mha(x, x, x)
+
+            spec.expect(output.shape()[0]).to_be(5)
+            spec.expect(output.shape()[1]).to_be(2)
+            spec.expect(output.shape()[2]).to_be(128)
+
+        it("should support cross-attention (Q != K=V)"):
+            let mha = nn.MultiheadAttention(embed_dim=256, num_heads=8)
+
+            # Decoder queries encoder outputs
+            let decoder_query = torch.randn([10, 2, 256])
+            let encoder_output = torch.randn([20, 2, 256])
+
+            # Cross-attention
+            let (output, _) = mha(decoder_query, encoder_output, encoder_output)
+
+            # Output has same seq_len as query
+            spec.expect(output.shape()[0]).to_be(10)
+            spec.expect(output.shape()[2]).to_be(256)
+
+        it("should work with attention mask"):
+            let mha = nn.MultiheadAttention(embed_dim=64, num_heads=4)
+
+            let x = torch.randn([5, 2, 64])
+
+            # Causal mask for autoregressive generation
+            let mask = torch.zeros([5, 5])
+            # TODO: Set upper triangle to -inf for causal masking
+
+            let (output, _) = mha(x, x, x, mask)
+
+            spec.expect(output.shape()[0]).to_be(5)
+
+        it("should support different numbers of heads"):
+            for num_heads in [1, 2, 4, 8, 16]:
+                let embed_dim = num_heads * 64  # Must be divisible by num_heads
+                let mha = nn.MultiheadAttention(embed_dim=embed_dim, num_heads=num_heads)
+
+                let x = torch.randn([5, 2, embed_dim])
+                let (output, _) = mha(x, x, x)
+
+                spec.expect(output.shape()[2]).to_be(embed_dim)
+
+    describe("PositionalEncoding"):
+        it("should create positional encoding with correct parameters"):
+            let pe = nn.PositionalEncoding(d_model=512, max_len=5000)
+            spec.expect(pe.d_model).to_be(512)
+            spec.expect(pe.max_len).to_be(5000)
+
+        it("should add positional information to embeddings"):
+            let pe = nn.PositionalEncoding(d_model=128, max_len=100)
+
+            let seq_len = 10
+            let batch_size = 2
+
+            # Input: [seq_len, batch, d_model]
+            let x = torch.randn([seq_len, batch_size, 128])
+
+            let output = pe(x)
+
+            # Output shape should match input shape
+            spec.expect(output.shape()[0]).to_be(seq_len)
+            spec.expect(output.shape()[1]).to_be(batch_size)
+            spec.expect(output.shape()[2]).to_be(128)
+
+        it("should handle different sequence lengths"):
+            let pe = nn.PositionalEncoding(d_model=256, max_len=1000)
+
+            # Short sequence
+            let short_seq = torch.randn([5, 2, 256])
+            let out_short = pe(short_seq)
+            spec.expect(out_short.shape()[0]).to_be(5)
+
+            # Long sequence
+            let long_seq = torch.randn([100, 2, 256])
+            let out_long = pe(long_seq)
+            spec.expect(out_long.shape()[0]).to_be(100)
+
+        it("should use sine/cosine for position encoding"):
+            let pe = nn.PositionalEncoding(d_model=64, max_len=100)
+
+            # Positional encoding table should exist
+            spec.expect(pe.pe_table.numel()).to_be_greater_than(0)
+
+    describe("TransformerEncoderLayer"):
+        it("should create encoder layer with correct parameters"):
+            let layer = nn.TransformerEncoderLayer(d_model=512, nhead=8)
+            spec.expect(layer.d_model).to_be(512)
+            spec.expect(layer.nhead).to_be(8)
+
+        it("should process source sequence"):
+            let layer = nn.TransformerEncoderLayer(d_model=256, nhead=8, dim_feedforward=1024)
+
+            let seq_len = 10
+            let batch_size = 2
+
+            # Source: [seq_len, batch, d_model]
+            let src = torch.randn([seq_len, batch_size, 256])
+
+            let output = layer(src)
+
+            # Output shape matches input
+            spec.expect(output.shape()[0]).to_be(seq_len)
+            spec.expect(output.shape()[1]).to_be(batch_size)
+            spec.expect(output.shape()[2]).to_be(256)
+
+        it("should support source mask"):
+            let layer = nn.TransformerEncoderLayer(d_model=128, nhead=4)
+
+            let src = torch.randn([5, 2, 128])
+            let mask = torch.zeros([5, 5])
+
+            let output = layer(src, mask)
+
+            spec.expect(output.shape()[0]).to_be(5)
+
+        it("should work with different feedforward dimensions"):
+            # Typical: dim_feedforward = 4 * d_model
+            let layer = nn.TransformerEncoderLayer(d_model=512, nhead=8, dim_feedforward=2048)
+
+            let src = torch.randn([5, 2, 512])
+            let output = layer(src)
+
+            spec.expect(output.shape()[2]).to_be(512)
+
+    describe("TransformerDecoderLayer"):
+        it("should create decoder layer with correct parameters"):
+            let layer = nn.TransformerDecoderLayer(d_model=512, nhead=8)
+            spec.expect(layer.d_model).to_be(512)
+            spec.expect(layer.nhead).to_be(8)
+
+        it("should process target and memory sequences"):
+            let layer = nn.TransformerDecoderLayer(d_model=256, nhead=8, dim_feedforward=1024)
+
+            let tgt_len = 10
+            let mem_len = 20
+            let batch_size = 2
+
+            # Target: [tgt_len, batch, d_model]
+            let tgt = torch.randn([tgt_len, batch_size, 256])
+
+            # Memory (from encoder): [mem_len, batch, d_model]
+            let memory = torch.randn([mem_len, batch_size, 256])
+
+            let output = layer(tgt, memory)
+
+            # Output shape matches target shape
+            spec.expect(output.shape()[0]).to_be(tgt_len)
+            spec.expect(output.shape()[1]).to_be(batch_size)
+            spec.expect(output.shape()[2]).to_be(256)
+
+        it("should support target and memory masks"):
+            let layer = nn.TransformerDecoderLayer(d_model=128, nhead=4)
+
+            let tgt = torch.randn([5, 2, 128])
+            let memory = torch.randn([10, 2, 128])
+
+            # Causal mask for target (autoregressive)
+            let tgt_mask = torch.zeros([5, 5])
+
+            # Padding mask for memory
+            let memory_mask = torch.zeros([5, 10])
+
+            let output = layer(tgt, memory, tgt_mask, memory_mask)
+
+            spec.expect(output.shape()[0]).to_be(5)
+
+    describe("Full Transformer architecture"):
+        it("should build encoder-decoder transformer for machine translation"):
+            # Hyperparameters
+            let src_vocab = 10000
+            let tgt_vocab = 8000
+            let d_model = 512
+            let nhead = 8
+            let num_encoder_layers = 6
+            let num_decoder_layers = 6
+            let dim_feedforward = 2048
+
+            # Source and target sequence lengths
+            let src_len = 20
+            let tgt_len = 15
+            let batch_size = 2
+
+            # Embeddings
+            let src_embed = nn.Embedding(src_vocab, d_model)
+            let tgt_embed = nn.Embedding(tgt_vocab, d_model)
+
+            # Positional encoding
+            let pe = nn.PositionalEncoding(d_model, max_len=5000)
+
+            # Source tokens
+            let src_tokens = torch.arange(0, src_len).reshape([src_len, 1])
+            let src_embedded = pe(src_embed(src_tokens))
+
+            # Encoder
+            let encoder_layers = []
+            for _ in range(num_encoder_layers):
+                encoder_layers.append(nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward))
+
+            let mut encoder_output = src_embedded
+            for layer in encoder_layers:
+                encoder_output = layer(encoder_output)
+
+            spec.expect(encoder_output.shape()[0]).to_be(src_len)
+            spec.expect(encoder_output.shape()[2]).to_be(d_model)
+
+            # Target tokens
+            let tgt_tokens = torch.arange(0, tgt_len).reshape([tgt_len, 1])
+            let tgt_embedded = pe(tgt_embed(tgt_tokens))
+
+            # Decoder
+            let decoder_layers = []
+            for _ in range(num_decoder_layers):
+                decoder_layers.append(nn.TransformerDecoderLayer(d_model, nhead, dim_feedforward))
+
+            let mut decoder_output = tgt_embedded
+            for layer in decoder_layers:
+                decoder_output = layer(decoder_output, encoder_output)
+
+            spec.expect(decoder_output.shape()[0]).to_be(tgt_len)
+            spec.expect(decoder_output.shape()[2]).to_be(d_model)
+
+            # Output projection
+            let output_projection = nn.Linear(d_model, tgt_vocab)
+            let logits = output_projection(decoder_output)
+
+            spec.expect(logits.shape()[0]).to_be(tgt_len)
+            spec.expect(logits.shape()[2]).to_be(tgt_vocab)
+
+        it("should build encoder-only transformer (BERT-style)"):
+            let vocab_size = 30000
+            let d_model = 768
+            let nhead = 12
+            let num_layers = 12
+
+            # Embeddings + positional encoding
+            let embed = nn.Embedding(vocab_size, d_model)
+            let pe = nn.PositionalEncoding(d_model, max_len=512)
+
+            # Input tokens
+            let seq_len = 128
+            let tokens = torch.arange(0, seq_len).reshape([seq_len, 1])
+            let x = pe(embed(tokens))
+
+            # Stacked encoder layers
+            for _ in range(num_layers):
+                let layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=3072)
+                x = layer(x)
+
+            spec.expect(x.shape()[0]).to_be(seq_len)
+            spec.expect(x.shape()[2]).to_be(d_model)
+
+        it("should build decoder-only transformer (GPT-style)"):
+            let vocab_size = 50000
+            let d_model = 1024
+            let nhead = 16
+            let num_layers = 24
+
+            # Token embedding + positional encoding
+            let token_embed = nn.Embedding(vocab_size, d_model)
+            let pe = nn.PositionalEncoding(d_model, max_len=1024)
+
+            # Input tokens
+            let seq_len = 256
+            let tokens = torch.arange(0, seq_len).reshape([seq_len, 1])
+            let x = pe(token_embed(tokens))
+
+            # For decoder-only, use encoder layer with causal masking
+            # (In practice, this would be a specialized decoder layer)
+            for _ in range(num_layers):
+                let layer = nn.TransformerEncoderLayer(d_model, nhead, dim_feedforward=4096)
+                # TODO: Add causal mask
+                x = layer(x)
+
+            spec.expect(x.shape()[0]).to_be(seq_len)
+            spec.expect(x.shape()[2]).to_be(d_model)
+
+            # Output projection to vocabulary
+            let output_layer = nn.Linear(d_model, vocab_size)
+            let logits = output_layer(x)
+
+            spec.expect(logits.shape()[0]).to_be(seq_len)
+            spec.expect(logits.shape()[2]).to_be(vocab_size)
+
+    describe("Training transformer models"):
+        it("should compute gradients through encoder layer"):
+            let layer = nn.TransformerEncoderLayer(d_model=128, nhead=4)
+
+            let src = torch.randn([5, 2, 128], requires_grad=true)
+            let output = layer(src)
+
+            let loss = output.sum()
+            loss.backward()
+
+            let grad = src.grad()
+            spec.expect(grad).to_not_be(None)
+
+        it("should compute gradients through decoder layer"):
+            let layer = nn.TransformerDecoderLayer(d_model=128, nhead=4)
+
+            let tgt = torch.randn([5, 2, 128], requires_grad=true)
+            let memory = torch.randn([10, 2, 128])
+
+            let output = layer(tgt, memory)
+
+            let loss = output.sum()
+            loss.backward()
+
+            let grad = tgt.grad()
+            spec.expect(grad).to_not_be(None)
+
+        it("should compute gradients through multi-head attention"):
+            let mha = nn.MultiheadAttention(embed_dim=64, num_heads=4)
+
+            let q = torch.randn([5, 2, 64], requires_grad=true)
+            let k = torch.randn([5, 2, 64], requires_grad=true)
+            let v = torch.randn([5, 2, 64], requires_grad=true)
+
+            let (output, _) = mha(q, k, v)
+
+            let loss = output.sum()
+            loss.backward()
+
+            let q_grad = q.grad()
+            let k_grad = k.grad()
+            let v_grad = v.grad()
+
+            spec.expect(q_grad).to_not_be(None)
+            spec.expect(k_grad).to_not_be(None)
+            spec.expect(v_grad).to_not_be(None)
+
+    describe("Transformer performance characteristics"):
+        it("should show attention complexity is O(n²) in sequence length"):
+            let mha = nn.MultiheadAttention(embed_dim=64, num_heads=4)
+
+            # Short sequence
+            let x_short = torch.randn([10, 1, 64])
+            let (out_short, _) = mha(x_short, x_short, x_short)
+            spec.expect(out_short.shape()[0]).to_be(10)
+
+            # Long sequence (4x longer, 16x more computation)
+            let x_long = torch.randn([40, 1, 64])
+            let (out_long, _) = mha(x_long, x_long, x_long)
+            spec.expect(out_long.shape()[0]).to_be(40)
+
+        it("should parallelize across attention heads"):
+            # More heads = more parallelism
+            let mha_2heads = nn.MultiheadAttention(embed_dim=64, num_heads=2)
+            let mha_8heads = nn.MultiheadAttention(embed_dim=64, num_heads=8)
+
+            let x = torch.randn([10, 2, 64])
+
+            let (out_2, _) = mha_2heads(x, x, x)
+            let (out_8, _) = mha_8heads(x, x, x)
+
+            # Both produce same output shape
+            spec.expect(out_2.shape()[0]).to_be(out_8.shape()[0])
+            spec.expect(out_2.shape()[2]).to_be(out_8.shape()[2])

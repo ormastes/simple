@@ -5,7 +5,7 @@
 **Related Documents:**
 - [vulkan_dsl.md](../research/vulkan_dsl.md) - Research on Vulkan DSL design
 - [ui_framework_unified.md](../research/ui_framework_unified.md) - UI rendering with Vulkan
-- [gpu_simd.md](../spec/gpu_simd.md) - GPU compute specification (CUDA-based)
+- [gpu_simd/README.md](../spec/gpu_simd/README.md) - GPU compute specification (CUDA-based)
 - [feature.md](../features/feature.md) - Feature tracking
 
 ## Executive Summary

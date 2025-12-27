@@ -4,15 +4,15 @@ use crate::error::CompileError;
 use crate::value::{Value, Env};
 use simple_parser::ast::{Argument, FunctionDef, ClassDef};
 use std::collections::HashMap;
-use crate::interpreter::{
+use super::super::{
     evaluate_expr,
     eval_arg, eval_arg_usize,
     eval_array_map, eval_array_filter, eval_array_reduce,
     eval_array_find, eval_array_any, eval_array_all,
     eval_dict_map_values, eval_dict_filter,
+    exec_function, instantiate_class,
+    Enums, ImplMethods,
 };
-use super::super::Enums;
-use super::super::ImplMethods;
 
 /// Handle Array methods
 pub fn handle_array_methods(
@@ -20,8 +20,8 @@ pub fn handle_array_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -372,8 +372,8 @@ pub fn handle_tuple_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -452,8 +452,8 @@ pub fn handle_dict_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -518,7 +518,38 @@ pub fn handle_dict_methods(
             let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             return Ok(Some(eval_dict_filter(map, func, functions, classes, enums, impl_methods)?));
         }
-        _ => return Ok(None),
+        _ => {
+            // Check if the dict contains a callable value at this key (module-style calls)
+            if let Some(value) = map.get(method) {
+                match value {
+                    Value::Function { def, captured_env, .. } => {
+                        // Call the function with the provided arguments
+                        // Use the caller's env for evaluating arguments, but merge with captured_env for the function body
+                        let mut merged_env = captured_env.clone();
+                        merged_env.extend(env.clone());
+                        let result = exec_function(def, args, &merged_env, functions, classes, enums, impl_methods, None)?;
+                        return Ok(Some(result));
+                    }
+                    Value::Lambda { params, body, env: captured } => {
+                        // Call the lambda
+                        let mut local_env = captured.clone();
+                        for (i, param) in params.iter().enumerate() {
+                            let arg_val = eval_arg(args, i, Value::Nil, env, functions, classes, enums, impl_methods)?;
+                            local_env.insert(param.clone(), arg_val);
+                        }
+                        let result = evaluate_expr(body, &local_env, functions, classes, enums, impl_methods)?;
+                        return Ok(Some(result));
+                    }
+                    Value::Constructor { class_name } => {
+                        // Instantiate the class
+                        let result = instantiate_class(class_name, args, env, functions, classes, enums, impl_methods)?;
+                        return Ok(Some(result));
+                    }
+                    _ => return Ok(None),
+                }
+            }
+            return Ok(None);
+        }
     };
     Ok(Some(result))
 }

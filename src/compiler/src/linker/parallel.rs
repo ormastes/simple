@@ -461,6 +461,9 @@ mod tests {
             section_index: 0,
             value: 0,
             size: 1,
+            layout_phase: 0,
+            is_event_loop_anchor: false,
+            layout_pinned: false,
         };
         module.add_symbol(symbol);
 
@@ -479,6 +482,9 @@ mod tests {
             section_index: 0,
             value: 0,
             size: 10,
+            layout_phase: 0,
+            is_event_loop_anchor: false,
+            layout_pinned: false,
         };
 
         let sym2 = SmfSymbol {
@@ -488,6 +494,9 @@ mod tests {
             section_index: 0,
             value: 10,
             size: 20,
+            layout_phase: 0,
+            is_event_loop_anchor: false,
+            layout_pinned: false,
         };
 
         let idx1 = table.add_symbol(sym1, "module1");
@@ -509,6 +518,9 @@ mod tests {
             section_index: 0,
             value: 0,
             size: 10,
+            layout_phase: 0,
+            is_event_loop_anchor: false,
+            layout_pinned: false,
         };
 
         let sym2 = SmfSymbol {
@@ -518,6 +530,9 @@ mod tests {
             section_index: 1,
             value: 100,
             size: 20,
+            layout_phase: 0,
+            is_event_loop_anchor: false,
+            layout_pinned: false,
         };
 
         let idx1 = table.add_symbol(sym1, "module1");
@@ -570,6 +585,9 @@ mod tests {
             section_index: 0,
             value: 0,
             size: 2,
+            layout_phase: 0,
+            is_event_loop_anchor: false,
+            layout_pinned: false,
         };
         module.add_symbol(symbol);
 

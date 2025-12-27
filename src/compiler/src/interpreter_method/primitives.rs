@@ -4,12 +4,11 @@ use crate::error::CompileError;
 use crate::value::{Value, Env};
 use simple_parser::ast::{Argument, FunctionDef, ClassDef};
 use std::collections::HashMap;
-use crate::interpreter::{
+use super::super::{
     evaluate_expr,
     eval_arg, eval_arg_int, eval_arg_usize,
+    Enums, ImplMethods,
 };
-use super::super::Enums;
-use super::super::ImplMethods;
 
 /// Handle Int methods
 pub fn handle_int_methods(
@@ -17,8 +16,8 @@ pub fn handle_int_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -101,8 +100,8 @@ pub fn handle_float_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -199,8 +198,8 @@ pub fn handle_bool_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {

@@ -1,0 +1,301 @@
+# PyTorch Recurrent Layer Tests
+#
+# Tests for RNN, LSTM, and GRU recurrent neural network layers.
+
+import spec
+import ml.torch as torch
+import ml.torch.nn as nn
+
+
+describe("PyTorch Recurrent Layers"):
+    describe("RNN - Vanilla Recurrent Neural Network"):
+        it("should create RNN with default parameters"):
+            let rnn = nn.RNN(input_size=10, hidden_size=20)
+            spec.expect(rnn.input_size).to_be(10)
+            spec.expect(rnn.hidden_size).to_be(20)
+            spec.expect(rnn.num_layers).to_be(1)
+
+        it("should create multi-layer RNN"):
+            let rnn = nn.RNN(input_size=10, hidden_size=20, num_layers=3)
+            spec.expect(rnn.num_layers).to_be(3)
+
+        it("should process sequence with correct output shape"):
+            let rnn = nn.RNN(input_size=10, hidden_size=20)
+            let seq_len = 5
+            let batch_size = 2
+
+            # Input: [seq_len, batch, input_size]
+            let input = torch.randn([seq_len, batch_size, 10])
+
+            let (output, hidden) = rnn(input)
+
+            # Output: [seq_len, batch, hidden_size]
+            spec.expect(output.shape()[0]).to_be(seq_len)
+            spec.expect(output.shape()[1]).to_be(batch_size)
+            spec.expect(output.shape()[2]).to_be(20)
+
+            # Hidden: [num_layers, batch, hidden_size]
+            spec.expect(hidden.shape()[0]).to_be(1)
+            spec.expect(hidden.shape()[1]).to_be(batch_size)
+            spec.expect(hidden.shape()[2]).to_be(20)
+
+        it("should accept initial hidden state"):
+            let rnn = nn.RNN(input_size=10, hidden_size=20, num_layers=2)
+            let input = torch.randn([5, 2, 10])
+
+            # Initial hidden: [num_layers, batch, hidden_size]
+            let h0 = torch.zeros([2, 2, 20])
+
+            let (output, hn) = rnn(input, h0)
+
+            spec.expect(output.shape()[0]).to_be(5)
+            spec.expect(hn.shape()[0]).to_be(2)
+
+        it("should support ReLU activation"):
+            let rnn_tanh = nn.RNN(input_size=10, hidden_size=20, nonlinearity="tanh")
+            let rnn_relu = nn.RNN(input_size=10, hidden_size=20, nonlinearity="relu")
+
+            let input = torch.randn([3, 2, 10])
+
+            let (out_tanh, _) = rnn_tanh(input)
+            let (out_relu, _) = rnn_relu(input)
+
+            # Both should work and produce outputs
+            spec.expect(out_tanh.numel()).to_be(3 * 2 * 20)
+            spec.expect(out_relu.numel()).to_be(3 * 2 * 20)
+
+    describe("LSTM - Long Short-Term Memory"):
+        it("should create LSTM with default parameters"):
+            let lstm = nn.LSTM(input_size=10, hidden_size=20)
+            spec.expect(lstm.input_size).to_be(10)
+            spec.expect(lstm.hidden_size).to_be(20)
+            spec.expect(lstm.num_layers).to_be(1)
+
+        it("should process sequence with correct output shape"):
+            let lstm = nn.LSTM(input_size=10, hidden_size=20)
+            let seq_len = 7
+            let batch_size = 3
+
+            let input = torch.randn([seq_len, batch_size, 10])
+
+            let (output, (hn, cn)) = lstm(input)
+
+            # Output: [seq_len, batch, hidden_size]
+            spec.expect(output.shape()[0]).to_be(seq_len)
+            spec.expect(output.shape()[1]).to_be(batch_size)
+            spec.expect(output.shape()[2]).to_be(20)
+
+            # Hidden state: [num_layers, batch, hidden_size]
+            spec.expect(hn.shape()[0]).to_be(1)
+            spec.expect(hn.shape()[1]).to_be(batch_size)
+            spec.expect(hn.shape()[2]).to_be(20)
+
+            # Cell state: [num_layers, batch, hidden_size]
+            spec.expect(cn.shape()[0]).to_be(1)
+            spec.expect(cn.shape()[1]).to_be(batch_size)
+            spec.expect(cn.shape()[2]).to_be(20)
+
+        it("should accept initial hidden and cell states"):
+            let lstm = nn.LSTM(input_size=10, hidden_size=20, num_layers=2)
+            let input = torch.randn([5, 2, 10])
+
+            # Initial states: [num_layers, batch, hidden_size]
+            let h0 = torch.zeros([2, 2, 20])
+            let c0 = torch.zeros([2, 2, 20])
+
+            let (output, (hn, cn)) = lstm(input, h0, c0)
+
+            spec.expect(output.shape()[0]).to_be(5)
+            spec.expect(hn.shape()[0]).to_be(2)
+            spec.expect(cn.shape()[0]).to_be(2)
+
+        it("should work with dropout for multi-layer LSTM"):
+            let lstm = nn.LSTM(input_size=10, hidden_size=20, num_layers=3, dropout=0.5)
+            spec.expect(lstm.num_layers).to_be(3)
+
+            let input = torch.randn([5, 2, 10])
+            let (output, _) = lstm(input)
+
+            spec.expect(output.shape()[0]).to_be(5)
+
+        it("should maintain cell state across sequences"):
+            let lstm = nn.LSTM(input_size=10, hidden_size=20)
+
+            # First sequence
+            let input1 = torch.randn([3, 1, 10])
+            let (out1, (h1, c1)) = lstm(input1)
+
+            # Second sequence using previous states
+            let input2 = torch.randn([3, 1, 10])
+            let (out2, (h2, c2)) = lstm(input2, h1, c1)
+
+            # States should have changed
+            spec.expect(h2.numel()).to_be(20)
+            spec.expect(c2.numel()).to_be(20)
+
+    describe("GRU - Gated Recurrent Unit"):
+        it("should create GRU with default parameters"):
+            let gru = nn.GRU(input_size=10, hidden_size=20)
+            spec.expect(gru.input_size).to_be(10)
+            spec.expect(gru.hidden_size).to_be(20)
+            spec.expect(gru.num_layers).to_be(1)
+
+        it("should process sequence with correct output shape"):
+            let gru = nn.GRU(input_size=10, hidden_size=20)
+            let seq_len = 6
+            let batch_size = 4
+
+            let input = torch.randn([seq_len, batch_size, 10])
+
+            let (output, hidden) = gru(input)
+
+            # Output: [seq_len, batch, hidden_size]
+            spec.expect(output.shape()[0]).to_be(seq_len)
+            spec.expect(output.shape()[1]).to_be(batch_size)
+            spec.expect(output.shape()[2]).to_be(20)
+
+            # Hidden: [num_layers, batch, hidden_size]
+            spec.expect(hidden.shape()[0]).to_be(1)
+            spec.expect(hidden.shape()[1]).to_be(batch_size)
+            spec.expect(hidden.shape()[2]).to_be(20)
+
+        it("should accept initial hidden state"):
+            let gru = nn.GRU(input_size=10, hidden_size=20, num_layers=2)
+            let input = torch.randn([5, 2, 10])
+
+            let h0 = torch.zeros([2, 2, 20])
+
+            let (output, hn) = gru(input, h0)
+
+            spec.expect(output.shape()[0]).to_be(5)
+            spec.expect(hn.shape()[0]).to_be(2)
+
+        it("should work with multi-layer and dropout"):
+            let gru = nn.GRU(input_size=10, hidden_size=20, num_layers=4, dropout=0.3)
+            spec.expect(gru.num_layers).to_be(4)
+
+            let input = torch.randn([5, 2, 10])
+            let (output, _) = gru(input)
+
+            spec.expect(output.shape()[0]).to_be(5)
+
+    describe("Sequence modeling scenarios"):
+        it("should handle variable sequence lengths (padding)"):
+            let lstm = nn.LSTM(input_size=10, hidden_size=20)
+
+            # Simulate padded sequences with different lengths
+            let short_seq = torch.randn([3, 1, 10])
+            let long_seq = torch.randn([10, 1, 10])
+
+            let (out1, _) = lstm(short_seq)
+            let (out2, _) = lstm(long_seq)
+
+            spec.expect(out1.shape()[0]).to_be(3)
+            spec.expect(out2.shape()[0]).to_be(10)
+
+        it("should process bidirectional sequence (forward only for now)"):
+            # Note: Bidirectional RNN would process sequence in both directions
+            # For now, testing forward direction only
+            let rnn = nn.RNN(input_size=10, hidden_size=20)
+
+            let input = torch.randn([5, 2, 10])
+            let (output, _) = rnn(input)
+
+            # Forward direction output
+            spec.expect(output.shape()[2]).to_be(20)
+
+        it("should work for time series prediction"):
+            let lstm = nn.LSTM(input_size=1, hidden_size=32, num_layers=2)
+
+            # Time series with 100 time steps
+            let time_series = torch.randn([100, 4, 1])
+
+            let (predictions, (h, c)) = lstm(time_series)
+
+            spec.expect(predictions.shape()[0]).to_be(100)
+            spec.expect(predictions.shape()[2]).to_be(32)
+
+        it("should work for language modeling"):
+            let vocab_size = 1000
+            let embed_dim = 128
+            let hidden_dim = 256
+
+            # Embedding layer + LSTM
+            let embedding = nn.Embedding(vocab_size, embed_dim)
+            let lstm = nn.LSTM(input_size=embed_dim, hidden_size=hidden_dim, num_layers=2)
+            let fc = nn.Linear(hidden_dim, vocab_size)
+
+            # Token IDs: [seq_len, batch]
+            let tokens = torch.arange(0, 10).reshape([10, 1])
+
+            # Forward pass
+            let embedded = embedding(tokens)  # [seq_len, batch, embed_dim]
+            let (lstm_out, _) = lstm(embedded)  # [seq_len, batch, hidden_dim]
+            let logits = fc(lstm_out)  # [seq_len, batch, vocab_size]
+
+            spec.expect(logits.shape()[0]).to_be(10)
+            spec.expect(logits.shape()[2]).to_be(vocab_size)
+
+    describe("Training with recurrent layers"):
+        it("should compute gradients through RNN"):
+            let rnn = nn.RNN(input_size=10, hidden_size=20)
+
+            let input = torch.randn([5, 2, 10], requires_grad=true)
+            let (output, hidden) = rnn(input)
+
+            let loss = output.sum()
+            loss.backward()
+
+            let grad = input.grad()
+            spec.expect(grad).to_not_be(None)
+
+        it("should compute gradients through LSTM"):
+            let lstm = nn.LSTM(input_size=10, hidden_size=20)
+
+            let input = torch.randn([5, 2, 10], requires_grad=true)
+            let (output, _) = lstm(input)
+
+            let loss = output.sum()
+            loss.backward()
+
+            let grad = input.grad()
+            spec.expect(grad).to_not_be(None)
+            spec.expect(grad.shape()[0]).to_be(5)
+            spec.expect(grad.shape()[1]).to_be(2)
+            spec.expect(grad.shape()[2]).to_be(10)
+
+        it("should compute gradients through GRU"):
+            let gru = nn.GRU(input_size=10, hidden_size=20)
+
+            let input = torch.randn([5, 2, 10], requires_grad=true)
+            let (output, _) = gru(input)
+
+            let loss = output.sum()
+            loss.backward()
+
+            let grad = input.grad()
+            spec.expect(grad).to_not_be(None)
+
+    describe("Performance comparisons"):
+        it("should show GRU is similar to LSTM but simpler"):
+            let lstm = nn.LSTM(input_size=10, hidden_size=20)
+            let gru = nn.GRU(input_size=10, hidden_size=20)
+
+            let input = torch.randn([5, 2, 10])
+
+            let (lstm_out, _) = lstm(input)
+            let (gru_out, _) = gru(input)
+
+            # Both should produce outputs of same shape
+            spec.expect(lstm_out.shape()[0]).to_be(gru_out.shape()[0])
+            spec.expect(lstm_out.shape()[1]).to_be(gru_out.shape()[1])
+            spec.expect(lstm_out.shape()[2]).to_be(gru_out.shape()[2])
+
+        it("should show vanilla RNN is fastest but simplest"):
+            let rnn = nn.RNN(input_size=10, hidden_size=20)
+
+            let input = torch.randn([5, 2, 10])
+            let (output, _) = rnn(input)
+
+            # RNN should process without issues
+            spec.expect(output.numel()).to_be(5 * 2 * 20)

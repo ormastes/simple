@@ -1,0 +1,238 @@
+# Basic 3D Graphics Example
+#
+# Demonstrates the Simple 3D graphics engine with:
+# - Scene creation and hierarchy
+# - Mesh primitives (cube, sphere)
+# - PBR materials (gold, silver)
+# - Lighting (directional + point lights)
+# - Camera setup and rendering
+
+import graphics.*
+import graphics.scene.*
+import graphics.render.*
+import graphics.resources.*
+import std.io
+
+fn main():
+    io.println("Simple 3D Graphics Engine - Basic Example")
+    io.println("=========================================")
+
+    # =============================================================================
+    # 1. Initialize Resource Manager
+    # =============================================================================
+    let mut resources = ResourceManager::new()
+    resources.init_defaults()
+
+    io.println("\n[1] Resource Manager Initialized")
+    resources.print_statistics()
+
+    # =============================================================================
+    # 2. Create Scene
+    # =============================================================================
+    let mut scene = Scene::new("Demo Scene")
+    let root = scene.get_root_mut()
+
+    io.println("\n[2] Scene Created: Demo Scene")
+
+    # =============================================================================
+    # 3. Register Custom Materials
+    # =============================================================================
+
+    # Gold cube material (metallic)
+    let gold_material = resources.materials().register_pbr_gold()
+
+    # Silver sphere material (metallic, smoother)
+    let silver_material = resources.materials().register_pbr_silver()
+
+    # Red plastic material (dielectric)
+    let red_plastic = resources.materials().register_pbr(
+        Color::red(),
+        0.0,   # metallic = 0 (dielectric)
+        0.4    # roughness = 0.4 (slightly glossy)
+    )
+
+    io.println("\n[3] Materials Registered")
+    io.println("  - Gold (metallic, rough)")
+    io.println("  - Silver (metallic, smooth)")
+    io.println("  - Red Plastic (dielectric)")
+
+    # =============================================================================
+    # 4. Register Meshes
+    # =============================================================================
+
+    let cube_mesh = resources.meshes().register_cube()
+    let sphere_mesh = resources.meshes().register_sphere(32)
+    let plane_mesh = resources.meshes().register_plane(10)
+
+    io.println("\n[4] Meshes Registered")
+    io.println("  - Cube")
+    io.println("  - Sphere (32 segments)")
+    io.println("  - Plane (10x10 grid)")
+
+    # =============================================================================
+    # 5. Create Scene Nodes
+    # =============================================================================
+
+    # Create ground plane
+    let ground_id = scene.create_node("Ground")
+    let mut ground_node = SceneNode::new(ground_id, "Ground")
+    ground_node.translate(Vec3::new(0.0, -2.0, 0.0))
+    ground_node.scale_uniform(10.0)
+    ground_node.add_component(Component::MeshRenderer(plane_mesh, red_plastic))
+    root.add_child(ground_node)
+
+    # Create rotating gold cube
+    let cube_id = scene.create_node("Gold Cube")
+    let mut cube_node = SceneNode::new(cube_id, "Gold Cube")
+    cube_node.translate(Vec3::new(-2.0, 0.0, 0.0))
+    cube_node.rotate_euler(0.0, 0.785, 0.0)  # 45 degrees Y rotation
+    cube_node.add_component(Component::MeshRenderer(cube_mesh, gold_material))
+    root.add_child(cube_node)
+
+    # Create silver sphere
+    let sphere_id = scene.create_node("Silver Sphere")
+    let mut sphere_node = SceneNode::new(sphere_id, "Silver Sphere")
+    sphere_node.translate(Vec3::new(2.0, 0.0, 0.0))
+    sphere_node.scale_uniform(0.8)
+    sphere_node.add_component(Component::MeshRenderer(sphere_mesh, silver_material))
+    root.add_child(sphere_node)
+
+    io.println("\n[5] Scene Nodes Created")
+    io.println("  - Ground (plane, red plastic)")
+    io.println("  - Gold Cube (at -2,0,0)")
+    io.println("  - Silver Sphere (at 2,0,0)")
+
+    # =============================================================================
+    # 6. Add Lighting
+    # =============================================================================
+
+    # Directional light (sun)
+    let light_id = scene.create_node("Sun")
+    let mut light_node = SceneNode::new(light_id, "Sun")
+    let directional = DirectionalLight::new(
+        Vec3::new(-1.0, -1.0, -0.5),  # Direction
+        Color::white(),                # Color
+        1.0                            # Intensity
+    )
+    light_node.add_component(Component::Light(Light::Directional(directional)))
+    root.add_child(light_node)
+
+    # Point light (above scene)
+    let point_light_id = scene.create_node("Point Light")
+    let mut point_light_node = SceneNode::new(point_light_id, "Point Light")
+    point_light_node.translate(Vec3::new(0.0, 3.0, 2.0))
+    let point = PointLight::with_range(
+        Vec3::zero(),                  # Local position (offset by node transform)
+        Color::from_hex(0xFFE5B4),    # Warm white color
+        0.8,                           # Intensity
+        50.0                           # Range
+    )
+    point_light_node.add_component(Component::Light(Light::Point(point)))
+    root.add_child(point_light_node)
+
+    io.println("\n[6] Lights Added")
+    io.println("  - Directional light (sun)")
+    io.println("  - Point light (warm, above scene)")
+
+    # =============================================================================
+    # 7. Create Camera
+    # =============================================================================
+
+    let camera_id = scene.create_node("Main Camera")
+    let mut camera_node = SceneNode::new(camera_id, "Main Camera")
+    camera_node.translate(Vec3::new(0.0, 2.0, 8.0))
+
+    let camera = Camera::perspective(
+        1.047,        # FOV: 60 degrees (in radians)
+        1920.0 / 1080.0,  # Aspect ratio: 16:9
+        0.1,          # Near plane
+        100.0         # Far plane
+    )
+
+    # Look at origin
+    let look_at = camera.look_at(
+        Vec3::new(0.0, 2.0, 8.0),   # Eye position
+        Vec3::zero(),                # Target (origin)
+        Vec3::new(0.0, 1.0, 0.0)    # Up vector
+    )
+
+    camera_node.add_component(Component::Camera(look_at))
+    root.add_child(camera_node)
+
+    io.println("\n[7] Camera Created")
+    io.println("  - Position: (0, 2, 8)")
+    io.println("  - Looking at: (0, 0, 0)")
+    io.println("  - FOV: 60 degrees")
+
+    # =============================================================================
+    # 8. Scene Statistics
+    # =============================================================================
+
+    io.println("\n[8] Scene Statistics")
+    io.println("  - Total nodes: " + scene.node_count().to_string())
+    io.println("  - Max depth: " + scene.max_depth().to_string())
+
+    let cameras = scene.find_all_cameras()
+    io.println("  - Cameras: " + cameras.len().to_string())
+
+    let lights = scene.find_all_lights()
+    io.println("  - Lights: " + lights.len().to_string())
+
+    let renderers = scene.find_all_mesh_renderers()
+    io.println("  - Mesh renderers: " + renderers.len().to_string())
+
+    # =============================================================================
+    # 9. Render Setup (would render with Vulkan backend)
+    # =============================================================================
+
+    io.println("\n[9] Rendering Setup")
+    io.println("  - Render target: 1920x1080")
+    io.println("  - Pipeline: Forward (Phong lighting)")
+
+    # Create renderer (640x480 for demo)
+    # let mut renderer = Renderer3D::new(1920, 1080)
+    # renderer.set_clear_color(Color::new(0.2, 0.3, 0.4, 1.0))
+
+    # Get active camera
+    # let active_camera = scene.get_active_camera().unwrap()
+
+    # Render loop (single frame demo)
+    # renderer.render(scene, active_camera)
+
+    io.println("\n  Note: Vulkan FFI implementation required for actual rendering")
+    io.println("  This example demonstrates the API structure and scene setup")
+
+    # =============================================================================
+    # 10. Scene Traversal Demo
+    # =============================================================================
+
+    io.println("\n[10] Scene Traversal (Depth-First)")
+
+    scene.traverse(|node, world_transform| {
+        io.println("  - Node: " + node.get_name())
+
+        if node.has_mesh_renderer():
+            io.println("    → Has mesh renderer")
+
+        if node.has_light():
+            io.println("    → Has light")
+
+        if node.has_camera():
+            io.println("    → Has camera")
+    })
+
+    # =============================================================================
+    # Cleanup
+    # =============================================================================
+
+    io.println("\n[COMPLETE] 3D Scene Setup Finished")
+    io.println("=========================================")
+
+    return 0
+
+# =============================================================================
+# Helper: Convert degrees to radians
+# =============================================================================
+
+fn degrees_to_radians(degrees: f32) -> f32:
+    return degrees * 3.14159265 / 180.0

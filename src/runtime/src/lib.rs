@@ -266,6 +266,25 @@ pub use value::{
     VulkanFfiError,
 };
 
+// Re-export Ratatui TUI FFI functions
+#[cfg(feature = "ratatui-tui")]
+pub use value::{
+    // Terminal operations
+    ratatui_terminal_new, ratatui_terminal_cleanup,
+    ratatui_terminal_clear,
+    // Text buffer operations
+    ratatui_textbuffer_new,
+    ratatui_textbuffer_insert_char, ratatui_textbuffer_backspace,
+    ratatui_textbuffer_newline,
+    ratatui_textbuffer_get_text, ratatui_textbuffer_set_text,
+    // Rendering
+    ratatui_render_textbuffer,
+    // Event handling
+    ratatui_read_event, ratatui_read_event_timeout,
+    // Cleanup
+    ratatui_object_destroy,
+};
+
 // Re-export CPU parallel runtime FFI functions (Rayon backend)
 pub use parallel::{
     // Kernel context

@@ -1,16 +1,21 @@
-// Native networking implementations for the interpreter
-//
-// This module provides implementations for extern functions declared in:
-// - simple/std_lib/src/host/async_nogc_mut/net/tcp.spl
-// - simple/std_lib/src/host/async_nogc_mut/net/udp.spl
-// - simple/std_lib/src/host/async_nogc_mut/net/http.spl
-//
-// Note: This file is include!'d into interpreter.rs, so it inherits imports from there.
+//! Native networking implementations for the interpreter
+//!
+//! This module provides implementations for extern functions declared in:
+//! - simple/std_lib/src/host/async_nogc_mut/net/tcp.spl
+//! - simple/std_lib/src/host/async_nogc_mut/net/udp.spl
+//! - simple/std_lib/src/host/async_nogc_mut/net/http.spl
 
+use crate::error::CompileError;
+use crate::value::Value;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::collections::HashMap as StdHashMap;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::time::Duration;
-// Note: ErrorKind, Read, Write are already imported from interpreter_native_io.rs
+
+// Import shared helper functions from interpreter_native_io
+use super::interpreter_native_io::extract_bytes;
 
 //==============================================================================
 // Socket Handle Pool
@@ -96,6 +101,105 @@ where
 
 fn release_socket(id: i64) -> bool {
     SOCKET_HANDLES.with(|handles| handles.borrow_mut().remove(&id).is_some())
+}
+
+//==============================================================================
+// Helper Macros for Reducing Duplication
+//==============================================================================
+
+/// Wrap operation result with net_ok/net_err
+macro_rules! net_result {
+    ($expr:expr) => {
+        match $expr {
+            Ok(v) => Ok(net_ok(v)),
+            Err(e) => Ok(net_err(e)),
+        }
+    };
+}
+
+/// Extract handle, call with_tcp_stream, wrap result with net_ok/net_err
+macro_rules! with_tcp_stream_op {
+    ($args:expr, $idx:expr, $op:expr) => {{
+        let handle = extract_handle($args, $idx)?;
+        net_result!(with_tcp_stream(handle, $op))
+    }};
+}
+
+/// Extract handle, call with_tcp_stream_mut, wrap result with net_ok/net_err
+macro_rules! with_tcp_stream_mut_op {
+    ($args:expr, $idx:expr, $op:expr) => {{
+        let handle = extract_handle($args, $idx)?;
+        net_result!(with_tcp_stream_mut(handle, $op))
+    }};
+}
+
+/// Extract handle, call with_udp_socket, wrap result with net_ok/net_err
+macro_rules! with_udp_socket_op {
+    ($args:expr, $idx:expr, $op:expr) => {{
+        let handle = extract_handle($args, $idx)?;
+        net_result!(with_udp_socket(handle, $op))
+    }};
+}
+
+/// Extract handle + timeout, call setter, wrap result (for nil-returning operations)
+macro_rules! set_timeout_op {
+    ($args:expr, $with_fn:ident, $setter:ident) => {{
+        let handle = extract_handle($args, 0)?;
+        let timeout = extract_timeout($args, 1);
+        net_result!($with_fn(handle, |socket| socket.$setter(timeout).map(|_| Value::Nil)))
+    }};
+}
+
+/// Extract handle + bool, call setter, wrap result (for nil-returning operations)
+macro_rules! set_bool_op {
+    ($args:expr, $with_fn:ident, $setter:ident, $default:expr) => {{
+        let handle = extract_handle($args, 0)?;
+        let flag = $args.get(1).map(|v| v.truthy()).unwrap_or($default);
+        net_result!($with_fn(handle, |socket| socket.$setter(flag).map(|_| Value::Nil)))
+    }};
+}
+
+/// Read into buffer and convert to Value::Array (for operations returning (size, data))
+macro_rules! read_to_array {
+    ($args:expr, $buf_len_idx:expr, $default_len:expr, $with_fn:ident, $read_fn:ident) => {{
+        let handle = extract_handle($args, 0)?;
+        let buf_len = $args.get($buf_len_idx).and_then(|v| v.as_int().ok()).unwrap_or($default_len) as usize;
+
+        let mut buf = vec![0u8; buf_len];
+        match $with_fn(handle, |socket| socket.$read_fn(&mut buf)) {
+            Ok(n) => {
+                buf.truncate(n);
+                let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
+                Ok(net_ok(Value::Array(vec![
+                    Value::Int(arr.len() as i64),
+                    Value::Array(arr),
+                ])))
+            }
+            Err(e) => Ok(net_err(e)),
+        }
+    }};
+}
+
+/// Read into buffer from address and convert to Value::Array (for operations returning (size, addr, data))
+macro_rules! read_from_to_array {
+    ($args:expr, $buf_len_idx:expr, $default_len:expr, $read_fn:ident) => {{
+        let handle = extract_handle($args, 0)?;
+        let buf_len = $args.get($buf_len_idx).and_then(|v| v.as_int().ok()).unwrap_or($default_len) as usize;
+
+        let mut buf = vec![0u8; buf_len];
+        match with_udp_socket(handle, |socket| socket.$read_fn(&mut buf)) {
+            Ok((n, addr)) => {
+                buf.truncate(n);
+                let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
+                Ok(net_ok(Value::Array(vec![
+                    Value::Int(arr.len() as i64),
+                    Value::Str(addr.to_string()),
+                    Value::Array(arr),
+                ])))
+            }
+            Err(e) => Ok(net_err(e)),
+        }
+    }};
 }
 
 //==============================================================================
@@ -303,64 +407,29 @@ pub fn native_tcp_connect_timeout_interp(args: &[Value]) -> Result<Value, Compil
     let addr = extract_socket_addr(args, 0)?;
     let timeout = extract_timeout(args, 1).unwrap_or(Duration::from_secs(30));
 
-    match TcpStream::connect_timeout(&addr, timeout) {
-        Ok(stream) => {
-            let local_addr = stream.local_addr().map(|a| a.to_string()).unwrap_or_default();
-            let handle = allocate_socket(SocketHandle::TcpStream(stream));
-            Ok(net_ok(Value::Array(vec![
-                Value::Int(handle),
-                Value::Str(local_addr),
-            ])))
-        }
-        Err(e) => Ok(net_err(e)),
-    }
+    net_result!(TcpStream::connect_timeout(&addr, timeout).map(|stream| {
+        let local_addr = stream.local_addr().map(|a| a.to_string()).unwrap_or_default();
+        let handle = allocate_socket(SocketHandle::TcpStream(stream));
+        Value::Array(vec![Value::Int(handle), Value::Str(local_addr)])
+    }))
 }
 
 pub fn native_tcp_read_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let buf_len = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096) as usize;
-
-    let mut buf = vec![0u8; buf_len];
-    match with_tcp_stream_mut(handle, |stream| stream.read(&mut buf)) {
-        Ok(n) => {
-            buf.truncate(n);
-            let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(net_ok(Value::Array(vec![
-                Value::Int(arr.len() as i64),
-                Value::Array(arr),
-            ])))
-        }
-        Err(e) => Ok(net_err(e)),
-    }
+    read_to_array!(args, 1, 4096, with_tcp_stream_mut, read)
 }
 
 pub fn native_tcp_write_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let data = extract_bytes(args, 1)?;
-
-    match with_tcp_stream_mut(handle, |stream| stream.write(&data)) {
-        Ok(n) => Ok(net_ok(Value::Int(n as i64))),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_tcp_stream_mut_op!(args, 0, |stream| stream.write(&data).map(|n| Value::Int(n as i64)))
 }
 
 pub fn native_tcp_flush_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-
-    match with_tcp_stream_mut(handle, |stream| stream.flush()) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_tcp_stream_mut_op!(args, 0, |stream| stream.flush().map(|_| Value::Nil))
 }
 
 pub fn native_tcp_shutdown_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let how = extract_shutdown_how(args, 1);
-
-    match with_tcp_stream(handle, |stream| stream.shutdown(how)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_tcp_stream_op!(args, 0, |stream| stream.shutdown(how).map(|_| Value::Nil))
 }
 
 pub fn native_tcp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -374,60 +443,23 @@ pub fn native_tcp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn native_tcp_set_nodelay_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let nodelay = args.get(1).map(|v| v.truthy()).unwrap_or(true);
-
-    match with_tcp_stream(handle, |stream| stream.set_nodelay(nodelay)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    set_bool_op!(args, with_tcp_stream, set_nodelay, true)
 }
 
 pub fn native_tcp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let timeout = extract_timeout(args, 1);
-
-    match with_tcp_stream(handle, |stream| stream.set_read_timeout(timeout)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    set_timeout_op!(args, with_tcp_stream, set_read_timeout)
 }
 
 pub fn native_tcp_set_write_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let timeout = extract_timeout(args, 1);
-
-    match with_tcp_stream(handle, |stream| stream.set_write_timeout(timeout)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    set_timeout_op!(args, with_tcp_stream, set_write_timeout)
 }
 
 pub fn native_tcp_get_nodelay_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-
-    match with_tcp_stream(handle, |stream| stream.nodelay()) {
-        Ok(nodelay) => Ok(net_ok(Value::Bool(nodelay))),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_tcp_stream_op!(args, 0, |stream| stream.nodelay().map(Value::Bool))
 }
 
 pub fn native_tcp_peek_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let buf_len = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(4096) as usize;
-
-    let mut buf = vec![0u8; buf_len];
-    match with_tcp_stream(handle, |stream| stream.peek(&mut buf)) {
-        Ok(n) => {
-            buf.truncate(n);
-            let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(net_ok(Value::Array(vec![
-                Value::Int(arr.len() as i64),
-                Value::Array(arr),
-            ])))
-        }
-        Err(e) => Ok(net_err(e)),
-    }
+    read_to_array!(args, 1, 4096, with_tcp_stream, peek)
 }
 
 //==============================================================================
@@ -450,50 +482,16 @@ pub fn native_udp_bind_interp(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn native_udp_connect_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let addr = extract_socket_addr(args, 1)?;
-
-    match with_udp_socket(handle, |socket| socket.connect(addr)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.connect(addr).map(|_| Value::Nil))
 }
 
 pub fn native_udp_recv_from_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let buf_len = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(65535) as usize;
-
-    let mut buf = vec![0u8; buf_len];
-    match with_udp_socket(handle, |socket| socket.recv_from(&mut buf)) {
-        Ok((n, addr)) => {
-            buf.truncate(n);
-            let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(net_ok(Value::Array(vec![
-                Value::Int(arr.len() as i64),
-                Value::Str(addr.to_string()),
-                Value::Array(arr),
-            ])))
-        }
-        Err(e) => Ok(net_err(e)),
-    }
+    read_from_to_array!(args, 1, 65535, recv_from)
 }
 
 pub fn native_udp_recv_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let buf_len = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(65535) as usize;
-
-    let mut buf = vec![0u8; buf_len];
-    match with_udp_socket(handle, |socket| socket.recv(&mut buf)) {
-        Ok(n) => {
-            buf.truncate(n);
-            let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(net_ok(Value::Array(vec![
-                Value::Int(arr.len() as i64),
-                Value::Array(arr),
-            ])))
-        }
-        Err(e) => Ok(net_err(e)),
-    }
+    read_to_array!(args, 1, 65535, with_udp_socket, recv)
 }
 
 pub fn native_udp_send_to_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -510,13 +508,8 @@ pub fn native_udp_send_to_interp(args: &[Value]) -> Result<Value, CompileError> 
 }
 
 pub fn native_udp_send_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let data = extract_bytes(args, 1)?;
-
-    match with_udp_socket(handle, |socket| socket.send(&data)) {
-        Ok(n) => Ok(net_ok(Value::Int(n as i64))),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.send(&data).map(|n| Value::Int(n as i64)))
 }
 
 pub fn native_udp_set_broadcast_interp(args: &[Value]) -> Result<Value, CompileError> {
@@ -550,147 +543,67 @@ pub fn native_udp_close_interp(args: &[Value]) -> Result<Value, CompileError> {
 }
 
 pub fn native_udp_peek_from_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let buf_len = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(65535) as usize;
-
-    let mut buf = vec![0u8; buf_len];
-    match with_udp_socket(handle, |socket| socket.peek_from(&mut buf)) {
-        Ok((n, addr)) => {
-            buf.truncate(n);
-            let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(net_ok(Value::Array(vec![
-                Value::Int(arr.len() as i64),
-                Value::Str(addr.to_string()),
-                Value::Array(arr),
-            ])))
-        }
-        Err(e) => Ok(net_err(e)),
-    }
+    read_from_to_array!(args, 1, 65535, peek_from)
 }
 
 pub fn native_udp_peek_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let buf_len = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(65535) as usize;
-
-    let mut buf = vec![0u8; buf_len];
-    match with_udp_socket(handle, |socket| socket.peek(&mut buf)) {
-        Ok(n) => {
-            buf.truncate(n);
-            let arr: Vec<Value> = buf.into_iter().map(|b| Value::Int(b as i64)).collect();
-            Ok(net_ok(Value::Array(vec![
-                Value::Int(arr.len() as i64),
-                Value::Array(arr),
-            ])))
-        }
-        Err(e) => Ok(net_err(e)),
-    }
+    read_to_array!(args, 1, 65535, with_udp_socket, peek)
 }
 
 pub fn native_udp_peer_addr_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-
-    match with_udp_socket(handle, |socket| socket.peer_addr()) {
-        Ok(addr) => Ok(net_ok(Value::Str(addr.to_string()))),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.peer_addr().map(|addr| Value::Str(addr.to_string())))
 }
 
 pub fn native_udp_set_multicast_loop_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let on = args.get(1).map(|v| v.truthy()).unwrap_or(true);
-
-    // Try IPv4 first, then IPv6
-    match with_udp_socket(handle, |socket| {
+    with_udp_socket_op!(args, 0, |socket| {
         socket.set_multicast_loop_v4(on)
             .or_else(|_| socket.set_multicast_loop_v6(on))
-    }) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+            .map(|_| Value::Nil)
+    })
 }
 
 pub fn native_udp_set_multicast_ttl_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let ttl = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(1) as u32;
-
-    match with_udp_socket(handle, |socket| socket.set_multicast_ttl_v4(ttl)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.set_multicast_ttl_v4(ttl).map(|_| Value::Nil))
 }
 
 pub fn native_udp_set_read_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let timeout = extract_timeout(args, 1);
-
-    match with_udp_socket(handle, |socket| socket.set_read_timeout(timeout)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    set_timeout_op!(args, with_udp_socket, set_read_timeout)
 }
 
 pub fn native_udp_set_write_timeout_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    let timeout = extract_timeout(args, 1);
-
-    match with_udp_socket(handle, |socket| socket.set_write_timeout(timeout)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    set_timeout_op!(args, with_udp_socket, set_write_timeout)
 }
 
 pub fn native_udp_get_broadcast_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-
-    match with_udp_socket(handle, |socket| socket.broadcast()) {
-        Ok(broadcast) => Ok(net_ok(Value::Bool(broadcast))),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.broadcast().map(Value::Bool))
 }
 
 pub fn native_udp_get_ttl_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-
-    match with_udp_socket(handle, |socket| socket.ttl()) {
-        Ok(ttl) => Ok(net_ok(Value::Int(ttl as i64))),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.ttl().map(|ttl| Value::Int(ttl as i64)))
 }
 
 pub fn native_udp_join_multicast_v4_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let multiaddr = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0) as u32;
     let interface = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0) as u32;
-
     let multi = std::net::Ipv4Addr::from(multiaddr.to_be_bytes());
     let iface = std::net::Ipv4Addr::from(interface.to_be_bytes());
 
-    match with_udp_socket(handle, |socket| socket.join_multicast_v4(&multi, &iface)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.join_multicast_v4(&multi, &iface).map(|_| Value::Nil))
 }
 
 pub fn native_udp_leave_multicast_v4_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let multiaddr = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(0) as u32;
     let interface = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0) as u32;
-
     let multi = std::net::Ipv4Addr::from(multiaddr.to_be_bytes());
     let iface = std::net::Ipv4Addr::from(interface.to_be_bytes());
 
-    match with_udp_socket(handle, |socket| socket.leave_multicast_v4(&multi, &iface)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.leave_multicast_v4(&multi, &iface).map(|_| Value::Nil))
 }
 
 pub fn native_udp_join_multicast_v6_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
-    // For IPv6, we expect a 16-byte array for the multicast address
     let interface = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0) as u32;
-
-    // Extract IPv6 address from array or use default
     let multi = match args.get(1) {
         Some(Value::Array(arr)) if arr.len() >= 16 => {
             let mut bytes = [0u8; 16];
@@ -702,16 +615,11 @@ pub fn native_udp_join_multicast_v6_interp(args: &[Value]) -> Result<Value, Comp
         _ => std::net::Ipv6Addr::UNSPECIFIED,
     };
 
-    match with_udp_socket(handle, |socket| socket.join_multicast_v6(&multi, interface)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.join_multicast_v6(&multi, interface).map(|_| Value::Nil))
 }
 
 pub fn native_udp_leave_multicast_v6_interp(args: &[Value]) -> Result<Value, CompileError> {
-    let handle = extract_handle(args, 0)?;
     let interface = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(0) as u32;
-
     let multi = match args.get(1) {
         Some(Value::Array(arr)) if arr.len() >= 16 => {
             let mut bytes = [0u8; 16];
@@ -723,10 +631,7 @@ pub fn native_udp_leave_multicast_v6_interp(args: &[Value]) -> Result<Value, Com
         _ => std::net::Ipv6Addr::UNSPECIFIED,
     };
 
-    match with_udp_socket(handle, |socket| socket.leave_multicast_v6(&multi, interface)) {
-        Ok(()) => Ok(net_ok(Value::Nil)),
-        Err(e) => Ok(net_err(e)),
-    }
+    with_udp_socket_op!(args, 0, |socket| socket.leave_multicast_v6(&multi, interface).map(|_| Value::Nil))
 }
 
 //==============================================================================

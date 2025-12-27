@@ -23,7 +23,7 @@ This is the main specification index for the Simple programming language. The sp
 | [Concurrency](concurrency.md) | Actors, async/await, isolated threads, futures |
 | [Metaprogramming](metaprogramming.md) | Macros, DSL features, decorators, comprehensions |
 | [Standard Library](stdlib.md) | Stdlib overview, variants, modules, configuration |
-| [GPU & SIMD](gpu_simd.md) | GPU programming, SIMD types, parallel compute |
+| [GPU & SIMD](gpu_simd/README.md) | GPU programming, SIMD types, parallel compute |
 
 ### Parser & Lexer
 
@@ -113,7 +113,7 @@ doc/spec/
 ├── concurrency.md        # Concurrency primitives
 ├── metaprogramming.md    # Macros and DSL features
 ├── stdlib.md             # Standard library
-├── gpu_simd.md           # GPU and SIMD
+├── gpu_simd/README.md           # GPU and SIMD
 ├── lexer_parser.md       # Parser specification
 └── sdn.md                # Simple Data Notation format
 ```

@@ -306,11 +306,15 @@ fn validate_intro_spec_recursive(
 
             Ok(())
         }
-        MacroIntroSpec::For { body, .. } => {
+        MacroIntroSpec::For { name, body, .. } => {
+            // Create new bindings with loop index added
+            let mut loop_bindings = const_bindings.clone();
+            loop_bindings.insert(name.clone(), "loop_index".to_string());
+
             for inner_spec in body {
                 validate_intro_spec_recursive(
                     inner_spec,
-                    const_bindings,
+                    &loop_bindings,
                     existing_symbols,
                     introduced_symbols,
                 )?;

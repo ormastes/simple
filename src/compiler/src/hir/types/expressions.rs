@@ -322,6 +322,7 @@ pub enum BinOp {
     Mod,
     Pow,
     FloorDiv,
+    MatMul, // @ operator for matrix multiplication (Simple Math #1930-#1939)
     // Comparison
     Eq,
     NotEq,
@@ -354,6 +355,7 @@ impl From<simple_parser::BinOp> for BinOp {
             simple_parser::BinOp::Mod => BinOp::Mod,
             simple_parser::BinOp::Pow => BinOp::Pow,
             simple_parser::BinOp::FloorDiv => BinOp::FloorDiv,
+            simple_parser::BinOp::MatMul => BinOp::MatMul, // Simple Math #1930-#1939
             simple_parser::BinOp::Eq => BinOp::Eq,
             simple_parser::BinOp::NotEq => BinOp::NotEq,
             simple_parser::BinOp::Lt => BinOp::Lt,

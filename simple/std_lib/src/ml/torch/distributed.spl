@@ -1,0 +1,881 @@
+# PyTorch Distributed Training - Multi-GPU Support
+#
+# Distributed data parallel training across multiple GPUs and nodes.
+# Supports NCCL backend for efficient GPU communication.
+#
+# ## Classes
+# - `ProcessGroup`: Communication group for distributed processes
+# - `DistributedDataParallel`: Wrapper for multi-GPU training
+#
+# ## Functions
+# - `init_process_group()`: Initialize distributed backend
+# - `destroy_process_group()`: Cleanup distributed resources
+# - `get_rank()`: Get current process rank
+# - `get_world_size()`: Get total number of processes
+# - `barrier()`: Synchronize all processes
+# - `all_reduce()`: Reduce tensor across all processes
+# - `all_gather()`: Gather tensors from all processes
+# - `broadcast()`: Broadcast tensor from root to all processes
+#
+# ## Example
+# ```simple
+# import ml.torch as torch
+# import ml.torch.distributed as dist
+# import ml.torch.nn as nn
+#
+# # Initialize process group (call once at startup)
+# dist.init_process_group(backend="nccl", rank=0, world_size=4)
+#
+# # Create model and wrap with DDP
+# let model = nn.Sequential([
+#     nn.Linear(10, 20),
+#     nn.ReLU(),
+#     nn.Linear(20, 1)
+# ])
+#
+# let device = torch.Device::CUDA(dist.get_rank())
+# model = model.to(device)
+# let ddp_model = dist.DistributedDataParallel(model, device_ids=[dist.get_rank()])
+#
+# # Training loop - gradients automatically synchronized
+# for batch in train_loader:
+#     let loss = ddp_model(batch)
+#     loss.backward()  # Gradients synced across GPUs
+#     optimizer.step()
+#
+# # Cleanup
+# dist.destroy_process_group()
+# ```
+
+export ProcessGroup, DistributedDataParallel
+
+import ml.torch.tensor_class.{Tensor}
+export init_process_group, destroy_process_group
+
+import ml.torch.tensor_class.{Tensor}
+export get_rank, get_world_size, barrier
+
+import ml.torch.tensor_class.{Tensor}
+export all_reduce, all_gather, broadcast, reduce_scatter
+
+import ml.torch.tensor_class.{Tensor}
+export is_initialized, is_available
+
+import ml.torch.tensor_class.{Tensor}
+
+import .. as torch
+
+
+# ============================================================================
+# Backend Enum
+# ============================================================================
+
+enum Backend:
+    """Distributed backend type.
+
+    - NCCL: NVIDIA Collective Communications Library (GPU-only, recommended)
+    - GLOO: CPU and GPU support (cross-platform)
+    - MPI: Message Passing Interface (research/HPC)
+    """
+    NCCL   # GPU-only, fastest for multi-GPU
+    GLOO   # CPU and GPU, cross-platform
+    MPI    # Research/HPC environments
+
+    fn to_str(self) -> str:
+        """Convert backend to string."""
+        match self:
+            Backend::NCCL -> "nccl"
+            Backend::GLOO -> "gloo"
+            Backend::MPI -> "mpi"
+
+
+# ============================================================================
+# Reduction Operations
+# ============================================================================
+
+enum ReduceOp:
+    """Reduction operation for collective communication.
+
+    - SUM: Sum values across processes
+    - PRODUCT: Multiply values across processes
+    - MIN: Minimum value across processes
+    - MAX: Maximum value across processes
+    - BAND: Bitwise AND across processes
+    - BOR: Bitwise OR across processes
+    - BXOR: Bitwise XOR across processes
+    """
+    SUM
+    PRODUCT
+    MIN
+    MAX
+    BAND   # Bitwise AND
+    BOR    # Bitwise OR
+    BXOR   # Bitwise XOR
+
+    fn code(self) -> i32:
+        """Convert to FFI code."""
+        match self:
+            ReduceOp::SUM -> 0
+            ReduceOp::PRODUCT -> 1
+            ReduceOp::MIN -> 2
+            ReduceOp::MAX -> 3
+            ReduceOp::BAND -> 4
+            ReduceOp::BOR -> 5
+            ReduceOp::BXOR -> 6
+
+
+# ============================================================================
+# Process Group Management
+# ============================================================================
+
+class ProcessGroup:
+    """Communication group for distributed processes.
+
+    A ProcessGroup manages communication between a subset of distributed processes.
+    By default, all processes belong to the world group.
+
+    Attributes:
+        handle: Internal handle to C++ ProcessGroup object
+        rank: This process's rank within the group
+        world_size: Total number of processes in the group
+    """
+    handle: u64
+    rank: i64
+    world_size: i64
+
+    fn __init__(self, handle: u64, rank: i64, world_size: i64):
+        """Initialize process group from handle.
+
+        Args:
+            handle: Internal FFI handle
+            rank: Process rank
+            world_size: Total processes
+
+        Note:
+            Users should not call this directly. Use init_process_group() instead.
+        """
+        self.handle = handle
+        self.rank = rank
+        self.world_size = world_size
+
+    fn __del__(self):
+        """Cleanup process group resources."""
+        if self.handle != 0:
+            @rt_torch_dist_destroy_process_group(self.handle)
+
+
+# Global process group (initialized by init_process_group)
+let mut _global_process_group: ProcessGroup = None
+
+
+fn init_process_group(
+    backend: Backend = Backend::NCCL,
+    rank: i64 = 0,
+    world_size: i64 = 1,
+    init_method: str = "env://",
+    timeout_seconds: i64 = 1800
+) -> ProcessGroup:
+    """Initialize distributed process group.
+
+    This must be called once at the start of each distributed process.
+    Uses environment variables for coordination:
+    - MASTER_ADDR: IP address of rank 0 process
+    - MASTER_PORT: Port for coordination
+    - RANK: This process's rank (optional if passed as argument)
+    - WORLD_SIZE: Total number of processes (optional if passed as argument)
+
+    Args:
+        backend: Communication backend (default: NCCL)
+        rank: This process's rank (0 to world_size-1)
+        world_size: Total number of processes
+        init_method: Initialization method (default: "env://")
+        timeout_seconds: Timeout for initialization (default: 1800)
+
+    Returns:
+        ProcessGroup object for this process
+
+    Example:
+        ```simple
+        import ml.torch.distributed as dist
+
+        # Process 0 (master)
+        # export MASTER_ADDR=localhost
+        # export MASTER_PORT=29500
+        dist.init_process_group(backend=dist.Backend::NCCL, rank=0, world_size=4)
+
+        # Process 1-3 (workers)
+        dist.init_process_group(backend=dist.Backend::NCCL, rank=1, world_size=4)
+        ```
+
+    Note:
+        Call destroy_process_group() when training completes.
+    """
+    let backend_str = backend.to_str()
+    let backend_ptr = backend_str.as_ptr()
+    let backend_len = backend_str.len() as i32
+
+    let init_ptr = init_method.as_ptr()
+    let init_len = init_method.len() as i32
+
+    let mut handle = 0u64
+
+    @rt_torch_dist_init_process_group(
+        backend_ptr, backend_len,
+        rank, world_size,
+        init_ptr, init_len,
+        timeout_seconds,
+        &handle
+    )
+
+    if handle == 0:
+        panic("Failed to initialize process group")
+
+    let pg = ProcessGroup(handle, rank, world_size)
+
+    # Store global reference
+    global _global_process_group
+    _global_process_group = pg
+
+    return pg
+
+
+fn destroy_process_group():
+    """Cleanup distributed resources.
+
+    Destroys the global process group and releases resources.
+    Call this at the end of training.
+
+    Example:
+        ```simple
+        dist.init_process_group(...)
+        # ... training ...
+        dist.destroy_process_group()
+        ```
+    """
+    global _global_process_group
+
+    if _global_process_group is not None:
+        # Destructor will cleanup
+        _global_process_group = None
+
+
+fn is_initialized() -> bool:
+    """Check if distributed training is initialized.
+
+    Returns:
+        True if init_process_group() was called, False otherwise
+    """
+    global _global_process_group
+    return _global_process_group is not None
+
+
+fn is_available() -> bool:
+    """Check if distributed training is available.
+
+    Returns:
+        True if distributed package is available, False otherwise
+    """
+    return @rt_torch_dist_is_available() != 0
+
+
+fn get_rank() -> i64:
+    """Get rank of current process.
+
+    Returns:
+        Rank (0 to world_size-1)
+
+    Raises:
+        Error if process group not initialized
+    """
+    global _global_process_group
+
+    if _global_process_group is None:
+        panic("Process group not initialized. Call init_process_group() first.")
+
+    return _global_process_group.rank
+
+
+fn get_world_size() -> i64:
+    """Get total number of processes.
+
+    Returns:
+        World size (total processes)
+
+    Raises:
+        Error if process group not initialized
+    """
+    global _global_process_group
+
+    if _global_process_group is None:
+        panic("Process group not initialized. Call init_process_group() first.")
+
+    return _global_process_group.world_size
+
+
+fn barrier(timeout_seconds: i64 = 1800):
+    """Synchronize all processes.
+
+    Blocks until all processes in the group reach this barrier.
+    Useful for coordinating operations across processes.
+
+    Args:
+        timeout_seconds: Maximum time to wait (default: 1800)
+
+    Example:
+        ```simple
+        # Process 0
+        print("Before barrier")
+        dist.barrier()
+        print("After barrier - all processes synchronized")
+        ```
+
+    Raises:
+        Error if timeout exceeded or process group not initialized
+    """
+    global _global_process_group
+
+    if _global_process_group is None:
+        panic("Process group not initialized")
+
+    @rt_torch_dist_barrier(_global_process_group.handle, timeout_seconds)
+
+
+# ============================================================================
+# Collective Communication Operations
+# ============================================================================
+
+fn all_reduce(
+    tensor: Tensor,
+    op: ReduceOp = ReduceOp::SUM,
+    group: ProcessGroup = None,
+    async: bool = false
+) -> Tensor:
+    """Reduce tensor across all processes.
+
+    Performs reduction operation and stores result in all processes.
+    For example, with ReduceOp::SUM, each process will receive the sum
+    of all tensors across all processes.
+
+    Args:
+        tensor: Tensor to reduce (must be same shape on all processes)
+        op: Reduction operation (default: SUM)
+        group: Process group (default: global group)
+        async: Return before operation completes (default: false)
+
+    Returns:
+        Reduced tensor (in-place modification)
+
+    Example:
+        ```simple
+        # Each process has a different tensor
+        # Process 0: tensor = [1, 2, 3]
+        # Process 1: tensor = [4, 5, 6]
+        # Process 2: tensor = [7, 8, 9]
+
+        let reduced = dist.all_reduce(tensor, op=dist.ReduceOp::SUM)
+        # All processes now have: [12, 15, 18]
+        ```
+    """
+    let pg = group if group is not None else _global_process_group
+
+    if pg is None:
+        panic("Process group not initialized")
+
+    let mut result_handle = 0u64
+
+    @rt_torch_dist_all_reduce(
+        tensor.handle,
+        op.code(),
+        pg.handle,
+        async as i32,
+        &result_handle
+    )
+
+    if result_handle == 0:
+        panic("all_reduce failed")
+
+    return Tensor(result_handle)
+
+
+fn all_gather(
+    tensor: Tensor,
+    group: ProcessGroup = None,
+    async: bool = false
+) -> [Tensor]:
+    """Gather tensors from all processes.
+
+    Each process contributes a tensor, and all processes receive
+    a list of tensors from all processes.
+
+    Args:
+        tensor: Tensor to contribute
+        group: Process group (default: global group)
+        async: Return before operation completes (default: false)
+
+    Returns:
+        List of tensors from all processes (length = world_size)
+
+    Example:
+        ```simple
+        # Process 0: tensor = [1, 2]
+        # Process 1: tensor = [3, 4]
+        # Process 2: tensor = [5, 6]
+
+        let gathered = dist.all_gather(tensor)
+        # All processes receive: [[1, 2], [3, 4], [5, 6]]
+        ```
+    """
+    let pg = group if group is not None else _global_process_group
+
+    if pg is None:
+        panic("Process group not initialized")
+
+    # Allocate array for result handles
+    let mut handles = [0u64; 16]  # Max 16 processes for now
+
+    @rt_torch_dist_all_gather(
+        tensor.handle,
+        pg.handle,
+        async as i32,
+        handles.data_ptr(),
+        handles.len() as i32
+    )
+
+    # Convert handles to tensors
+    let mut result = []
+    for i in range(pg.world_size):
+        if handles[i] != 0:
+            result.append(Tensor(handles[i]))
+
+    return result
+
+
+fn broadcast(
+    tensor: Tensor,
+    src: i64 = 0,
+    group: ProcessGroup = None,
+    async: bool = false
+) -> Tensor:
+    """Broadcast tensor from source process to all processes.
+
+    The source process sends its tensor to all other processes.
+
+    Args:
+        tensor: Tensor to broadcast (only used on src rank)
+        src: Source rank (default: 0)
+        group: Process group (default: global group)
+        async: Return before operation completes (default: false)
+
+    Returns:
+        Broadcasted tensor (same on all processes)
+
+    Example:
+        ```simple
+        # Process 0: tensor = [1, 2, 3]
+        # Process 1: tensor = [0, 0, 0]  (will be overwritten)
+        # Process 2: tensor = [0, 0, 0]  (will be overwritten)
+
+        let result = dist.broadcast(tensor, src=0)
+        # All processes now have: [1, 2, 3]
+        ```
+    """
+    let pg = group if group is not None else _global_process_group
+
+    if pg is None:
+        panic("Process group not initialized")
+
+    let mut result_handle = 0u64
+
+    @rt_torch_dist_broadcast(
+        tensor.handle,
+        src,
+        pg.handle,
+        async as i32,
+        &result_handle
+    )
+
+    if result_handle == 0:
+        panic("broadcast failed")
+
+    return Tensor(result_handle)
+
+
+fn reduce_scatter(
+    input_list: [Tensor],
+    op: ReduceOp = ReduceOp::SUM,
+    group: ProcessGroup = None,
+    async: bool = false
+) -> Tensor:
+    """Reduce and scatter tensor list.
+
+    Reduces tensors across all processes and scatters the result.
+    Each process receives a portion of the reduced result.
+
+    Args:
+        input_list: List of tensors to reduce (length = world_size)
+        op: Reduction operation (default: SUM)
+        group: Process group (default: global group)
+        async: Return before operation completes (default: false)
+
+    Returns:
+        Scattered portion of reduced result
+
+    Example:
+        ```simple
+        # Process 0: input = [tensor_0_0, tensor_0_1]
+        # Process 1: input = [tensor_1_0, tensor_1_1]
+
+        let result = dist.reduce_scatter(input, op=dist.ReduceOp::SUM)
+        # Process 0 receives: tensor_0_0 + tensor_1_0
+        # Process 1 receives: tensor_0_1 + tensor_1_1
+        ```
+    """
+    let pg = group if group is not None else _global_process_group
+
+    if pg is None:
+        panic("Process group not initialized")
+
+    # Convert tensor list to handles
+    let mut handles = []
+    for tensor in input_list:
+        handles.append(tensor.handle)
+
+    let mut result_handle = 0u64
+
+    @rt_torch_dist_reduce_scatter(
+        handles.data_ptr(),
+        handles.len() as i32,
+        op.code(),
+        pg.handle,
+        async as i32,
+        &result_handle
+    )
+
+    if result_handle == 0:
+        panic("reduce_scatter failed")
+
+    return Tensor(result_handle)
+
+
+# ============================================================================
+# Distributed Data Parallel
+# ============================================================================
+
+class DistributedDataParallel:
+    """Distributed data parallel training wrapper.
+
+    Wraps a model for multi-GPU training with automatic gradient synchronization.
+    Gradients are averaged across all processes during backward pass.
+
+    Attributes:
+        module: The wrapped model
+        device_ids: GPU devices to use
+        output_device: Device for model outputs
+        broadcast_buffers: Whether to sync buffers (batch norm stats)
+        find_unused_parameters: Detect unused parameters for gradient sync
+        gradient_as_bucket_view: Optimize memory by using bucket views
+
+    Example:
+        ```simple
+        import ml.torch.distributed as dist
+        import ml.torch.nn as nn
+
+        # Initialize distributed
+        dist.init_process_group(backend=dist.Backend::NCCL, rank=0, world_size=4)
+
+        # Create model
+        let model = nn.Sequential([
+            nn.Linear(784, 256),
+            nn.ReLU(),
+            nn.Linear(256, 10)
+        ])
+
+        # Move to GPU
+        let device = torch.Device::CUDA(dist.get_rank())
+        model = model.to(device)
+
+        # Wrap with DDP
+        let ddp_model = dist.DistributedDataParallel(
+            model,
+            device_ids=[dist.get_rank()],
+            output_device=dist.get_rank()
+        )
+
+        # Training loop - gradients automatically synchronized
+        for (inputs, targets) in train_loader:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+
+            let outputs = ddp_model(inputs)
+            let loss = criterion(outputs, targets)
+
+            optimizer.zero_grad()
+            loss.backward()  # Gradients synced across GPUs here
+            optimizer.step()
+        ```
+    """
+    handle: u64
+    module: any  # nn.Module
+    device_ids: [i64]
+    output_device: i64
+    broadcast_buffers: bool
+    find_unused_parameters: bool
+    gradient_as_bucket_view: bool
+
+    fn __init__(
+        self,
+        module: any,
+        device_ids: [i64] = None,
+        output_device: i64 = 0,
+        broadcast_buffers: bool = true,
+        process_group: ProcessGroup = None,
+        bucket_cap_mb: i64 = 25,
+        find_unused_parameters: bool = false,
+        check_reduction: bool = false,
+        gradient_as_bucket_view: bool = false
+    ):
+        """Initialize DistributedDataParallel wrapper.
+
+        Args:
+            module: Model to wrap (nn.Module)
+            device_ids: GPU device IDs to use (default: [current_rank])
+            output_device: Device for outputs (default: 0)
+            broadcast_buffers: Sync buffers (batch norm stats) (default: true)
+            process_group: Process group (default: global group)
+            bucket_cap_mb: Gradient bucketing size in MB (default: 25)
+            find_unused_parameters: Enable unused param detection (default: false)
+            check_reduction: Verify gradient reduction (default: false)
+            gradient_as_bucket_view: Use bucket views for memory efficiency (default: false)
+        """
+        let pg = process_group if process_group is not None else _global_process_group
+
+        if pg is None:
+            panic("Process group not initialized. Call init_process_group() first.")
+
+        # Default device_ids to current rank
+        let mut dev_ids = device_ids
+        if dev_ids is None:
+            dev_ids = [pg.rank]
+
+        self.module = module
+        self.device_ids = dev_ids
+        self.output_device = output_device
+        self.broadcast_buffers = broadcast_buffers
+        self.find_unused_parameters = find_unused_parameters
+        self.gradient_as_bucket_view = gradient_as_bucket_view
+
+        # Get module handle (assuming module has .handle attribute)
+        let module_handle = module.handle if hasattr(module, "handle") else 0u64
+
+        let mut ddp_handle = 0u64
+
+        @rt_torch_dist_ddp_new(
+            module_handle,
+            dev_ids.data_ptr(),
+            dev_ids.len() as i32,
+            output_device,
+            broadcast_buffers as i32,
+            pg.handle,
+            bucket_cap_mb,
+            find_unused_parameters as i32,
+            check_reduction as i32,
+            gradient_as_bucket_view as i32,
+            &ddp_handle
+        )
+
+        if ddp_handle == 0:
+            panic("Failed to create DistributedDataParallel wrapper")
+
+        self.handle = ddp_handle
+
+    fn __del__(self):
+        """Cleanup DDP resources."""
+        if self.handle != 0:
+            @rt_torch_dist_ddp_free(self.handle)
+
+    fn forward(self, *args, **kwargs) -> any:
+        """Forward pass through wrapped module.
+
+        Args:
+            *args: Positional arguments for module.forward()
+            **kwargs: Keyword arguments for module.forward()
+
+        Returns:
+            Module output
+        """
+        # Delegate to wrapped module
+        return self.module.forward(*args, **kwargs)
+
+    fn __call__(self, *args, **kwargs) -> any:
+        """Call forward pass."""
+        return self.forward(*args, **kwargs)
+
+    fn parameters(self) -> [Tensor]:
+        """Get model parameters.
+
+        Returns:
+            List of parameter tensors
+        """
+        return self.module.parameters()
+
+    fn named_parameters(self) -> [(str, Tensor)]:
+        """Get named model parameters.
+
+        Returns:
+            List of (name, tensor) tuples
+        """
+        return self.module.named_parameters()
+
+    fn state_dict(self) -> {str: any}:
+        """Get model state dictionary.
+
+        Returns:
+            State dictionary for saving/loading
+        """
+        return self.module.state_dict()
+
+    fn load_state_dict(self, state_dict: {str: any}):
+        """Load model state dictionary.
+
+        Args:
+            state_dict: State dictionary to load
+        """
+        self.module.load_state_dict(state_dict)
+
+    fn train(self, mode: bool = true):
+        """Set training mode.
+
+        Args:
+            mode: Training mode (default: true)
+        """
+        self.module.train(mode)
+
+    fn eval(self):
+        """Set evaluation mode."""
+        self.module.eval()
+
+    fn to(self, device: torch.Device) -> DistributedDataParallel:
+        """Move model to device.
+
+        Args:
+            device: Target device
+
+        Returns:
+            Self (for method chaining)
+        """
+        self.module = self.module.to(device)
+        return self
+
+    fn no_sync(self):
+        """Context manager to disable gradient synchronization.
+
+        Use this to accumulate gradients over multiple steps before synchronizing.
+
+        Example:
+            ```simple
+            # Accumulate gradients for 4 steps
+            for i in range(4):
+                with ddp_model.no_sync():
+                    let loss = compute_loss(...)
+                    loss.backward()  # No sync yet
+
+            # Final step - synchronize gradients
+            let loss = compute_loss(...)
+            loss.backward()  # Syncs all accumulated gradients
+            optimizer.step()
+            ```
+
+        Returns:
+            Context manager object
+        """
+        # TODO: Implement context manager in Simple language
+        # For now, return a simple object that disables sync
+        return _NoSyncContext(self)
+
+
+class _NoSyncContext:
+    """Context manager for disabling gradient sync."""
+    ddp: DistributedDataParallel
+
+    fn __init__(self, ddp: DistributedDataParallel):
+        self.ddp = ddp
+
+    fn __enter__(self):
+        """Enter context - disable sync."""
+        @rt_torch_dist_ddp_set_sync(self.ddp.handle, 0)
+
+    fn __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context - re-enable sync."""
+        @rt_torch_dist_ddp_set_sync(self.ddp.handle, 1)
+
+
+# ============================================================================
+# External FFI Functions
+# ============================================================================
+
+# These are implemented in src/runtime/src/value/torch.rs
+
+extern fn rt_torch_dist_is_available() -> i32
+
+extern fn rt_torch_dist_init_process_group(
+    backend_ptr: *u8, backend_len: i32,
+    rank: i64, world_size: i64,
+    init_method_ptr: *u8, init_method_len: i32,
+    timeout_seconds: i64,
+    handle_out: *u64
+) -> i32
+
+extern fn rt_torch_dist_destroy_process_group(handle: u64) -> i32
+
+extern fn rt_torch_dist_barrier(handle: u64, timeout_seconds: i64) -> i32
+
+extern fn rt_torch_dist_all_reduce(
+    tensor_handle: u64,
+    op: i32,
+    pg_handle: u64,
+    async: i32,
+    result_handle_out: *u64
+) -> i32
+
+extern fn rt_torch_dist_all_gather(
+    tensor_handle: u64,
+    pg_handle: u64,
+    async: i32,
+    handles_out: *u64,
+    max_handles: i32
+) -> i32
+
+extern fn rt_torch_dist_broadcast(
+    tensor_handle: u64,
+    src: i64,
+    pg_handle: u64,
+    async: i32,
+    result_handle_out: *u64
+) -> i32
+
+extern fn rt_torch_dist_reduce_scatter(
+    handles_ptr: *u64,
+    count: i32,
+    op: i32,
+    pg_handle: u64,
+    async: i32,
+    result_handle_out: *u64
+) -> i32
+
+extern fn rt_torch_dist_ddp_new(
+    module_handle: u64,
+    device_ids_ptr: *i64,
+    device_ids_len: i32,
+    output_device: i64,
+    broadcast_buffers: i32,
+    pg_handle: u64,
+    bucket_cap_mb: i64,
+    find_unused_parameters: i32,
+    check_reduction: i32,
+    gradient_as_bucket_view: i32,
+    ddp_handle_out: *u64
+) -> i32
+
+extern fn rt_torch_dist_ddp_free(handle: u64) -> i32
+
+extern fn rt_torch_dist_ddp_set_sync(handle: u64, enable: i32) -> i32

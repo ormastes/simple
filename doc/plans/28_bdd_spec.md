@@ -10,7 +10,7 @@ Create a comprehensive BDD testing framework inspired by Ruby's RSpec, providing
 
 ## Specification
 
-See `doc/bdd_spec.md` for complete specification.
+See `doc/testing/testing_bdd_framework.md` for complete specification.
 
 ## Sprint 1: Core DSL & Registry ✅ COMPLETE
 
@@ -281,7 +281,7 @@ system_coverage = "method"        # class/struct method
 
 ### 2. Migration Guide
 
-**File:** `doc/migration/bdd_spec.md`
+**File:** `doc/migration/testing/testing_bdd_framework.md`
 
 **Content:**
 - Migrating from doctest
@@ -352,7 +352,7 @@ simple test --coverage
 
 ## See Also
 
-- `doc/bdd_spec.md` - Complete specification
+- `doc/testing/testing_bdd_framework.md` - Complete specification
 - `doc/guides/test.md` - Test policy and coverage rules
 - `doc/plans/28_doctest.md` - Doctest implementation plan
 - `lib/std/spec/` - Current implementation

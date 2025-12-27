@@ -1,0 +1,185 @@
+# Verification Module Demo
+#
+# Demonstrates how to use the verification module to generate Lean code.
+
+import verification.lean.codegen as codegen
+import verification.models.memory_capabilities as memcap
+import verification.regenerate as regen
+
+fn demo_basic_codegen():
+    """Generate a simple Lean module"""
+    print("=== Basic Code Generation Demo ===\n")
+
+    gen = codegen.LeanCodegen.new("Example")
+
+    # Add an enum
+    color = codegen.build_enum("Color", [
+        ("Red", []),
+        ("Green", []),
+        ("Blue", [])
+    ])
+    gen = gen.add_inductive(color)
+
+    # Add a structure
+    point = codegen.build_class("Point", [
+        ("x", codegen.make_int_type()),
+        ("y", codegen.make_int_type())
+    ])
+    gen = gen.add_structure(point)
+
+    # Add a function
+    distance = codegen.build_function(
+        "distance",
+        [
+            ("p1", codegen.make_simple_type("Point")),
+            ("p2", codegen.make_simple_type("Point"))
+        ],
+        codegen.make_int_type(),
+        "abs (p1.x - p2.x) + abs (p1.y - p2.y)"
+    )
+    gen = gen.add_function(distance)
+
+    print(gen.emit())
+    print("\n")
+
+fn demo_memory_capabilities():
+    """Use the memory capabilities model"""
+    print("=== Memory Capabilities Demo ===\n")
+
+    # Create environment
+    env = memcap.RefEnv.new()
+
+    # Try to create references
+    print("Can create Shared ref at location 0: " + str(memcap.can_create_ref(env, 0, memcap.RefCapability.Shared)))
+    print("Can create Exclusive ref at location 0: " + str(memcap.can_create_ref(env, 0, memcap.RefCapability.Exclusive)))
+    print("Can create Isolated ref at location 0: " + str(memcap.can_create_ref(env, 0, memcap.RefCapability.Isolated)))
+
+    # Add a reference and try again
+    ref1 = memcap.Reference.new(0, memcap.CapType.new("i64", memcap.RefCapability.Shared))
+    env = memcap.add_ref(env, ref1)
+
+    print("\nAfter adding Shared ref:")
+    print("Can create another Shared ref: " + str(memcap.can_create_ref(env, 0, memcap.RefCapability.Shared)))
+    print("Can create Exclusive ref: " + str(memcap.can_create_ref(env, 0, memcap.RefCapability.Exclusive)))
+
+    # Test capability conversions
+    print("\nCapability conversions:")
+    print("Exclusive -> Shared: " + str(memcap.can_convert(memcap.RefCapability.Exclusive, memcap.RefCapability.Shared)))
+    print("Shared -> Exclusive: " + str(memcap.can_convert(memcap.RefCapability.Shared, memcap.RefCapability.Exclusive)))
+    print("Isolated -> Exclusive: " + str(memcap.can_convert(memcap.RefCapability.Isolated, memcap.RefCapability.Exclusive)))
+    print("\n")
+
+fn demo_contract_translation():
+    """Translate contracts to Lean"""
+    print("=== Contract Translation Demo ===\n")
+
+    import verification.models.contracts as c
+    import verification.lean.contracts as lean_c
+
+    # Build a simple contract
+    contract = c.FunctionContract.new()
+
+    # Add precondition: x != 0
+    pre = c.ContractClause.new(
+        c.ContractExpr.BinOpExpr("!=",
+            c.ContractExpr.VarExpr("x"),
+            c.ContractExpr.ValExpr(c.Val.IntVal(0))
+        ),
+        "Divisor must be non-zero"
+    )
+    contract = contract.with_precondition(pre)
+
+    # Add postcondition: result * x == y
+    post = c.ContractClause.new(
+        c.ContractExpr.BinOpExpr("==",
+            c.ContractExpr.BinOpExpr("*",
+                c.ContractExpr.RetExpr,
+                c.ContractExpr.VarExpr("x")
+            ),
+            c.ContractExpr.VarExpr("y")
+        )
+    )
+    contract = contract.with_postcondition(post)
+
+    # Translate to Lean
+    pre_expr = lean_c.translate_contract_expr(contract.preconditions[0].condition)
+    post_expr = lean_c.translate_contract_expr(contract.postconditions[0].condition)
+
+    print("Precondition (Simple):", str(contract.preconditions[0].condition))
+    print("Precondition (Lean):  ", pre_expr)
+    print()
+    print("Postcondition (Simple):", str(contract.postconditions[0].condition))
+    print("Postcondition (Lean):  ", post_expr)
+    print("\n")
+
+fn demo_regeneration():
+    """Regenerate existing Lean files"""
+    print("=== Lean File Regeneration Demo ===\n")
+
+    # Regenerate memory capabilities
+    lean_code = regen.regenerate_memory_capabilities()
+
+    print("Generated MemoryCapabilities.lean:")
+    print("=" * 60)
+    # Show first 20 lines
+    lines = lean_code.split("\n")
+    for i in range(min(20, len(lines))):
+        print(lines[i])
+    print("...")
+    print("(" + str(len(lines)) + " total lines)")
+    print("\n")
+
+fn demo_proof_obligations():
+    """Work with proof obligations"""
+    print("=== Proof Obligations Demo ===\n")
+
+    import verification.proofs.obligations as ob
+    import verification.models.contracts as c
+
+    # Create a contract
+    contract = c.FunctionContract.new()
+    contract = contract.with_precondition(
+        c.ContractClause.new(
+            c.ContractExpr.BinOpExpr(">",
+                c.ContractExpr.VarExpr("n"),
+                c.ContractExpr.ValExpr(c.Val.IntVal(0))
+            )
+        )
+    )
+    contract = contract.with_postcondition(
+        c.ContractClause.new(
+            c.ContractExpr.BinOpExpr(">",
+                c.ContractExpr.RetExpr,
+                c.ContractExpr.VarExpr("n")
+            )
+        )
+    )
+
+    # Extract obligations
+    obligations = ob.extract_from_contract("increment", "math.spl", 42, contract)
+
+    # Create obligation set
+    ob_set = ob.ObligationSet.new("math")
+    for obl in obligations:
+        ob_set = ob_set.add(obl)
+
+    print(ob_set.summary())
+    print()
+
+    # Show individual obligations
+    for obl in ob_set.obligations:
+        print("Obligation:", obl.name)
+        print("  ID:", obl.id)
+        print("  Status:", obl.status.to_string())
+        print("  Proposition:", obl.proposition)
+        print()
+
+fn main():
+    """Run all demos"""
+    demo_basic_codegen()
+    demo_memory_capabilities()
+    demo_contract_translation()
+    demo_regeneration()
+    demo_proof_obligations()
+
+    print("=== All Demos Complete ===")

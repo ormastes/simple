@@ -286,8 +286,8 @@ fn call_value_with_args(
     callee: &Value,
     args: Vec<Value>,
     _env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -450,8 +450,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                         let decorator_fn = evaluate_expr(
                             &decorator.name,
                             &env,
-                            &functions,
-                            &classes,
+                            &mut functions,
+                            &mut classes,
                             &enums,
                             &impl_methods,
                         )?;
@@ -463,8 +463,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                                 arg_values.push(evaluate_expr(
                                     &arg.value,
                                     &env,
-                                    &functions,
-                                    &classes,
+                                    &mut functions,
+                                    &mut classes,
                                     &enums,
                                     &impl_methods,
                                 )?);
@@ -473,8 +473,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                                 &decorator_fn,
                                 arg_values,
                                 &env,
-                                &functions,
-                                &classes,
+                                &mut functions,
+                                &mut classes,
                                 &enums,
                                 &impl_methods,
                             )?
@@ -487,8 +487,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                             &actual_decorator,
                             vec![decorated],
                             &env,
-                            &functions,
-                            &classes,
+                            &mut functions,
+                            &mut classes,
                             &enums,
                             &impl_methods,
                         )?;
@@ -753,7 +753,7 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
             | Node::Context(_)
             | Node::With(_) => {
                 if let Control::Return(val) =
-                    exec_node(item, &mut env, &functions, &classes, &enums, &impl_methods)?
+                    exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
                 {
                     return val.as_int().map(|v| v as i32);
                 }
@@ -761,7 +761,7 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
             Node::Return(ret) => {
                 if let Some(expr) = &ret.value {
                     let val =
-                        evaluate_expr(expr, &env, &functions, &classes, &enums, &impl_methods)?;
+                        evaluate_expr(expr, &env, &mut functions, &mut classes, &enums, &impl_methods)?;
                     return val.as_int().map(|v| v as i32);
                 }
                 return Ok(0);
@@ -778,8 +778,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                         method,
                         args,
                         &env,
-                        &functions,
-                        &classes,
+                        &mut functions,
+                        &mut classes,
                         &enums,
                         &impl_methods,
                     )? {
@@ -791,8 +791,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                 let (_, update) = handle_method_call_with_self_update(
                     expr,
                     &env,
-                    &functions,
-                    &classes,
+                    &mut functions,
+                    &mut classes,
                     &enums,
                     &impl_methods,
                 )?;
@@ -848,10 +848,33 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
             Node::Continue(_) => {
                 return Err(CompileError::Semantic("continue outside of loop".into()));
             }
-            // Module system nodes - parsed but not interpreted at this level
-            // Module resolution happens before interpretation
+            // Module system nodes
+            Node::UseStmt(use_stmt) => {
+                // Handle runtime module loading
+                use simple_parser::ast::ImportTarget;
+
+                // Determine the binding name (alias or last segment)
+                let module_name = if let Some(alias_name) = get_import_alias(use_stmt) {
+                    alias_name
+                } else {
+                    // Use last segment of path as module name
+                    use_stmt.path.segments.last().cloned().unwrap_or_else(|| "module".to_string())
+                };
+
+                // Try to load the module and merge its definitions into global state
+                match load_and_merge_module(use_stmt, None, &mut functions, &mut classes, &mut enums) {
+                    Ok(module_dict) => {
+                        env.insert(module_name.clone(), module_dict);
+                    }
+                    Err(_e) => {
+                        // Module loading failed - use empty dict as fallback
+                        // This allows the program to continue, with errors appearing
+                        // when the module members are accessed
+                        env.insert(module_name.clone(), Value::Dict(HashMap::new()));
+                    }
+                }
+            }
             Node::ModDecl(_)
-            | Node::UseStmt(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
             | Node::AutoImportStmt(_)
@@ -872,13 +895,13 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
     }
 
     // Check if main is defined as a function and call it
-    if let Some(main_func) = functions.get("main") {
+    if let Some(main_func) = functions.get("main").cloned() {
         let result = exec_function(
-            main_func,
+            &main_func,
             &[],  // No arguments
             &env,
-            &functions,
-            &classes,
+            &mut functions,
+            &mut classes,
             &enums,
             &impl_methods,
             None,  // No self context
@@ -972,8 +995,8 @@ fn register_trait_impl(
 pub(crate) fn exec_node(
     node: &Node,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -1281,8 +1304,8 @@ pub(crate) fn exec_node(
 pub(crate) fn exec_block(
     block: &Block,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -1300,8 +1323,8 @@ pub(crate) fn exec_block(
 pub(crate) fn exec_block_fn(
     block: &Block,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Control, Option<Value>), CompileError> {
@@ -1399,8 +1422,13 @@ macro_rules! bail_unknown_method {
     }};
 }
 
-// Include control flow functions (if, while, loop, for, match, pattern_matches)
-include!("interpreter_control.rs");
+// Control flow functions (if, while, loop, for, match, pattern_matches)
+#[path = "interpreter_control.rs"]
+mod interpreter_control;
+use interpreter_control::{
+    check_enum_exhaustiveness, collect_covered_variants, exec_context, exec_for, exec_if,
+    exec_loop, exec_match, exec_while, exec_with, is_catch_all_pattern, pattern_matches,
+};
 
 /// Helper to execute a method function with self context (for auto-forwarding properties)
 fn exec_method_function(
@@ -1408,8 +1436,8 @@ fn exec_method_function(
     args: &[simple_parser::ast::Argument],
     self_val: &Value,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -1433,8 +1461,20 @@ fn exec_method_function(
 
 include!("interpreter_expr.rs");
 
-// Include helper functions (method dispatch, array/dict ops, pattern binding, slicing)
-include!("interpreter_helpers.rs");
+// Helper functions (method dispatch, array/dict ops, pattern binding, slicing)
+#[path = "interpreter_helpers.rs"]
+mod interpreter_helpers;
+pub(crate) use interpreter_helpers::{
+    bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
+    eval_arg, eval_arg_int, eval_arg_usize, eval_array_all, eval_array_any, eval_array_filter,
+    eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter, eval_dict_map_values,
+    eval_option_and_then, eval_option_filter, eval_option_map, eval_option_or_else,
+    eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else,
+    find_and_exec_method, handle_functional_update, handle_method_call_with_self_update,
+    iter_to_vec, message_to_value, normalize_index, slice_collection, spawn_actor_with_expr,
+    spawn_future_with_callable, spawn_future_with_callable_and_env, spawn_future_with_expr,
+    try_method_missing, with_effect_context,
+};
 
 // Include the rest of the interpreter functions
 #[path = "interpreter_call/mod.rs"]
@@ -1444,11 +1484,311 @@ use interpreter_call::{evaluate_call, BDD_INDENT, BDD_COUNTS, BDD_SHARED_EXAMPLE
                        exec_function, exec_function_with_values, exec_function_with_captured_env,
                        bind_args, bind_args_with_injected, exec_lambda, instantiate_class,
                        exec_block_value};
+/// Get the import alias from a UseStmt if it exists
+fn get_import_alias(use_stmt: &simple_parser::ast::UseStmt) -> Option<String> {
+    match &use_stmt.target {
+        simple_parser::ast::ImportTarget::Aliased { alias, .. } => Some(alias.clone()),
+        _ => None,
+    }
+}
+
+/// Load a module file, evaluate it, and return exports with captured environment
+/// This is needed so that module-level imports are accessible in exported functions
+fn load_and_merge_module(
+    use_stmt: &simple_parser::ast::UseStmt,
+    current_file: Option<&std::path::Path>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &mut Enums,
+) -> Result<Value, CompileError> {
+    use std::fs;
+    use std::path::Path;
+    use simple_parser::ast::ImportTarget;
+
+    // Build module path from segments
+    let mut parts: Vec<String> = use_stmt
+        .path
+        .segments
+        .iter()
+        .filter(|s| s.as_str() != "crate")
+        .cloned()
+        .collect();
+
+    // Handle different import targets
+    match &use_stmt.target {
+        ImportTarget::Single(name) => {
+            parts.push(name.clone());
+        }
+        ImportTarget::Aliased { name, .. } => {
+            parts.push(name.clone());
+        }
+        ImportTarget::Glob => {
+            // For glob imports, the path is complete
+        }
+        ImportTarget::Group(_) => {
+            // Group imports need special handling
+            return Ok(Value::Dict(HashMap::new()));
+        }
+    }
+
+    // Try to resolve the module path
+    let base_dir = current_file
+        .and_then(|p| p.parent())
+        .unwrap_or(Path::new("."));
+
+    let module_path = resolve_module_path(&parts, base_dir)?;
+
+    // Read and parse the module
+    let source = fs::read_to_string(&module_path)
+        .map_err(|e| CompileError::Io(format!("Cannot read module: {}", e)))?;
+
+    let mut parser = simple_parser::Parser::new(&source);
+    let module = parser.parse()
+        .map_err(|e| CompileError::Parse(format!("Cannot parse module: {}", e)))?;
+
+    // Evaluate the module to get its environment (including imports)
+    let (module_env, module_exports) = evaluate_module_exports(
+        &module.items,
+        Some(&module_path),
+        functions,
+        classes,
+        enums,
+    )?;
+
+    // Create exports with the module's environment captured
+    let mut exports: HashMap<String, Value> = HashMap::new();
+    for (name, value) in module_exports {
+        match value {
+            Value::Function { name: fn_name, def, .. } => {
+                // Re-create function with module's env as captured_env
+                exports.insert(name, Value::Function {
+                    name: fn_name,
+                    def,
+                    captured_env: module_env.clone(),
+                });
+            }
+            other => {
+                exports.insert(name, other);
+            }
+        }
+    }
+
+    Ok(Value::Dict(exports))
+}
+
+/// Evaluate a module's statements and collect its environment and exports
+fn evaluate_module_exports(
+    items: &[Node],
+    module_path: Option<&std::path::Path>,
+    global_functions: &mut HashMap<String, FunctionDef>,
+    global_classes: &mut HashMap<String, ClassDef>,
+    global_enums: &mut Enums,
+) -> Result<(Env, HashMap<String, Value>), CompileError> {
+    let mut env: Env = HashMap::new();
+    let mut exports: HashMap<String, Value> = HashMap::new();
+    let mut local_functions: HashMap<String, FunctionDef> = HashMap::new();
+    let mut local_classes: HashMap<String, ClassDef> = HashMap::new();
+    let mut local_enums: Enums = HashMap::new();
+    let impl_methods: ImplMethods = HashMap::new();
+
+    // First pass: register functions and types
+    for item in items {
+        match item {
+            Node::Function(f) => {
+                local_functions.insert(f.name.clone(), f.clone());
+                // Don't add "main" from imported modules to global functions
+                // to prevent auto-execution when the main script finishes
+                if f.name != "main" {
+                    global_functions.insert(f.name.clone(), f.clone());
+                }
+            }
+            Node::Class(c) => {
+                local_classes.insert(c.name.clone(), c.clone());
+                global_classes.insert(c.name.clone(), c.clone());
+                exports.insert(c.name.clone(), Value::Constructor {
+                    class_name: c.name.clone(),
+                });
+            }
+            Node::Enum(e) => {
+                local_enums.insert(e.name.clone(), e.clone());
+                global_enums.insert(e.name.clone(), e.clone());
+                exports.insert(e.name.clone(), Value::Str(format!("enum:{}", e.name)));
+            }
+            _ => {}
+        }
+    }
+
+    // Second pass: process imports and assignments to build the environment
+    for item in items {
+        match item {
+            Node::UseStmt(use_stmt) => {
+                // Recursively load imported modules
+                let module_name = if let Some(alias_name) = get_import_alias(use_stmt) {
+                    alias_name
+                } else {
+                    use_stmt.path.segments.last().cloned().unwrap_or_else(|| "module".to_string())
+                };
+
+                match load_and_merge_module(use_stmt, module_path, global_functions, global_classes, global_enums) {
+                    Ok(module_dict) => {
+                        env.insert(module_name.clone(), module_dict);
+                    }
+                    Err(_e) => {
+                        // Module loading failed - use empty dict
+                        env.insert(module_name.clone(), Value::Dict(HashMap::new()));
+                    }
+                }
+            }
+            Node::Assignment(stmt) => {
+                // Evaluate module-level assignments
+                if let Expr::Identifier(name) = &stmt.target {
+                    if let Ok(value) = evaluate_expr(&stmt.value, &env, &mut local_functions, &mut local_classes, &local_enums, &impl_methods) {
+                        env.insert(name.clone(), value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Export functions with placeholder (env will be set in caller)
+    for (name, f) in &local_functions {
+        exports.insert(name.clone(), Value::Function {
+            name: name.clone(),
+            def: Box::new(f.clone()),
+            captured_env: Env::new(), // Will be replaced with module_env in caller
+        });
+    }
+
+    Ok((env, exports))
+}
+
+/// Resolve module path from segments
+fn resolve_module_path(parts: &[String], base_dir: &std::path::Path) -> Result<std::path::PathBuf, CompileError> {
+    use std::path::PathBuf;
+
+    // Try resolving from base directory first (sibling files)
+    let mut resolved = base_dir.to_path_buf();
+    for part in parts {
+        resolved = resolved.join(part);
+    }
+    resolved.set_extension("spl");
+    if resolved.exists() {
+        return Ok(resolved);
+    }
+
+    // Try __init__.spl in directory
+    let mut init_resolved = base_dir.to_path_buf();
+    for part in parts {
+        init_resolved = init_resolved.join(part);
+    }
+    init_resolved = init_resolved.join("__init__");
+    init_resolved.set_extension("spl");
+    if init_resolved.exists() {
+        return Ok(init_resolved);
+    }
+
+    // Try stdlib location - walk up directory tree
+    let mut current = base_dir.to_path_buf();
+    for _ in 0..10 {
+        let stdlib_candidate = current.join("simple/std_lib/src");
+        if stdlib_candidate.exists() {
+            // Try resolving from stdlib
+            let mut stdlib_path = stdlib_candidate.clone();
+            for part in parts {
+                stdlib_path = stdlib_path.join(part);
+            }
+            stdlib_path.set_extension("spl");
+            if stdlib_path.exists() {
+                return Ok(stdlib_path);
+            }
+
+            // Also try __init__.spl in stdlib
+            let mut stdlib_init_path = stdlib_candidate.clone();
+            for part in parts {
+                stdlib_init_path = stdlib_init_path.join(part);
+            }
+            stdlib_init_path = stdlib_init_path.join("__init__");
+            stdlib_init_path.set_extension("spl");
+            if stdlib_init_path.exists() {
+                return Ok(stdlib_init_path);
+            }
+        }
+        if let Some(parent) = current.parent() {
+            current = parent.to_path_buf();
+        } else {
+            break;
+        }
+    }
+
+    Err(CompileError::Semantic(format!(
+        "Cannot resolve module: {}",
+        parts.join(".")
+    )))
+}
+
+/// Merge module definitions into global state and collect exports
+fn merge_module_definitions(
+    items: &[Node],
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &mut Enums,
+) -> Result<HashMap<String, Value>, CompileError> {
+    let mut exports: HashMap<String, Value> = HashMap::new();
+
+    // First pass: collect all definitions into global maps
+    for item in items {
+        match item {
+            Node::Function(f) => {
+                // Add to global functions map
+                functions.insert(f.name.clone(), f.clone());
+
+                // Add to exports dict
+                let func_value = Value::Function {
+                    name: f.name.clone(),
+                    def: Box::new(f.clone()),
+                    captured_env: Env::new(),
+                };
+                exports.insert(f.name.clone(), func_value);
+            }
+            Node::Class(c) => {
+                // Add to global classes map
+                classes.insert(c.name.clone(), c.clone());
+
+                // Add to exports dict
+                exports.insert(c.name.clone(), Value::Constructor {
+                    class_name: c.name.clone(),
+                });
+            }
+            Node::Enum(e) => {
+                // Add to global enums map - this is critical for enum variant access
+                enums.insert(e.name.clone(), e.clone());
+
+                // Export the enum type name as well (for type access)
+                exports.insert(e.name.clone(), Value::Str(format!("enum:{}", e.name)));
+            }
+            _ => {}
+        }
+    }
+
+    Ok(exports)
+}
+
 #[path = "interpreter_method/mod.rs"]
 mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
 include!("interpreter_macro.rs");
-include!("interpreter_extern.rs");
-include!("interpreter_native_io.rs");
-include!("interpreter_native_net.rs");
-include!("interpreter_context.rs");
+#[path = "interpreter_native_io.rs"]
+mod interpreter_native_io;
+// Re-export all native I/O functions
+pub use interpreter_native_io::*;
+#[path = "interpreter_native_net.rs"]
+mod interpreter_native_net;
+// Re-export all native networking functions
+pub use interpreter_native_net::*;
+#[path = "interpreter_context.rs"]
+mod interpreter_context;
+use interpreter_context::dispatch_context_method;
+#[path = "interpreter_extern.rs"]
+mod interpreter_extern;
+pub(crate) use interpreter_extern::call_extern_function;

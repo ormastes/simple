@@ -18,12 +18,36 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_module_path(&mut self) -> Result<ModulePath, ParseError> {
         let mut segments = Vec::new();
 
-        // First segment (could be 'crate' keyword or identifier)
-        if self.check(&TokenKind::Crate) {
+        // Handle relative imports (Python-style):
+        // import .. as parent         -> [".."]
+        // import ..sibling             -> ["..", "sibling"]
+        // import ...grandparent        -> ["...", "grandparent"] (not yet supported, but future-proof)
+        while self.check(&TokenKind::DoubleDot) {
             self.advance();
-            segments.push("crate".to_string());
+            segments.push("..".to_string());
+        }
+
+        // If we only have DoubleDots and hit end-of-path markers, we're done
+        if !segments.is_empty() {
+            // Check if this is a bare ".." import (import .. as name)
+            if self.check(&TokenKind::As) || self.check(&TokenKind::Newline) || self.is_at_end() {
+                return Ok(ModulePath::new(segments));
+            }
+            // Otherwise, we have DoubleDots followed by a path (import ..sibling)
+            // Continue to parse the remaining path
+        }
+
+        // First segment (could be 'crate' keyword or identifier)
+        if segments.is_empty() {
+            if self.check(&TokenKind::Crate) {
+                self.advance();
+                segments.push("crate".to_string());
+            } else {
+                // Use expect_path_segment to allow keywords like 'unit', 'test', etc.
+                segments.push(self.expect_path_segment()?);
+            }
         } else {
-            // Use expect_path_segment to allow keywords like 'unit', 'test', etc.
+            // We already have DoubleDots, now get the first real segment
             segments.push(self.expect_path_segment()?);
         }
 
@@ -198,7 +222,10 @@ impl<'a> Parser<'a> {
                 target,
             }))
         } else {
-            // New style: export X, Y, Z from module
+            // Two styles:
+            // 1. export X, Y, Z from module (with 'from')
+            // 2. export X, Y, Z (bare export, no 'from')
+
             // Parse list of identifiers
             let mut items = Vec::new();
             items.push(self.expect_identifier()?);
@@ -208,28 +235,50 @@ impl<'a> Parser<'a> {
                 items.push(self.expect_identifier()?);
             }
 
-            // Expect 'from'
-            self.expect(&TokenKind::From)?;
+            // Check if 'from' keyword is present
+            if self.check(&TokenKind::From) {
+                // Style 1: export X, Y from module
+                self.advance(); // consume 'from'
 
-            // Parse module path
-            let module_path = self.parse_module_path()?;
+                // Parse module path
+                let module_path = self.parse_module_path()?;
 
-            // Create export use statement with group import
-            let targets: Vec<ImportTarget> = items
-                .into_iter()
-                .map(|name| ImportTarget::Single(name))
-                .collect();
+                // Create export use statement with group import
+                let targets: Vec<ImportTarget> = items
+                    .into_iter()
+                    .map(|name| ImportTarget::Single(name))
+                    .collect();
 
-            Ok(Node::ExportUseStmt(ExportUseStmt {
-                span: Span::new(
-                    start_span.start,
-                    self.previous.span.end,
-                    start_span.line,
-                    start_span.column,
-                ),
-                path: module_path,
-                target: ImportTarget::Group(targets),
-            }))
+                Ok(Node::ExportUseStmt(ExportUseStmt {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                    path: module_path,
+                    target: ImportTarget::Group(targets),
+                }))
+            } else {
+                // Style 2: bare export (export X, Y, Z)
+                // Create export use statement with empty path
+                // This marks the symbols for export without importing them
+                let targets: Vec<ImportTarget> = items
+                    .into_iter()
+                    .map(|name| ImportTarget::Single(name))
+                    .collect();
+
+                Ok(Node::ExportUseStmt(ExportUseStmt {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                    path: ModulePath::new(Vec::new()), // Empty path for bare exports
+                    target: ImportTarget::Group(targets),
+                }))
+            }
         }
     }
 

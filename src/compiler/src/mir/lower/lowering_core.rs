@@ -551,12 +551,17 @@ impl<'a> MirLowerer<'a> {
         mir_func.attributes = self.extract_function_attributes(func);
         mir_func.effects = self.extract_function_effects(func);
 
+        // Propagate layout hints for code locality optimization
+        mir_func.layout_phase = func.layout_phase();
+        mir_func.is_event_loop_anchor = func.is_event_loop_anchor();
+
         // Add parameters
         for param in &func.params {
             mir_func.params.push(MirLocal {
                 name: param.name.clone(),
                 ty: param.ty,
                 kind: LocalKind::Parameter,
+                is_ghost: param.is_ghost,
             });
         }
 
@@ -566,6 +571,7 @@ impl<'a> MirLowerer<'a> {
                 name: local.name.clone(),
                 ty: local.ty,
                 kind: LocalKind::Local,
+                is_ghost: local.is_ghost,
             });
         }
 

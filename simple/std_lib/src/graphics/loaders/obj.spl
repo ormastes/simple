@@ -1,0 +1,333 @@
+# OBJ Loader - Wavefront OBJ file format
+#
+# Loads 3D models from .obj files (text-based format).
+# Supports vertices, normals, UVs, and faces.
+# Automatically triangulates quads and n-gons.
+# Generates tangents for normal mapping.
+#
+# Based on: doc/plans/floating-booping-coral.md (Phase 5)
+
+use core.*
+use graphics.math.*
+use graphics.scene.*
+
+# =============================================================================
+# OBJ Loader
+# =============================================================================
+
+pub struct ObjLoader:
+    positions: Array[Vec3]      # Vertex positions
+    normals: Array[Vec3]        # Vertex normals
+    tex_coords: Array[Vec2]     # Texture coordinates
+    faces: Array[ObjFace]       # Face definitions
+
+pub struct ObjFace:
+    indices: Array[ObjVertex]   # 3+ vertices (triangulated later)
+
+pub struct ObjVertex:
+    position_index: i32         # Index into positions (1-based)
+    tex_coord_index: i32        # Index into tex_coords (1-based, 0 = none)
+    normal_index: i32           # Index into normals (1-based, 0 = none)
+
+# =============================================================================
+# Public API
+# =============================================================================
+
+impl ObjLoader:
+    # Load OBJ file from path
+    pub fn load_file(path: String) -> Result[Mesh, String]:
+        # Read file contents
+        let contents = match file_read_string(path):
+            case Ok(data):
+                data
+            case Err(err):
+                return Err("Failed to read OBJ file: " + err)
+
+        # Parse OBJ data
+        return ObjLoader::parse(contents)
+
+    # Parse OBJ from string
+    pub fn parse(contents: String) -> Result[Mesh, String]:
+        let mut loader = ObjLoader {
+            positions: Array::new(),
+            normals: Array::new(),
+            tex_coords: Array::new(),
+            faces: Array::new()
+        }
+
+        # Parse line by line
+        let lines = contents.split('\n')
+        let mut line_number = 0
+
+        for line in lines:
+            line_number = line_number + 1
+            let trimmed = line.trim()
+
+            # Skip empty lines and comments
+            if trimmed.is_empty() or trimmed.starts_with('#'):
+                continue
+
+            # Parse line based on prefix
+            if trimmed.starts_with("v "):
+                loader.parse_vertex(trimmed, line_number)?
+            else if trimmed.starts_with("vt "):
+                loader.parse_tex_coord(trimmed, line_number)?
+            else if trimmed.starts_with("vn "):
+                loader.parse_normal(trimmed, line_number)?
+            else if trimmed.starts_with("f "):
+                loader.parse_face(trimmed, line_number)?
+            # Ignore other lines (mtllib, usemtl, o, g, s, etc.)
+
+        # Convert to mesh
+        return loader.to_mesh()
+
+# =============================================================================
+# Parsing Methods
+# =============================================================================
+
+impl ObjLoader:
+    fn parse_vertex(mut self, line: String, line_num: i32) -> Result[(), String]:
+        let parts = line.split_whitespace()
+        if parts.len() < 4:
+            return Err("Invalid vertex at line " + line_num.to_string() +
+                      ": expected 'v x y z'")
+
+        let x = parts[1].parse_f32()
+            .ok_or("Invalid x coordinate at line " + line_num.to_string())?
+        let y = parts[2].parse_f32()
+            .ok_or("Invalid y coordinate at line " + line_num.to_string())?
+        let z = parts[3].parse_f32()
+            .ok_or("Invalid z coordinate at line " + line_num.to_string())?
+
+        self.positions.push(Vec3::new(x, y, z))
+        return Ok(())
+
+    fn parse_tex_coord(mut self, line: String, line_num: i32) -> Result[(), String]:
+        let parts = line.split_whitespace()
+        if parts.len() < 3:
+            return Err("Invalid texture coordinate at line " + line_num.to_string() +
+                      ": expected 'vt u v'")
+
+        let u = parts[1].parse_f32()
+            .ok_or("Invalid u coordinate at line " + line_num.to_string())?
+        let v = parts[2].parse_f32()
+            .ok_or("Invalid v coordinate at line " + line_num.to_string())?
+
+        self.tex_coords.push(Vec2::new(u, v))
+        return Ok(())
+
+    fn parse_normal(mut self, line: String, line_num: i32) -> Result[(), String]:
+        let parts = line.split_whitespace()
+        if parts.len() < 4:
+            return Err("Invalid normal at line " + line_num.to_string() +
+                      ": expected 'vn x y z'")
+
+        let x = parts[1].parse_f32()
+            .ok_or("Invalid x coordinate at line " + line_num.to_string())?
+        let y = parts[2].parse_f32()
+            .ok_or("Invalid y coordinate at line " + line_num.to_string())?
+        let z = parts[3].parse_f32()
+            .ok_or("Invalid z coordinate at line " + line_num.to_string())?
+
+        self.normals.push(Vec3::new(x, y, z).normalize())
+        return Ok(())
+
+    fn parse_face(mut self, line: String, line_num: i32) -> Result[(), String]:
+        let parts = line.split_whitespace()
+        if parts.len() < 4:  # f + at least 3 vertices
+            return Err("Invalid face at line " + line_num.to_string() +
+                      ": expected 'f v1 v2 v3 ...'")
+
+        let mut face = ObjFace { indices: Array::new() }
+
+        # Parse each vertex (skip first part which is "f")
+        for i in 1..parts.len():
+            let vertex = self.parse_face_vertex(parts[i], line_num)?
+            face.indices.push(vertex)
+
+        # Must have at least 3 vertices
+        if face.indices.len() < 3:
+            return Err("Face must have at least 3 vertices at line " + line_num.to_string())
+
+        self.faces.push(face)
+        return Ok(())
+
+    fn parse_face_vertex(self, vertex_str: String, line_num: i32) -> Result[ObjVertex, String]:
+        # Format: v or v/vt or v/vt/vn or v//vn
+        let parts = vertex_str.split('/')
+
+        let position_index = parts[0].parse_i32()
+            .ok_or("Invalid vertex index at line " + line_num.to_string())?
+
+        let tex_coord_index = if parts.len() > 1 and not parts[1].is_empty():
+            parts[1].parse_i32()
+                .ok_or("Invalid texture coordinate index at line " + line_num.to_string())?
+        else:
+            0
+
+        let normal_index = if parts.len() > 2:
+            parts[2].parse_i32()
+                .ok_or("Invalid normal index at line " + line_num.to_string())?
+        else:
+            0
+
+        return Ok(ObjVertex {
+            position_index: position_index,
+            tex_coord_index: tex_coord_index,
+            normal_index: normal_index
+        })
+
+# =============================================================================
+# Mesh Conversion
+# =============================================================================
+
+impl ObjLoader:
+    fn to_mesh(self) -> Result[Mesh, String]:
+        if self.faces.is_empty():
+            return Err("OBJ file contains no faces")
+
+        let mut vertices = Array[MeshVertex]::new()
+        let mut indices = Array[u32]::new()
+
+        # Convert faces to triangles
+        for face in self.faces:
+            # Triangulate face (fan triangulation for n-gons)
+            for i in 1..(face.indices.len() - 1):
+                # Triangle: vertex 0, vertex i, vertex i+1
+                let v0 = self.convert_vertex(face.indices[0])?
+                let v1 = self.convert_vertex(face.indices[i])?
+                let v2 = self.convert_vertex(face.indices[i + 1])?
+
+                # Add vertices and indices
+                let base_index = vertices.len() as u32
+                vertices.push(v0)
+                vertices.push(v1)
+                vertices.push(v2)
+
+                indices.push(base_index)
+                indices.push(base_index + 1)
+                indices.push(base_index + 2)
+
+        # Generate tangents for normal mapping
+        self.generate_tangents(&mut vertices, &indices)
+
+        # Compute AABB
+        let aabb = self.compute_aabb(&vertices)
+
+        return Ok(Mesh {
+            vertices: vertices,
+            indices: indices,
+            aabb: aabb
+        })
+
+    fn convert_vertex(self, obj_vertex: ObjVertex) -> Result[MeshVertex, String]:
+        # Convert 1-based OBJ indices to 0-based array indices
+        let pos_idx = obj_vertex.position_index - 1
+        if pos_idx < 0 or pos_idx >= self.positions.len() as i32:
+            return Err("Position index out of bounds: " + obj_vertex.position_index.to_string())
+
+        let position = self.positions[pos_idx as usize]
+
+        # Get normal (or default)
+        let normal = if obj_vertex.normal_index > 0:
+            let norm_idx = obj_vertex.normal_index - 1
+            if norm_idx < 0 or norm_idx >= self.normals.len() as i32:
+                return Err("Normal index out of bounds: " + obj_vertex.normal_index.to_string())
+            self.normals[norm_idx as usize]
+        else:
+            Vec3::new(0.0, 1.0, 0.0)  # Default up normal
+
+        # Get texture coordinate (or default)
+        let tex_coord = if obj_vertex.tex_coord_index > 0:
+            let tex_idx = obj_vertex.tex_coord_index - 1
+            if tex_idx < 0 or tex_idx >= self.tex_coords.len() as i32:
+                return Err("Texture coordinate index out of bounds: " +
+                          obj_vertex.tex_coord_index.to_string())
+            self.tex_coords[tex_idx as usize]
+        else:
+            Vec2::new(0.0, 0.0)  # Default UV
+
+        return Ok(MeshVertex {
+            position: position,
+            normal: normal,
+            tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),  # Computed later
+            tex_coord: tex_coord,
+            color: Vec4::new(1.0, 1.0, 1.0, 1.0)     # Default white
+        })
+
+    fn generate_tangents(self, vertices: &mut Array[MeshVertex], indices: &Array[u32]):
+        # Generate tangents using Lengyel's method
+        # For each triangle, calculate tangent and bitangent
+        for i in 0..indices.len() step 3:
+            let i0 = indices[i] as usize
+            let i1 = indices[i + 1] as usize
+            let i2 = indices[i + 2] as usize
+
+            let v0 = vertices[i0]
+            let v1 = vertices[i1]
+            let v2 = vertices[i2]
+
+            # Edge vectors
+            let edge1 = v1.position - v0.position
+            let edge2 = v2.position - v0.position
+
+            # Delta UVs
+            let delta_uv1 = v1.tex_coord - v0.tex_coord
+            let delta_uv2 = v2.tex_coord - v0.tex_coord
+
+            # Calculate tangent
+            let f = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y)
+            let tangent = Vec3::new(
+                f * (delta_uv2.y * edge1.x - delta_uv1.y * edge2.x),
+                f * (delta_uv2.y * edge1.y - delta_uv1.y * edge2.y),
+                f * (delta_uv2.y * edge1.z - delta_uv1.y * edge2.z)
+            ).normalize()
+
+            # Apply tangent to all three vertices (will be averaged)
+            vertices[i0].tangent = Vec4::new(tangent.x, tangent.y, tangent.z, 1.0)
+            vertices[i1].tangent = Vec4::new(tangent.x, tangent.y, tangent.z, 1.0)
+            vertices[i2].tangent = Vec4::new(tangent.x, tangent.y, tangent.z, 1.0)
+
+    fn compute_aabb(self, vertices: &Array[MeshVertex]) -> AABB:
+        if vertices.is_empty():
+            return AABB {
+                min: Vec3::new(0.0, 0.0, 0.0),
+                max: Vec3::new(0.0, 0.0, 0.0)
+            }
+
+        let mut min = vertices[0].position
+        let mut max = vertices[0].position
+
+        for vertex in vertices:
+            min = Vec3::new(
+                min_f32(min.x, vertex.position.x),
+                min_f32(min.y, vertex.position.y),
+                min_f32(min.z, vertex.position.z)
+            )
+            max = Vec3::new(
+                max_f32(max.x, vertex.position.x),
+                max_f32(max.y, vertex.position.y),
+                max_f32(max.z, vertex.position.z)
+            )
+
+        return AABB { min: min, max: max }
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+fn min_f32(a: f32, b: f32) -> f32:
+    if a < b:
+        return a
+    return b
+
+fn max_f32(a: f32, b: f32) -> f32:
+    if a > b:
+        return a
+    return b
+
+# =============================================================================
+# File I/O (FFI - to be implemented in runtime)
+# =============================================================================
+
+extern fn file_read_string(path: String) -> Result[String, String]

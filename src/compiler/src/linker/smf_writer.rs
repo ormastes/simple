@@ -75,6 +75,12 @@ pub struct SmfSymbol {
     pub section_index: u16,
     pub value: u64,
     pub size: u64,
+    /// Layout phase for code locality optimization (startup, first_frame, steady, cold)
+    pub layout_phase: u8,
+    /// Whether this symbol is an event loop anchor point
+    pub is_event_loop_anchor: bool,
+    /// Whether this symbol's layout is pinned (should not be moved)
+    pub layout_pinned: bool,
 }
 
 /// Relocation entry for SMF
@@ -285,6 +291,10 @@ impl SmfWriter {
                 section_index: 0, // .text section
                 value: 0,         // Would need to get from object file
                 size: 0,
+                // Propagate layout information from MIR for 4KB page locality optimization
+                layout_phase: func.layout_phase.priority(),
+                is_event_loop_anchor: func.is_event_loop_anchor,
+                layout_pinned: false, // Could be extracted from HIR if needed
             };
             writer.add_symbol(symbol);
         }
@@ -339,6 +349,9 @@ mod tests {
             section_index: 0,
             value: 0,
             size: 10,
+            layout_phase: 2, // Steady
+            is_event_loop_anchor: false,
+            layout_pinned: false,
         };
 
         let idx = writer.add_symbol(sym);
@@ -358,6 +371,9 @@ mod tests {
             section_index: 0,
             value: 0,
             size: 1,
+            layout_phase: 0, // Startup
+            is_event_loop_anchor: false,
+            layout_pinned: false,
         });
 
         let mut output = Vec::new();

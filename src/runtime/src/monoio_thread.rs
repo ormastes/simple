@@ -15,6 +15,68 @@ use monoio::net::udp::UdpSocket;
 use monoio::io::{AsyncReadRent, AsyncWriteRent, AsyncReadRentExt, AsyncWriteRentExt};
 
 // ============================================================================
+// Helper Macros for Reducing Duplication
+// ============================================================================
+
+/// Send error response and return early
+macro_rules! send_error {
+    ($tx:expr, $code:expr, $msg:expr) => {{
+        let _ = $tx.send(IoResponse::Error {
+            code: $code,
+            message: $msg.to_string(),
+        });
+        return;
+    }};
+}
+
+/// Send success response
+macro_rules! send_success {
+    ($tx:expr, $id:expr) => {
+        let _ = $tx.send(IoResponse::Success { id: $id });
+    };
+}
+
+/// Get TCP stream from registry or send error and return
+macro_rules! get_tcp_stream {
+    ($registry:expr, $id:expr, $tx:expr) => {
+        match $registry.get_tcp_stream($id) {
+            Some(s) => s,
+            None => send_error!($tx, -1, "Invalid stream ID"),
+        }
+    };
+}
+
+/// Get TCP listener from registry or send error and return
+macro_rules! get_tcp_listener {
+    ($registry:expr, $id:expr, $tx:expr) => {
+        match $registry.get_tcp_listener($id) {
+            Some(l) => l,
+            None => send_error!($tx, -1, "Invalid listener ID"),
+        }
+    };
+}
+
+/// Get UDP socket from registry or send error and return
+macro_rules! get_udp_socket {
+    ($registry:expr, $id:expr, $tx:expr) => {
+        match $registry.get_udp_socket($id) {
+            Some(s) => s,
+            None => send_error!($tx, -1, "Invalid socket ID"),
+        }
+    };
+}
+
+/// Parse socket address or send error and return
+macro_rules! parse_addr {
+    ($addr:expr, $tx:expr) => {
+        match $addr.parse::<SocketAddr>() {
+            Ok(a) => a,
+            Err(e) => send_error!($tx, -1, format!("Invalid address: {}", e)),
+        }
+    };
+}
+
+// ============================================================================
 // Request/Response Types
 // ============================================================================
 
@@ -275,73 +337,36 @@ impl RuntimeThread {
 
     // TCP Handlers
     async fn handle_tcp_listen(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let socket_addr: SocketAddr = match addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: format!("Invalid address: {}", e),
-                });
-                return;
-            }
-        };
+        let socket_addr = parse_addr!(addr, response_tx);
 
         match TcpListener::bind(socket_addr) {
             Ok(listener) => {
                 let id = registry.add_tcp_listener(listener);
-                let _ = response_tx.send(IoResponse::Success { id });
+                send_success!(response_tx, id);
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -2,
-                    message: format!("Bind failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -2, format!("Bind failed: {}", e)),
         }
     }
 
     async fn handle_tcp_accept(listener_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let listener = match registry.get_tcp_listener(listener_id) {
-            Some(l) => l,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid listener ID".to_string(),
-                });
-                return;
-            }
-        };
+        let listener = get_tcp_listener!(registry, listener_id, response_tx);
 
         match listener.accept().await {
             Ok((stream, _peer_addr)) => {
                 let id = registry.add_tcp_stream(stream);
-                let _ = response_tx.send(IoResponse::Success { id });
+                send_success!(response_tx, id);
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -5,
-                    message: format!("Accept failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -5, format!("Accept failed: {}", e)),
         }
     }
 
     async fn handle_tcp_connect(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let socket_addr: SocketAddr = match addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: format!("Invalid address: {}", e),
-                });
-                return;
-            }
-        };
+        let socket_addr = parse_addr!(addr, response_tx);
 
         match TcpStream::connect(socket_addr).await {
             Ok(stream) => {
                 let id = registry.add_tcp_stream(stream);
-                let _ = response_tx.send(IoResponse::Success { id });
+                send_success!(response_tx, id);
             }
             Err(e) => {
                 let code = match e.kind() {
@@ -349,62 +374,31 @@ impl RuntimeThread {
                     std::io::ErrorKind::TimedOut => -4,
                     _ => -1,
                 };
-                let _ = response_tx.send(IoResponse::Error {
-                    code,
-                    message: format!("Connect failed: {}", e),
-                });
+                send_error!(response_tx, code, format!("Connect failed: {}", e));
             }
         }
     }
 
     async fn handle_tcp_read(stream_id: i64, max_len: usize, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let stream = match registry.get_tcp_stream(stream_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid stream ID".to_string(),
-                });
-                return;
-            }
-        };
+        let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
-        // Allocate buffer for reading
         let buf = vec![0u8; max_len];
-
-        // Use monoio's rent pattern: buffer ownership is transferred
         let (result, buf) = stream.read(buf).await;
 
         match result {
             Ok(n) => {
-                // Return the data read
                 let _ = response_tx.send(IoResponse::Data {
                     bytes: buf[..n].to_vec(),
                     len: n,
                 });
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -5,
-                    message: format!("Read failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -5, format!("Read failed: {}", e)),
         }
     }
 
     async fn handle_tcp_write(stream_id: i64, data: Vec<u8>, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let stream = match registry.get_tcp_stream(stream_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid stream ID".to_string(),
-                });
-                return;
-            }
-        };
+        let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
-        // Use monoio's rent pattern: buffer ownership is transferred
         let (result, _buf) = stream.write(data).await;
 
         match result {
@@ -414,77 +408,35 @@ impl RuntimeThread {
                     len: n,
                 });
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -5,
-                    message: format!("Write failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -5, format!("Write failed: {}", e)),
         }
     }
 
     fn handle_tcp_close(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         if registry.remove_tcp_stream(stream_id) {
-            let _ = response_tx.send(IoResponse::Success { id: 0 });
+            send_success!(response_tx, 0);
         } else {
-            let _ = response_tx.send(IoResponse::Error {
-                code: -1,
-                message: "Invalid stream ID".to_string(),
-            });
+            send_error!(response_tx, -1, "Invalid stream ID");
         }
     }
 
     // UDP Handlers
     async fn handle_udp_bind(addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let socket_addr: SocketAddr = match addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: format!("Invalid address: {}", e),
-                });
-                return;
-            }
-        };
+        let socket_addr = parse_addr!(addr, response_tx);
 
         match UdpSocket::bind(socket_addr) {
             Ok(socket) => {
                 let id = registry.add_udp_socket(socket);
-                let _ = response_tx.send(IoResponse::Success { id });
+                send_success!(response_tx, id);
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -2,
-                    message: format!("Bind failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -2, format!("Bind failed: {}", e)),
         }
     }
 
     async fn handle_udp_send_to(socket_id: i64, data: Vec<u8>, addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let socket = match registry.get_udp_socket(socket_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid socket ID".to_string(),
-                });
-                return;
-            }
-        };
+        let socket = get_udp_socket!(registry, socket_id, response_tx);
+        let socket_addr = parse_addr!(addr, response_tx);
 
-        let socket_addr: SocketAddr = match addr.parse() {
-            Ok(a) => a,
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: format!("Invalid address: {}", e),
-                });
-                return;
-            }
-        };
-
-        // Use monoio's rent pattern
         let (result, _buf) = socket.send_to(data, socket_addr).await;
 
         match result {
@@ -494,26 +446,12 @@ impl RuntimeThread {
                     len: n,
                 });
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -5,
-                    message: format!("Send failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -5, format!("Send failed: {}", e)),
         }
     }
 
     async fn handle_udp_recv_from(socket_id: i64, max_len: usize, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let socket = match registry.get_udp_socket(socket_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid socket ID".to_string(),
-                });
-                return;
-            }
-        };
+        let socket = get_udp_socket!(registry, socket_id, response_tx);
 
         let buf = vec![0u8; max_len];
         let (result, buf) = socket.recv_from(buf).await;
@@ -526,125 +464,59 @@ impl RuntimeThread {
                     addr: peer_addr.to_string(),
                 });
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -5,
-                    message: format!("Recv failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -5, format!("Recv failed: {}", e)),
         }
     }
 
     fn handle_udp_close(socket_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         if registry.remove_udp_socket(socket_id) {
-            let _ = response_tx.send(IoResponse::Success { id: 0 });
+            send_success!(response_tx, 0);
         } else {
-            let _ = response_tx.send(IoResponse::Error {
-                code: -1,
-                message: "Invalid socket ID".to_string(),
-            });
+            send_error!(response_tx, -1, "Invalid socket ID");
         }
     }
 
     // TCP Socket Option Handlers
 
     fn handle_tcp_set_nodelay(stream_id: i64, nodelay: bool, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let stream = match registry.get_tcp_stream(stream_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid stream ID".to_string(),
-                });
-                return;
-            }
-        };
+        let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
         match stream.set_nodelay(nodelay) {
-            Ok(_) => {
-                let _ = response_tx.send(IoResponse::Success { id: 0 });
-            }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -2,
-                    message: format!("set_nodelay failed: {}", e),
-                });
-            }
+            Ok(_) => send_success!(response_tx, 0),
+            Err(e) => send_error!(response_tx, -2, format!("set_nodelay failed: {}", e)),
         }
     }
 
     fn handle_tcp_set_keepalive(stream_id: i64, secs: Option<u32>, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let stream = match registry.get_tcp_stream(stream_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid stream ID".to_string(),
-                });
-                return;
-            }
-        };
-
-        // Convert Option<u32> to Option<Duration>
-        let duration = secs.map(|s| std::time::Duration::from_secs(s as u64));
+        let _stream = get_tcp_stream!(registry, stream_id, response_tx);
 
         // Note: monoio's TcpStream may not expose set_keepalive directly
         // For now, we'll return success as a stub
-        // TODO: Access underlying std socket if needed
         tracing::warn!("TCP keepalive not fully supported in monoio, returning success");
-        let _ = response_tx.send(IoResponse::Success { id: 0 });
+        send_success!(response_tx, 0);
     }
 
     async fn handle_tcp_shutdown(stream_id: i64, how: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let stream = match registry.get_tcp_stream(stream_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid stream ID".to_string(),
-                });
-                return;
-            }
-        };
+        let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
         // Note: monoio's shutdown() doesn't take a mode parameter
         // It always shuts down writes. The 'how' parameter is ignored for now.
-        // TODO: Access underlying socket if fine-grained shutdown control is needed
         match stream.shutdown().await {
-            Ok(_) => {
-                let _ = response_tx.send(IoResponse::Success { id: 0 });
-            }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -3,
-                    message: format!("shutdown failed: {}", e),
-                });
-            }
+            Ok(_) => send_success!(response_tx, 0),
+            Err(e) => send_error!(response_tx, -3, format!("shutdown failed: {}", e)),
         }
     }
 
     fn handle_tcp_listener_close(listener_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
         if registry.remove_tcp_listener(listener_id) {
-            let _ = response_tx.send(IoResponse::Success { id: 0 });
+            send_success!(response_tx, 0);
         } else {
-            let _ = response_tx.send(IoResponse::Error {
-                code: -1,
-                message: "Invalid listener ID".to_string(),
-            });
+            send_error!(response_tx, -1, "Invalid listener ID");
         }
     }
 
     fn handle_tcp_get_local_addr(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let stream = match registry.get_tcp_stream(stream_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid stream ID".to_string(),
-                });
-                return;
-            }
-        };
+        let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
         match stream.local_addr() {
             Ok(addr) => {
@@ -652,26 +524,12 @@ impl RuntimeThread {
                     addr: addr.to_string(),
                 });
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -2,
-                    message: format!("local_addr failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -2, format!("local_addr failed: {}", e)),
         }
     }
 
     fn handle_tcp_get_peer_addr(stream_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let stream = match registry.get_tcp_stream(stream_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid stream ID".to_string(),
-                });
-                return;
-            }
-        };
+        let stream = get_tcp_stream!(registry, stream_id, response_tx);
 
         match stream.peer_addr() {
             Ok(addr) => {
@@ -679,100 +537,50 @@ impl RuntimeThread {
                     addr: addr.to_string(),
                 });
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -2,
-                    message: format!("peer_addr failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -2, format!("peer_addr failed: {}", e)),
         }
     }
 
     // UDP Socket Option Handlers
 
     fn handle_udp_set_broadcast(socket_id: i64, broadcast: bool, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let _socket = match registry.get_udp_socket(socket_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid socket ID".to_string(),
-                });
-                return;
-            }
-        };
+        let _socket = get_udp_socket!(registry, socket_id, response_tx);
 
         // Note: monoio's UdpSocket doesn't expose set_broadcast
         // TODO: Access underlying socket2 socket if needed
         tracing::warn!("UDP set_broadcast not fully supported in monoio, returning success");
-        let _ = response_tx.send(IoResponse::Success { id: 0 });
+        send_success!(response_tx, 0);
     }
 
     fn handle_udp_set_multicast_ttl(socket_id: i64, ttl: u32, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let _socket = match registry.get_udp_socket(socket_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid socket ID".to_string(),
-                });
-                return;
-            }
-        };
+        let _socket = get_udp_socket!(registry, socket_id, response_tx);
 
         // Note: monoio's UdpSocket doesn't expose set_multicast_ttl_v4
         // TODO: Access underlying socket2 socket if needed
         tracing::warn!("UDP set_multicast_ttl not fully supported in monoio, returning success");
-        let _ = response_tx.send(IoResponse::Success { id: 0 });
+        send_success!(response_tx, 0);
     }
 
     fn handle_udp_join_multicast(socket_id: i64, multicast_addr: String, interface_addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let _socket = match registry.get_udp_socket(socket_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid socket ID".to_string(),
-                });
-                return;
-            }
-        };
+        let _socket = get_udp_socket!(registry, socket_id, response_tx);
 
         // Note: monoio's UdpSocket doesn't expose join_multicast_v4
         // TODO: Access underlying socket2 socket if needed
         tracing::warn!("UDP join_multicast not fully supported in monoio, returning success");
-        let _ = response_tx.send(IoResponse::Success { id: 0 });
+        send_success!(response_tx, 0);
     }
 
     fn handle_udp_leave_multicast(socket_id: i64, multicast_addr: String, interface_addr: String, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let _socket = match registry.get_udp_socket(socket_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid socket ID".to_string(),
-                });
-                return;
-            }
-        };
+        let _socket = get_udp_socket!(registry, socket_id, response_tx);
 
         // Note: monoio's UdpSocket doesn't expose leave_multicast_v4
         // TODO: Access underlying socket2 socket if needed
         tracing::warn!("UDP leave_multicast not fully supported in monoio, returning success");
-        let _ = response_tx.send(IoResponse::Success { id: 0 });
+        send_success!(response_tx, 0);
     }
 
     fn handle_udp_get_local_addr(socket_id: i64, response_tx: ResponseSender, registry: &mut StreamRegistry) {
-        let socket = match registry.get_udp_socket(socket_id) {
-            Some(s) => s,
-            None => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -1,
-                    message: "Invalid socket ID".to_string(),
-                });
-                return;
-            }
-        };
+        let socket = get_udp_socket!(registry, socket_id, response_tx);
 
         match socket.local_addr() {
             Ok(addr) => {
@@ -780,12 +588,7 @@ impl RuntimeThread {
                     addr: addr.to_string(),
                 });
             }
-            Err(e) => {
-                let _ = response_tx.send(IoResponse::Error {
-                    code: -2,
-                    message: format!("local_addr failed: {}", e),
-                });
-            }
+            Err(e) => send_error!(response_tx, -2, format!("local_addr failed: {}", e)),
         }
     }
 

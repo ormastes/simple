@@ -1,0 +1,290 @@
+# Quaternion - Rotation representation for 3D graphics
+#
+# Provides Quaternion type for smooth rotations without gimbal lock.
+# Stored as (x, y, z, w) where w is the scalar part.
+# Supports axis-angle conversion, Euler angles, and spherical interpolation (slerp).
+#
+# Based on: doc/plans/floating-booping-coral.md (3D Graphics Library)
+
+use core.*
+use graphics.math.vector.*
+use graphics.math.matrix.*
+
+# =============================================================================
+# Quaternion - 4D rotation representation
+# =============================================================================
+
+pub struct Quaternion:
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+
+impl Quaternion:
+    # Constructors
+    pub fn new(x: f32, y: f32, z: f32, w: f32) -> Quaternion:
+        return Quaternion { x: x, y: y, z: z, w: w }
+
+    pub fn identity() -> Quaternion:
+        return Quaternion { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }
+
+    # Create from axis and angle (radians)
+    pub fn from_axis_angle(axis: Vec3, angle: f32) -> Quaternion:
+        let half_angle = angle / 2.0
+        let s = sin(half_angle)
+        let n = axis.normalize()
+
+        return Quaternion {
+            x: n.x * s,
+            y: n.y * s,
+            z: n.z * s,
+            w: cos(half_angle)
+        }
+
+    # Create from Euler angles (radians): pitch (X), yaw (Y), roll (Z)
+    pub fn from_euler(pitch: f32, yaw: f32, roll: f32) -> Quaternion:
+        let half_pitch = pitch / 2.0
+        let half_yaw = yaw / 2.0
+        let half_roll = roll / 2.0
+
+        let cp = cos(half_pitch)
+        let sp = sin(half_pitch)
+        let cy = cos(half_yaw)
+        let sy = sin(half_yaw)
+        let cr = cos(half_roll)
+        let sr = sin(half_roll)
+
+        return Quaternion {
+            x: sp * cy * cr - cp * sy * sr,
+            y: cp * sy * cr + sp * cy * sr,
+            z: cp * cy * sr - sp * sy * cr,
+            w: cp * cy * cr + sp * sy * sr
+        }
+
+    # Create from rotation matrix
+    pub fn from_matrix(m: Mat4) -> Quaternion:
+        let trace = m.get(0, 0) + m.get(1, 1) + m.get(2, 2)
+
+        if trace > 0.0:
+            let s = sqrt(trace + 1.0) * 2.0
+            return Quaternion {
+                x: (m.get(2, 1) - m.get(1, 2)) / s,
+                y: (m.get(0, 2) - m.get(2, 0)) / s,
+                z: (m.get(1, 0) - m.get(0, 1)) / s,
+                w: 0.25 * s
+            }
+        else if m.get(0, 0) > m.get(1, 1) and m.get(0, 0) > m.get(2, 2):
+            let s = sqrt(1.0 + m.get(0, 0) - m.get(1, 1) - m.get(2, 2)) * 2.0
+            return Quaternion {
+                x: 0.25 * s,
+                y: (m.get(0, 1) + m.get(1, 0)) / s,
+                z: (m.get(0, 2) + m.get(2, 0)) / s,
+                w: (m.get(2, 1) - m.get(1, 2)) / s
+            }
+        else if m.get(1, 1) > m.get(2, 2):
+            let s = sqrt(1.0 + m.get(1, 1) - m.get(0, 0) - m.get(2, 2)) * 2.0
+            return Quaternion {
+                x: (m.get(0, 1) + m.get(1, 0)) / s,
+                y: 0.25 * s,
+                z: (m.get(1, 2) + m.get(2, 1)) / s,
+                w: (m.get(0, 2) - m.get(2, 0)) / s
+            }
+        else:
+            let s = sqrt(1.0 + m.get(2, 2) - m.get(0, 0) - m.get(1, 1)) * 2.0
+            return Quaternion {
+                x: (m.get(0, 2) + m.get(2, 0)) / s,
+                y: (m.get(1, 2) + m.get(2, 1)) / s,
+                z: 0.25 * s,
+                w: (m.get(1, 0) - m.get(0, 1)) / s
+            }
+
+    # Component access
+    pub fn x(self) -> f32:
+        return self.x
+
+    pub fn y(self) -> f32:
+        return self.y
+
+    pub fn z(self) -> f32:
+        return self.z
+
+    pub fn w(self) -> f32:
+        return self.w
+
+    # Quaternion operations
+    pub fn dot(self, other: Quaternion) -> f32:
+        return self.x * other.x + self.y * other.y + self.z * other.z + self.w * other.w
+
+    pub fn length_squared(self) -> f32:
+        return self.dot(self)
+
+    pub fn length(self) -> f32:
+        return sqrt(self.length_squared())
+
+    pub fn normalize(self) -> Quaternion:
+        let len = self.length()
+        if len < 0.0001:
+            return Quaternion::identity()
+
+        return Quaternion {
+            x: self.x / len,
+            y: self.y / len,
+            z: self.z / len,
+            w: self.w / len
+        }
+
+    pub fn conjugate(self) -> Quaternion:
+        return Quaternion {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: self.w
+        }
+
+    pub fn inverse(self) -> Quaternion:
+        let len_sq = self.length_squared()
+        if len_sq < 0.0001:
+            return Quaternion::identity()
+
+        let conj = self.conjugate()
+        return Quaternion {
+            x: conj.x / len_sq,
+            y: conj.y / len_sq,
+            z: conj.z / len_sq,
+            w: conj.w / len_sq
+        }
+
+    # Spherical linear interpolation
+    pub fn slerp(self, other: Quaternion, t: f32) -> Quaternion:
+        let mut dot = self.dot(other)
+
+        # If the dot product is negative, negate one quaternion to take shorter path
+        let mut other_adj = other
+        if dot < 0.0:
+            other_adj = Quaternion {
+                x: -other.x,
+                y: -other.y,
+                z: -other.z,
+                w: -other.w
+            }
+            dot = -dot
+
+        # If quaternions are very close, use linear interpolation
+        if dot > 0.9995:
+            return Quaternion {
+                x: self.x + (other_adj.x - self.x) * t,
+                y: self.y + (other_adj.y - self.y) * t,
+                z: self.z + (other_adj.z - self.z) * t,
+                w: self.w + (other_adj.w - self.w) * t
+            }.normalize()
+
+        # Spherical interpolation
+        let theta = acos(dot)
+        let sin_theta = sin(theta)
+        let a = sin((1.0 - t) * theta) / sin_theta
+        let b = sin(t * theta) / sin_theta
+
+        return Quaternion {
+            x: self.x * a + other_adj.x * b,
+            y: self.y * a + other_adj.y * b,
+            z: self.z * a + other_adj.z * b,
+            w: self.w * a + other_adj.w * b
+        }
+
+    # Conversion to rotation matrix
+    pub fn to_matrix(self) -> Mat4:
+        let q = self.normalize()
+        let x = q.x
+        let y = q.y
+        let z = q.z
+        let w = q.w
+
+        let x2 = x * x
+        let y2 = y * y
+        let z2 = z * z
+        let xy = x * y
+        let xz = x * z
+        let yz = y * z
+        let wx = w * x
+        let wy = w * y
+        let wz = w * z
+
+        return Mat4::new(
+            1.0 - 2.0 * (y2 + z2), 2.0 * (xy + wz),       2.0 * (xz - wy),       0.0,
+            2.0 * (xy - wz),       1.0 - 2.0 * (x2 + z2), 2.0 * (yz + wx),       0.0,
+            2.0 * (xz + wy),       2.0 * (yz - wx),       1.0 - 2.0 * (x2 + y2), 0.0,
+            0.0,                   0.0,                   0.0,                   1.0
+        )
+
+    # Rotate a vector by this quaternion
+    pub fn rotate_vector(self, v: Vec3) -> Vec3:
+        # Convert to matrix and transform
+        return self.to_matrix().transform_vector(v)
+
+    # Alternative direct rotation (more efficient)
+    pub fn rotate_vector_direct(self, v: Vec3) -> Vec3:
+        let q = self.normalize()
+        let qv = Vec3::new(q.x, q.y, q.z)
+        let uv = qv.cross(v)
+        let uuv = qv.cross(uv)
+
+        return v + (uv * (2.0 * q.w)) + (uuv * 2.0)
+
+    # Get rotation axis and angle
+    pub fn to_axis_angle(self) -> (Vec3, f32):
+        let q = self.normalize()
+        let angle = 2.0 * acos(q.w)
+        let s = sqrt(1.0 - q.w * q.w)
+
+        if s < 0.0001:
+            # Arbitrary axis when angle is near zero
+            return (Vec3::unit_x(), 0.0)
+
+        let axis = Vec3::new(q.x / s, q.y / s, q.z / s)
+        return (axis, angle)
+
+    # Get Euler angles (pitch, yaw, roll in radians)
+    pub fn to_euler(self) -> (f32, f32, f32):
+        let q = self.normalize()
+
+        # Pitch (X-axis rotation)
+        let sin_pitch = 2.0 * (q.w * q.x - q.y * q.z)
+        let pitch = if abs(sin_pitch) >= 1.0:
+            # Gimbal lock case
+            if sin_pitch > 0.0:
+                1.5707963  # π/2
+            else:
+                -1.5707963  # -π/2
+        else:
+            asin(sin_pitch)
+
+        # Yaw (Y-axis rotation)
+        let sin_yaw = 2.0 * (q.w * q.y + q.z * q.x)
+        let cos_yaw = 1.0 - 2.0 * (q.x * q.x + q.y * q.y)
+        let yaw = atan2(sin_yaw, cos_yaw)
+
+        # Roll (Z-axis rotation)
+        let sin_roll = 2.0 * (q.w * q.z + q.x * q.y)
+        let cos_roll = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        let roll = atan2(sin_roll, cos_roll)
+
+        return (pitch, yaw, roll)
+
+# Quaternion operators
+impl Mul for Quaternion:
+    fn mul(self, other: Quaternion) -> Quaternion:
+        return Quaternion {
+            x: self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y,
+            y: self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x,
+            z: self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w,
+            w: self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z
+        }
+
+impl Neg for Quaternion:
+    fn neg(self) -> Quaternion:
+        return Quaternion {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+            w: -self.w
+        }

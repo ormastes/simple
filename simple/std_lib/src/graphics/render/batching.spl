@@ -1,0 +1,287 @@
+# Batching - Draw call batching and instancing
+#
+# Provides automatic batching of draw calls by material and mesh,
+# reducing state changes and improving rendering performance.
+#
+# Based on: doc/spec/graphics_3d.md (Part 3.4: Draw Call Batching)
+
+use core.*
+use graphics.math.*
+use graphics.scene.*
+use graphics.render.*
+
+# =============================================================================
+# BatchKey - Key for grouping draw calls
+# =============================================================================
+
+pub struct BatchKey:
+    pipeline_id: u64
+    material_id: u64
+    mesh_id: u64
+
+impl BatchKey:
+    pub fn new(pipeline_id: u64, material_id: u64, mesh_id: u64) -> BatchKey:
+        return BatchKey {
+            pipeline_id: pipeline_id,
+            material_id: material_id,
+            mesh_id: mesh_id
+        }
+
+    # Create from node components
+    pub fn from_node(node: SceneNode, mesh_handle: MeshHandle, material_handle: MaterialHandle) -> BatchKey:
+        # In real implementation, would extract IDs from handles
+        return BatchKey {
+            pipeline_id: material_handle.id,  # Material determines pipeline
+            material_id: material_handle.id,
+            mesh_id: mesh_handle.id
+        }
+
+    # Hash for dictionary key
+    pub fn hash(self) -> u64:
+        # Simple hash combining all IDs
+        let mut hash = self.pipeline_id
+        hash = hash * 31 + self.material_id
+        hash = hash * 31 + self.mesh_id
+        return hash
+
+    # Equality comparison
+    pub fn equals(self, other: BatchKey) -> bool:
+        return self.pipeline_id == other.pipeline_id and
+               self.material_id == other.material_id and
+               self.mesh_id == other.mesh_id
+
+# =============================================================================
+# InstanceData - Per-instance data for batching
+# =============================================================================
+
+pub struct InstanceData:
+    world_matrix: Mat4       # Transform from object to world space
+    normal_matrix: Mat3      # Inverse-transpose for normal transformation
+    color_tint: Vec4         # Per-instance color tint
+    custom_data: Vec4        # Custom per-instance data
+
+impl InstanceData:
+    pub fn new(world_matrix: Mat4) -> InstanceData:
+        # Compute normal matrix (upper-left 3x3 inverse-transpose)
+        let normal_matrix = world_matrix.to_mat3().inverse().transpose()
+
+        return InstanceData {
+            world_matrix: world_matrix,
+            normal_matrix: normal_matrix,
+            color_tint: Vec4::one(),
+            custom_data: Vec4::zero()
+        }
+
+    pub fn from_transform(transform: Transform) -> InstanceData:
+        let world_matrix = transform.to_matrix()
+        return InstanceData::new(world_matrix)
+
+    pub fn with_color(mut self, color: Vec4) -> InstanceData:
+        self.color_tint = color
+        return self
+
+    pub fn with_custom_data(mut self, data: Vec4) -> InstanceData:
+        self.custom_data = data
+        return self
+
+# =============================================================================
+# DrawBatch - A batch of instances sharing same material/mesh
+# =============================================================================
+
+pub struct DrawBatch:
+    key: BatchKey
+    instances: Array[InstanceData]
+    mesh_handle: MeshHandle
+    material_handle: MaterialHandle
+
+impl DrawBatch:
+    pub fn new(key: BatchKey, mesh: MeshHandle, material: MaterialHandle) -> DrawBatch:
+        return DrawBatch {
+            key: key,
+            instances: Array::new(),
+            mesh_handle: mesh,
+            material_handle: material
+        }
+
+    pub fn add_instance(mut self, instance: InstanceData):
+        self.instances.push(instance)
+
+    pub fn get_instance_count(self) -> i32:
+        return self.instances.len()
+
+    pub fn is_empty(self) -> bool:
+        return self.instances.len() == 0
+
+    pub fn clear(mut self):
+        self.instances.clear()
+
+# =============================================================================
+# BatchCollector - Collects and organizes draw calls
+# =============================================================================
+
+pub struct BatchCollector:
+    batches: Dict[u64, DrawBatch]
+    batch_count: i32
+    instance_count: i32
+
+impl BatchCollector:
+    pub fn new() -> BatchCollector:
+        return BatchCollector {
+            batches: Dict::new(),
+            batch_count: 0,
+            instance_count: 0
+        }
+
+    # Add a draw call to appropriate batch
+    pub fn add_draw_call(
+        mut self,
+        mesh: MeshHandle,
+        material: MaterialHandle,
+        world_transform: Mat4
+    ):
+        # Create batch key
+        let key = BatchKey::new(
+            material.id,  # Pipeline from material
+            material.id,
+            mesh.id
+        )
+        let key_hash = key.hash()
+
+        # Create instance data
+        let instance = InstanceData::new(world_transform)
+
+        # Get or create batch
+        if not self.batches.contains_key(key_hash):
+            let batch = DrawBatch::new(key, mesh, material)
+            self.batches.insert(key_hash, batch)
+            self.batch_count = self.batch_count + 1
+
+        # Add instance to batch
+        let mut batch = self.batches.get_mut(key_hash).unwrap()
+        batch.add_instance(instance)
+        self.instance_count = self.instance_count + 1
+
+    # Add from scene node
+    pub fn add_node(
+        mut self,
+        node: SceneNode,
+        mesh: MeshHandle,
+        material: MaterialHandle,
+        world_transform: Mat4
+    ):
+        self.add_draw_call(mesh, material, world_transform)
+
+    # Get all batches sorted by key (for state change minimization)
+    pub fn get_sorted_batches(self) -> Array[DrawBatch]:
+        let mut batches = Array::new()
+
+        for (_, batch) in self.batches:
+            batches.push(batch)
+
+        # Sort by key to minimize state changes
+        # Pipeline changes > Material changes > Mesh changes
+        batches.sort_by(\a, b:
+            if a.key.pipeline_id != b.key.pipeline_id:
+                return a.key.pipeline_id < b.key.pipeline_id
+            else if a.key.material_id != b.key.material_id:
+                return a.key.material_id < b.key.material_id
+            else:
+                return a.key.mesh_id < b.key.mesh_id
+        )
+
+        return batches
+
+    # Clear all batches
+    pub fn clear(mut self):
+        self.batches.clear()
+        self.batch_count = 0
+        self.instance_count = 0
+
+    # Get statistics
+    pub fn get_batch_count(self) -> i32:
+        return self.batch_count
+
+    pub fn get_instance_count(self) -> i32:
+        return self.instance_count
+
+    pub fn get_average_batch_size(self) -> f32:
+        if self.batch_count == 0:
+            return 0.0
+        return (self.instance_count as f32) / (self.batch_count as f32)
+
+    pub fn print_statistics(self):
+        io.println("Batch Statistics:")
+        io.println("  Batches:         " + self.batch_count.to_string())
+        io.println("  Total Instances: " + self.instance_count.to_string())
+        io.println("  Avg Batch Size:  " + self.get_average_batch_size().to_string())
+
+# =============================================================================
+# InstancingBuffer - GPU buffer for instance data
+# =============================================================================
+
+pub struct InstancingBuffer:
+    buffer_handle: u64
+    capacity: i32
+    instance_count: i32
+
+impl InstancingBuffer:
+    pub fn new(capacity: i32) -> InstancingBuffer:
+        # Create GPU buffer for instance data
+        # Each instance: 80 bytes (Mat4=64 + Mat3=36, packed to 80)
+        let buffer_size = capacity * 80
+        let buffer_handle = vk_create_instance_buffer(buffer_size as u64)
+
+        return InstancingBuffer {
+            buffer_handle: buffer_handle,
+            capacity: capacity,
+            instance_count: 0
+        }
+
+    # Upload instance data to GPU
+    pub fn upload(mut self, instances: Array[InstanceData]):
+        self.instance_count = instances.len()
+
+        if self.instance_count > self.capacity:
+            io.println("Warning: Instance count exceeds buffer capacity")
+            self.instance_count = self.capacity
+
+        # Pack instance data and upload
+        # In real implementation, would serialize InstanceData array
+        # For now, just update the buffer with raw data
+        let data_size = self.instance_count * 80
+        vk_update_instance_buffer(
+            self.buffer_handle,
+            instances.data_ptr(),
+            data_size as u64
+        )
+
+    pub fn get_buffer_handle(self) -> u64:
+        return self.buffer_handle
+
+    pub fn get_instance_count(self) -> i32:
+        return self.instance_count
+
+    pub fn destroy(self):
+        vk_destroy_buffer(self.buffer_handle)
+
+# =============================================================================
+# FFI Functions for Instancing
+# =============================================================================
+
+# Create instance buffer
+extern fn vk_create_instance_buffer(size: u64) -> u64
+
+# Update instance buffer
+extern fn vk_update_instance_buffer(buffer: u64, data: *u8, size: u64)
+
+# Draw instanced
+extern fn vk_draw_indexed_instanced(
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: i32,
+    first_instance: u32
+)
+
+# Destroy buffer (reuse existing)
+extern fn vk_destroy_buffer(buffer: u64)

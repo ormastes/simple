@@ -200,8 +200,8 @@ fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Value, Compil
 pub(crate) fn evaluate_expr(
     expr: &Expr,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -303,7 +303,7 @@ pub(crate) fn evaluate_expr(
             }
             // Then check functions for top-level function definitions
             // Return as Value::Function for first-class function usage
-            if let Some(func) = functions.get(name) {
+            if let Some(func) = functions.get(name).cloned() {
                 return Ok(Value::Function {
                     name: name.clone(),
                     def: Box::new(func.clone()),
@@ -427,6 +427,12 @@ pub(crate) fn evaluate_expr(
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
                     (Value::Str(a), b) => Ok(Value::Str(format!("{a}{}", b.to_display_string()))),
                     (a, Value::Str(b)) => Ok(Value::Str(format!("{}{}", a.to_display_string(), b))),
+                    // Array concatenation: [a, b] + [c, d] => [a, b, c, d]
+                    (Value::Array(a), Value::Array(b)) => {
+                        let mut result = a.clone();
+                        result.extend(b.iter().cloned());
+                        Ok(Value::Array(result))
+                    },
                     _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
                     _ => Ok(Value::Int(left_val.as_int()? + right_val.as_int()?)),
                 },
@@ -557,6 +563,15 @@ pub(crate) fn evaluate_expr(
                         _ => Err(CompileError::Semantic(
                             "'in' operator requires array, tuple, dict, or string".into(),
                         )),
+                    }
+                }
+                BinOp::MatMul => {
+                    // Matrix multiplication (@) - for now, treat as element-wise multiply for numbers
+                    // or defer to a matrix library for actual matrix operations
+                    if use_float {
+                        Ok(Value::Float(left_val.as_float()? * right_val.as_float()?))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
                     }
                 }
             }
@@ -739,7 +754,7 @@ pub(crate) fn evaluate_expr(
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {
                 if env.get(module_name).is_none() {
-                    if let Some(func) = functions.get(field) {
+                    if let Some(func) = functions.get(field).cloned() {
                         return Ok(Value::Function {
                             name: field.clone(),
                             def: Box::new(func.clone()),
@@ -770,7 +785,7 @@ pub(crate) fn evaluate_expr(
                     let getter_name = format!("get_{}", field);
                     let is_getter_name = format!("is_{}", field);
 
-                    if let Some(class_def) = classes.get(class) {
+                    if let Some(class_def) = classes.get(class).cloned() {
                         // Try get_<field>
                         if let Some(method) = class_def.methods.iter().find(|m| m.name == getter_name) {
                             // Call the getter method with self
@@ -793,7 +808,7 @@ pub(crate) fn evaluate_expr(
                 }
                 Value::Constructor { ref class_name } => {
                     // Look up static method on class
-                    if let Some(class_def) = classes.get(class_name) {
+                    if let Some(class_def) = classes.get(class_name).cloned() {
                         if let Some(method) = class_def.methods.iter().find(|m| &m.name == field) {
                             // Return as a function value for call
                             Ok(Value::Function {
@@ -834,11 +849,19 @@ pub(crate) fn evaluate_expr(
                     }
                 }
                 // Dict property access (e.g., dict.len, dict.is_empty)
+                // Also supports module namespace access (e.g., physics.World)
                 Value::Dict(ref map) => {
                     match field.as_str() {
                         "len" => Ok(Value::Int(map.len() as i64)),
                         "is_empty" => Ok(Value::Bool(map.is_empty())),
-                        _ => Err(CompileError::Semantic(format!("unknown property '{field}' on Dict"))),
+                        _ => {
+                            // Check if this is a key in the dict (module namespace access)
+                            if let Some(value) = map.get(field) {
+                                Ok(value.clone())
+                            } else {
+                                Err(CompileError::Semantic(format!("unknown property or key '{field}' on Dict")))
+                            }
+                        }
                     }
                 }
                 // Enum property access (Option/Result properties)
@@ -893,7 +916,7 @@ pub(crate) fn evaluate_expr(
                             "unknown variant {variant} for enum {enum_name}"
                         )))
                     }
-                } else if let Some(func) = functions.get(variant) {
+                } else if let Some(func) = functions.get(variant).cloned() {
                     Ok(Value::Function {
                         name: variant.clone(),
                         def: Box::new(func.clone()),
@@ -1236,15 +1259,45 @@ pub(crate) fn evaluate_expr(
         Expr::MacroInvocation {
             name,
             args: macro_args,
-        } => evaluate_macro_invocation(
-            name,
-            macro_args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-        ),
+        } => {
+            let result = evaluate_macro_invocation(
+                name,
+                macro_args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+
+            // Register symbols introduced by macro contracts (#1303)
+            if let Some(introduced) = take_macro_introduced_symbols() {
+                // Register introduced functions
+                for (func_name, func_def) in introduced.introduced_functions {
+                    functions.insert(func_name, func_def);
+                }
+
+                // Register introduced classes
+                for (class_name, class_def) in introduced.introduced_classes {
+                    classes.insert(class_name, class_def);
+                }
+
+                // TODO: Execute inject code
+                // NOTE: Inject code requires mutable environment access and block-level modification
+                // Currently inject code is extracted and stored in contract result, but not executed
+                // Full implementation requires:
+                // 1. Mutable env access (currently expressions have &Env, not &mut Env)
+                // 2. Block-level handling for head/tail/here injection points
+                // 3. Statement-level macro invocation handling (not just expressions)
+                //
+                // For now, inject contract items are parsed, validated, and extracted,
+                // but the code is not yet spliced into the callsite.
+
+                // TODO: Register types, variables when those contract types are implemented
+            }
+
+            Ok(result)
+        },
         Expr::Try(inner) => {
             // Try operator: expr? - unwrap Ok or propagate Err
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;

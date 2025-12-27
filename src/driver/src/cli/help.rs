@@ -6,7 +6,8 @@ pub fn print_help() {
     eprintln!("Simple Language v{}", VERSION);
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  simple                      Start interactive REPL");
+    eprintln!("  simple                      Start interactive TUI REPL (default)");
+    eprintln!("  simple --notui              Start Normal REPL (rustyline-based)");
     eprintln!("  simple <file.spl>           Run source file");
     eprintln!("  simple <file.smf>           Run compiled binary");
     eprintln!("  simple -c \"code\"            Run code string");
@@ -60,6 +61,14 @@ pub fn print_help() {
     eprintln!("  simple replay --compare <log1> <log2>    Compare two builds");
     eprintln!("  simple replay --extract-errors <log>     Extract diagnostics");
     eprintln!();
+    eprintln!("Verification (Lean Code Generation):");
+    eprintln!("  simple gen-lean generate           Generate all Lean verification files");
+    eprintln!("  simple gen-lean compare            Compare generated with existing Lean files");
+    eprintln!("  simple gen-lean compare --diff     Show unified diff for differences");
+    eprintln!("  simple gen-lean write              Write generated files (safe, won't overwrite)");
+    eprintln!("  simple gen-lean write --force      Overwrite existing Lean files");
+    eprintln!("  simple gen-lean --project <name>   Generate specific project only");
+    eprintln!();
     eprintln!("Package Management:");
     eprintln!("  simple init [name]          Create a new project");
     eprintln!("  simple add <pkg> [options]  Add a dependency");
@@ -78,6 +87,7 @@ pub fn print_help() {
     eprintln!("  -h, --help     Show this help");
     eprintln!("  -v, --version  Show version");
     eprintln!("  -c <code>      Run code string");
+    eprintln!("  --notui        Use Normal REPL instead of TUI (TUI is default)");
     eprintln!("  --gc-log       Enable verbose GC logging");
     eprintln!("  --gc=off       Disable garbage collection");
     eprintln!("  --target <arch>  Target architecture for cross-compilation");

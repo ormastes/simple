@@ -86,6 +86,7 @@ impl<'a> super::Lexer<'a> {
             "extern" => TokenKind::Extern,
             "context" => TokenKind::Context,
             "with" => TokenKind::With,
+            "ghost" => TokenKind::Ghost,
             "macro" => TokenKind::Macro,
             "vec" => TokenKind::Vec,
             "shared" => TokenKind::Shared,
@@ -120,6 +121,12 @@ impl<'a> super::Lexer<'a> {
             "and_then" => TokenKind::AndThen,
             // Memory management keywords
             "handle_pool" => TokenKind::HandlePool,
+            // Simple Math keywords (#1910-#1969)
+            "grid" => TokenKind::Grid,
+            "tensor" => TokenKind::Tensor,
+            "slice" => TokenKind::Slice,
+            "flat" => TokenKind::Flat,
+            "default" => TokenKind::Default,
             "_" => TokenKind::Underscore,
             // AOP keywords
             "on" => TokenKind::On,

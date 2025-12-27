@@ -1,0 +1,225 @@
+# Shadow Depth Shaders - Depth-only rendering for shadow maps
+#
+# Implements vertex and fragment shaders for shadow map generation.
+# Used for both directional lights (CSM) and point lights (cubemap).
+#
+# Based on: doc/spec/graphics_3d.md (Part 5.2: Shadow Mapping)
+
+use core.*
+use graphics.math.*
+
+# =============================================================================
+# Shadow Depth Vertex Input
+# =============================================================================
+
+pub struct ShadowVertexInput:
+    position: Vec3      # Vertex position (object space)
+
+# =============================================================================
+# Shadow Depth Uniforms
+# =============================================================================
+
+pub struct ShadowUniforms:
+    mvp_matrix: Mat4        # Model-View-Projection matrix (light space)
+    depth_bias: f32         # Bias to prevent shadow acne
+    normal_bias: f32        # Normal offset to prevent peter-panning
+
+# =============================================================================
+# Shadow Depth Vertex Shader
+# =============================================================================
+
+#[vertex_shader]
+pub fn shadow_depth_vertex_shader(
+    input: ShadowVertexInput,
+    uniforms: ShadowUniforms
+) -> Vec4:
+    # Transform vertex to light space
+    let clip_pos = uniforms.mvp_matrix.transform_point(input.position)
+
+    # Apply depth bias in clip space
+    clip_pos.z = clip_pos.z + uniforms.depth_bias
+
+    return clip_pos
+
+# =============================================================================
+# Shadow Depth Vertex Shader with Normal Bias
+# =============================================================================
+
+pub struct ShadowVertexInputWithNormal:
+    position: Vec3
+    normal: Vec3
+
+#[vertex_shader]
+pub fn shadow_depth_vertex_shader_normal_bias(
+    input: ShadowVertexInputWithNormal,
+    uniforms: ShadowUniforms,
+    model_matrix: Mat4,
+    normal_matrix: Mat3
+) -> Vec4:
+    # Apply normal bias (offset along normal to prevent peter-panning)
+    let world_normal = normal_matrix.transform_vector(input.normal).normalize()
+    let biased_position = input.position + world_normal * uniforms.normal_bias
+
+    # Transform to light space
+    let world_pos = model_matrix.transform_point(biased_position)
+    let clip_pos = uniforms.mvp_matrix.transform_point(world_pos)
+
+    # Apply depth bias
+    clip_pos.z = clip_pos.z + uniforms.depth_bias
+
+    return clip_pos
+
+# =============================================================================
+# Shadow Depth Fragment Shader
+# =============================================================================
+
+#[fragment_shader]
+pub fn shadow_depth_fragment_shader() -> f32:
+    # Depth is written automatically to depth buffer
+    # Fragment shader can be empty or discard transparent pixels
+    return gl_FragCoord.z
+
+# =============================================================================
+# Shadow Depth Fragment Shader with Alpha Test
+# =============================================================================
+
+pub struct ShadowFragmentInput:
+    tex_coord: Vec2
+
+pub struct ShadowMaterialUniforms:
+    use_alpha_map: bool
+    alpha_cutoff: f32
+
+#[fragment_shader]
+pub fn shadow_depth_fragment_shader_alpha(
+    input: ShadowFragmentInput,
+    material: ShadowMaterialUniforms
+) -> f32:
+    if material.use_alpha_map:
+        let alpha = sample_texture_2d(alpha_map, input.tex_coord).a
+
+        # Discard transparent pixels
+        if alpha < material.alpha_cutoff:
+            discard()
+
+    return gl_FragCoord.z
+
+# =============================================================================
+# Point Light Shadow Cube Vertex Shader
+# =============================================================================
+
+pub struct CubeShadowUniforms:
+    model_matrix: Mat4
+    light_position: Vec3
+    far_plane: f32
+
+pub struct CubeShadowVaryings:
+    world_pos: Vec3
+
+#[vertex_shader]
+pub fn cube_shadow_vertex_shader(
+    input: ShadowVertexInput,
+    uniforms: CubeShadowUniforms
+) -> (Vec4, CubeShadowVaryings):
+    # Transform to world space
+    let world_pos = uniforms.model_matrix.transform_point(input.position)
+
+    # Output varyings
+    let varyings = CubeShadowVaryings {
+        world_pos: world_pos
+    }
+
+    # Geometry shader will project to cube faces
+    # For now, just output world position
+    return (Vec4::from_vec3(world_pos, 1.0), varyings)
+
+# =============================================================================
+# Point Light Shadow Cube Fragment Shader
+# =============================================================================
+
+#[fragment_shader]
+pub fn cube_shadow_fragment_shader(
+    varyings: CubeShadowVaryings,
+    uniforms: CubeShadowUniforms
+) -> f32:
+    # Calculate distance from light
+    let light_distance = (varyings.world_pos - uniforms.light_position).length()
+
+    # Normalize to [0, 1] range
+    let normalized_depth = light_distance / uniforms.far_plane
+
+    return normalized_depth
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+# Placeholder for gl_FragCoord (provided by GPU)
+pub struct gl_FragCoord:
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+
+# Discard fragment (early fragment test)
+extern fn discard()
+
+# Texture sampling
+extern fn sample_texture_2d(texture_id: u64, uv: Vec2) -> Vec4
+extern fn alpha_map() -> u64
+
+# =============================================================================
+# Shadow Comparison (for PCF in main shader)
+# =============================================================================
+
+# Compare depth values for shadow test
+pub fn shadow_comparison(
+    shadow_depth: f32,
+    fragment_depth: f32,
+    bias: f32
+) -> f32:
+    # Returns 1.0 if lit, 0.0 if in shadow
+    return if fragment_depth <= shadow_depth + bias: 1.0 else: 0.0
+
+# Optimized PCF with Poisson disk sampling
+pub fn pcf_poisson_disk(
+    shadow_map: u64,
+    shadow_coord: Vec3,
+    bias: f32
+) -> f32:
+    # Poisson disk offsets (16 samples, evenly distributed)
+    let poisson_disk = [
+        Vec2::new(-0.94201624, -0.39906216),
+        Vec2::new( 0.94558609, -0.76890725),
+        Vec2::new(-0.09418410, -0.92938870),
+        Vec2::new( 0.34495938,  0.29387760),
+        Vec2::new(-0.91588581,  0.45771432),
+        Vec2::new(-0.81544232, -0.87912464),
+        Vec2::new(-0.38277543,  0.27676845),
+        Vec2::new( 0.97484398,  0.75648379),
+        Vec2::new( 0.44323325, -0.97511554),
+        Vec2::new( 0.53742981, -0.47373420),
+        Vec2::new(-0.26496911, -0.41893023),
+        Vec2::new( 0.79197514,  0.19090188),
+        Vec2::new(-0.24188840,  0.99706507),
+        Vec2::new(-0.81409955,  0.91437590),
+        Vec2::new( 0.19984126,  0.78641367),
+        Vec2::new( 0.14383161, -0.14100790)
+    ]
+
+    let texel_size = 1.0 / 2048.0  # Shadow map resolution
+    let mut shadow_factor = 0.0
+
+    for offset in poisson_disk:
+        let sample_uv = Vec2::new(
+            shadow_coord.x + offset.x * texel_size,
+            shadow_coord.y + offset.y * texel_size
+        )
+
+        let sampled_depth = sample_depth_texture(shadow_map, sample_uv)
+        shadow_factor = shadow_factor + shadow_comparison(sampled_depth, shadow_coord.z, bias)
+
+    return shadow_factor / 16.0
+
+# Sample depth texture (external function)
+extern fn sample_depth_texture(texture_id: u64, uv: Vec2) -> f32

@@ -5,6 +5,7 @@ mod cranelift;
 pub mod instr;
 pub mod instr_gpu;
 mod jit;
+pub mod lean;
 pub mod llvm;
 pub mod parallel;
 pub mod runtime_ffi;

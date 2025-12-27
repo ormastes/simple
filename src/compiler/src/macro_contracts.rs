@@ -41,6 +41,9 @@ pub struct MacroContractResult {
     /// Code to inject at callsite (anchor -> blocks)
     pub injections: HashMap<MacroAnchor, Vec<Block>>,
 
+    /// Mapping from emit label to inject anchor (for code extraction)
+    pub inject_labels: HashMap<String, MacroAnchor>,
+
     /// Return type of the macro (if declared)
     pub return_type: Option<Type>,
 
@@ -226,15 +229,16 @@ fn process_intro_decl(
 
 /// Process an inject contract item
 fn process_inject_item(
-    _inject: &MacroInject,
-    _result: &mut MacroContractResult,
+    inject: &MacroInject,
+    result: &mut MacroContractResult,
 ) -> Result<(), CompileError> {
-    // Inject specs declare where code will be inserted
-    // The actual code is emitted during macro expansion
-    // For now, we just track that an injection point exists
+    // Store the mapping from emit label to inject anchor
+    // This allows macro expansion to know which emit blocks contain injection code
+    result.inject_labels.insert(inject.label.clone(), inject.spec.anchor.clone());
 
-    // Note: Actual injection handling will be done in macro expansion phase
-    // This is just for contract validation
+    // Initialize the injection vector for this anchor if not present
+    result.injections.entry(inject.spec.anchor.clone()).or_insert_with(Vec::new);
+
     Ok(())
 }
 

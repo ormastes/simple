@@ -275,6 +275,177 @@ fn main():
 
 ---
 
+## Grid and Tensor (Math Extensions)
+
+SDN supports matrix grids and N-dimensional tensors for mathematical data. These extensions use keyword-first syntax that is unambiguous with existing table forms.
+
+### Grid (2D Matrix)
+
+Grid blocks use pipe-delimited rows for human-readable matrix representation.
+
+#### Basic Grid (no headers)
+
+```sdn
+grid A:
+    | 3 | 1 |
+    | 1 | 2 |
+```
+
+#### Expression Form (assignment)
+
+```sdn
+A = grid:
+    | 3 | 1 |
+    | 1 | 2 |
+
+b = grid:
+    | 9 |
+    | 8 |
+```
+
+#### With Column Headers
+
+```sdn
+grid weights:
+    | feature | w1   | w2   | w3   |
+    | bias    | 0.1  | 0.2  | 0.3  |
+    | input1  | 0.5  | 0.6  | 0.7  |
+    | input2  | 0.8  | 0.9  | 1.0  |
+```
+
+#### With Row\Column Axis Labels
+
+```sdn
+grid A:
+    | r\c | 0 | 1 |
+    | 0   | 3 | 1 |
+    | 1   | 1 | 2 |
+```
+
+The first row can optionally label axes (e.g., `r\c` means row\column).
+
+#### Confusion Matrix Example
+
+```sdn
+grid confusion_matrix:
+    | pred\actual | cat  | dog  | bird |
+    | cat         | 45   | 3    | 2    |
+    | dog         | 5    | 38   | 7    |
+    | bird        | 1    | 4    | 45   |
+```
+
+### Tensor (N-Dimensional)
+
+For N-dimensional data, use `tensor` with explicit shape and render mode.
+
+#### Slice Mode (human-readable)
+
+```sdn
+tensor K: Float [d=2, h=3, w=4]
+    slice d=0:
+        | h\w | 0    | 1    | 2    | 3    |
+        | 0   | 0.01 | 0.02 | 0.03 | 0.04 |
+        | 1   | 0.05 | 0.06 | 0.07 | 0.08 |
+        | 2   | 0.09 | 0.10 | 0.11 | 0.12 |
+    slice d=1:
+        | h\w | 0    | 1    | 2    | 3    |
+        | 0   | 0.13 | 0.14 | 0.15 | 0.16 |
+        | 1   | 0.17 | 0.18 | 0.19 | 0.20 |
+        | 2   | 0.21 | 0.22 | 0.23 | 0.24 |
+```
+
+#### 3D RGB Image Example
+
+```sdn
+tensor rgb_image: Float [c=3, h=2, w=3]
+    slice c=0:
+        | h\w | 0    | 1    | 2    |
+        | 0   | 0.9  | 0.8  | 0.7  |
+        | 1   | 0.6  | 0.5  | 0.4  |
+    slice c=1:
+        | h\w | 0    | 1    | 2    |
+        | 0   | 0.1  | 0.2  | 0.3  |
+        | 1   | 0.4  | 0.5  | 0.6  |
+    slice c=2:
+        | h\w | 0    | 1    | 2    |
+        | 0   | 0.0  | 0.1  | 0.2  |
+        | 1   | 0.3  | 0.4  | 0.5  |
+```
+
+#### 4D Batch Tensor with Nested Slices
+
+```sdn
+tensor batch: Float [n=2, c=2, h=2, w=2]
+    slice n=0:
+        slice c=0:
+            | h\w | 0   | 1   |
+            | 0   | 1.0 | 0.9 |
+            | 1   | 0.8 | 0.7 |
+        slice c=1:
+            | h\w | 0   | 1   |
+            | 0   | 0.5 | 0.4 |
+            | 1   | 0.3 | 0.2 |
+    slice n=1:
+        slice c=0:
+            | h\w | 0   | 1   |
+            | 0   | 0.6 | 0.5 |
+            | 1   | 0.4 | 0.3 |
+        slice c=1:
+            | h\w | 0   | 1   |
+            | 0   | 0.2 | 0.1 |
+            | 1   | 0.1 | 0.0 |
+```
+
+#### Flat Mode (sparse/large tensors)
+
+```sdn
+tensor K: Float [d=2, h=3, w=4]
+    default: 0
+    flat:
+        | d | h | w | value |
+        | 0 | 0 | 0 | 0.01  |
+        | 0 | 0 | 1 | 0.02  |
+        | 1 | 2 | 3 | 0.24  |
+```
+
+#### Sparse Neural Network Weights Example
+
+```sdn
+tensor sparse_weights: Float [layer=10, in=1000, out=500]
+    default: 0
+    flat:
+        | layer | in  | out | value  |
+        | 0     | 0   | 0   | 0.123  |
+        | 0     | 5   | 10  | -0.456 |
+        | 3     | 100 | 250 | 0.789  |
+        | 9     | 999 | 499 | -0.321 |
+```
+
+### Comparison: Table vs Grid vs Tensor
+
+| Feature | Named Table | Typed Table | Grid | Tensor |
+|---------|-------------|-------------|------|--------|
+| Syntax | `name \|cols\|` | `name: table{types}` | `grid name:` | `tensor name: Type [dims]` |
+| Rows | Comma-separated | Comma-separated | Pipe-delimited | Pipe-delimited |
+| Headers | Field names | Types | Any labels | Axis labels |
+| Dimensions | 2D | 2D | 2D | N-D |
+| Use case | Data records | Typed data | Matrices | ML tensors |
+
+### LL(1) Disambiguation
+
+The keyword-first design ensures one-pass parsing:
+
+| First Token | Form | Example |
+|-------------|------|---------|
+| `ident` then `\|` | Named table | `users \|id, name\|` |
+| `ident:` then `table{` | Typed table | `p: table{i32, i32}` |
+| `grid` | 2D matrix grid | `grid A:` |
+| `tensor` | N-D tensor | `tensor K: Float [...]` |
+
+Reserved keywords for grid/tensor blocks: `grid`, `tensor`, `slice`, `flat`, `default`
+
+---
+
 ## Grammar (EBNF)
 
 ```ebnf
@@ -288,6 +459,8 @@ statement    = ident ':' value NEWLINE                          (* simple value 
              | ident ':' table_type NEWLINE INDENT rows DEDENT  (* long typed table *)
              | ident '|' field_list '|' row                     (* short named table *)
              | ident '|' field_list '|' NEWLINE INDENT rows DEDENT    (* long named table *)
+             | grid_decl                                        (* 2D matrix grid *)
+             | tensor_decl                                      (* N-D tensor *)
              | COMMENT NEWLINE
              | NEWLINE
              ;
@@ -331,6 +504,28 @@ tuple        = '(' value_list ')' ;
 
 rows         = row+ ;
 row          = value (',' value)* NEWLINE ;
+
+(* === GRID (2D Matrix) === *)
+grid_decl    = 'grid' ident? ':' NEWLINE INDENT grid_rows DEDENT   (* statement form *)
+             | ident '=' 'grid' ':' NEWLINE INDENT grid_rows DEDENT (* expression form *)
+             ;
+
+grid_rows    = grid_row+ ;
+grid_row     = '|' cell ('|' cell)+ '|' NEWLINE ;
+cell         = value | ident '\\' ident | empty ;                  (* r\c for axis labels *)
+
+(* === TENSOR (N-Dimensional) === *)
+tensor_decl  = 'tensor' ident ':' type_name dim_list NEWLINE INDENT tensor_body DEDENT ;
+dim_list     = '[' dim_spec (',' dim_spec)* ']' ;
+dim_spec     = ident '=' number ;
+
+tensor_body  = slice_block+
+             | default_line? flat_block
+             ;
+
+slice_block  = 'slice' ident '=' number ':' NEWLINE INDENT (slice_block | grid_rows) DEDENT ;
+flat_block   = 'flat' ':' NEWLINE INDENT grid_rows DEDENT ;
+default_line = 'default' ':' value NEWLINE ;
 
 (* === TOKENS === *)
 ident        = [A-Za-z_][A-Za-z0-9_]* ;

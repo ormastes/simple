@@ -1,0 +1,128 @@
+# GC Manual Borrow Model
+#
+# Formal model for garbage collection with manual borrow tracking.
+# Mirrors: verification/gc_manual_borrow/src/GcManualBorrow.lean
+
+# Object identifier
+class ObjId:
+    id: Int
+
+    fn create(id: Int) -> ObjId:
+        return ObjId(id)
+
+    fn to_lean(self) -> String:
+        return "ObjId.mk " + str(self.id)
+
+# Borrow status
+enum BorrowStatus:
+    Unborrowed
+    ImmutBorrowed(count: Int)
+    MutBorrowed
+
+    fn to_lean(self) -> String:
+        match self:
+            case Unborrowed: return "BorrowStatus.unborrowed"
+            case ImmutBorrowed(n): return "BorrowStatus.immutBorrowed " + str(n)
+            case MutBorrowed: return "BorrowStatus.mutBorrowed"
+
+# Object state in the heap
+class ObjState:
+    id: ObjId
+    borrow_status: BorrowStatus
+    ref_count: Int
+    is_rooted: Bool
+
+    fn create(id: ObjId) -> ObjState:
+        return ObjState(id, BorrowStatus.Unborrowed, 1, True)
+
+    fn to_lean(self) -> String:
+        rooted = "false"
+        if self.is_rooted:
+            rooted = "true"
+        return "{{ id := " + self.id.to_lean() + ", borrowStatus := " + self.borrow_status.to_lean() + ", refCount := " + str(self.ref_count) + ", isRooted := " + rooted + " }}"
+
+# GC Heap
+class GcHeap:
+    objects: List[ObjState]
+    next_id: Int
+
+    fn create() -> GcHeap:
+        return GcHeap([], 0)
+
+    fn allocate(self) -> (GcHeap, ObjId):
+        new_id = ObjId.create(self.next_id)
+        new_obj = ObjState.create(new_id)
+        new_objects = self.objects.append(new_obj)
+        return (
+            GcHeap(new_objects, self.next_id + 1),
+            new_id
+        )
+
+    fn find_object(self, id: ObjId) -> ObjState | None:
+        for obj in self.objects:
+            if obj.id.id == id.id:
+                return obj
+        return None
+
+    fn update_object(self, id: ObjId, new_state: ObjState) -> GcHeap:
+        new_objects = []
+        for obj in self.objects:
+            if obj.id.id == id.id:
+                new_objects.append(new_state)
+            else:
+                new_objects.append(obj)
+        return GcHeap(new_objects, self.next_id)
+
+# Borrow operations
+fn try_immut_borrow(heap: GcHeap, id: ObjId) -> (GcHeap, Bool):
+    obj = heap.find_object(id)
+    if obj is None:
+        return (heap, False)
+
+    match obj.borrow_status:
+        case BorrowStatus.Unborrowed:
+            new_obj = ObjState(obj.id, BorrowStatus.ImmutBorrowed(1), obj.ref_count, obj.is_rooted)
+            return (heap.update_object(id, new_obj), True)
+        case BorrowStatus.ImmutBorrowed(n):
+            new_obj = ObjState(obj.id, BorrowStatus.ImmutBorrowed(n + 1), obj.ref_count, obj.is_rooted)
+            return (heap.update_object(id, new_obj), True)
+        case BorrowStatus.MutBorrowed:
+            return (heap, False)
+
+fn try_mut_borrow(heap: GcHeap, id: ObjId) -> (GcHeap, Bool):
+    obj = heap.find_object(id)
+    if obj is None:
+        return (heap, False)
+
+    match obj.borrow_status:
+        case BorrowStatus.Unborrowed:
+            new_obj = ObjState(obj.id, BorrowStatus.MutBorrowed, obj.ref_count, obj.is_rooted)
+            return (heap.update_object(id, new_obj), True)
+        case _:
+            return (heap, False)
+
+fn release_borrow(heap: GcHeap, id: ObjId) -> GcHeap:
+    obj = heap.find_object(id)
+    if obj is None:
+        return heap
+
+    match obj.borrow_status:
+        case BorrowStatus.ImmutBorrowed(n):
+            new_status = BorrowStatus.ImmutBorrowed(n - 1)
+            if n <= 1:
+                new_status = BorrowStatus.Unborrowed
+            new_obj = ObjState(obj.id, new_status, obj.ref_count, obj.is_rooted)
+            return heap.update_object(id, new_obj)
+        case BorrowStatus.MutBorrowed:
+            new_obj = ObjState(obj.id, BorrowStatus.Unborrowed, obj.ref_count, obj.is_rooted)
+            return heap.update_object(id, new_obj)
+        case _:
+            return heap
+
+# Specification functions
+
+fn borrow_exclusivity_spec() -> String:
+    return "theorem borrow_exclusivity : ∀ heap obj, obj.borrowStatus = mutBorrowed → ¬∃ other, other ≠ obj ∧ borrows heap other obj"
+
+fn gc_safety_spec() -> String:
+    return "theorem gc_safety : ∀ heap obj, is_reachable heap obj → ¬is_collected heap obj"

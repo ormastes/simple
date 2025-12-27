@@ -1,0 +1,459 @@
+# Physics Playground Demo
+#
+# Demonstrates the physics abstraction layer working across engines:
+# - Rigid body dynamics
+# - Collision shapes (sphere, box, capsule)
+# - Raycasting and overlap queries
+# - Forces and impulses
+# - Collision layers and filtering
+# - Physics simulation stepping
+
+import game_engine.physics
+import game_engine.scene_node
+import game_engine.actor_model
+import sys.ffi
+
+# Physics Object
+struct PhysicsObject:
+    entity_id: i32
+    body_type: physics.RigidBodyType
+    shape: physics.CollisionShape
+    transform: scene_node.Transform3D
+    mass: f32
+    velocity: (f32, f32, f32)
+    angular_velocity: (f32, f32, f32)
+    restitution: f32  # Bounciness
+    friction: f32
+
+impl PhysicsObject:
+    fn new_sphere(radius: f32, position: (f64, f64, f64)) -> PhysicsObject:
+        let null_ptr: ffi.VoidPtr = 0 as ffi.VoidPtr
+        let entity_id = spawn_game_entity(null_ptr)
+
+        return PhysicsObject(
+            entity_id: entity_id,
+            body_type: physics.RigidBodyType::Dynamic,
+            shape: physics.CollisionShape::Sphere(radius),
+            transform: scene_node.Transform3D(
+                position: position,
+                rotation: (0.0, 0.0, 0.0),
+                scale: (1.0, 1.0, 1.0)
+            ),
+            mass: 1.0,
+            velocity: (0.0, 0.0, 0.0),
+            angular_velocity: (0.0, 0.0, 0.0),
+            restitution: 0.5,
+            friction: 0.5
+        )
+
+    fn new_box(half_extents: (f32, f32, f32), position: (f64, f64, f64)) -> PhysicsObject:
+        let null_ptr: ffi.VoidPtr = 0 as ffi.VoidPtr
+        let entity_id = spawn_game_entity(null_ptr)
+
+        let (x, y, z) = half_extents
+
+        return PhysicsObject(
+            entity_id: entity_id,
+            body_type: physics.RigidBodyType::Dynamic,
+            shape: physics.CollisionShape::Box(x, y, z),
+            transform: scene_node.Transform3D(
+                position: position,
+                rotation: (0.0, 0.0, 0.0),
+                scale: (1.0, 1.0, 1.0)
+            ),
+            mass: 2.0,
+            velocity: (0.0, 0.0, 0.0),
+            angular_velocity: (0.0, 0.0, 0.0),
+            restitution: 0.3,
+            friction: 0.7
+        )
+
+    fn new_capsule(radius: f32, height: f32, position: (f64, f64, f64)) -> PhysicsObject:
+        let null_ptr: ffi.VoidPtr = 0 as ffi.VoidPtr
+        let entity_id = spawn_game_entity(null_ptr)
+
+        return PhysicsObject(
+            entity_id: entity_id,
+            body_type: physics.RigidBodyType::Dynamic,
+            shape: physics.CollisionShape::Capsule(radius, height),
+            transform: scene_node.Transform3D(
+                position: position,
+                rotation: (0.0, 0.0, 0.0),
+                scale: (1.0, 1.0, 1.0)
+            ),
+            mass: 1.5,
+            velocity: (0.0, 0.0, 0.0),
+            angular_velocity: (0.0, 0.0, 0.0),
+            restitution: 0.7,
+            friction: 0.4
+        )
+
+    fn apply_force(mut self, force: (f32, f32, f32)):
+        let (fx, fy, fz) = force
+        let (mut vx, mut vy, mut vz) = self.velocity
+
+        # F = ma, so a = F/m
+        vx = vx + (fx / self.mass)
+        vy = vy + (fy / self.mass)
+        vz = vz + (fz / self.mass)
+
+        self.velocity = (vx, vy, vz)
+
+    fn apply_impulse(mut self, impulse: (f32, f32, f32)):
+        let (ix, iy, iz) = impulse
+        let (mut vx, mut vy, mut vz) = self.velocity
+
+        # Impulse directly changes velocity
+        vx = vx + ix
+        vy = vy + iy
+        vz = vz + iz
+
+        self.velocity = (vx, vy, vz)
+
+    fn apply_torque(mut self, torque: (f32, f32, f32)):
+        let (tx, ty, tz) = torque
+        let (mut wx, mut wy, mut wz) = self.angular_velocity
+
+        # Simplified torque application
+        wx = wx + tx
+        wy = wy + ty
+        wz = wz + tz
+
+        self.angular_velocity = (wx, wy, wz)
+
+    fn update(mut self, delta: f32):
+        # Apply gravity
+        let gravity = (0.0, 0.0, -9.8)
+        self.apply_force(gravity)
+
+        # Update position
+        let (px, py, pz) = self.transform.position
+        let (vx, vy, vz) = self.velocity
+
+        let new_x = px + (vx * delta)
+        let new_y = py + (vy * delta)
+        let new_z = pz + (vz * delta)
+
+        self.transform.position = (new_x, new_y, new_z)
+
+        # Update rotation
+        let (rx, ry, rz) = self.transform.rotation
+        let (wx, wy, wz) = self.angular_velocity
+
+        let new_rx = rx + (wx * delta)
+        let new_ry = ry + (wy * delta)
+        let new_rz = rz + (wz * delta)
+
+        self.transform.rotation = (new_rx, new_ry, new_rz)
+
+        # Apply friction/damping
+        let (mut vx, mut vy, mut vz) = self.velocity
+        let damping = 0.98
+        vx = vx * damping
+        vy = vy * damping
+        vz = vz * damping
+        self.velocity = (vx, vy, vz)
+
+        # Check ground collision
+        if new_z <= 0.0:
+            self.handle_ground_collision()
+
+    fn handle_ground_collision(mut self):
+        let (px, py, pz) = self.transform.position
+        self.transform.position = (px, py, 0.0)
+
+        # Bounce
+        let (vx, vy, mut vz) = self.velocity
+        vz = -vz * self.restitution
+        self.velocity = (vx, vy, vz)
+
+        # If velocity is small, stop bouncing
+        if vz < 0.1 and vz > -0.1:
+            self.velocity = (vx * self.friction, vy * self.friction, 0.0)
+
+# Physics World
+struct PhysicsWorld:
+    objects: Vec[PhysicsObject]
+    static_objects: Vec[StaticObject]
+    gravity: (f32, f32, f32)
+    time_accumulator: f32
+    fixed_timestep: f32
+
+impl PhysicsWorld:
+    fn new() -> PhysicsWorld:
+        return PhysicsWorld(
+            objects: [],
+            static_objects: [],
+            gravity: (0.0, 0.0, -9.8),
+            time_accumulator: 0.0,
+            fixed_timestep: 0.016  # 60 FPS
+        )
+
+    fn add_object(mut self, obj: PhysicsObject):
+        self.objects.push(obj)
+
+    fn add_static_object(mut self, obj: StaticObject):
+        self.static_objects.push(obj)
+
+    fn update(mut self, delta: f32):
+        # Accumulate time
+        self.time_accumulator = self.time_accumulator + delta
+
+        # Fixed timestep updates
+        while self.time_accumulator >= self.fixed_timestep:
+            self.physics_step(self.fixed_timestep)
+            self.time_accumulator = self.time_accumulator - self.fixed_timestep
+
+    fn physics_step(mut self, dt: f32):
+        # Update all dynamic objects
+        for mut obj in self.objects:
+            obj.update(dt)
+
+        # Check collisions
+        self.check_collisions()
+
+    fn check_collisions(mut self):
+        # Naive O(n²) collision detection
+        let num_objects = self.objects.len()
+
+        for i in range(num_objects):
+            for j in range(i + 1, num_objects):
+                if self.check_collision_pair(i, j):
+                    self.resolve_collision(i, j)
+
+    fn check_collision_pair(self, i: i32, j: i32) -> bool:
+        let obj1 = self.objects[i]
+        let obj2 = self.objects[j]
+
+        # Simple sphere-sphere collision for now
+        let dist = scene_node.position_distance(
+            obj1.transform.position,
+            obj2.transform.position
+        )
+
+        # Get radii from shapes
+        let r1 = self.get_shape_radius(obj1.shape)
+        let r2 = self.get_shape_radius(obj2.shape)
+
+        return dist < (r1 + r2)
+
+    fn get_shape_radius(self, shape: physics.CollisionShape) -> f64:
+        if shape is physics.CollisionShape::Sphere(r):
+            return r as f64
+        elif shape is physics.CollisionShape::Box(x, y, z):
+            # Approximate with largest extent
+            return x as f64
+        elif shape is physics.CollisionShape::Capsule(r, h):
+            return r as f64
+        else:
+            return 1.0
+
+    fn resolve_collision(mut self, i: i32, j: i32):
+        # Simple elastic collision
+        let mut obj1 = self.objects[i]
+        let mut obj2 = self.objects[j]
+
+        # Swap velocities (simplified)
+        let temp_v = obj1.velocity
+        obj1.velocity = obj2.velocity
+        obj2.velocity = temp_v
+
+        self.objects[i] = obj1
+        self.objects[j] = obj2
+
+    fn raycast(self, origin: (f64, f64, f64), direction: (f32, f32, f32), max_distance: f32) -> Option[physics.RaycastHit]:
+        # Simple raycast against all objects
+        let mut closest_hit: Option[physics.RaycastHit] = None
+        let mut closest_dist = max_distance
+
+        for obj in self.objects:
+            # Check ray-sphere intersection
+            if let Some(hit) = self.raycast_object(origin, direction, obj):
+                if hit.distance < closest_dist:
+                    closest_dist = hit.distance
+                    closest_hit = Some(hit)
+
+        return closest_hit
+
+    fn raycast_object(self, origin: (f64, f64, f64), direction: (f32, f32, f32), obj: PhysicsObject) -> Option[physics.RaycastHit]:
+        # Simplified ray-sphere intersection
+        # Returns None for now
+        return None
+
+# Static Object (immovable)
+struct StaticObject:
+    shape: physics.CollisionShape
+    position: (f64, f64, f64)
+    friction: f32
+
+# Demo Scenarios
+fn demo_bouncing_spheres():
+    print("Demo: Bouncing Spheres")
+    print("======================")
+
+    let mut world = PhysicsWorld::new()
+
+    # Add ground plane
+    world.add_static_object(StaticObject(
+        shape: physics.CollisionShape::Box(100.0, 100.0, 1.0),
+        position: (0.0, 0.0, -1.0),
+        friction: 0.5
+    ))
+
+    # Add spheres at different heights
+    for i in range(5):
+        let x = (i as f64) * 2.0
+        let y = 0.0
+        let z = 5.0 + (i as f64) * 2.0
+
+        let mut sphere = PhysicsObject::new_sphere(0.5, (x, y, z))
+        sphere.restitution = 0.7  # Bouncy!
+        world.add_object(sphere)
+
+    # Simulate for 5 seconds
+    print("Simulating...")
+    for frame in range(300):  # 5 seconds at 60 FPS
+        world.update(0.016)
+
+        if frame % 60 == 0:
+            print(f"  Time: {frame/60} seconds")
+
+    print("Simulation complete!")
+    print("")
+
+fn demo_stacking_boxes():
+    print("Demo: Stacking Boxes")
+    print("====================")
+
+    let mut world = PhysicsWorld::new()
+
+    # Add ground
+    world.add_static_object(StaticObject(
+        shape: physics.CollisionShape::Box(100.0, 100.0, 1.0),
+        position: (0.0, 0.0, -1.0),
+        friction: 0.8
+    ))
+
+    # Stack boxes
+    for i in range(5):
+        let z = (i as f64) * 2.0 + 1.0
+        let box = PhysicsObject::new_box((1.0, 1.0, 1.0), (0.0, 0.0, z))
+        world.add_object(box)
+
+    # Simulate
+    print("Simulating...")
+    for frame in range(180):  # 3 seconds
+        world.update(0.016)
+
+    print("Stack complete!")
+    print("")
+
+fn demo_explosive_force():
+    print("Demo: Explosive Force")
+    print("=====================")
+
+    let mut world = PhysicsWorld::new()
+
+    # Create sphere cluster
+    for i in range(10):
+        let angle = (i as f32) * 0.628  # 2π / 10
+        let radius = 5.0
+        let x = (cos(angle) * radius) as f64
+        let y = (sin(angle) * radius) as f64
+        let z = 5.0
+
+        let sphere = PhysicsObject::new_sphere(0.5, (x, y, z))
+        world.add_object(sphere)
+
+    # Apply explosion impulse
+    print("Applying explosive force...")
+    for mut obj in world.objects:
+        let center = (0.0, 0.0, 5.0)
+        let dir = subtract_positions(obj.transform.position, center)
+        let force = 50.0
+
+        obj.apply_impulse(scale_vec3(normalize_vec3(dir), force))
+
+    # Simulate
+    for frame in range(240):  # 4 seconds
+        world.update(0.016)
+
+    print("Explosion complete!")
+    print("")
+
+fn demo_raycast():
+    print("Demo: Raycasting")
+    print("================")
+
+    let mut world = PhysicsWorld::new()
+
+    # Add target sphere
+    let target = PhysicsObject::new_sphere(1.0, (0.0, 0.0, 5.0))
+    world.add_object(target)
+
+    # Raycast from camera position
+    let ray_origin = (0.0, -10.0, 5.0)
+    let ray_direction = (0.0, 1.0, 0.0)
+    let max_distance = 100.0
+
+    print(f"Raycasting from {ray_origin} in direction {ray_direction}")
+
+    if let Some(hit) = world.raycast(ray_origin, ray_direction, max_distance):
+        print(f"  Hit at: {hit.position}")
+        print(f"  Distance: {hit.distance}")
+        print(f"  Normal: {hit.normal}")
+    else:
+        print("  No hit")
+
+    print("")
+
+# Utility Functions
+fn cos(x: f32) -> f32:
+    # Placeholder - would use math library
+    return 0.0
+
+fn sin(x: f32) -> f32:
+    # Placeholder - would use math library
+    return 0.0
+
+fn normalize_vec3(v: (f64, f64, f64)) -> (f32, f32, f32):
+    let (x, y, z) = v
+    let len = sqrt_f64(x*x + y*y + z*z)
+    if len > 0.0:
+        return ((x/len) as f32, (y/len) as f32, (z/len) as f32)
+    return (0.0, 0.0, 0.0)
+
+fn scale_vec3(v: (f32, f32, f32), s: f32) -> (f32, f32, f32):
+    let (x, y, z) = v
+    return (x*s, y*s, z*s)
+
+fn subtract_positions(a: (f64, f64, f64), b: (f64, f64, f64)) -> (f64, f64, f64):
+    let (ax, ay, az) = a
+    let (bx, by, bz) = b
+    return (ax-bx, ay-by, az-bz)
+
+fn sqrt_f64(x: f64) -> f64:
+    # Placeholder
+    return x
+
+# Main
+fn main():
+    print("Physics Playground Demo")
+    print("=======================")
+    print("")
+    print("Demonstrates:")
+    print("  - Rigid body dynamics")
+    print("  - Collision shapes")
+    print("  - Forces and impulses")
+    print("  - Collision detection")
+    print("  - Raycasting")
+    print("  - Fixed timestep simulation")
+    print("")
+
+    # Run demos
+    demo_bouncing_spheres()
+    demo_stacking_boxes()
+    demo_explosive_force()
+    demo_raycast()
+
+    print("All demos complete!")

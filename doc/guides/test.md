@@ -746,5 +746,5 @@ All coverage thresholds met!
 ## See Also
 
 - `doc/system_test.md` - System test framework guide (SDN config, BDD patterns)
-- `doc/spec/bdd_spec.md` - BDD spec framework specification (describe/context/it)
+- `doc/spec/testing/testing_bdd_framework.md` - BDD spec framework specification (describe/context/it)
 - `doc/spec/sdn.md` - SDN (Simple Data Notation) format specification

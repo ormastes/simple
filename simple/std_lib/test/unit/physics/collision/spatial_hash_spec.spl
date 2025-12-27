@@ -1,0 +1,357 @@
+# Physics Spatial Hashing Tests
+#
+# Tests for spatial hashing broad-phase collision detection.
+
+import spec
+import physics.core as core
+import physics.collision as collision
+
+
+describe "Spatial Hashing":
+    describe "Hash grid creation":
+        it "should create empty hash grid":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+            spec.expect(grid.cell_size).to_be_close_to(1.0, 0.001)
+            spec.expect(grid.num_objects()).to_be(0)
+
+        it "should create grid with custom cell size":
+            let grid = collision.SpatialHashGrid(cell_size=2.5)
+            spec.expect(grid.cell_size).to_be_close_to(2.5, 0.001)
+
+        it "should handle very small cell sizes":
+            let grid = collision.SpatialHashGrid(cell_size=0.1)
+            spec.expect(grid.cell_size).to_be_close_to(0.1, 0.001)
+
+        it "should handle large cell sizes":
+            let grid = collision.SpatialHashGrid(cell_size=100.0)
+            spec.expect(grid.cell_size).to_be_close_to(100.0, 0.001)
+
+    describe "Object insertion":
+        it "should insert single object":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+            let aabb = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(1.0, 1.0, 1.0)
+            )
+
+            grid.insert(object_id=1, aabb=aabb)
+
+            spec.expect(grid.num_objects()).to_be(1)
+
+        it "should insert multiple objects":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            for i in range(10):
+                let aabb = collision.AABB(
+                    core.Vector3(i as f64, 0.0, 0.0),
+                    core.Vector3((i + 1) as f64, 1.0, 1.0)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            spec.expect(grid.num_objects()).to_be(10)
+
+        it "should handle overlapping objects":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Insert objects at same position
+            for i in range(5):
+                let aabb = collision.AABB(
+                    core.Vector3(0.0, 0.0, 0.0),
+                    core.Vector3(0.5, 0.5, 0.5)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            spec.expect(grid.num_objects()).to_be(5)
+
+        it "should insert large object spanning multiple cells":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Large AABB spanning 4x4x4 = 64 cells
+            let large_aabb = collision.AABB(
+                core.Vector3(-2.0, -2.0, -2.0),
+                core.Vector3(2.0, 2.0, 2.0)
+            )
+
+            grid.insert(object_id=1, aabb=large_aabb)
+
+            spec.expect(grid.num_objects()).to_be(1)
+
+    describe "Object removal":
+        it "should remove object":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+            let aabb = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(1.0, 1.0, 1.0)
+            )
+
+            grid.insert(object_id=1, aabb=aabb)
+            spec.expect(grid.num_objects()).to_be(1)
+
+            grid.remove(object_id=1)
+            spec.expect(grid.num_objects()).to_be(0)
+
+        it "should remove multiple objects":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Insert objects
+            for i in range(5):
+                let aabb = collision.AABB(
+                    core.Vector3(i as f64, 0.0, 0.0),
+                    core.Vector3((i + 1) as f64, 1.0, 1.0)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            # Remove some objects
+            grid.remove(object_id=1)
+            grid.remove(object_id=3)
+
+            spec.expect(grid.num_objects()).to_be(3)
+
+        it "should handle removing non-existent object":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Should not crash
+            grid.remove(object_id=999)
+            spec.expect(grid.num_objects()).to_be(0)
+
+    describe "Object updates":
+        it "should update object position":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            let aabb1 = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(1.0, 1.0, 1.0)
+            )
+            grid.insert(object_id=1, aabb=aabb1)
+
+            # Update to new position
+            let aabb2 = collision.AABB(
+                core.Vector3(5.0, 0.0, 0.0),
+                core.Vector3(6.0, 1.0, 1.0)
+            )
+            grid.update(object_id=1, aabb=aabb2)
+
+            spec.expect(grid.num_objects()).to_be(1)
+
+        it "should update multiple objects":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Insert objects
+            for i in range(10):
+                let aabb = collision.AABB(
+                    core.Vector3(i as f64, 0.0, 0.0),
+                    core.Vector3((i + 1) as f64, 1.0, 1.0)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            # Update all objects
+            for i in range(10):
+                let new_aabb = collision.AABB(
+                    core.Vector3((i + 5) as f64, 5.0, 0.0),
+                    core.Vector3((i + 6) as f64, 6.0, 1.0)
+                )
+                grid.update(object_id=i, aabb=new_aabb)
+
+            spec.expect(grid.num_objects()).to_be(10)
+
+    describe "Query operations":
+        it "should query empty grid":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+            let aabb = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(1.0, 1.0, 1.0)
+            )
+
+            let results = grid.query(aabb)
+
+            spec.expect(len(results)).to_be(0)
+
+        it "should query for single object":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            let obj_aabb = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(1.0, 1.0, 1.0)
+            )
+            grid.insert(object_id=1, aabb=obj_aabb)
+
+            # Query overlapping region
+            let query_aabb = collision.AABB(
+                core.Vector3(0.5, 0.5, 0.5),
+                core.Vector3(1.5, 1.5, 1.5)
+            )
+            let results = grid.query(query_aabb)
+
+            spec.expect(len(results)).to_be(1)
+            spec.expect(results[0]).to_be(1)
+
+        it "should query for multiple objects":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Insert objects in a row
+            for i in range(5):
+                let aabb = collision.AABB(
+                    core.Vector3(i as f64, 0.0, 0.0),
+                    core.Vector3((i + 1) as f64, 1.0, 1.0)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            # Query region overlapping first 3 objects
+            let query_aabb = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(2.5, 1.0, 1.0)
+            )
+            let results = grid.query(query_aabb)
+
+            spec.expect(len(results)).to_be_greater_than_or_equal(3)
+
+        it "should query with no results":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Insert object at origin
+            let obj_aabb = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(1.0, 1.0, 1.0)
+            )
+            grid.insert(object_id=1, aabb=obj_aabb)
+
+            # Query far away
+            let query_aabb = collision.AABB(
+                core.Vector3(100.0, 100.0, 100.0),
+                core.Vector3(101.0, 101.0, 101.0)
+            )
+            let results = grid.query(query_aabb)
+
+            spec.expect(len(results)).to_be(0)
+
+    describe "Broad-phase collision pairs":
+        it "should find no pairs in empty grid":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+            let pairs = grid.get_collision_pairs()
+
+            spec.expect(len(pairs)).to_be(0)
+
+        it "should find overlapping pairs":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Insert two overlapping objects
+            let aabb1 = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(2.0, 2.0, 2.0)
+            )
+            let aabb2 = collision.AABB(
+                core.Vector3(1.0, 1.0, 1.0),
+                core.Vector3(3.0, 3.0, 3.0)
+            )
+
+            grid.insert(object_id=1, aabb=aabb1)
+            grid.insert(object_id=2, aabb=aabb2)
+
+            let pairs = grid.get_collision_pairs()
+
+            # Should find pair (1, 2)
+            spec.expect(len(pairs)).to_be_greater_than(0)
+
+        it "should find multiple pairs":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Insert chain of overlapping objects
+            for i in range(10):
+                let aabb = collision.AABB(
+                    core.Vector3(i as f64 * 0.9, 0.0, 0.0),
+                    core.Vector3((i as f64 * 0.9) + 1.0, 1.0, 1.0)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            let pairs = grid.get_collision_pairs()
+
+            # Adjacent objects should overlap
+            spec.expect(len(pairs)).to_be_greater_than(0)
+
+        it "should not find pairs for separated objects":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            # Insert well-separated objects
+            for i in range(5):
+                let aabb = collision.AABB(
+                    core.Vector3(i as f64 * 10.0, 0.0, 0.0),
+                    core.Vector3((i as f64 * 10.0) + 1.0, 1.0, 1.0)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            let pairs = grid.get_collision_pairs()
+
+            spec.expect(len(pairs)).to_be(0)
+
+    describe "Performance characteristics":
+        it "should handle large number of objects":
+            let grid = collision.SpatialHashGrid(cell_size=10.0)
+
+            # Insert 1000 objects
+            for i in range(1000):
+                let x = (i % 10) as f64 * 10.0
+                let y = ((i / 10) % 10) as f64 * 10.0
+                let z = (i / 100) as f64 * 10.0
+
+                let aabb = collision.AABB(
+                    core.Vector3(x, y, z),
+                    core.Vector3(x + 5.0, y + 5.0, z + 5.0)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            spec.expect(grid.num_objects()).to_be(1000)
+
+        it "should query large grid efficiently":
+            let grid = collision.SpatialHashGrid(cell_size=10.0)
+
+            # Insert many objects
+            for i in range(100):
+                let aabb = collision.AABB(
+                    core.Vector3(i as f64, 0.0, 0.0),
+                    core.Vector3((i + 1) as f64, 1.0, 1.0)
+                )
+                grid.insert(object_id=i, aabb=aabb)
+
+            # Query should be fast (returns only nearby objects)
+            let query_aabb = collision.AABB(
+                core.Vector3(50.0, 0.0, 0.0),
+                core.Vector3(55.0, 1.0, 1.0)
+            )
+            let results = grid.query(query_aabb)
+
+            # Should return only local objects, not all 100
+            spec.expect(len(results)).to_be_less_than(20)
+
+    describe "Edge cases":
+        it "should handle zero-size AABB":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            let point_aabb = collision.AABB(
+                core.Vector3(0.0, 0.0, 0.0),
+                core.Vector3(0.0, 0.0, 0.0)
+            )
+
+            grid.insert(object_id=1, aabb=point_aabb)
+            spec.expect(grid.num_objects()).to_be(1)
+
+        it "should handle negative coordinates":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            let aabb = collision.AABB(
+                core.Vector3(-5.0, -5.0, -5.0),
+                core.Vector3(-4.0, -4.0, -4.0)
+            )
+
+            grid.insert(object_id=1, aabb=aabb)
+            spec.expect(grid.num_objects()).to_be(1)
+
+        it "should handle mixed positive/negative coordinates":
+            let grid = collision.SpatialHashGrid(cell_size=1.0)
+
+            let aabb = collision.AABB(
+                core.Vector3(-1.0, -1.0, -1.0),
+                core.Vector3(1.0, 1.0, 1.0)
+            )
+
+            grid.insert(object_id=1, aabb=aabb)
+            spec.expect(grid.num_objects()).to_be(1)

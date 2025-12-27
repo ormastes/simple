@@ -62,11 +62,13 @@ fn test_mir_binop_compilation() {
         name: "a".to_string(),
         ty: T::I32,
         kind: LocalKind::Parameter,
+        is_ghost: false,
     });
     func.params.push(MirLocal {
         name: "b".to_string(),
         ty: T::I32,
         kind: LocalKind::Parameter,
+        is_ghost: false,
     });
 
     // Parameters map to v0 and v1
@@ -120,6 +122,7 @@ fn test_mir_control_flow_compilation() {
         name: "x".to_string(),
         ty: T::I32,
         kind: LocalKind::Parameter,
+        is_ghost: false,
     });
 
     let v0 = VReg(0); // parameter
@@ -220,6 +223,7 @@ fn test_mir_unaryop() {
         name: "x".to_string(),
         ty: T::I32,
         kind: LocalKind::Parameter,
+        is_ghost: false,
     });
 
     let v0 = VReg(0); // parameter

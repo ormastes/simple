@@ -50,7 +50,7 @@ Completed IR export functionality for LLM-friendly compiler introspection (#885-
 
 **Status:** AST/IR Export category now 80% complete (4/5 features)
 
-**Documentation:** See `doc/report/AST_HIR_MIR_EXPORT_COMPLETE_2025-12-24.md`
+**Documentation:** See `doc/llm_friendly/ast_hir_mir_export.md`
 
 ### LLM-Friendly Features Status (2025-12-24)
 
@@ -67,7 +67,7 @@ Assessed implementation status of LLM-Friendly Features (#880-919) - **14/40 com
 3. Complete Lint Framework (#906-907 - CLI command + auto-fix)
 4. Implement Canonical Formatter (#908-910)
 
-**Documentation:** See `doc/report/LLM_FEATURES_IMPLEMENTATION_STATUS_2025-12-24.md`
+**Documentation:** See `doc/llm_friendly/implementation_status.md`
 
 ### Type System Enhancements (2025-12-23)
 

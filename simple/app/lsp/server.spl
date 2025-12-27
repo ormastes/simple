@@ -14,6 +14,7 @@ import lsp.handlers.hover as hover
 import lsp.handlers.definition as definition
 import lsp.handlers.references as references
 import lsp.handlers.completion as completion
+import lsp.handlers.verification as verification
 
 # Server state
 enum ServerState:
@@ -70,6 +71,7 @@ class LspServer:
     query_cache: optimize.QueryCache  # Query result cache
     debouncer: optimize.Debouncer  # didChange debouncing
     metrics: optimize.PerformanceMetrics  # Performance tracking
+    lean_output_dir: Option<String>  # Lean artifact output directory
 
     fn new() -> LspServer:
         LspServer(
@@ -78,7 +80,8 @@ class LspServer:
             query_optimizer: optimize.QueryOptimizer.new(),
             query_cache: optimize.QueryCache.new(100),  # Cache 100 query results
             debouncer: optimize.Debouncer.new(300),  # 300ms debounce delay
-            metrics: optimize.PerformanceMetrics.new()
+            metrics: optimize.PerformanceMetrics.new(),
+            lean_output_dir: Some("build/lean")  # Default Lean output directory
         )
 
     # Handle initialize request
@@ -474,6 +477,75 @@ class LspServer:
                                 transport.write_response(id, result)?
                                 Ok(nil)
 
+    # Handle simple/leanDefinition request (go to Lean artifact)
+    fn handle_lean_definition(self, id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for leanDefinition")
+            case Some(p):
+                # Extract text document and position
+                let text_document_data = p.get("textDocument")?
+                let doc_id = protocol.TextDocumentIdentifier.from_json(text_document_data)?
+
+                let position_data = p.get("position")?
+                let position = protocol.Position.from_json(position_data)?
+
+                # Get document from cache
+                match self.documents.get(doc_id.uri):
+                    case None:
+                        transport.write_error(
+                            id,
+                            protocol.ERROR_INVALID_PARAMS,
+                            f"Document not found: {doc_id.uri}"
+                        )?
+                        Ok(nil)
+                    case Some(doc_info):
+                        match doc_info.tree:
+                            case None:
+                                transport.write_response(id, nil)?
+                                Ok(nil)
+                            case Some(tree):
+                                # Use Lean output dir from server config
+                                match self.lean_output_dir:
+                                    case Some(output_dir):
+                                        match verification.handle_lean_definition(tree, position.line, position.character, output_dir):
+                                            case Some(location):
+                                                transport.write_response(id, location)?
+                                            case None:
+                                                transport.write_response(id, nil)?
+                                    case None:
+                                        transport.write_response(id, nil)?
+                                Ok(nil)
+
+    # Handle simple/verificationSymbols request
+    fn handle_verification_symbols(self, id: Int, params: Option<Dict>) -> Result<Nil, String>:
+        match params:
+            case None:
+                return Err("Missing params for verificationSymbols")
+            case Some(p):
+                # Extract text document
+                let text_document_data = p.get("textDocument")?
+                let doc_id = protocol.TextDocumentIdentifier.from_json(text_document_data)?
+
+                # Get document from cache
+                match self.documents.get(doc_id.uri):
+                    case None:
+                        transport.write_error(
+                            id,
+                            protocol.ERROR_INVALID_PARAMS,
+                            f"Document not found: {doc_id.uri}"
+                        )?
+                        Ok(nil)
+                    case Some(doc_info):
+                        match doc_info.tree:
+                            case None:
+                                transport.write_response(id, [])?
+                                Ok(nil)
+                            case Some(tree):
+                                let symbols = verification.get_verification_symbols(tree)
+                                transport.write_response(id, symbols)?
+                                Ok(nil)
+
     # Main request dispatcher
     fn handle_request(self, request: protocol.JsonRpcRequest) -> Result<Nil, String>:
         match request.method:
@@ -491,6 +563,10 @@ class LspServer:
                 self.handle_references(request.id, request.params)
             case "textDocument/completion":
                 self.handle_completion(request.id, request.params)
+            case "simple/leanDefinition":
+                self.handle_lean_definition(request.id, request.params)
+            case "simple/verificationSymbols":
+                self.handle_verification_symbols(request.id, request.params)
             case _:
                 # Unknown method
                 transport.write_error(

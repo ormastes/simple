@@ -109,12 +109,20 @@ impl<'a> Parser<'a> {
             self.advance();
             let label = self.expect_identifier()?;
             self.expect(&TokenKind::Colon)?;
+            // Skip newlines and indents after colon
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
+                self.advance();
+            }
             let spec = self.parse_macro_intro_spec()?;
             Ok(MacroContractItem::Intro(MacroIntro { label, spec }))
         } else if self.check_ident("inject") {
             self.advance();
             let label = self.expect_identifier()?;
             self.expect(&TokenKind::Colon)?;
+            // Skip newlines and indents after colon
+            while self.check(&TokenKind::Newline) || self.check(&TokenKind::Indent) {
+                self.advance();
+            }
             let spec = self.parse_macro_inject_spec()?;
             Ok(MacroContractItem::Inject(MacroInject { label, spec }))
         } else {
@@ -131,7 +139,8 @@ impl<'a> Parser<'a> {
             self.advance();
             let name = self.expect_identifier()?;
             self.expect(&TokenKind::In)?;
-            let start = self.parse_expression()?;
+            // Use parse_primary to avoid consuming .. operator as part of expression
+            let start = self.parse_primary()?;
             let inclusive = if self.check(&TokenKind::DoubleDotEq) {
                 self.advance();
                 true
@@ -139,7 +148,7 @@ impl<'a> Parser<'a> {
                 self.expect(&TokenKind::DoubleDot)?;
                 false
             };
-            let end = self.parse_expression()?;
+            let end = self.parse_primary()?;
             self.expect(&TokenKind::Colon)?;
             let body = self.parse_macro_intro_spec_block(&[TokenKind::Comma, TokenKind::RParen])?;
             Ok(MacroIntroSpec::For {

@@ -208,12 +208,14 @@ fn create_outlined_function(
             name: "generator".to_string(),
             ty: crate::hir::TypeId::I64,
             kind: LocalKind::Parameter,
+            is_ghost: false,
         });
     } else {
         outlined.params.push(MirLocal {
             name: "ctx".to_string(),
             ty: crate::hir::TypeId::I64,
             kind: LocalKind::Parameter,
+            is_ghost: false,
         });
     }
 

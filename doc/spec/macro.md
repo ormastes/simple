@@ -1,9 +1,29 @@
 Simple Language — Contract-First Macros (LL(1), One-Pass) Specification
 
+**Status:** SPECIFICATION (Partially Implemented)
+**Last Updated:** 2025-12-27
+**Implementation Status:** See `doc/status/macros.md`
+
 This macro system is designed so the parser/IDE can learn introduced symbols and insertion points from the macro header alone, while still keeping the grammar LL(1) and enabling single-pass parsing + immediate symbol-table updates.
 
-It assumes Simple’s existing layout model: indentation-based blocks, if x: / for i in 0..10: forms, etc. 
+It assumes Simple's existing layout model: indentation-based blocks, if x: / for i in 0..10: forms, etc.
 
+## Implementation Notes
+
+**Currently Working:**
+- ✅ Macro definition syntax parsing
+- ✅ User-defined macros with `const_eval:` and `emit` blocks
+- ✅ Template substitution (`"{NAME}"` → const value)
+- ✅ Contract processing infrastructure (intro/inject/returns)
+- ✅ Const-eval engine (integers, arithmetic, conditions)
+
+**Not Yet Integrated:**
+- ⏳ LL(1) parser integration (currently interpreter-driven)
+- ⏳ One-pass symbol registration
+- ⏳ IDE autocomplete from contracts
+- ⏳ Code injection at callsite
+
+**See:** `doc/status/macros.md` for detailed implementation status
 
 ---
 
@@ -710,6 +730,56 @@ macro gen_axes(BASE: Str const, N: Int const) -> (
       fn "{BASE}{i}"(v: Vec[N]) -> Int:
         return v[i]
 
+
+---
+
+## Implementation Status
+
+This specification describes the **target design** for Simple's macro system. Current implementation status:
+
+### Implemented Components
+1. **AST Types** (`src/parser/src/ast.rs`)
+   - `MacroDef`, `MacroContractItem`, `MacroIntro`, `MacroInject`, `MacroReturns`
+   - All target/anchor/kind enums
+
+2. **Contract Processing** (`src/compiler/src/macro_contracts.rs` - 390 lines)
+   - `process_macro_contract()` - Processes all contract items
+   - Const-eval engine for `For` and `If` const-time unrolling
+   - Template substitution engine
+   - Shadow detection and validation
+
+3. **Macro Expansion** (`src/compiler/src/interpreter_macro.rs` - 1270 lines)
+   - User-defined macro expansion
+   - `const_eval:` and `emit` blocks
+   - Hygiene system (gensym-based)
+   - Template substitution in strings
+
+4. **Built-in Macros**
+   - `println!`, `print!`, `vec!`, `assert!`, `assert_eq!`, `panic!`, `format!`, `dbg!`
+
+### Pending Integration
+1. **Symbol Table Mutation**
+   - Contract processing works but doesn't register symbols yet
+   - Need mutable symbol tables during expansion
+
+2. **LL(1) Parser Integration**
+   - Currently interpreter-driven expansion
+   - Parser has macro AST but doesn't invoke contracts
+
+3. **IDE Protocol**
+   - Infrastructure ready but not exposed to LSP
+   - Would enable autocomplete for introduced symbols
+
+4. **Code Injection**
+   - Injection points tracked but code not spliced
+
+### Next Steps
+See `doc/contracts/macro_contracts.md` for detailed integration plan.
+
+### Test Coverage
+- 13 tests in `src/driver/tests/interpreter_macros.rs`
+- Basic macro expansion fully tested
+- Contract integration tests pending
 
 ---
 

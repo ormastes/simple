@@ -554,7 +554,7 @@ let t5: -Tensor = weak_of(t3)
 
 ### 4.2 Effect System for GPU Operations
 
-From Simple's [GPU specification](../spec/gpu_simd.md):
+From Simple's [GPU specification](../spec/gpu_simd/README.md):
 
 ```simple
 # GPU kernel for custom operations
@@ -1607,7 +1607,7 @@ let dataloader = DataLoader.builder()
 
 ### Simple Language Specifications
 
-- [GPU and SIMD Specification](../spec/gpu_simd.md)
+- [GPU and SIMD Specification](../spec/gpu_simd/README.md)
 - [Memory and Ownership](../spec/memory.md)
 - [Concurrency and Actors](../spec/concurrency.md)
 - [FFI/ABI Specification](../spec/ffi_abi.md)

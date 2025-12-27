@@ -1,11 +1,13 @@
-// Native I/O implementations for the interpreter
-//
-// This module provides implementations for extern functions declared in:
-// - simple/std_lib/src/host/async_nogc/io/fs.spl (filesystem operations)
-// - simple/std_lib/src/host/async_nogc/io/term.spl (terminal I/O)
-//
-// Note: This file is include!'d into interpreter.rs, so it inherits imports from there.
+//! Native I/O implementations for the interpreter
+//!
+//! This module provides implementations for extern functions declared in:
+//! - simple/std_lib/src/host/async_nogc/io/fs.spl (filesystem operations)
+//! - simple/std_lib/src/host/async_nogc/io/term.spl (terminal I/O)
 
+use crate::error::CompileError;
+use crate::value::Value;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Seek, SeekFrom, Write};
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -118,7 +120,7 @@ fn make_io_error(err: io::Error) -> Value {
     }
 }
 
-fn io_ok(val: Value) -> Value {
+pub(crate) fn io_ok(val: Value) -> Value {
     Value::Enum {
         enum_name: "Result".to_string(),
         variant: "Ok".to_string(),
@@ -126,7 +128,7 @@ fn io_ok(val: Value) -> Value {
     }
 }
 
-fn io_err(err: io::Error) -> Value {
+pub(crate) fn io_err(err: io::Error) -> Value {
     Value::Enum {
         enum_name: "Result".to_string(),
         variant: "Err".to_string(),
@@ -134,7 +136,7 @@ fn io_err(err: io::Error) -> Value {
     }
 }
 
-fn io_err_msg(msg: &str) -> Value {
+pub(crate) fn io_err_msg(msg: &str) -> Value {
     Value::Enum {
         enum_name: "Result".to_string(),
         variant: "Err".to_string(),
@@ -150,7 +152,7 @@ fn io_err_msg(msg: &str) -> Value {
 // Value Extraction Helpers
 //==============================================================================
 
-fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
+pub(crate) fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
     args.get(idx)
         .and_then(|v| match v {
             Value::Str(s) => Some(s.clone()),
@@ -161,7 +163,7 @@ fn extract_path(args: &[Value], idx: usize) -> Result<String, CompileError> {
         .ok_or_else(|| CompileError::Semantic(format!("argument {} must be a path string", idx)))
 }
 
-fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError> {
+pub(crate) fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError> {
     match args.get(idx) {
         Some(Value::Array(arr)) => {
             let mut bytes = Vec::with_capacity(arr.len());
@@ -185,17 +187,17 @@ fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError> {
     }
 }
 
-fn extract_bool(args: &[Value], idx: usize) -> bool {
+pub(crate) fn extract_bool(args: &[Value], idx: usize) -> bool {
     args.get(idx).map(|v| v.truthy()).unwrap_or(false)
 }
 
-fn extract_int(args: &[Value], idx: usize) -> Result<i64, CompileError> {
+pub(crate) fn extract_int(args: &[Value], idx: usize) -> Result<i64, CompileError> {
     args.get(idx)
         .and_then(|v| v.as_int().ok())
         .ok_or_else(|| CompileError::Semantic(format!("argument {} must be an integer", idx)))
 }
 
-fn extract_open_mode(args: &[Value], idx: usize) -> Result<String, CompileError> {
+pub(crate) fn extract_open_mode(args: &[Value], idx: usize) -> Result<String, CompileError> {
     match args.get(idx) {
         Some(Value::Enum { variant, .. }) => Ok(variant.clone()),
         Some(Value::Str(s)) => Ok(s.clone()),

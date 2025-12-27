@@ -1,0 +1,179 @@
+# Memory Capabilities Model Tests
+#
+# Tests for the memory capabilities verification model.
+
+import spec
+import verification.models.memory_capabilities as memcap
+
+describe "Memory Capabilities":
+    context "RefCapability":
+        it "converts to Lean names":
+            expect(memcap.RefCapability.Shared.to_lean_name()).to_equal("RefCapability.Shared")
+            expect(memcap.RefCapability.Exclusive.to_lean_name()).to_equal("RefCapability.Exclusive")
+            expect(memcap.RefCapability.Isolated.to_lean_name()).to_equal("RefCapability.Isolated")
+
+    context "CapType":
+        it "creates capability type":
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Shared)
+            expect(cap_type.base_type).to_equal("i64")
+            expect(cap_type.capability).to_equal(memcap.RefCapability.Shared)
+
+        it "converts to Lean":
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Exclusive)
+            lean = cap_type.to_lean()
+            expect(lean).to_include("baseType := \"i64\"")
+            expect(lean).to_include("RefCapability.Exclusive")
+
+    context "Reference":
+        it "creates reference":
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Shared)
+            ref = memcap.Reference.new(42, cap_type)
+            expect(ref.location).to_equal(42)
+            expect(ref.ref_type.base_type).to_equal("i64")
+
+    context "RefEnv - Shared References":
+        it "allows creating shared reference in empty environment":
+            env = memcap.RefEnv.new()
+            can_create = memcap.can_create_ref(env, 0, memcap.RefCapability.Shared)
+            expect(can_create).to_be_true()
+
+        it "allows multiple shared references":
+            env = memcap.RefEnv.new()
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Shared)
+
+            ref1 = memcap.Reference.new(0, cap_type)
+            env = memcap.add_ref(env, ref1)
+
+            can_create = memcap.can_create_ref(env, 0, memcap.RefCapability.Shared)
+            expect(can_create).to_be_true()
+
+        it "prevents exclusive when shared exists":
+            env = memcap.RefEnv.new()
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Shared)
+
+            ref1 = memcap.Reference.new(0, cap_type)
+            env = memcap.add_ref(env, ref1)
+
+            can_create = memcap.can_create_ref(env, 0, memcap.RefCapability.Exclusive)
+            expect(can_create).to_be_false()
+
+    context "RefEnv - Exclusive References":
+        it "allows exclusive reference in empty environment":
+            env = memcap.RefEnv.new()
+            can_create = memcap.can_create_ref(env, 0, memcap.RefCapability.Exclusive)
+            expect(can_create).to_be_true()
+
+        it "prevents any reference when exclusive exists":
+            env = memcap.RefEnv.new()
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Exclusive)
+
+            ref1 = memcap.Reference.new(0, cap_type)
+            env = memcap.add_ref(env, ref1)
+
+            expect(memcap.can_create_ref(env, 0, memcap.RefCapability.Shared)).to_be_false()
+            expect(memcap.can_create_ref(env, 0, memcap.RefCapability.Exclusive)).to_be_false()
+            expect(memcap.can_create_ref(env, 0, memcap.RefCapability.Isolated)).to_be_false()
+
+    context "RefEnv - Isolated References":
+        it "allows isolated reference in empty environment":
+            env = memcap.RefEnv.new()
+            can_create = memcap.can_create_ref(env, 0, memcap.RefCapability.Isolated)
+            expect(can_create).to_be_true()
+
+        it "prevents any reference when isolated exists":
+            env = memcap.RefEnv.new()
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Isolated)
+
+            ref1 = memcap.Reference.new(0, cap_type)
+            env = memcap.add_ref(env, ref1)
+
+            expect(memcap.can_create_ref(env, 0, memcap.RefCapability.Shared)).to_be_false()
+            expect(memcap.can_create_ref(env, 0, memcap.RefCapability.Exclusive)).to_be_false()
+            expect(memcap.can_create_ref(env, 0, memcap.RefCapability.Isolated)).to_be_false()
+
+    context "Capability Conversions":
+        it "allows same capability conversion":
+            expect(memcap.can_convert(memcap.RefCapability.Shared, memcap.RefCapability.Shared)).to_be_true()
+            expect(memcap.can_convert(memcap.RefCapability.Exclusive, memcap.RefCapability.Exclusive)).to_be_true()
+
+        it "allows exclusive to shared":
+            expect(memcap.can_convert(memcap.RefCapability.Exclusive, memcap.RefCapability.Shared)).to_be_true()
+
+        it "allows isolated to exclusive":
+            expect(memcap.can_convert(memcap.RefCapability.Isolated, memcap.RefCapability.Exclusive)).to_be_true()
+
+        it "allows isolated to shared":
+            expect(memcap.can_convert(memcap.RefCapability.Isolated, memcap.RefCapability.Shared)).to_be_true()
+
+        it "prevents shared to exclusive":
+            expect(memcap.can_convert(memcap.RefCapability.Shared, memcap.RefCapability.Exclusive)).to_be_false()
+
+        it "prevents shared to isolated":
+            expect(memcap.can_convert(memcap.RefCapability.Shared, memcap.RefCapability.Isolated)).to_be_false()
+
+        it "prevents exclusive to isolated":
+            expect(memcap.can_convert(memcap.RefCapability.Exclusive, memcap.RefCapability.Isolated)).to_be_false()
+
+    context "Memory Access":
+        it "allows read with any capability":
+            cap_type_shared = memcap.CapType.new("i64", memcap.RefCapability.Shared)
+            cap_type_excl = memcap.CapType.new("i64", memcap.RefCapability.Exclusive)
+
+            ref_shared = memcap.Reference.new(0, cap_type_shared)
+            ref_excl = memcap.Reference.new(0, cap_type_excl)
+
+            read_access = memcap.MemAccess.Read(0)
+
+            expect(memcap.allows_access(ref_shared, read_access)).to_be_true()
+            expect(memcap.allows_access(ref_excl, read_access)).to_be_true()
+
+        it "prevents write with shared capability":
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Shared)
+            ref = memcap.Reference.new(0, cap_type)
+            write_access = memcap.MemAccess.Write(0)
+
+            expect(memcap.allows_access(ref, write_access)).to_be_false()
+
+        it "allows write with exclusive capability":
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Exclusive)
+            ref = memcap.Reference.new(0, cap_type)
+            write_access = memcap.MemAccess.Write(0)
+
+            expect(memcap.allows_access(ref, write_access)).to_be_true()
+
+        it "allows write with isolated capability":
+            cap_type = memcap.CapType.new("i64", memcap.RefCapability.Isolated)
+            ref = memcap.Reference.new(0, cap_type)
+            write_access = memcap.MemAccess.Write(0)
+
+            expect(memcap.allows_access(ref, write_access)).to_be_true()
+
+    context "Concurrency Modes":
+        it "allows shared in actor mode":
+            expect(memcap.capability_allowed_in_mode(
+                memcap.RefCapability.Shared,
+                memcap.ConcurrencyMode.Actor
+            )).to_be_true()
+
+        it "allows isolated in actor mode":
+            expect(memcap.capability_allowed_in_mode(
+                memcap.RefCapability.Isolated,
+                memcap.ConcurrencyMode.Actor
+            )).to_be_true()
+
+        it "prevents exclusive in actor mode":
+            expect(memcap.capability_allowed_in_mode(
+                memcap.RefCapability.Exclusive,
+                memcap.ConcurrencyMode.Actor
+            )).to_be_false()
+
+        it "allows all in lock-based mode":
+            expect(memcap.capability_allowed_in_mode(
+                memcap.RefCapability.Shared,
+                memcap.ConcurrencyMode.LockBase
+            )).to_be_true()
+
+            expect(memcap.capability_allowed_in_mode(
+                memcap.RefCapability.Exclusive,
+                memcap.ConcurrencyMode.LockBase
+            )).to_be_true()

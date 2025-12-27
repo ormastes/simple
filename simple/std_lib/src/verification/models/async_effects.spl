@@ -1,0 +1,250 @@
+# Async Effects Model
+# Effect tracking for async operations and concurrency.
+
+# Effect kinds
+enum EffectKind:
+    Pure       # No effects
+    IO         # I/O operations
+    Async      # Async/await
+    Spawn      # Thread/actor spawning
+    Send       # Channel send
+    Recv       # Channel receive
+    Lock       # Mutex/lock operations
+    Alloc      # Memory allocation
+    FFI        # Foreign function calls
+    Panic      # May panic
+    Diverge    # May not terminate
+
+    fn to_string(self) -> String:
+        match self:
+            case Pure: "pure"
+            case IO: "io"
+            case Async: "async"
+            case Spawn: "spawn"
+            case Send: "send"
+            case Recv: "recv"
+            case Lock: "lock"
+            case Alloc: "alloc"
+            case FFI: "ffi"
+            case Panic: "panic"
+            case Diverge: "diverge"
+
+    fn is_safe(self) -> Bool:
+        match self:
+            case Pure: true
+            case Alloc: true
+            case _: false
+
+# Effect set
+class Effects:
+    effects: List<EffectKind>
+
+    fn new() -> Effects:
+        Effects(effects: [])
+
+    fn pure() -> Effects:
+        Effects(effects: [EffectKind.Pure])
+
+    fn io() -> Effects:
+        Effects(effects: [EffectKind.IO])
+
+    fn async_() -> Effects:
+        Effects(effects: [EffectKind.Async])
+
+    fn add(mut self, effect: EffectKind) -> Effects:
+        if not self.effects.contains(effect):
+            self.effects.push(effect)
+        self
+
+    fn union(self, other: Effects) -> Effects:
+        let mut result = Effects.new()
+        for e in self.effects:
+            result.add(e)
+        for e in other.effects:
+            result.add(e)
+        result
+
+    fn contains(self, effect: EffectKind) -> Bool:
+        self.effects.contains(effect)
+
+    fn is_pure(self) -> Bool:
+        self.effects.len() == 0 or 
+        (self.effects.len() == 1 and self.effects[0] == EffectKind.Pure)
+
+    fn is_async(self) -> Bool:
+        self.contains(EffectKind.Async)
+
+    fn has_io(self) -> Bool:
+        self.contains(EffectKind.IO)
+
+    fn to_string(self) -> String:
+        if self.is_pure():
+            "pure"
+        else:
+            self.effects.map(|e| e.to_string()).join(" + ")
+
+# Effect constraint
+class EffectConstraint:
+    required: Effects
+    forbidden: Effects
+    message: String
+
+    fn new() -> EffectConstraint:
+        EffectConstraint(
+            required: Effects.new(),
+            forbidden: Effects.new(),
+            message: ""
+        )
+
+    fn require(mut self, effect: EffectKind) -> EffectConstraint:
+        self.required.add(effect)
+        self
+
+    fn forbid(mut self, effect: EffectKind) -> EffectConstraint:
+        self.forbidden.add(effect)
+        self
+
+    fn with_message(mut self, msg: String) -> EffectConstraint:
+        self.message = msg
+        self
+
+    fn check(self, actual: Effects) -> Result<Nil, String>:
+        # Check required effects are present
+        for req in self.required.effects:
+            if not actual.contains(req):
+                return Err(f"Missing required effect: {req.to_string()}")
+
+        # Check forbidden effects are absent
+        for forbid in self.forbidden.effects:
+            if actual.contains(forbid):
+                return Err(f"Forbidden effect present: {forbid.to_string()}")
+
+        Ok(nil)
+
+# Async context - where async operations are valid
+enum AsyncContext:
+    Sync           # Synchronous context (no async)
+    AsyncFn        # Inside async function
+    ActorBody      # Inside actor message handler
+    SpawnBlock     # Inside spawn { } block
+
+    fn allows_await(self) -> Bool:
+        match self:
+            case AsyncFn: true
+            case ActorBody: true
+            case _: false
+
+    fn allows_spawn(self) -> Bool:
+        match self:
+            case Sync: true
+            case AsyncFn: true
+            case ActorBody: true
+            case SpawnBlock: true
+
+# Effect checker for async safety
+class AsyncEffectChecker:
+    context: AsyncContext
+    effects: Effects
+    errors: List<String>
+
+    fn new(context: AsyncContext) -> AsyncEffectChecker:
+        AsyncEffectChecker(
+            context: context,
+            effects: Effects.new(),
+            errors: []
+        )
+
+    fn record_effect(mut self, effect: EffectKind):
+        self.effects.add(effect)
+
+    fn check_await(mut self) -> Result<Nil, String>:
+        if not self.context.allows_await():
+            self.errors.push("await used outside async context")
+            Err("await used outside async context")
+        else:
+            self.record_effect(EffectKind.Async)
+            Ok(nil)
+
+    fn check_spawn(mut self) -> Result<Nil, String>:
+        if not self.context.allows_spawn():
+            self.errors.push("spawn used in invalid context")
+            Err("spawn used in invalid context")
+        else:
+            self.record_effect(EffectKind.Spawn)
+            Ok(nil)
+
+    fn check_io(mut self) -> Result<Nil, String>:
+        self.record_effect(EffectKind.IO)
+        Ok(nil)
+
+    fn check_channel_send(mut self) -> Result<Nil, String>:
+        self.record_effect(EffectKind.Send)
+        Ok(nil)
+
+    fn check_channel_recv(mut self) -> Result<Nil, String>:
+        self.record_effect(EffectKind.Recv)
+        Ok(nil)
+
+    fn get_effects(self) -> Effects:
+        self.effects
+
+    fn has_errors(self) -> Bool:
+        self.errors.len() > 0
+
+    fn get_errors(self) -> List<String>:
+        self.errors
+
+# Effect inference for functions
+class EffectInference:
+    function_effects: Dict<String, Effects>
+
+    fn new() -> EffectInference:
+        EffectInference(function_effects: {})
+
+    fn set_function_effect(mut self, name: String, effects: Effects):
+        self.function_effects[name] = effects
+
+    fn get_function_effect(self, name: String) -> Effects:
+        self.function_effects.get(name).unwrap_or(Effects.pure())
+
+    fn infer_call_effect(self, func_name: String, arg_effects: List<Effects>) -> Effects:
+        let func_effect = self.get_function_effect(func_name)
+        let mut result = func_effect
+        for arg_eff in arg_effects:
+            result = result.union(arg_eff)
+        result
+
+# Verified context effect rules
+class VerifiedEffectRules:
+    fn check_verified_function(effects: Effects) -> List<String>:
+        let mut errors: List<String> = []
+
+        # V-EFFECT: No IO in verified
+        if effects.has_io():
+            errors.push("V-EFFECT-001: IO effects not allowed in verified function")
+
+        # V-EFFECT: No async in verified (unless explicitly proven)
+        if effects.is_async():
+            errors.push("V-EFFECT-002: Async effects not allowed in verified function")
+
+        # V-EFFECT: No spawn in verified
+        if effects.contains(EffectKind.Spawn):
+            errors.push("V-EFFECT-003: Spawn not allowed in verified function")
+
+        # V-EFFECT: No FFI in verified
+        if effects.contains(EffectKind.FFI):
+            errors.push("V-EFFECT-004: FFI not allowed in verified function")
+
+        errors
+
+    fn check_trusted_function(effects: Effects) -> List<String>:
+        # Trusted functions can have any effects (they're axioms)
+        []
+
+    fn check_pure_contract(effects: Effects) -> List<String>:
+        let mut errors: List<String> = []
+
+        if not effects.is_pure():
+            errors.push("Contract expressions must be pure")
+
+        errors

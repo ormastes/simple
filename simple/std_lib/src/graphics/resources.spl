@@ -1,0 +1,369 @@
+# Resources - Resource management and registries
+#
+# Provides centralized registries for meshes, materials, and textures
+# with automatic handle generation and resource lifecycle management.
+#
+# Based on: doc/plans/3d_engine_core_implementation.md (Phase 7)
+
+use core.*
+use graphics.math.*
+use graphics.scene.*
+use graphics.render.*
+
+# =============================================================================
+# MeshRegistry - Mesh resource registry
+# =============================================================================
+
+pub struct MeshRegistry:
+    meshes: Dict[u64, Mesh]
+    next_id: u64
+
+impl MeshRegistry:
+    pub fn new() -> MeshRegistry:
+        return MeshRegistry {
+            meshes: Dict::new(),
+            next_id: 1
+        }
+
+    # Register a mesh and get its handle
+    pub fn register(mut self, mesh: Mesh) -> MeshHandle:
+        let id = self.next_id
+        self.next_id = self.next_id + 1
+        self.meshes.insert(id, mesh)
+        return MeshHandle::new(id)
+
+    # Get mesh by handle
+    pub fn get(self, handle: MeshHandle) -> Option[Mesh]:
+        if not handle.is_valid():
+            return None
+        return self.meshes.get(handle.id)
+
+    # Check if mesh exists
+    pub fn contains(self, handle: MeshHandle) -> bool:
+        if not handle.is_valid():
+            return false
+        return self.meshes.contains_key(handle.id)
+
+    # Remove mesh by handle
+    pub fn remove(mut self, handle: MeshHandle) -> Option[Mesh]:
+        if not handle.is_valid():
+            return None
+        return self.meshes.remove(handle.id)
+
+    # Get mesh count
+    pub fn count(self) -> i32:
+        return self.meshes.len()
+
+    # Clear all meshes
+    pub fn clear(mut self):
+        self.meshes.clear()
+        self.next_id = 1
+
+    # =============================================================================
+    # Mesh Primitive Presets - Register common mesh primitives
+    # =============================================================================
+
+    pub fn register_cube(mut self) -> MeshHandle:
+        let mesh = create_cube()
+        return self.register(mesh)
+
+    pub fn register_sphere(mut self, segments: i32) -> MeshHandle:
+        let mesh = create_sphere(segments)
+        return self.register(mesh)
+
+    pub fn register_plane(mut self, subdivisions: i32) -> MeshHandle:
+        let mesh = create_plane(subdivisions)
+        return self.register(mesh)
+
+    pub fn register_cylinder(mut self, segments: i32) -> MeshHandle:
+        let mesh = create_cylinder(segments)
+        return self.register(mesh)
+
+    pub fn register_cone(mut self, segments: i32) -> MeshHandle:
+        let mesh = create_cone(segments)
+        return self.register(mesh)
+
+    pub fn register_torus(mut self, major_segments: i32, minor_segments: i32) -> MeshHandle:
+        let mesh = create_torus(major_segments, minor_segments)
+        return self.register(mesh)
+
+    pub fn register_quad(mut self) -> MeshHandle:
+        let mesh = create_quad()
+        return self.register(mesh)
+
+# =============================================================================
+# MaterialRegistry - Material resource registry
+# =============================================================================
+
+pub struct MaterialRegistry:
+    materials: Dict[u64, Material]
+    next_id: u64
+
+impl MaterialRegistry:
+    pub fn new() -> MaterialRegistry:
+        return MaterialRegistry {
+            materials: Dict::new(),
+            next_id: 1
+        }
+
+    # Register a material and get its handle
+    pub fn register(mut self, material: Material) -> MaterialHandle:
+        let id = self.next_id
+        self.next_id = self.next_id + 1
+        self.materials.insert(id, material)
+        return MaterialHandle::new(id)
+
+    # Get material by handle
+    pub fn get(self, handle: MaterialHandle) -> Option[Material]:
+        if not handle.is_valid():
+            return None
+        return self.materials.get(handle.id)
+
+    # Check if material exists
+    pub fn contains(self, handle: MaterialHandle) -> bool:
+        if not handle.is_valid():
+            return false
+        return self.materials.contains_key(handle.id)
+
+    # Update material
+    pub fn update(mut self, handle: MaterialHandle, material: Material) -> bool:
+        if not handle.is_valid():
+            return false
+        if not self.materials.contains_key(handle.id):
+            return false
+        self.materials.insert(handle.id, material)
+        return true
+
+    # Remove material by handle
+    pub fn remove(mut self, handle: MaterialHandle) -> Option[Material]:
+        if not handle.is_valid():
+            return None
+        return self.materials.remove(handle.id)
+
+    # Get material count
+    pub fn count(self) -> i32:
+        return self.materials.len()
+
+    # Clear all materials
+    pub fn clear(mut self):
+        self.materials.clear()
+        self.next_id = 1
+
+    # =============================================================================
+    # Material Presets - Register common materials
+    # =============================================================================
+
+    pub fn register_pbr(mut self, albedo: Color, metallic: f32, roughness: f32) -> MaterialHandle:
+        let pbr = PbrMaterial::new(albedo, metallic, roughness)
+        return self.register(Material::Pbr(pbr))
+
+    pub fn register_pbr_gold(mut self) -> MaterialHandle:
+        return self.register(Material::Pbr(PbrMaterial::gold()))
+
+    pub fn register_pbr_silver(mut self) -> MaterialHandle:
+        return self.register(Material::Pbr(PbrMaterial::silver()))
+
+    pub fn register_pbr_copper(mut self) -> MaterialHandle:
+        return self.register(Material::Pbr(PbrMaterial::copper()))
+
+    pub fn register_phong(mut self, diffuse: Color, specular: Color, shininess: f32) -> MaterialHandle:
+        let phong = PhongMaterial::new(diffuse, specular, shininess)
+        return self.register(Material::Phong(phong))
+
+    pub fn register_phong_emerald(mut self) -> MaterialHandle:
+        return self.register(Material::Phong(PhongMaterial::emerald()))
+
+    pub fn register_unlit(mut self, color: Color) -> MaterialHandle:
+        let unlit = UnlitMaterial::new(color)
+        return self.register(Material::Unlit(unlit))
+
+# =============================================================================
+# TextureRegistry - Texture resource registry
+# =============================================================================
+
+pub struct TextureRegistry:
+    textures: Dict[u64, Texture2D]
+    cubemaps: Dict[u64, CubemapTexture]
+    next_id: u64
+
+impl TextureRegistry:
+    pub fn new() -> TextureRegistry:
+        return TextureRegistry {
+            textures: Dict::new(),
+            cubemaps: Dict::new(),
+            next_id: 1
+        }
+
+    # Register a 2D texture and get its handle
+    pub fn register_texture(mut self, texture: Texture2D) -> TextureHandle:
+        let id = self.next_id
+        self.next_id = self.next_id + 1
+        self.textures.insert(id, texture)
+        return TextureHandle::new(id)
+
+    # Register a cubemap and get its handle
+    pub fn register_cubemap(mut self, cubemap: CubemapTexture) -> TextureHandle:
+        let id = self.next_id
+        self.next_id = self.next_id + 1
+        self.cubemaps.insert(id, cubemap)
+        return TextureHandle::new(id)
+
+    # Get 2D texture by handle
+    pub fn get_texture(self, handle: TextureHandle) -> Option[Texture2D]:
+        if not handle.is_valid():
+            return None
+        return self.textures.get(handle.id)
+
+    # Get cubemap by handle
+    pub fn get_cubemap(self, handle: TextureHandle) -> Option[CubemapTexture]:
+        if not handle.is_valid():
+            return None
+        return self.cubemaps.get(handle.id)
+
+    # Check if texture exists (either 2D or cubemap)
+    pub fn contains(self, handle: TextureHandle) -> bool:
+        if not handle.is_valid():
+            return false
+        return self.textures.contains_key(handle.id) or self.cubemaps.contains_key(handle.id)
+
+    # Remove texture by handle (checks both 2D and cubemap)
+    pub fn remove(mut self, handle: TextureHandle) -> bool:
+        if not handle.is_valid():
+            return false
+
+        if self.textures.contains_key(handle.id):
+            self.textures.remove(handle.id)
+            return true
+
+        if self.cubemaps.contains_key(handle.id):
+            self.cubemaps.remove(handle.id)
+            return true
+
+        return false
+
+    # Get total texture count (2D + cubemaps)
+    pub fn count(self) -> i32:
+        return self.textures.len() + self.cubemaps.len()
+
+    # Get 2D texture count
+    pub fn texture_count(self) -> i32:
+        return self.textures.len()
+
+    # Get cubemap count
+    pub fn cubemap_count(self) -> i32:
+        return self.cubemaps.len()
+
+    # Clear all textures
+    pub fn clear(mut self):
+        # Clean up Vulkan resources
+        for (_, texture) in self.textures:
+            texture.destroy()
+        for (_, cubemap) in self.cubemaps:
+            cubemap.destroy()
+
+        self.textures.clear()
+        self.cubemaps.clear()
+        self.next_id = 1
+
+    # =============================================================================
+    # Texture Creation Helpers
+    # =============================================================================
+
+    pub fn create_texture(
+        mut self,
+        width: u32,
+        height: u32,
+        format: TextureFormat
+    ) -> TextureHandle:
+        let texture = Texture2D::new(width, height, format)
+        return self.register_texture(texture)
+
+    pub fn create_texture_from_pixels(
+        mut self,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        pixels: Array[u8]
+    ) -> TextureHandle:
+        let texture = Texture2D::from_pixels(width, height, format, pixels)
+        return self.register_texture(texture)
+
+    pub fn create_cubemap(mut self, size: u32, format: TextureFormat) -> TextureHandle:
+        let cubemap = CubemapTexture::new(size, format)
+        return self.register_cubemap(cubemap)
+
+# =============================================================================
+# ResourceManager - Unified resource management
+# =============================================================================
+
+pub struct ResourceManager:
+    meshes: MeshRegistry
+    materials: MaterialRegistry
+    textures: TextureRegistry
+
+impl ResourceManager:
+    # Create new resource manager
+    pub fn new() -> ResourceManager:
+        return ResourceManager {
+            meshes: MeshRegistry::new(),
+            materials: MaterialRegistry::new(),
+            textures: TextureRegistry::new()
+        }
+
+    # Access registries
+    pub fn meshes(mut self) -> MeshRegistry:
+        return self.meshes
+
+    pub fn materials(mut self) -> MaterialRegistry:
+        return self.materials
+
+    pub fn textures(mut self) -> TextureRegistry:
+        return self.textures
+
+    # Get resource counts
+    pub fn mesh_count(self) -> i32:
+        return self.meshes.count()
+
+    pub fn material_count(self) -> i32:
+        return self.materials.count()
+
+    pub fn texture_count(self) -> i32:
+        return self.textures.count()
+
+    pub fn total_resource_count(self) -> i32:
+        return self.meshes.count() + self.materials.count() + self.textures.count()
+
+    # Clear all resources
+    pub fn clear_all(mut self):
+        self.meshes.clear()
+        self.materials.clear()
+        self.textures.clear()
+
+    # =============================================================================
+    # Common Resource Initialization
+    # =============================================================================
+
+    # Initialize with default primitives and materials
+    pub fn init_defaults(mut self):
+        # Register primitive meshes
+        self.meshes.register_cube()
+        self.meshes.register_sphere(32)
+        self.meshes.register_plane(10)
+        self.meshes.register_cylinder(32)
+        self.meshes.register_cone(32)
+        self.meshes.register_torus(32, 16)
+
+        # Register common materials
+        self.materials.register_pbr_gold()
+        self.materials.register_pbr_silver()
+        self.materials.register_pbr_copper()
+        self.materials.register_phong_emerald()
+        self.materials.register_unlit(Color::white())
+
+    # Resource statistics
+    pub fn print_statistics(self):
+        io.println("Resource Statistics:")
+        io.println("  Meshes:    " + self.mesh_count().to_string())
+        io.println("  Materials: " + self.material_count().to_string())
+        io.println("  Textures:  " + self.texture_count().to_string())
+        io.println("  Total:     " + self.total_resource_count().to_string())

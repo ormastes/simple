@@ -1,0 +1,200 @@
+# Feature Documentation Test Helpers
+# Utility functions for testing feature documentation generation
+
+use core.collections.{List, Dict}
+use core.string.String
+use core.io.{File, Directory}
+use spec.feature_doc.metadata.FeatureMetadata
+use spec.feature_doc.registry.{get_all_features, get_all_categories}
+
+## Count generated feature files in doc/features/
+fn count_generated_features() -> Int:
+    let mut count = 0
+    let categories = get_all_categories()
+
+    for category in categories:
+        let dir_path = f"doc/features/{category.to_lowercase()}"
+
+        if Directory.exists(dir_path):
+            let files = Directory.list(dir_path)
+            for file in files:
+                if file.ends_with(".md") and not file.starts_with("__"):
+                    count = count + 1
+
+    return count
+
+## Get list of all generated feature file paths
+fn get_all_generated_features() -> List[String]:
+    let mut files = List.new()
+    let categories = get_all_categories()
+
+    for category in categories:
+        let dir_path = f"doc/features/{category.to_lowercase()}"
+
+        if Directory.exists(dir_path):
+            let dir_files = Directory.list(dir_path)
+            for file in dir_files:
+                if file.ends_with(".md") and not file.starts_with("__"):
+                    files.append(f"{dir_path}/{file}")
+
+    return files
+
+## Get list of category directories that have been generated
+fn get_generated_categories() -> List[String]:
+    let mut categories = List.new()
+
+    if not Directory.exists("doc/features"):
+        return categories
+
+    let entries = Directory.list("doc/features")
+
+    for entry in entries:
+        let path = f"doc/features/{entry}"
+        if Directory.is_directory(path) and entry != "done":
+            categories.append(entry)
+
+    return categories
+
+## Read feature file content
+fn read_feature_file(id: Int) -> Option[String]:
+    # Find feature in registry
+    use spec.feature_doc.registry.get_feature
+
+    if let Some(feature) = get_feature(id):
+        let path = feature.full_path()
+
+        if File.exists(path):
+            return Some(File.read(path))
+
+    return None
+
+## Read any file (for testing)
+fn read_file(path: String) -> String:
+    if File.exists(path):
+        return File.read(path)
+
+    return ""
+
+## Extract all feature IDs from markdown files in a directory
+fn extract_feature_ids(dir_path: String) -> List[Int]:
+    let mut ids = List.new()
+
+    if not Directory.exists(dir_path):
+        return ids
+
+    # Recursively find all .md files
+    let files = find_markdown_files(dir_path)
+
+    for file in files:
+        if let Some(id) = extract_feature_id_from_file(file):
+            ids.append(id)
+
+    return ids
+
+## Find all markdown files recursively
+fn find_markdown_files(dir_path: String) -> List[String]:
+    let mut files = List.new()
+
+    if not Directory.exists(dir_path):
+        return files
+
+    let entries = Directory.list(dir_path)
+
+    for entry in entries:
+        let full_path = f"{dir_path}/{entry}"
+
+        if Directory.is_directory(full_path):
+            # Recurse into subdirectories
+            let sub_files = find_markdown_files(full_path)
+            files.extend(sub_files)
+        else if entry.ends_with(".md"):
+            files.append(full_path)
+
+    return files
+
+## Extract feature ID from markdown file
+fn extract_feature_id_from_file(file_path: String) -> Option[Int]:
+    if not File.exists(file_path):
+        return None
+
+    let content = File.read(file_path)
+
+    # Look for "# Feature #123:" pattern
+    use core.regex.Regex
+
+    let pattern = Regex.new(r"# Feature #(\d+):")
+    if let Some(match) = pattern.find(content):
+        if let Some(id_str) = match.group(1):
+            return Some(id_str.to_int())
+
+    return None
+
+## Validate markdown syntax (basic check)
+fn validate_markdown(file_path: String) -> Bool:
+    if not File.exists(file_path):
+        return False
+
+    let content = File.read(file_path)
+
+    # Basic validation checks
+    let checks = [
+        content.includes("# Feature #"),      # Has feature header
+        content.includes("## Overview"),      # Has overview section
+        content.includes("## Description"),   # Has description section
+        content.includes("| Property | Value |")  # Has metadata table
+    ]
+
+    # All checks must pass
+    for check in checks:
+        if not check:
+            return False
+
+    return True
+
+## Clear test feature files (for cleanup)
+fn clear_test_features():
+    # Remove E2E test features
+    let test_categories = ["E2ETest", "ComplexTest", "Meta", "AnotherCategory"]
+
+    for category in test_categories:
+        let dir_path = f"doc/features/{category.to_lowercase()}"
+
+        if Directory.exists(dir_path):
+            Directory.remove_all(dir_path)
+
+## Generate features for a specific category
+fn generate_features_for_category(category: String):
+    use spec.feature_doc.file_writer.write_category
+    write_category(category)
+
+## Compare two feature files for equivalence
+fn compare_features(old_path: String, new_path: String) -> (Bool, String):
+    if not File.exists(old_path):
+        return (False, f"Old file not found: {old_path}")
+
+    if not File.exists(new_path):
+        return (False, f"New file not found: {new_path}")
+
+    let old_content = File.read(old_path)
+    let new_content = File.read(new_path)
+
+    # Extract feature IDs to compare
+    let old_id = extract_feature_id_from_file(old_path)
+    let new_id = extract_feature_id_from_file(new_path)
+
+    if old_id != new_id:
+        return (False, f"Feature ID mismatch: {old_id} vs {new_id}")
+
+    # Check that new file has all major sections
+    let required_sections = [
+        "## Overview",
+        "## Description",
+        "## Implementation",
+        "## Testing"
+    ]
+
+    for section in required_sections:
+        if not new_content.includes(section):
+            return (False, f"Missing section: {section}")
+
+    return (True, "Files are equivalent")

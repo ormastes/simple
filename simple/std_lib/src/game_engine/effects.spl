@@ -1,0 +1,247 @@
+# Effect System for Async Safety in Game Engines
+#
+# Leverages Simple's effect system to track and enforce async safety
+# for game logic that interacts with engine APIs
+#
+# Features:
+# - Effect tracking for engine operations
+# - Async-safe game logic composition
+# - Effect isolation boundaries
+# - Engine API safety guarantees
+# - Cross-engine effect compatibility
+
+import sys.ffi
+
+mod effects
+
+# GameEffect
+# Effect types for game engine operations
+pub effect GameEffect:
+    # Rendering effects (may block on GPU)
+    RenderEffect(String)         # Render operation name
+
+    # Physics effects (synchronized with physics step)
+    PhysicsEffect(String)        # Physics operation name
+
+    # Audio effects (may block on audio thread)
+    AudioEffect(String)          # Audio operation name
+
+    # IO effects (asset loading, file access)
+    IOEffect(String)             # IO operation name
+
+    # Engine sync effects (must run on main thread)
+    EngineSyncEffect(String)     # Sync operation name
+
+
+# EffectContext
+# Tracks active effects in current execution context
+pub struct EffectContext:
+    active_effects: Vec[GameEffect]
+    async_safe: bool
+
+impl EffectContext:
+    pub fn new() -> EffectContext:
+        return EffectContext(
+            active_effects: [],
+            async_safe: true,
+        )
+
+    # Check if specific effect is active
+    pub fn has_effect(self, effect_name: String) -> bool:
+        for effect in self.active_effects:
+            if effect is GameEffect::RenderEffect(name) and name == effect_name:
+                return true
+            elif effect is GameEffect::PhysicsEffect(name) and name == effect_name:
+                return true
+            elif effect is GameEffect::AudioEffect(name) and name == effect_name:
+                return true
+            elif effect is GameEffect::IOEffect(name) and name == effect_name:
+                return true
+            elif effect is GameEffect::EngineSyncEffect(name) and name == effect_name:
+                return true
+        return false
+
+    # Add effect to context
+    pub fn add_effect(mut self, effect: GameEffect):
+        self.active_effects.push(effect)
+        # Mark as not async-safe if adding sync effect
+        if effect is GameEffect::EngineSyncEffect(_):
+            self.async_safe = false
+
+    # Remove effect from context
+    pub fn remove_effect(mut self, effect_name: String):
+        let mut new_effects = Vec::new()
+        for effect in self.active_effects:
+            let should_keep = if effect is GameEffect::RenderEffect(name):
+                name != effect_name
+            elif effect is GameEffect::PhysicsEffect(name):
+                name != effect_name
+            elif effect is GameEffect::AudioEffect(name):
+                name != effect_name
+            elif effect is GameEffect::IOEffect(name):
+                name != effect_name
+            elif effect is GameEffect::EngineSyncEffect(name):
+                name != effect_name
+            else:
+                true
+
+            if should_keep:
+                new_effects.push(effect)
+
+        self.active_effects = new_effects
+
+    # Check if context is async-safe
+    pub fn is_async_safe(self) -> bool:
+        return self.async_safe
+
+    # Get all active effects
+    pub fn get_active_effects(self) -> Vec[GameEffect]:
+        return self.active_effects
+
+
+# EffectfulOperation
+# Wraps an operation with effect tracking
+pub struct EffectfulOperation:
+    operation_name: String
+    effect: GameEffect
+    context: EffectContext
+
+impl EffectfulOperation:
+    pub fn new(operation_name: String, effect: GameEffect) -> EffectfulOperation:
+        let mut context = EffectContext::new()
+        context.add_effect(effect)
+
+        return EffectfulOperation(
+            operation_name: operation_name,
+            effect: effect,
+            context: context,
+        )
+
+    # Execute operation with effect tracking
+    pub fn execute(self, operation: fn() -> ()):
+        # Effect is already tracked in context
+        operation()
+
+    # Check if operation is async-safe
+    pub fn is_async_safe(self) -> bool:
+        return self.context.is_async_safe()
+
+
+# AsyncSafeGuard
+# Guards async-unsafe operations
+pub struct AsyncSafeGuard:
+    allowed_effects: Vec[String]
+
+impl AsyncSafeGuard:
+    pub fn new() -> AsyncSafeGuard:
+        return AsyncSafeGuard(allowed_effects: [])
+
+    # Allow specific effect
+    pub fn allow_effect(mut self, effect_name: String):
+        self.allowed_effects.push(effect_name)
+
+    # Check if effect is allowed
+    pub fn is_effect_allowed(self, effect_name: String) -> bool:
+        for allowed in self.allowed_effects:
+            if allowed == effect_name:
+                return true
+        return false
+
+    # Verify context against guard
+    pub fn verify_context(self, context: EffectContext) -> bool:
+        # All effects in context must be in allowed list
+        for effect in context.get_active_effects():
+            let effect_name = if effect is GameEffect::RenderEffect(name):
+                name
+            elif effect is GameEffect::PhysicsEffect(name):
+                name
+            elif effect is GameEffect::AudioEffect(name):
+                name
+            elif effect is GameEffect::IOEffect(name):
+                name
+            elif effect is GameEffect::EngineSyncEffect(name):
+                name
+            else:
+                ""
+
+            if not self.is_effect_allowed(effect_name):
+                return false
+
+        return true
+
+
+# Effect combinators
+
+# Run operation with render effect
+pub fn with_render_effect(operation_name: String, operation: fn() -> ()):
+    let op = EffectfulOperation::new(operation_name, GameEffect::RenderEffect(operation_name))
+    op.execute(operation)
+
+# Run operation with physics effect
+pub fn with_physics_effect(operation_name: String, operation: fn() -> ()):
+    let op = EffectfulOperation::new(operation_name, GameEffect::PhysicsEffect(operation_name))
+    op.execute(operation)
+
+# Run operation with audio effect
+pub fn with_audio_effect(operation_name: String, operation: fn() -> ()):
+    let op = EffectfulOperation::new(operation_name, GameEffect::AudioEffect(operation_name))
+    op.execute(operation)
+
+# Run operation with IO effect
+pub fn with_io_effect(operation_name: String, operation: fn() -> ()):
+    let op = EffectfulOperation::new(operation_name, GameEffect::IOEffect(operation_name))
+    op.execute(operation)
+
+# Run operation with engine sync effect (main thread only)
+pub fn with_engine_sync_effect(operation_name: String, operation: fn() -> ()):
+    let op = EffectfulOperation::new(operation_name, GameEffect::EngineSyncEffect(operation_name))
+    if not op.is_async_safe():
+        # Must run on main thread
+        queue_on_main_thread(operation)
+    else:
+        op.execute(operation)
+
+
+# Engine integration
+
+# Queue operation on engine main thread
+fn queue_on_main_thread(operation: fn() -> ()):
+    # This would use engine-specific main thread queue
+    # For now, execute directly (in real impl, would defer)
+    operation()
+
+
+# Example usage:
+#
+# # Async-safe rendering operation
+# with_render_effect("draw_sprite", fn():
+#     # This is tracked as RenderEffect
+#     draw_sprite_to_screen(sprite_id)
+# )
+#
+# # Physics operation (synchronized with physics step)
+# with_physics_effect("apply_force", fn():
+#     # This is tracked as PhysicsEffect
+#     rigidbody.apply_force(10.0, 0.0, 0.0)
+# )
+#
+# # Engine sync operation (must run on main thread)
+# with_engine_sync_effect("spawn_actor", fn():
+#     # This is tracked as EngineSyncEffect
+#     # Will be queued on main thread automatically
+#     let actor = spawn_actor_in_world(world_ptr)
+# )
+#
+# # Create async-safe guard
+# let mut guard = AsyncSafeGuard::new()
+# guard.allow_effect("draw_sprite")
+# guard.allow_effect("play_sound")
+#
+# # Verify operation is async-safe
+# let context = EffectContext::new()
+# context.add_effect(GameEffect::RenderEffect("draw_sprite"))
+#
+# if guard.verify_context(context):
+#     print("Operation is async-safe!")
+# else:
+#     print("Operation has disallowed effects!")

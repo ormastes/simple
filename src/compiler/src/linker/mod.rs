@@ -4,6 +4,7 @@
 //! - **SMF Writer**: Creates Simple Module Format binaries
 //! - **Native Linker**: High-performance native linking with mold/lld/ld support
 //! - **Parallel Linker**: Parallel SMF linking using rayon
+//! - **Layout Optimizer**: 4KB page locality optimization (#2030-#2039)
 //!
 //! # Native Linker Selection
 //!
@@ -21,6 +22,7 @@ mod interner;
 mod native;
 mod builder;
 pub mod parallel;
+pub mod layout;
 
 // SMF exports
 pub use smf_writer::*;
@@ -45,4 +47,9 @@ pub use parallel::{
 // Symbol analysis exports
 pub use analysis::{
     AnalysisStats, AnalyzedSymbol, RefKind, SymbolAnalyzer, SymbolGraph, SymbolVisibility,
+};
+
+// Layout optimization exports (4KB page locality)
+pub use layout::{
+    LayoutOptimizer, LayoutSegment, LayoutStats, LayoutSymbol,
 };

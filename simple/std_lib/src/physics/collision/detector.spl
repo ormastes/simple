@@ -1,0 +1,345 @@
+# Physics Collision Detection - Core Detection Algorithms
+#
+# Collision detection algorithms for various primitive shape combinations.
+# Implements both simple boolean tests and detailed contact information.
+#
+# ## Supported Shape Combinations
+# - Sphere-Sphere: Fast distance check
+# - AABB-AABB: Axis-aligned box intersection
+# - Sphere-AABB: Closest point method
+# - OBB-OBB: Separating Axis Theorem (SAT) with 15 axes
+# - Capsule-Sphere: Line segment distance
+# - Capsule-Capsule: Segment-segment distance
+# - Capsule-AABB: Hybrid approach
+#
+# ## Example
+# ```simple
+# import physics.collision as collision
+# import physics.core as core
+#
+# # Sphere-sphere detection
+# if collision.Detector::sphere_sphere(pos1, 1.0, pos2, 1.0):
+#     print("Spheres colliding!")
+#
+# # OBB-OBB detection (with rotation)
+# let box1 = collision.OBB(core.Vector3(0, 0, 0), core.Vector3(1, 1, 1))
+# let box2 = collision.OBB(
+#     core.Vector3(1.5, 0, 0),
+#     core.Vector3(1, 1, 1),
+#     core.Quaternion::from_axis_angle(core.Vector3(0, 1, 0), 0.785)
+# )
+# if collision.Detector::box_box(box1, box2):
+#     print("Boxes colliding!")
+#
+# # Capsule-sphere (character controller)
+# let capsule = collision.Capsule(start, end, 0.5)
+# if collision.Detector::capsule_sphere(capsule, obstacle_pos, obstacle_radius):
+#     print("Character hit obstacle!")
+# ```
+
+export Detector
+
+import ..core as core
+from .aabb import AABB
+from . import OBB, Capsule
+
+
+# ============================================================================
+# Detector - Collision Detection
+# ============================================================================
+
+class Detector:
+    """Collision detection algorithms."""
+
+    @staticmethod
+    fn sphere_sphere(
+        pos1: core.Vector3,
+        radius1: f64,
+        pos2: core.Vector3,
+        radius2: f64
+    ) -> bool:
+        """Detect sphere-sphere collision.
+
+        Args:
+            pos1: Position of first sphere
+            radius1: Radius of first sphere
+            pos2: Position of second sphere
+            radius2: Radius of second sphere
+
+        Returns:
+            True if spheres collide
+        """
+        let distance = pos1.distance(pos2)
+        let sum_radii = radius1 + radius2
+        return distance < sum_radii
+
+    @staticmethod
+    fn aabb_aabb(aabb1: AABB, aabb2: AABB) -> bool:
+        """Detect AABB-AABB collision.
+
+        Args:
+            aabb1: First AABB
+            aabb2: Second AABB
+
+        Returns:
+            True if AABBs collide
+        """
+        return aabb1.intersects(aabb2)
+
+    @staticmethod
+    fn sphere_aabb(
+        sphere_pos: core.Vector3,
+        sphere_radius: f64,
+        aabb: AABB
+    ) -> bool:
+        """Detect sphere-AABB collision.
+
+        Args:
+            sphere_pos: Sphere center
+            sphere_radius: Sphere radius
+            aabb: AABB
+
+        Returns:
+            True if sphere and AABB collide
+        """
+        # Find closest point on AABB to sphere center
+        let closest_x = sphere_pos.x.max(aabb.min.x).min(aabb.max.x)
+        let closest_y = sphere_pos.y.max(aabb.min.y).min(aabb.max.y)
+        let closest_z = sphere_pos.z.max(aabb.min.z).min(aabb.max.z)
+        let closest = core.Vector3(closest_x, closest_y, closest_z)
+
+        # Check if distance from sphere center to closest point is < radius
+        let distance = sphere_pos.distance(closest)
+        return distance < sphere_radius
+
+    @staticmethod
+    fn box_box(box1: OBB, box2: OBB) -> bool:
+        """Detect OBB-OBB collision using Separating Axis Theorem (SAT).
+
+        Tests 15 potential separating axes:
+        - 3 face normals from box1
+        - 3 face normals from box2
+        - 9 edge cross products
+
+        Args:
+            box1: First oriented bounding box
+            box2: Second oriented bounding box
+
+        Returns:
+            True if boxes collide
+        """
+        let axes1 = box1.get_axes()
+        let axes2 = box2.get_axes()
+
+        # Test face normals from box1 (3 axes)
+        for axis in axes1:
+            if Detector::_is_separating_axis(box1, box2, axis):
+                return false
+
+        # Test face normals from box2 (3 axes)
+        for axis in axes2:
+            if Detector::_is_separating_axis(box1, box2, axis):
+                return false
+
+        # Test edge cross products (9 axes)
+        for i in range(3):
+            for j in range(3):
+                let cross = axes1[i].cross(axes2[j])
+                let cross_length = cross.magnitude()
+
+                # Skip near-parallel edges (cross product near zero)
+                if cross_length > 0.0001:
+                    let axis = cross.scale(1.0 / cross_length)  # Normalize
+                    if Detector::_is_separating_axis(box1, box2, axis):
+                        return false
+
+        # No separating axis found, boxes must be colliding
+        return true
+
+    @staticmethod
+    fn _is_separating_axis(box1: OBB, box2: OBB, axis: core.Vector3) -> bool:
+        """Check if an axis separates two OBBs.
+
+        Args:
+            box1: First box
+            box2: Second box
+            axis: Potential separating axis (normalized)
+
+        Returns:
+            True if axis separates the boxes
+        """
+        let (min1, max1) = box1.project_onto_axis(axis)
+        let (min2, max2) = box2.project_onto_axis(axis)
+
+        # Check for gap between projections
+        return max1 < min2 or max2 < min1
+
+    @staticmethod
+    fn capsule_sphere(capsule: Capsule, sphere_pos: core.Vector3, sphere_radius: f64) -> bool:
+        """Detect capsule-sphere collision.
+
+        Reduces to sphere-sphere test using closest point on capsule's central axis.
+
+        Args:
+            capsule: Capsule
+            sphere_pos: Sphere center
+            sphere_radius: Sphere radius
+
+        Returns:
+            True if capsule and sphere collide
+
+        Example:
+            ```simple
+            let character = Capsule(start=core.Vector3(0, 0, 0), end=core.Vector3(0, 2, 0), radius=0.5)
+            let obstacle_pos = core.Vector3(1, 1, 0)
+            let obstacle_radius = 0.5
+
+            if Detector::capsule_sphere(character, obstacle_pos, obstacle_radius):
+                print("Character hit obstacle!")
+            ```
+        """
+        # Find closest point on capsule's central axis to sphere center
+        let closest_on_axis = capsule.closest_point_on_axis(sphere_pos)
+
+        # Distance from sphere center to closest point on axis
+        let distance = sphere_pos.distance(closest_on_axis)
+
+        # Collision if distance < sum of radii
+        return distance < (capsule.radius + sphere_radius)
+
+    @staticmethod
+    fn capsule_capsule(capsule1: Capsule, capsule2: Capsule) -> bool:
+        """Detect capsule-capsule collision.
+
+        Uses closest points between two line segments, then sphere-sphere test.
+
+        Args:
+            capsule1: First capsule
+            capsule2: Second capsule
+
+        Returns:
+            True if capsules collide
+
+        Example:
+            ```simple
+            let player = Capsule(start=core.Vector3(0, 0, 0), end=core.Vector3(0, 2, 0), radius=0.5)
+            let enemy = Capsule(start=core.Vector3(1, 0, 0), end=core.Vector3(1, 2, 0), radius=0.5)
+
+            if Detector::capsule_capsule(player, enemy):
+                print("Player collided with enemy!")
+            ```
+        """
+        # Find closest points between the two line segments (capsule axes)
+        let (point1, point2) = Detector::_closest_points_segments(
+            capsule1.start, capsule1.end,
+            capsule2.start, capsule2.end
+        )
+
+        # Distance between closest points
+        let distance = point1.distance(point2)
+
+        # Collision if distance < sum of radii
+        return distance < (capsule1.radius + capsule2.radius)
+
+    @staticmethod
+    fn capsule_aabb(capsule: Capsule, aabb: AABB) -> bool:
+        """Detect capsule-AABB collision.
+
+        Finds closest point on capsule axis, then uses sphere-AABB test.
+
+        Args:
+            capsule: Capsule
+            aabb: Axis-aligned bounding box
+
+        Returns:
+            True if capsule and AABB collide
+
+        Example:
+            ```simple
+            let character = Capsule(start=core.Vector3(0, 0, 0), end=core.Vector3(0, 2, 0), radius=0.5)
+            let wall = AABB::from_center_size(core.Vector3(2, 1, 0), core.Vector3(1, 3, 1))
+
+            if Detector::capsule_aabb(character, wall):
+                print("Character hit wall!")
+            ```
+        """
+        # Find closest point on AABB to capsule's central axis
+        # We test the capsule axis against the AABB to find the closest point on the axis
+        let aabb_center = aabb.center()
+        let closest_on_axis = capsule.closest_point_on_axis(aabb_center)
+
+        # Now do sphere-AABB test with the capsule radius
+        let closest_x = closest_on_axis.x.max(aabb.min.x).min(aabb.max.x)
+        let closest_y = closest_on_axis.y.max(aabb.min.y).min(aabb.max.y)
+        let closest_z = closest_on_axis.z.max(aabb.min.z).min(aabb.max.z)
+        let closest_on_aabb = core.Vector3(closest_x, closest_y, closest_z)
+
+        # Distance from closest point on axis to closest point on AABB
+        let distance = closest_on_axis.distance(closest_on_aabb)
+
+        return distance < capsule.radius
+
+    @staticmethod
+    fn _closest_points_segments(
+        a_start: core.Vector3,
+        a_end: core.Vector3,
+        b_start: core.Vector3,
+        b_end: core.Vector3
+    ) -> (core.Vector3, core.Vector3):
+        """Find closest points between two line segments.
+
+        Uses parametric line representation and minimizes distance.
+
+        Args:
+            a_start: Start of first segment
+            a_end: End of first segment
+            b_start: Start of second segment
+            b_end: End of second segment
+
+        Returns:
+            Tuple of (point on segment A, point on segment B)
+        """
+        let d1 = a_end.sub(a_start)
+        let d2 = b_end.sub(b_start)
+        let r = a_start.sub(b_start)
+
+        let a = d1.dot(d1)
+        let b = d1.dot(d2)
+        let c = d1.dot(r)
+        let e = d2.dot(d2)
+        let f = d2.dot(r)
+
+        let mut s = 0.0
+        let mut t = 0.0
+
+        # Handle degenerate cases
+        if a < 0.0001 and e < 0.0001:
+            # Both segments are points
+            return (a_start, b_start)
+
+        if a < 0.0001:
+            # Segment A is a point
+            s = 0.0
+            t = (f / e).max(0.0).min(1.0)
+        elif e < 0.0001:
+            # Segment B is a point
+            t = 0.0
+            s = (-c / a).max(0.0).min(1.0)
+        else:
+            # General case
+            let denom = a * e - b * b
+
+            if denom != 0.0:
+                s = ((b * f - c * e) / denom).max(0.0).min(1.0)
+            else:
+                s = 0.0
+
+            t = ((b * s + f) / e).max(0.0).min(1.0)
+
+            # Recompute s for the final t
+            s = ((-c + b * t) / a).max(0.0).min(1.0)
+
+        let point_a = a_start.add(d1.scale(s))
+        let point_b = b_start.add(d2.scale(t))
+
+        return (point_a, point_b)

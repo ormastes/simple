@@ -170,9 +170,16 @@ mod tests {
         let backend = BackendKind::for_gpu_kernel(&target);
 
         // Verify it's one of the expected backends
+        #[cfg(feature = "vulkan")]
         assert!(
             matches!(backend, BackendKind::Software)
                 || matches!(backend, BackendKind::Vulkan),
+            "Unexpected backend for X86_64: {:?}",
+            backend
+        );
+        #[cfg(not(feature = "vulkan"))]
+        assert!(
+            matches!(backend, BackendKind::Software),
             "Unexpected backend for X86_64: {:?}",
             backend
         );
@@ -184,9 +191,16 @@ mod tests {
         let backend = BackendKind::for_gpu_kernel(&target);
 
         // Should work on ARM64 too (Vulkan is cross-platform)
+        #[cfg(feature = "vulkan")]
         assert!(
             matches!(backend, BackendKind::Software)
                 || matches!(backend, BackendKind::Vulkan),
+            "Unexpected backend for ARM64: {:?}",
+            backend
+        );
+        #[cfg(not(feature = "vulkan"))]
+        assert!(
+            matches!(backend, BackendKind::Software),
             "Unexpected backend for ARM64: {:?}",
             backend
         );

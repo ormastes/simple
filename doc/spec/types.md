@@ -1,5 +1,21 @@
 # Simple Language Type System
 
+**Status:** Stable
+**Feature IDs:** #20-29
+**Last Updated:** 2025-12-28
+**Keywords:** types, mutability, generics, type-inference
+**Topics:** type-system
+
+Complete specification of Simple's type system, including primitives, composites, generics, and mutability rules.
+
+## Related Specifications
+- [Syntax](syntax.md) - Type annotation syntax
+- [Units](units.md) - Semantic unit types
+- [Data Structures](data_structures.md) - Composite types
+- [Memory](memory.md) - Ownership and reference types
+
+---
+
 This document covers the type system, mutability rules, unit types, and type inference.
 
 ## Type System Overview
