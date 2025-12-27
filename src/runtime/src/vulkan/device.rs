@@ -16,10 +16,18 @@ pub struct VulkanDevice {
     // Queue families
     compute_queue_family: u32,
     transfer_queue_family: u32,
+    #[cfg(feature = "vulkan")]
+    graphics_queue_family: Option<u32>,
+    #[cfg(feature = "vulkan")]
+    present_queue_family: Option<u32>,
 
     // Queues
     compute_queue: Mutex<vk::Queue>,
     transfer_queue: Mutex<vk::Queue>,
+    #[cfg(feature = "vulkan")]
+    graphics_queue: Option<Mutex<vk::Queue>>,
+    #[cfg(feature = "vulkan")]
+    present_queue: Option<Mutex<vk::Queue>>,
 
     // Memory allocator
     allocator: Mutex<Allocator>,
@@ -30,6 +38,12 @@ pub struct VulkanDevice {
     // Command pools (per-thread would be better, but global for now)
     compute_pool: Mutex<vk::CommandPool>,
     transfer_pool: Mutex<vk::CommandPool>,
+    #[cfg(feature = "vulkan")]
+    graphics_pool: Option<Mutex<vk::CommandPool>>,
+
+    // Swapchain loader (for presentation)
+    #[cfg(feature = "vulkan")]
+    swapchain_loader: Option<ash::khr::swapchain::Device>,
 }
 
 impl VulkanDevice {
@@ -44,6 +58,24 @@ impl VulkanDevice {
             .find_transfer_queue_family()
             .unwrap_or(compute_family);
 
+        // Graphics queue support (optional - may not be needed for compute-only devices)
+        #[cfg(feature = "vulkan")]
+        let graphics_family = physical_device.find_graphics_queue_family();
+
+        // Note: present_family requires a surface, will be set later via set_surface()
+        #[cfg(feature = "vulkan")]
+        let present_family: Option<u32> = None;
+
+        #[cfg(feature = "vulkan")]
+        tracing::info!(
+            "Selected device: {} (compute: {}, transfer: {}, graphics: {:?})",
+            physical_device.name(),
+            compute_family,
+            transfer_family,
+            graphics_family
+        );
+
+        #[cfg(not(feature = "vulkan"))]
         tracing::info!(
             "Selected device: {} (compute queue: {}, transfer queue: {})",
             physical_device.name(),
@@ -51,28 +83,38 @@ impl VulkanDevice {
             transfer_family
         );
 
-        // Queue create infos
+        // Queue create infos - collect unique queue families
         let queue_priorities = [1.0f32];
-        let mut queue_create_infos = vec![
-            vk::DeviceQueueCreateInfo::default()
-                .queue_family_index(compute_family)
-                .queue_priorities(&queue_priorities),
-        ];
+        let mut unique_families = std::collections::HashSet::new();
+        unique_families.insert(compute_family);
+        unique_families.insert(transfer_family);
 
-        if transfer_family != compute_family {
-            queue_create_infos.push(
-                vk::DeviceQueueCreateInfo::default()
-                    .queue_family_index(transfer_family)
-                    .queue_priorities(&queue_priorities)
-            );
+        #[cfg(feature = "vulkan")]
+        if let Some(gfx) = graphics_family {
+            unique_families.insert(gfx);
         }
+
+        let queue_create_infos: Vec<_> = unique_families
+            .into_iter()
+            .map(|family| {
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(family)
+                    .queue_priorities(&queue_priorities)
+            })
+            .collect();
 
         // Required features
         let mut features = vk::PhysicalDeviceFeatures::default();
         features.shader_int64 = vk::TRUE; // For 64-bit atomics
 
-        // Device extensions (none required for basic compute)
-        let extension_names = [];
+        // Device extensions
+        let mut extension_names_raw = vec![];
+
+        // Add swapchain extension for graphics/presentation
+        #[cfg(feature = "vulkan")]
+        extension_names_raw.push(ash::khr::swapchain::NAME.as_ptr());
+
+        let extension_names: Vec<*const i8> = extension_names_raw;
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_create_infos)
@@ -87,6 +129,16 @@ impl VulkanDevice {
         // Get queues
         let compute_queue = unsafe { device.get_device_queue(compute_family, 0) };
         let transfer_queue = unsafe { device.get_device_queue(transfer_family, 0) };
+
+        #[cfg(feature = "vulkan")]
+        let graphics_queue = graphics_family.map(|family| unsafe {
+            device.get_device_queue(family, 0)
+        });
+
+        #[cfg(feature = "vulkan")]
+        let present_queue = present_family.map(|family| unsafe {
+            device.get_device_queue(family, 0)
+        });
 
         // Create allocator
         let allocator = Allocator::new(&AllocatorCreateDesc {
@@ -123,6 +175,25 @@ impl VulkanDevice {
                 .map_err(|e| VulkanError::DeviceCreationFailed(format!("Transfer pool: {:?}", e)))?
         };
 
+        // Create graphics command pool if graphics queue exists
+        #[cfg(feature = "vulkan")]
+        let graphics_pool = if let Some(gfx_family) = graphics_family {
+            let graphics_pool_info = vk::CommandPoolCreateInfo::default()
+                .queue_family_index(gfx_family)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+            let pool = unsafe {
+                device.create_command_pool(&graphics_pool_info, None)
+                    .map_err(|e| VulkanError::DeviceCreationFailed(format!("Graphics pool: {:?}", e)))?
+            };
+            Some(pool)
+        } else {
+            None
+        };
+
+        // Create swapchain loader
+        #[cfg(feature = "vulkan")]
+        let swapchain_loader = Some(ash::khr::swapchain::Device::new(instance.instance(), &device));
+
         tracing::info!("Vulkan device created successfully");
 
         Ok(Arc::new(Self {
@@ -131,12 +202,24 @@ impl VulkanDevice {
             device,
             compute_queue_family: compute_family,
             transfer_queue_family: transfer_family,
+            #[cfg(feature = "vulkan")]
+            graphics_queue_family: graphics_family,
+            #[cfg(feature = "vulkan")]
+            present_queue_family: present_family,
             compute_queue: Mutex::new(compute_queue),
             transfer_queue: Mutex::new(transfer_queue),
+            #[cfg(feature = "vulkan")]
+            graphics_queue: graphics_queue.map(Mutex::new),
+            #[cfg(feature = "vulkan")]
+            present_queue: present_queue.map(Mutex::new),
             allocator: Mutex::new(allocator),
             pipeline_cache,
             compute_pool: Mutex::new(compute_pool),
             transfer_pool: Mutex::new(transfer_pool),
+            #[cfg(feature = "vulkan")]
+            graphics_pool: graphics_pool.map(Mutex::new),
+            #[cfg(feature = "vulkan")]
+            swapchain_loader,
         }))
     }
 
@@ -187,6 +270,36 @@ impl VulkanDevice {
     /// Get transfer queue family index
     pub fn transfer_queue_family(&self) -> u32 {
         self.transfer_queue_family
+    }
+
+    /// Get graphics queue family index (if available)
+    #[cfg(feature = "vulkan")]
+    pub fn graphics_queue_family(&self) -> Option<u32> {
+        self.graphics_queue_family
+    }
+
+    /// Get present queue family index (if available)
+    #[cfg(feature = "vulkan")]
+    pub fn present_queue_family(&self) -> Option<u32> {
+        self.present_queue_family
+    }
+
+    /// Get graphics queue (if available, requires lock)
+    #[cfg(feature = "vulkan")]
+    pub fn graphics_queue(&self) -> Option<&Mutex<vk::Queue>> {
+        self.graphics_queue.as_ref()
+    }
+
+    /// Get present queue (if available, requires lock)
+    #[cfg(feature = "vulkan")]
+    pub fn present_queue(&self) -> Option<&Mutex<vk::Queue>> {
+        self.present_queue.as_ref()
+    }
+
+    /// Get swapchain loader
+    #[cfg(feature = "vulkan")]
+    pub fn swapchain_loader(&self) -> Option<&ash::khr::swapchain::Device> {
+        self.swapchain_loader.as_ref()
     }
 
     /// Wait for device to be idle

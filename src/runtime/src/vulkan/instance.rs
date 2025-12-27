@@ -13,6 +13,8 @@ static VULKAN_INSTANCE: Mutex<Option<Arc<VulkanInstance>>> = Mutex::new(None);
 pub struct VulkanInstance {
     entry: ash::Entry,
     instance: ash::Instance,
+    #[cfg(feature = "vulkan")]
+    surface_loader: ash::khr::surface::Instance,
     #[allow(dead_code)]
     debug_utils: Option<ash::ext::debug_utils::Instance>,
     #[allow(dead_code)]
@@ -78,9 +80,33 @@ impl VulkanInstance {
         let mut extension_names_raw = vec![];
         let mut extension_names = vec![];
 
+        // Debug utils extension (debug builds only)
         #[cfg(debug_assertions)]
         {
             extension_names_raw.push(ash::ext::debug_utils::NAME.to_owned());
+        }
+
+        // Surface extensions for windowing
+        #[cfg(feature = "vulkan")]
+        {
+            extension_names_raw.push(ash::khr::surface::NAME.to_owned());
+
+            // Platform-specific surface extensions
+            #[cfg(target_os = "windows")]
+            extension_names_raw.push(ash::khr::win32_surface::NAME.to_owned());
+
+            #[cfg(target_os = "linux")]
+            {
+                // Prefer Wayland if available, fall back to X11
+                if std::env::var("WAYLAND_DISPLAY").is_ok() {
+                    extension_names_raw.push(ash::khr::wayland_surface::NAME.to_owned());
+                } else {
+                    extension_names_raw.push(ash::khr::xlib_surface::NAME.to_owned());
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            extension_names_raw.push(ash::ext::metal_surface::NAME.to_owned());
         }
 
         for ext in &extension_names_raw {
@@ -123,11 +149,17 @@ impl VulkanInstance {
         #[cfg(not(debug_assertions))]
         let (debug_utils, debug_messenger) = (None, None);
 
+        // Create surface loader for windowing support
+        #[cfg(feature = "vulkan")]
+        let surface_loader = ash::khr::surface::Instance::new(&entry, &instance);
+
         tracing::info!("Vulkan instance created successfully");
 
         Ok(Self {
             entry,
             instance,
+            #[cfg(feature = "vulkan")]
+            surface_loader,
             debug_utils,
             debug_messenger,
         })
@@ -153,6 +185,12 @@ impl VulkanInstance {
     /// Get the Vulkan entry
     pub fn entry(&self) -> &ash::Entry {
         &self.entry
+    }
+
+    /// Get the surface loader
+    #[cfg(feature = "vulkan")]
+    pub fn surface_loader(&self) -> &ash::khr::surface::Instance {
+        &self.surface_loader
     }
 }
 
@@ -290,6 +328,42 @@ impl VulkanPhysicalDevice {
             .iter()
             .enumerate()
             .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::TRANSFER))
+            .map(|(idx, _)| idx as u32)
+    }
+
+    /// Find graphics queue family index
+    #[cfg(feature = "vulkan")]
+    pub fn find_graphics_queue_family(&self) -> Option<u32> {
+        self.queue_families
+            .iter()
+            .enumerate()
+            .find(|(_, props)| props.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|(idx, _)| idx as u32)
+    }
+
+    /// Find present queue family index (requires surface support check)
+    #[cfg(feature = "vulkan")]
+    pub fn find_present_queue_family(
+        &self,
+        instance: &VulkanInstance,
+        surface: vk::SurfaceKHR,
+    ) -> Option<u32> {
+        let surface_loader = instance.surface_loader();
+
+        self.queue_families
+            .iter()
+            .enumerate()
+            .find(|(idx, _)| {
+                unsafe {
+                    surface_loader
+                        .get_physical_device_surface_support(
+                            self.handle,
+                            *idx as u32,
+                            surface,
+                        )
+                        .unwrap_or(false)
+                }
+            })
             .map(|(idx, _)| idx as u32)
     }
 

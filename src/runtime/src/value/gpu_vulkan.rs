@@ -6,6 +6,7 @@
 #[cfg(feature = "vulkan")]
 use crate::vulkan::{
     BufferUsage, ComputePipeline, VulkanBuffer, VulkanDevice, VulkanError,
+    WindowManager, Surface, VulkanSwapchain,
 };
 #[cfg(feature = "vulkan")]
 use parking_lot::Mutex;
@@ -26,6 +27,15 @@ lazy_static::lazy_static! {
 
     /// Global pipeline handle registry
     static ref PIPELINE_REGISTRY: Mutex<HashMap<u64, Arc<ComputePipeline>>> = Mutex::new(HashMap::new());
+
+    /// Global window manager (singleton)
+    static ref WINDOW_MANAGER: Mutex<Option<Arc<Mutex<WindowManager>>>> = Mutex::new(None);
+
+    /// Global window handle to surface mapping
+    static ref WINDOW_SURFACES: Mutex<HashMap<u64, Arc<Surface>>> = Mutex::new(HashMap::new());
+
+    /// Global swapchain handle registry
+    static ref SWAPCHAIN_REGISTRY: Mutex<HashMap<u64, Arc<VulkanSwapchain>>> = Mutex::new(HashMap::new());
 
     /// Atomic counter for handle generation
     static ref NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -48,6 +58,9 @@ pub enum VulkanFfiError {
     ExecutionFailed = -5,
     BufferTooSmall = -6,
     InvalidParameter = -7,
+    WindowError = -8,
+    SurfaceError = -9,
+    NotSupported = -10,
 }
 
 #[cfg(feature = "vulkan")]
@@ -62,6 +75,9 @@ impl From<VulkanError> for VulkanFfiError {
                 VulkanFfiError::CompilationFailed
             }
             VulkanError::ExecutionFailed(_) => VulkanFfiError::ExecutionFailed,
+            VulkanError::WindowError(_) => VulkanFfiError::WindowError,
+            VulkanError::SurfaceError(_) => VulkanFfiError::SurfaceError,
+            VulkanError::NotSupported(_) => VulkanFfiError::NotSupported,
             _ => VulkanFfiError::ExecutionFailed,
         }
     }
@@ -463,6 +479,384 @@ pub extern "C" fn rt_vk_kernel_launch_1d(
         1,
         1,
     )
+}
+
+// =============================================================================
+// Window Management FFI
+// =============================================================================
+//
+// NOTE: Full window management requires event loop integration which doesn't
+// work well with the current FFI design (event loop blocks the thread).
+// These are simplified implementations that provide surface creation without
+// full windowing support. Full implementation requires architectural changes.
+
+/// Create a Vulkan surface for windowing (simplified - no actual window)
+///
+/// Returns surface handle on success (positive i64), error code on failure (negative)
+///
+/// NOTE: This is a placeholder. Full window creation requires event loop integration.
+#[no_mangle]
+pub extern "C" fn rt_vk_window_create(
+    _device_handle: u64,
+    _width: u32,
+    _height: u32,
+    _title_ptr: *const u8,
+    _title_len: u64,
+) -> i64 {
+    #[cfg(feature = "vulkan")]
+    {
+        // TODO: Implement window creation with proper event loop handling
+        // This requires refactoring WindowManager to support non-blocking operations
+        tracing::warn!("rt_vk_window_create not fully implemented - requires event loop refactoring");
+        VulkanFfiError::NotSupported as i64
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i64
+    }
+}
+
+/// Destroy a window
+///
+/// Returns 0 on success, error code on failure
+#[no_mangle]
+pub extern "C" fn rt_vk_window_destroy(_window_handle: i64) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        // TODO: Implement window destruction
+        VulkanFfiError::NotSupported as i32
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Get window size
+///
+/// Returns 0 on success, error code on failure
+#[no_mangle]
+pub extern "C" fn rt_vk_window_get_size(
+    _window_handle: i64,
+    _out_width: *mut u32,
+    _out_height: *mut u32,
+) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        // TODO: Implement window size query
+        VulkanFfiError::NotSupported as i32
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Set window fullscreen mode
+///
+/// mode: 0 = windowed, 1 = borderless, 2 = exclusive
+/// Returns 0 on success, error code on failure
+#[no_mangle]
+pub extern "C" fn rt_vk_window_set_fullscreen(_window_handle: i64, _mode: i32) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        // TODO: Implement fullscreen mode setting
+        VulkanFfiError::NotSupported as i32
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Poll for window events (non-blocking)
+///
+/// Returns event type (positive) if event available, 0 if no event, negative on error
+/// Event data is written to out parameters
+#[no_mangle]
+pub extern "C" fn rt_vk_window_poll_event(
+    _out_window: *mut i64,
+    _out_type: *mut i32,
+    _out_data_ptr: *mut u8,
+    _out_data_len: u64,
+) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        // TODO: Implement event polling
+        0  // No events available
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Wait for window event with timeout
+///
+/// timeout_ms: timeout in milliseconds
+/// Returns event type (positive) if event available, 0 on timeout, negative on error
+#[no_mangle]
+pub extern "C" fn rt_vk_window_wait_event(
+    _timeout_ms: u64,
+    _out_window: *mut i64,
+    _out_type: *mut i32,
+    _out_data_ptr: *mut u8,
+    _out_data_len: u64,
+) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        // TODO: Implement event waiting
+        0  // Timeout
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+// =============================================================================
+// Swapchain Management FFI
+// =============================================================================
+
+/// Create a swapchain for presentation
+///
+/// Returns swapchain handle on success (positive), error code on failure (negative)
+///
+/// NOTE: Requires a valid surface handle (from window creation)
+#[no_mangle]
+pub extern "C" fn rt_vk_swapchain_create(
+    device_handle: u64,
+    surface_handle: u64,
+    width: u32,
+    height: u32,
+    prefer_hdr: i32,
+    prefer_no_vsync: i32,
+) -> i64 {
+    #[cfg(feature = "vulkan")]
+    {
+        let device_registry = DEVICE_REGISTRY.lock();
+        let surface_registry = WINDOW_SURFACES.lock();
+
+        if let (Some(device), Some(surface)) = (
+            device_registry.get(&device_handle),
+            surface_registry.get(&surface_handle),
+        ) {
+            match VulkanSwapchain::new(
+                device.clone(),
+                surface,
+                width,
+                height,
+                prefer_hdr != 0,
+                prefer_no_vsync != 0,
+            ) {
+                Ok(swapchain) => {
+                    let handle = next_handle();
+                    SWAPCHAIN_REGISTRY.lock().insert(handle, swapchain);
+                    tracing::info!("Swapchain created with handle {}", handle);
+                    handle as i64
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create swapchain: {:?}", e);
+                    VulkanFfiError::from(e) as i64
+                }
+            }
+        } else {
+            tracing::error!("Invalid device or surface handle");
+            VulkanFfiError::InvalidHandle as i64
+        }
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i64
+    }
+}
+
+/// Recreate swapchain (e.g., on window resize)
+///
+/// Returns 0 on success, error code on failure
+#[no_mangle]
+pub extern "C" fn rt_vk_swapchain_recreate(
+    swapchain_handle: u64,
+    surface_handle: u64,
+    width: u32,
+    height: u32,
+) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        let swapchain_registry = SWAPCHAIN_REGISTRY.lock();
+        let surface_registry = WINDOW_SURFACES.lock();
+
+        if let (Some(swapchain), Some(surface)) = (
+            swapchain_registry.get(&swapchain_handle),
+            surface_registry.get(&surface_handle),
+        ) {
+            // Need to get mutable access - use interior mutability workaround
+            // For now, return NotSupported as this requires Arc<Mutex<VulkanSwapchain>>
+            // TODO: Refactor to use Arc<Mutex<VulkanSwapchain>> in registry
+            tracing::warn!("Swapchain recreation requires refactoring for mutable access");
+            VulkanFfiError::NotSupported as i32
+        } else {
+            VulkanFfiError::InvalidHandle as i32
+        }
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Destroy a swapchain
+///
+/// Returns 0 on success, error code on failure
+#[no_mangle]
+pub extern "C" fn rt_vk_swapchain_destroy(swapchain_handle: u64) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        let mut registry = SWAPCHAIN_REGISTRY.lock();
+        if registry.remove(&swapchain_handle).is_some() {
+            tracing::info!("Swapchain {} destroyed", swapchain_handle);
+            VulkanFfiError::Success as i32
+        } else {
+            tracing::error!("Invalid swapchain handle: {}", swapchain_handle);
+            VulkanFfiError::InvalidHandle as i32
+        }
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Acquire next image from swapchain
+///
+/// Returns image index on success (>= 0), error code on failure (< 0)
+/// If result is positive and > 1000, swapchain is suboptimal (should recreate)
+#[no_mangle]
+pub extern "C" fn rt_vk_swapchain_acquire_next_image(
+    swapchain_handle: u64,
+    timeout_ns: u64,
+    out_suboptimal: *mut i32,
+) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        if out_suboptimal.is_null() {
+            return VulkanFfiError::InvalidParameter as i32;
+        }
+
+        let registry = SWAPCHAIN_REGISTRY.lock();
+        if let Some(swapchain) = registry.get(&swapchain_handle) {
+            match swapchain.acquire_next_image(None, timeout_ns) {
+                Ok((index, suboptimal)) => {
+                    unsafe {
+                        *out_suboptimal = if suboptimal { 1 } else { 0 };
+                    }
+                    index as i32
+                }
+                Err(VulkanError::SwapchainOutOfDate) => {
+                    tracing::warn!("Swapchain out of date");
+                    VulkanFfiError::SurfaceError as i32
+                }
+                Err(e) => {
+                    tracing::error!("Failed to acquire next image: {:?}", e);
+                    VulkanFfiError::from(e) as i32
+                }
+            }
+        } else {
+            VulkanFfiError::InvalidHandle as i32
+        }
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Present an image to the screen
+///
+/// Returns 0 on success, 1 if needs recreation, negative on error
+#[no_mangle]
+pub extern "C" fn rt_vk_swapchain_present(
+    swapchain_handle: u64,
+    image_index: u32,
+) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        let registry = SWAPCHAIN_REGISTRY.lock();
+        if let Some(swapchain) = registry.get(&swapchain_handle) {
+            match swapchain.present(image_index, &[]) {
+                Ok(needs_recreation) => {
+                    if needs_recreation {
+                        tracing::info!("Swapchain needs recreation");
+                        1  // Needs recreation
+                    } else {
+                        VulkanFfiError::Success as i32
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to present: {:?}", e);
+                    VulkanFfiError::from(e) as i32
+                }
+            }
+        } else {
+            VulkanFfiError::InvalidHandle as i32
+        }
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Get swapchain image count
+///
+/// Returns image count on success, negative on error
+#[no_mangle]
+pub extern "C" fn rt_vk_swapchain_get_image_count(swapchain_handle: u64) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        let registry = SWAPCHAIN_REGISTRY.lock();
+        if let Some(swapchain) = registry.get(&swapchain_handle) {
+            swapchain.image_count() as i32
+        } else {
+            VulkanFfiError::InvalidHandle as i32
+        }
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
+}
+
+/// Get swapchain dimensions
+///
+/// Returns 0 on success, error code on failure
+#[no_mangle]
+pub extern "C" fn rt_vk_swapchain_get_extent(
+    swapchain_handle: u64,
+    out_width: *mut u32,
+    out_height: *mut u32,
+) -> i32 {
+    #[cfg(feature = "vulkan")]
+    {
+        if out_width.is_null() || out_height.is_null() {
+            return VulkanFfiError::InvalidParameter as i32;
+        }
+
+        let registry = SWAPCHAIN_REGISTRY.lock();
+        if let Some(swapchain) = registry.get(&swapchain_handle) {
+            unsafe {
+                *out_width = swapchain.width();
+                *out_height = swapchain.height();
+            }
+            VulkanFfiError::Success as i32
+        } else {
+            VulkanFfiError::InvalidHandle as i32
+        }
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        VulkanFfiError::NotAvailable as i32
+    }
 }
 
 #[cfg(test)]

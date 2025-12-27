@@ -42,6 +42,28 @@ pub mod instance;
 pub mod device;
 pub mod buffer;
 pub mod pipeline;
+pub mod sync;
+
+#[cfg(feature = "vulkan")]
+pub mod window;
+
+#[cfg(feature = "vulkan")]
+pub mod surface;
+
+#[cfg(feature = "vulkan")]
+pub mod swapchain;
+
+#[cfg(feature = "vulkan")]
+pub mod render_pass;
+
+#[cfg(feature = "vulkan")]
+pub mod framebuffer;
+
+#[cfg(feature = "vulkan")]
+pub mod descriptor;
+
+#[cfg(feature = "vulkan")]
+pub mod graphics_pipeline;
 
 // Re-export main types
 pub use error::{VulkanError, VulkanResult};
@@ -49,6 +71,28 @@ pub use instance::{VulkanInstance, VulkanPhysicalDevice};
 pub use device::VulkanDevice;
 pub use buffer::{VulkanBuffer, StagingBuffer, BufferUsage};
 pub use pipeline::ComputePipeline;
+pub use sync::{Fence, Semaphore, SemaphorePool};
+
+#[cfg(feature = "vulkan")]
+pub use window::{WindowManager, WindowEvent, WindowHandle, FullscreenMode};
+
+#[cfg(feature = "vulkan")]
+pub use surface::Surface;
+
+#[cfg(feature = "vulkan")]
+pub use swapchain::VulkanSwapchain;
+
+#[cfg(feature = "vulkan")]
+pub use render_pass::RenderPass;
+
+#[cfg(feature = "vulkan")]
+pub use framebuffer::Framebuffer;
+
+#[cfg(feature = "vulkan")]
+pub use descriptor::{DescriptorSetLayout, DescriptorPool, DescriptorSet};
+
+#[cfg(feature = "vulkan")]
+pub use graphics_pipeline::{ShaderModule, GraphicsPipeline};
 
 /// Check if Vulkan is available on this system
 pub fn is_available() -> bool {
