@@ -26,6 +26,4 @@ mod attributes;
 // Re-export the Parser struct and ParserMode
 pub use core::{Parser, ParserMode};
 
-#[cfg(test)]
-#[path = "../../tests/mod.rs"]
-mod tests;
+// Integration tests moved to tests/ directory - no longer using #[path] include

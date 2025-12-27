@@ -1,0 +1,34 @@
+//! Macro invocation and expansion for the Simple interpreter
+//!
+//! This module handles both builtin macros (println, vec, assert, etc.) and
+//! user-defined macros with const evaluation, hygiene, and template substitution.
+//!
+//! ## Architecture
+//!
+//! - `helpers`: Const binding evaluation for macro parameters
+//! - `invocation`: Builtin macro implementations and dispatch
+//! - `expansion`: User-defined macro expansion with contracts
+//! - `hygiene`: Hygienic identifier renaming to prevent variable capture
+//! - `substitution`: Template string substitution for const parameters
+//!
+//! ## Public API
+//!
+//! - `evaluate_macro_invocation()`: Main entry point for macro evaluation
+//! - `take_macro_introduced_symbols()`: Retrieve symbols introduced by macro expansion
+//! - `build_macro_const_bindings()`: Helper for const parameter evaluation
+//! - `const_value_to_string()`: Helper for converting values to strings
+
+// Module declarations
+mod helpers;
+mod invocation;
+mod expansion;
+mod hygiene;
+mod substitution;
+
+// Re-export public API (accessible from parent interpreter module)
+pub(crate) use helpers::{build_macro_const_bindings, const_value_to_string};
+pub(crate) use expansion::take_macro_introduced_symbols;
+pub(crate) use invocation::evaluate_macro_invocation;
+
+// Internal API (used by expansion module)
+pub(super) use expansion::expand_user_macro;

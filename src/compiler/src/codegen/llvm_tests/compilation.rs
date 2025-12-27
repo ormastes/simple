@@ -105,6 +105,7 @@ fn test_compile_multiple_functions() {
         name: "x".to_string(),
         ty: T::I64,
         kind: LocalKind::Parameter,
+        is_ghost: false,
     });
     let v0 = VReg(0); // parameter
     let v1 = VReg(1); // result

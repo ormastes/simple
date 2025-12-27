@@ -133,7 +133,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
 
-        let variants = self.parse_indented_items(|p| p.parse_enum_variant())?;
+        let (variants, methods) = self.parse_enum_variants_and_methods()?;
 
         Ok(Node::Enum(EnumDef {
             span: self.make_span(start_span),
@@ -141,10 +141,52 @@ impl<'a> Parser<'a> {
             generic_params,
             where_clause,
             variants,
+            methods,
             visibility: Visibility::Private,
             attributes,
             doc_comment: None,
         }))
+    }
+
+    /// Parse enum body: variants and optional methods
+    fn parse_enum_variants_and_methods(
+        &mut self,
+    ) -> Result<(Vec<EnumVariant>, Vec<FunctionDef>), ParseError> {
+        let mut variants = Vec::new();
+        let mut methods = Vec::new();
+
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.skip_newlines();
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
+
+            // Check if this is a method definition
+            if self.check(&TokenKind::Fn)
+                || self.check(&TokenKind::Async)
+                || self.check(&TokenKind::At)
+                || self.check(&TokenKind::Hash)
+                || (self.check(&TokenKind::Pub)
+                    && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+            {
+                // Parse method
+                let item = self.parse_item()?;
+                if let Node::Function(f) = item {
+                    methods.push(f);
+                } else {
+                    return Err(ParseError::syntax_error_with_span(
+                        "Expected method definition in enum body",
+                        self.current.span,
+                    ));
+                }
+            } else {
+                // Parse enum variant
+                variants.push(self.parse_enum_variant()?);
+            }
+        }
+
+        self.consume_dedent();
+        Ok((variants, methods))
     }
 
     pub(crate) fn parse_enum_variant(&mut self) -> Result<EnumVariant, ParseError> {
@@ -152,7 +194,7 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
 
         let fields = if self.check(&TokenKind::LParen) {
-            Some(self.parse_paren_type_list()?)
+            Some(self.parse_enum_field_list()?)
         } else {
             None
         };
@@ -166,6 +208,62 @@ impl<'a> Parser<'a> {
             name,
             fields,
         })
+    }
+
+    /// Parse enum variant fields: `(Type1, Type2)` or `(name1: Type1, name2: Type2)`
+    /// Supports both positional and named fields.
+    fn parse_enum_field_list(&mut self) -> Result<Vec<EnumField>, ParseError> {
+        self.expect(&TokenKind::LParen)?;
+        let mut fields = Vec::new();
+
+        while !self.check(&TokenKind::RParen) {
+            // Try to parse as named field: `name: Type`
+            // Look ahead to check if this is `Identifier Colon Type`
+            let field = if matches!(self.current.kind, TokenKind::Identifier(_)) {
+                // Save position for potential backtrack
+                let saved_current = self.current.clone();
+
+                // Try to get the identifier
+                if let TokenKind::Identifier(ident) = &self.current.kind {
+                    let name = ident.clone();
+                    self.advance();
+
+                    if self.check(&TokenKind::Colon) {
+                        // This is a named field: `name: Type`
+                        self.advance();
+                        let ty = self.parse_type()?;
+                        EnumField {
+                            name: Some(name),
+                            ty,
+                        }
+                    } else {
+                        // Not a named field, backtrack and parse as type
+                        // Restore position (put current token back)
+                        self.pending_token = Some(self.current.clone());
+                        self.current = saved_current;
+                        let ty = self.parse_type()?;
+                        EnumField { name: None, ty }
+                    }
+                } else {
+                    // Should not happen, but handle gracefully
+                    let ty = self.parse_type()?;
+                    EnumField { name: None, ty }
+                }
+            } else {
+                // Not an identifier, just parse as type
+                let ty = self.parse_type()?;
+                EnumField { name: None, ty }
+            };
+
+            fields.push(field);
+
+            if !self.check(&TokenKind::RParen) {
+                self.expect(&TokenKind::Comma)?;
+            }
+        }
+
+        self.expect(&TokenKind::RParen)?;
+        Ok(fields)
     }
 
     // === Trait ===
@@ -541,6 +639,15 @@ impl<'a> Parser<'a> {
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         let mut invariant = None;
+
+        // Skip docstring if present (first item after indent)
+        self.skip_newlines();
+        if matches!(self.current.kind, TokenKind::String(_)) {
+            // This is a docstring, skip it for now (we don't store class-level docstrings)
+            // TODO: Store this as class.doc_comment
+            self.advance();
+            self.skip_newlines();
+        }
 
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
             self.skip_newlines();

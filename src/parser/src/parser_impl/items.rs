@@ -4,7 +4,7 @@
 
 use crate::ast::*;
 use crate::error::ParseError;
-use crate::token::TokenKind;
+use crate::token::{Span, TokenKind};
 
 use super::core::Parser;
 
@@ -168,6 +168,22 @@ impl<'a> Parser<'a> {
                 Ok(node)
             }
             TokenKind::Mod => self.parse_mod(Visibility::Public, vec![]),
+            TokenKind::Use => {
+                // pub use is equivalent to export use (re-export)
+                let start_span = self.current.span;
+                self.advance(); // consume 'use'
+                let (path, target) = self.parse_use_path_and_target()?;
+                Ok(Node::ExportUseStmt(ExportUseStmt {
+                    span: Span::new(
+                        start_span.start,
+                        self.previous.span.end,
+                        start_span.line,
+                        start_span.column,
+                    ),
+                    path,
+                    target,
+                }))
+            }
             _ => Err(ParseError::unexpected_token(
                 "fn, struct, class, enum, trait, actor, const, static, type, extern, macro, or mod after 'pub'",
                 format!("{:?}", self.current.kind),

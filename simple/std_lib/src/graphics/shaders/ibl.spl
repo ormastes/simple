@@ -1,0 +1,319 @@
+# IBL Shaders - Image-Based Lighting precomputation
+#
+# Shaders for generating IBL maps: diffuse irradiance, specular
+# prefiltering, and BRDF integration lookup table.
+#
+# Based on: doc/spec/graphics_3d.md (Part 1.2: IBL)
+
+use core.*
+use graphics.math.*
+
+# =============================================================================
+# Common Structures
+# =============================================================================
+
+pub struct CubemapVertex:
+    position: Vec3
+
+pub struct CubemapVaryings:
+    local_pos: Vec3    # Used as cubemap sampling direction
+
+# =============================================================================
+# Cubemap Vertex Shader (shared for all IBL shaders)
+# =============================================================================
+
+pub struct CubemapUniforms:
+    view_matrix: Mat4
+    projection_matrix: Mat4
+
+#[vertex_shader]
+pub fn cubemap_vertex_shader(
+    input: CubemapVertex,
+    uniforms: CubemapUniforms
+) -> (Vec4, CubemapVaryings):
+    let varyings = CubemapVaryings {
+        local_pos: input.position
+    }
+
+    let world_pos = uniforms.view_matrix.transform_point(input.position)
+    let clip_pos = uniforms.projection_matrix.transform_point(world_pos)
+
+    return (clip_pos, varyings)
+
+# =============================================================================
+# Irradiance Convolution Shader (Diffuse IBL)
+# =============================================================================
+
+pub struct IrradianceUniforms:
+    view_matrix: Mat4
+    projection_matrix: Mat4
+    samples: i32
+
+#[fragment_shader]
+pub fn irradiance_convolution_fragment_shader(
+    varyings: CubemapVaryings,
+    uniforms: IrradianceUniforms
+) -> Vec4:
+    # Sample direction (normal)
+    let N = varyings.local_pos.normalize()
+
+    # Calculate tangent space from normal
+    let up = if abs(N.y) < 0.999:
+        Vec3::new(0.0, 1.0, 0.0)
+    else:
+        Vec3::new(1.0, 0.0, 0.0)
+
+    let tangent = up.cross(N).normalize()
+    let bitangent = N.cross(tangent)
+
+    # Convolve environment map
+    let mut irradiance = Vec3::zero()
+    let sample_delta = 0.025  # Sampling resolution
+
+    let mut sample_count = 0.0
+
+    let mut phi = 0.0
+    while phi < 2.0 * PI:
+        let mut theta = 0.0
+        while theta < 0.5 * PI:
+            # Spherical to cartesian (in tangent space)
+            let tangent_sample = Vec3::new(
+                sin(theta) * cos(phi),
+                sin(theta) * sin(phi),
+                cos(theta)
+            )
+
+            # Transform to world space
+            let sample_vec = (
+                tangent * tangent_sample.x +
+                bitangent * tangent_sample.y +
+                N * tangent_sample.z
+            ).normalize()
+
+            # Sample environment
+            let sample_color = sample_cubemap(environment_map, sample_vec).rgb()
+
+            # Weight by cosine term
+            irradiance = irradiance + sample_color * cos(theta) * sin(theta)
+            sample_count = sample_count + 1.0
+
+            theta = theta + sample_delta
+
+        phi = phi + sample_delta
+
+    irradiance = irradiance * PI / sample_count
+
+    return Vec4::from_vec3(irradiance, 1.0)
+
+# =============================================================================
+# Specular Prefilter Shader (Specular IBL with importance sampling)
+# =============================================================================
+
+pub struct PrefilterUniforms:
+    view_matrix: Mat4
+    projection_matrix: Mat4
+    roughness: f32
+    samples: i32
+
+#[fragment_shader]
+pub fn prefilter_fragment_shader(
+    varyings: CubemapVaryings,
+    uniforms: PrefilterUniforms
+) -> Vec4:
+    let N = varyings.local_pos.normalize()
+    let R = N  # Reflection vector equals normal for prefiltering
+    let V = R  # View vector equals reflection
+
+    let mut prefiltered_color = Vec3::zero()
+    let mut total_weight = 0.0
+
+    # Importance sampling using GGX distribution
+    for i in 0..uniforms.samples:
+        # Generate quasi-random sample (Hammersley sequence)
+        let xi = hammersley(i, uniforms.samples)
+
+        # Importance sample GGX distribution
+        let H = importance_sample_ggx(xi, N, uniforms.roughness)
+        let L = (H * 2.0 * dot(V, H) - V).normalize()
+
+        let NdotL = max(dot(N, L), 0.0)
+
+        if NdotL > 0.0:
+            # Sample environment map
+            let sample_color = sample_cubemap(environment_map, L).rgb()
+
+            prefiltered_color = prefiltered_color + sample_color * NdotL
+            total_weight = total_weight + NdotL
+
+    prefiltered_color = prefiltered_color / total_weight
+
+    return Vec4::from_vec3(prefiltered_color, 1.0)
+
+# Importance sample GGX distribution
+fn importance_sample_ggx(xi: Vec2, N: Vec3, roughness: f32) -> Vec3:
+    let a = roughness * roughness
+
+    # Sample spherical coordinates
+    let phi = 2.0 * PI * xi.x
+    let cos_theta = sqrt((1.0 - xi.y) / (1.0 + (a * a - 1.0) * xi.y))
+    let sin_theta = sqrt(1.0 - cos_theta * cos_theta)
+
+    # Spherical to cartesian (in tangent space)
+    let H_tangent = Vec3::new(
+        cos(phi) * sin_theta,
+        sin(phi) * sin_theta,
+        cos_theta
+    )
+
+    # Tangent space to world space
+    let up = if abs(N.y) < 0.999:
+        Vec3::new(0.0, 1.0, 0.0)
+    else:
+        Vec3::new(1.0, 0.0, 0.0)
+
+    let tangent = up.cross(N).normalize()
+    let bitangent = N.cross(tangent)
+
+    return (tangent * H_tangent.x + bitangent * H_tangent.y + N * H_tangent.z).normalize()
+
+# =============================================================================
+# BRDF Integration LUT Shader
+# =============================================================================
+
+pub struct BRDFLUTVaryings:
+    uv: Vec2
+
+pub struct BRDFLUTUniforms:
+    samples: i32
+
+#[vertex_shader]
+pub fn brdf_lut_vertex_shader(
+    position: Vec2,
+    uv: Vec2
+) -> (Vec4, BRDFLUTVaryings):
+    let varyings = BRDFLUTVaryings {
+        uv: uv
+    }
+
+    return (Vec4::from_vec2(position, 0.0, 1.0), varyings)
+
+#[fragment_shader]
+pub fn brdf_lut_fragment_shader(
+    varyings: BRDFLUTVaryings,
+    uniforms: BRDFLUTUniforms
+) -> Vec4:
+    # UV coordinates represent (NdotV, roughness)
+    let NdotV = varyings.uv.x
+    let roughness = varyings.uv.y
+
+    # Fixed view and normal vectors
+    let V = Vec3::new(
+        sqrt(1.0 - NdotV * NdotV),  # sin
+        0.0,
+        NdotV                        # cos
+    )
+    let N = Vec3::new(0.0, 0.0, 1.0)
+
+    let mut A = 0.0  # Scale
+    let mut B = 0.0  # Bias
+
+    # Integrate BRDF
+    for i in 0..uniforms.samples:
+        let xi = hammersley(i, uniforms.samples)
+        let H = importance_sample_ggx(xi, N, roughness)
+        let L = (H * 2.0 * dot(V, H) - V).normalize()
+
+        let NdotL = max(L.z, 0.0)
+        let NdotH = max(H.z, 0.0)
+        let VdotH = max(dot(V, H), 0.0)
+
+        if NdotL > 0.0:
+            # Geometry term
+            let G = geometry_smith_ibl(N, V, L, roughness)
+
+            # Fresnel (Schlick approximation)
+            let G_Vis = (G * VdotH) / (NdotH * NdotV)
+            let Fc = pow(1.0 - VdotH, 5.0)
+
+            A = A + (1.0 - Fc) * G_Vis
+            B = B + Fc * G_Vis
+
+    A = A / uniforms.samples as f32
+    B = B / uniforms.samples as f32
+
+    return Vec4::new(A, B, 0.0, 1.0)
+
+# Geometry function for IBL
+fn geometry_smith_ibl(N: Vec3, V: Vec3, L: Vec3, roughness: f32) -> f32:
+    let NdotV = max(dot(N, V), 0.0)
+    let NdotL = max(dot(N, L), 0.0)
+
+    let ggx1 = geometry_schlick_ggx_ibl(NdotV, roughness)
+    let ggx2 = geometry_schlick_ggx_ibl(NdotL, roughness)
+
+    return ggx1 * ggx2
+
+fn geometry_schlick_ggx_ibl(NdotV: f32, roughness: f32) -> f32:
+    let a = roughness
+    let k = (a * a) / 2.0
+
+    let nom = NdotV
+    let denom = NdotV * (1.0 - k) + k
+
+    return nom / denom
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+# Hammersley quasi-random sequence
+fn hammersley(i: i32, N: i32) -> Vec2:
+    return Vec2::new(
+        i as f32 / N as f32,
+        radical_inverse_vdc(i)
+    )
+
+# Van der Corput radical inverse (base 2)
+fn radical_inverse_vdc(mut bits: i32) -> f32:
+    bits = (bits << 16) | (bits >> 16)
+    bits = ((bits & 0x55555555) << 1) | ((bits & 0xAAAAAAAA) >> 1)
+    bits = ((bits & 0x33333333) << 2) | ((bits & 0xCCCCCCCC) >> 2)
+    bits = ((bits & 0x0F0F0F0F) << 4) | ((bits & 0xF0F0F0F0) >> 4)
+    bits = ((bits & 0x00FF00FF) << 8) | ((bits & 0xFF00FF00) >> 8)
+
+    return bits as f32 * 2.3283064365386963e-10  # / 0x100000000
+
+# Constants
+const PI: f32 = 3.14159265359
+
+fn abs(x: f32) -> f32:
+    return if x < 0.0: -x else: x
+
+fn max(a: f32, b: f32) -> f32:
+    return if a > b: a else: b
+
+fn dot(a: Vec3, b: Vec3) -> f32:
+    return a.x * b.x + a.y * b.y + a.z * b.z
+
+fn pow(base: f32, exp: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+fn sqrt(x: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+fn sin(x: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+fn cos(x: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+# =============================================================================
+# External Functions
+# =============================================================================
+
+extern fn sample_cubemap(cubemap_id: u64, direction: Vec3) -> Vec4
+extern fn environment_map() -> u64

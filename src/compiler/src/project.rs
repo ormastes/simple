@@ -10,6 +10,7 @@ use crate::error::CompileError;
 use crate::aop_config::{parse_aop_config, AopConfig};
 use crate::build_mode::DeterministicConfig;
 use crate::di::{parse_di_config, DiConfig};
+use crate::hir::{LayoutAnchor, LayoutConfig, LayoutPhase};
 use crate::lint::{LintConfig, LintLevel, LintName};
 use crate::module_resolver::ModuleResolver;
 
@@ -36,6 +37,8 @@ pub struct ProjectContext {
     pub aop_config: Option<AopConfig>,
     /// Deterministic build configuration from simple.toml
     pub deterministic: DeterministicConfig,
+    /// Layout configuration for 4KB page locality optimization
+    pub layout_config: Option<LayoutConfig>,
 }
 
 impl ProjectContext {
@@ -67,6 +70,9 @@ impl ProjectContext {
 
         let resolver = ModuleResolver::new(root.clone(), source_root.clone());
 
+        // Try to load layout.sdn if it exists
+        let layout_config = Self::load_layout_config(&root);
+
         Ok(Self {
             root,
             source_root,
@@ -78,7 +84,24 @@ impl ProjectContext {
             di_config: None,
             aop_config: None,
             deterministic: DeterministicConfig::default(),
+            layout_config,
         })
+    }
+
+    /// Load layout configuration from layout.sdn if it exists
+    fn load_layout_config(root: &Path) -> Option<LayoutConfig> {
+        let layout_path = root.join("layout.sdn");
+        if layout_path.exists() {
+            match LayoutConfig::from_file(&layout_path) {
+                Ok(config) => Some(config),
+                Err(e) => {
+                    tracing::warn!("Failed to load layout.sdn: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        }
     }
 
     /// Create a project context from a manifest file
@@ -195,6 +218,9 @@ impl ProjectContext {
             .with_features(features.clone())
             .with_profiles(profiles.clone());
 
+        // Try to load layout.sdn if it exists
+        let layout_config = Self::load_layout_config(root);
+
         Ok(Self {
             root: root.to_path_buf(),
             source_root,
@@ -206,6 +232,7 @@ impl ProjectContext {
             di_config,
             aop_config,
             deterministic,
+            layout_config,
         })
     }
 
@@ -229,6 +256,7 @@ impl ProjectContext {
             di_config: None,
             aop_config: None,
             deterministic: DeterministicConfig::default(),
+            layout_config: None,
         }
     }
 
@@ -273,6 +301,25 @@ impl ProjectContext {
     /// Get the lint configuration
     pub fn lint_config(&self) -> &LintConfig {
         &self.lint_config
+    }
+
+    /// Get the layout configuration
+    pub fn layout_config(&self) -> Option<&LayoutConfig> {
+        self.layout_config.as_ref()
+    }
+
+    /// Get the layout phase for a function based on configuration
+    pub fn get_layout_phase(&self, function_name: &str) -> LayoutPhase {
+        if let Some(config) = &self.layout_config {
+            config.get_phase(function_name)
+        } else {
+            LayoutPhase::Steady
+        }
+    }
+
+    /// Check if a function is an anchor point
+    pub fn is_layout_anchor(&self, function_name: &str) -> Option<LayoutAnchor> {
+        self.layout_config.as_ref().and_then(|c| c.is_anchor(function_name))
     }
 }
 

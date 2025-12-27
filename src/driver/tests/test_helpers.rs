@@ -407,3 +407,30 @@ pub fn run_get_stdout(src: &str) -> String {
 pub fn run_get_stderr(src: &str) -> String {
     run_with_capture(src).expect("run ok").stderr
 }
+
+// ============================================================================
+// Capability testing helpers
+// ============================================================================
+
+/// Parse source code to AST module
+#[allow(dead_code)]
+pub fn parse_source(source: &str) -> simple_parser::ast::Module {
+    use simple_parser::Parser;
+    let mut parser = Parser::new(source);
+    parser.parse().expect("should parse")
+}
+
+/// Lower AST module to HIR
+#[allow(dead_code)]
+pub fn lower_module(module: &simple_parser::ast::Module) -> Result<simple_compiler::hir::HirModule, simple_compiler::error::CompileError> {
+    use simple_compiler::hir::Lowerer;
+    let lowerer = Lowerer::new();
+    lowerer.lower_module(module)
+}
+
+/// Parse and lower in one step (common pattern in capability tests)
+#[allow(dead_code)]
+pub fn parse_and_lower_source(source: &str) -> Result<simple_compiler::hir::HirModule, simple_compiler::error::CompileError> {
+    let module = parse_source(source);
+    lower_module(&module)
+}

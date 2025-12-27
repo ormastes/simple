@@ -297,7 +297,7 @@ The LLM-Friendly Features initiative provides 40 features across 9 categories de
 5. Add sandbox configuration (resource limits, allowed operations)
 6. Implement platform-specific backends
 
-**Documentation:** [sandboxed_execution.md](../spec/sandboxed_execution.md)
+**Documentation:** [sandboxing.md](../spec/sandboxing.md)
 
 ---
 
@@ -444,7 +444,7 @@ The LLM-Friendly Features initiative provides 40 features across 9 categories de
 - [snapshot_testing.md](../spec/snapshot_testing.md) - Snapshot test system
 - [formatter.md](../spec/formatter.md) - Canonical formatting rules
 - [build_audit.md](../spec/build_audit.md) - Deterministic builds
-- [sandboxed_execution.md](../spec/sandboxed_execution.md) - Sandbox design
+- [sandboxing.md](../spec/sandboxing.md) - Sandbox design
 
 ### Implementation Reports
 

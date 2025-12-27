@@ -68,7 +68,7 @@ test_cases |name, timeout, tags|
 
 ### Gherkin DSL - Examples Tables
 
-For parameterized system tests, use `examples` tables with two-space delimiter. See **[Gherkin DSL Specification](../spec/gherkin_dsl.md)** for full grammar.
+For parameterized system tests, use `examples` tables with two-space delimiter. See **[Gherkin DSL Specification](../spec/testing/testing_bdd_framework.md)** for full grammar.
 
 **Quick Reference:**
 
@@ -495,7 +495,7 @@ docs/test-spec.md     # GitHub-compatible Markdown
 
 For complex system tests with parameterized data, use the Gherkin-style DSL with `feature`, `scenario`, and `examples` keywords.
 
-See **[Gherkin DSL Specification](../spec/gherkin_dsl.md)** for full grammar.
+See **[Gherkin DSL Specification](../spec/testing/testing_bdd_framework.md)** for full grammar.
 
 ### Quick Example
 
@@ -522,8 +522,8 @@ feature Arithmetic:
 
 ## See Also
 
-- [BDD Spec Framework](../spec/bdd_spec.md) - `describe`/`context`/`it` DSL
-- [Gherkin DSL](../spec/gherkin_dsl.md) - `feature`/`scenario`/`examples` DSL
+- [BDD Spec Framework](../spec/testing/testing_bdd_framework.md) - `describe`/`context`/`it` DSL
+- [Gherkin DSL](../spec/testing/testing_bdd_framework.md) - `feature`/`scenario`/`examples` DSL
 - [SDN Format](../spec/sdn.md) - Data notation for configuration
 - [Test Policy](test.md) - Coverage metrics and test levels
 - `simple/std_lib/test/` - Standard library test examples

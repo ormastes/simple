@@ -1,0 +1,267 @@
+# Simple Verification Tool
+# CLI for regenerating and validating Lean verification code.
+#
+# Usage:
+#   simple verify regenerate     - Regenerate Lean files from models
+#   simple verify check          - Check all proof obligations
+#   simple verify status         - Show verification status
+#   simple verify list           - List all proof obligations
+
+import io.fs as fs
+import io.args as args
+import verification.lean.codegen as codegen
+import verification.lean.emitter as emitter
+import verification.proofs.checker as checker
+import verification.proofs.obligations as obligations
+
+# Command handlers
+
+fn cmd_regenerate() -> Int:
+    print("Regenerating Lean verification files...")
+
+    let options = codegen.LeanCodegenOptions.new()
+        .with_output_dir("verification/generated")
+
+    # Generate memory capabilities module
+    regenerate_memory_capabilities(options)?
+
+    # Generate contracts module
+    regenerate_contracts(options)?
+
+    # Generate memory model DRF module
+    regenerate_memory_model(options)?
+
+    print("Done! Generated files in verification/generated/")
+    0
+
+fn regenerate_memory_capabilities(options: codegen.LeanCodegenOptions) -> Result<Nil, String>:
+    let gen = codegen.LeanCodegen.new(
+        options.with_module_name("MemoryCapabilities")
+    )
+
+    # Add RefCapability inductive
+    let ref_cap = codegen.LeanInductive.new("RefCapability")
+        .add_constructor("Mut", [])
+        .add_constructor("Iso", [])
+        .add_constructor("Imm", [])
+
+    gen.add_inductive(ref_cap)
+
+    # Add capability conversion function
+    let can_convert = codegen.LeanFunction.new("canConvert")
+        .add_param("from_cap", "RefCapability")
+        .add_param("to_cap", "RefCapability")
+        .with_return_type("Bool")
+        .with_body("""match from_cap, to_cap with
+| RefCapability.Mut, _ => true
+| RefCapability.Iso, RefCapability.Iso => true
+| RefCapability.Iso, RefCapability.Imm => true
+| RefCapability.Imm, RefCapability.Imm => true
+| _, _ => false""")
+
+    gen.add_function(can_convert)
+
+    # Write file
+    gen.write_to_file("MemoryCapabilities")
+
+fn regenerate_contracts(options: codegen.LeanCodegenOptions) -> Result<Nil, String>:
+    let gen = codegen.LeanCodegen.new(
+        options.with_module_name("Contracts")
+    )
+
+    # Add ContractExprKind inductive
+    let expr_kind = codegen.LeanInductive.new("ContractExprKind")
+        .add_constructor("True_", [])
+        .add_constructor("False_", [])
+        .add_constructor("Var", [])
+        .add_constructor("Old", [])
+        .add_constructor("Result", [])
+        .add_constructor("And", [])
+        .add_constructor("Or", [])
+        .add_constructor("Not", [])
+        .add_constructor("Implies", [])
+        .add_constructor("Forall", [])
+        .add_constructor("Exists", [])
+        .add_constructor("Eq", [])
+        .add_constructor("Ne", [])
+        .add_constructor("Lt", [])
+        .add_constructor("Le", [])
+        .add_constructor("Gt", [])
+        .add_constructor("Ge", [])
+        .add_constructor("Call", [])
+
+    gen.add_inductive(expr_kind)
+
+    # Add ContractExpr structure
+    let contract_expr = codegen.LeanStructure.new("ContractExpr")
+        .add_field("kind", "ContractExprKind")
+        .add_field("children", "List ContractExpr")
+        .add_field("name", "Option String")
+        .add_field("typeName", "Option String")
+
+    gen.add_structure(contract_expr)
+
+    # Write file
+    gen.write_to_file("Contracts")
+
+fn regenerate_memory_model(options: codegen.LeanCodegenOptions) -> Result<Nil, String>:
+    let gen = codegen.LeanCodegen.new(
+        options.with_module_name("MemoryModelDRF")
+    )
+
+    # Add MemoryOrder inductive
+    let mem_order = codegen.LeanInductive.new("MemoryOrder")
+        .add_constructor("Relaxed", [])
+        .add_constructor("Acquire", [])
+        .add_constructor("Release", [])
+        .add_constructor("AcqRel", [])
+        .add_constructor("SeqCst", [])
+
+    gen.add_inductive(mem_order)
+
+    # Add AccessType inductive
+    let access_type = codegen.LeanInductive.new("AccessType")
+        .add_constructor("Read", [])
+        .add_constructor("Write", [])
+        .add_constructor("Atomic", [])
+
+    gen.add_inductive(access_type)
+
+    # Add SC-DRF theorem (as sorry)
+    let sc_drf_theorem = codegen.LeanTheorem.new(
+        "sc_drf_guarantee",
+        "data_race_free program -> sequentially_consistent (execute program)"
+    )
+
+    gen.add_theorem(sc_drf_theorem)
+
+    # Write file
+    gen.write_to_file("MemoryModelDRF")
+
+fn cmd_check() -> Int:
+    print("Checking proof obligations...")
+
+    let config = checker.CheckerConfig.create()
+        .with_project_dir("verification")
+
+    let proof_checker = checker.ProofChecker.create(config)
+    let result = proof_checker.check_verification_dir()
+
+    print(result.summary())
+
+    if result.failure_count() > 0:
+        print("")
+        print("Failed checks:")
+        for file_result in result.file_results:
+            if not file_result.result.is_success():
+                print(f"  {file_result.file_path}: {file_result.result.to_string()}")
+        1
+    else:
+        0
+
+fn cmd_status() -> Int:
+    print("Verification Status")
+    print("===================")
+    print("")
+
+    # Check Lean availability
+    let lean_available = is_lean_available()
+    if lean_available:
+        print("Lean 4: Available")
+    else:
+        print("Lean 4: Not found (install with: elan install leanprover/lean4:stable)")
+
+    print("")
+
+    # List verification projects
+    let projects = [
+        ("memory_capabilities", "Reference capability verification"),
+        ("memory_model_drf", "SC-DRF memory model verification"),
+        ("type_inference_compile", "Type inference proofs"),
+        ("async_compile", "Async effect tracking"),
+        ("gc_manual_borrow", "GC safety proofs"),
+        ("nogc_compile", "NoGC instruction verification"),
+        ("module_resolution", "Module resolution verification"),
+        ("visibility_export", "Visibility and export verification")
+    ]
+
+    print("Verification Projects:")
+    for (name, description) in projects:
+        let dir = f"verification/{name}"
+        let exists = fs.exists(dir)
+        let status = if exists: "OK" else: "MISSING"
+        print(f"  [{status}] {name} - {description}")
+
+    0
+
+fn cmd_list() -> Int:
+    print("Proof Obligations")
+    print("=================")
+    print("")
+
+    # TODO: Load and display actual obligations from source files
+    print("To list proof obligations, use: simple verify check")
+    print("")
+    print("Obligation categories:")
+    print("  - Preconditions: requires clauses")
+    print("  - Postconditions: ensures clauses")
+    print("  - Invariants: class and loop invariants")
+    print("  - Termination: decreases clauses")
+    print("  - Safety: memory safety properties")
+
+    0
+
+fn is_lean_available() -> Bool:
+    # Try to run lean --version
+    match fs.exec("lean", ["--version"]):
+        case Ok(_): true
+        case Err(_): false
+
+fn print_help():
+    print("Simple Verification Tool")
+    print("")
+    print("Usage: simple verify <command>")
+    print("")
+    print("Commands:")
+    print("  regenerate    Regenerate Lean files from verification models")
+    print("  check         Check all proof obligations")
+    print("  status        Show verification status")
+    print("  list          List all proof obligations")
+    print("  help          Show this help message")
+    print("")
+    print("Examples:")
+    print("  simple verify regenerate")
+    print("  simple verify check")
+    print("  simple verify status")
+
+fn main() -> Int:
+    let argv = args.get_args()
+
+    if argv.len() < 2:
+        print_help()
+        return 0
+
+    let command = argv[1]
+
+    match command:
+        case "regenerate":
+            cmd_regenerate()
+        case "check":
+            cmd_check()
+        case "status":
+            cmd_status()
+        case "list":
+            cmd_list()
+        case "help":
+            print_help()
+            0
+        case "--help":
+            print_help()
+            0
+        case "-h":
+            print_help()
+            0
+        case _:
+            print(f"Unknown command: {command}")
+            print("Run 'simple verify help' for usage information.")
+            1

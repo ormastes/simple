@@ -38,6 +38,36 @@ impl<'a> Parser<'a> {
         result
     }
 
+    /// Check if the next token after the current could start a type.
+    /// Used to distinguish typed patterns (x: Int) from match arm separators (case x:).
+    pub(crate) fn peek_is_type_start(&mut self) -> bool {
+        // Save current state
+        let saved_current = self.current.clone();
+        let saved_previous = self.previous.clone();
+
+        // Advance past colon to peek at what follows
+        self.advance();
+
+        // Check if this token could start a type expression
+        let result = matches!(
+            &self.current.kind,
+            TokenKind::Identifier(_)
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::Fn
+                | TokenKind::Mut
+                | TokenKind::Dyn
+                | TokenKind::Ampersand
+        );
+
+        // Restore state
+        self.pending_token = Some(self.current.clone());
+        self.current = saved_current;
+        self.previous = saved_previous;
+
+        result
+    }
+
     /// Parse array with spread operators: [*a, 1, *b]
     pub(crate) fn parse_array_with_spreads(&mut self) -> Result<Expr, ParseError> {
         let mut elements = Vec::new();
@@ -164,6 +194,8 @@ impl<'a> Parser<'a> {
             TokenKind::Return => "return",
             TokenKind::True => "true",
             TokenKind::False => "false",
+            TokenKind::Crate => "crate",  // Allow "crate" keyword in paths
+            TokenKind::Result => "result",  // Allow "result" keyword in paths
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -184,6 +216,23 @@ impl<'a> Parser<'a> {
             let name = name.clone();
             self.advance();
             return Ok(name);
+        }
+
+        // Support f-strings and strings for macro template substitution
+        // This allows: fn "get_{field}"() or fn "get_value"()
+        match &self.current.kind {
+            TokenKind::FString(_)
+            | TokenKind::String(_)
+            | TokenKind::RawString(_)
+            | TokenKind::TypedString(_, _)
+            | TokenKind::TypedRawString(_, _) => {
+                let lexeme = self.current.lexeme.clone();
+                self.advance();
+                // Keep the string as-is (with quotes/template markers)
+                // The macro expansion will handle template substitution
+                return Ok(lexeme);
+            }
+            _ => {}
         }
 
         // Allow certain keywords as method names

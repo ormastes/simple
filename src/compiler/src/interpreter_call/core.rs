@@ -1,6 +1,58 @@
 // Core function execution for interpreter
 // Function binding, lambda execution, function call logic
 
+//==============================================================================
+// Helper Macros for Reducing Duplication
+//==============================================================================
+
+/// Wrap value in TraitObject if parameter has DynTrait type
+macro_rules! wrap_trait_object {
+    ($val:expr, $param_ty:expr) => {
+        if let Some(Type::DynTrait(trait_name)) = $param_ty {
+            Value::TraitObject {
+                trait_name: trait_name.clone(),
+                inner: Box::new($val),
+            }
+        } else {
+            $val
+        }
+    };
+}
+
+/// Validate unit type for parameter or return type
+macro_rules! validate_unit {
+    ($val:expr, $ty:expr, $context:expr) => {
+        if let Some(Type::Simple(type_name)) = $ty {
+            if is_unit_type(type_name) {
+                if let Err(e) = validate_unit_type($val, type_name) {
+                    bail_semantic!("{}: {}", $context, e);
+                }
+            }
+        }
+    };
+}
+
+/// Check effect compatibility and execute with effect context
+macro_rules! with_effect_check {
+    ($func:expr, $body:expr) => {{
+        crate::effects::check_call_compatibility(&$func.name, &$func.effects)?;
+        with_effect_context(&$func.effects, || $body)
+    }};
+}
+
+/// Extract result from exec_block_fn return value
+macro_rules! extract_block_result {
+    ($block_exec:expr) => {
+        match $block_exec {
+            Ok((Control::Return(v), _)) => v,
+            Ok((_, Some(v))) => v,
+            Ok((_, None)) => Value::Nil,
+            Err(CompileError::TryError(val)) => val,
+            Err(e) => return Err(e),
+        }
+    };
+}
+
 use crate::aop_config::AopConfig;
 use crate::di::DiScope;
 use crate::error::CompileError;
@@ -23,8 +75,8 @@ pub(crate) fn bind_args(
     params: &[Parameter],
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -46,8 +98,8 @@ pub(crate) fn bind_args_with_injected(
     params: &[Parameter],
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -67,42 +119,16 @@ pub(crate) fn bind_args_with_injected(
             if param.is_none() {
                 bail_semantic!("unknown argument {}", name);
             }
-            let val = if let Some(Type::DynTrait(trait_name)) = param.and_then(|p| p.ty.as_ref()) {
-                Value::TraitObject {
-                    trait_name: trait_name.clone(),
-                    inner: Box::new(val),
-                }
-            } else {
-                val
-            };
-            if let Some(Type::Simple(type_name)) = param.and_then(|p| p.ty.as_ref()) {
-                if is_unit_type(type_name) {
-                    if let Err(e) = validate_unit_type(&val, type_name) {
-                        bail_semantic!("parameter '{}': {}", name, e);
-                    }
-                }
-            }
+            let val = wrap_trait_object!(val, param.and_then(|p| p.ty.as_ref()));
+            validate_unit!(&val, param.and_then(|p| p.ty.as_ref()), format!("parameter '{}'", name));
             bound.insert(name.clone(), val);
         } else {
             if positional_idx >= params_to_bind.len() {
                 bail_semantic!("too many arguments");
             }
             let param = params_to_bind[positional_idx];
-            let val = if let Some(Type::DynTrait(trait_name)) = &param.ty {
-                Value::TraitObject {
-                    trait_name: trait_name.clone(),
-                    inner: Box::new(val),
-                }
-            } else {
-                val
-            };
-            if let Some(Type::Simple(type_name)) = &param.ty {
-                if is_unit_type(type_name) {
-                    if let Err(e) = validate_unit_type(&val, type_name) {
-                        bail_semantic!("parameter '{}': {}", param.name, e);
-                    }
-                }
-            }
+            let val = wrap_trait_object!(val, param.ty.as_ref());
+            validate_unit!(&val, param.ty.as_ref(), format!("parameter '{}'", param.name));
             bound.insert(param.name.clone(), val);
             positional_idx += 1;
         }
@@ -112,21 +138,8 @@ pub(crate) fn bind_args_with_injected(
         if !bound.contains_key(&param.name) {
             if let Some(default_expr) = &param.default {
                 let v = evaluate_expr(default_expr, outer_env, functions, classes, enums, impl_methods)?;
-                let v = if let Some(Type::DynTrait(trait_name)) = &param.ty {
-                    Value::TraitObject {
-                        trait_name: trait_name.clone(),
-                        inner: Box::new(v),
-                    }
-                } else {
-                    v
-                };
-                if let Some(Type::Simple(type_name)) = &param.ty {
-                    if is_unit_type(type_name) {
-                        if let Err(e) = validate_unit_type(&v, type_name) {
-                            bail_semantic!("parameter '{}' default value: {}", param.name, e);
-                        }
-                    }
-                }
+                let v = wrap_trait_object!(v, param.ty.as_ref());
+                validate_unit!(&v, param.ty.as_ref(), format!("parameter '{}' default value", param.name));
                 bound.insert(param.name.clone(), v);
             } else if let Some(injected_val) = injected.get(&param.name) {
                 bound.insert(param.name.clone(), injected_val.clone());
@@ -143,8 +156,8 @@ fn bind_args_with_values(
     params: &[Parameter],
     args: &[Value],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -168,22 +181,8 @@ fn bind_args_with_values(
             bail_semantic!("missing argument {}", param.name);
         };
 
-        let value = if let Some(Type::DynTrait(trait_name)) = &param.ty {
-            Value::TraitObject {
-                trait_name: trait_name.clone(),
-                inner: Box::new(value),
-            }
-        } else {
-            value
-        };
-
-        if let Some(Type::Simple(type_name)) = &param.ty {
-            if is_unit_type(type_name) {
-                if let Err(e) = validate_unit_type(&value, type_name) {
-                    bail_semantic!("parameter '{}': {}", param.name, e);
-                }
-            }
-        }
+        let value = wrap_trait_object!(value, param.ty.as_ref());
+        validate_unit!(&value, param.ty.as_ref(), format!("parameter '{}'", param.name));
         bound.insert(param.name.clone(), value);
     }
 
@@ -196,8 +195,8 @@ pub(crate) fn exec_lambda(
     args: &[Argument],
     call_env: &Env,
     captured_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -237,15 +236,13 @@ pub(crate) fn exec_function(
     func: &FunctionDef,
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
-    crate::effects::check_call_compatibility(&func.name, &func.effects)?;
-
-    with_effect_context(&func.effects, || {
+    with_effect_check!(func, {
         exec_function_inner(func, args, outer_env, functions, classes, enums, impl_methods, self_ctx)
     })
 }
@@ -254,14 +251,12 @@ pub(crate) fn exec_function_with_values(
     func: &FunctionDef,
     args: &[Value],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    crate::effects::check_call_compatibility(&func.name, &func.effects)?;
-
-    with_effect_context(&func.effects, || {
+    with_effect_check!(func, {
         exec_function_with_values_inner(func, args, outer_env, functions, classes, enums, impl_methods)
     })
 }
@@ -271,14 +266,12 @@ pub(crate) fn exec_function_with_captured_env(
     args: &[Argument],
     outer_env: &Env,
     captured_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    crate::effects::check_call_compatibility(&func.name, &func.effects)?;
-
-    with_effect_context(&func.effects, || {
+    with_effect_check!(func, {
         let mut local_env = captured_env.clone();
 
         let self_mode = SelfMode::IncludeSelf;
@@ -287,21 +280,8 @@ pub(crate) fn exec_function_with_captured_env(
             local_env.insert(name, value);
         }
 
-        let result_value = exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods);
-        let result = match result_value {
-            Ok((Control::Return(v), _)) => v,
-            Ok((_, Some(v))) => v,
-            Ok((_, None)) => Value::Nil,
-            Err(e) => return Err(e),
-        };
-
-        if let Some(Type::Simple(type_name)) = &func.return_type {
-            if is_unit_type(type_name) {
-                if let Err(e) = validate_unit_type(&result, type_name) {
-                    bail_semantic!("return type mismatch in '{}': {}", func.name, e);
-                }
-            }
-        }
+        let result = extract_block_result!(exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods));
+        validate_unit!(&result, func.return_type.as_ref(), format!("return type mismatch in '{}'", func.name));
 
         Ok(result)
     })
@@ -311,12 +291,15 @@ fn exec_function_inner(
     func: &FunctionDef,
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_ctx: Option<(&str, &HashMap<String, Value>)>,
 ) -> Result<Value, CompileError> {
+    // Layout recording for 4KB page locality optimization
+    crate::layout_recorder::record_function_call(&func.name);
+
     // TODO: Re-enable coverage tracking when module is complete
     // if let Some(cov) = crate::coverage::get_global_coverage() {
     //     cov.lock().unwrap().record_function_call(&func.name);
@@ -351,21 +334,11 @@ fn exec_function_inner(
     for (name, val) in bound {
         local_env.insert(name, val);
     }
-    let result = match exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
-        Ok((Control::Return(v), _)) => v,
-        Ok((_, Some(v))) => v,
-        Ok((_, None)) => Value::Nil,
-        Err(CompileError::TryError(val)) => val,
-        Err(e) => return Err(e),
-    };
+    let result = extract_block_result!(exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods));
+    validate_unit!(&result, func.return_type.as_ref(), format!("return type mismatch in '{}'", func.name));
 
-    if let Some(Type::Simple(type_name)) = &func.return_type {
-        if is_unit_type(type_name) {
-            if let Err(e) = validate_unit_type(&result, type_name) {
-                bail_semantic!("return type mismatch in '{}': {}", func.name, e);
-            }
-        }
-    }
+    // Record function return for layout call graph tracking
+    crate::layout_recorder::record_function_return();
 
     Ok(result)
 }
@@ -374,11 +347,14 @@ fn exec_function_with_values_inner(
     func: &FunctionDef,
     args: &[Value],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Layout recording for 4KB page locality optimization
+    crate::layout_recorder::record_function_call(&func.name);
+
     // TODO: Re-enable coverage tracking when module is complete
     // if let Some(cov) = crate::coverage::get_global_coverage() {
     //     cov.lock().unwrap().record_function_call(&func.name);
@@ -399,21 +375,11 @@ fn exec_function_with_values_inner(
     for (name, val) in bound {
         local_env.insert(name, val);
     }
-    let result = match exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
-        Ok((Control::Return(v), _)) => v,
-        Ok((_, Some(v))) => v,
-        Ok((_, None)) => Value::Nil,
-        Err(CompileError::TryError(val)) => val,
-        Err(e) => return Err(e),
-    };
+    let result = extract_block_result!(exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods));
+    validate_unit!(&result, func.return_type.as_ref(), format!("return type mismatch in '{}'", func.name));
 
-    if let Some(Type::Simple(type_name)) = &func.return_type {
-        if is_unit_type(type_name) {
-            if let Err(e) = validate_unit_type(&result, type_name) {
-                bail_semantic!("return type mismatch in '{}': {}", func.name, e);
-            }
-        }
-    }
+    // Record function return for layout call graph tracking
+    crate::layout_recorder::record_function_return();
 
     Ok(result)
 }
@@ -422,12 +388,12 @@ pub(crate) fn instantiate_class(
     class_name: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    let class_def = classes.get(class_name).ok_or_else(|| {
+    let class_def = classes.get(class_name).cloned().ok_or_else(|| {
         semantic_err!("unknown class: {}", class_name)
     })?;
 
@@ -535,8 +501,8 @@ fn resolve_injected_args(
     args: &[Argument],
     class_name: &str,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     self_mode: SelfMode,
@@ -612,8 +578,8 @@ fn resolve_binding_instance(
     impl_type: &str,
     scope: DiScope,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -722,12 +688,14 @@ fn invoke_runtime_around_chain(
     ctx: Arc<ProceedContext>,
 ) -> Result<Value, CompileError> {
     if idx >= advices.len() {
+        let mut functions_clone = (*ctx.functions).clone();
+        let mut classes_clone = (*ctx.classes).clone();
         return instantiate_class(
             impl_type,
             &[],
             ctx.env.as_ref(),
-            ctx.functions.as_ref(),
-            ctx.classes.as_ref(),
+            &mut functions_clone,
+            &mut classes_clone,
             ctx.enums.as_ref(),
             ctx.impl_methods.as_ref(),
         );
@@ -768,12 +736,14 @@ fn invoke_runtime_around_chain(
         }),
     });
 
+    let mut functions_clone = (*ctx.functions).clone();
+    let mut classes_clone = (*ctx.classes).clone();
     let result = exec_function_with_values(
         func,
         &[proceed],
         ctx.env.as_ref(),
-        ctx.functions.as_ref(),
-        ctx.classes.as_ref(),
+        &mut functions_clone,
+        &mut classes_clone,
         ctx.enums.as_ref(),
         ctx.impl_methods.as_ref(),
     )?;

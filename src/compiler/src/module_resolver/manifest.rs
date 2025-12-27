@@ -123,6 +123,8 @@ impl DirectoryManifest {
             match effect {
                 // Async is an execution model, not a capability - always allowed
                 Effect::Async => {}
+                // Verification effects are compile-time markers, always allowed
+                Effect::Verify | Effect::Trusted => {}
                 // Pure requires the Pure capability
                 Effect::Pure => {
                     if !self.capabilities.contains(&Capability::Pure) {

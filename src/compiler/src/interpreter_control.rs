@@ -1,6 +1,32 @@
-// ============================================================================
-// Control flow execution functions for the interpreter
-// ============================================================================
+//! Control flow execution functions for the interpreter
+//!
+//! This module provides implementations for control flow constructs:
+//! - If/else statements
+//! - Match expressions
+//! - While loops
+//! - For loops
+//! - Loop control (break, continue)
+
+use crate::error::CompileError;
+use crate::value::{Env, Value, ATTR_STRONG, BUILTIN_ARRAY, BUILTIN_RANGE};
+use simple_parser::ast::{
+    ClassDef, ContextStmt, EnumDef, Expr, ForStmt, FStringPart, FunctionDef, IfStmt, LoopStmt,
+    MatchStmt, Pattern, Type, WhileStmt, WithStmt,
+};
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+// Import parent interpreter types and functions
+use super::{
+    evaluate_expr, exec_block, Control, Enums, ImplMethods,
+    CONTEXT_OBJECT, BDD_CONTEXT_DEFS, BDD_INDENT, BDD_LAZY_VALUES,
+};
+
+// Import helpers for pattern binding
+use super::interpreter_helpers::{bind_pattern, iter_to_vec};
+
+// Import from interpreter_call for exec_block_value (sibling module)
+use super::interpreter_call::exec_block_value;
 
 /// Handle loop control flow result. Returns Some if we should exit the loop.
 #[inline]
@@ -13,11 +39,11 @@ fn handle_loop_control(ctrl: Control) -> Option<Result<Control, CompileError>> {
     }
 }
 
-fn exec_if(
+pub(super) fn exec_if(
     if_stmt: &IfStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -53,11 +79,11 @@ fn exec_if(
     Ok(Control::Next)
 }
 
-fn exec_while(
+pub(super) fn exec_while(
     while_stmt: &simple_parser::ast::WhileStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -92,11 +118,11 @@ fn exec_while(
     Ok(Control::Next)
 }
 
-fn exec_loop(
+pub(super) fn exec_loop(
     loop_stmt: &simple_parser::ast::LoopStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -107,11 +133,11 @@ fn exec_loop(
     }
 }
 
-fn exec_context(
+pub(super) fn exec_context(
     ctx_stmt: &ContextStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -182,11 +208,11 @@ fn exec_context(
 /// with resource as name:
 ///     body
 /// Calls __enter__ before body, __exit__ after (even on error)
-fn exec_with(
+pub(super) fn exec_with(
     with_stmt: &WithStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
@@ -220,8 +246,8 @@ fn exec_method_body(
     receiver: &Value,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -240,16 +266,16 @@ fn call_method_if_exists(
     method_name: &str,
     _args: &[Value],
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     if let Value::Object { class, fields } = receiver {
         // Check if the class has the method
-        if let Some(class_def) = classes.get(class) {
-            if let Some(method) = class_def.methods.iter().find(|m| m.name == method_name) {
-                return Ok(Some(exec_method_body(method, receiver, fields, env, functions, classes, enums, impl_methods)?));
+        if let Some(class_def) = classes.get(class).cloned() {
+            if let Some(method) = class_def.methods.iter().find(|m| m.name == method_name).cloned() {
+                return Ok(Some(exec_method_body(&method, receiver, fields, env, functions, classes, enums, impl_methods)?));
             }
         }
         // Check impl_methods
@@ -262,66 +288,26 @@ fn call_method_if_exists(
     Ok(None)
 }
 
-fn exec_for(
+pub(super) fn exec_for(
     for_stmt: &simple_parser::ast::ForStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
     let iterable = evaluate_expr(&for_stmt.iterable, env, functions, classes, enums, impl_methods)?;
-    let items = match iterable {
-        Value::Object { class, fields } if class == BUILTIN_RANGE => {
-            if let Some(Value::Int(start)) = fields.get("start") {
-                if let Some(Value::Int(end)) = fields.get("end") {
-                    let inclusive = matches!(fields.get("inclusive"), Some(Value::Bool(true)));
-                    let mut v = Vec::new();
-                    let mut i = *start;
-                    if inclusive {
-                        while i <= *end {
-                            v.push(i);
-                            i += 1;
-                        }
-                    } else {
-                        while i < *end {
-                            v.push(i);
-                            i += 1;
-                        }
-                    }
-                    v
-                } else {
-                    return Err(CompileError::Semantic("invalid range".into()));
-                }
-            } else {
-                return Err(CompileError::Semantic("invalid range".into()));
-            }
-        }
-        Value::Object { class, fields } if class == BUILTIN_ARRAY => {
-            let mut out = Vec::new();
-            for (_, v) in fields {
-                if let Value::Int(i) = v {
-                    out.push(i);
-                }
-            }
-            out
-        }
-        Value::Array(items) => {
-            let mut out = Vec::new();
-            for v in items {
-                if let Value::Int(i) = v {
-                    out.push(i);
-                }
-            }
-            out
-        }
-        _ => return Err(CompileError::Semantic("for expects range or array".into())),
-    };
 
-    for val in items {
-        if let Pattern::Identifier(name) = &for_stmt.pattern {
-            env.insert(name.clone(), Value::Int(val));
+    // Use iter_to_vec to handle all iterable types uniformly
+    let items = iter_to_vec(&iterable)?;
+
+    for item in items {
+        // Use bind_pattern to handle all pattern types (identifier, tuple, etc.)
+        if !bind_pattern(&for_stmt.pattern, &item, env) {
+            // Pattern didn't match - skip this iteration
+            continue;
         }
+
         let ctrl = exec_block(&for_stmt.body, env, functions, classes, enums, impl_methods)?;
         if matches!(ctrl, Control::Continue) { continue; }
         if let Some(result) = handle_loop_control(ctrl) { return result; }
@@ -340,11 +326,11 @@ pub(crate) fn is_catch_all_pattern(pattern: &Pattern) -> bool {
     }
 }
 
-fn exec_match(
+pub(super) fn exec_match(
     match_stmt: &MatchStmt,
     env: &mut Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {

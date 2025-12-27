@@ -1,0 +1,144 @@
+# Visibility Export Model
+#
+# Formal model for visibility and export rules.
+# Mirrors: verification/visibility_export/src/VisibilityExport.lean
+
+# Visibility levels
+enum Visibility:
+    Private    # Only visible in defining module
+    Internal   # Visible in package
+    Public     # Visible everywhere
+
+    fn to_lean(self) -> String:
+        match self:
+            case Private: return "Visibility.private"
+            case Internal: return "Visibility.internal"
+            case Public: return "Visibility.public"
+
+    fn can_access(self, from_same_module: Bool, from_same_package: Bool) -> Bool:
+        match self:
+            case Public: return True
+            case Internal: return from_same_package
+            case Private: return from_same_module
+
+# Symbol definition
+class SymbolDef:
+    name: String
+    visibility: Visibility
+    module_path: String
+    package_path: String
+
+    fn create(name: String, visibility: Visibility, module_path: String, package_path: String) -> SymbolDef:
+        return SymbolDef(
+            name=name,
+            visibility=visibility,
+            module_path=module_path,
+            package_path=package_path
+        )
+
+    fn to_lean(self) -> String:
+        return "{{ name := \"" + self.name + "\", visibility := " + self.visibility.to_lean() + ", modulePath := \"" + self.module_path + "\", packagePath := \"" + self.package_path + "\" }}"
+
+# Export declaration
+class ExportDecl:
+    name: String
+    original: SymbolDef
+    re_export_visibility: Option<Visibility>
+
+    fn create(name: String, original: SymbolDef, re_export_visibility: Option<Visibility> = None) -> ExportDecl:
+        return ExportDecl(
+            name=name,
+            original=original,
+            re_export_visibility=re_export_visibility
+        )
+
+    fn effective_visibility(self) -> Visibility:
+        if self.re_export_visibility is not None:
+            # Re-export cannot be more visible than original
+            match (self.original.visibility, self.re_export_visibility):
+                case (Visibility.Private, _): return Visibility.Private
+                case (Visibility.Internal, Visibility.Public): return Visibility.Internal
+                case (_, v): return v
+        return self.original.visibility
+
+# Access context
+class AccessContext:
+    current_module: String
+    current_package: String
+
+    fn create(module: String, package: String) -> AccessContext:
+        return AccessContext(module, package)
+
+    fn same_module_as(self, symbol: SymbolDef) -> Bool:
+        return self.current_module == symbol.module_path
+
+    fn same_package_as(self, symbol: SymbolDef) -> Bool:
+        return self.current_package == symbol.package_path
+
+# Check if access is allowed
+fn can_access(ctx: AccessContext, symbol: SymbolDef) -> Bool:
+    same_module = ctx.same_module_as(symbol)
+    same_package = ctx.same_package_as(symbol)
+    return symbol.visibility.can_access(same_module, same_package)
+
+# Export validation
+fn validate_export(exp_decl: ExportDecl, ctx: AccessContext) -> Bool:
+    # Must be able to access the original
+    if not can_access(ctx, exp_decl.original):
+        return False
+
+    # Re-export visibility must not exceed original
+    effective = exp_decl.effective_visibility()
+    match (exp_decl.original.visibility, effective):
+        case (Visibility.Private, Visibility.Internal): return False
+        case (Visibility.Private, Visibility.Public): return False
+        case (Visibility.Internal, Visibility.Public): return False
+        case _: return True
+
+# Visibility ordering
+fn visibility_leq(v1: Visibility, v2: Visibility) -> Bool:
+    match (v1, v2):
+        case (Visibility.Private, _): return True
+        case (Visibility.Internal, Visibility.Private): return False
+        case (Visibility.Internal, _): return True
+        case (Visibility.Public, Visibility.Public): return True
+        case (Visibility.Public, _): return False
+
+# Module exports
+class ModuleExports:
+    module_path: String
+    exports: List[ExportDecl]
+
+    fn create(module_path: String) -> ModuleExports:
+        return ModuleExports(module_path, [])
+
+    fn add_export(self, exp_decl: ExportDecl) -> ModuleExports:
+        new_exports = self.exports.append(exp_decl)
+        return ModuleExports(self.module_path, new_exports)
+
+    fn lookup(self, name: String) -> ExportDecl | None:
+        for e in self.exports:
+            if e.name == name:
+                return e
+        return None
+
+    fn visible_from(self, ctx: AccessContext) -> List[ExportDecl]:
+        result = []
+        for e in self.exports:
+            effective = e.effective_visibility()
+            same_module = ctx.current_module == self.module_path
+            same_package = ctx.current_package == self.module_path.split(".")[0]
+            if effective.can_access(same_module, same_package):
+                result.append(e)
+        return result
+
+# Specification functions
+
+fn visibility_monotonic_spec() -> String:
+    return "theorem visibility_monotonic : ∀ export, effective_visibility export ≤ exp_decl.original.visibility"
+
+fn private_stays_private_spec() -> String:
+    return "theorem private_stays_private : ∀ ctx symbol, symbol.visibility = private → can_access ctx symbol → ctx.currentModule = symbol.modulePath"
+
+fn export_requires_access_spec() -> String:
+    return "theorem export_requires_access : ∀ ctx export, valid_export ctx export → can_access ctx exp_decl.original"

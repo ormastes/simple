@@ -29,8 +29,8 @@ pub(crate) fn evaluate_call(
     callee: &Box<Expr>,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -65,8 +65,8 @@ pub(crate) fn evaluate_call(
         }
 
         // Check regular functions
-        if let Some(func) = functions.get(name) {
-            return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+        if let Some(func) = functions.get(name).cloned() {
+            return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
         }
 
         // Check extern functions
@@ -84,9 +84,24 @@ pub(crate) fn evaluate_call(
 
     // Handle module-style calls: module.function()
     if let Expr::FieldAccess { receiver, field } = callee.as_ref() {
-        if let Expr::Identifier(_module_name) = receiver.as_ref() {
-            if let Some(func) = functions.get(field) {
-                return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+        if let Expr::Identifier(module_name) = receiver.as_ref() {
+            // First, check if the receiver is a module dict in env
+            if let Some(module_val) = env.get(module_name) {
+                if let Value::Dict(module_dict) = module_val {
+                    // Look up function in the module's exports
+                    if let Some(func_val) = module_dict.get(field) {
+                        if let Value::Function { def, captured_env, .. } = func_val {
+                            return core::exec_function_with_captured_env(def, args, env, captured_env, functions, classes, enums, impl_methods);
+                        }
+                        if let Value::Constructor { class_name } = func_val {
+                            return core::instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
+                        }
+                    }
+                }
+            }
+            // Fall back to global functions if module lookup failed
+            if let Some(func) = functions.get(field).cloned() {
+                return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             } else if classes.contains_key(field) {
                 return core::instantiate_class(field, args, env, functions, classes, enums, impl_methods);
             } else if let Some(func) = env.get(field) {
@@ -94,7 +109,7 @@ pub(crate) fn evaluate_call(
                     return core::exec_function_with_captured_env(def, args, env, captured_env, functions, classes, enums, impl_methods);
                 }
             }
-            bail_semantic!("unknown symbol {}.{}", _module_name, field);
+            bail_semantic!("unknown symbol {}.{}", module_name, field);
         }
     }
 
@@ -129,20 +144,20 @@ pub(crate) fn evaluate_call(
             // Check for associated function call
             if let Some(methods) = impl_methods.get(type_name) {
                 if let Some(func) = methods.iter().find(|m| m.name == *method_name) {
-                    return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
                 }
             }
 
             // Check for class associated function (static method)
-            if let Some(class_def) = classes.get(type_name) {
+            if let Some(class_def) = classes.get(type_name).cloned() {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == *method_name) {
-                    return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+                    return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
                 }
             }
 
             // Legacy fallbacks
-            if let Some(func) = functions.get(method_name) {
-                return core::exec_function(func, args, env, functions, classes, enums, impl_methods, None);
+            if let Some(func) = functions.get(method_name).cloned() {
+                return core::exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             } else if classes.contains_key(method_name) {
                 return core::instantiate_class(method_name, args, env, functions, classes, enums, impl_methods);
             }

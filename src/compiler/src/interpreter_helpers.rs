@@ -1,9 +1,32 @@
-// ============================================================================
-// Helper functions to reduce duplication across interpreter modules
-// ============================================================================
+//! Helper functions to reduce duplication across interpreter modules
+//!
+//! This module provides utility functions for:
+//! - Method dispatch and method_missing hooks
+//! - Range object creation
+//! - Actor spawning
+//! - Lambda and functional programming utilities
+//! - Pattern matching and binding
+//! - Collection operations (map, filter, reduce, etc.)
+
+use crate::error::CompileError;
+use crate::value::{Env, FutureValue, Value, BUILTIN_RANGE, METHOD_MISSING};
+use simple_common::actor::ActorSpawner;
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, LambdaParam, Pattern, RangeBound};
+use std::collections::HashMap;
+use std::sync::{mpsc, Arc, Mutex};
+
+// Import parent interpreter types and functions
+use super::{
+    evaluate_expr, evaluate_method_call_with_self_update, exec_block, exec_function,
+    Control, Enums, ImplMethods, CONST_NAMES,
+    ACTOR_SPAWNER, ACTOR_INBOX, ACTOR_OUTBOX,
+};
 
 /// Build method_missing arguments from method name and original args
-fn build_method_missing_args(method: &str, args: &[simple_parser::ast::Argument]) -> Vec<simple_parser::ast::Argument> {
+pub(crate) fn build_method_missing_args(
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+) -> Vec<simple_parser::ast::Argument> {
     vec![
         simple_parser::ast::Argument {
             name: None,
@@ -29,13 +52,13 @@ fn find_method_and_exec(
     class: &str,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     // Check class methods
-    if let Some(class_def) = classes.get(class) {
+    if let Some(class_def) = classes.get(class).cloned() {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method_name) {
             return Ok(Some(exec_function(func, args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
         }
@@ -52,14 +75,14 @@ fn find_method_and_exec(
 /// Find and execute a method on a class/struct object.
 /// Searches in class_def methods first, then impl_methods.
 /// Returns Ok(Some(value)) if method found, Ok(None) if not found.
-fn find_and_exec_method<'a>(
+pub(crate) fn find_and_exec_method<'a>(
     method: &str,
     args: &[simple_parser::ast::Argument],
     class: &str,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -68,14 +91,14 @@ fn find_and_exec_method<'a>(
 
 /// Try to call method_missing hook on a class/struct object.
 /// Returns Ok(Some(value)) if method_missing found, Ok(None) if not found.
-fn try_method_missing<'a>(
+pub(crate) fn try_method_missing<'a>(
     method: &str,
     args: &[simple_parser::ast::Argument],
     class: &str,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -85,7 +108,7 @@ fn try_method_missing<'a>(
 
 /// Create a range object with start, end, and bound type fields.
 /// The bound is stored as a boolean for runtime compatibility.
-fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Value {
+pub(crate) fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Value {
     let mut fields = HashMap::new();
     fields.insert("start".into(), Value::Int(start));
     fields.insert("end".into(), Value::Int(end));
@@ -98,25 +121,25 @@ fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Value {
 }
 
 /// Spawn an actor with the given expression and environment
-fn spawn_actor_with_expr(
+pub(crate) fn spawn_actor_with_expr(
     expr: &Expr,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Value {
     let expr_clone = expr.clone();
     let env_clone = env.clone();
-    let funcs = functions.clone();
-    let classes_clone = classes.clone();
+    let mut funcs = functions.clone();
+    let mut classes_clone = classes.clone();
     let enums_clone = enums.clone();
     let impls_clone = impl_methods.clone();
     let handle = ACTOR_SPAWNER.with(|s| s.spawn(move |inbox, outbox| {
         let inbox = Arc::new(Mutex::new(inbox));
         ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));
         ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = Some(outbox.clone()));
-        let _ = evaluate_expr(&expr_clone, &env_clone, &funcs, &classes_clone, &enums_clone, &impls_clone);
+        let _ = evaluate_expr(&expr_clone, &env_clone, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
         ACTOR_INBOX.with(|cell| *cell.borrow_mut() = None);
         ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
     }));
@@ -125,13 +148,13 @@ fn spawn_actor_with_expr(
 
 /// Evaluate an optional argument at given index with a default value.
 /// This is a common pattern in method calls: args.get(idx).map(eval).transpose()?.unwrap_or(default)
-fn eval_arg(
+pub(crate) fn eval_arg(
     args: &[simple_parser::ast::Argument],
     idx: usize,
     default: Value,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -142,13 +165,13 @@ fn eval_arg(
 }
 
 /// Evaluate an argument as i64 with default
-fn eval_arg_int(
+pub(crate) fn eval_arg_int(
     args: &[simple_parser::ast::Argument],
     idx: usize,
     default: i64,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<i64, CompileError> {
@@ -157,13 +180,13 @@ fn eval_arg_int(
 }
 
 /// Evaluate an argument as usize with default
-fn eval_arg_usize(
+pub(crate) fn eval_arg_usize(
     args: &[simple_parser::ast::Argument],
     idx: usize,
     default: usize,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<usize, CompileError> {
@@ -174,8 +197,8 @@ fn eval_arg_usize(
 fn apply_lambda_to_vec(
     arr: &[Value],
     lambda_val: &Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Value>, CompileError> {
@@ -196,11 +219,11 @@ fn apply_lambda_to_vec(
 }
 
 /// Array map: apply lambda to each element
-fn eval_array_map(
+pub(crate) fn eval_array_map(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -234,11 +257,11 @@ where
 }
 
 /// Array filter: keep elements where lambda returns truthy
-fn eval_array_filter(
+pub(crate) fn eval_array_filter(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -255,12 +278,12 @@ fn eval_array_filter(
 }
 
 /// Array reduce: fold over elements with accumulator
-fn eval_array_reduce(
+pub(crate) fn eval_array_reduce(
     arr: &[Value],
     init: Value,
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -283,11 +306,11 @@ fn eval_array_reduce(
 }
 
 /// Array find: return first element where lambda is truthy
-fn eval_array_find(
+pub(crate) fn eval_array_find(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -303,11 +326,11 @@ fn eval_array_find(
 }
 
 /// Array any: return true if any element satisfies lambda
-fn eval_array_any(
+pub(crate) fn eval_array_any(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -323,11 +346,11 @@ fn eval_array_any(
 }
 
 /// Array all: return true if all elements satisfy lambda
-fn eval_array_all(
+pub(crate) fn eval_array_all(
     arr: &[Value],
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -359,11 +382,11 @@ where
 }
 
 /// Dict map_values: apply lambda to each value
-fn eval_dict_map_values(
+pub(crate) fn eval_dict_map_values(
     map: &HashMap<String, Value>,
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -379,11 +402,11 @@ fn eval_dict_map_values(
 }
 
 /// Dict filter: keep entries where lambda returns truthy
-fn eval_dict_filter(
+pub(crate) fn eval_dict_filter(
     map: &HashMap<String, Value>,
     func: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -407,11 +430,13 @@ fn eval_dict_filter(
 
 // === Helper functions for comprehensions and slicing ===
 
-// Option and Result helpers are included from a separate file
-include!("interpreter_helpers_option_result.rs");
+// Option and Result helpers from a separate module
+#[path = "interpreter_helpers_option_result.rs"]
+mod interpreter_helpers_option_result;
+pub(crate) use interpreter_helpers_option_result::*;
 
 /// Convert a value to an iterable vector (for comprehensions)
-fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
+pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
     match val {
         Value::Array(arr) => Ok(arr.clone()),
         Value::Tuple(tup) => Ok(tup.clone()),
@@ -454,7 +479,7 @@ fn bind_sequence_pattern(value: &Value, patterns: &[Pattern], env: &mut Env, all
 }
 
 /// Bind a pattern to a value in an environment (returns false if pattern doesn't match)
-fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
+pub(crate) fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
     match pattern {
         Pattern::Wildcard => true,
         Pattern::Identifier(name) => {
@@ -478,13 +503,13 @@ fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
 
 /// Handle functional update expression: target.&method(args)
 /// Returns Ok(Some(new_value)) if successfully processed, Ok(None) if not applicable
-fn handle_functional_update(
+pub(crate) fn handle_functional_update(
     target: &Expr,
     method: &str,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<(String, Value)>, CompileError> {
@@ -532,11 +557,11 @@ fn handle_functional_update(
 
 /// Handle method call on object with self-update tracking
 /// Returns (result, optional_updated_self) where updated_self is the object with mutations
-fn handle_method_call_with_self_update(
+pub(crate) fn handle_method_call_with_self_update(
     value_expr: &Expr,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
@@ -583,7 +608,7 @@ fn bind_let_pattern_element(
 }
 
 /// Bind any pattern from a let statement.
-fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, env: &mut Env) {
+pub(crate) fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, env: &mut Env) {
     match pat {
         Pattern::Tuple(patterns) => {
             // Allow tuple pattern to match both Tuple and Array
@@ -616,7 +641,7 @@ fn bind_collection_pattern(
 }
 
 /// Normalize a Python-style index (handling negative indices)
-fn normalize_index(idx: i64, len: i64) -> i64 {
+pub(crate) fn normalize_index(idx: i64, len: i64) -> i64 {
     if idx < 0 {
         (len + idx).max(0)
     } else {
@@ -625,7 +650,7 @@ fn normalize_index(idx: i64, len: i64) -> i64 {
 }
 
 /// Slice a collection with Python-style semantics
-fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step: i64) -> Vec<T> {
+pub(crate) fn slice_collection<T: Clone>(items: &[T], start: i64, end: i64, step: i64) -> Vec<T> {
     let len = items.len() as i64;
 
     if step > 0 {
@@ -669,13 +694,13 @@ pub(crate) fn control_to_value(result: Result<Control, CompileError>) -> Result<
 /// Iterate over items with pattern binding and optional condition filtering.
 /// Returns a vector of environments for items that match the pattern and pass the condition.
 /// This is used by both ListComprehension and DictComprehension to avoid code duplication.
-fn comprehension_iterate(
+pub(crate) fn comprehension_iterate(
     iterable: &Value,
     pattern: &Pattern,
     condition: &Option<Box<Expr>>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Env>, CompileError> {
@@ -751,8 +776,8 @@ struct ClonedContext {
 impl ClonedContext {
     /// Clone context from references
     fn from_refs(
-        functions: &HashMap<String, FunctionDef>,
-        classes: &HashMap<String, ClassDef>,
+        functions: &mut HashMap<String, FunctionDef>,
+        classes: &mut HashMap<String, ClassDef>,
         enums: &Enums,
         impl_methods: &ImplMethods,
     ) -> Self {
@@ -773,7 +798,7 @@ fn execute_callable_with_arg(
     callable: Value,
     arg: Value,
     base_env: Option<&Env>,
-    ctx: &ClonedContext,
+    ctx: &mut ClonedContext,
 ) -> Result<Value, String> {
     match callable {
         Value::Function { ref def, ref captured_env, .. } => {
@@ -782,7 +807,7 @@ fn execute_callable_with_arg(
             if let Some(first_param) = def.params.first() {
                 local_env.insert(first_param.name.clone(), arg);
             }
-            match exec_block(&def.body, &mut local_env, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods) {
+            match exec_block(&def.body, &mut local_env, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods) {
                 Ok(Control::Return(v)) => Ok(v),
                 Ok(_) => Ok(Value::Nil),
                 Err(e) => Err(format!("{:?}", e)),
@@ -794,7 +819,7 @@ fn execute_callable_with_arg(
             if let Some(first_param) = params.first() {
                 local_env.insert(first_param.clone(), arg);
             }
-            evaluate_expr(&body, &local_env, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods)
+            evaluate_expr(&body, &local_env, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods)
                 .map_err(|e| format!("{:?}", e))
         }
         _ => Err("expected a function or lambda".into()),
@@ -804,49 +829,49 @@ fn execute_callable_with_arg(
 /// Create a FutureValue that executes a callable with an argument.
 /// Uses the callable's captured environment.
 /// Clones all necessary context for thread-safe execution.
-fn spawn_future_with_callable(
+pub(crate) fn spawn_future_with_callable(
     callable: Value,
     arg: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
-    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
-    FutureValue::new(move || execute_callable_with_arg(callable, arg, None, &ctx))
+    let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    FutureValue::new(move || execute_callable_with_arg(callable, arg, None, &mut ctx))
 }
 
 /// Create a FutureValue that executes a callable with an argument and outer environment.
 /// Uses the outer environment as the base (for spawn_isolated semantics).
 /// Clones all necessary context for thread-safe execution.
-fn spawn_future_with_callable_and_env(
+pub(crate) fn spawn_future_with_callable_and_env(
     callable: Value,
     arg: Value,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
     let env_clone = env.clone();
-    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
-    FutureValue::new(move || execute_callable_with_arg(callable, arg, Some(&env_clone), &ctx))
+    let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    FutureValue::new(move || execute_callable_with_arg(callable, arg, Some(&env_clone), &mut ctx))
 }
 
 /// Create a FutureValue that evaluates an expression.
 /// Clones all necessary context for thread-safe execution.
-fn spawn_future_with_expr(
+pub(crate) fn spawn_future_with_expr(
     expr: Expr,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> FutureValue {
     let env_clone = env.clone();
-    let ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
+    let mut ctx = ClonedContext::from_refs(functions, classes, enums, impl_methods);
     FutureValue::new(move || {
-        evaluate_expr(&expr, &env_clone, &ctx.functions, &ctx.classes, &ctx.enums, &ctx.impl_methods)
+        evaluate_expr(&expr, &env_clone, &mut ctx.functions, &mut ctx.classes, &ctx.enums, &ctx.impl_methods)
             .map_err(|e| format!("{:?}", e))
     })
 }

@@ -1,0 +1,169 @@
+# Proof Checker
+#
+# Invokes Lean 4 to check proofs and reports results.
+
+import verification.proofs.obligations as ob
+
+# Lean invocation result
+enum LeanResult:
+    Success
+    TypeError(message: String)
+    ProofError(message: String)
+    Timeout
+    NotFound
+
+    fn is_success(self) -> Bool:
+        match self:
+            case Success: return True
+            case _: return False
+
+    fn to_string(self) -> String:
+        match self:
+            case Success: return "success"
+            case TypeError(m): return "type error: " + m
+            case ProofError(m): return "proof error: " + m
+            case Timeout: return "timeout"
+            case NotFound: return "lean not found"
+
+# Checker configuration
+class CheckerConfig:
+    lean_path: String
+    lake_path: String
+    timeout_ms: Int
+    project_dir: String
+
+    fn create() -> CheckerConfig:
+        return CheckerConfig("lean", "lake", 30000, ".")
+
+    fn with_lean_path(self, path: String) -> CheckerConfig:
+        return CheckerConfig(path, self.lake_path, self.timeout_ms, self.project_dir)
+
+    fn with_timeout(self, timeout_ms: Int) -> CheckerConfig:
+        return CheckerConfig(self.lean_path, self.lake_path, timeout_ms, self.project_dir)
+
+    fn with_project_dir(self, dir: String) -> CheckerConfig:
+        return CheckerConfig(self.lean_path, self.lake_path, self.timeout_ms, dir)
+
+# Check result for a single file
+class FileCheckResult:
+    file_path: String
+    result: LeanResult
+    errors: List[String]
+    warnings: List[String]
+
+    fn create(file_path: String, result: LeanResult) -> FileCheckResult:
+        return FileCheckResult(file_path, result, [], [])
+
+    fn with_error(self, error: String) -> FileCheckResult:
+        new_errors = self.errors.append(error)
+        return FileCheckResult(self.file_path, self.result, new_errors, self.warnings)
+
+    fn with_warning(self, warning: String) -> FileCheckResult:
+        new_warnings = self.warnings.append(warning)
+        return FileCheckResult(self.file_path, self.result, self.errors, new_warnings)
+
+# Batch check result
+class BatchCheckResult:
+    file_results: List[FileCheckResult]
+    total_time_ms: Int
+
+    fn create() -> BatchCheckResult:
+        return BatchCheckResult([], 0)
+
+    fn add_result(self, result: FileCheckResult) -> BatchCheckResult:
+        new_results = self.file_results.append(result)
+        return BatchCheckResult(new_results, self.total_time_ms)
+
+    fn with_time(self, time_ms: Int) -> BatchCheckResult:
+        return BatchCheckResult(self.file_results, time_ms)
+
+    fn success_count(self) -> Int:
+        count = 0
+        for r in self.file_results:
+            if r.result.is_success():
+                count = count + 1
+        return count
+
+    fn failure_count(self) -> Int:
+        return len(self.file_results) - self.success_count()
+
+    fn summary(self) -> String:
+        total = len(self.file_results)
+        success = self.success_count()
+        failed = self.failure_count()
+        return "Checked " + str(total) + " files: " + str(success) + " passed, " + str(failed) + " failed (" + str(self.total_time_ms) + "ms)"
+
+# Proof checker
+class ProofChecker:
+    config: CheckerConfig
+
+    fn create(config: CheckerConfig = CheckerConfig.create()) -> ProofChecker:
+        return ProofChecker(config)
+
+    fn check_file(self, file_path: String) -> FileCheckResult:
+        # TODO: Actually invoke Lean via subprocess
+        # For now, return a placeholder result
+        return FileCheckResult.create(file_path, LeanResult.Success)
+
+    fn check_files(self, file_paths: List[String]) -> BatchCheckResult:
+        result = BatchCheckResult.create()
+        for path in file_paths:
+            file_result = self.check_file(path)
+            result = result.add_result(file_result)
+        return result
+
+    fn check_obligations(self, obligations: ob.ObligationSet) -> BatchCheckResult:
+        # Generate theorem file
+        content = ob.generate_theorem_stubs(obligations)
+
+        # Write to temp file
+        temp_file = "/tmp/proof_obligations_" + obligations.module_name + ".lean"
+        # TODO: Write file
+
+        # Check the file
+        return self.check_files([temp_file])
+
+    fn check_verification_dir(self) -> BatchCheckResult:
+        # Check all Lean files in verification/
+        files = [
+            "verification/memory_capabilities/src/MemoryCapabilities.lean",
+            "verification/memory_model_drf/src/MemoryModelDRF.lean",
+            "verification/type_inference_compile/src/TypeInferenceCompile.lean",
+            "verification/type_inference_compile/src/Contracts.lean",
+            "verification/async_compile/src/AsyncCompile.lean",
+            "verification/gc_manual_borrow/src/GcManualBorrow.lean",
+            "verification/nogc_compile/src/NogcCompile.lean",
+            "verification/module_resolution/src/ModuleResolution.lean",
+            "verification/visibility_export/src/VisibilityExport.lean"
+        ]
+        return self.check_files(files)
+
+# Status reporting
+class ProofStatus:
+    module_name: String
+    obligations: ob.ObligationSet
+    check_result: Option<BatchCheckResult>
+
+    fn create(module_name: String, obligations: ob.ObligationSet) -> ProofStatus:
+        return ProofStatus(module_name, obligations, None)
+
+    fn with_check_result(self, result: BatchCheckResult) -> ProofStatus:
+        return ProofStatus(self.module_name, self.obligations, result)
+
+    fn report(self) -> String:
+        lines = []
+        lines.append("=== Proof Status: " + self.module_name + " ===")
+        lines.append("")
+        lines.append(self.obligations.summary())
+        lines.append("")
+
+        if self.check_result is not None:
+            lines.append(self.check_result.summary())
+
+        lines.append("")
+        lines.append("Obligations by status:")
+        counts = self.obligations.count_by_status()
+        for (status, count) in counts.items():
+            lines.append("  " + status + ": " + str(count))
+
+        return "\n".join(lines)

@@ -1,12 +1,21 @@
-// Option and Result helper functions for the interpreter
-//
-// This module contains helper functions for Option and Result type methods:
-// - map, and_then, or_else, filter for Option
-// - map, map_err, and_then, or_else for Result
-// - Message to Value conversion
+//! Option and Result helper functions for the interpreter
+//!
+//! This module contains helper functions for Option and Result type methods:
+//! - map, and_then, or_else, filter for Option
+//! - map, map_err, and_then, or_else for Result
+//! - Message to Value conversion
+
+use crate::error::CompileError;
+use crate::value::{Env, OptionVariant, ResultVariant, Value};
+use simple_common::actor::Message;
+use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
+use std::collections::HashMap;
+
+// Import parent module items
+use super::{eval_arg, evaluate_expr, exec_block, Control, Enums, ImplMethods};
 
 /// Convert a Message to a Value
-fn message_to_value(msg: Message) -> Value {
+pub(crate) fn message_to_value(msg: Message) -> Value {
     match msg {
         Message::Value(s) => Value::Str(s),
         Message::Bytes(b) => Value::Str(String::from_utf8_lossy(&b).to_string()),
@@ -18,8 +27,8 @@ fn message_to_value(msg: Message) -> Value {
 fn apply_lambda_to_value(
     val: &Value,
     lambda_arg: Value,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -42,15 +51,15 @@ fn handle_option_operation<F, W>(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     _mapper: F,
     wrap_result: W,
 ) -> Result<Value, CompileError>
 where
-    F: Fn(&Value, Value, &HashMap<String, FunctionDef>, &HashMap<String, ClassDef>, &Enums, &ImplMethods) -> Result<Value, CompileError>,
+    F: Fn(&Value, Value, &mut HashMap<String, FunctionDef>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> Result<Value, CompileError>,
     W: Fn(Value) -> Value,
 {
     if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
@@ -71,8 +80,8 @@ fn handle_result_map_operation<WOk, WErr>(
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     check_ok: bool,
@@ -98,13 +107,13 @@ where
 }
 
 /// Option map: apply lambda to Some value
-fn eval_option_map(
+pub(crate) fn eval_option_map(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -116,13 +125,13 @@ fn eval_option_map(
 }
 
 /// Option and_then: flat-map - apply lambda that returns Option to Some value
-fn eval_option_and_then(
+pub(crate) fn eval_option_and_then(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -134,13 +143,13 @@ fn eval_option_and_then(
 }
 
 /// Option or_else: if None, call function to get alternative Option
-fn eval_option_or_else(
+pub(crate) fn eval_option_or_else(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -161,13 +170,13 @@ fn eval_option_or_else(
 }
 
 /// Option filter: if Some and predicate returns true, keep Some; else None
-fn eval_option_filter(
+pub(crate) fn eval_option_filter(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -190,13 +199,13 @@ fn eval_option_filter(
 }
 
 /// Result map: apply lambda to Ok value
-fn eval_result_map(
+pub(crate) fn eval_result_map(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -218,13 +227,13 @@ fn eval_result_map(
 }
 
 /// Result map_err: apply lambda to Err value
-fn eval_result_map_err(
+pub(crate) fn eval_result_map_err(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -246,13 +255,13 @@ fn eval_result_map_err(
 }
 
 /// Result and_then: flat-map - apply lambda that returns Result to Ok value
-fn eval_result_and_then(
+pub(crate) fn eval_result_and_then(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -272,13 +281,13 @@ fn eval_result_and_then(
 }
 
 /// Result or_else: if Err, call function to get alternative Result
-fn eval_result_or_else(
+pub(crate) fn eval_result_or_else(
     variant: &str,
     payload: &Option<Box<Value>>,
     args: &[simple_parser::ast::Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

@@ -5,12 +5,15 @@ use std::collections::HashMap;
 // Module declarations
 pub mod type_system;
 pub mod layout;
+pub mod code_layout;
+pub mod layout_config;
 pub mod expressions;
 pub mod statements;
 pub mod contracts;
 pub mod functions;
 pub mod aop;
 pub mod module;
+pub mod verification;
 
 // GPU intrinsics
 /// GPU intrinsic function kind for kernel-side operations
@@ -22,12 +25,15 @@ include!("../type_registry.rs");
 // Re-export all public types
 pub use type_system::*;
 pub use layout::*;
+pub use code_layout::*;
+pub use layout_config::*;
 pub use expressions::*;
 pub use statements::*;
 pub use contracts::*;
 pub use functions::*;
 pub use aop::*;
 pub use module::*;
+pub use verification::*;
 
 #[cfg(test)]
 mod tests {
@@ -149,12 +155,14 @@ mod tests {
                     ty: TypeId::I64,
                     mutability: Mutability::Immutable,
                     inject: false,
+                    is_ghost: false,
                 },
                 LocalVar {
                     name: "b".to_string(),
                     ty: TypeId::I64,
                     mutability: Mutability::Immutable,
                     inject: false,
+                    is_ghost: false,
                 },
             ],
             locals: vec![],
@@ -181,6 +189,8 @@ mod tests {
             module_path: String::new(),
             attributes: vec![],
             effects: vec![],
+            layout_hint: None,
+            verification_mode: VerificationMode::default(),
         };
 
         assert_eq!(func.name, "add");
@@ -188,6 +198,11 @@ mod tests {
         assert_eq!(func.return_type, TypeId::I64);
         assert!(func.is_public());
         assert!(!func.params[0].is_mutable());
+        // Default layout phase is Steady
+        assert_eq!(func.layout_phase(), LayoutPhase::Steady);
+        assert!(!func.is_event_loop_anchor());
+        // Default verification mode is Unverified
+        assert!(!func.is_verified());
     }
 
     #[test]

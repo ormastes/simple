@@ -225,6 +225,9 @@ impl Effect {
             AstEffect::Net => Effect::Net,
             AstEffect::Fs => Effect::Fs,
             AstEffect::Unsafe => Effect::Unsafe,
+            // Verification effects are compile-time only, no runtime effect
+            AstEffect::Verify => Effect::Compute,
+            AstEffect::Trusted => Effect::Compute,
         }
     }
 

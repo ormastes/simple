@@ -258,4 +258,4 @@ fn test_coverage_data_generated() {
 
 - [LLVM Source-Based Code Coverage](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html)
 - [simple_mock_helper coverage module](../../src/util/simple_mock_helper/src/coverage.rs)
-- [BDD Spec Framework](../spec/bdd_spec.md)
+- [BDD Spec Framework](../spec/testing/testing_bdd_framework.md)

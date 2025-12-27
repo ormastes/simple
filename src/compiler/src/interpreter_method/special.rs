@@ -4,7 +4,7 @@ use crate::error::CompileError;
 use crate::value::{Value, Env, SpecialEnumType, OptionVariant, ResultVariant};
 use simple_parser::ast::{Argument, FunctionDef, ClassDef};
 use std::collections::HashMap;
-use crate::interpreter::{
+use super::super::{
     evaluate_expr,
     eval_arg, eval_arg_int,
     eval_option_map, eval_option_and_then, eval_option_or_else, eval_option_filter,
@@ -17,10 +17,46 @@ use crate::interpreter::{
     exec_block_fn,
     Control,
     UNIT_SUFFIX_TO_FAMILY, UNIT_FAMILY_CONVERSIONS,
+    Enums, ImplMethods,
 };
 use crate::interpreter_unit::decompose_si_prefix;
-use super::super::Enums;
-use super::super::ImplMethods;
+
+/// Extract method name from Symbol or String argument
+macro_rules! extract_method_name {
+    ($args:expr, $idx:expr, $context:expr, $env:expr, $functions:expr, $classes:expr, $enums:expr, $impl_methods:expr) => {{
+        let method_name = eval_arg($args, $idx, Value::Symbol("".to_string()), $env, $functions, $classes, $enums, $impl_methods)?;
+        match &method_name {
+            Value::Symbol(s) => s.clone(),
+            Value::Str(s) => s.clone(),
+            _ => return Err(CompileError::Semantic(format!("{} expects symbol or string method name", $context))),
+        }
+    }};
+}
+
+/// Execute operation with current configuring method
+macro_rules! with_configuring_method {
+    ($mock:expr, $context:expr, $op:expr) => {{
+        let configuring = $mock.configuring_method.lock().unwrap();
+        if let Some(ref method_name) = *configuring {
+            $op(method_name)
+        } else {
+            Err(CompileError::Semantic(format!("{}() must be chained after verify(:method)", $context)))
+        }
+    }};
+}
+
+/// Extract result from exec_block_fn return value
+macro_rules! extract_block_result {
+    ($block_exec:expr) => {
+        match $block_exec {
+            Ok((Control::Return(v), _)) => v,
+            Ok((_, Some(v))) => v,
+            Ok((_, None)) => Value::Nil,
+            Err(CompileError::TryError(val)) => val,
+            Err(e) => return Err(e),
+        }
+    };
+}
 
 /// Handle Unit value methods (value, suffix, family, to_string, to_X)
 pub fn handle_unit_methods(
@@ -30,8 +66,8 @@ pub fn handle_unit_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -149,8 +185,8 @@ pub fn handle_option_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -268,8 +304,8 @@ pub fn handle_result_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -409,20 +445,15 @@ pub fn handle_mock_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match method {
         // when(:method_name) - Configure a method for stubbing
         "when" => {
-            let method_name = eval_arg(args, 0, Value::Symbol("".to_string()), env, functions, classes, enums, impl_methods)?;
-            let method_str = match &method_name {
-                Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
-                _ => return Err(CompileError::Semantic("when expects symbol or string method name".into())),
-            };
+            let method_str = extract_method_name!(args, 0, "when", env, functions, classes, enums, impl_methods);
             mock.when_method(&method_str);
             return Ok(Some(Value::Mock(mock.clone())));
         }
@@ -454,33 +485,24 @@ pub fn handle_mock_methods(
         }
         // verify(:method_name) - Start verification for a method
         "verify" => {
-            let method_name = eval_arg(args, 0, Value::Symbol("".to_string()), env, functions, classes, enums, impl_methods)?;
-            let method_str = match &method_name {
-                Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
-                _ => return Err(CompileError::Semantic("verify expects symbol or string method name".into())),
-            };
+            let method_str = extract_method_name!(args, 0, "verify", env, functions, classes, enums, impl_methods);
             mock.when_method(&method_str); // Reuse to set current method
             return Ok(Some(Value::Mock(mock.clone())));
         }
         // called() - Check if method was called at least once
         "called" => {
-            let configuring = mock.configuring_method.lock().unwrap();
-            if let Some(ref method_name) = *configuring {
+            with_configuring_method!(mock, "called", |method_name| {
                 let was_called = mock.was_called(method_name);
-                return Ok(Some(Value::Bool(was_called)));
-            }
-            return Err(CompileError::Semantic("called() must be chained after verify(:method)".into()));
+                Ok(Some(Value::Bool(was_called)))
+            })
         }
         // calledTimes(n) - Check exact call count
         "calledTimes" | "called_times" => {
             let expected = eval_arg_int(args, 0, 1, env, functions, classes, enums, impl_methods)?;
-            let configuring = mock.configuring_method.lock().unwrap();
-            if let Some(ref method_name) = *configuring {
+            with_configuring_method!(mock, "calledTimes", |method_name| {
                 let actual = mock.call_count(method_name) as i64;
-                return Ok(Some(Value::Bool(actual == expected)));
-            }
-            return Err(CompileError::Semantic("calledTimes() must be chained after verify(:method)".into()));
+                Ok(Some(Value::Bool(actual == expected)))
+            })
         }
         // calledWith(args...) - Check if method was called with specific arguments
         "calledWith" | "called_with" => {
@@ -489,12 +511,10 @@ pub fn handle_mock_methods(
                 let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
                 expected_args.push(val);
             }
-            let configuring = mock.configuring_method.lock().unwrap();
-            if let Some(ref method_name) = *configuring {
+            with_configuring_method!(mock, "calledWith", |method_name| {
                 let was_called_with = mock.was_called_with(method_name, &expected_args);
-                return Ok(Some(Value::Bool(was_called_with)));
-            }
-            return Err(CompileError::Semantic("calledWith() must be chained after verify(:method)".into()));
+                Ok(Some(Value::Bool(was_called_with)))
+            })
         }
         // reset() - Clear all call records
         "reset" => {
@@ -503,12 +523,7 @@ pub fn handle_mock_methods(
         }
         // getCalls(:method) - Get all calls to a method
         "getCalls" | "get_calls" => {
-            let method_name = eval_arg(args, 0, Value::Symbol("".to_string()), env, functions, classes, enums, impl_methods)?;
-            let method_str = match &method_name {
-                Value::Symbol(s) => s.clone(),
-                Value::Str(s) => s.clone(),
-                _ => return Err(CompileError::Semantic("getCalls expects symbol or string method name".into())),
-            };
+            let method_str = extract_method_name!(args, 0, "getCalls", env, functions, classes, enums, impl_methods);
             let calls = mock.get_calls(&method_str);
             let call_arrays: Vec<Value> = calls.into_iter().map(Value::Array).collect();
             return Ok(Some(Value::Array(call_arrays)));
@@ -552,8 +567,8 @@ pub fn handle_channel_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -592,8 +607,8 @@ pub fn handle_threadpool_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -617,8 +632,8 @@ pub fn handle_trait_object_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
@@ -645,17 +660,19 @@ pub fn handle_constructor_methods(
     method: &str,
     args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
-    if let Some(class_def) = classes.get(class_name) {
+    if let Some(class_def) = classes.get(class_name).cloned() {
         // Find static method (no self parameter)
         if let Some(method_def) = class_def.methods.iter().find(|m| m.name == method) {
-            // Execute without self
-            let mut local_env = env.clone();
+            // Execute without self - start with empty local_env to avoid shadowing defaults
+            let mut local_env: HashMap<String, Value> = HashMap::new();
             let mut positional_idx = 0;
+
+            // Bind provided arguments
             for arg in args {
                 let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
                 if let Some(name) = &arg.name {
@@ -666,6 +683,19 @@ pub fn handle_constructor_methods(
                     positional_idx += 1;
                 }
             }
+
+            // Bind default values for remaining parameters using an empty scope
+            // to prevent caller's variables from shadowing defaults
+            let empty_env: HashMap<String, Value> = HashMap::new();
+            for param in &method_def.params {
+                if !local_env.contains_key(&param.name) {
+                    if let Some(default_expr) = &param.default {
+                        let default_val = evaluate_expr(default_expr, &empty_env, functions, classes, enums, impl_methods)?;
+                        local_env.insert(param.name.clone(), default_val);
+                    }
+                }
+            }
+
             return match exec_block(&method_def.body, &mut local_env, functions, classes, enums, impl_methods) {
                 Ok(Control::Return(v)) => Ok(Some(v)),
                 Ok(_) => Ok(Some(Value::Nil)),
@@ -701,13 +731,13 @@ pub fn find_and_exec_method_with_self(
     class: &str,
     fields: &HashMap<String, Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<(Value, Value)>, CompileError> {
     // Check class methods
-    if let Some(class_def) = classes.get(class) {
+    if let Some(class_def) = classes.get(class).cloned() {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
             let (result, updated_self) = exec_function_with_self_return(func, args, env, functions, classes, enums, impl_methods, class, fields)?;
             return Ok(Some((result, updated_self)));
@@ -728,8 +758,8 @@ pub fn exec_function_with_self_return(
     func: &FunctionDef,
     args: &[Argument],
     outer_env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
     class_name: &str,
@@ -763,13 +793,7 @@ pub fn exec_function_with_self_return(
     }
 
     // Execute the function body with implicit return support
-    let result = match exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods) {
-        Ok((Control::Return(v), _)) => v,
-        Ok((_, Some(v))) => v, // Implicit return from last expression
-        Ok((_, None)) => Value::Nil,
-        Err(CompileError::TryError(val)) => val,
-        Err(e) => return Err(e),
-    };
+    let result = extract_block_result!(exec_block_fn(&func.body, &mut local_env, functions, classes, enums, impl_methods));
 
     // Get the potentially modified self
     let updated_self = local_env.get("self").cloned().unwrap_or_else(|| Value::Object {

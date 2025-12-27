@@ -1,5 +1,20 @@
 # Simple Language Syntax Specification
 
+**Status:** Stable
+**Feature IDs:** #10-19
+**Last Updated:** 2025-12-28
+**Keywords:** syntax, lexical, operators, execution-modes, indentation
+**Topics:** syntax, type-system
+
+Comprehensive specification of Simple's syntax, execution modes, and lexical structure.
+
+## Related Specifications
+- [Types](types.md) - Type annotations and type syntax
+- [Functions](functions.md) - Function definition syntax
+- [Parser](parser/overview.md) - Parser implementation details
+
+---
+
 This document covers the core syntax, execution modes, and basic language constructs.
 
 ## Execution Modes

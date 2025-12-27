@@ -1,15 +1,17 @@
 # One-Pass LL(1) Macro Compilation Status (#1304)
 
-**Date:** 2025-12-23
-**Status:** ✅ **Core Validation Infrastructure COMPLETE**
+**Date:** 2025-12-23 (Updated: 2025-12-27)
+**Status:** 🔄 **Validation Infrastructure COMPLETE - Parser Integration PENDING**
 
 ## Overview
 
 Feature #1304 aims to enable one-pass LL(1) compilation for macros by validating contracts at macro definition time, allowing:
-- Symbol table updates without full expansion
-- IDE autocomplete for macro-introduced symbols
-- Forward reference prevention
-- Shadowing detection
+- ✅ Forward reference prevention (validation working)
+- ✅ Shadowing detection (validation working)
+- 🔄 Symbol table updates without full expansion (infrastructure ready, not wired)
+- ⏳ IDE autocomplete for macro-introduced symbols (depends on symbol registration)
+
+**Current Status:** Validation infrastructure is complete (488 lines) but parser integration and symbol table registration are pending (~3-5 hours work).
 
 ## Completed Components
 
@@ -211,15 +213,40 @@ pub fn validate_macro_contract(
 - **Symbol Scope**: Linear scan of existing symbols (typically <100 symbols)
 - **Order Tracking**: Simple append to Vec (amortized O(1))
 
-## Summary
+## Summary (Updated 2025-12-27)
 
-**Core feature #1304 is effectively complete** with:
+**Feature #1304 status: 🔄 Partially Complete (Infrastructure Ready, Integration Pending)**
+
+### ✅ What's Complete:
 - ✅ Comprehensive validation infrastructure (488 lines)
-- ✅ Full pipeline integration (6 files modified)
+- ✅ 6 files modified with validation hooks
 - ✅ 12 unit tests passing
-- ✅ Error codes defined and used
-- ⏳ Integration tests created (need macro syntax fixes)
+- ✅ Error codes defined (E1402-E1406)
+- ✅ Ordering validation (macros before use)
+- ✅ Shadowing detection
+- ✅ Template variable validation
+- ✅ Type annotation requirements
 
-The implementation enables one-pass LL(1) compilation for macros by validating contracts at definition time, preventing forward references and shadowing, and ensuring type safety—all without executing macro bodies.
+### 🔄 What's Partial:
+- 🔄 Parser integration - Validation infrastructure exists but parser doesn't use it for one-pass compilation
+- 🔄 Symbol table updates - Contract processing works but doesn't register symbols
 
-**Recommended Status**: Mark #1304 as ✅ **Complete** with note about integration test refinement.
+### ⏳ What's Pending (~3-5 hours):
+1. **LL(1) Parser Integration** (~3 hours)
+   - Wire validation into parser's macro handling
+   - Enable one-pass compilation with immediate symbol updates
+   - Update parser to call contract processing during parse
+
+2. **Symbol Table Registration** (~2 hours)
+   - Make symbol tables mutable in expansion path
+   - Register functions/classes/types from `intro` contracts
+   - Enable IDE autocomplete for introduced symbols
+
+3. **Integration Testing**
+   - Test one-pass compilation flow
+   - Verify symbol availability before macro body execution
+   - Test IDE autocomplete scenarios
+
+**Current Status**: Validation infrastructure is production-ready, but the "one-pass LL(1) compilation" goal requires parser work that hasn't been done yet.
+
+**Accurate Status**: Mark #1304 as 🔄 **Partial** - Infrastructure complete (50%), parser integration pending (50%).

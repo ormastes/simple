@@ -451,7 +451,7 @@ print("Result: {result}")
 
 ## Related Documents
 
-- [GPU SIMD Specification](../spec/gpu_simd.md) - Language-level GPU features
+- [GPU SIMD Specification](../spec/gpu_simd/README.md) - Language-level GPU features
 - [Vulkan Phase 1 Progress](../report/VULKAN_PHASE_1_PROGRESS.md) - Graphics pipeline status
 - [Vulkan Backend Implementation](../report/VULKAN_BACKEND_IMPLEMENTATION_2025-12-26.md) - SPIR-V compute backend
 - [PyTorch Integration Plan](PYTORCH_INTEGRATION_PLAN.md) - ML framework integration

@@ -115,7 +115,8 @@ pub enum TokenKind {
     Unit, // unit (for unit type definitions)
     Extern,
     Context,
-    With, // with (for context managers)
+    With,  // with (for context managers)
+    Ghost, // ghost (verification-only code, erased at runtime)
     Macro,
     Bang,   // ! (for macro invocations)
     Vec,    // vec (for SIMD vector types)
@@ -165,6 +166,13 @@ pub enum TokenKind {
 
     // Memory management keywords
     HandlePool, // handle_pool (declare a handle pool for a type)
+
+    // Simple Math keywords (#1910-#1969)
+    Grid,    // grid (2D matrix literal)
+    Tensor,  // tensor (N-D tensor literal)
+    Slice,   // slice (tensor slice block)
+    Flat,    // flat (sparse tensor mode)
+    Default, // default (default value for sparse tensors)
 
     // Operators
     Plus,        // +

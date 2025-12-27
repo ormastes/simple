@@ -563,6 +563,8 @@ mod tests {
             module_path: String::new(),
             attributes: vec![],
             effects: vec![],
+            layout_hint: None,
+            verification_mode: crate::hir::VerificationMode::default(),
         };
 
         module.functions.push(func);

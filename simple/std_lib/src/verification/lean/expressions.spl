@@ -1,0 +1,394 @@
+# Lean Expression Translation
+#
+# Translates Simple expressions to Lean 4 syntax.
+
+import verification.models.contracts.{ContractExpr, ContractExprKind}
+
+# Simple expression AST
+enum SimpleExpr:
+    IntLit(value: Int)
+    BoolLit(value: Bool)
+    StringLit(value: String)
+    Var(name: String)
+    BinOp(op: String, left: SimpleExpr, right: SimpleExpr)
+    UnOp(op: String, expr: SimpleExpr)
+    Call(fn_name: String, args: List[SimpleExpr])
+    FieldAccess(obj: SimpleExpr, field: String)
+    MethodCall(obj: SimpleExpr, method: String, args: List[SimpleExpr])
+    If(cond: SimpleExpr, then_branch: SimpleExpr, else_branch: SimpleExpr)
+    Match(expr: SimpleExpr, cases: List[(String, SimpleExpr)])
+    Lambda(params: List[String], body: SimpleExpr)
+    Let(name: String, value: SimpleExpr, body: SimpleExpr)
+    ListLit(elements: List[SimpleExpr])
+    TupleLit(elements: List[SimpleExpr])
+    Constructor(type_name: String, variant: String, args: List[SimpleExpr])
+
+# Translate Simple expression to Lean
+fn translate_expr(expr: SimpleExpr) -> String:
+    match expr:
+        case SimpleExpr.IntLit(v):
+            return str(v)
+
+        case SimpleExpr.BoolLit(v):
+            if v:
+                return "true"
+            else:
+                return "false"
+
+        case SimpleExpr.StringLit(v):
+            return "\"" + escape_string(v) + "\""
+
+        case SimpleExpr.Var(name):
+            return lean_ident(name)
+
+        case SimpleExpr.BinOp(op, left, right):
+            l = translate_expr(left)
+            r = translate_expr(right)
+            lean_op = translate_operator(op)
+            return "(" + l + " " + lean_op + " " + r + ")"
+
+        case SimpleExpr.UnOp(op, e):
+            inner = translate_expr(e)
+            lean_op = translate_unary_operator(op)
+            return "(" + lean_op + inner + ")"
+
+        case SimpleExpr.Call(fn_name, args):
+            arg_strs = [translate_expr(a) for a in args]
+            if len(arg_strs) == 0:
+                return lean_ident(fn_name)
+            return lean_ident(fn_name) + " " + arg_strs.join(" ")
+
+        case SimpleExpr.FieldAccess(obj, field):
+            obj_str = translate_expr(obj)
+            return obj_str + "." + lean_ident(field)
+
+        case SimpleExpr.MethodCall(obj, method, args):
+            obj_str = translate_expr(obj)
+            arg_strs = [translate_expr(a) for a in args]
+            if len(arg_strs) == 0:
+                return obj_str + "." + lean_ident(method)
+            return obj_str + "." + lean_ident(method) + " " + arg_strs.join(" ")
+
+        case SimpleExpr.If(cond, then_b, else_b):
+            c = translate_expr(cond)
+            t = translate_expr(then_b)
+            e = translate_expr(else_b)
+            return "if " + c + " then " + t + " else " + e
+
+        case SimpleExpr.Match(e, cases):
+            expr_str = translate_expr(e)
+            case_strs = []
+            for (pattern, body) in cases:
+                body_str = translate_expr(body)
+                case_strs.append("| " + pattern + " => " + body_str)
+            return "match " + expr_str + " with\n" + case_strs.join("\n")
+
+        case SimpleExpr.Lambda(params, body):
+            body_str = translate_expr(body)
+            params_str = params.join(" ")
+            return "fun " + params_str + " => " + body_str
+
+        case SimpleExpr.Let(name, value, body):
+            v = translate_expr(value)
+            b = translate_expr(body)
+            return "let " + lean_ident(name) + " := " + v + "\n" + b
+
+        case SimpleExpr.ListLit(elements):
+            elem_strs = [translate_expr(e) for e in elements]
+            return "[" + elem_strs.join(", ") + "]"
+
+        case SimpleExpr.TupleLit(elements):
+            elem_strs = [translate_expr(e) for e in elements]
+            return "(" + elem_strs.join(", ") + ")"
+
+        case SimpleExpr.Constructor(type_name, variant, args):
+            arg_strs = [translate_expr(a) for a in args]
+            if len(arg_strs) == 0:
+                return type_name + "." + variant
+            return type_name + "." + variant + " " + arg_strs.join(" ")
+
+# Convert snake_case to camelCase
+fn lean_ident(name: String) -> String:
+    parts = name.split("_")
+    if len(parts) == 1:
+        return name
+    result = parts[0]
+    for i in range(1, len(parts)):
+        if len(parts[i]) > 0:
+            result = result + parts[i][0].upper() + parts[i][1:]
+    return result
+
+# Escape special characters in strings
+fn escape_string(s: String) -> String:
+    result = ""
+    for c in s:
+        if c == "\\":
+            result = result + "\\\\"
+        elif c == "\"":
+            result = result + "\\\""
+        elif c == "\n":
+            result = result + "\\n"
+        elif c == "\t":
+            result = result + "\\t"
+        else:
+            result = result + c
+    return result
+
+# Translate binary operator
+fn translate_operator(op: String) -> String:
+    match op:
+        case "+": return "+"
+        case "-": return "-"
+        case "*": return "*"
+        case "/": return "/"
+        case "%": return "%"
+        case "==": return "=="
+        case "!=": return "!="
+        case "<": return "<"
+        case "<=": return "<="
+        case ">": return ">"
+        case ">=": return ">="
+        case "and": return "&&"
+        case "or": return "||"
+        case "&&": return "&&"
+        case "||": return "||"
+        case "++": return "++"  # List concat
+        case "::": return "::"  # List cons
+        case _: return op
+
+# Translate unary operator
+fn translate_unary_operator(op: String) -> String:
+    match op:
+        case "-": return "-"
+        case "not": return "!"
+        case "!": return "!"
+        case _: return op
+
+# Pattern translation
+enum SimplePattern:
+    WildcardPat
+    VarPat(name: String)
+    ConstructorPat(type_name: String, variant: String, args: List[SimplePattern])
+    LitPat(value: SimpleExpr)
+    TuplePat(elements: List[SimplePattern])
+
+fn translate_pattern(pat: SimplePattern) -> String:
+    match pat:
+        case SimplePattern.WildcardPat:
+            return "_"
+
+        case SimplePattern.VarPat(name):
+            return lean_ident(name)
+
+        case SimplePattern.ConstructorPat(type_name, variant, args):
+            if len(args) == 0:
+                return type_name + "." + variant
+            arg_strs = [translate_pattern(a) for a in args]
+            return type_name + "." + variant + " " + arg_strs.join(" ")
+
+        case SimplePattern.LitPat(value):
+            return translate_expr(value)
+
+        case SimplePattern.TuplePat(elements):
+            elem_strs = [translate_pattern(e) for e in elements]
+            return "(" + elem_strs.join(", ") + ")"
+
+# Statement translation (for imperative code in do blocks)
+enum SimpleStmt:
+    ExprStmt(expr: SimpleExpr)
+    LetStmt(name: String, value: SimpleExpr)
+    ReturnStmt(value: SimpleExpr)
+    IfStmt(cond: SimpleExpr, then_stmts: List[SimpleStmt], else_stmts: List[SimpleStmt])
+    MatchStmt(expr: SimpleExpr, cases: List[(SimplePattern, List[SimpleStmt])])
+    ForStmt(var: String, iter: SimpleExpr, body: List[SimpleStmt])
+
+fn translate_stmt(stmt: SimpleStmt, in_do_block: Bool = True) -> String:
+    match stmt:
+        case SimpleStmt.ExprStmt(e):
+            return translate_expr(e)
+
+        case SimpleStmt.LetStmt(name, value):
+            v = translate_expr(value)
+            if in_do_block:
+                return "let " + lean_ident(name) + " := " + v
+            return "let " + lean_ident(name) + " := " + v
+
+        case SimpleStmt.ReturnStmt(value):
+            v = translate_expr(value)
+            if in_do_block:
+                return "return " + v
+            return v
+
+        case SimpleStmt.IfStmt(cond, then_stmts, else_stmts):
+            c = translate_expr(cond)
+            then_str = [translate_stmt(s.join("\n") for s in then_stmts])
+            else_str = [translate_stmt(s.join("\n") for s in else_stmts])
+            return "if " + c + " then\n" + then_str + "\nelse\n" + else_str
+
+        case SimpleStmt.MatchStmt(expr, cases):
+            e = translate_expr(expr)
+            case_strs = []
+            for (pat, stmts) in cases:
+                pat_str = translate_pattern(pat)
+                body_str = [translate_stmt(s.join("\n") for s in stmts])
+                case_strs.append("| " + pat_str + " =>\n" + body_str)
+            return "match " + e + " with\n" + case_strs.join("\n")
+
+        case SimpleStmt.ForStmt(var, iter, body):
+            it = translate_expr(iter)
+            body_str = [translate_stmt(s.join("\n") for s in body])
+            return "for " + lean_ident(var) + " in " + it + " do\n" + body_str
+
+# =============================================================================
+# Contract Expression Translation
+# Translates ContractExpr from verification.models.contracts to Lean syntax
+# =============================================================================
+
+fn translate_contract_expr(expr: ContractExpr) -> String:
+    match expr.kind:
+        case ContractExprKind.True_:
+            "True"
+        case ContractExprKind.False_:
+            "False"
+        case ContractExprKind.Var:
+            match expr.name:
+                case Some(name): lean_ident(name)
+                case None: "_"
+        case ContractExprKind.OldValue:
+            if expr.children.len() > 0:
+                let inner = translate_contract_expr(expr.children[0])
+                f"old_{inner}"
+            else:
+                "old_value"
+        case ContractExprKind.Result:
+            "result"
+        case ContractExprKind.And:
+            if expr.children.len() >= 2:
+                let left = translate_contract_expr(expr.children[0])
+                let right = translate_contract_expr(expr.children[1])
+                f"({left} ∧ {right})"
+            else:
+                "True"
+        case ContractExprKind.Or:
+            if expr.children.len() >= 2:
+                let left = translate_contract_expr(expr.children[0])
+                let right = translate_contract_expr(expr.children[1])
+                f"({left} ∨ {right})"
+            else:
+                "False"
+        case ContractExprKind.Not:
+            if expr.children.len() > 0:
+                let inner = translate_contract_expr(expr.children[0])
+                f"(¬{inner})"
+            else:
+                "True"
+        case ContractExprKind.Implies:
+            if expr.children.len() >= 2:
+                let left = translate_contract_expr(expr.children[0])
+                let right = translate_contract_expr(expr.children[1])
+                f"({left} → {right})"
+            else:
+                "True"
+        case ContractExprKind.Iff:
+            if expr.children.len() >= 2:
+                let left = translate_contract_expr(expr.children[0])
+                let right = translate_contract_expr(expr.children[1])
+                f"({left} ↔ {right})"
+            else:
+                "True"
+        case ContractExprKind.Forall:
+            let var_name = expr.name.unwrap_or("x")
+            let type_name = expr.type_name.unwrap_or("_")
+            if expr.children.len() > 0:
+                let body = translate_contract_expr(expr.children[0])
+                f"(∀ {lean_ident(var_name)} : {type_name}, {body})"
+            else:
+                f"(∀ {lean_ident(var_name)} : {type_name}, True)"
+        case ContractExprKind.Exists:
+            let var_name = expr.name.unwrap_or("x")
+            let type_name = expr.type_name.unwrap_or("_")
+            if expr.children.len() > 0:
+                let body = translate_contract_expr(expr.children[0])
+                f"(∃ {lean_ident(var_name)} : {type_name}, {body})"
+            else:
+                f"(∃ {lean_ident(var_name)} : {type_name}, True)"
+        case ContractExprKind.Eq:
+            translate_binary_contract(expr, "=")
+        case ContractExprKind.Ne:
+            translate_binary_contract(expr, "≠")
+        case ContractExprKind.Lt:
+            translate_binary_contract(expr, "<")
+        case ContractExprKind.Le:
+            translate_binary_contract(expr, "≤")
+        case ContractExprKind.Gt:
+            translate_binary_contract(expr, ">")
+        case ContractExprKind.Ge:
+            translate_binary_contract(expr, "≥")
+        case ContractExprKind.Add:
+            translate_binary_contract(expr, "+")
+        case ContractExprKind.Sub:
+            translate_binary_contract(expr, "-")
+        case ContractExprKind.Mul:
+            translate_binary_contract(expr, "*")
+        case ContractExprKind.Div:
+            translate_binary_contract(expr, "/")
+        case ContractExprKind.Mod:
+            translate_binary_contract(expr, "%")
+        case ContractExprKind.Neg:
+            if expr.children.len() > 0:
+                let inner = translate_contract_expr(expr.children[0])
+                f"(-{inner})"
+            else:
+                "0"
+        case ContractExprKind.Len:
+            if expr.children.len() > 0:
+                let inner = translate_contract_expr(expr.children[0])
+                f"({inner}).length"
+            else:
+                "0"
+        case ContractExprKind.Index:
+            if expr.children.len() >= 2:
+                let coll = translate_contract_expr(expr.children[0])
+                let idx = translate_contract_expr(expr.children[1])
+                f"({coll}[{idx}])"
+            else:
+                "_"
+        case ContractExprKind.Contains:
+            if expr.children.len() >= 2:
+                let elem = translate_contract_expr(expr.children[0])
+                let coll = translate_contract_expr(expr.children[1])
+                f"({elem} ∈ {coll})"
+            else:
+                "False"
+        case ContractExprKind.Call:
+            let func_name = expr.name.unwrap_or("_")
+            let args = expr.children.map(|c| translate_contract_expr(c))
+            if args.len() == 0:
+                lean_ident(func_name)
+            else:
+                f"{lean_ident(func_name)} {args.join(\" \")}"
+
+# Helper for binary operations
+fn translate_binary_contract(expr: ContractExpr, op: String) -> String:
+    if expr.children.len() >= 2:
+        let left = translate_contract_expr(expr.children[0])
+        let right = translate_contract_expr(expr.children[1])
+        f"({left} {op} {right})"
+    else:
+        "_"
+
+# Translate a decreases expression for termination proofs
+fn translate_decreases_expr(exprs: List<ContractExpr>) -> String:
+    if exprs.len() == 0:
+        "_"
+    else if exprs.len() == 1:
+        translate_contract_expr(exprs[0])
+    else:
+        let translated = exprs.map(|e| translate_contract_expr(e))
+        f"({translated.join(\", \")})"
+
+# Generate a Lean proposition from a contract expression
+fn to_lean_prop(expr: ContractExpr) -> String:
+    let translated = translate_contract_expr(expr)
+    # Wrap in decidability if needed
+    translated

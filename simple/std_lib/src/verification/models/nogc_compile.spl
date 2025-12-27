@@ -1,0 +1,131 @@
+# NoGC Compile Model
+#
+# Formal model for no-GC (manual memory) compilation mode.
+# Mirrors: verification/nogc_compile/src/NogcCompile.lean
+#
+# In NoGC mode:
+#   - No garbage collection
+#   - Explicit allocation/deallocation
+#   - Stack allocation preferred
+#   - Ownership tracking required
+
+# Allocation mode
+enum AllocMode:
+    Stack
+    Heap
+    Static
+
+    fn to_lean(self) -> String:
+        match self:
+            case Stack: return "AllocMode.stack"
+            case Heap: return "AllocMode.heap"
+            case Static: return "AllocMode.static"
+
+# Ownership state
+enum Ownership:
+    Owned
+    Borrowed
+    Moved
+
+    fn to_lean(self) -> String:
+        match self:
+            case Owned: return "Ownership.owned"
+            case Borrowed: return "Ownership.borrowed"
+            case Moved: return "Ownership.moved"
+
+# Memory region
+class MemRegion:
+    id: Int
+    alloc_mode: AllocMode
+    size: Int
+    is_freed: Bool
+
+    fn create(id: Int, mode: AllocMode, size: Int) -> MemRegion:
+        return MemRegion(id, mode, size, False)
+
+    fn to_lean(self) -> String:
+        freed = "false"
+        if self.is_freed:
+            freed = "true"
+        return "{{ id := " + str(self.id) + ", allocMode := " + self.alloc_mode.to_lean() + ", size := " + str(self.size) + ", isFreed := " + freed + " }}"
+
+# Variable with ownership tracking
+class VarState:
+    name: String
+    region: MemRegion | None
+    ownership: Ownership
+
+    fn create(name: String) -> VarState:
+        return VarState(name, None, Ownership.Owned)
+
+    fn with_region(self, region: MemRegion) -> VarState:
+        return VarState(self.name, region, self.ownership)
+
+    fn is_valid(self) -> Bool:
+        if self.ownership == Ownership.Moved:
+            return False
+        if self.region is not None and self.region.is_freed:
+            return False
+        return True
+
+# NoGC context for compilation
+class NoGcContext:
+    regions: List[MemRegion]
+    variables: List[VarState]
+    next_region_id: Int
+    stack_depth: Int
+
+    fn create() -> NoGcContext:
+        return NoGcContext([], [], 0, 0)
+
+    fn alloc_stack(self, size: Int) -> (NoGcContext, MemRegion):
+        region = MemRegion.create(self.next_region_id, AllocMode.Stack, size)
+        new_regions = self.regions.append(region)
+        return (NoGcContext(new_regions, self.variables, self.next_region_id + 1, self.stack_depth), region)
+
+    fn alloc_heap(self, size: Int) -> (NoGcContext, MemRegion):
+        region = MemRegion.create(self.next_region_id, AllocMode.Heap, size)
+        new_regions = self.regions.append(region)
+        return (NoGcContext(new_regions, self.variables, self.next_region_id + 1, self.stack_depth), region)
+
+    fn free_region(self, region_id: Int) -> NoGcContext:
+        new_regions = []
+        for r in self.regions:
+            if r.id == region_id:
+                new_regions.append(MemRegion(r.id, r.alloc_mode, r.size, True))
+            else:
+                new_regions.append(r)
+        return NoGcContext(new_regions, self.variables, self.next_region_id, self.stack_depth)
+
+    fn enter_scope(self) -> NoGcContext:
+        return NoGcContext(self.regions, self.variables, self.next_region_id, self.stack_depth + 1)
+
+    fn exit_scope(self) -> NoGcContext:
+        # Free all stack allocations at current depth
+        # Simplified - would track scope per region
+        return NoGcContext(self.regions, self.variables, self.next_region_id, self.stack_depth - 1)
+
+# Check for use-after-free
+fn check_use_after_free(ctx: NoGcContext, region_id: Int) -> Bool:
+    for r in ctx.regions:
+        if r.id == region_id:
+            return r.is_freed
+    return True  # Region not found = invalid
+
+# Check for double-free
+fn check_double_free(ctx: NoGcContext, region_id: Int) -> Bool:
+    for r in ctx.regions:
+        if r.id == region_id:
+            return r.is_freed
+    return False
+
+# Specification functions
+
+fn no_use_after_free_spec() -> String:
+    return "theorem no_use_after_free : ∀ ctx var, valid_access ctx var → ¬is_freed ctx (region_of var)"
+
+fn no_double_free_spec() -> String:
+    return "theorem no_double_free : ∀ ctx region, free ctx region → ¬is_freed ctx region"
+
+fn stack_lifetime_spec() -> String:
+    return "theorem stack_lifetime : ∀ ctx var, alloc_mode var = stack → scope_of var ⊆ lifetime_of var"

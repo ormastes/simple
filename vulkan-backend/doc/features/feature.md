@@ -61,28 +61,28 @@ All feature tables use this standardized 8-column format:
 | #936-#945 | Architecture Test Library | ✅ Complete |
 | #950-#970 | Formal Verification | ✅ Complete |
 | #980-#999 | Code Quality & Documentation | ✅ Complete |
-| #1000-#1050 | AOP & Unified Predicates | ✅ Complete → [feature_done_11.md](feature_done_11.md) |
-| #1051-#1060 | SDN Self-Hosting | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
-| #1061-#1103 | Missing Language Features | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
+| #1000-#1050 | AOP & Unified Predicates | ✅ Complete → [feature_done_11.md](done/feature_done_11.md) |
+| #1051-#1060 | SDN Self-Hosting | ✅ Complete → [feature_done_9.md](done/feature_done_9.md) |
+| #1061-#1103 | Missing Language Features | ✅ Complete → [feature_done_9.md](done/feature_done_9.md) |
 | #1104-#1115 | Concurrency Modes | ✅ Complete (12/12) |
 | #1116-#1130 | FFI/ABI Interface | ✅ Complete |
-| #1131-#1145 | Formatting & Lints | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
-| #1146-#1155 | Trait Coherence | ✅ Complete → [feature_done_9.md](feature_done_9.md) |
-| #1156-#1179 | Tree-sitter Implementation | ✅ Complete (24/24) → [feature_done_13.md](feature_done_13.md) |
+| #1131-#1145 | Formatting & Lints | ✅ Complete → [feature_done_9.md](done/feature_done_9.md) |
+| #1146-#1155 | Trait Coherence | ✅ Complete → [feature_done_9.md](done/feature_done_9.md) |
+| #1156-#1179 | Tree-sitter Implementation | ✅ Complete (24/24) → [feature_done_13.md](done/feature_done_13.md) |
 | #1180-#1199 | Multi-Language Tooling | 📋 Planned |
 | #1200-#1209 | Language Model Server | ✅ Complete (100% - Parser Pending) |
 | #1210-#1299 | MCP-MCP (Model Context Preview) | 🔄 Core Complete (20/90) |
-| #1300-#1324 | Metaprogramming (Macros, DSL, Decorators) | ✅ Complete → [feature_done_11.md](feature_done_11.md) |
-| #1325-#1329 | Pattern Matching Safety | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
+| #1300-#1324 | Metaprogramming (Macros, DSL, Decorators) | ✅ Complete → [feature_done_11.md](done/feature_done_11.md) |
+| #1325-#1329 | Pattern Matching Safety | ✅ Complete (5/5) → [feature_done_10.md](done/feature_done_10.md) |
 | #1330-#1342 | Type System (Unions, Bitfields, HTTP) | ✅ Complete (13/13) |
-| #1343-#1347 | Gherkin/BDD Extensions | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
+| #1343-#1347 | Gherkin/BDD Extensions | ✅ Complete (5/5) → [feature_done_10.md](done/feature_done_10.md) |
 | #1348-#1358 | MCP-MCP Protocol Core | 📋 Planned |
-| #1359-#1368 | Developer Tools (LSP, DAP) | ✅ Complete (10/10) → [feature_done_13.md](feature_done_13.md) |
+| #1359-#1368 | Developer Tools (LSP, DAP) | ✅ Complete (10/10) → [feature_done_13.md](done/feature_done_13.md) |
 | #1369-#1378 | UI Frameworks (TUI, GUI) | 📋 Planned |
 | #1379-#1387 | Language Features (Context Managers, Primitives) | ✅ Complete (9/9) |
-| #1388-#1390 | Shared Infrastructure | ✅ Complete (3/3) → [feature_done_10.md](feature_done_10.md) |
-| #1391-#1395 | Advanced Contract Features | ✅ Complete (5/5) → [feature_done_10.md](feature_done_10.md) |
-| #1396-#1403 | Mock Library Fluent API | ✅ Complete (8/8) → [feature_done_10.md](feature_done_10.md) |
+| #1388-#1390 | Shared Infrastructure | ✅ Complete (3/3) → [feature_done_10.md](done/feature_done_10.md) |
+| #1391-#1395 | Advanced Contract Features | ✅ Complete (5/5) → [feature_done_10.md](done/feature_done_10.md) |
+| #1396-#1403 | Mock Library Fluent API | ✅ Complete (8/8) → [feature_done_10.md](done/feature_done_10.md) |
 | #1404-#1420 | Electron Desktop Apps | ✅ Complete (Non-UI: 3 modules + 50+ tests) |
 | #1421-#1440 | VSCode Extension Support | 🔄 In Progress (Tests: 38+ E2E tests) |
 | #1441-#1450 | LSP Tree-sitter Integration | ✅ Complete (10/10) |
@@ -91,7 +91,7 @@ All feature tables use this standardized 8-column format:
 
 ## Summary Statistics
 
-**Overall Progress:** 62% (406/676 active features complete, 169 archived in feature_done_*.md, 50 new features added)
+**Overall Progress:** 62% (406/676 active features complete, 169 archived in done/feature_done_*.md, 50 new features added)
 
 | Category | Total | Complete | Planned |
 |----------|-------|----------|---------|
@@ -136,7 +136,7 @@ All feature tables use this standardized 8-column format:
 
 **Notes:**
 - See `simple/bug_report.md` for details on blocking issues
-- Completed categories moved to feature_done_*.md files (see "Completed Features" section above)
+- Completed categories moved to done/feature_done_*.md files (see "Completed Features" section above)
 - **Tree-sitter (24/24):** ALL PHASES COMPLETE - Core + optimization + grammars + CLI (9,910 lines, 478 tests, 100%) ✅
 
 **Test Status:** 1,588+ tests passing (100% pass rate: 1,500 Rust + 88 E2E system tests)
@@ -148,19 +148,19 @@ All feature tables use this standardized 8-column format:
 - LLM-friendly features: 40/40 complete (100%) ✅
 - Electron/VSCode: 3 modules + 88 E2E tests + CI/CD ✅
 
-**Completed Features:** See [feature_done_1.md](feature_done_1.md), [feature_done_2.md](feature_done_2.md), [feature_done_3.md](feature_done_3.md), [feature_done_4.md](feature_done_4.md), [feature_done_5.md](feature_done_5.md), [feature_done_6.md](feature_done_6.md), [feature_done_7.md](feature_done_7.md), [feature_done_8.md](feature_done_8.md), [feature_done_9.md](feature_done_9.md), [feature_done_10.md](feature_done_10.md), [feature_done_11.md](feature_done_11.md), [feature_done_12.md](feature_done_12.md)
+**Completed Features:** See [feature_done_1.md](done/feature_done_1.md), [feature_done_2.md](done/feature_done_2.md), [feature_done_3.md](done/feature_done_3.md), [feature_done_4.md](done/feature_done_4.md), [feature_done_5.md](done/feature_done_5.md), [feature_done_6.md](done/feature_done_6.md), [feature_done_7.md](done/feature_done_7.md), [feature_done_8.md](done/feature_done_8.md), [feature_done_9.md](done/feature_done_9.md), [feature_done_10.md](done/feature_done_10.md), [feature_done_11.md](done/feature_done_11.md), [feature_done_12.md](done/feature_done_12.md)
 
 ---
 
 ## Planned Features
 
-### LLM-Friendly Features (#880-919) ✅ → [feature_done_12.md](feature_done_12.md)
+### LLM-Friendly Features (#880-919) ✅ → [feature_done_12.md](done/feature_done_12.md)
 
 **Status:** ✅ **COMPLETE** (40/40 features, 100%) - **Archived 2025-12-24**
 
 Features to make Simple optimized for LLM-assisted development, verification, and collaboration: capability-based effects, AST/IR export, context pack generator, property-based testing, snapshot testing, lint framework, canonical formatter, build & audit infrastructure, and sandboxed execution.
 
-**See [feature_done_12.md](feature_done_12.md) for complete details.**
+**See [feature_done_12.md](done/feature_done_12.md) for complete details.**
 
 ---
 
@@ -232,13 +232,13 @@ fn main():
 
 ---
 
-### Tree-sitter Implementation (#1156-1179) ✅ → [feature_done_13.md](feature_done_13.md)
+### Tree-sitter Implementation (#1156-1179) ✅ → [feature_done_13.md](done/feature_done_13.md)
 
 **Status:** ✅ **COMPLETE** (24/24 features) - **Archived 2025-12-25**
 
 Self-hosted tree-sitter parser in Simple language. All 8 phases complete with 9,910 lines of implementation and 478 tests.
 
-See [feature_done_13.md](feature_done_13.md) for complete details.
+See [feature_done_13.md](done/feature_done_13.md) for complete details.
 
 ---
 
@@ -578,7 +578,7 @@ simple mcp --compile --test --deploy --languages rust,python
 - #890-893: Context Pack Generator (LLM-Friendly)
 - #885-889: AST/IR Export (LLM-Friendly)
 
-### Metaprogramming (#1300-1324) ✅ → [feature_done_11.md](feature_done_11.md)
+### Metaprogramming (#1300-1324) ✅ → [feature_done_11.md](done/feature_done_11.md)
 
 **Status:** ✅ **COMPLETE** (25/25 features) - **Archived 2025-12-23**
 
@@ -588,18 +588,18 @@ Advanced metaprogramming: contract-first macros, DSL support, decorators, compre
 
 ---
 
-### Pattern Matching Safety (#1325-1329) ✅ → [feature_done_10.md](feature_done_10.md)
+### Pattern Matching Safety (#1325-1329) ✅ → [feature_done_10.md](done/feature_done_10.md)
 
 **Status:** ✅ **COMPLETE** (5/5 features, 750+ lines, 18 tests) - **Archived 2025-12-23**
 
 Rust-level match safety guarantees: exhaustiveness checking, unreachable arm detection, tagged union support, strong enum enforcement, pattern subsumption analysis.
 
-**See [feature_done_10.md](feature_done_10.md) for complete details.**
+**See [feature_done_10.md](done/feature_done_10.md) for complete details.**
 
 ---
 
 
-### Gherkin/BDD Extensions (#1343-1347) ✅ → [feature_done_10.md](feature_done_10.md)
+### Gherkin/BDD Extensions (#1343-1347) ✅ → [feature_done_10.md](done/feature_done_10.md)
 
 **Status:** ✅ **COMPLETE** (5/5 features) - **Archived 2025-12-23**
 
@@ -639,13 +639,13 @@ Core MCP-MCP protocol implementation for token-efficient code representation.
 
 ---
 
-### Developer Tools (#1359-1368) ✅ → [feature_done_13.md](feature_done_13.md)
+### Developer Tools (#1359-1368) ✅ → [feature_done_13.md](done/feature_done_13.md)
 
 **Status:** ✅ **COMPLETE** (10/10 features) - **Archived 2025-12-25**
 
 Language Server Protocol (LSP) and Debug Adapter Protocol (DAP) implementation in Simple language. 1,550+ lines of LSP implementation with 112 tests, 1,017 lines of DAP implementation with 270+ tests.
 
-See [feature_done_13.md](feature_done_13.md) for complete details.
+See [feature_done_13.md](done/feature_done_13.md) for complete details.
 
 ---
 
@@ -692,7 +692,7 @@ app = App():
 ---
 
 
-### Shared Infrastructure (#1388-1390) ✅ → [feature_done_10.md](feature_done_10.md)
+### Shared Infrastructure (#1388-1390) ✅ → [feature_done_10.md](done/feature_done_10.md)
 
 **Status:** ✅ **COMPLETE** (3/3 features) - **Archived 2025-12-23**
 
@@ -702,7 +702,7 @@ Cross-crate diagnostic infrastructure: moved Diagnostic to common, cross-crate s
 
 ---
 
-### Advanced Contract Features (#1391-1395) ✅ → [feature_done_10.md](feature_done_10.md)
+### Advanced Contract Features (#1391-1395) ✅ → [feature_done_10.md](done/feature_done_10.md)
 
 **Status:** ✅ **COMPLETE** (5/5 features, 27 tests, 89% pass rate) - **Archived 2025-12-23**
 
@@ -720,7 +720,7 @@ Extended contracts: `in:`, `out:`, `out_err:`, `old()`, `invariant:`. Parser, MI
 
 ---
 
-### Mock Library Fluent API (#1396-1403) ✅ → [feature_done_10.md](feature_done_10.md)
+### Mock Library Fluent API (#1396-1403) ✅ → [feature_done_10.md](done/feature_done_10.md)
 
 **Status:** ✅ **COMPLETE** (8/8 features, 700+ lines, 19 tests) - **Archived 2025-12-23**
 
@@ -1095,11 +1095,11 @@ code --install-extension simple-language-0.1.0.vsix
 
 ## Related Documentation
 
-- [feature_done_1.md](feature_done_1.md) - Archive 1: Infrastructure, Core Language
-- [feature_done_2.md](feature_done_2.md) - Archive 2: Codegen, Concurrency, Contracts
-- [feature_done_3.md](feature_done_3.md) - Archive 3: UI, Union Types, GPU/SIMD
-- [feature_done_4.md](feature_done_4.md) - Archive 4: DB/SQP design, consolidated
-- [feature_done_7.md](feature_done_7.md) - Archive 7: Web, Build/Link, Infra, Module Privacy, FFI/ABI
+- [feature_done_1.md](done/feature_done_1.md) - Archive 1: Infrastructure, Core Language
+- [feature_done_2.md](done/feature_done_2.md) - Archive 2: Codegen, Concurrency, Contracts
+- [feature_done_3.md](done/feature_done_3.md) - Archive 3: UI, Union Types, GPU/SIMD
+- [feature_done_4.md](done/feature_done_4.md) - Archive 4: DB/SQP design, consolidated
+- [feature_done_7.md](done/feature_done_7.md) - Archive 7: Web, Build/Link, Infra, Module Privacy, FFI/ABI
 - [db.md](db.md) - Database Abstraction Layer
 - [sqp.md](sqp.md) - Simple Query and Persistence DSL
 - [research/mold_linker_analysis.md](research/mold_linker_analysis.md) - Mold linker integration analysis

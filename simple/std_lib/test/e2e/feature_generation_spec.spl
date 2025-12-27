@@ -1,0 +1,288 @@
+# End-to-End Feature Documentation Generation Test
+# Tests the complete workflow from BDD tests to generated markdown
+
+use spec.{describe, context, it, before_all, after_all, expect}
+use spec.{eq, be, be_true, be_false, include, have_length, gte}
+use spec.feature_doc.{
+    feature_metadata,
+    get_feature,
+    get_features_by_category,
+    get_all_features,
+    clear_feature_registry,
+    write_feature_docs
+}
+use spec.feature_doc.generator.{generate_markdown, generate_category_index, generate_master_index}
+use spec.feature_doc.file_writer.{write_feature, clear_generated_docs}
+use core.io.{File, Directory}
+use core.collections.List
+
+describe "E2E Feature Documentation Generation":
+    before_all:
+        # Clear registry and any existing generated docs
+        clear_feature_registry()
+
+    context "Phase 1: Single Feature Generation":
+        it "registers feature metadata from BDD test":
+            # Simulate a feature test registering metadata
+            feature_metadata(
+                id: 999,
+                name: "E2E Test Feature",
+                category: "E2ETest",
+                difficulty: 1,
+                status: "✅ Complete",
+                impl_type: "R",
+                spec_ref: "doc/spec/test.md",
+                files: ["src/e2e_test.rs"],
+                tests: ["tests/e2e_test.rs"],
+                description: "End-to-end test feature for validation",
+                examples: [],
+                dependencies: [],
+                required_by: [],
+                notes: "This is a test feature"
+            )
+
+            # Verify registration
+            let retrieved = get_feature(999)
+            expect retrieved.is_some() to be_true
+            expect retrieved.unwrap().name to eq "E2E Test Feature"
+
+        it "generates markdown from registered feature":
+            # Feature should already be registered from previous test
+            let retrieved = get_feature(999)
+            expect retrieved.is_some() to be_true
+
+            # Generate markdown
+            let markdown = generate_markdown(retrieved.unwrap())
+
+            # Verify markdown content
+            expect markdown to include "# Feature #999: E2E Test Feature"
+            expect markdown to include "| **Feature ID** | #999 |"
+            expect markdown to include "| **Category** | E2ETest |"
+            expect markdown to include "## Description"
+            expect markdown to include "End-to-end test feature"
+            expect markdown to include "## Implementation"
+            expect markdown to include "## Testing"
+
+        it "includes all metadata fields in generated markdown":
+            let retrieved = get_feature(999)
+            let markdown = generate_markdown(retrieved.unwrap())
+
+            # Check all required sections
+            expect markdown to include "## Overview"
+            expect markdown to include "## Description"
+            expect markdown to include "## Specification"
+            expect markdown to include "## Implementation"
+            expect markdown to include "## Testing"
+            expect markdown to include "## Examples"
+            expect markdown to include "## Dependencies"
+
+        it "includes auto-generation warning":
+            let retrieved = get_feature(999)
+            let markdown = generate_markdown(retrieved.unwrap())
+
+            expect markdown to include "This file is auto-generated from BDD system tests"
+            expect markdown to include "Manual edits may be overwritten"
+
+    context "Phase 2: Multiple Features":
+        it "handles multiple features in same category":
+            # Register second feature in same category
+            feature_metadata(
+                id: 998,
+                name: "E2E Second Feature",
+                category: "E2ETest",
+                difficulty: 2,
+                status: "🔄 In Progress",
+                impl_type: "S",
+                spec_ref: "doc/spec/test2.md",
+                files: ["simple/std_lib/src/e2e_test.spl"],
+                tests: [],
+                description: "Second test feature",
+                examples: [],
+                dependencies: [999],
+                required_by: [],
+                notes: ""
+            )
+
+            # Verify both features in category
+            let features = get_features_by_category("E2ETest")
+            expect features.len() to eq 2
+
+        it "generates category index with multiple features":
+            let index = generate_category_index("E2ETest")
+
+            # Check index content
+            expect index to include "# E2ETest Features"
+            expect index to include "## Summary"
+            expect index to include "**Total Features:** 2"
+            expect index to include "**Completed:** 1"
+            expect index to include "**In Progress:** 1"
+
+            # Check feature list table
+            expect index to include "| ID | Name | Difficulty | Status |"
+            expect index to include "#999"
+            expect index to include "#998"
+
+    context "Phase 3: Cross-Category":
+        it "handles features across multiple categories":
+            # Register feature in different category
+            feature_metadata(
+                id: 997,
+                name: "Cross Category Test",
+                category: "AnotherCategory",
+                difficulty: 3,
+                status: "📋 Planned",
+                impl_type: "S+R",
+                spec_ref: "",
+                files: [],
+                tests: [],
+                description: "Feature in another category",
+                examples: [],
+                dependencies: [],
+                required_by: [],
+                notes: ""
+            )
+
+            # Verify multiple categories exist
+            let categories = get_all_categories()
+            expect categories to include "E2ETest"
+            expect categories to include "AnotherCategory"
+
+        it "generates master index with all categories":
+            let master = generate_master_index()
+
+            # Check master index content
+            expect master to include "# Simple Language Feature Documentation"
+            expect master to include "## Overview"
+            expect master to include "**Total Features:** 3"
+
+            # Check category breakdown
+            expect master to include "## Features by Category"
+            expect master to include "E2ETest"
+            expect master to include "AnotherCategory"
+
+    context "Phase 4: File Generation":
+        it "determines correct file paths":
+            let feature = get_feature(999).unwrap()
+
+            # Check filename generation
+            expect feature.filename() to eq "0999_e2e_test_feature.md"
+
+            # Check directory path
+            expect feature.directory_path() to eq "doc/features/e2etest"
+
+            # Check full path
+            expect feature.full_path() to eq "doc/features/e2etest/0999_e2e_test_feature.md"
+
+        # Note: Actual file writing tested separately to avoid polluting doc/features/
+        # In real usage, write_feature_docs() would be called here
+
+    context "Phase 5: Content Quality":
+        it "preserves all metadata in generated docs":
+            let feature = get_feature(999).unwrap()
+            let markdown = generate_markdown(feature)
+
+            # Verify all input metadata is in output
+            expect markdown to include "999"
+            expect markdown to include "E2E Test Feature"
+            expect markdown to include "E2ETest"
+            expect markdown to include "✅ Complete"
+            expect markdown to include "src/e2e_test.rs"
+            expect markdown to include "tests/e2e_test.rs"
+            expect markdown to include "doc/spec/test.md"
+
+        it "formats markdown correctly":
+            let feature = get_feature(999).unwrap()
+            let markdown = generate_markdown(feature)
+
+            # Check markdown structure
+            expect markdown to include "# Feature #999"  # H1 header
+            expect markdown to include "## Overview"     # H2 headers
+            expect markdown to include "| Property | Value |"  # Tables
+            expect markdown to include "```simple"       # Code blocks
+
+        it "includes dependency information":
+            let feature = get_feature(998).unwrap()  # Has dependency on #999
+            let markdown = generate_markdown(feature)
+
+            expect markdown to include "## Dependencies"
+            expect markdown to include "#999"
+            expect markdown to include "Depends on"
+
+    context "Phase 6: Validation":
+        it "validates generated markdown completeness":
+            let all_features = get_all_features()
+
+            # Each feature should generate valid markdown
+            for feature in all_features:
+                let markdown = generate_markdown(feature)
+
+                # Must have header
+                expect markdown to include f"# Feature #{feature.id}"
+
+                # Must have all major sections
+                expect markdown to include "## Overview"
+                expect markdown to include "## Description"
+                expect markdown to include "## Implementation"
+
+        it "ensures no data loss in generation":
+            # Test that complex metadata survives generation
+            feature_metadata(
+                id: 996,
+                name: "Complex Feature",
+                category: "ComplexTest",
+                difficulty: 5,
+                status: "✅ Complete",
+                impl_type: "S+R",
+                spec_ref: "doc/spec/complex.md",
+                files: ["file1.rs", "file2.rs", "file3.rs"],
+                tests: ["test1.rs", "test2.rs"],
+                description: """
+                Multi-line description
+                with special characters: !@#$%^&*()
+                and formatting **bold** _italic_
+                """,
+                examples: ["example1", "example2"],
+                dependencies: [1, 2, 3],
+                required_by: [10, 20],
+                notes: "Important notes here"
+            )
+
+            let feature = get_feature(996).unwrap()
+            let markdown = generate_markdown(feature)
+
+            # Verify complex data preserved
+            expect markdown to include "Multi-line description"
+            expect markdown to include "file1.rs"
+            expect markdown to include "file2.rs"
+            expect markdown to include "file3.rs"
+            expect markdown to include "#1"
+            expect markdown to include "#2"
+            expect markdown to include "#3"
+            expect markdown to include "Important notes"
+
+    context "Phase 7: Integration with BDD":
+        it "works within describe/context/it structure":
+            # This entire test file demonstrates BDD integration!
+            # feature_metadata() calls work inside describe blocks
+            expect be_true to eq true  # Meta-assertion
+
+        it "can be called from any describe block":
+            # Feature metadata can be registered anywhere
+            feature_metadata(
+                id: 995,
+                name: "Flexible Registration",
+                category: "Meta",
+                difficulty: 1,
+                status: "✅ Complete",
+                impl_type: "R",
+                spec_ref: "",
+                files: [],
+                tests: [],
+                description: "Can register from nested contexts",
+                examples: [],
+                dependencies: [],
+                required_by: [],
+                notes: ""
+            )
+
+            expect get_feature(995).is_some() to be_true

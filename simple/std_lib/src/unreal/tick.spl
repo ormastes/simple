@@ -1,0 +1,282 @@
+# Unreal Tick Function System
+#
+# Provides tick function override and frame timing
+#
+# Features:
+# - Tick function registration
+# - Delta time access
+# - Frame timing utilities
+# - Tick group management
+# - Conditional tick enabling
+#
+# Based on: https://docs.unrealengine.org/5.4/en-US/API/Runtime/Engine/Engine/FTickFunction/
+
+import sys.ffi
+import unreal.actor
+
+mod tick
+
+# TickGroup
+# Groups for tick function ordering
+pub enum TickGroup:
+    PrePhysics = 0      # Before physics simulation
+    StartPhysics = 1    # Physics simulation starts
+    DuringPhysics = 2   # During physics
+    EndPhysics = 3      # After physics
+    PostPhysics = 4     # After all physics
+    PostUpdateWork = 5  # Post-update work
+    LastDemotable = 6   # Last group that can be demoted
+
+impl TickGroup:
+    pub fn to_int(self) -> i32:
+        if self == TickGroup::PrePhysics:
+            return 0
+        elif self == TickGroup::StartPhysics:
+            return 1
+        elif self == TickGroup::DuringPhysics:
+            return 2
+        elif self == TickGroup::EndPhysics:
+            return 3
+        elif self == TickGroup::PostPhysics:
+            return 4
+        elif self == TickGroup::PostUpdateWork:
+            return 5
+        else:
+            return 6
+
+
+# TickFunction
+# Represents a registered tick function
+pub struct TickFunction:
+    tick_fn_ptr: ffi.VoidPtr
+    actor_ptr: ffi.VoidPtr
+
+impl TickFunction:
+    # Create from pointers
+    pub fn new(tick_fn_ptr: ffi.VoidPtr, actor_ptr: ffi.VoidPtr) -> TickFunction:
+        return TickFunction(
+            tick_fn_ptr: tick_fn_ptr,
+            actor_ptr: actor_ptr,
+        )
+
+    # Set tick enabled
+    pub fn set_tick_enabled(mut self, enabled: bool):
+        unreal_tick_function_set_enabled(self.tick_fn_ptr, enabled)
+
+    # Check if tick enabled
+    pub fn is_tick_enabled(self) -> bool:
+        return unreal_tick_function_is_enabled(self.tick_fn_ptr)
+
+    # Set tick interval (0 = every frame)
+    pub fn set_tick_interval(mut self, interval: f32):
+        unreal_tick_function_set_interval(self.tick_fn_ptr, interval)
+
+    # Set tick group
+    pub fn set_tick_group(mut self, group: TickGroup):
+        unreal_tick_function_set_group(self.tick_fn_ptr, group.to_int())
+
+    # Set can tick when paused
+    pub fn set_can_tick_when_paused(mut self, can_tick: bool):
+        unreal_tick_function_set_can_tick_when_paused(self.tick_fn_ptr, can_tick)
+
+    # Set tick even when paused
+    pub fn set_tick_even_when_paused(mut self, tick_paused: bool):
+        unreal_tick_function_set_tick_even_when_paused(self.tick_fn_ptr, tick_paused)
+
+    # Add tick prerequisite (tick must happen after another)
+    pub fn add_tick_prerequisite(mut self, prereq_actor: actor.AActor):
+        unreal_tick_function_add_prerequisite(self.tick_fn_ptr, prereq_actor.as_ptr())
+
+
+# DeltaTime
+# Frame timing information
+pub struct DeltaTime:
+    delta_seconds: f32
+    real_time_seconds: f64
+    world_time_seconds: f64
+    frame_number: u64
+
+impl DeltaTime:
+    # Get delta time in seconds
+    pub fn delta_seconds(self) -> f32:
+        return self.delta_seconds
+
+    # Get delta time in milliseconds
+    pub fn delta_ms(self) -> f32:
+        return self.delta_seconds * 1000.0
+
+    # Get real time since start
+    pub fn real_time(self) -> f64:
+        return self.real_time_seconds
+
+    # Get world time (affected by time dilation)
+    pub fn world_time(self) -> f64:
+        return self.world_time_seconds
+
+    # Get frame number
+    pub fn frame_number(self) -> u64:
+        return self.frame_number
+
+
+# TickCallback
+# Type for tick callback functions
+pub type TickCallback = fn(actor.AActor, DeltaTime) -> ()
+
+
+# TickManager
+# Manages tick function registration for Simple actors
+pub struct TickManager:
+    callbacks: Vec[(ffi.VoidPtr, TickCallback)]
+
+impl TickManager:
+    # Create new tick manager (singleton)
+    pub fn new() -> TickManager:
+        return TickManager(callbacks: [])
+
+    # Register tick callback for actor
+    pub fn register_tick(mut self, actor: actor.AActor, callback: TickCallback) -> TickFunction:
+        let actor_ptr = actor.as_ptr()
+
+        # Store callback
+        self.callbacks.push((actor_ptr, callback))
+
+        # Register native tick function
+        let tick_fn_ptr = unreal_tick_manager_register(actor_ptr)
+
+        return TickFunction::new(tick_fn_ptr, actor_ptr)
+
+    # Unregister tick callback
+    pub fn unregister_tick(mut self, actor: actor.AActor):
+        let actor_ptr = actor.as_ptr()
+
+        # Remove callback
+        let mut new_callbacks = Vec::new()
+        for (ptr, cb) in self.callbacks:
+            if ptr != actor_ptr:
+                new_callbacks.push((ptr, cb))
+        self.callbacks = new_callbacks
+
+        # Unregister native tick
+        unreal_tick_manager_unregister(actor_ptr)
+
+    # Internal: Dispatch tick to registered callback
+    pub fn _dispatch_tick(mut self, actor_ptr: ffi.VoidPtr, delta: DeltaTime):
+        # Find callback for this actor
+        for (ptr, callback) in self.callbacks:
+            if ptr == actor_ptr:
+                let actor = actor.AActor::from_ptr(actor_ptr)
+                callback(actor, delta)
+                return
+
+
+# Global tick manager instance
+let mut TICK_MANAGER: Option[TickManager] = None
+
+# Get global tick manager
+pub fn get_tick_manager() -> TickManager:
+    if TICK_MANAGER.is_none():
+        TICK_MANAGER = Some(TickManager::new())
+
+    return TICK_MANAGER.unwrap()
+
+
+# Utility functions
+
+# Register tick for actor
+pub fn register_tick(actor: actor.AActor, callback: TickCallback) -> TickFunction:
+    let mut manager = get_tick_manager()
+    return manager.register_tick(actor, callback)
+
+# Unregister tick for actor
+pub fn unregister_tick(actor: actor.AActor):
+    let mut manager = get_tick_manager()
+    manager.unregister_tick(actor)
+
+# Get current delta time
+pub fn get_delta_time(world: ffi.VoidPtr) -> DeltaTime:
+    let delta = ffi.alloc_f32()
+    let real_time = ffi.alloc_f64()
+    let world_time = ffi.alloc_f64()
+    let frame_num = ffi.alloc_u64()
+
+    unreal_world_get_delta_time(world, delta, real_time, world_time, frame_num)
+
+    let result = DeltaTime(
+        delta_seconds: ffi.read_f32(delta),
+        real_time_seconds: ffi.read_f64(real_time),
+        world_time_seconds: ffi.read_f64(world_time),
+        frame_number: ffi.read_u64(frame_num),
+    )
+
+    ffi.free(delta)
+    ffi.free(real_time)
+    ffi.free(world_time)
+    ffi.free(frame_num)
+
+    return result
+
+# Get frame rate statistics
+pub fn get_frame_stats(world: ffi.VoidPtr) -> (f32, f32, f32):
+    let avg_fps = ffi.alloc_f32()
+    let min_fps = ffi.alloc_f32()
+    let max_fps = ffi.alloc_f32()
+
+    unreal_world_get_frame_stats(world, avg_fps, min_fps, max_fps)
+
+    let result = (ffi.read_f32(avg_fps), ffi.read_f32(min_fps), ffi.read_f32(max_fps))
+
+    ffi.free(avg_fps)
+    ffi.free(min_fps)
+    ffi.free(max_fps)
+
+    return result
+
+# Set time dilation (slow motion / fast forward)
+pub fn set_global_time_dilation(world: ffi.VoidPtr, dilation: f32):
+    unreal_world_set_time_dilation(world, dilation)
+
+# Pause/unpause game
+pub fn set_game_paused(world: ffi.VoidPtr, paused: bool):
+    unreal_world_set_paused(world, paused)
+
+
+# FFI function declarations
+
+extern "C":
+    fn unreal_tick_function_set_enabled(tick_fn: ffi.VoidPtr, enabled: bool)
+    fn unreal_tick_function_is_enabled(tick_fn: ffi.VoidPtr) -> bool
+    fn unreal_tick_function_set_interval(tick_fn: ffi.VoidPtr, interval: f32)
+    fn unreal_tick_function_set_group(tick_fn: ffi.VoidPtr, group: i32)
+    fn unreal_tick_function_set_can_tick_when_paused(tick_fn: ffi.VoidPtr, can_tick: bool)
+    fn unreal_tick_function_set_tick_even_when_paused(tick_fn: ffi.VoidPtr, tick_paused: bool)
+    fn unreal_tick_function_add_prerequisite(tick_fn: ffi.VoidPtr, prereq_actor: ffi.VoidPtr)
+
+    fn unreal_tick_manager_register(actor: ffi.VoidPtr) -> ffi.VoidPtr
+    fn unreal_tick_manager_unregister(actor: ffi.VoidPtr)
+
+    fn unreal_world_get_delta_time(
+        world: ffi.VoidPtr,
+        delta: ffi.VoidPtr,
+        real_time: ffi.VoidPtr,
+        world_time: ffi.VoidPtr,
+        frame_num: ffi.VoidPtr
+    )
+    fn unreal_world_get_frame_stats(
+        world: ffi.VoidPtr,
+        avg_fps: ffi.VoidPtr,
+        min_fps: ffi.VoidPtr,
+        max_fps: ffi.VoidPtr
+    )
+    fn unreal_world_set_time_dilation(world: ffi.VoidPtr, dilation: f32)
+    fn unreal_world_set_paused(world: ffi.VoidPtr, paused: bool)
+
+
+# Example usage:
+#
+# fn my_tick(actor: AActor, delta: DeltaTime):
+#     let (x, y, z) = actor.get_actor_location()
+#     actor.set_actor_location(x + delta.delta_seconds() * 100.0, y, z)
+#
+# let tick_fn = register_tick(my_actor, my_tick)
+# tick_fn.set_tick_group(TickGroup::PostPhysics)
+# tick_fn.set_tick_interval(0.1)  # Tick every 0.1 seconds

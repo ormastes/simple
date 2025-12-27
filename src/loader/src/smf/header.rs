@@ -26,7 +26,13 @@ pub struct SmfHeader {
     pub module_hash: u64,
     pub source_hash: u64,
 
-    pub reserved: [u8; 8],
+    // Startup optimization hints (using reserved space)
+    pub app_type: u8,          // Application type (0=cli, 1=tui, 2=gui, 3=service, 4=repl)
+    pub window_width: u16,     // Window width hint (GUI apps)
+    pub window_height: u16,    // Window height hint (GUI apps)
+    pub prefetch_hint: u8,     // Prefetch hint: 0=no, 1=yes (#1998)
+    pub prefetch_file_count: u8, // Expected number of files to prefetch
+    pub reserved: [u8; 1],     // Remaining reserved space
 }
 
 impl SmfHeader {
@@ -91,8 +97,45 @@ impl SmfHeader {
             entry_point: 0,
             module_hash: 0,
             source_hash: 0,
-            reserved: [0; 8],
+            app_type: 0,        // Default to CLI
+            window_width: 1280, // Default window size
+            window_height: 720,
+            prefetch_hint: 0,   // No prefetch by default
+            prefetch_file_count: 0,
+            reserved: [0; 1],
         }
+    }
+
+    /// Get the application type from the header.
+    pub fn get_app_type(&self) -> SmfAppType {
+        SmfAppType::from_u8(self.app_type)
+    }
+
+    /// Set the application type in the header.
+    pub fn set_app_type(&mut self, app_type: SmfAppType) {
+        self.app_type = app_type as u8;
+    }
+
+    /// Set window hints for GUI applications.
+    pub fn set_window_hints(&mut self, width: u16, height: u16) {
+        self.window_width = width;
+        self.window_height = height;
+    }
+
+    /// Enable prefetching and set expected file count (#1998).
+    pub fn set_prefetch_hint(&mut self, enabled: bool, file_count: u8) {
+        self.prefetch_hint = if enabled { 1 } else { 0 };
+        self.prefetch_file_count = file_count;
+    }
+
+    /// Check if prefetching is recommended.
+    pub fn should_prefetch(&self) -> bool {
+        self.prefetch_hint != 0
+    }
+
+    /// Get the expected number of files to prefetch.
+    pub fn expected_prefetch_count(&self) -> usize {
+        self.prefetch_file_count as usize
     }
 }
 
@@ -219,5 +262,51 @@ impl Arch {
     /// Check if this is a 64-bit architecture.
     pub fn is_64bit(self) -> bool {
         matches!(self, Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 | Arch::Wasm64)
+    }
+}
+
+/// SMF application type identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SmfAppType {
+    /// Command-line tool (minimal resources)
+    Cli = 0,
+    /// Terminal UI application (terminal mode, buffers)
+    Tui = 1,
+    /// Graphical application (window, GPU context)
+    Gui = 2,
+    /// Background service/daemon (IPC, signal handlers)
+    Service = 3,
+    /// Interactive REPL (history, line editor)
+    Repl = 4,
+}
+
+impl SmfAppType {
+    /// Convert from u8 value.
+    pub fn from_u8(value: u8) -> Self {
+        match value {
+            1 => SmfAppType::Tui,
+            2 => SmfAppType::Gui,
+            3 => SmfAppType::Service,
+            4 => SmfAppType::Repl,
+            _ => SmfAppType::Cli, // Default to CLI for unknown values
+        }
+    }
+
+    /// Convert to string name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SmfAppType::Cli => "cli",
+            SmfAppType::Tui => "tui",
+            SmfAppType::Gui => "gui",
+            SmfAppType::Service => "service",
+            SmfAppType::Repl => "repl",
+        }
+    }
+}
+
+impl Default for SmfAppType {
+    fn default() -> Self {
+        SmfAppType::Cli
     }
 }

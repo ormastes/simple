@@ -24,7 +24,7 @@ All 40 LLM-friendly features (#880-919) are now **properly documented** with spe
 | #899-902 | Snapshot Testing | `snapshot_testing.md` | 10KB | 4 |
 | #908-910 | Canonical Formatter | `formatter.md` | 12.5KB | 3 |
 | #911-913, #915 | Build & Audit | `build_audit.md` | 11.5KB | 4 |
-| #916-919 | Sandboxed Execution | `sandboxed_execution.md` | 12KB | 4 |
+| #916-919 | Sandboxed Execution | `sandboxing.md` | 12KB | 4 |
 | **TOTAL** | **7 Specs** | **78KB** | **26 Features** | **Specified** |
 
 ### Features Already Implemented
@@ -56,7 +56,7 @@ All 40 LLM-friendly features (#880-919) are now **properly documented** with spe
 | #906-907 | 📋 Partial | Implemented (blocked) | ⏳ After compiler fix |
 | #908-910 | 📋 Specified | `formatter.md` | ✅ Yes |
 | #911-913, #915 | 📋 Specified | `build_audit.md` | ✅ Yes |
-| #916-919 | 📋 Specified | `sandboxed_execution.md` | ✅ Yes |
+| #916-919 | 📋 Specified | `sandboxing.md` | ✅ Yes |
 | **TOTAL** | **26 Features** | **Fully Specified** |
 
 ---
@@ -182,7 +182,7 @@ All features now point to specific specification files:
 - `snapshot_testing.md` - #899-902
 - `formatter.md` - #908-910
 - `build_audit.md` - #911-913, #915
-- `sandboxed_execution.md` - #916-919
+- `sandboxing.md` - #916-919
 
 ---
 
@@ -220,7 +220,7 @@ doc/spec/
 ├── snapshot_testing.md         (10KB)   - #899-902
 ├── formatter.md                (12.5KB) - #908-910
 ├── build_audit.md              (11.5KB) - #911-913, #915
-└── sandboxed_execution.md      (12KB)   - #916-919
+└── sandboxing.md      (12KB)   - #916-919
 ```
 
 ### Implementation Documentation

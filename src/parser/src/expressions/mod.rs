@@ -466,10 +466,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    parse_binary_multi!(parse_shift, parse_term,
+    parse_binary_multi!(parse_shift, parse_matmul,
         ShiftLeft => BinOp::ShiftLeft,
         ShiftRight => BinOp::ShiftRight,
     );
+
+    // Simple Math: Matrix multiplication @ operator (#1930-#1939)
+    // Precedence: between shift and term (same level as factor: *, /, %, //)
+    parse_binary_single!(parse_matmul, parse_term, At, BinOp::MatMul);
 
     parse_binary_multi!(parse_term, parse_factor,
         Plus => BinOp::Add,
@@ -589,6 +593,22 @@ impl<'a> Parser<'a> {
             }
             _ => Err(ParseError::syntax_error_with_span(
                 "Expected qualified name (identifier or field access)".to_string(),
+                self.current.span,
+            )),
+        }
+    }
+
+    /// Convert a FieldAccess chain to path segments (e.g., torch.Device -> ["torch", "Device"])
+    fn field_access_to_path_segments(&self, expr: &Expr) -> Result<Vec<String>, ParseError> {
+        match expr {
+            Expr::Identifier(name) => Ok(vec![name.clone()]),
+            Expr::FieldAccess { receiver, field } => {
+                let mut segments = self.field_access_to_path_segments(receiver)?;
+                segments.push(field.clone());
+                Ok(segments)
+            }
+            _ => Err(ParseError::syntax_error_with_span(
+                "Expected path expression (identifier or field access)".to_string(),
                 self.current.span,
             )),
         }
@@ -777,6 +797,22 @@ impl<'a> Parser<'a> {
                                 receiver: Box::new(expr),
                                 field,
                             };
+                        }
+
+                        // Check for :: after field access (e.g., torch.Device::CPU)
+                        // Convert FieldAccess to Path for static method calls
+                        if self.check(&TokenKind::DoubleColon) {
+                            // Convert expr (which is now a FieldAccess) to a path
+                            let path_segments = self.field_access_to_path_segments(&expr)?;
+                            let mut segments = path_segments;
+
+                            while self.check(&TokenKind::DoubleColon) {
+                                self.advance(); // consume '::'
+                                let segment = self.expect_method_name()?;
+                                segments.push(segment);
+                            }
+
+                            expr = Expr::Path(segments);
                         }
                     }
                 }

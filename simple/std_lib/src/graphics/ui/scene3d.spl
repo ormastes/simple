@@ -1,0 +1,272 @@
+# Scene3D - 3D viewport widget for UI embedding
+#
+# Provides Scene3D widget for embedding 3D scenes in 2D UI layouts,
+# with event handling for camera controls and viewport management.
+#
+# Based on: doc/plans/floating-booping-coral.md (3D Graphics Library)
+
+use core.*
+use graphics.math.*
+use graphics.scene.*
+use graphics.render.*
+use graphics.ui.*
+use ui.*
+use ui.layout.*
+use ui.widget.*
+
+# =============================================================================
+# Scene3D - 3D viewport widget
+# =============================================================================
+
+pub struct Scene3D:
+    id: ElementId
+    viewport: Viewport3D
+    fps_camera: Option[FpsCamera]
+    input_state: CameraInput
+    last_mouse_x: f32
+    last_mouse_y: f32
+    mouse_captured: bool
+
+impl Scene3D:
+    # Create Scene3D widget
+    pub fn new(id: ElementId, width: u32, height: u32) -> Scene3D:
+        let viewport = Viewport3D::new(width, height)
+
+        return Scene3D {
+            id: id,
+            viewport: viewport,
+            fps_camera: None,
+            input_state: CameraInput::new(),
+            last_mouse_x: 0.0,
+            last_mouse_y: 0.0,
+            mouse_captured: false
+        }
+
+    # Create with custom scene
+    pub fn with_scene(mut self, scene: Scene) -> Scene3D:
+        self.viewport.set_scene(scene)
+        return self
+
+    # Create with custom camera
+    pub fn with_camera(mut self, camera: Camera) -> Scene3D:
+        self.viewport.set_camera(camera)
+        return self
+
+    # Enable FPS camera controls
+    pub fn with_controls(mut self) -> Scene3D:
+        let camera = self.viewport.get_camera()
+        let fps_camera = FpsCamera::new(camera)
+        self.fps_camera = Some(fps_camera)
+        self.viewport.enable_controls(true)
+        return self
+
+    # Set clear color
+    pub fn with_clear_color(mut self, color: Color) -> Scene3D:
+        self.viewport.set_clear_color(color)
+        return self
+
+    # Configure FPS camera settings
+    pub fn with_camera_settings(mut self, move_speed: f32, look_sensitivity: f32) -> Scene3D:
+        match self.fps_camera:
+            case Some(mut fps_cam):
+                fps_cam.set_move_speed(move_speed)
+                fps_cam.set_look_sensitivity(look_sensitivity)
+                self.fps_camera = Some(fps_cam)
+            case None:
+                # Create FPS camera if not already created
+                let camera = self.viewport.get_camera()
+                let mut fps_cam = FpsCamera::with_settings(camera, move_speed, look_sensitivity)
+                self.fps_camera = Some(fps_cam)
+                self.viewport.enable_controls(true)
+
+        return self
+
+    # Convert to Element for UI tree
+    pub fn to_element(self) -> Element:
+        return Element::Scene3D(self)
+
+    # Get viewport for direct access
+    pub fn get_viewport(self) -> Viewport3D:
+        return self.viewport
+
+    pub fn get_viewport_mut(mut self) -> Viewport3D:
+        return self.viewport
+
+    # Update method (called each frame)
+    pub fn update(mut self, delta_time: f32):
+        # Update FPS camera if enabled
+        match self.fps_camera:
+            case Some(mut fps_cam):
+                fps_cam.update(delta_time, self.input_state)
+                # Update viewport camera
+                self.viewport.set_camera(fps_cam.get_camera())
+                self.fps_camera = Some(fps_cam)
+
+                # Clear input deltas
+                self.input_state.clear_deltas()
+            case None:
+                pass
+
+        # Render the scene
+        self.viewport.render()
+
+    # Event handling
+    pub fn handle_key_down(mut self, key: Key):
+        if not self.viewport.are_controls_enabled():
+            return
+
+        match key:
+            case Key::W:
+                self.input_state.forward = true
+            case Key::S:
+                self.input_state.backward = true
+            case Key::A:
+                self.input_state.left = true
+            case Key::D:
+                self.input_state.right = true
+            case Key::E:
+                self.input_state.up = true
+            case Key::Q:
+                self.input_state.down = true
+            case _:
+                pass
+
+    pub fn handle_key_up(mut self, key: Key):
+        if not self.viewport.are_controls_enabled():
+            return
+
+        match key:
+            case Key::W:
+                self.input_state.forward = false
+            case Key::S:
+                self.input_state.backward = false
+            case Key::A:
+                self.input_state.left = false
+            case Key::D:
+                self.input_state.right = false
+            case Key::E:
+                self.input_state.up = false
+            case Key::Q:
+                self.input_state.down = false
+            case _:
+                pass
+
+    pub fn handle_mouse_move(mut self, x: f32, y: f32):
+        if not self.viewport.are_controls_enabled():
+            return
+
+        if not self.mouse_captured:
+            # First mouse movement, just record position
+            self.last_mouse_x = x
+            self.last_mouse_y = y
+            return
+
+        # Calculate delta
+        let delta_x = x - self.last_mouse_x
+        let delta_y = y - self.last_mouse_y
+
+        self.input_state.mouse_delta_x = delta_x
+        self.input_state.mouse_delta_y = delta_y
+
+        # Update last position
+        self.last_mouse_x = x
+        self.last_mouse_y = y
+
+    pub fn handle_mouse_down(mut self, button: MouseButton):
+        if not self.viewport.are_controls_enabled():
+            return
+
+        match button:
+            case MouseButton::Left:
+                # Capture mouse for camera control
+                self.mouse_captured = true
+            case _:
+                pass
+
+    pub fn handle_mouse_up(mut self, button: MouseButton):
+        match button:
+            case MouseButton::Left:
+                self.mouse_captured = false
+            case _:
+                pass
+
+    # Resize handling
+    pub fn handle_resize(mut self, width: u32, height: u32):
+        self.viewport.resize(width, height)
+
+# =============================================================================
+# Key and MouseButton enums (UI integration)
+# =============================================================================
+
+pub enum Key:
+    W
+    A
+    S
+    D
+    Q
+    E
+    Space
+    Shift
+    Ctrl
+    Alt
+    Escape
+
+pub enum MouseButton:
+    Left
+    Right
+    Middle
+
+# =============================================================================
+# Widget implementation for Scene3D
+# =============================================================================
+
+impl Widget for Scene3D:
+    fn id(self) -> ElementId:
+        return self.id
+
+    fn layout(self, constraints: Constraints) -> Size:
+        # Use viewport dimensions, constrained by parent
+        let width = min(self.viewport.get_width() as f32, constraints.max_width)
+        let height = min(self.viewport.get_height() as f32, constraints.max_height)
+
+        return Size::new(width, height)
+
+    fn render(mut self, context: RenderContext):
+        # Update and render viewport
+        self.update(context.delta_time)
+
+        # Get texture from viewport
+        let texture_handle = self.viewport.get_texture_handle()
+
+        # Draw textured quad with viewport texture
+        context.draw_textured_rect(
+            context.position,
+            Size::new(
+                self.viewport.get_width() as f32,
+                self.viewport.get_height() as f32
+            ),
+            texture_handle
+        )
+
+    fn handle_event(mut self, event: Event):
+        match event:
+            case Event::KeyDown(key):
+                self.handle_key_down(key)
+            case Event::KeyUp(key):
+                self.handle_key_up(key)
+            case Event::MouseMove(x, y):
+                self.handle_mouse_move(x, y)
+            case Event::MouseDown(button):
+                self.handle_mouse_down(button)
+            case Event::MouseUp(button):
+                self.handle_mouse_up(button)
+            case Event::Resize(width, height):
+                self.handle_resize(width, height)
+            case _:
+                pass
+
+# Helper function
+fn min(a: f32, b: f32) -> f32:
+    if a < b:
+        return a
+    return b

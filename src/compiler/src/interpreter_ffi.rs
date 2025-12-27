@@ -186,8 +186,8 @@ fn with_interp_state<F, R>(f: F) -> R
 where
     F: FnOnce(
         &Env,
-        &HashMap<String, FunctionDef>,
-        &HashMap<String, ClassDef>,
+        &mut HashMap<String, FunctionDef>,
+        &mut HashMap<String, ClassDef>,
         &Enums,
         &ImplMethods,
     ) -> R,
@@ -195,14 +195,14 @@ where
     INTERP_ENV.with(|env| {
         let env = env.borrow();
         INTERP_FUNCTIONS.with(|funcs| {
-            let funcs = funcs.borrow();
+            let mut funcs = funcs.borrow_mut();
             INTERP_CLASSES.with(|classes| {
-                let classes = classes.borrow();
+                let mut classes = classes.borrow_mut();
                 INTERP_ENUMS.with(|enums| {
                     let enums = enums.borrow();
                     INTERP_IMPL_METHODS.with(|impl_methods| {
                         let impl_methods = impl_methods.borrow();
-                        f(&env, &funcs, &classes, &enums, &impl_methods)
+                        f(&env, &mut funcs, &mut classes, &enums, &impl_methods)
                     })
                 })
             })
@@ -264,8 +264,8 @@ pub unsafe extern "C" fn simple_interp_call(
 
     // Look up and call the function
     let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
-        if let Some(func) = funcs.get(name) {
-            call_interpreted_function(func, args.clone(), env, funcs, classes, enums, impl_methods)
+        if let Some(func) = funcs.get(name).cloned() {
+            call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
             Err(CompileError::Semantic(format!(
                 "function not found: {}",
@@ -285,8 +285,8 @@ fn call_interpreted_function(
     func: &FunctionDef,
     args: Vec<Value>,
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
@@ -405,8 +405,8 @@ pub unsafe extern "C" fn simple_interp_get_var(name: *const c_char) -> BridgeVal
 /// Call an interpreted function by name with Value arguments.
 pub fn call_interp_function(name: &str, args: Vec<Value>) -> Result<Value, CompileError> {
     with_interp_state(|env, funcs, classes, enums, impl_methods| {
-        if let Some(func) = funcs.get(name) {
-            call_interpreted_function(func, args, env, funcs, classes, enums, impl_methods)
+        if let Some(func) = funcs.get(name).cloned() {
+            call_interpreted_function(&func, args, env, funcs, classes, enums, impl_methods)
         } else {
             Err(CompileError::Semantic(format!(
                 "function not found: {}",
@@ -502,8 +502,8 @@ unsafe extern "C" fn interp_call_handler(
 
     // Look up and call the function
     let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
-        if let Some(func) = funcs.get(name) {
-            call_interpreted_function(func, args.clone(), env, funcs, classes, enums, impl_methods)
+        if let Some(func) = funcs.get(name).cloned() {
+            call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
         } else {
             tracing::error!("rt_interp_call: function not found: {}", name);
             Err(CompileError::Semantic(format!(

@@ -580,6 +580,6 @@ describe "Tests":
 
 ## See Also
 
-- [BDD Spec Framework Specification](../spec/bdd_spec.md#36-reusable-contexts-context-sharing)
+- [BDD Spec Framework Specification](../spec/testing/testing_bdd_framework.md#36-reusable-contexts-context-sharing)
 - [Example Test Files](simple/std_lib/test/unit/spec/context_sharing_spec.spl)
 - [Usage Examples](simple/std_lib/test/unit/spec/context_sharing_examples.spl)

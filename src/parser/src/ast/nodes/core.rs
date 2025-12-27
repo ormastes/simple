@@ -341,6 +341,12 @@ pub enum Effect {
     Fs,
     /// Unsafe/unchecked operations allowed (raw pointers, FFI)
     Unsafe,
+    /// Verification mode - enables Lean proof generation and verification constraints
+    /// Code marked @verify must follow the verified subset (no unsafe, no reflection, etc.)
+    Verify,
+    /// Trusted boundary - marks interface between verified and unverified code
+    /// Must prove calling code satisfies contracts before crossing boundary
+    Trusted,
 }
 
 impl Effect {
@@ -354,6 +360,8 @@ impl Effect {
             "net" => Some(Effect::Net),
             "fs" => Some(Effect::Fs),
             "unsafe" => Some(Effect::Unsafe),
+            "verify" => Some(Effect::Verify),
+            "trusted" => Some(Effect::Trusted),
             _ => None,
         }
     }
@@ -367,7 +375,14 @@ impl Effect {
             Effect::Net => "net",
             Effect::Fs => "fs",
             Effect::Unsafe => "unsafe",
+            Effect::Verify => "verify",
+            Effect::Trusted => "trusted",
         }
+    }
+
+    /// Check if this is a verification-related effect.
+    pub fn is_verification(&self) -> bool {
+        matches!(self, Effect::Verify | Effect::Trusted)
     }
 }
 
@@ -430,6 +445,7 @@ impl Capability {
 
     /// Convert an Effect to its corresponding Capability (if applicable).
     /// Note: Async is not a capability since it's about execution model, not permissions.
+    /// Note: Verify and Trusted are verification mode markers, not capabilities.
     pub fn from_effect(effect: &Effect) -> Option<Self> {
         match effect {
             Effect::Pure => Some(Capability::Pure),
@@ -437,7 +453,9 @@ impl Capability {
             Effect::Net => Some(Capability::Net),
             Effect::Fs => Some(Capability::Fs),
             Effect::Unsafe => Some(Capability::Unsafe),
-            Effect::Async => None, // Async is execution model, not capability
+            Effect::Async => None,   // Async is execution model, not capability
+            Effect::Verify => None,  // Verify is verification mode marker
+            Effect::Trusted => None, // Trusted is verification boundary marker
         }
     }
 }
@@ -581,6 +599,47 @@ pub enum Expr {
     /// Do block - a sequence of statements that evaluate to () (unit)
     /// Used for colon-block syntax in BDD DSL: `describe "name": body`
     DoBlock(Vec<Node>),
+
+    // Simple Math literals (#1910-#1969)
+    /// Grid literal: grid device="cuda": | row | row |
+    GridLiteral {
+        rows: Vec<Vec<Box<Expr>>>,
+        device: Option<String>,
+    },
+    /// Tensor literal: tensor K: Float [d=2, h=3] ...
+    TensorLiteral {
+        dtype: String,
+        dims: Vec<(String, i64)>,
+        mode: Box<TensorMode>,
+        device: Option<String>,
+    },
+}
+
+/// Tensor rendering mode for N-dimensional tensors (#1910-#1969)
+#[derive(Debug, Clone, PartialEq)]
+pub enum TensorMode {
+    /// Slice mode: explicit slices with grid rows
+    Slice(Vec<TensorSlice>),
+    /// Flat mode: sparse representation with default value
+    Flat {
+        default: Option<Box<Expr>>,
+        values: Vec<Vec<Box<Expr>>>,
+    },
+}
+
+/// A single slice in tensor slice mode
+#[derive(Debug, Clone, PartialEq)]
+pub struct TensorSlice {
+    pub dim_name: String,
+    pub dim_value: i64,
+    pub content: TensorSliceContent,
+}
+
+/// Content of a tensor slice - can be nested slices or grid rows
+#[derive(Debug, Clone, PartialEq)]
+pub enum TensorSliceContent {
+    NestedSlices(Vec<TensorSlice>),
+    GridRows(Vec<Vec<Box<Expr>>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -612,6 +671,7 @@ pub enum BinOp {
     Mod,
     Pow,
     FloorDiv,
+    MatMul, // @ operator for matrix multiplication (Simple Math #1930-#1939)
     // Comparison
     Eq,
     NotEq,
@@ -721,11 +781,20 @@ pub struct Field {
     pub visibility: Visibility,
 }
 
+/// A field in an enum variant, can be named or positional
+/// Named: `RGB(r: Int, g: Int, b: Int)` - name is Some("r"), Some("g"), Some("b")
+/// Positional: `RGB(Int, Int, Int)` - name is None for all fields
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumField {
+    pub name: Option<String>,  // None for positional, Some("name") for named
+    pub ty: Type,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumVariant {
     pub span: Span,
     pub name: String,
-    pub fields: Option<Vec<Type>>, // None = unit, Some = tuple/struct
+    pub fields: Option<Vec<EnumField>>, // None = unit, Some = tuple/struct
 }
 
 #[derive(Debug, Clone, PartialEq)]

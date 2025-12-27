@@ -303,7 +303,14 @@ impl<'a> Lexer<'a> {
             }
 
             // String literals
-            '"' => self.scan_fstring(), // Double quotes are interpolated by default
+            '"' => {
+                // Check for triple-quoted string (docstring)
+                if self.check('"') && self.check_ahead(1, '"') {
+                    self.scan_triple_quoted_string()
+                } else {
+                    self.scan_fstring() // Double quotes are interpolated by default
+                }
+            }
             '\'' => self.scan_raw_string(), // Single quotes are raw strings
 
             // Numbers
@@ -345,6 +352,10 @@ impl<'a> Lexer<'a> {
 
     fn check(&mut self, expected: char) -> bool {
         self.peek() == Some(expected)
+    }
+
+    fn check_ahead(&mut self, n: usize, expected: char) -> bool {
+        self.peek_ahead(n) == Some(expected)
     }
 
     fn check_alpha(&mut self) -> bool {

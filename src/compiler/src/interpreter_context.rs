@@ -1,12 +1,23 @@
-// Context method dispatch (part of interpreter module)
+//! Context method dispatch (part of interpreter module)
+//!
+//! Handles method dispatch for context objects, including method_missing hooks
+//! and value-to-expression conversion.
 
-fn dispatch_context_method(
+use crate::error::CompileError;
+use crate::value::{Env, Value};
+use simple_parser::ast::{Argument, Expr, ClassDef, FunctionDef};
+use std::collections::HashMap;
+
+// Import parent interpreter types and functions
+use super::{Enums, ImplMethods, evaluate_expr, find_and_exec_method, try_method_missing};
+
+pub(super) fn dispatch_context_method(
     ctx: &Value,
     method: &str,
-    args: &[simple_parser::ast::Argument],
+    args: &[Argument],
     env: &Env,
-    functions: &HashMap<String, FunctionDef>,
-    classes: &HashMap<String, ClassDef>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {

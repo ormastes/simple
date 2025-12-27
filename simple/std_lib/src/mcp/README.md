@@ -379,5 +379,5 @@ Part of the Simple language standard library.
 ## See Also
 
 - [MCP Specification](../../doc/spec/basic_mcp.md)
-- [Implementation Report](../../doc/report/MCP_IMPLEMENTATION_SUMMARY_2025-12-26.md)
+- [Implementation Report](../../doc/mcp/implementation_summary.md)
 - [Simple Language Documentation](../../doc/)

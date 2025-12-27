@@ -1,0 +1,330 @@
+# Advanced ML + Physics Integration
+#
+# Demonstrates advanced features:
+# - Physics: Damping, force fields (gravity, wind, drag)
+# - ML: Tensor reductions, learning rate schedulers, RMSprop optimizer
+#
+# This example trains a neural network to predict projectile trajectories
+# under realistic conditions (gravity + wind + air resistance).
+
+import ml.torch as torch
+import ml.torch.nn as nn
+import ml.torch.optim as optim
+import physics.core as core
+import physics.dynamics as dynamics
+
+
+# ============================================================================
+# Neural Network Model
+# ============================================================================
+
+class TrajectoryNet(nn.Module):
+    """Neural network for trajectory prediction with multiple force fields.
+
+    Input: [initial_pos (3), initial_vel (3), wind (3), drag_coef (1), time (1)] = 11 features
+    Output: [final_pos (3), final_vel (3)] = 6 features
+    """
+    fc1: nn.Linear
+    fc2: nn.Linear
+    fc3: nn.Linear
+
+    fn __init__(self):
+        """Initialize network."""
+        super().__init__()
+        self.fc1 = nn.Linear(11, 64)
+        self.fc2 = nn.Linear(64, 32)
+        self.fc3 = nn.Linear(32, 6)
+
+    fn forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
+        x = nn.relu(self.fc1(x))
+        x = nn.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+
+# ============================================================================
+# Physics Simulation with Force Fields
+# ============================================================================
+
+fn simulate_trajectory_with_fields(
+    initial_pos: core.Vector3,
+    initial_vel: core.Vector3,
+    wind_direction: core.Vector3,
+    wind_strength: f64,
+    drag_coefficient: f64,
+    time: f64,
+    dt: f64 = 0.01
+) -> (core.Vector3, core.Vector3):
+    """Simulate trajectory with gravity, wind, and drag.
+
+    Args:
+        initial_pos: Initial position
+        initial_vel: Initial velocity
+        wind_direction: Wind direction vector
+        wind_strength: Wind strength
+        drag_coefficient: Drag coefficient
+        time: Total simulation time
+        dt: Time step
+
+    Returns:
+        Tuple of (final_position, final_velocity)
+    """
+    # Create rigid body with damping
+    let body = dynamics.RigidBody(
+        mass=1.0,
+        position=initial_pos,
+        velocity=initial_vel,
+        radius=0.1,
+        linear_damping=0.005,
+        angular_damping=0.005
+    )
+
+    # Create force fields
+    let gravity = dynamics.GravityField(core.Vector3(0.0, -9.81, 0.0))
+    let wind = dynamics.WindField(wind_direction, wind_strength)
+    let drag = dynamics.DragField(
+        coefficient=drag_coefficient,
+        fluid_density=1.225,  # Air density
+        mode="quadratic"
+    )
+
+    # Simulate
+    let steps = (time / dt) as i32
+    for _ in range(steps):
+        # Apply all force fields
+        gravity.apply(body, dt)
+        wind.apply(body, dt)
+        drag.apply(body, dt)
+
+        # Integrate
+        body.integrate(dt)
+
+    return (body.position, body.velocity)
+
+
+fn generate_training_data(num_samples: i32, device: torch.Device) -> (torch.Tensor, torch.Tensor):
+    """Generate training data using physics simulation.
+
+    Args:
+        num_samples: Number of samples
+        device: Device for tensors
+
+    Returns:
+        Tuple of (inputs, targets)
+    """
+    print(f"Generating {num_samples} samples with advanced physics...")
+
+    let mut inputs = []
+    let mut targets = []
+
+    for i in range(num_samples):
+        # Random initial conditions
+        let px = (rand() * 20.0) - 10.0
+        let py = rand() * 10.0 + 5.0
+        let pz = (rand() * 20.0) - 10.0
+        let vx = (rand() * 10.0) - 5.0
+        let vy = rand() * 10.0
+        let vz = (rand() * 10.0) - 5.0
+
+        # Random wind conditions
+        let wx = (rand() * 4.0) - 2.0
+        let wy = 0.0
+        let wz = (rand() * 4.0) - 2.0
+        let wind_strength = rand() * 2.0
+
+        # Random drag coefficient (0.2 to 0.8)
+        let drag_coef = rand() * 0.6 + 0.2
+
+        # Random time
+        let t = rand() * 2.0 + 0.5
+
+        # Simulate
+        let initial_pos = core.Vector3(px, py, pz)
+        let initial_vel = core.Vector3(vx, vy, vz)
+        let wind_dir = core.Vector3(wx, wy, wz)
+
+        let (final_pos, final_vel) = simulate_trajectory_with_fields(
+            initial_pos, initial_vel, wind_dir, wind_strength, drag_coef, t
+        )
+
+        # Store as input/output
+        inputs.append([px, py, pz, vx, vy, vz, wx, wy, wz, drag_coef, t])
+        targets.append([final_pos.x, final_pos.y, final_pos.z, final_vel.x, final_vel.y, final_vel.z])
+
+        if (i + 1) % 100 == 0:
+            print(f"  Generated {i + 1}/{num_samples}")
+
+    # Convert to tensors
+    let input_tensor = torch.from_data(inputs, device=device)
+    let target_tensor = torch.from_data(targets, device=device)
+
+    print("Data generation complete!")
+    return (input_tensor, target_tensor)
+
+
+# ============================================================================
+# Training with Advanced Features
+# ============================================================================
+
+fn train_with_scheduler(
+    model: TrajectoryNet,
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    epochs: i32 = 100
+):
+    """Train model with learning rate scheduler and advanced optimizers.
+
+    Args:
+        model: Neural network
+        inputs: Input tensor
+        targets: Target tensor
+        epochs: Number of epochs
+    """
+    print("\n" + "=" * 80)
+    print("Training with RMSprop + CosineAnnealingLR")
+    print("=" * 80)
+
+    # Create RMSprop optimizer (good for RNNs and noisy data)
+    let params = model.parameters()
+    let optimizer = optim.RMSprop(
+        params,
+        lr=0.01,
+        alpha=0.99,
+        eps=1e-8
+    )
+
+    # Create learning rate scheduler
+    let scheduler = optim.CosineAnnealingLR(
+        optimizer,
+        T_max=epochs,
+        eta_min=0.0001
+    )
+
+    # Training loop
+    model.train()
+
+    for epoch in range(epochs):
+        # Forward pass
+        let predictions = model.forward(inputs)
+
+        # Compute loss using tensor reductions
+        let diff = predictions - targets
+        let squared_diff = diff ** 2
+        let loss = squared_diff.mean()  # Using new mean reduction
+
+        # Compute per-feature loss for monitoring
+        let pos_loss = squared_diff[:, 0:3].mean()  # Position MSE
+        let vel_loss = squared_diff[:, 3:6].mean()  # Velocity MSE
+
+        # Backward pass
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        scheduler.step()  # Update learning rate
+
+        # Log progress
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            let current_lr = optimizer.lr
+            print(f"Epoch {epoch + 1}/{epochs}")
+            print(f"  Loss: {loss.item():.6f} (Pos: {pos_loss.item():.6f}, Vel: {vel_loss.item():.6f})")
+            print(f"  LR: {current_lr:.6f}")
+
+    print("\nTraining complete!")
+
+
+# ============================================================================
+# Evaluation
+# ============================================================================
+
+fn evaluate_model(model: TrajectoryNet):
+    """Evaluate trained model.
+
+    Args:
+        model: Trained model
+    """
+    print("\n" + "=" * 80)
+    print("Model Evaluation")
+    print("=" * 80)
+
+    model.eval()
+
+    # Test case: Projectile with wind and drag
+    print("\nTest: Projectile with strong wind and drag")
+    let initial_pos = core.Vector3(0.0, 10.0, 0.0)
+    let initial_vel = core.Vector3(5.0, 5.0, 0.0)
+    let wind_dir = core.Vector3(1.0, 0.0, 0.0)
+    let wind_strength = 2.0
+    let drag_coef = 0.47  # Sphere
+    let t = 1.5
+
+    # Physics simulation
+    let (physics_pos, physics_vel) = simulate_trajectory_with_fields(
+        initial_pos, initial_vel, wind_dir, wind_strength, drag_coef, t
+    )
+
+    # Neural network prediction
+    let input = torch.from_data([[
+        0.0, 10.0, 0.0,  # position
+        5.0, 5.0, 0.0,   # velocity
+        1.0, 0.0, 0.0,   # wind direction
+        drag_coef,       # drag coefficient
+        t                # time
+    ]])
+    let nn_output = model.forward(input)
+
+    print(f"  Initial: pos=({initial_pos.x:.2f}, {initial_pos.y:.2f}, {initial_pos.z:.2f}), ")
+    print(f"          vel=({initial_vel.x:.2f}, {initial_vel.y:.2f}, {initial_vel.z:.2f})")
+    print(f"  Wind: ({wind_dir.x:.2f}, {wind_dir.y:.2f}, {wind_dir.z:.2f}) * {wind_strength:.2f}")
+    print(f"  Drag coefficient: {drag_coef:.2f}")
+    print(f"\n  Physics:")
+    print(f"    Position: ({physics_pos.x:.2f}, {physics_pos.y:.2f}, {physics_pos.z:.2f})")
+    print(f"    Velocity: ({physics_vel.x:.2f}, {physics_vel.y:.2f}, {physics_vel.z:.2f})")
+    print(f"\n  Neural Net:")
+    print(f"    Position: ({nn_output[0, 0]:.2f}, {nn_output[0, 1]:.2f}, {nn_output[0, 2]:.2f})")
+    print(f"    Velocity: ({nn_output[0, 3]:.2f}, {nn_output[0, 4]:.2f}, {nn_output[0, 5]:.2f})")
+
+    # Compute error
+    let pos_error = ((physics_pos.x - nn_output[0, 0])**2 +
+                     (physics_pos.y - nn_output[0, 1])**2 +
+                     (physics_pos.z - nn_output[0, 2])**2)**0.5
+    print(f"\n  Position Error: {pos_error:.4f} m")
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+fn main():
+    """Main program."""
+    print("=" * 80)
+    print("Advanced ML + Physics Integration")
+    print("Features: Damping, Force Fields, Drag, LR Schedulers, RMSprop")
+    print("=" * 80)
+
+    # Check device
+    let device = if torch.cuda_available():
+        print(f"\nUsing GPU with {torch.cuda_device_count()} device(s)")
+        torch.Device::CUDA(0)
+    else:
+        print("\nUsing CPU")
+        torch.Device::CPU
+
+    # Generate training data
+    let (inputs, targets) = generate_training_data(500, device)
+
+    # Create and train model
+    let model = TrajectoryNet()
+    model.to(device)
+    train_with_scheduler(model, inputs, targets, epochs=100)
+
+    # Evaluate
+    evaluate_model(model)
+
+    print("\n" + "=" * 80)
+    print("Complete!")
+    print("=" * 80)
+
+
+# Run
+main()

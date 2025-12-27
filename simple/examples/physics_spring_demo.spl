@@ -1,0 +1,125 @@
+# Physics Example: Spring Constraint Demo
+#
+# Demonstrates:
+# - Spring joints between bodies
+# - Constraint solving
+# - Oscillating motion
+# - Distance joints
+
+import physics
+import physics.core as core
+import physics.dynamics as dynamics
+import physics.constraints as constraints
+import ml.torch as torch
+
+
+fn main():
+    """Main entry point."""
+    print("=== Physics Spring Constraint Demo ===\n")
+
+    # Create physics world (no gravity for clear spring visualization)
+    print("Creating physics world (no gravity)...")
+    let world = physics.World(
+        gravity=core.Vector3::zero(),  # No gravity
+        device=torch.Device::CPU,
+        substeps=4  # More substeps for stable spring simulation
+    )
+
+    # Create two bodies connected by spring
+    print("Creating bodies...")
+
+    # Body 1: Static anchor
+    let anchor = dynamics.RigidBody(
+        mass=0.0,  # Static (infinite mass)
+        position=core.Vector3(0.0, 5.0, 0.0),
+        radius=0.3
+    )
+    world.add_body(anchor)
+
+    # Body 2: Dynamic body
+    let body = dynamics.RigidBody(
+        mass=1.0,  # 1kg
+        position=core.Vector3(3.0, 5.0, 0.0),  # 3m away from anchor
+        velocity=core.Vector3(0.0, 2.0, 0.0),  # Initial upward velocity
+        radius=0.5
+    )
+    world.add_body(body)
+
+    # Create spring joint
+    print("Creating spring joint...")
+    let spring = constraints.SpringJoint(
+        anchor,
+        body,
+        stiffness=50.0,      # Spring constant (N/m)
+        damping=2.0,         # Damping coefficient
+        rest_length=2.0      # Rest length (m)
+    )
+
+    # Create another pair with distance joint
+    print("Creating distance joint pair...")
+
+    let anchor2 = dynamics.RigidBody(
+        mass=0.0,
+        position=core.Vector3(0.0, -5.0, 0.0),
+        radius=0.3
+    )
+    world.add_body(anchor2)
+
+    let body2 = dynamics.RigidBody(
+        mass=1.0,
+        position=core.Vector3(2.5, -5.0, 0.0),
+        velocity=core.Vector3(0.0, -1.0, 0.0),
+        radius=0.5
+    )
+    world.add_body(body2)
+
+    let distance_joint = constraints.DistanceJoint(
+        anchor2,
+        body2,
+        distance=2.0  # Fixed distance
+    )
+
+    # Simulation parameters
+    let dt = 0.016  # 60 FPS
+    let num_steps = 300  # 5 seconds
+
+    print(f"\n=== Running Simulation ===")
+    print(f"Spring: k={spring.stiffness} N/m, damping={spring.damping}, rest={spring.rest_length}m")
+    print(f"Distance joint: fixed distance={distance_joint.distance}m\n")
+
+    # Track maximum displacement
+    let mut max_displacement = 0.0
+
+    # Run simulation
+    for step in range(num_steps):
+        # Apply spring forces
+        spring.solve(dt)
+        distance_joint.solve(dt)
+
+        # Step world
+        world.step(dt)
+
+        # Print progress every 15 steps (0.25 seconds)
+        if step % 15 == 0:
+            let time = step as f64 * dt
+
+            # Spring system
+            let spring_distance = body.position.distance(anchor.position)
+            let extension = spring_distance - spring.rest_length
+            max_displacement = max_displacement.max(extension.abs())
+
+            print(f"Time: {time:.2f}s")
+            print(f"  Spring - Distance: {spring_distance:.3f}m, Extension: {extension:+.3f}m")
+            print(f"  Spring Body - Vel: {body.velocity.magnitude():.2f}m/s")
+
+            # Distance joint system
+            let dist_distance = body2.position.distance(anchor2.position)
+            print(f"  Distance Joint - Distance: {dist_distance:.3f}m (target: {distance_joint.distance:.3f}m)")
+            print(f"  Distance Body - Vel: {body2.velocity.magnitude():.2f}m/s")
+
+    print(f"\n=== Simulation Complete ===")
+    print(f"Maximum spring displacement: {max_displacement:.3f}m")
+    print(f"Final spring extension: {(body.position.distance(anchor.position) - spring.rest_length):+.3f}m")
+    print(f"Final distance joint error: {(body2.position.distance(anchor2.position) - distance_joint.distance):.6f}m")
+
+    print("\n=== Example Complete ===")

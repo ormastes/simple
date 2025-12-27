@@ -1,0 +1,412 @@
+# Post-Processing Shaders
+#
+# Screen-space effects: tone mapping, bloom, FXAA, color grading, vignette.
+#
+# Based on: doc/spec/graphics_3d.md (Part 13: Post-Processing)
+
+use core.*
+use graphics.math.*
+
+# =============================================================================
+# Common Structures
+# =============================================================================
+
+pub struct FullscreenVertex:
+    position: Vec2    # NDC coordinates (-1 to 1)
+    tex_coord: Vec2   # UV coordinates (0 to 1)
+
+pub struct FullscreenVaryings:
+    tex_coord: Vec2
+
+# =============================================================================
+# Fullscreen Quad Vertex Shader
+# =============================================================================
+
+#[vertex_shader]
+pub fn fullscreen_vertex_shader(input: FullscreenVertex) -> (Vec4, FullscreenVaryings):
+    let varyings = FullscreenVaryings {
+        tex_coord: input.tex_coord
+    }
+
+    return (Vec4::from_vec2(input.position, 0.0, 1.0), varyings)
+
+# =============================================================================
+# Tone Mapping Shaders
+# =============================================================================
+
+pub struct ToneMappingUniforms:
+    tone_mapping_mode: i32    # 0=None, 1=Reinhard, 2=ReinhardLuma, 3=ACES, 4=Filmic, 5=Unreal
+    exposure: f32
+    white_point: f32
+
+#[fragment_shader]
+pub fn tone_mapping_fragment_shader(
+    varyings: FullscreenVaryings,
+    uniforms: ToneMappingUniforms
+) -> Vec4:
+    # Sample HDR color
+    let hdr_color = sample_texture_2d(input_texture, varyings.tex_coord).rgb()
+
+    # Apply exposure
+    let color = hdr_color * uniforms.exposure
+
+    # Apply tone mapping
+    let tone_mapped = if uniforms.tone_mapping_mode == 0:
+        color  # No tone mapping
+    else if uniforms.tone_mapping_mode == 1:
+        tone_map_reinhard(color)
+    else if uniforms.tone_mapping_mode == 2:
+        tone_map_reinhard_luma(color)
+    else if uniforms.tone_mapping_mode == 3:
+        tone_map_aces(color)
+    else if uniforms.tone_mapping_mode == 4:
+        tone_map_filmic(color, uniforms.white_point)
+    else if uniforms.tone_mapping_mode == 5:
+        tone_map_unreal(color)
+    else:
+        color
+
+    # Gamma correction (sRGB)
+    let gamma_corrected = pow_vec3(tone_mapped, Vec3::new(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2))
+
+    return Vec4::from_vec3(gamma_corrected, 1.0)
+
+# Reinhard tone mapping
+fn tone_map_reinhard(color: Vec3) -> Vec3:
+    return color / (color + Vec3::one())
+
+# Reinhard tone mapping (luminance-based)
+fn tone_map_reinhard_luma(color: Vec3) -> Vec3:
+    let luma = luminance(color)
+    let tone_mapped_luma = luma / (1.0 + luma)
+    return color * (tone_mapped_luma / luma)
+
+# ACES Filmic tone mapping (industry standard)
+fn tone_map_aces(color: Vec3) -> Vec3:
+    let a = 2.51
+    let b = 0.03
+    let c = 2.43
+    let d = 0.59
+    let e = 0.14
+
+    return clamp_vec3((color * (a * color + b)) / (color * (c * color + d) + e), Vec3::zero(), Vec3::one())
+
+# Uncharted 2 Filmic tone mapping
+fn tone_map_filmic(color: Vec3, white_point: f32) -> Vec3:
+    let filmic = fn(x: Vec3) -> Vec3:
+        let a = 0.15  # Shoulder strength
+        let b = 0.50  # Linear strength
+        let c = 0.10  # Linear angle
+        let d = 0.20  # Toe strength
+        let e = 0.02  # Toe numerator
+        let f = 0.30  # Toe denominator
+
+        return ((x * (a * x + c * b) + d * e) / (x * (a * x + b) + d * f)) - e / f
+
+    let curr = filmic(color)
+    let w = Vec3::new(white_point, white_point, white_point)
+    let white_scale = Vec3::one() / filmic(w)
+
+    return curr * white_scale
+
+# Unreal Engine 3 tone mapping
+fn tone_map_unreal(color: Vec3) -> Vec3:
+    return color / (color + 0.155) * 1.019
+
+# =============================================================================
+# Bloom Shaders
+# =============================================================================
+
+pub struct BloomThresholdUniforms:
+    threshold: f32
+
+#[fragment_shader]
+pub fn bloom_threshold_fragment_shader(
+    varyings: FullscreenVaryings,
+    uniforms: BloomThresholdUniforms
+) -> Vec4:
+    let color = sample_texture_2d(input_texture, varyings.tex_coord).rgb()
+
+    # Extract bright pixels
+    let brightness = max_component(color)
+
+    let contribution = if brightness > uniforms.threshold:
+        color * ((brightness - uniforms.threshold) / brightness)
+    else:
+        Vec3::zero()
+
+    return Vec4::from_vec3(contribution, 1.0)
+
+pub struct BloomBlurUniforms:
+    filter_radius: f32
+    texel_size: Vec2
+
+#[fragment_shader]
+pub fn bloom_downsample_fragment_shader(
+    varyings: FullscreenVaryings,
+    uniforms: BloomBlurUniforms
+) -> Vec4:
+    # 13-tap downsampling (Kawase blur)
+    let uv = varyings.tex_coord
+    let offset = uniforms.texel_size * uniforms.filter_radius
+
+    let mut color = Vec3::zero()
+
+    # Center
+    color = color + sample_texture_2d(input_texture, uv).rgb() * 0.125
+
+    # 4-neighborhood
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(-offset.x, 0.0)).rgb() * 0.125
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new( offset.x, 0.0)).rgb() * 0.125
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(0.0, -offset.y)).rgb() * 0.125
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(0.0,  offset.y)).rgb() * 0.125
+
+    # Diagonals
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(-offset.x, -offset.y)).rgb() * 0.125
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new( offset.x, -offset.y)).rgb() * 0.125
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(-offset.x,  offset.y)).rgb() * 0.125
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new( offset.x,  offset.y)).rgb() * 0.125
+
+    return Vec4::from_vec3(color, 1.0)
+
+#[fragment_shader]
+pub fn bloom_upsample_fragment_shader(
+    varyings: FullscreenVaryings,
+    uniforms: BloomBlurUniforms
+) -> Vec4:
+    # Tent filter upsampling
+    let uv = varyings.tex_coord
+    let offset = uniforms.texel_size * 0.5
+
+    let mut color = Vec3::zero()
+
+    # 9-tap tent filter
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(-offset.x, -offset.y)).rgb()
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(0.0,      -offset.y)).rgb() * 2.0
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new( offset.x, -offset.y)).rgb()
+
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(-offset.x, 0.0)).rgb() * 2.0
+    color = color + sample_texture_2d(input_texture, uv).rgb() * 4.0
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new( offset.x, 0.0)).rgb() * 2.0
+
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(-offset.x,  offset.y)).rgb()
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new(0.0,       offset.y)).rgb() * 2.0
+    color = color + sample_texture_2d(input_texture, uv + Vec2::new( offset.x,  offset.y)).rgb()
+
+    return Vec4::from_vec3(color / 16.0, 1.0)
+
+pub struct BloomCompositeUniforms:
+    bloom_intensity: f32
+
+#[fragment_shader]
+pub fn bloom_composite_fragment_shader(
+    varyings: FullscreenVaryings,
+    uniforms: BloomCompositeUniforms
+) -> Vec4:
+    let scene_color = sample_texture_2d(scene_texture, varyings.tex_coord).rgb()
+    let bloom_color = sample_texture_2d(bloom_texture, varyings.tex_coord).rgb()
+
+    let final_color = scene_color + bloom_color * uniforms.bloom_intensity
+
+    return Vec4::from_vec3(final_color, 1.0)
+
+# =============================================================================
+# FXAA Anti-Aliasing Shader
+# =============================================================================
+
+pub struct FXAAUniforms:
+    texel_size: Vec2
+    quality: i32  # 0=Low, 1=Medium, 2=High, 3=Ultra
+
+#[fragment_shader]
+pub fn fxaa_fragment_shader(
+    varyings: FullscreenVaryings,
+    uniforms: FXAAUniforms
+) -> Vec4:
+    let uv = varyings.tex_coord
+    let texel = uniforms.texel_size
+
+    # Sample 3x3 neighborhood
+    let rgb_n  = sample_texture_2d(input_texture, uv + Vec2::new(0.0, -texel.y)).rgb()
+    let rgb_w  = sample_texture_2d(input_texture, uv + Vec2::new(-texel.x, 0.0)).rgb()
+    let rgb_m  = sample_texture_2d(input_texture, uv).rgb()
+    let rgb_e  = sample_texture_2d(input_texture, uv + Vec2::new(texel.x, 0.0)).rgb()
+    let rgb_s  = sample_texture_2d(input_texture, uv + Vec2::new(0.0, texel.y)).rgb()
+
+    # Convert to luminance
+    let luma_n = luminance(rgb_n)
+    let luma_w = luminance(rgb_w)
+    let luma_m = luminance(rgb_m)
+    let luma_e = luminance(rgb_e)
+    let luma_s = luminance(rgb_s)
+
+    # Detect edges
+    let range_min = min(luma_m, min(min(luma_n, luma_w), min(luma_s, luma_e)))
+    let range_max = max(luma_m, max(max(luma_n, luma_w), max(luma_s, luma_e)))
+    let range = range_max - range_min
+
+    # Early exit if no edge
+    let fxaa_threshold = 0.0833  # 1/12
+    if range < max(fxaa_threshold, range_max * 0.125):
+        return Vec4::from_vec3(rgb_m, 1.0)
+
+    # Diagonal corners
+    let rgb_nw = sample_texture_2d(input_texture, uv + Vec2::new(-texel.x, -texel.y)).rgb()
+    let rgb_ne = sample_texture_2d(input_texture, uv + Vec2::new( texel.x, -texel.y)).rgb()
+    let rgb_sw = sample_texture_2d(input_texture, uv + Vec2::new(-texel.x,  texel.y)).rgb()
+    let rgb_se = sample_texture_2d(input_texture, uv + Vec2::new( texel.x,  texel.y)).rgb()
+
+    let luma_nw = luminance(rgb_nw)
+    let luma_ne = luminance(rgb_ne)
+    let luma_sw = luminance(rgb_sw)
+    let luma_se = luminance(rgb_se)
+
+    # Determine edge direction
+    let luma_down = luma_n + luma_s
+    let luma_up = luma_w + luma_e
+
+    let edge_horizontal = abs(luma_n + luma_s - 2.0 * luma_m) >= abs(luma_w + luma_e - 2.0 * luma_m)
+
+    # Blend factor based on edge direction
+    let blend_factor = if edge_horizontal:
+        0.5 * abs(luma_n - luma_m) + abs(luma_s - luma_m)
+    else:
+        0.5 * abs(luma_w - luma_m) + abs(luma_e - luma_m)
+
+    # Sample along edge
+    let uv_offset = if edge_horizontal:
+        Vec2::new(texel.x, 0.0)
+    else:
+        Vec2::new(0.0, texel.y)
+
+    let rgb_positive = sample_texture_2d(input_texture, uv + uv_offset).rgb()
+    let rgb_negative = sample_texture_2d(input_texture, uv - uv_offset).rgb()
+
+    # Blend
+    let blend = clamp(blend_factor / range, 0.0, 1.0)
+    let final_rgb = lerp_vec3(rgb_m, (rgb_positive + rgb_negative) * 0.5, blend)
+
+    return Vec4::from_vec3(final_rgb, 1.0)
+
+# =============================================================================
+# Color Grading Shader
+# =============================================================================
+
+pub struct ColorGradingUniforms:
+    saturation: f32
+    contrast: f32
+    brightness: f32
+    temperature: f32
+    tint: f32
+
+#[fragment_shader]
+pub fn color_grading_fragment_shader(
+    varyings: FullscreenVaryings,
+    uniforms: ColorGradingUniforms
+) -> Vec4:
+    let mut color = sample_texture_2d(input_texture, varyings.tex_coord).rgb()
+
+    # Brightness
+    color = color + Vec3::new(uniforms.brightness, uniforms.brightness, uniforms.brightness)
+
+    # Contrast
+    let gray = Vec3::new(0.5, 0.5, 0.5)
+    color = lerp_vec3(gray, color, uniforms.contrast)
+
+    # Saturation
+    let luma = luminance(color)
+    let gray_color = Vec3::new(luma, luma, luma)
+    color = lerp_vec3(gray_color, color, uniforms.saturation)
+
+    # Temperature (warm-cool)
+    if uniforms.temperature > 0.0:
+        color.x = color.x + uniforms.temperature * 0.1  # Add red
+        color.z = color.z - uniforms.temperature * 0.05  # Remove blue
+    else:
+        color.x = color.x + uniforms.temperature * 0.05
+        color.z = color.z - uniforms.temperature * 0.1
+
+    # Tint (green-magenta)
+    color.y = color.y + uniforms.tint * 0.1
+
+    return Vec4::from_vec3(color, 1.0)
+
+# =============================================================================
+# Vignette Shader
+# =============================================================================
+
+pub struct VignetteUniforms:
+    intensity: f32
+    smoothness: f32
+
+#[fragment_shader]
+pub fn vignette_fragment_shader(
+    varyings: FullscreenVaryings,
+    uniforms: VignetteUniforms
+) -> Vec4:
+    let color = sample_texture_2d(input_texture, varyings.tex_coord).rgb()
+
+    # Distance from center
+    let center = Vec2::new(0.5, 0.5)
+    let dist = (varyings.tex_coord - center).length()
+
+    # Vignette factor
+    let vignette = smoothstep(uniforms.intensity, uniforms.intensity - uniforms.smoothness, dist)
+
+    return Vec4::from_vec3(color * vignette, 1.0)
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+fn luminance(color: Vec3) -> f32:
+    return color.x * 0.2126 + color.y * 0.7152 + color.z * 0.0722
+
+fn max_component(v: Vec3) -> f32:
+    return max(max(v.x, v.y), v.z)
+
+fn max(a: f32, b: f32) -> f32:
+    return if a > b: a else: b
+
+fn min(a: f32, b: f32) -> f32:
+    return if a < b: a else: b
+
+fn abs(x: f32) -> f32:
+    return if x < 0.0: -x else: x
+
+fn clamp(value: f32, min_val: f32, max_val: f32) -> f32:
+    return max(min_val, min(max_val, value))
+
+fn clamp_vec3(v: Vec3, min_v: Vec3, max_v: Vec3) -> Vec3:
+    return Vec3::new(
+        clamp(v.x, min_v.x, max_v.x),
+        clamp(v.y, min_v.y, max_v.y),
+        clamp(v.z, min_v.z, max_v.z)
+    )
+
+fn pow(base: f32, exp: f32) -> f32:
+    # Would use math library
+    return 0.0  # Placeholder
+
+fn pow_vec3(v: Vec3, exp: Vec3) -> Vec3:
+    return Vec3::new(
+        pow(v.x, exp.x),
+        pow(v.y, exp.y),
+        pow(v.z, exp.z)
+    )
+
+fn lerp_vec3(a: Vec3, b: Vec3, t: f32) -> Vec3:
+    return a * (1.0 - t) + b * t
+
+fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32:
+    let t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+# =============================================================================
+# Texture Sampling
+# =============================================================================
+
+extern fn sample_texture_2d(texture_id: u64, uv: Vec2) -> Vec4
+extern fn input_texture() -> u64
+extern fn scene_texture() -> u64
+extern fn bloom_texture() -> u64

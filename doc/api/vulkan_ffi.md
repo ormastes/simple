@@ -719,7 +719,7 @@ for kernel_data in batch:
 
 - [Vulkan Backend User Guide](../guides/vulkan_backend.md) - Getting started and examples
 - [Vulkan Backend Architecture](../architecture/vulkan_backend.md) - Implementation details
-- [GPU Kernel Specification](../spec/gpu_simd.md) - Language-level GPU features
+- [GPU Kernel Specification](../spec/gpu_simd/README.md) - Language-level GPU features
 
 ---
 

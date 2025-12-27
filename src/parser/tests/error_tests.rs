@@ -1,7 +1,7 @@
-use crate::error::ParseError;
-use crate::Parser;
+use simple_parser::error::ParseError;
+use simple_parser::Parser;
 
-fn parse(source: &str) -> Result<crate::ast::Module, ParseError> {
+fn parse(source: &str) -> Result<simple_parser::ast::Module, ParseError> {
     let mut parser = Parser::new(source);
     parser.parse()
 }

@@ -115,6 +115,12 @@ pub use child_module.*
 pub use child_module.{TypeA, TypeB, function_c}
 ```
 
+**Note:** The following syntaxes are **semantically identical** (both create re-exports):
+- `pub use module.*` - Rust/Python-style syntax
+- `export use module.*` - Simple-style syntax
+
+Both are fully supported. Use whichever style fits your team's conventions.
+
 ### 3.3 Common Export Patterns
 
 ```spl

@@ -52,7 +52,8 @@ impl TypeChecker {
                     | BinOp::Div
                     | BinOp::Mod
                     | BinOp::Pow
-                    | BinOp::FloorDiv => {
+                    | BinOp::FloorDiv
+                    | BinOp::MatMul => { // Simple Math #1930-#1939: matrix multiplication
                         // Unify operands to ensure they're compatible
                         let _ = self.unify(&left_ty, &right_ty);
                         Ok(self.resolve(&left_ty))

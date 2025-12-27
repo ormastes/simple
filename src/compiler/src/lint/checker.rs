@@ -200,11 +200,15 @@ impl LintChecker {
         // Check variant fields
         for variant in &e.variants {
             if let Some(ref fields) = variant.fields {
-                for (i, field_ty) in fields.iter().enumerate() {
+                for (i, field) in fields.iter().enumerate() {
+                    let field_desc = match &field.name {
+                        Some(name) => format!("{}::{}.{}", e.name, variant.name, name),
+                        None => format!("{}::{}.{}", e.name, variant.name, i),
+                    };
                     self.check_type_in_public_api(
-                        field_ty,
+                        &field.ty,
                         variant.span,
-                        &format!("{}::{}.{}", e.name, variant.name, i),
+                        &field_desc,
                         "variant field",
                     );
                 }

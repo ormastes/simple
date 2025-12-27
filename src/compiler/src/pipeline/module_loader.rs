@@ -4,9 +4,189 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use simple_parser::ast::{Capability, Effect, ImportTarget, Module, Node, UseStmt};
+use simple_parser::ast::{Argument, Capability, Effect, Expr, ImportTarget, Module, Node, UseStmt};
 
 use crate::CompileError;
+
+/// Application type for startup optimization (#1979)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StartupAppType {
+    /// Command-line tool (minimal resources)
+    #[default]
+    Cli,
+    /// Terminal UI application (terminal mode, buffers)
+    Tui,
+    /// Graphical application (window, GPU context)
+    Gui,
+    /// Background service/daemon (IPC, signal handlers)
+    Service,
+    /// Interactive REPL (history, line editor)
+    Repl,
+}
+
+impl StartupAppType {
+    /// Parse from string
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "cli" => Some(Self::Cli),
+            "tui" => Some(Self::Tui),
+            "gui" => Some(Self::Gui),
+            "service" => Some(Self::Service),
+            "repl" => Some(Self::Repl),
+            _ => None,
+        }
+    }
+
+    /// Convert to u8 for SMF header
+    pub fn to_smf_byte(self) -> u8 {
+        match self {
+            Self::Cli => 0,
+            Self::Tui => 1,
+            Self::Gui => 2,
+            Self::Service => 3,
+            Self::Repl => 4,
+        }
+    }
+}
+
+/// Window hints for GUI applications (#1986)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartupWindowHints {
+    pub width: u16,
+    pub height: u16,
+    pub title: String,
+}
+
+impl Default for StartupWindowHints {
+    fn default() -> Self {
+        Self {
+            width: 1280,
+            height: 720,
+            title: "Simple Application".to_string(),
+        }
+    }
+}
+
+/// Startup configuration extracted from module decorators (#1979, #1986)
+#[derive(Debug, Clone, Default)]
+pub struct StartupConfig {
+    /// Application type from @app_type decorator
+    pub app_type: StartupAppType,
+    /// Window hints from @window_hints decorator
+    pub window_hints: StartupWindowHints,
+    /// Whether @app_type was explicitly set
+    pub has_app_type: bool,
+    /// Whether @window_hints was explicitly set
+    pub has_window_hints: bool,
+}
+
+/// Extract startup configuration from a module's main function decorators.
+///
+/// Looks for:
+/// - `@app_type("gui")` - application type
+/// - `@window_hints(width=1920, height=1080, title="My App")` - window configuration
+///
+/// Returns None if no main function found.
+pub fn extract_startup_config(module: &Module) -> Option<StartupConfig> {
+    // Find the main function
+    for item in &module.items {
+        if let Node::Function(func) = item {
+            if func.name == "main" {
+                return Some(extract_startup_config_from_decorators(&func.decorators));
+            }
+        }
+    }
+    None
+}
+
+/// Extract startup configuration from a list of decorators.
+fn extract_startup_config_from_decorators(
+    decorators: &[simple_parser::ast::Decorator],
+) -> StartupConfig {
+    let mut config = StartupConfig::default();
+
+    for decorator in decorators {
+        // Check decorator name
+        let name = match &decorator.name {
+            Expr::Identifier(name) => name.as_str(),
+            _ => continue,
+        };
+
+        match name {
+            "app_type" => {
+                // @app_type("gui") - first positional argument is the type
+                if let Some(args) = &decorator.args {
+                    if let Some(first_arg) = args.first() {
+                        if let Some(type_str) = extract_string_from_arg(first_arg) {
+                            if let Some(app_type) = StartupAppType::from_str(&type_str) {
+                                config.app_type = app_type;
+                                config.has_app_type = true;
+                            }
+                        }
+                    }
+                }
+            }
+            "window_hints" => {
+                // @window_hints(width=1920, height=1080, title="My App")
+                if let Some(args) = &decorator.args {
+                    for arg in args {
+                        // Argument is a struct with name: Option<String> and value: Expr
+                        if let Some(arg_name) = &arg.name {
+                            match arg_name.as_str() {
+                                "width" => {
+                                    if let Some(w) = extract_integer_from_expr(&arg.value) {
+                                        config.window_hints.width = w as u16;
+                                        config.has_window_hints = true;
+                                    }
+                                }
+                                "height" => {
+                                    if let Some(h) = extract_integer_from_expr(&arg.value) {
+                                        config.window_hints.height = h as u16;
+                                        config.has_window_hints = true;
+                                    }
+                                }
+                                "title" => {
+                                    if let Some(t) = extract_string_from_expr(&arg.value) {
+                                        config.window_hints.title = t;
+                                        config.has_window_hints = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Ignore positional args for window_hints
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    config
+}
+
+/// Extract string value from an argument
+fn extract_string_from_arg(arg: &Argument) -> Option<String> {
+    extract_string_from_expr(&arg.value)
+}
+
+/// Extract string value from an expression
+fn extract_string_from_expr(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::String(s) => Some(s.clone()),
+        Expr::TypedString(s, _) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Extract integer value from an expression
+fn extract_integer_from_expr(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Integer(n) => Some(*n),
+        Expr::TypedInteger(n, _) => Some(*n),
+        _ => None,
+    }
+}
 
 /// Extract capabilities from a module's `requires [...]` statement.
 /// Returns None if no requires statement found (unrestricted module).
@@ -52,7 +232,9 @@ pub fn check_import_compatibility(
             Effect::Net => Some(Capability::Net),
             Effect::Fs => Some(Capability::Fs),
             Effect::Unsafe => Some(Capability::Unsafe),
-            Effect::Async => None, // Async is always allowed
+            Effect::Async => None,   // Async is always allowed
+            Effect::Verify => None,  // Verification mode marker, no capability
+            Effect::Trusted => None, // Trusted boundary marker, no capability
         };
 
         if let Some(cap) = required_cap {
@@ -190,6 +372,17 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
         return Some(resolved);
     }
 
+    // Try __init__.spl in directory (Python-style package imports)
+    let mut init_resolved = base.to_path_buf();
+    for part in &parts {
+        init_resolved = init_resolved.join(part);
+    }
+    init_resolved = init_resolved.join("__init__");
+    init_resolved.set_extension("spl");
+    if init_resolved.exists() {
+        return Some(init_resolved);
+    }
+
     // If not found, try stdlib location
     // Detect stdlib by walking up directory tree
     let mut current = base.to_path_buf();
@@ -205,6 +398,17 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
             if stdlib_path.exists() {
                 return Some(stdlib_path);
             }
+
+            // Also try __init__.spl in stdlib
+            let mut stdlib_init_path = stdlib_candidate.clone();
+            for part in &parts {
+                stdlib_init_path = stdlib_init_path.join(part);
+            }
+            stdlib_init_path = stdlib_init_path.join("__init__");
+            stdlib_init_path.set_extension("spl");
+            if stdlib_init_path.exists() {
+                return Some(stdlib_init_path);
+            }
         }
         if let Some(parent) = current.parent() {
             current = parent.to_path_buf();
@@ -214,4 +418,152 @@ fn resolve_use_to_path(use_stmt: &UseStmt, base: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_startup_app_type_parsing() {
+        assert_eq!(StartupAppType::from_str("cli"), Some(StartupAppType::Cli));
+        assert_eq!(StartupAppType::from_str("tui"), Some(StartupAppType::Tui));
+        assert_eq!(StartupAppType::from_str("gui"), Some(StartupAppType::Gui));
+        assert_eq!(StartupAppType::from_str("service"), Some(StartupAppType::Service));
+        assert_eq!(StartupAppType::from_str("repl"), Some(StartupAppType::Repl));
+        assert_eq!(StartupAppType::from_str("GUI"), Some(StartupAppType::Gui)); // Case insensitive
+        assert_eq!(StartupAppType::from_str("invalid"), None);
+    }
+
+    #[test]
+    fn test_startup_app_type_to_smf_byte() {
+        assert_eq!(StartupAppType::Cli.to_smf_byte(), 0);
+        assert_eq!(StartupAppType::Tui.to_smf_byte(), 1);
+        assert_eq!(StartupAppType::Gui.to_smf_byte(), 2);
+        assert_eq!(StartupAppType::Service.to_smf_byte(), 3);
+        assert_eq!(StartupAppType::Repl.to_smf_byte(), 4);
+    }
+
+    #[test]
+    fn test_startup_window_hints_default() {
+        let hints = StartupWindowHints::default();
+        assert_eq!(hints.width, 1280);
+        assert_eq!(hints.height, 720);
+        assert_eq!(hints.title, "Simple Application");
+    }
+
+    #[test]
+    fn test_startup_config_default() {
+        let config = StartupConfig::default();
+        assert_eq!(config.app_type, StartupAppType::Cli);
+        assert!(!config.has_app_type);
+        assert!(!config.has_window_hints);
+    }
+
+    #[test]
+    fn test_extract_startup_config_with_app_type() {
+        let source = r#"
+@app_type("gui")
+fn main():
+    pass
+"#;
+        let mut parser = simple_parser::Parser::new(source);
+        let module = parser.parse().expect("parse ok");
+        let config = extract_startup_config(&module);
+
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.app_type, StartupAppType::Gui);
+        assert!(config.has_app_type);
+    }
+
+    #[test]
+    fn test_extract_startup_config_with_window_hints() {
+        let source = r#"
+@window_hints(width=1920, height=1080, title="Test App")
+fn main():
+    pass
+"#;
+        let mut parser = simple_parser::Parser::new(source);
+        let module = parser.parse().expect("parse ok");
+        let config = extract_startup_config(&module);
+
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.window_hints.width, 1920);
+        assert_eq!(config.window_hints.height, 1080);
+        assert_eq!(config.window_hints.title, "Test App");
+        assert!(config.has_window_hints);
+    }
+
+    #[test]
+    fn test_extract_startup_config_combined() {
+        let source = r#"
+@app_type("gui")
+@window_hints(width=800, height=600, title="My Game")
+fn main():
+    pass
+"#;
+        let mut parser = simple_parser::Parser::new(source);
+        let module = parser.parse().expect("parse ok");
+        let config = extract_startup_config(&module);
+
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.app_type, StartupAppType::Gui);
+        assert!(config.has_app_type);
+        assert_eq!(config.window_hints.width, 800);
+        assert_eq!(config.window_hints.height, 600);
+        assert_eq!(config.window_hints.title, "My Game");
+        assert!(config.has_window_hints);
+    }
+
+    #[test]
+    fn test_extract_startup_config_no_main() {
+        let source = r#"
+fn other():
+    pass
+"#;
+        let mut parser = simple_parser::Parser::new(source);
+        let module = parser.parse().expect("parse ok");
+        let config = extract_startup_config(&module);
+
+        assert!(config.is_none());
+    }
+
+    #[test]
+    fn test_extract_startup_config_main_no_decorators() {
+        let source = r#"
+fn main():
+    pass
+"#;
+        let mut parser = simple_parser::Parser::new(source);
+        let module = parser.parse().expect("parse ok");
+        let config = extract_startup_config(&module);
+
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.app_type, StartupAppType::Cli); // Default
+        assert!(!config.has_app_type);
+        assert!(!config.has_window_hints);
+    }
+
+    #[test]
+    fn test_extract_startup_config_partial_window_hints() {
+        let source = r#"
+@window_hints(width=1600)
+fn main():
+    pass
+"#;
+        let mut parser = simple_parser::Parser::new(source);
+        let module = parser.parse().expect("parse ok");
+        let config = extract_startup_config(&module);
+
+        assert!(config.is_some());
+        let config = config.unwrap();
+        assert_eq!(config.window_hints.width, 1600);
+        assert_eq!(config.window_hints.height, 720); // Default
+        assert_eq!(config.window_hints.title, "Simple Application"); // Default
+        assert!(config.has_window_hints);
+    }
 }

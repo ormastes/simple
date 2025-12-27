@@ -1,0 +1,158 @@
+# Simple Math Operations Test Suite
+# Tests for Simple Math #1940-#1949 features
+# Tests: clamp, where, one_hot operations
+
+import spec
+import ml.torch as torch
+
+describe "Simple Math: clamp operation":
+    it "should clamp values to range [min, max]":
+        # Create tensor with values outside range
+        t = torch.from_data([[-2.0, 0.5, 3.0], [1.0, 5.0, -1.0]])
+
+        # Clamp to [0.0, 2.0]
+        result = t.clamp(0.0, 2.0)
+
+        # Expected: [0.0, 0.5, 2.0], [1.0, 2.0, 0.0]
+        expected = torch.from_data([[0.0, 0.5, 2.0], [1.0, 2.0, 0.0]])
+
+        spec.expect(result.allclose(expected)).to_be(True)
+
+    it "should handle negative range":
+        t = torch.from_data([[-5.0, -2.0, 0.0, 2.0, 5.0]])
+
+        # Clamp to [-3.0, -1.0]
+        result = t.clamp(-3.0, -1.0)
+
+        # Expected: [-3.0, -2.0, -1.0, -1.0, -1.0]
+        expected = torch.from_data([[-3.0, -2.0, -1.0, -1.0, -1.0]])
+
+        spec.expect(result.allclose(expected)).to_be(True)
+
+    it "should work with scalars":
+        t = torch.from_data([[10.0]])
+        result = t.clamp(0.0, 5.0)
+
+        spec.expect(result.item()).to_be(5.0)
+
+describe "Simple Math: where operation":
+    it "should select from two tensors based on condition":
+        # Condition tensor (boolean-like: 1.0 = true, 0.0 = false)
+        cond = torch.from_data([[1.0, 0.0, 1.0], [0.0, 1.0, 0.0]])
+        a = torch.from_data([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+        b = torch.from_data([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]])
+
+        # where(cond, a, b) returns a where cond is true, b otherwise
+        result = torch.select(cond, a, b)
+
+        # Expected: [1.0, 20.0, 3.0], [40.0, 5.0, 60.0]
+        expected = torch.from_data([[1.0, 20.0, 3.0], [40.0, 5.0, 60.0]])
+
+        spec.expect(result.allclose(expected)).to_be(True)
+
+    it "should work with comparison conditions":
+        x = torch.from_data([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+
+        # Select values: if x > 3 then x, else 0
+        cond = x.gt(torch.from_data([[3.0]]))  # Broadcasting
+        zeros = torch.zeros_like(x)
+        result = torch.select(cond, x, zeros)
+
+        # Expected: [0.0, 0.0, 0.0], [4.0, 5.0, 6.0]
+        expected = torch.from_data([[0.0, 0.0, 0.0], [4.0, 5.0, 6.0]])
+
+        spec.expect(result.allclose(expected)).to_be(True)
+
+    it "should handle scalar broadcast":
+        cond = torch.from_data([[1.0, 0.0, 1.0]])
+        a = torch.from_data([[5.0]])  # Scalar will broadcast
+        b = torch.from_data([[1.0, 2.0, 3.0]])
+
+        result = torch.select(cond, a, b)
+
+        # Expected: [5.0, 2.0, 5.0]
+        expected = torch.from_data([[5.0, 2.0, 5.0]])
+
+        spec.expect(result.allclose(expected)).to_be(True)
+
+describe "Simple Math: one_hot encoding":
+    it "should convert integer indices to one-hot vectors":
+        # Indices: 0, 1, 2
+        indices = torch.from_data([[0, 1, 2]], dtype="int64")
+
+        # One-hot with 4 classes
+        result = indices.one_hot(4)
+
+        # Expected shape: (1, 3, 4)
+        # [[1,0,0,0], [0,1,0,0], [0,0,1,0]]
+        spec.expect(result.shape()).to_equal([1, 3, 4])
+
+        # Check first one-hot vector [1,0,0,0]
+        first = result.select(1, 0)  # Select first position along dim 1
+        spec.expect(first.item_at([0, 0])).to_be(1)
+        spec.expect(first.item_at([0, 1])).to_be(0)
+        spec.expect(first.item_at([0, 2])).to_be(0)
+        spec.expect(first.item_at([0, 3])).to_be(0)
+
+    it "should handle 1D integer tensor":
+        indices = torch.from_data([2, 0, 1], dtype="int64")
+
+        # One-hot with 3 classes
+        result = indices.one_hot(3)
+
+        # Expected shape: (3, 3)
+        # [[0,0,1], [1,0,0], [0,1,0]]
+        spec.expect(result.shape()).to_equal([3, 3])
+
+        # Check second one-hot vector [1,0,0]
+        second = result.select(0, 1)
+        spec.expect(second.item_at([0])).to_be(1)
+        spec.expect(second.item_at([1])).to_be(0)
+        spec.expect(second.item_at([2])).to_be(0)
+
+    it "should work with num_classes larger than max index":
+        indices = torch.from_data([0, 1], dtype="int64")
+
+        # More classes than needed
+        result = indices.one_hot(5)
+
+        # Expected shape: (2, 5)
+        spec.expect(result.shape()).to_equal([2, 5])
+
+        # Check that extra classes are all zeros
+        first = result.select(0, 0)  # [1,0,0,0,0]
+        spec.expect(first.item_at([3])).to_be(0)
+        spec.expect(first.item_at([4])).to_be(0)
+
+describe "Simple Math: integration tests":
+    it "should combine clamp and where for conditional clamping":
+        x = torch.from_data([[1.0, 5.0, 3.0], [7.0, 2.0, 9.0]])
+
+        # Clamp values > 4 to 4, keep others unchanged
+        cond = x.gt(torch.from_data([[4.0]]))
+        clamped = torch.from_data([[4.0]])
+        result = torch.select(cond, clamped, x)
+
+        # Expected: [1.0, 4.0, 3.0], [4.0, 2.0, 4.0]
+        expected = torch.from_data([[1.0, 4.0, 3.0], [4.0, 2.0, 4.0]])
+
+        spec.expect(result.allclose(expected)).to_be(True)
+
+    it "should use one_hot for categorical selection with where":
+        # Category indices
+        categories = torch.from_data([0, 2, 1], dtype="int64")
+
+        # One-hot encode
+        one_hot = categories.one_hot(3)  # Shape: (3, 3)
+
+        # Use where to select values based on category
+        # Category 0 → 10.0, Category 1 → 20.0, Category 2 → 30.0
+        values = torch.from_data([[10.0, 20.0, 30.0]])  # Shape: (1, 3)
+
+        # Multiply one_hot by values and sum to get selected value
+        result = (one_hot * values).sum(dim=1)
+
+        # Expected: [10.0, 30.0, 20.0] (cat 0→10, cat 2→30, cat 1→20)
+        expected = torch.from_data([10.0, 30.0, 20.0])
+
+        spec.expect(result.allclose(expected)).to_be(True)

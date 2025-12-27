@@ -1,4 +1,21 @@
-// Extern function calls (part of interpreter module)
+//! Extern function calls (part of interpreter module)
+
+use crate::effects::check_effect_violations;
+use crate::error::CompileError;
+use crate::value::{Env, Value};
+use simple_parser::ast::{Argument, FunctionDef, ClassDef, EnumDef};
+use std::collections::HashMap;
+
+// Import parent interpreter types
+type Enums = HashMap<String, EnumDef>;
+type ImplMethods = HashMap<String, Vec<FunctionDef>>;
+
+// Import shared functions from parent module
+use super::{evaluate_expr, get_interpreter_args};
+
+// Import native I/O and networking functions
+use super::interpreter_native_io::*;
+use super::interpreter_native_net::*;
 
 // Import the runtime I/O capture functions
 use simple_runtime::value::{
@@ -40,9 +57,9 @@ extern "C" {
     fn simple_repl_runner_get_prelude(buffer: *mut u8, capacity: usize) -> usize;
 }
 
-fn call_extern_function(
+pub(crate) fn call_extern_function(
     name: &str,
-    args: &[simple_parser::ast::Argument],
+    args: &[Argument],
     env: &Env,
     functions: &mut HashMap<String, FunctionDef>,
     classes: &mut HashMap<String, ClassDef>,
@@ -518,6 +535,35 @@ fn call_extern_function(
         }
         "simple_repl_runner_cleanup" => {
             unsafe { simple_repl_runner_cleanup(); }
+            Ok(Value::Nil)
+        }
+
+        // =====================================================================
+        // Layout Marker Functions (simple/std_lib/src/layout/markers.spl)
+        // Used for profiling and 4KB page locality optimization
+        // =====================================================================
+        "simple_layout_mark" => {
+            // Record layout marker for 4KB page locality optimization.
+            // When running with --layout-record, this tracks phase boundaries
+            // (startup, first_frame, event_loop) for optimal code placement.
+            let val = evaluated.first()
+                .ok_or_else(|| CompileError::Semantic("simple_layout_mark expects 1 argument".into()))?;
+
+            let marker_name = match val {
+                Value::Str(s) => s.clone(),
+                Value::Symbol(s) => s.clone(),
+                _ => return Err(CompileError::Semantic("simple_layout_mark expects a string argument".into())),
+            };
+
+            // Record the marker if layout recording is enabled
+            crate::layout_recorder::record_layout_marker(&marker_name);
+
+            // In debug builds, log the marker for verification
+            #[cfg(debug_assertions)]
+            {
+                tracing::debug!(marker = %marker_name, "layout marker reached");
+            }
+
             Ok(Value::Nil)
         }
 

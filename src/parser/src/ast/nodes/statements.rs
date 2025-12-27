@@ -13,6 +13,9 @@ pub struct LetStmt {
     pub mutability: Mutability,
     /// Storage class (Auto for normal variables, Shared for GPU shared memory)
     pub storage_class: StorageClass,
+    /// Ghost variable - only exists for verification, erased at runtime
+    /// Used in @verify mode for Lean proof generation
+    pub is_ghost: bool,
 }
 
 /// Compile-time constant declaration

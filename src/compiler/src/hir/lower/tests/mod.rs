@@ -10,7 +10,7 @@ pub fn parse_and_lower(source: &str) -> LowerResult<HirModule> {
 }
 
 // Test modules
-mod advanced_tests;
+mod advanced; // Refactored into sub-modules (SIMD/GPU tests)
 mod class_tests;
 mod control_flow_tests;
 mod expression_tests;

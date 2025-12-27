@@ -141,13 +141,22 @@ impl<'a> Parser<'a> {
                 // Check for typed pattern: name: Type (for union type discrimination)
                 // This must be distinguished from struct field patterns, which are only
                 // valid inside struct patterns (handled above in LBrace case)
+                // Also distinguish from match arm separator: `case Active:` where the colon
+                // is followed by Newline (block) or Indent, not a type.
                 if self.check(&TokenKind::Colon) {
-                    self.advance();
-                    let ty = self.parse_type()?;
-                    return Ok(Pattern::Typed {
-                        pattern: Box::new(Pattern::Identifier(name)),
-                        ty,
-                    });
+                    // Look ahead to see if what follows could be a type
+                    // Types start with: Identifier, LParen, LBracket, Fn, Mut, Dyn, etc.
+                    // If followed by Newline, Indent, or other non-type tokens, this colon
+                    // is likely a match arm separator, not a typed pattern.
+                    let is_type_start = self.peek_is_type_start();
+                    if is_type_start {
+                        self.advance();
+                        let ty = self.parse_type()?;
+                        return Ok(Pattern::Typed {
+                            pattern: Box::new(Pattern::Identifier(name)),
+                            ty,
+                        });
+                    }
                 }
 
                 Ok(Pattern::Identifier(name))

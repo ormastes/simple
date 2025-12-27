@@ -113,7 +113,7 @@ Achieved **100% specification coverage** of 40-feature LLM-friendly roadmap. **1
 4. `doc/spec/build_audit.md` (11.5KB)
 5. `doc/spec/formatter.md` (12.5KB)
 6. `doc/spec/capability_effects.md` (13.5KB)
-7. `doc/spec/sandboxed_execution.md` (12KB)
+7. `doc/spec/sandboxing.md` (12KB)
 
 **Documentation (20):**
 - Implementation guides (7)

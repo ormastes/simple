@@ -1,0 +1,253 @@
+# Lean Code Generator
+# Main entry point for generating Lean 4 code from Simple.
+
+import verification.lean.emitter as emitter
+import verification.lean.types as types
+import verification.lean.expressions as expressions
+import verification.models.{ContractExpr, FunctionContract, RefCapability}
+import io.fs as fs
+
+# Lean code generation options
+class LeanCodegenOptions:
+    module_name: String
+    generate_stubs: Bool       # Generate sorry for unproven theorems
+    include_proofs: Bool       # Include proof obligations
+    verbose: Bool              # Emit comments
+    output_dir: String
+
+    fn new() -> LeanCodegenOptions:
+        LeanCodegenOptions(
+            module_name: "Main",
+            generate_stubs: true,
+            include_proofs: true,
+            verbose: false,
+            output_dir: "build/lean"
+        )
+
+    fn with_module_name(mut self, name: String) -> LeanCodegenOptions:
+        self.module_name = name
+        self
+
+    fn with_stubs(mut self, generate: Bool) -> LeanCodegenOptions:
+        self.generate_stubs = generate
+        self
+
+    fn with_output_dir(mut self, dir: String) -> LeanCodegenOptions:
+        self.output_dir = dir
+        self
+
+# Lean function representation
+class LeanFunction:
+    name: String
+    params: List<(String, String)>  # (name, type)
+    return_type: String
+    body: String
+    is_partial: Bool
+    decreases: Option<String>
+
+    fn new(name: String) -> LeanFunction:
+        LeanFunction(
+            name: name,
+            params: [],
+            return_type: "Unit",
+            body: "sorry",
+            is_partial: false,
+            decreases: None
+        )
+
+    fn add_param(mut self, name: String, ty: String) -> LeanFunction:
+        self.params.push((name, ty))
+        self
+
+    fn with_return_type(mut self, ty: String) -> LeanFunction:
+        self.return_type = ty
+        self
+
+    fn with_body(mut self, body: String) -> LeanFunction:
+        self.body = body
+        self
+
+    fn with_decreases(mut self, expr: String) -> LeanFunction:
+        self.decreases = Some(expr)
+        self
+
+    fn partial(mut self) -> LeanFunction:
+        self.is_partial = true
+        self
+
+# Lean theorem representation
+class LeanTheorem:
+    name: String
+    params: List<(String, String)>
+    statement: String
+    proof: Option<String>
+
+    fn new(name: String, statement: String) -> LeanTheorem:
+        LeanTheorem(
+            name: name,
+            params: [],
+            statement: statement,
+            proof: None
+        )
+
+    fn add_param(mut self, name: String, ty: String) -> LeanTheorem:
+        self.params.push((name, ty))
+        self
+
+    fn with_proof(mut self, proof: String) -> LeanTheorem:
+        self.proof = Some(proof)
+        self
+
+# Lean structure (for Simple classes)
+class LeanStructure:
+    name: String
+    fields: List<(String, String)>  # (name, type)
+    deriving: List<String>
+
+    fn new(name: String) -> LeanStructure:
+        LeanStructure(name: name, fields: [], deriving: [])
+
+    fn add_field(mut self, name: String, ty: String) -> LeanStructure:
+        self.fields.push((name, ty))
+        self
+
+    fn derive(mut self, trait_name: String) -> LeanStructure:
+        self.deriving.push(trait_name)
+        self
+
+# Lean inductive (for Simple enums)
+class LeanInductive:
+    name: String
+    constructors: List<(String, List<String>)>  # (name, param types)
+
+    fn new(name: String) -> LeanInductive:
+        LeanInductive(name: name, constructors: [])
+
+    fn add_constructor(mut self, name: String, params: List<String>) -> LeanInductive:
+        self.constructors.push((name, params))
+        self
+
+# Main Lean code generator
+class LeanCodegen:
+    options: LeanCodegenOptions
+    structures: List<LeanStructure>
+    inductives: List<LeanInductive>
+    functions: List<LeanFunction>
+    theorems: List<LeanTheorem>
+    imports: List<String>
+
+    fn new(options: LeanCodegenOptions) -> LeanCodegen:
+        LeanCodegen(
+            options: options,
+            structures: [],
+            inductives: [],
+            functions: [],
+            theorems: [],
+            imports: ["Mathlib.Data.Nat.Basic"]
+        )
+
+    fn add_import(mut self, import_path: String) -> LeanCodegen:
+        self.imports.push(import_path)
+        self
+
+    fn add_structure(mut self, structure: LeanStructure) -> LeanCodegen:
+        self.structures.push(structure)
+        self
+
+    fn add_inductive(mut self, inductive: LeanInductive) -> LeanCodegen:
+        self.inductives.push(inductive)
+        self
+
+    fn add_function(mut self, function: LeanFunction) -> LeanCodegen:
+        self.functions.push(function)
+        self
+
+    fn add_theorem(mut self, theorem: LeanTheorem) -> LeanCodegen:
+        self.theorems.push(theorem)
+        self
+
+    # Generate Lean code for a function contract
+    fn generate_contract_theorems(mut self, func_name: String, contract: FunctionContract):
+        # Generate precondition theorem
+        for (i, clause) in contract.requires.enumerate():
+            let theorem_name = f"{func_name}_pre_{i}"
+            let statement = expressions.translate_contract_expr(clause.expr)
+            let theorem = LeanTheorem.new(theorem_name, statement)
+            self.add_theorem(theorem)
+
+        # Generate postcondition theorems
+        for (i, clause) in contract.ensures.enumerate():
+            let theorem_name = f"{func_name}_post_{i}"
+            let statement = expressions.translate_contract_expr(clause.expr)
+            let theorem = LeanTheorem.new(theorem_name, statement)
+            self.add_theorem(theorem)
+
+        # Generate invariant theorems
+        for (i, clause) in contract.invariants.enumerate():
+            let theorem_name = f"{func_name}_inv_{i}"
+            let statement = expressions.translate_contract_expr(clause.expr)
+            let theorem = LeanTheorem.new(theorem_name, statement)
+            self.add_theorem(theorem)
+
+    # Generate complete Lean module
+    fn generate(self) -> String:
+        let mut emit = emitter.LeanEmitter.new()
+
+        # Module header
+        emit.emit_line(f"-- Auto-generated Lean 4 code from Simple")
+        emit.emit_line(f"-- Module: {self.options.module_name}")
+        emit.emit_line("")
+
+        # Imports
+        for import_path in self.imports:
+            emit.emit_line(f"import {import_path}")
+        emit.emit_line("")
+
+        # Namespace
+        emit.emit_line(f"namespace {self.options.module_name}")
+        emit.emit_line("")
+
+        # Structures
+        for structure in self.structures:
+            emit.emit_structure(structure)
+            emit.emit_line("")
+
+        # Inductives
+        for inductive in self.inductives:
+            emit.emit_inductive(inductive)
+            emit.emit_line("")
+
+        # Functions
+        for function in self.functions:
+            emit.emit_function(function, self.options.generate_stubs)
+            emit.emit_line("")
+
+        # Theorems
+        for theorem in self.theorems:
+            emit.emit_theorem(theorem, self.options.generate_stubs)
+            emit.emit_line("")
+
+        # Close namespace
+        emit.emit_line(f"end {self.options.module_name}")
+
+        emit.finish()
+
+    # Write generated code to file
+    fn write_to_file(self, filename: String) -> Result<Nil, String>:
+        let content = self.generate()
+        let path = f"{self.options.output_dir}/{filename}.lean"
+
+        # Ensure output directory exists
+        fs.makedirs(self.options.output_dir)?
+
+        # Write file
+        fs.write_string(path, content)?
+
+        Ok(nil)
+
+# Convenience function to generate Lean for a module
+fn generate_module(module_name: String, output_dir: String) -> LeanCodegen:
+    let options = LeanCodegenOptions.new()
+        .with_module_name(module_name)
+        .with_output_dir(output_dir)
+    LeanCodegen.new(options)

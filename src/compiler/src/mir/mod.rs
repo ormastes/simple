@@ -4,6 +4,7 @@ mod blocks;
 mod effects;
 mod function;
 mod generator;
+mod ghost_erasure;
 pub mod hybrid;
 mod instructions;
 mod lower;
@@ -25,6 +26,10 @@ pub use blocks::*;
 pub use effects::*;
 pub use function::*;
 pub use generator::*;
+pub use ghost_erasure::{
+    erase_ghost_from_module, ghost_variable_count, has_ghost_variables, GhostErasureError,
+    GhostErasureStats,
+};
 pub use hybrid::{apply_hybrid_transform, HybridStats};
 pub use instructions::*;
 pub use lower::*;

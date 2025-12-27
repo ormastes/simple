@@ -19,6 +19,8 @@
 
 mod actors;
 mod async_gen;
+#[cfg(feature = "ratatui-tui")]
+pub mod ratatui_tui;
 mod channels;
 mod collections;
 mod contracts;
@@ -27,8 +29,13 @@ mod doctest_io;
 mod ffi;
 mod file_io;
 pub mod gpu;
+mod pty;
+mod process;
 #[cfg(feature = "vulkan")]
 pub mod gpu_vulkan;
+#[cfg(feature = "pytorch")]
+pub mod torch;
+pub mod gpu_backend;
 mod heap;
 pub mod net;
 mod objects;
@@ -189,6 +196,120 @@ pub use gpu_vulkan::{
     rt_vk_kernel_launch, rt_vk_kernel_launch_1d,
     // Error codes
     VulkanFfiError,
+};
+
+// Re-export PyTorch tensor FFI functions
+#[cfg(feature = "pytorch")]
+pub use torch::{
+    // Availability
+    rt_torch_available, rt_torch_cuda_available, rt_torch_cuda_device_count,
+    // Tensor creation
+    rt_torch_zeros, rt_torch_ones, rt_torch_randn, rt_torch_arange, rt_torch_clone,
+    // Memory management
+    rt_torch_free,
+    // Metadata
+    rt_torch_shape, rt_torch_dtype, rt_torch_numel, rt_torch_device,
+    // Element-wise binary operations
+    rt_torch_add, rt_torch_sub, rt_torch_mul, rt_torch_div,
+    // Scalar operations
+    rt_torch_add_scalar, rt_torch_sub_scalar, rt_torch_mul_scalar, rt_torch_div_scalar,
+    // Unary operations
+    rt_torch_pow, rt_torch_sqrt, rt_torch_exp, rt_torch_log,
+    // Matrix operations
+    rt_torch_matmul, rt_torch_bmm, rt_torch_transpose,
+    // Activation functions
+    rt_torch_relu, rt_torch_sigmoid, rt_torch_tanh,
+    // Shape operations
+    rt_torch_reshape, rt_torch_permute, rt_torch_squeeze, rt_torch_unsqueeze,
+    rt_torch_slice, rt_torch_cat, rt_torch_stack,
+    // Device operations
+    rt_torch_to_device, rt_torch_to_cpu, rt_torch_to_cuda,
+    // Data access
+    rt_torch_copy_data_to_cpu, rt_torch_item, rt_torch_sum, rt_torch_mean,
+    // Memory management
+    rt_torch_cuda_synchronize, rt_torch_cuda_memory_allocated, rt_torch_cuda_reset_peak_memory_stats,
+    // Reduction operations
+    rt_torch_max, rt_torch_min, rt_torch_argmax, rt_torch_argmin,
+    // Comparison operations
+    rt_torch_eq, rt_torch_ne, rt_torch_gt, rt_torch_lt, rt_torch_ge, rt_torch_le,
+    // Autograd - gradient tracking
+    rt_torch_set_requires_grad, rt_torch_requires_grad, rt_torch_is_leaf,
+    // Autograd - gradient access
+    rt_torch_grad, rt_torch_zero_grad, rt_torch_detach,
+    // Autograd - backward pass
+    rt_torch_backward, rt_torch_retain_grad,
+    // Autograd - advanced
+    rt_torch_set_grad_enabled, rt_torch_is_grad_enabled, rt_torch_shallow_clone,
+    // Neural Network - advanced activations
+    rt_torch_gelu, rt_torch_leaky_relu, rt_torch_silu, rt_torch_mish, rt_torch_elu, rt_torch_softplus,
+    rt_torch_softmax, rt_torch_log_softmax,
+    // Neural Network - loss functions
+    rt_torch_mse_loss, rt_torch_cross_entropy, rt_torch_nll_loss,
+    // Neural Network - normalization & dropout
+    rt_torch_layer_norm, rt_torch_dropout,
+    // Neural Network - initialization
+    rt_torch_normal_, rt_torch_uniform_, rt_torch_xavier_uniform_, rt_torch_kaiming_uniform_,
+    // Optimizers - creation
+    rt_torch_sgd_new, rt_torch_adam_new, rt_torch_adamw_new,
+    // Optimizers - operations
+    rt_torch_optimizer_step, rt_torch_optimizer_zero_grad,
+    rt_torch_optimizer_get_lr, rt_torch_optimizer_set_lr, rt_torch_optimizer_free,
+    // Neural Network Modules - Linear
+    rt_torch_linear_new, rt_torch_linear_forward,
+    rt_torch_linear_get_weight, rt_torch_linear_get_bias,
+    // Neural Network Modules - Conv2d
+    rt_torch_conv2d_new, rt_torch_conv2d_forward,
+    // Neural Network Modules - Pooling
+    rt_torch_max_pool2d, rt_torch_avg_pool2d,
+    // Neural Network Modules - Global & Adaptive Pooling
+    rt_torch_global_avg_pool2d, rt_torch_global_max_pool2d,
+    rt_torch_adaptive_avg_pool2d, rt_torch_adaptive_max_pool2d,
+    // Neural Network Modules - BatchNorm
+    rt_torch_batchnorm2d_new, rt_torch_batchnorm2d_forward,
+    rt_torch_batchnorm2d_get_running_mean, rt_torch_batchnorm2d_get_running_var,
+    // Neural Network Modules - Dropout
+    rt_torch_dropout_new, rt_torch_dropout_forward,
+    // Neural Network Modules - LayerNorm
+    rt_torch_layernorm_new, rt_torch_layernorm_forward,
+    rt_torch_layernorm_get_weight, rt_torch_layernorm_get_bias,
+    // Neural Network Modules - Embedding
+    rt_torch_embedding_new, rt_torch_embedding_forward,
+    rt_torch_embedding_get_weight, rt_torch_embedding_from_pretrained,
+    // Neural Network Modules - RNN (LSTM, GRU)
+    rt_torch_lstm_new, rt_torch_lstm_forward,
+    rt_torch_gru_new, rt_torch_gru_forward,
+    // Neural Network Modules - Management
+    rt_torch_module_free,
+    // Learning Rate Schedulers - Creation
+    rt_torch_scheduler_step_new, rt_torch_scheduler_exponential_new,
+    rt_torch_scheduler_cosine_new, rt_torch_scheduler_plateau_new,
+    // Learning Rate Schedulers - Operations
+    rt_torch_scheduler_step, rt_torch_scheduler_step_with_metric, rt_torch_scheduler_free,
+    // Data Loading - Dataset
+    rt_torch_tensor_dataset_new, rt_torch_dataset_len, rt_torch_dataset_get, rt_torch_dataset_free,
+    // Data Loading - DataLoader
+    rt_torch_dataloader_new, rt_torch_dataloader_next, rt_torch_dataloader_reset, rt_torch_dataloader_free,
+    // Error codes
+    TorchFfiError,
+};
+
+// Re-export Ratatui TUI FFI functions
+#[cfg(feature = "ratatui-tui")]
+pub use ratatui_tui::{
+    // Terminal operations
+    ratatui_terminal_new, ratatui_terminal_cleanup,
+    ratatui_terminal_clear,
+    // Text buffer operations
+    ratatui_textbuffer_new,
+    ratatui_textbuffer_insert_char, ratatui_textbuffer_backspace,
+    ratatui_textbuffer_newline,
+    ratatui_textbuffer_get_text, ratatui_textbuffer_set_text,
+    // Rendering
+    ratatui_render_textbuffer,
+    // Event handling
+    ratatui_read_event, ratatui_read_event_timeout,
+    // Cleanup
+    ratatui_object_destroy,
 };
 
 // Re-export networking FFI functions

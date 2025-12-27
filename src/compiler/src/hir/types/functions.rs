@@ -25,11 +25,68 @@ pub struct HirFunction {
     pub attributes: Vec<String>,
     /// Effect decorators (e.g., "async", "pure", "io") for AOP effect() selector
     pub effects: Vec<String>,
+    /// Code layout hint for 4KB page locality optimization.
+    /// Specifies the execution phase (startup, first_frame, steady, cold)
+    /// and optional anchor designation (event_loop).
+    pub layout_hint: Option<FunctionLayoutHint>,
+    /// Verification mode for Lean proof generation (#1840-#1879)
+    /// Determines if this function is subject to formal verification constraints.
+    pub verification_mode: VerificationMode,
 }
 
 impl HirFunction {
     /// Check if this function is public (helper for backwards compatibility)
     pub fn is_public(&self) -> bool {
         self.visibility.is_public()
+    }
+
+    /// Get the layout phase for this function.
+    /// Returns `Steady` (default) if no layout hint is specified.
+    pub fn layout_phase(&self) -> LayoutPhase {
+        self.layout_hint
+            .as_ref()
+            .map(|h| h.phase)
+            .unwrap_or_default()
+    }
+
+    /// Check if this function is marked as an event loop anchor.
+    pub fn is_event_loop_anchor(&self) -> bool {
+        self.layout_hint
+            .as_ref()
+            .map(|h| h.is_event_loop())
+            .unwrap_or(false)
+    }
+
+    /// Check if this function's layout is pinned (should not be moved by optimizer).
+    pub fn is_layout_pinned(&self) -> bool {
+        self.layout_hint
+            .as_ref()
+            .map(|h| h.pinned)
+            .unwrap_or(false)
+    }
+
+    /// Get the ELF section suffix for this function based on its layout phase.
+    pub fn layout_section_suffix(&self) -> &'static str {
+        self.layout_phase().section_suffix()
+    }
+
+    /// Check if this function is subject to formal verification.
+    pub fn is_verified(&self) -> bool {
+        self.verification_mode.is_verified()
+    }
+
+    /// Check if this function is a trusted boundary.
+    pub fn is_trusted(&self) -> bool {
+        self.verification_mode.is_trusted()
+    }
+
+    /// Check if this function has any ghost parameters.
+    pub fn has_ghost_params(&self) -> bool {
+        self.params.iter().any(|p| p.is_ghost)
+    }
+
+    /// Check if this function has any ghost locals.
+    pub fn has_ghost_locals(&self) -> bool {
+        self.locals.iter().any(|l| l.is_ghost)
     }
 }

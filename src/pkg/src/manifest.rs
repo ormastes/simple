@@ -18,6 +18,72 @@ pub struct Manifest {
     pub features: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub registry: RegistryConfig,
+    /// Lean verification configuration (#1876)
+    #[serde(default)]
+    pub verify: VerifyConfig,
+}
+
+/// Lean verification configuration (#1876)
+///
+/// Example in simple.toml:
+/// ```toml
+/// [verify]
+/// enabled = true
+/// lean_path = "/usr/local/bin/lean"
+/// output_dir = "build/lean"
+/// generate_stubs = true
+/// modules = ["core", "math"]
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct VerifyConfig {
+    /// Enable Lean verification for this package
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to Lean executable (defaults to "lean" in PATH)
+    #[serde(default)]
+    pub lean_path: Option<String>,
+    /// Output directory for generated Lean files (defaults to "build/lean")
+    #[serde(default)]
+    pub output_dir: Option<String>,
+    /// Generate proof stubs (sorry) for unproven theorems
+    #[serde(default = "default_generate_stubs")]
+    pub generate_stubs: bool,
+    /// Modules to verify (empty = all @verify modules)
+    #[serde(default)]
+    pub modules: Vec<String>,
+    /// Check proofs with Lean (requires Lean 4 installed)
+    #[serde(default)]
+    pub check_proofs: bool,
+    /// Strict mode: fail build on unproven theorems
+    #[serde(default)]
+    pub strict: bool,
+}
+
+fn default_generate_stubs() -> bool {
+    true
+}
+
+impl VerifyConfig {
+    /// Get the Lean executable path
+    pub fn lean_executable(&self) -> &str {
+        self.lean_path.as_deref().unwrap_or("lean")
+    }
+
+    /// Get the output directory for Lean files
+    pub fn lean_output_dir(&self) -> &str {
+        self.output_dir.as_deref().unwrap_or("build/lean")
+    }
+
+    /// Check if a module should be verified
+    pub fn should_verify_module(&self, module: &str) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        if self.modules.is_empty() {
+            return true; // Verify all modules
+        }
+        self.modules.iter().any(|m| module.starts_with(m))
+    }
 }
 
 /// Package metadata
@@ -136,7 +202,13 @@ impl Manifest {
             dev_dependencies: HashMap::new(),
             features: HashMap::new(),
             registry: RegistryConfig::default(),
+            verify: VerifyConfig::default(),
         }
+    }
+
+    /// Check if verification is enabled for this package
+    pub fn is_verification_enabled(&self) -> bool {
+        self.verify.enabled
     }
 
     /// Add a dependency
@@ -275,5 +347,60 @@ http = { version = "1.0", optional = true }
         let manifest = Manifest::new("testpkg");
         let content = toml::to_string_pretty(&manifest).unwrap();
         assert!(content.contains("name = \"testpkg\""));
+    }
+
+    #[test]
+    fn test_parse_verify_config() {
+        let content = r#"
+[package]
+name = "verified_app"
+version = "0.1.0"
+
+[verify]
+enabled = true
+lean_path = "/opt/lean/bin/lean"
+output_dir = "target/lean"
+generate_stubs = false
+modules = ["core", "math"]
+check_proofs = true
+strict = true
+"#;
+        let manifest = Manifest::parse(content).unwrap();
+        assert!(manifest.verify.enabled);
+        assert_eq!(manifest.verify.lean_path, Some("/opt/lean/bin/lean".to_string()));
+        assert_eq!(manifest.verify.output_dir, Some("target/lean".to_string()));
+        assert!(!manifest.verify.generate_stubs);
+        assert_eq!(manifest.verify.modules, vec!["core", "math"]);
+        assert!(manifest.verify.check_proofs);
+        assert!(manifest.verify.strict);
+    }
+
+    #[test]
+    fn test_verify_config_defaults() {
+        let manifest = Manifest::new("testpkg");
+        assert!(!manifest.verify.enabled);
+        assert!(manifest.verify.generate_stubs);
+        assert_eq!(manifest.verify.lean_executable(), "lean");
+        assert_eq!(manifest.verify.lean_output_dir(), "build/lean");
+    }
+
+    #[test]
+    fn test_should_verify_module() {
+        let mut config = VerifyConfig::default();
+
+        // Disabled - should not verify
+        assert!(!config.should_verify_module("core"));
+
+        // Enabled with no modules - verify all
+        config.enabled = true;
+        assert!(config.should_verify_module("core"));
+        assert!(config.should_verify_module("math"));
+
+        // Enabled with specific modules
+        config.modules = vec!["core".to_string(), "math".to_string()];
+        assert!(config.should_verify_module("core"));
+        assert!(config.should_verify_module("core.types"));
+        assert!(config.should_verify_module("math.vector"));
+        assert!(!config.should_verify_module("io"));
     }
 }

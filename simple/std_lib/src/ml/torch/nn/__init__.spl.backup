@@ -1,0 +1,918 @@
+# Neural Network - Layers and Modules
+#
+# Provides neural network building blocks including layers, activation functions,
+# normalization layers, and the Module base class for building custom models.
+#
+# ## Classes
+# - `Module`: Base class for all neural network modules
+# - `Sequential`: Container for chaining layers
+# - `Linear`: Fully connected (dense) layer
+# - `Conv2d`: 2D convolutional layer
+# - `Dropout`: Dropout regularization layer
+# - `BatchNorm1d`: 1D batch normalization
+# - `BatchNorm2d`: 2D batch normalization
+# - `LayerNorm`: Layer normalization
+#
+# ## Activation Functions
+# - `relu()`, `gelu()`, `silu()`, `tanh()`, `sigmoid()`
+# - `mish()`, `elu()`, `softplus()`, `leaky_relu()`
+#
+# ## Example
+# ```simple
+# import ml.torch as torch
+# import ml.torch.nn as nn
+#
+# class MyModel(nn.Module):
+#     fn __init__(self):
+#         super().__init__()
+#         self.fc1 = nn.Linear(784, 128)
+#         self.fc2 = nn.Linear(128, 10)
+#
+#     fn forward(self, x):
+#         x = nn.relu(self.fc1(x))
+#         x = self.fc2(x)
+#         return x
+# ```
+
+export Module, Sequential, ModuleList
+export Linear, Conv2d, Conv3d, Dropout, BatchNorm1d, BatchNorm2d, LayerNorm, Embedding
+export RNN, LSTM, GRU
+export MultiheadAttention, TransformerEncoderLayer, TransformerDecoderLayer, PositionalEncoding
+export relu, gelu, silu, tanh, sigmoid
+export mish, elu, softplus, leaky_relu
+export MSELoss, CrossEntropyLoss, BCELoss
+export accuracy, precision, recall, f1_score
+export clip_grad_value, clip_grad_norm
+
+import .. as torch
+from .activations import relu, gelu, silu, mish, elu, softplus, leaky_relu, tanh, sigmoid
+from .conv import Conv2d, Conv3d
+from .recurrent import RNN, LSTM, GRU
+from .loss import MSELoss, CrossEntropyLoss, BCELoss
+from .transformer import MultiheadAttention, PositionalEncoding
+from .transformer import TransformerEncoderLayer, TransformerDecoderLayer
+from .base import Module, Sequential, ModuleList
+
+
+# ============================================================================
+# Module Base Class
+# ============================================================================
+
+class Module:
+    """Base class for all neural network modules.
+
+    All layer classes should inherit from this and implement forward().
+
+    Example:
+        ```simple
+        class MyLayer(nn.Module):
+            fn __init__(self, in_size, out_size):
+                super().__init__()
+                self.weight = torch.randn([out_size, in_size])
+
+            fn forward(self, x):
+                return x @ self.weight.transpose(0, 1)
+        ```
+    """
+    training: bool
+
+    fn __init__(self):
+        """Initialize module in training mode."""
+        self.training = true
+
+    fn forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass (must be overridden by subclasses).
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Output tensor
+        """
+        panic("forward() must be implemented by subclass")
+
+    fn __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """Call forward pass."""
+        return self.forward(x)
+
+    fn train(self, mode: bool = true):
+        """Set module to training mode.
+
+        Args:
+            mode: True for training, False for evaluation
+        """
+        self.training = mode
+
+    fn eval(self):
+        """Set module to evaluation mode."""
+        self.train(false)
+
+    fn to(self, device: torch.Device) -> Module:
+        """Move module to device (override in subclasses).
+
+        Args:
+            device: Target device
+
+        Returns:
+            Self for chaining
+        """
+        return self
+
+    fn parameters(self) -> [torch.Tensor]:
+        """Get all trainable parameters.
+
+        Returns:
+            List of parameter tensors
+
+        Example:
+            ```simple
+            let model = MyModel()
+            let params = model.parameters()
+            let optimizer = optim.Adam(params, lr=0.001)
+            ```
+
+        Note:
+            Subclasses should override this to return their actual parameters.
+            Default implementation returns empty list.
+        """
+        return []
+
+    fn named_parameters(self) -> {str: torch.Tensor}:
+        """Get parameters with their names.
+
+        Returns:
+            Dictionary mapping parameter names to tensors
+
+        Example:
+            ```simple
+            let model = MyModel()
+            for name, param in model.named_parameters().items():
+                print(f"{name}: {param.shape}")
+            ```
+
+        Note:
+            Subclasses should override this to return their actual named parameters.
+            Default implementation returns empty dict.
+        """
+        return {}
+
+    fn num_parameters(self, trainable_only: bool = true) -> i64:
+        """Count total number of parameters.
+
+        Args:
+            trainable_only: If True, only count trainable parameters (default: True)
+
+        Returns:
+            Total parameter count
+
+        Example:
+            ```simple
+            let model = MyModel()
+            print(f"Total parameters: {model.num_parameters()}")
+            print(f"All parameters: {model.num_parameters(trainable_only=false)}")
+            ```
+        """
+        let mut total = 0
+
+        for param in self.parameters():
+            if trainable_only:
+                if param.requires_grad:
+                    total = total + param.numel()
+            else:
+                total = total + param.numel()
+
+        return total
+
+    fn freeze(self):
+        """Freeze all parameters (disable gradient computation).
+
+        Useful for transfer learning when you want to keep pretrained weights fixed.
+
+        Example:
+            ```simple
+            # Freeze pretrained backbone
+            let backbone = PretrainedModel()
+            backbone.freeze()
+
+            # Only train the new classifier head
+            let classifier = nn.Linear(512, 10)
+            ```
+        """
+        for param in self.parameters():
+            param.requires_grad = false
+
+    fn unfreeze(self):
+        """Unfreeze all parameters (enable gradient computation).
+
+        Example:
+            ```simple
+            # First freeze for warmup
+            model.freeze()
+            train_warmup()
+
+            # Then unfreeze for fine-tuning
+            model.unfreeze()
+            train_full()
+            ```
+        """
+        for param in self.parameters():
+            param.requires_grad = true
+
+    fn state_dict(self) -> {str: torch.Tensor}:
+        """Get module state dictionary for saving.
+
+        Returns:
+            Dictionary of parameter names to tensors
+
+        Example:
+            ```simple
+            # Save model
+            let model = MyModel()
+            let state = model.state_dict()
+            torch.save(state, "model.pth")
+
+            # Load model
+            let new_model = MyModel()
+            let state = torch.load("model.pth")
+            new_model.load_state_dict(state)
+            ```
+
+        Note:
+            Default implementation uses named_parameters().
+            Override for custom state handling.
+        """
+        return self.named_parameters()
+
+    fn load_state_dict(self, state: {str: torch.Tensor}):
+        """Load module state from dictionary.
+
+        Args:
+            state: Dictionary of parameter names to tensors
+
+        Example:
+            ```simple
+            let model = MyModel()
+            let checkpoint = torch.load("checkpoint.pth")
+            model.load_state_dict(checkpoint["model_state"])
+            ```
+
+        Note:
+            Subclasses should override this to properly load their parameters.
+            Default implementation is a no-op.
+        """
+        # Default implementation - subclasses should override
+        pass
+
+
+# ============================================================================
+# Sequential Container
+# ============================================================================
+
+class Sequential(Module):
+    """Sequential container for chaining layers.
+
+    Applies layers in order, passing output of each as input to next.
+
+    Example:
+        ```simple
+        let model = nn.Sequential([
+            nn.Linear(784, 128),
+            nn.ReLU(),
+            nn.Linear(128, 10)
+        ])
+
+        let output = model(input)
+        ```
+    """
+    layers: [Module]
+
+    fn __init__(self, layers: [Module]):
+        """Initialize sequential container.
+
+        Args:
+            layers: List of modules to chain
+        """
+        super().__init__()
+        self.layers = layers
+
+    fn forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply all layers in sequence.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Output after all layers
+        """
+        let mut out = x
+        for layer in self.layers:
+            out = layer(out)
+        return out
+
+    fn to(self, device: torch.Device) -> Sequential:
+        """Move all layers to device.
+
+        Args:
+            device: Target device
+
+        Returns:
+            Self for chaining
+        """
+        for layer in self.layers:
+            layer.to(device)
+        return self
+
+
+# ============================================================================
+# Linear Layer
+# ============================================================================
+
+class Linear(Module):
+    """Fully connected (dense) layer.
+
+    Applies linear transformation: y = xW^T + b
+
+    Attributes:
+        weight: Weight matrix [out_features, in_features]
+        bias: Bias vector [out_features] (optional)
+
+    Example:
+        ```simple
+        let fc = nn.Linear(784, 128)
+        let output = fc(input)  # [batch, 784] -> [batch, 128]
+        ```
+    """
+    module_handle: u64
+    in_features: i32
+    out_features: i32
+    has_bias: bool
+
+    fn __init__(self, in_features: i32, out_features: i32, bias: bool = true):
+        """Initialize linear layer.
+
+        Args:
+            in_features: Input size
+            out_features: Output size
+            bias: Whether to include bias term (default: True)
+        """
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.has_bias = bias
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_linear_new(
+            in_features,
+            out_features,
+            bias as i32
+        )
+        if self.module_handle == 0:
+            panic("Failed to create Linear layer")
+
+    fn __del__(self):
+        """Free module resources."""
+        if self.module_handle != 0:
+            @rt_torch_module_free(self.module_handle)
+
+    fn forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply linear transformation.
+
+        Args:
+            x: Input tensor [..., in_features]
+
+        Returns:
+            Output tensor [..., out_features]
+        """
+        let handle = @rt_torch_linear_forward(self.module_handle, x.handle)
+        if handle == 0:
+            panic("Linear forward pass failed")
+        return torch.Tensor(handle)
+
+
+
+# Dropout Layer
+# ============================================================================
+
+class Dropout(Module):
+    """Dropout regularization layer.
+
+    Randomly zeroes elements with probability p during training.
+
+    Example:
+        ```simple
+        let dropout = nn.Dropout(p=0.5)
+        dropout.train()  # Enable dropout
+        let train_out = dropout(x)  # Some elements zeroed
+
+        dropout.eval()  # Disable dropout
+        let eval_out = dropout(x)  # No elements zeroed
+        ```
+    """
+    module_handle: u64
+    p: f64
+
+    fn __init__(self, p: f64 = 0.5):
+        """Initialize dropout layer.
+
+        Args:
+            p: Probability of zeroing each element (default: 0.5)
+        """
+        super().__init__()
+        self.p = p
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_dropout_new(p, 0)  # inplace=0
+        if self.module_handle == 0:
+            panic("Failed to create Dropout layer")
+
+    fn __del__(self):
+        """Free module resources."""
+        if self.module_handle != 0:
+            @rt_torch_module_free(self.module_handle)
+
+    fn forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply dropout.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Output tensor (same shape as input)
+        """
+        let handle = @rt_torch_dropout_forward(
+            self.module_handle,
+            x.handle,
+            self.training as i32
+        )
+        if handle == 0:
+            panic("Dropout forward pass failed")
+        return torch.Tensor(handle)
+
+
+# ============================================================================
+# Batch Normalization Layers
+# ============================================================================
+
+class BatchNorm1d(Module):
+    """1D Batch Normalization layer.
+
+    Normalizes mini-batches of 1D inputs (features or sequences).
+    Helps stabilize training and allows higher learning rates.
+
+    Example:
+        ```simple
+        # Input: [batch, features]
+        let bn = nn.BatchNorm1d(num_features=128)
+        let normalized = bn(x)
+        ```
+    """
+    module_handle: u64
+    num_features: i32
+    eps: f64
+    momentum: f64
+    affine: bool
+    track_running_stats: bool
+
+    fn __init__(
+        self,
+        num_features: i32,
+        eps: f64 = 1e-5,
+        momentum: f64 = 0.1,
+        affine: bool = true,
+        track_running_stats: bool = true
+    ):
+        """Initialize 1D batch normalization layer.
+
+        Args:
+            num_features: Number of features (C from [N, C] or [N, C, L])
+            eps: Epsilon for numerical stability (default: 1e-5)
+            momentum: Momentum for running mean/variance (default: 0.1)
+            affine: If True, learns scale and shift parameters (default: True)
+            track_running_stats: Track running statistics for inference (default: True)
+        """
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        self.track_running_stats = track_running_stats
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_batchnorm1d_new(
+            num_features,
+            eps,
+            momentum,
+            affine as i32,
+            track_running_stats as i32
+        )
+        if self.module_handle == 0:
+            panic("Failed to create BatchNorm1d layer")
+
+    fn __del__(self):
+        """Free module resources."""
+        if self.module_handle != 0:
+            @rt_torch_module_free(self.module_handle)
+
+    fn forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply batch normalization.
+
+        Args:
+            x: Input tensor [N, C] or [N, C, L]
+
+        Returns:
+            Normalized tensor (same shape as input)
+        """
+        let handle = @rt_torch_batchnorm1d_forward(
+            self.module_handle,
+            x.handle,
+            self.training as i32
+        )
+        if handle == 0:
+            panic("BatchNorm1d forward pass failed")
+        return torch.Tensor(handle)
+
+
+class BatchNorm2d(Module):
+    """2D Batch Normalization layer.
+
+    Normalizes mini-batches of 2D inputs (images/feature maps).
+    Applied to convolutional networks.
+
+    Example:
+        ```simple
+        # Input: [batch, channels, height, width]
+        let bn = nn.BatchNorm2d(num_features=64)
+        let normalized = bn(feature_maps)
+        ```
+    """
+    module_handle: u64
+    num_features: i32
+    eps: f64
+    momentum: f64
+    affine: bool
+    track_running_stats: bool
+
+    fn __init__(
+        self,
+        num_features: i32,
+        eps: f64 = 1e-5,
+        momentum: f64 = 0.1,
+        affine: bool = true,
+        track_running_stats: bool = true
+    ):
+        """Initialize 2D batch normalization layer.
+
+        Args:
+            num_features: Number of channels (C from [N, C, H, W])
+            eps: Epsilon for numerical stability (default: 1e-5)
+            momentum: Momentum for running mean/variance (default: 0.1)
+            affine: If True, learns scale and shift parameters (default: True)
+            track_running_stats: Track running statistics for inference (default: True)
+        """
+        super().__init__()
+        self.num_features = num_features
+        self.eps = eps
+        self.momentum = momentum
+        self.affine = affine
+        self.track_running_stats = track_running_stats
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_batchnorm2d_new(
+            num_features,
+            eps,
+            momentum,
+            affine as i32,
+            track_running_stats as i32
+        )
+        if self.module_handle == 0:
+            panic("Failed to create BatchNorm2d layer")
+
+    fn __del__(self):
+        """Free module resources."""
+        if self.module_handle != 0:
+            @rt_torch_module_free(self.module_handle)
+
+    fn forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply 2D batch normalization.
+
+        Args:
+            x: Input tensor [N, C, H, W]
+
+        Returns:
+            Normalized tensor (same shape as input)
+        """
+        let handle = @rt_torch_batchnorm2d_forward(
+            self.module_handle,
+            x.handle,
+            self.training as i32
+        )
+        if handle == 0:
+            panic("BatchNorm2d forward pass failed")
+        return torch.Tensor(handle)
+
+
+# ============================================================================
+# Layer Normalization
+# ============================================================================
+
+class LayerNorm(Module):
+    """Layer Normalization.
+
+    Normalizes across features instead of batch dimension.
+    More stable than BatchNorm for small batches and RNNs/Transformers.
+
+    Example:
+        ```simple
+        # Input: [batch, seq_len, features]
+        let ln = nn.LayerNorm(normalized_shape=[512])
+        let normalized = ln(x)
+        ```
+    """
+    module_handle: u64
+    normalized_shape: [i64]
+    eps: f64
+    elementwise_affine: bool
+
+    fn __init__(
+        self,
+        normalized_shape: [i64],
+        eps: f64 = 1e-5,
+        elementwise_affine: bool = true
+    ):
+        """Initialize layer normalization.
+
+        Args:
+            normalized_shape: Shape of the input to normalize over
+            eps: Epsilon for numerical stability (default: 1e-5)
+            elementwise_affine: If True, learns scale and shift (default: True)
+        """
+        super().__init__()
+        self.normalized_shape = normalized_shape
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_layernorm_new(
+            normalized_shape.data_ptr(),
+            normalized_shape.len() as i32,
+            eps,
+            elementwise_affine as i32
+        )
+        if self.module_handle == 0:
+            panic("Failed to create LayerNorm layer")
+
+    fn __del__(self):
+        """Free module resources."""
+        if self.module_handle != 0:
+            @rt_torch_module_free(self.module_handle)
+
+    fn forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply layer normalization.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Normalized tensor (same shape as input)
+        """
+        let handle = @rt_torch_layernorm_forward(self.module_handle, x.handle)
+        if handle == 0:
+            panic("LayerNorm forward pass failed")
+        return torch.Tensor(handle)
+
+
+class Embedding(Module):
+    """Embedding layer for mapping indices to dense vectors.
+
+    Commonly used for word embeddings in NLP and item embeddings in recommendation systems.
+
+    Example:
+        ```simple
+        # Vocabulary size 1000, embedding dimension 128
+        let embedding = nn.Embedding(num_embeddings=1000, embedding_dim=128)
+
+        # Input: [batch_size, sequence_length] of integer indices
+        let indices = torch.tensor([[1, 2, 3], [4, 5, 6]])
+        let embedded = embedding(indices)  # [batch, seq_len, embedding_dim]
+        ```
+    """
+    module_handle: u64
+    num_embeddings: i32
+    embedding_dim: i32
+
+    fn __init__(self, num_embeddings: i32, embedding_dim: i32, padding_idx: i32 = -1):
+        """Initialize embedding layer.
+
+        Args:
+            num_embeddings: Size of vocabulary (number of unique indices)
+            embedding_dim: Dimension of embedding vectors
+            padding_idx: If specified, entries at this index are zero vectors (default: -1 = none)
+        """
+        super().__init__()
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+
+        # Create module via FFI
+        self.module_handle = @rt_torch_embedding_new(
+            num_embeddings,
+            embedding_dim,
+            padding_idx
+        )
+        if self.module_handle == 0:
+            panic("Failed to create Embedding layer")
+
+    fn __del__(self):
+        """Free module resources."""
+        if self.module_handle != 0:
+            @rt_torch_module_free(self.module_handle)
+
+    fn forward(self, indices: torch.Tensor) -> torch.Tensor:
+        """Look up embeddings for input indices.
+
+        Args:
+            indices: Integer tensor of indices [batch, seq_len] or [batch]
+
+        Returns:
+            Embedded tensor [batch, seq_len, embedding_dim] or [batch, embedding_dim]
+        """
+        let handle = @rt_torch_embedding_forward(self.module_handle, indices.handle)
+        if handle == 0:
+            panic("Embedding forward pass failed")
+        return torch.Tensor(handle)
+
+
+class ModuleList:
+    """Container for storing a list of modules.
+
+    Useful for building dynamic networks or networks with repeated sub-modules.
+
+    Example:
+        ```simple
+        let layers = nn.ModuleList([
+            nn.Linear(10, 20),
+            nn.Linear(20, 30),
+            nn.Linear(30, 10)
+        ])
+
+        # Apply all layers sequentially
+        let x = input
+        for layer in layers:
+            x = nn.relu(layer(x))
+        ```
+    """
+    modules: [Module]
+
+    fn __init__(self, modules: [Module] = []):
+        """Initialize module list.
+
+        Args:
+            modules: List of modules to store (default: empty)
+        """
+        self.modules = modules
+
+    fn append(self, module: Module):
+        """Add module to the list.
+
+        Args:
+            module: Module to add
+        """
+        self.modules.append(module)
+
+    fn __len__(self) -> i32:
+        """Get number of modules.
+
+        Returns:
+            Number of modules in list
+        """
+        return self.modules.len() as i32
+
+    fn __getitem__(self, index: i32) -> Module:
+        """Get module by index.
+
+        Args:
+            index: Index of module
+
+        Returns:
+            Module at index
+        """
+        return self.modules[index as usize]
+
+
+# ============================================================================
+# ============================================================================
+# Evaluation Metrics
+# ============================================================================
+    Args:
+        predictions: Predicted class indices [batch_size]
+        targets: Target class indices [batch_size]
+        class_idx: Class to compute F1 for (default: 1 for binary classification)
+
+    Returns:
+        F1 score value between 0.0 and 1.0
+
+    Example:
+        ```simple
+        # Binary classification example
+        let preds = torch.tensor([1, 1, 0, 1, 0])
+        let targets = torch.tensor([1, 0, 0, 1, 1])
+        let f1 = nn.f1_score(preds, targets, class_idx=1)
+        # Precision: 2/3, Recall: 2/3 → F1: 2/3 = 0.6667
+
+        # Multi-class example - compute F1 for class 2
+        let preds = torch.tensor([0, 1, 2, 2, 1])
+        let targets = torch.tensor([0, 1, 2, 1, 2])
+        let f1_class2 = nn.f1_score(preds, targets, class_idx=2)
+        ```
+    """
+    let prec = precision(predictions, targets, class_idx)
+    let rec = recall(predictions, targets, class_idx)
+
+    # Avoid division by zero
+    if (prec + rec) == 0.0:
+        return 0.0
+
+    # Harmonic mean
+    return 2.0 * (prec * rec) / (prec + rec)
+
+
+# ============================================================================
+# Gradient Clipping
+# ============================================================================
+
+fn clip_grad_value(parameters: [torch.Tensor], clip_value: f64):
+    """Clip gradients by value (element-wise clipping).
+
+    Clips each gradient component to the range [-clip_value, clip_value].
+    Useful for preventing exploding gradients in RNNs and deep networks.
+
+    Args:
+        parameters: List of parameters (tensors with .grad attribute)
+        clip_value: Maximum absolute value for gradients
+
+    Example:
+        ```simple
+        # During training loop
+        let model = MyModel()
+        let optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+        for batch in training_data:
+            optimizer.zero_grad()
+            let loss = compute_loss(batch)
+            loss.backward()
+
+            # Clip gradients before optimizer step
+            nn.clip_grad_value(model.parameters(), clip_value=1.0)
+            optimizer.step()
+        ```
+
+    Note:
+        This modifies gradients in-place. Should be called after backward()
+        but before optimizer.step().
+    """
+    for param in parameters:
+        if param.grad is not None:
+            # Clamp gradient values to [-clip_value, clip_value]
+            let grad_handle = @rt_torch_clip_grad_value(
+                param.grad.handle,
+                clip_value
+            )
+            if grad_handle == 0:
+                panic("Gradient value clipping failed")
+            param.grad = torch.Tensor(grad_handle)
+
+
+fn clip_grad_norm(parameters: [torch.Tensor], max_norm: f64, norm_type: f64 = 2.0) -> f64:
+    """Clip gradients by global norm.
+
+    Computes the norm of all gradients together and scales them down if the
+    total norm exceeds max_norm. Preserves gradient direction.
+
+    More commonly used than clip_grad_value as it considers the overall
+    gradient magnitude rather than individual components.
+
+    Args:
+        parameters: List of parameters (tensors with .grad attribute)
+        max_norm: Maximum allowed norm
+        norm_type: Type of norm (default: 2.0 for L2 norm)
+
+    Returns:
+        Total norm of gradients before clipping
+
+    Example:
+        ```simple
+        # Typical usage in training loop
+        let model = MyModel()
+        let optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+        for batch in training_data:
+            optimizer.zero_grad()
+            let loss = compute_loss(batch)
+            loss.backward()
+
+            # Clip by global norm (common for transformers)
+            let total_norm = nn.clip_grad_norm(model.parameters(), max_norm=1.0)
+            if total_norm > 10.0:
+                print(f"Warning: gradient norm was {total_norm}")
+
+            optimizer.step()
+        ```

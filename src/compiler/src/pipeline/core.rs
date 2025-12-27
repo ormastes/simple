@@ -9,6 +9,7 @@ use crate::build_mode::BuildMode;
 use crate::lint::{LintConfig, LintDiagnostic};
 use crate::mir::ContractMode;
 use crate::project::ProjectContext;
+use crate::verification_checker::{VerificationChecker, VerificationViolation};
 use crate::CompileError;
 
 /// Minimal compiler pipeline that validates syntax then emits a runnable SMF.
@@ -30,6 +31,10 @@ pub struct CompilerPipeline {
     pub(super) emit_hir: Option<Option<PathBuf>>,
     /// Emit MIR as JSON to file or stdout (LLM-friendly #887)
     pub(super) emit_mir: Option<Option<PathBuf>>,
+    /// Enable strict verification mode (all violations are errors)
+    pub(super) verification_strict: bool,
+    /// Verification violations from the last compilation
+    pub(super) verification_violations: Vec<VerificationViolation>,
 }
 
 impl CompilerPipeline {
@@ -44,6 +49,8 @@ impl CompilerPipeline {
             emit_ast: None,
             emit_hir: None,
             emit_mir: None,
+            verification_strict: false,
+            verification_violations: Vec::new(),
         })
     }
 
@@ -58,6 +65,8 @@ impl CompilerPipeline {
             emit_ast: None,
             emit_hir: None,
             emit_mir: None,
+            verification_strict: false,
+            verification_violations: Vec::new(),
         })
     }
 
@@ -74,6 +83,8 @@ impl CompilerPipeline {
             emit_ast: None,
             emit_hir: None,
             emit_mir: None,
+            verification_strict: false,
+            verification_violations: Vec::new(),
         })
     }
 
@@ -93,6 +104,8 @@ impl CompilerPipeline {
             emit_ast: None,
             emit_hir: None,
             emit_mir: None,
+            verification_strict: false,
+            verification_violations: Vec::new(),
         })
     }
 
@@ -180,6 +193,34 @@ impl CompilerPipeline {
     /// Set emit MIR option (LLM-friendly #887)
     pub fn set_emit_mir(&mut self, path: Option<PathBuf>) {
         self.emit_mir = Some(path);
+    }
+
+    /// Enable strict verification mode (all violations are errors)
+    ///
+    /// When strict mode is enabled, any verification constraint violation
+    /// will cause compilation to fail. Otherwise, violations are warnings.
+    pub fn set_verification_strict(&mut self, strict: bool) {
+        self.verification_strict = strict;
+    }
+
+    /// Check if strict verification mode is enabled
+    pub fn verification_strict(&self) -> bool {
+        self.verification_strict
+    }
+
+    /// Get verification violations from the last compilation
+    pub fn verification_violations(&self) -> &[VerificationViolation] {
+        &self.verification_violations
+    }
+
+    /// Take verification violations (clears internal storage)
+    pub fn take_verification_violations(&mut self) -> Vec<VerificationViolation> {
+        std::mem::take(&mut self.verification_violations)
+    }
+
+    /// Check if the last compilation had verification violations
+    pub fn has_verification_violations(&self) -> bool {
+        !self.verification_violations.is_empty()
     }
 
     /// Validate AOP/DI configuration for release builds (#1034-1035).

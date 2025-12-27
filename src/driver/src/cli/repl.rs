@@ -3,10 +3,137 @@
 use std::path::PathBuf;
 
 use rustyline::error::ReadlineError;
-use rustyline::DefaultEditor;
+use rustyline::{Config, Editor, Helper, Cmd, KeyEvent, EventHandler, EventContext};
+use rustyline::history::DefaultHistory;
+use rustyline::validate::{Validator, ValidationContext, ValidationResult};
+use rustyline::highlight::Highlighter;
+use rustyline::hint::Hinter;
+use rustyline::completion::Completer;
+use rustyline::{Event, RepeatCount};
+use rustyline::{KeyCode, Modifiers};
 
 use simple_driver::doctest::{append_to_prelude, build_source, is_definition_like};
 use simple_driver::runner::Runner;
+
+/// Helper for REPL that handles smart indentation deletion
+#[derive(Clone)]
+struct ReplHelper;
+
+impl Completer for ReplHelper {
+    type Candidate = String;
+}
+
+impl Hinter for ReplHelper {
+    type Hint = String;
+}
+
+impl Highlighter for ReplHelper {}
+
+impl Validator for ReplHelper {
+    fn validate(&self, _ctx: &mut ValidationContext) -> Result<ValidationResult, ReadlineError> {
+        Ok(ValidationResult::Valid(None))
+    }
+}
+
+impl Helper for ReplHelper {}
+
+/// Tab handler that inserts 4 spaces for indentation
+struct TabHandler;
+
+impl rustyline::ConditionalEventHandler for TabHandler {
+    fn handle(&self, _evt: &Event, _n: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
+        if std::env::var("REPL_DEBUG").is_ok() {
+            eprintln!("[REPL_DEBUG] Tab pressed");
+            eprintln!("[REPL_DEBUG]   line: '{}'", ctx.line());
+            eprintln!("[REPL_DEBUG]   pos: {}", ctx.pos());
+            eprintln!("[REPL_DEBUG]   Action: Insert 4 spaces");
+        }
+        // Insert 4 spaces
+        Some(Cmd::Insert(1, "    ".to_string()))
+    }
+}
+
+/// Backspace handler for REPL
+///
+/// LIMITATION: Due to rustyline's architecture, we cannot make backspace delete
+/// multiple characters (e.g., a full indent level of 4 spaces) in a single keypress.
+///
+/// The issue: rustyline's command execution overrides Movement::BackwardChar(n) repeat
+/// counts with the event's repeat count (always 1 for single backspace press).
+///
+/// See doc/research/REPL_BACKSPACE_LIMITATION.md for full details.
+///
+/// WORKAROUND: Users should use Ctrl+U to delete full indents (4 spaces at once).
+/// Regular backspace deletes one character at a time (standard behavior).
+struct PythonBackspaceHandler;
+
+impl rustyline::ConditionalEventHandler for PythonBackspaceHandler {
+    fn handle(&self, _evt: &Event, n: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
+        if std::env::var("REPL_DEBUG").is_ok() {
+            eprintln!("[REPL_DEBUG] Backspace pressed (repeat: {})", n);
+            eprintln!("[REPL_DEBUG]   line: '{}'", ctx.line());
+            eprintln!("[REPL_DEBUG]   pos: {}", ctx.pos());
+
+            // Check if in leading whitespace
+            let line = ctx.line();
+            let pos = ctx.pos();
+            if pos > 0 && pos <= line.len() {
+                let before_cursor = &line[..pos];
+                let is_all_spaces = before_cursor.chars().all(|c| c == ' ');
+                eprintln!("[REPL_DEBUG]   before_cursor: '{}'", before_cursor);
+                eprintln!("[REPL_DEBUG]   all_spaces: {}", is_all_spaces);
+            }
+            eprintln!("[REPL_DEBUG]   Action: Default (delete 1 char) - rustyline limitation");
+        }
+        // Return None to use default backspace behavior (delete one character)
+        // For full indent deletion, users should press Ctrl+U
+        None
+    }
+}
+
+/// Ctrl+U handler that deletes 4 spaces (dedent)
+struct DedentHandler;
+
+impl rustyline::ConditionalEventHandler for DedentHandler {
+    fn handle(&self, _evt: &Event, _n: RepeatCount, _: bool, ctx: &EventContext) -> Option<Cmd> {
+        let line = ctx.line();
+        let pos = ctx.pos();
+
+        if std::env::var("REPL_DEBUG").is_ok() {
+            eprintln!("[REPL_DEBUG] Ctrl+U pressed");
+            eprintln!("[REPL_DEBUG]   line: '{}'", line);
+            eprintln!("[REPL_DEBUG]   pos: {}", pos);
+        }
+
+        // Check if we can delete 4 spaces before cursor
+        if pos >= 4 && line[pos-4..pos] == *"    " {
+            if std::env::var("REPL_DEBUG").is_ok() {
+                eprintln!("[REPL_DEBUG]   Action: Delete 4 spaces");
+            }
+            // Delete 4 spaces
+            Some(Cmd::Kill(rustyline::Movement::BackwardChar(4)))
+        } else if pos > 0 {
+            // Delete what we can (less than 4 spaces)
+            let spaces_before = line[..pos].chars().rev().take_while(|&c| c == ' ').count();
+            if spaces_before > 0 {
+                if std::env::var("REPL_DEBUG").is_ok() {
+                    eprintln!("[REPL_DEBUG]   Action: Delete {} spaces", spaces_before);
+                }
+                Some(Cmd::Kill(rustyline::Movement::BackwardChar(spaces_before.min(pos))))
+            } else {
+                if std::env::var("REPL_DEBUG").is_ok() {
+                    eprintln!("[REPL_DEBUG]   Action: No spaces to delete");
+                }
+                None // Do nothing if no spaces before cursor
+            }
+        } else {
+            if std::env::var("REPL_DEBUG").is_ok() {
+                eprintln!("[REPL_DEBUG]   Action: At start of line");
+            }
+            None
+        }
+    }
+}
 
 /// Check if text has unbalanced brackets/parens/braces.
 fn has_unbalanced_brackets(text: &str) -> bool {
@@ -137,8 +264,40 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
     println!();
 
     let mut prelude = String::new();
-    let mut rl = match DefaultEditor::new() {
-        Ok(editor) => editor,
+    let config = Config::builder()
+        .auto_add_history(false)  // We'll add history manually
+        .edit_mode(rustyline::EditMode::Emacs)  // Ensure we're in a mode that supports bindings
+        .build();
+    let mut rl: Editor<ReplHelper, DefaultHistory> = match Editor::with_config(config) {
+        Ok(mut editor) => {
+            editor.set_helper(Some(ReplHelper));
+
+            // Bind Tab to insert 4 spaces (indentation)
+            editor.bind_sequence(
+                KeyEvent::from('\t'),  // Tab key
+                EventHandler::Conditional(Box::new(TabHandler)),
+            );
+
+            // Bind Ctrl+U to dedent (delete 4 spaces)
+            editor.bind_sequence(
+                KeyEvent::ctrl('u'),  // Ctrl+U for dedent (Unindent)
+                EventHandler::Conditional(Box::new(DedentHandler)),
+            );
+
+            // Bind backspace to Python-style behavior
+            // Delete whole indent if line is only spaces, else delete one char
+            // Try multiple backspace representations
+            editor.bind_sequence(
+                KeyEvent(KeyCode::Backspace, rustyline::Modifiers::NONE),
+                EventHandler::Conditional(Box::new(PythonBackspaceHandler)),
+            );
+            editor.bind_sequence(
+                KeyEvent(KeyCode::Delete, rustyline::Modifiers::NONE),
+                EventHandler::Conditional(Box::new(PythonBackspaceHandler)),
+            );
+
+            editor
+        }
         Err(e) => {
             eprintln!("Failed to initialize REPL: {}", e);
             return 1;
@@ -160,7 +319,7 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
         let (prompt, auto_indent) = if in_multiline {
             let level = calculate_indent_level(&accumulated_lines);
             let indent = "    ".repeat(level);
-            (format!("... {}", indent), indent)
+            ("... ".to_string(), indent)
         } else {
             (">>> ".to_string(), String::new())
         };
@@ -170,7 +329,7 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
             if input.trim().is_empty() {
                 return;
             }
-            
+
             let is_def = is_definition_like(input);
             let code = build_source(prelude, input, is_def);
 
@@ -184,32 +343,20 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
             }
         };
 
-        match rl.readline(&prompt) {
-            Ok(raw_line) => {
-                // Handle line with auto-indent prepended for multiline
-                let line = if in_multiline && !raw_line.starts_with(' ') && !raw_line.is_empty() {
-                    // Check if line starts with dedent keywords (else, elif, except, finally, case)
-                    let trimmed_input = raw_line.trim_start();
-                    let is_else_like = trimmed_input.starts_with("else:")
-                        || trimmed_input.starts_with("else ")
-                        || trimmed_input.starts_with("elif ")
-                        || trimmed_input.starts_with("except:")
-                        || trimmed_input.starts_with("except ")
-                        || trimmed_input.starts_with("finally:")
-                        || trimmed_input.starts_with("case ");
+        // Read line with pre-filled indentation for multiline mode
+        let readline_result = if in_multiline && !auto_indent.is_empty() {
+            rl.readline_with_initial(&prompt, (&auto_indent, ""))
+        } else {
+            rl.readline(&prompt)
+        };
 
-                    if is_else_like {
-                        // Find the matching if/elif/try level by looking for the last
-                        // if/elif/try/match at a level less than current
-                        let target_indent = find_matching_block_indent(&accumulated_lines);
-                        format!("{}{}", "    ".repeat(target_indent), raw_line)
-                    } else {
-                        // Normal auto-indent
-                        format!("{}{}", auto_indent, raw_line)
-                    }
-                } else {
-                    raw_line.clone()
-                };
+        match readline_result {
+            Ok(line) => {
+                if std::env::var("REPL_DEBUG").is_ok() {
+                    eprintln!("[REPL_DEBUG] Line accepted: '{}'", line);
+                    eprintln!("[REPL_DEBUG]   in_multiline: {}", in_multiline);
+                    eprintln!("[REPL_DEBUG]   accumulated_lines: {:?}", accumulated_lines);
+                }
 
                 let trimmed = line.trim();
 
@@ -221,6 +368,9 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
                 // Handle empty line
                 if trimmed.is_empty() {
                     if in_multiline {
+                        if std::env::var("REPL_DEBUG").is_ok() {
+                            eprintln!("[REPL_DEBUG] Empty line in multiline - executing accumulated input");
+                        }
                         // Empty line ends multiline input
                         in_multiline = false;
                         let full_input = accumulated_lines.join("\n");
@@ -236,13 +386,23 @@ pub fn run_repl(version: &str, mut runner: Runner) -> i32 {
                 // Add line to accumulator
                 accumulated_lines.push(line.clone());
 
+                if std::env::var("REPL_DEBUG").is_ok() {
+                    eprintln!("[REPL_DEBUG] Added to accumulator: {:?}", accumulated_lines);
+                }
+
                 // Check if we need more input
                 if needs_continuation(&accumulated_lines) {
+                    if std::env::var("REPL_DEBUG").is_ok() {
+                        eprintln!("[REPL_DEBUG] Needs continuation - entering/staying in multiline mode");
+                    }
                     in_multiline = true;
                     continue;
                 }
 
                 // Execute the complete input
+                if std::env::var("REPL_DEBUG").is_ok() {
+                    eprintln!("[REPL_DEBUG] Input complete - executing");
+                }
                 in_multiline = false;
                 let full_input = accumulated_lines.join("\n");
                 accumulated_lines.clear();
