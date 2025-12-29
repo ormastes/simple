@@ -1,7 +1,7 @@
 # Simple Language Features
 
 **Last Updated:** 2025-12-29
-**Recent Update:** Lean Verification Mode **100% COMPLETE!** (70/70 features) - Phase 6 complete: Self-hosting with verification models in Simple, Lean code generator, verify CLI tool, proof obligation management. See [lean_verification_implementation.md](../plans/lean_verification_implementation.md). \| **Previous:** 4KB Page Locality **100% COMPLETE!** See [4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md](../report/4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md).
+**Recent Update:** BDD Feature Documentation System **COMPLETE!** - Test-driven documentation with executable assertions for all 4 numbered features (11 tests passing). Infrastructure includes metadata DSL, markdown generators, scaffolding tools, and verification system. See [BDD_FEATURE_DOC_COMPLETE_2025-12-29.md](../report/BDD_FEATURE_DOC_COMPLETE_2025-12-29.md). \| **Previous:** Lean Verification Mode **100% COMPLETE!** (70/70 features) - See [lean_verification_implementation.md](../plans/lean_verification_implementation.md).
 
 ## Feature Table Format
 
@@ -62,9 +62,60 @@ Feature documentation is organized into category folders for easier navigation. 
 
 ### BDD Test Generation
 
-Feature documentation can be auto-generated from BDD system tests. See:
-- [Test template](../../simple/std_lib/test/system/features/_feature_spec_template.spl)
-- [Test README](../../simple/std_lib/test/system/features/README.md)
+Feature documentation is auto-generated from BDD system tests using executable assertions. The system replaces manual documentation with test-generated markdown files, ensuring living documentation that stays synchronized with implementation.
+
+**Status:** ✅ Complete (Session 1: 2025-12-29)
+- **Tests:** 11 tests passing (4 features: Lexer, Parser, AOP Predicates, Functions)
+- **Infrastructure:** Metadata DSL, markdown generators, scaffolding tools, verification system
+- **Coverage:** All 4 existing numbered features migrated to BDD tests
+
+**Architecture:**
+```
+BDD Test (.spl) → feature_metadata() → Global Registry → Markdown Generator → doc/features/*.md
+```
+
+**Key Components:**
+- `simple/std_lib/src/spec/feature_doc/` - Feature documentation framework (7 modules)
+  - `metadata.spl` - FeatureMetadata struct and validation
+  - `registry.spl` - Global singleton registry
+  - `generator.spl` - Markdown template renderer
+  - `index_generator.spl` - Category and master index generation
+  - `file_writer.spl` - File I/O and directory management
+  - `test_helpers.spl` - Test utilities for verification
+  - `feature_doc.spl` - Public API
+- `simple/std_lib/test/features/` - Feature test files
+  - `all_features_spec.spl` - All 4 feature tests (11 tests, 100% passing)
+  - `infrastructure_spec.spl` - Detailed infrastructure tests
+  - `aop_spec.spl` - Detailed AOP tests
+  - `language_core_spec.spl` - Detailed language tests
+- `scripts/` - Migration and verification tools
+  - `scaffold_feature_test.py` - Test template generator
+  - `compare_features.sh` - Migration progress tracker
+  - `verify_features.sh` - Quality verification
+
+**Documentation:**
+- [BDD_FEATURE_DOC_COMPLETE_2025-12-29.md](../report/BDD_FEATURE_DOC_COMPLETE_2025-12-29.md) - Session 1 completion report
+- [BDD_FEATURE_DOC_INFRASTRUCTURE_2025-12-29.md](../report/BDD_FEATURE_DOC_INFRASTRUCTURE_2025-12-29.md) - Phase 1-6 infrastructure report
+- [Test README](../../simple/std_lib/test/features/README.md) - Guidelines for writing feature tests
+- [Test template](../../simple/std_lib/test/system/features/_feature_spec_template.spl) - BDD test template
+
+**Usage:**
+```bash
+# Run all feature tests
+./target/debug/simple simple/std_lib/test/features/all_features_spec.spl
+
+# Track migration progress
+./scripts/compare_features.sh
+
+# Generate test template from markdown
+python3 scripts/scaffold_feature_test.py doc/old_features/infrastructure/0001_lexer.md
+```
+
+**Benefits:**
+- **Living documentation:** Tests generate docs automatically, ensuring sync with implementation
+- **Quality assurance:** Tests verify features actually work with real assertions
+- **Single source of truth:** Documentation derived from executable tests
+- **Scalable:** Easy to add new features using scaffolding tools
 
 ---
 
