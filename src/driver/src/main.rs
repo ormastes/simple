@@ -189,7 +189,20 @@ fn main() {
 
             if args.len() < 2 {
                 eprintln!("error: compile requires a source file");
-                eprintln!("Usage: simple compile <source.spl> [-o <output.smf>] [--target <arch>] [--linker <name>] [--snapshot]");
+                eprintln!("Usage: simple compile <source.spl> [-o <output>] [--native] [--target <arch>] [--linker <name>] [--snapshot]");
+                eprintln!();
+                eprintln!("Options:");
+                eprintln!("  -o <output>         Output file (default: source.smf or source for --native)");
+                eprintln!("  --native            Compile to standalone native binary (ELF/PE)");
+                eprintln!("  --target <arch>     Target architecture (x86_64, aarch64, etc.)");
+                eprintln!("  --linker <name>     Native linker to use (mold, lld, ld)");
+                eprintln!("  --layout-optimize   Enable 4KB page layout optimization");
+                eprintln!("  --strip             Strip symbols from output");
+                eprintln!("  --pie               Create position-independent executable (default)");
+                eprintln!("  --no-pie            Disable position-independent executable");
+                eprintln!("  --shared            Create shared library (.so/.dll)");
+                eprintln!("  --map               Generate linker map file");
+                eprintln!("  --snapshot          Create JJ snapshot with build state");
                 std::process::exit(1);
             }
             let source = PathBuf::from(&args[1]);
@@ -198,6 +211,9 @@ fn main() {
                 .position(|a| a == "-o")
                 .and_then(|i| args.get(i + 1))
                 .map(PathBuf::from);
+
+            // Parse --native flag
+            let native = args.iter().any(|a| a == "--native");
 
             // Parse --target flag
             let target = args
@@ -230,21 +246,41 @@ fn main() {
             if let Some(l) = linker {
                 if !NativeLinker::is_available(l) {
                     eprintln!("warning: linker '{}' not found on system", l.name());
-                } else {
-                    eprintln!("Using linker: {}", l.name());
+                } else if native {
+                    println!("Using linker: {}", l.name());
                 }
             }
 
             // Parse --snapshot flag
             let snapshot = args.iter().any(|a| a == "--snapshot");
 
+            // Parse native binary options
+            let layout_optimize = args.iter().any(|a| a == "--layout-optimize");
+            let strip = args.iter().any(|a| a == "--strip");
+            let pie = !args.iter().any(|a| a == "--no-pie");
+            let shared = args.iter().any(|a| a == "--shared");
+            let generate_map = args.iter().any(|a| a == "--map");
+
             // Parse compile options (including emit flags)
             let options = CompileOptions::from_args(&args);
 
-            // TODO: Pass linker to compile_file when pipeline integration is complete
-            let _ = linker; // Currently unused but parsed for future integration
-
-            std::process::exit(compile_file(&source, output, target, snapshot, options));
+            if native {
+                // Compile to standalone native binary
+                std::process::exit(cli::compile::compile_file_native(
+                    &source,
+                    output,
+                    target,
+                    linker,
+                    layout_optimize,
+                    strip,
+                    pie,
+                    shared,
+                    generate_map,
+                ));
+            } else {
+                // Compile to SMF (existing behavior)
+                std::process::exit(compile_file(&source, output, target, snapshot, options));
+            }
         }
         "targets" => {
             std::process::exit(list_targets());

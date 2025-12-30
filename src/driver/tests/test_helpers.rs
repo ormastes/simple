@@ -422,7 +422,7 @@ pub fn parse_source(source: &str) -> simple_parser::ast::Module {
 
 /// Lower AST module to HIR
 #[allow(dead_code)]
-pub fn lower_module(module: &simple_parser::ast::Module) -> Result<simple_compiler::hir::HirModule, simple_compiler::error::CompileError> {
+pub fn lower_module(module: &simple_parser::ast::Module) -> Result<simple_compiler::hir::HirModule, simple_compiler::hir::LowerError> {
     use simple_compiler::hir::Lowerer;
     let lowerer = Lowerer::new();
     lowerer.lower_module(module)
@@ -430,7 +430,7 @@ pub fn lower_module(module: &simple_parser::ast::Module) -> Result<simple_compil
 
 /// Parse and lower in one step (common pattern in capability tests)
 #[allow(dead_code)]
-pub fn parse_and_lower_source(source: &str) -> Result<simple_compiler::hir::HirModule, simple_compiler::error::CompileError> {
+pub fn parse_and_lower_source(source: &str) -> Result<simple_compiler::hir::HirModule, simple_compiler::hir::LowerError> {
     let module = parse_source(source);
     lower_module(&module)
 }

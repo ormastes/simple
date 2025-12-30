@@ -341,4 +341,122 @@ impl CompilerPipeline {
             target,
         ))
     }
+
+    /// Compile source to a standalone native binary.
+    ///
+    /// This produces a native executable (ELF on Linux, PE on Windows) that
+    /// can run without the Simple runtime.
+    ///
+    /// # Arguments
+    ///
+    /// * `source` - Simple source code
+    /// * `output` - Output file path
+    /// * `options` - Native binary options (linker, layout, etc.)
+    #[instrument(skip(self, source, output))]
+    pub fn compile_to_native_binary(
+        &mut self,
+        source: &str,
+        output: &Path,
+        options: Option<crate::linker::NativeBinaryOptions>,
+    ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
+        use crate::linker::{NativeBinaryBuilder, NativeBinaryOptions, LayoutOptimizer};
+
+        // Clear previous diagnostics
+        self.lint_diagnostics.clear();
+
+        // Validate release mode configuration
+        self.validate_release_config()?;
+
+        // Parse source
+        let mut parser = simple_parser::Parser::new(source);
+        let ast_module = parser
+            .parse()
+            .map_err(|e| CompileError::Parse(format!("{e}")))?;
+
+        // Emit AST if requested
+        if let Some(path) = &self.emit_ast {
+            crate::ir_export::export_ast(&ast_module, path.as_deref())
+                .map_err(|e| CompileError::Semantic(e))?;
+        }
+
+        // Monomorphization
+        let ast_module = monomorphize_module(&ast_module);
+
+        // Run lint checks
+        self.run_lint_checks(&ast_module.items)?;
+
+        // Validate capabilities
+        self.validate_capabilities(&ast_module.items)?;
+
+        // Check trait coherence
+        self.check_trait_coherence(&ast_module.items)?;
+
+        // Type check and lower to MIR
+        let mir_module = self.type_check_and_lower(&ast_module)?;
+
+        // Get options
+        let options = options.unwrap_or_else(|| {
+            NativeBinaryOptions::default().output(output)
+        });
+
+        // Check for main function (not required for shared libraries)
+        if !options.shared {
+            let has_main_function = mir_module.functions.iter().any(|f| f.name == FUNC_MAIN);
+            if !has_main_function {
+                return Err(CompileError::Semantic(
+                    "native binary requires a main function".to_string(),
+                ));
+            }
+        }
+
+        // Generate object code
+        let object_code = self.compile_mir_to_object(&mir_module, options.target.clone())?;
+
+        // Build native binary
+        let mut builder = NativeBinaryBuilder::new(object_code)
+            .output(output)
+            .target(options.target.clone())
+            .strip(options.strip)
+            .pie(options.pie)
+            .shared(options.shared)
+            .map(options.generate_map)
+            .verbose(options.verbose);
+
+        // Add libraries
+        for lib in &options.libraries {
+            builder = builder.library(lib);
+        }
+
+        // Add library paths
+        for path in &options.library_paths {
+            builder = builder.library_path(path);
+        }
+
+        // Set linker
+        if let Some(linker) = options.linker {
+            builder = builder.linker(linker);
+        }
+
+        // Set up layout optimizer if requested
+        if options.layout_optimize {
+            let optimizer = LayoutOptimizer::new();
+            builder = builder.with_layout_optimizer(optimizer);
+        }
+
+        // Build
+        builder.build().map_err(|e| CompileError::Codegen(format!("{e}")))
+    }
+
+    /// Compile a source file to a standalone native binary.
+    #[instrument(skip(self, source_path, output))]
+    pub fn compile_file_to_native_binary(
+        &mut self,
+        source_path: &Path,
+        output: &Path,
+        options: Option<crate::linker::NativeBinaryOptions>,
+    ) -> Result<crate::linker::NativeBinaryResult, CompileError> {
+        let source = fs::read_to_string(source_path)
+            .map_err(|e| CompileError::Io(format!("failed to read {}: {}", source_path.display(), e)))?;
+        self.compile_to_native_binary(&source, output, options)
+    }
 }

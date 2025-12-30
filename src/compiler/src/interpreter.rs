@@ -203,6 +203,10 @@ thread_local! {
     /// When a unique pointer is used (moved out), its name is added here.
     /// Any subsequent access to a moved variable results in a compile error.
     pub(crate) static MOVED_VARS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
+    /// Module-level mutable variables accessible from functions.
+    /// When a module declares `let mut x = ...` at top level, x is added here.
+    /// Functions can read and write these variables.
+    pub(crate) static MODULE_GLOBALS: RefCell<HashMap<String, Value>> = RefCell::new(HashMap::new());
 }
 
 /// Mark a variable as moved (for unique pointer move semantics).
@@ -224,6 +228,16 @@ pub(crate) fn clear_moved_vars() {
 fn get_identifier_name(expr: &Expr) -> Option<&str> {
     match expr {
         Expr::Identifier(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+/// Extract the variable name from a pattern (for module-level global tracking)
+fn get_pattern_name(pattern: &simple_parser::ast::Pattern) -> Option<String> {
+    match pattern {
+        simple_parser::ast::Pattern::Identifier(name) => Some(name.clone()),
+        simple_parser::ast::Pattern::MutIdentifier(name) => Some(name.clone()),
+        simple_parser::ast::Pattern::Typed { pattern, .. } => get_pattern_name(pattern),
         _ => None,
     }
 }
@@ -405,6 +419,8 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
     COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     BASE_UNIT_DIMENSIONS.with(|cell| cell.borrow_mut().clear());
     SI_BASE_UNITS.with(|cell| cell.borrow_mut().clear());
+    // Clear module-level globals from previous runs
+    MODULE_GLOBALS.with(|cell| cell.borrow_mut().clear());
 
     let mut env = Env::new();
     let mut functions: HashMap<String, FunctionDef> = HashMap::new();
@@ -741,8 +757,24 @@ fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> {
                     cell.borrow_mut().insert(cu.name.clone(), dimension);
                 });
             }
-            Node::Let(_)
-            | Node::Const(_)
+            Node::Let(let_stmt) => {
+                if let Control::Return(val) =
+                    exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
+                {
+                    return val.as_int().map(|v| v as i32);
+                }
+                // Sync mutable module-level variables to MODULE_GLOBALS for function access
+                if let_stmt.mutability.is_mutable() {
+                    if let Some(name) = get_pattern_name(&let_stmt.pattern) {
+                        if let Some(value) = env.get(&name) {
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut().insert(name, value.clone());
+                            });
+                        }
+                    }
+                }
+            }
+            Node::Const(_)
             | Node::Static(_)
             | Node::Assignment(_)
             | Node::If(_)
@@ -1136,7 +1168,23 @@ pub(crate) fn exec_node(
                 if let Some((obj_name, new_self)) = update {
                     env.insert(obj_name, new_self);
                 }
-                env.insert(name.clone(), value);
+                // Check if this is a module-level global variable (for function access)
+                let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
+                if is_global && !env.contains_key(name) {
+                    // Update module-level global
+                    MODULE_GLOBALS.with(|cell| {
+                        cell.borrow_mut().insert(name.clone(), value);
+                    });
+                } else {
+                    env.insert(name.clone(), value);
+                    // Also sync to MODULE_GLOBALS if it exists there (for module-level assignments)
+                    MODULE_GLOBALS.with(|cell| {
+                        let mut globals = cell.borrow_mut();
+                        if globals.contains_key(name) {
+                            globals.insert(name.clone(), env.get(name).unwrap().clone());
+                        }
+                    });
+                }
                 Ok(Control::Next)
             } else if let Expr::FieldAccess { receiver, field } = &assign.target {
                 // Handle field assignment: obj.field = value

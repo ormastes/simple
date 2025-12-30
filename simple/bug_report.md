@@ -803,7 +803,13 @@ Parser likely does lookahead on identifiers and matches prefixes against class n
 
 ### Status
 
-Workaround available (rename parameters). Should still be fixed for better developer experience.
+✅ **FIXED** (2025-12-30)
+
+**Fix:** Modified `parser_helpers.rs:expect_identifier()` and `expressions/primary.rs:parse_primary()` to allow Gherkin keywords (`feature`, `scenario`, `given`, `when`, `then`, etc.) to be used as identifiers in non-BDD contexts.
+
+**Files changed:**
+- `src/parser/src/parser_helpers.rs` - Added Gherkin tokens to `expect_identifier()`
+- `src/parser/src/expressions/primary.rs` - Added Gherkin tokens to `parse_primary()`
 
 ## List.append() Method Does Not Mutate
 
@@ -864,7 +870,12 @@ The append method likely returns a new array instead of mutating the existing on
 
 ### Status
 
-Workaround applied in `simple/std_lib/src/spec/feature_doc.spl`. The underlying bug should still be fixed.
+✅ **FIXED** (2025-12-30)
+
+**Fix:** Modified `interpreter_helpers.rs` to add `ARRAY_MUTATING_METHODS` constant and extend `handle_method_call_with_self_update()` to handle array and dict mutations. When a mutating method (append, push, pop, etc.) is called on a mutable array, the updated array is written back to the binding.
+
+**Files changed:**
+- `src/compiler/src/interpreter_helpers.rs` - Added mutation handling for Array and Dict types
 
 ## Module-Level Mutable Globals Inaccessible from Functions
 
@@ -944,7 +955,73 @@ When functions are defined, their captured environment doesn't include module-le
 
 ### Status
 
-Open - needs investigation. Workaround is to use class-based state management.
+✅ **FIXED** (2025-12-30)
+
+**Fix:** Implemented `MODULE_GLOBALS` thread-local storage to track module-level mutable variables. Modified:
+1. `interpreter.rs` - Added `MODULE_GLOBALS` thread-local, sync module-level `let mut` bindings to it
+2. `interpreter_expr.rs` - Check `MODULE_GLOBALS` as fallback in identifier lookup
+3. `interpreter.rs:exec_node()` - Handle assignment to module globals
+4. `interpreter_call/block_execution.rs` - Handle function-level assignment to module globals
+
+**Files changed:**
+- `src/compiler/src/interpreter.rs` - MODULE_GLOBALS thread-local and module-level handling
+- `src/compiler/src/interpreter_expr.rs` - Identifier lookup fallback to MODULE_GLOBALS
+- `src/compiler/src/interpreter_call/block_execution.rs` - Function assignment handling
+
+## BDD Test Syntax Mismatch - Parenthesized vs Non-Parenthesized
+
+**Type:** Bug
+**Priority:** Medium
+**Discovered:** 2025-12-30
+**Status:** ✅ PARTIALLY FIXED (2025-12-30)
+**Component:** BDD Test Framework / Parser
+
+### Description
+
+There were two BDD syntaxes in use across the stdlib tests, but only ONE was supported by the parser.
+
+### Fix Applied
+
+Converted all 44 files with broken syntax using automated script:
+1. `describe("name"):` → `describe "name":`
+2. `it("name"):` → `it "name":`
+3. `expect(X).to_equal(Y)` → `expect X == Y`
+4. `expect(X).to_be_true()` → `expect X`
+5. `case Pattern:` → `Pattern =>` (match syntax)
+
+### Current Status
+
+- **Syntax issues:** Fixed in all 44 files
+- **Remaining failures:** Most tests now fail because they test non-existent modules:
+  - `core.json` - JSON parsing (not implemented)
+  - `core.math` - Math functions (not implemented)
+  - `core.random` - Random numbers (not implemented)
+  - LSP, DAP, ML modules (not implemented)
+
+### Test Results After Fix
+
+- **79 passed** (unchanged - these were already working)
+- **110 failed** (same count, but different reasons):
+  - ~44 were parse errors → now runtime/semantic errors (missing modules)
+  - Tests that parsed are now failing on missing functionality
+
+### Evidence
+
+Before fix (example):
+```
+error: parse: Unexpected token: expected expression, found Colon
+```
+
+After fix (same test):
+```
+Random module > Seeding > ✓ should set seed
+1 example, 0 failures
+error: semantic: method call on unsupported type: seed
+```
+
+The BDD syntax now works - tests parse and run - but fail on missing stdlib modules.
+
+---
 
 ## Module Import Class Access via Alias Broken
 

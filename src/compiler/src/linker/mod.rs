@@ -23,6 +23,7 @@ mod native;
 mod builder;
 pub mod parallel;
 pub mod layout;
+mod native_binary;
 
 // SMF exports
 pub use smf_writer::*;
@@ -52,4 +53,9 @@ pub use analysis::{
 // Layout optimization exports (4KB page locality)
 pub use layout::{
     LayoutOptimizer, LayoutSegment, LayoutStats, LayoutSymbol,
+};
+
+// Native binary exports (standalone executables)
+pub use native_binary::{
+    compile_to_native_binary, NativeBinaryBuilder, NativeBinaryOptions, NativeBinaryResult,
 };

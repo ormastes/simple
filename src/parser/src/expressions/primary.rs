@@ -180,6 +180,39 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Identifier("type".to_string()))
             }
+            // Allow Gherkin keywords to be used as identifiers in expressions
+            TokenKind::Feature => {
+                self.advance();
+                Ok(Expr::Identifier("feature".to_string()))
+            }
+            TokenKind::Scenario => {
+                self.advance();
+                Ok(Expr::Identifier("scenario".to_string()))
+            }
+            TokenKind::Outline => {
+                self.advance();
+                Ok(Expr::Identifier("outline".to_string()))
+            }
+            TokenKind::Examples => {
+                self.advance();
+                Ok(Expr::Identifier("examples".to_string()))
+            }
+            TokenKind::Given => {
+                self.advance();
+                Ok(Expr::Identifier("given".to_string()))
+            }
+            TokenKind::When => {
+                self.advance();
+                Ok(Expr::Identifier("when".to_string()))
+            }
+            TokenKind::Then => {
+                self.advance();
+                Ok(Expr::Identifier("then".to_string()))
+            }
+            TokenKind::AndThen => {
+                self.advance();
+                Ok(Expr::Identifier("and_then".to_string()))
+            }
             // Note: TokenKind::Result is handled above (line 96) for ContractResult
             // If needed as identifier, use method_name or a different syntax
             TokenKind::Backslash => {

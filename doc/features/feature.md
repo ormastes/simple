@@ -38,54 +38,113 @@ Feature documentation is organized into category folders for easier navigation. 
 
 | Folder | Description | Features |
 |--------|-------------|----------|
-| [infrastructure/](infrastructure/__index__.md) | Core compiler infrastructure | #1-#2 |
-| [types/](types/__index__.md) | Type system and primitives | #10 |
-| [language/](language/__index__.md) | Language features (functions, classes) | #11-#12 |
-| [data_structures/](data_structures/__index__.md) | Arrays, dicts, collections | #20 |
-| [control_flow/](control_flow/__index__.md) | Match expressions, control flow | #90 |
-| [codegen/](codegen/__index__.md) | Code generation | #100 |
-
-*Note: Additional categories can be added by creating BDD spec tests.*
+| [infrastructure/](infrastructure/__index__.md) | Core compiler infrastructure | #1-#9 |
+| [types/](types/__index__.md) | Type system and primitives | #10, #16, #18-#19, #27, #30, #32 |
+| [language/](language/__index__.md) | Language features (functions, classes) | #11-#12, #14-#15, #17, #24, #28-#29, #31 |
+| [data_structures/](data_structures/__index__.md) | Arrays, dicts, collections | #20-#21, #25-#26, #33-#34 |
+| [control_flow/](control_flow/__index__.md) | Loops, conditionals, error handling | #13, #35, #90-#91 |
+| [concurrency/](concurrency/__index__.md) | Async, actors, generators | #40-#43 |
+| [codegen/](codegen/__index__.md) | Code generation backends | #95-#97, #100-#101 |
+| [testing_framework/](testing_framework/__index__.md) | BDD testing framework | #180-#184, #187, #192 |
 
 ### BDD Test Generation
 
 Feature documentation is auto-generated from BDD spec tests. Each spec test defines feature metadata and executable assertions that verify the feature works correctly. The generated markdown replaces manual documentation.
 
-**Status:** ✅ Active (2025-12-30)
-- **Tests:** 180 tests passing across 21 feature specs
-- **Features:** Lexer (#1), Parser (#2), Basic Types (#10), Enums (#16), Option/Result (#27), Operators (#30), Classes (#11), Functions (#12), Structs (#14), Variables (#15), Methods (#17), Closures (#24), Imports (#28), Arrays (#20), Dicts (#21), Strings (#25), Tuples (#26), Loops (#13), Match (#90), Conditionals (#91), Cranelift (#100)
-- **Generated Docs:** 27 markdown files in 6 categories
+**Status:** ✅ **COMPLETE** (2025-12-30)
+- **Tests:** 615 tests passing across 51 feature specs
+- **Categories:** Infrastructure (9), Types (7), Language (9), Data Structures (6), Control Flow (4), Concurrency (4), Codegen (5), Testing Framework (7)
+- **Generated Docs:** 51 markdown files in 8 categories
 
 **Architecture:**
 ```
 BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{category}/*.md
 ```
 
-**Current BDD Spec Tests:**
+**Current BDD Spec Tests (51 specs, 615 tests):**
 
+#### Infrastructure (9 specs, 147 tests)
 | Spec File | Feature | Tests | Status |
 |-----------|---------|-------|--------|
-| `infrastructure/lexer_spec.spl` | #1 Lexer | 9 | ✅ |
-| `infrastructure/parser_spec.spl` | #2 Parser | 9 | ✅ |
-| `types/basic_types_spec.spl` | #10 Basic Types | 9 | ✅ |
-| `types/enums_spec.spl` | #16 Enums | 7 | ✅ |
-| `types/option_result_spec.spl` | #27 Option/Result | 9 | ✅ |
-| `types/operators_spec.spl` | #30 Operators | 15 | ✅ |
-| `language/classes_spec.spl` | #11 Classes | 5 | ✅ |
-| `language/functions_spec.spl` | #12 Functions | 8 | ✅ |
-| `language/structs_spec.spl` | #14 Structs | 7 | ✅ |
-| `language/variables_spec.spl` | #15 Variables | 10 | ✅ |
-| `language/methods_spec.spl` | #17 Methods | 8 | ✅ |
-| `language/closures_spec.spl` | #24 Closures | 9 | ✅ |
-| `language/imports_spec.spl` | #28 Imports | 8 | ✅ |
-| `data_structures/arrays_spec.spl` | #20 Arrays | 11 | ✅ |
-| `data_structures/dicts_spec.spl` | #21 Dicts | 9 | ✅ |
-| `data_structures/strings_spec.spl` | #25 Strings | 10 | ✅ |
-| `data_structures/tuples_spec.spl` | #26 Tuples | 9 | ✅ |
-| `control_flow/loops_spec.spl` | #13 Loops | 7 | ✅ |
-| `control_flow/match_spec.spl` | #90 Match Expressions | 7 | ✅ |
-| `control_flow/conditionals_spec.spl` | #91 Conditionals | 10 | ✅ |
-| `codegen/cranelift_spec.spl` | #100 Cranelift Backend | 4 | ✅ |
+| `infrastructure/lexer_spec.spl` | #1 Lexer | 10 | ✅ |
+| `infrastructure/parser_spec.spl` | #2 Parser | 10 | ✅ |
+| `infrastructure/ast_spec.spl` | #3 AST | 19 | ✅ |
+| `infrastructure/hir_spec.spl` | #4 HIR | 16 | ✅ |
+| `infrastructure/mir_spec.spl` | #5 MIR | 19 | ✅ |
+| `infrastructure/runtime_value_spec.spl` | #6 RuntimeValue | 21 | ✅ |
+| `infrastructure/gc_spec.spl` | #7 GC | 16 | ✅ |
+| `infrastructure/package_manager_spec.spl` | #8 Package Manager | 17 | ✅ |
+| `infrastructure/smf_spec.spl` | #9 SMF | 19 | ✅ |
+
+#### Types (7 specs, 89 tests)
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `types/basic_types_spec.spl` | #10 Basic Types | 10 | ✅ |
+| `types/enums_spec.spl` | #16 Enums | 8 | ✅ |
+| `types/memory_types_spec.spl` | #18 Memory Types | 16 | ✅ |
+| `types/borrowing_spec.spl` | #19 Borrowing | 16 | ✅ |
+| `types/option_result_spec.spl` | #27 Option/Result | 10 | ✅ |
+| `types/operators_spec.spl` | #30 Operators | 16 | ✅ |
+| `types/generics_spec.spl` | #32 Generics | 13 | ✅ |
+
+#### Language (9 specs, 91 tests)
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `language/classes_spec.spl` | #11 Classes | 6 | ✅ |
+| `language/functions_spec.spl` | #12 Functions | 9 | ✅ |
+| `language/structs_spec.spl` | #14 Structs | 8 | ✅ |
+| `language/variables_spec.spl` | #15 Variables | 11 | ✅ |
+| `language/methods_spec.spl` | #17 Methods | 9 | ✅ |
+| `language/closures_spec.spl` | #24 Closures | 10 | ✅ |
+| `language/imports_spec.spl` | #28 Imports | 9 | ✅ |
+| `language/macros_spec.spl` | #29 Macros | 17 | ✅ |
+| `language/traits_spec.spl` | #31 Traits | 12 | ✅ |
+
+#### Data Structures (6 specs, 73 tests)
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `data_structures/arrays_spec.spl` | #20 Arrays | 13 | ✅ |
+| `data_structures/dicts_spec.spl` | #21 Dicts | 10 | ✅ |
+| `data_structures/strings_spec.spl` | #25 Strings | 11 | ✅ |
+| `data_structures/tuples_spec.spl` | #26 Tuples | 10 | ✅ |
+| `data_structures/sets_spec.spl` | #33 Sets | 14 | ✅ |
+| `data_structures/ranges_spec.spl` | #34 Ranges | 15 | ✅ |
+
+#### Control Flow (4 specs, 43 tests)
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `control_flow/loops_spec.spl` | #13 Loops | 8 | ✅ |
+| `control_flow/error_handling_spec.spl` | #35 Error Handling | 14 | ✅ |
+| `control_flow/match_spec.spl` | #90 Match Expressions | 10 | ✅ |
+| `control_flow/conditionals_spec.spl` | #91 Conditionals | 11 | ✅ |
+
+#### Concurrency (4 specs, 41 tests)
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `concurrency/actors_spec.spl` | #40 Actors | 8 | ✅ |
+| `concurrency/async_await_spec.spl` | #41 Async/Await | 10 | ✅ |
+| `concurrency/generators_spec.spl` | #42 Generators | 12 | ✅ |
+| `concurrency/futures_spec.spl` | #43 Futures | 11 | ✅ |
+
+#### Codegen (5 specs, 58 tests)
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `codegen/buffer_pool_spec.spl` | #95 Buffer Pool | 15 | ✅ |
+| `codegen/generator_codegen_spec.spl` | #96 Generator Codegen | 13 | ✅ |
+| `codegen/llvm_backend_spec.spl` | #97 LLVM Backend | 19 | ✅ |
+| `codegen/cranelift_spec.spl` | #100 Cranelift Backend | 5 | ✅ |
+| `codegen/native_binary_spec.spl` | #101 Native Binary | 6 | ✅ |
+
+#### Testing Framework (7 specs, 73 tests)
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `testing_framework/describe_blocks_spec.spl` | #180 Describe Blocks | 11 | ✅ |
+| `testing_framework/context_blocks_spec.spl` | #181 Context Blocks | 9 | ✅ |
+| `testing_framework/it_examples_spec.spl` | #182 It Examples | 9 | ✅ |
+| `testing_framework/before_each_spec.spl` | #183 Before Each | 9 | ✅ |
+| `testing_framework/after_each_spec.spl` | #184 After Each | 9 | ✅ |
+| `testing_framework/expect_matchers_spec.spl` | #187 Expect Matchers | 15 | ✅ |
+| `testing_framework/doctest_spec.spl` | #192 Doctest | 11 | ✅ |
 
 **Key Files:**
 - `simple/std_lib/src/spec/feature_doc.spl` - Feature documentation framework
@@ -110,68 +169,25 @@ for f in simple/std_lib/test/features/**/*_spec.spl; do ./target/debug/simple "$
 - **Single source of truth:** Documentation derived from passing tests
 - **Scalable:** Add new features by creating spec tests
 
-### Planned BDD Specs (29 remaining)
+### BDD Specs Complete! 🎉
+
+All 51 BDD feature specs have been implemented with 615 passing tests.
 
 See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 
-**High Priority (Core Language):**
+**Completed Categories:**
 
-| ID | Feature | Category | Priority |
-|----|---------|----------|----------|
-| #29 | Macros | Language | High |
-| #31 | Traits | Language | High |
-| #32 | Generics | Language | High |
-| #35 | Error Handling | Control Flow | High |
-
-**Medium Priority (Infrastructure):**
-
-| ID | Feature | Category | Priority |
-|----|---------|----------|----------|
-| #3 | AST | Infrastructure | Medium |
-| #4 | HIR | Infrastructure | Medium |
-| #5 | MIR | Infrastructure | Medium |
-| #6 | RuntimeValue | Infrastructure | Medium |
-| #7 | GC | Infrastructure | Medium |
-| #8 | Package Manager | Infrastructure | Medium |
-| #9 | SMF | Infrastructure | Medium |
-
-**Medium Priority (Concurrency):**
-
-| ID | Feature | Category | Priority |
-|----|---------|----------|----------|
-| #40 | Actors | Concurrency | Medium |
-| #41 | Async/Await | Concurrency | Medium |
-| #42 | Generators | Concurrency | Medium |
-| #43 | Futures | Concurrency | Medium |
-
-**Lower Priority (Advanced):**
-
-| ID | Feature | Category | Priority |
-|----|---------|----------|----------|
-| #18 | Memory Types | Types | Low |
-| #19 | Borrowing | Types | Low |
-| #33 | Sets | Data Structures | Low |
-| #34 | Ranges | Data Structures | Low |
-
-**Testing Framework (Self-referential):**
-
-| ID | Feature | Category | Priority |
-|----|---------|----------|----------|
-| #180 | describe blocks | Testing | Low |
-| #181 | context blocks | Testing | Low |
-| #182 | it examples | Testing | Low |
-| #183 | before_each | Testing | Low |
-| #184 | after_each | Testing | Low |
-| #187 | expect matchers | Testing | Low |
-| #192 | Doctest | Testing | Low |
-
-**Codegen:**
-
-| ID | Feature | Category | Priority |
-|----|---------|----------|----------|
-| #95 | Capture Buffer | Codegen | Low |
-| #96 | Generator Codegen | Codegen | Low |
-| #97 | LLVM Backend | Codegen | Low |
+| Category | Specs | Tests |
+|----------|-------|-------|
+| Infrastructure | 9 | 147 |
+| Types | 7 | 89 |
+| Language | 9 | 91 |
+| Data Structures | 6 | 73 |
+| Control Flow | 4 | 43 |
+| Concurrency | 4 | 41 |
+| Codegen | 5 | 58 |
+| Testing Framework | 7 | 73 |
+| **Total** | **51** | **615** |
 
 ---
 
