@@ -1,26 +1,18 @@
-# Codegen Features (#95-#103)
+# Codegen Features (#100-#100)
 
-Code generation and compilation pipeline.
+Code generation and compilation backends.
 
 ## Features
 
 | ID | Feature | Difficulty | Status | Impl |
 |----|---------|------------|--------|------|
-| #95 | Capture Buffer & VReg Remapping | 4 | ✅ | R |
-| #96 | Generator State Machine Codegen | 5 | ✅ | R |
-| #97 | LLVM Backend | 5 | ✅ | R |
-| #99 | Body Block Outlining | 4 | ✅ | R |
-| #100 | Cranelift Backend | 4 | ✅ | R |
+| #100 | [Cranelift Backend](0100_cranelift_backend.md) | 4 | ✅ | Rust |
 
 ## Summary
 
-**Status:** 5/5 Complete (100%)
-
-## Documentation
-
-- [codegen_status.md](../codegen_status.md) - MIR instruction coverage
-- `doc/llvm_backend.md` - LLVM backend details
+**Status:** 1/1 Complete (100%)
 
 ## Test Locations
 
-- **Rust Tests:** `src/compiler/tests/`, `src/compiler/src/codegen/llvm_tests/`
+- **Simple Tests:** `simple/std_lib/test/features/codegen/`
+- **Rust Tests:** See individual feature pages

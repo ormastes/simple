@@ -2,7 +2,7 @@
 
 A statically typed programming language with Python-like syntax, modern safety features, and GPU computing support.
 
-**Quick Navigation:** [Features](#key-features) | [Quick Start](#quick-start) | [Language Basics](#language-basics) | [Documentation](#documentation) | [Grammar & Spec](#grammar--specification) | [Project Structure](#project-structure)
+**Quick Navigation:** [Features](#key-features) | [Quick Start](#quick-start) | [Language Basics](#language-basics) | [Examples](#examples) | [BDD Docs](#bdd-feature-documentation) | [Documentation](#documentation) | [Grammar & Spec](#grammar--specification) | [Project Structure](#project-structure)
 
 ---
 
@@ -15,7 +15,11 @@ A statically typed programming language with Python-like syntax, modern safety f
 - **GPU computing** - Cross-platform Vulkan backend for GPU kernels and SIMD
 - **Pattern matching** - Exhaustiveness checking with strong enums
 - **Contracts** - Pre/postconditions, invariants (DbC - Design by Contract)
-- **Macros** - Hygienic compile-time metaprogramming
+- **Parser-friendly macros** - Contract-first LL(1) macros with IDE support
+- **AOP & Unified Predicates** - Aspect-oriented programming, DI, mocking, architecture rules
+- **SDN configuration** - Simple Data Notation for human-readable config files
+- **Doctest** - Executable examples in docstrings (`>>> prompt` style)
+- **BDD Feature Docs** - Living documentation generated from passing tests
 - **SMF binary format** - Compile once, run anywhere
 
 ---
@@ -237,6 +241,116 @@ fn area(s: Shape) -> f64:
             return w * h
 ```
 
+### Parser-Friendly Macros
+
+Simple macros are contract-first and LL(1) parseable - the IDE can provide autocomplete without expanding the macro:
+
+```simple
+# Macro declares what it introduces in the contract header
+macro define_counter(NAME: Str const) -> (
+  returns result: (init: Int, step: Int),
+  intro counter_fn: enclosing.class.fn "{NAME}Counter"(start: Int) -> Int
+):
+  const_eval:
+    const init = 0
+    const step = 1
+
+  emit counter_fn:
+    fn "{NAME}Counter"(start: Int) -> Int:
+      return start + step
+
+# Usage - IDE knows about UserCounter before expansion
+class Demo:
+  define_counter!("User")
+
+  fn run(self) -> Int:
+    return self.UserCounter(10)  # Autocomplete works!
+```
+
+### AOP & Aspect-Oriented Programming
+
+Unified predicate grammar for cross-cutting concerns:
+
+```simple
+# Pointcut expression syntax: pc{...}
+# Applies logging to all service methods
+on pc{ execution(services.**.*(..)) } use LoggingInterceptor
+
+# Architecture rules - enforce layer dependencies
+forbid pc{ hal.** } -> pc{ services.** }  # HAL cannot depend on services
+allow  pc{ services.** } -> pc{ hal.** }  # Services can use HAL
+
+# Dependency Injection with predicates
+bind on pc{ attr(Repository) } -> PostgresRepository
+  when profile("prod")
+
+bind on pc{ attr(Repository) } -> MockRepository
+  when profile("test")
+```
+
+### SDN Configuration
+
+Simple Data Notation - a minimal, token-efficient format for config files:
+
+```sdn
+# app.sdn - Application configuration
+app:
+    name: MyService
+    version: 2.1.0
+
+server:
+    host: 0.0.0.0
+    port: 8080
+    workers: 4
+
+# Inline arrays and dicts
+features = [auth, logging, metrics]
+database = {driver: postgres, host: localhost, port: 5432}
+
+# Named tables - compact tabular data
+rate_limits |endpoint, requests, window|
+    /api/login, 5, 60
+    /api/search, 100, 60
+    /api/upload, 10, 300
+```
+
+Load SDN in Simple:
+
+```simple
+config = sdn::load("app.sdn")
+print("Server port: {config.server.port}")
+```
+
+### Doctest
+
+Executable examples in docstrings - tests that serve as documentation:
+
+```simple
+"""
+Computes factorial of n
+
+Examples:
+```sdoctest
+>>> factorial(5)
+120
+>>> factorial(0)
+1
+>>> factorial(-1)
+Error: ValueError
+```
+"""
+fn factorial(n: Int) -> Int:
+    if n < 0: raise ValueError("negative input")
+    if n <= 1: return 1
+    return n * factorial(n - 1)
+```
+
+Run doctests:
+```bash
+simple doctest src/math.spl      # Run doctests in file
+simple test --doctest            # Run all doctests
+```
+
 ### Functional Update Operator (`->`)
 
 ```simple
@@ -323,6 +437,72 @@ fn main():
 - [Module System](doc/spec/modules.md) - Import/export, packages, __init__.spl
 - [Testing Framework](doc/spec/testing/testing_bdd_framework.md) - BDD testing with matchers
 - [Build System](doc/guides/test.md) - Building and testing Simple projects
+
+**Advanced Features:**
+- [Macro System](doc/spec/macro.md) - Contract-first LL(1) macros
+- [AOP & Unified Predicates](doc/research/aop.md) - Aspect-oriented programming
+- [SDN Format](doc/spec/sdn.md) - Simple Data Notation specification
+- [Doctest](doc/spec/testing/sdoctest.md) - Documentation testing
+- [Feature Documentation](doc/features/feature.md) - BDD-generated feature docs
+
+---
+
+## Examples
+
+The `simple/std_lib/examples/` directory contains working examples:
+
+| Example | Description |
+|---------|-------------|
+| `cli_demo.spl` | Command-line argument parsing |
+| `file_async_basic.spl` | Async file I/O operations |
+| `ui_todo_app.spl` | Cross-platform UI application |
+| `vulkan_triangle.spl` | GPU rendering with Vulkan |
+| `async_tcp_echo_server.spl` | Async TCP networking |
+
+Run an example:
+```bash
+./target/debug/simple simple/std_lib/examples/cli_demo.spl
+```
+
+---
+
+## BDD Feature Documentation
+
+Feature documentation is auto-generated from BDD spec tests. Each spec defines feature metadata and executable assertions that verify the feature works correctly.
+
+```simple
+# simple/std_lib/test/features/infrastructure/lexer_spec.spl
+import std.spec
+
+feature "Lexer":
+    """
+    The lexer tokenizes Simple source code into tokens.
+    Feature ID: #1
+    Category: infrastructure
+    """
+
+    scenario "tokenizes keywords":
+        given "source code with keywords"
+        when "the lexer processes it"
+        then "it produces keyword tokens"
+        expect tokenize("fn main") to contain Token(Keyword, "fn")
+
+    scenario "handles indentation":
+        given "indented code blocks"
+        when "the lexer processes it"
+        then "it emits INDENT and DEDENT tokens"
+```
+
+Run feature tests:
+```bash
+# Run a specific feature spec
+./target/debug/simple simple/std_lib/test/features/infrastructure/lexer_spec.spl
+
+# Generate documentation from tests
+./target/debug/simple simple/std_lib/test/features/generate_docs.spl
+```
+
+Generated docs appear in `doc/features/{category}/` folders with living documentation that stays in sync with the implementation.
 
 ---
 
