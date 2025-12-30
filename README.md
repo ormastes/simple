@@ -10,9 +10,10 @@ A statically typed programming language with Python-like syntax, modern safety f
 
 - **Python-like syntax** - Indentation-based blocks, clean readable code
 - **Static typing with inference** - Type safety without verbosity (Hindley-Milner)
+- **Unit types** - Type-safe postfix literals (`10_cm`, `200_kmph`, `42_uid`)
 - **Multiple memory modes** - GC-managed (default), manual, or reference-counted
 - **Actor-based concurrency** - Safe concurrent programming with async/await
-- **GPU computing** - Cross-platform Vulkan backend for GPU kernels and SIMD
+- **GPU computing** - Cross-platform Vulkan backend with `this.index()` / `gpu.global_id()`
 - **Pattern matching** - Exhaustiveness checking with strong enums
 - **Contracts** - Pre/postconditions, invariants (DbC - Design by Contract)
 - **Parser-friendly macros** - Contract-first LL(1) macros with IDE support
@@ -517,12 +518,18 @@ data->normalize()->filter(min: 0)->save("out.txt")
 ```simple
 import std.gpu
 
-# GPU kernel - runs on device
+# GPU kernel style 1: #[gpu] with explicit bounds check
 #[gpu]
 fn vector_add_kernel(a: []f32, b: []f32, result: []f32):
-    idx = gpu.global_id(0)
+    idx = gpu.global_id(0)           # Global thread index
     if idx < len(result):
         result[idx] = a[idx] + b[idx]
+
+# GPU kernel style 2: @simd with auto bounds handling
+@simd
+fn vector_scale(data: []f32, scale: f32):
+    let i = this.index()             # Global linear index (same as gpu.global_id())
+    data[i] = data[i] * scale        # Bounds auto-handled
 
 # Host function - runs on CPU
 fn main():
@@ -543,6 +550,31 @@ fn main():
     device.sync()
     result = device.download(buf_result)
     # result = [6.0, 8.0, 10.0, 12.0]
+```
+
+**GPU Thread Indexers:**
+
+```simple
+#[gpu]
+fn matrix_multiply(A: []f32, B: []f32, C: []f32, N: u32):
+    # Multi-dimensional indexing
+    let row = gpu.global_id(0)       # First dimension
+    let col = gpu.global_id(1)       # Second dimension
+
+    # Thread group (workgroup) info
+    let local_row = gpu.local_id(0)  # Index within workgroup
+    let group_row = gpu.group_id(0)  # Workgroup index
+
+    # Alternative @simd style
+    # let (row, col) = this.index()  # Tuple for 2D
+    # let local_idx = this.thread_index()
+    # let group_idx = this.group_index()
+
+    if row < N and col < N:
+        var sum = 0.0_f32
+        for k in 0..N:
+            sum += A[row * N + k] * B[k * N + col]
+        C[row * N + col] = sum
 ```
 
 **GPU Examples:** See `examples/gpu/vulkan/` for vector add, matrix multiply, reduction, and image blur.
