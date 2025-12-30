@@ -267,6 +267,48 @@ class Demo:
     return self.UserCounter(10)  # Autocomplete works!
 ```
 
+**Built-in macros:**
+
+```simple
+# Print with formatting
+println!("Hello, {name}!")           # Print with newline
+print!("Value: {x}")                 # Print without newline
+
+# Debug output with source location
+dbg!(expression)                     # Prints: [file:line] expression = value
+
+# Assertions
+assert!(condition)                   # Panic if false
+assert_eq!(a, b)                     # Panic if a != b
+assert_ne!(a, b)                     # Panic if a == b
+
+# Collections
+let nums = vec![1, 2, 3, 4, 5]       # Create vector
+let formatted = format!("x={x}")     # Format string without printing
+
+# Panic with message
+panic!("Something went wrong: {err}")
+```
+
+**Const-unrolled macro (generate multiple functions):**
+
+```simple
+# Generate accessor functions for each axis
+macro gen_axes(BASE: Str const, N: Int const) -> (
+  intro axes:
+    for i in 0 .. N:
+      enclosing.class.fn "{BASE}{i}"(v: Vec[N]) -> Int
+):
+  emit axes:
+    for i in 0 .. N:
+      fn "{BASE}{i}"(v: Vec[N]) -> Int:
+        return v[i]
+
+# Usage: generates x(), y(), z() accessors
+class Point3D:
+  gen_axes!("axis_", 3)  # Creates axis_0, axis_1, axis_2
+```
+
 ### AOP & Aspect-Oriented Programming
 
 Unified predicate grammar for cross-cutting concerns:
@@ -345,10 +387,83 @@ fn factorial(n: Int) -> Int:
     return n * factorial(n - 1)
 ```
 
+**Multi-line examples and setup/teardown:**
+
+```simple
+"""
+Stack data structure with LIFO semantics
+
+Setup:
+```sdoctest
+>>> stack = Stack.new()
+```
+
+Examples:
+```sdoctest
+>>> stack.push(1)
+>>> stack.push(2)
+>>> stack.push(3)
+>>> stack.pop()
+3
+>>> stack.pop()
+2
+>>> stack.size()
+1
+```
+
+Error handling:
+```sdoctest
+>>> empty = Stack.new()
+>>> empty.pop()
+Error: EmptyStackError
+```
+"""
+class Stack:
+    # ...
+```
+
+**Wildcard matching for non-deterministic output:**
+
+```simple
+"""
+Generate unique identifiers
+
+```sdoctest
+>>> generate_uuid()
+"........-....-....-....-............"
+>>> get_timestamp()
+1702......
+>>> random_int(1, 100)
+..
+```
+"""
+fn generate_uuid() -> String:
+    # ...
+```
+
+**Doctest in Markdown files:**
+
+````markdown
+# Tutorial: Getting Started
+
+Create your first Simple program:
+
+```sdoctest
+>>> let x = 10
+>>> let y = 20
+>>> x + y
+30
+>>> "Result: {x + y}"
+"Result: 30"
+```
+````
+
 Run doctests:
 ```bash
 simple doctest src/math.spl      # Run doctests in file
+simple doctest doc/tutorial.md   # Run doctests in markdown
 simple test --doctest            # Run all doctests
+simple test --doctest --tag slow # Run only slow-tagged doctests
 ```
 
 ### Functional Update Operator (`->`)
