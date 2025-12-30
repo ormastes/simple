@@ -38,84 +38,62 @@ Feature documentation is organized into category folders for easier navigation. 
 
 | Folder | Description | Features |
 |--------|-------------|----------|
-| [infrastructure/](infrastructure/__index__.md) | Core compiler infrastructure | #1-#9 |
-| [language/](language/__index__.md) | Language features (core, metaprogramming, types) | #10-#49, #1300-#1342 |
-| [codegen/](codegen/__index__.md) | Code generation | #95-#103 |
-| [concurrency/](concurrency/__index__.md) | Concurrency modes, async runtime | #1104-#1115, #1730-#1779 |
-| [testing/](testing/__index__.md) | BDD, doctest frameworks | #180-#197, #1343-#1347 |
-| [verification/](verification/__index__.md) | Formal verification | #950-#970, #1840-#1909 |
-| [aop/](aop/__index__.md) | AOP & Unified Predicates | #1000-#1050, #1391-#1403 |
-| [tooling/](tooling/__index__.md) | Multi-language, tree-sitter, LSP/DAP | #1156-#1199, #1359-#1368 |
-| [mcp/](mcp/__index__.md) | MCP Protocol | #1200-#1358 |
-| [ui/](ui/__index__.md) | TUI, GUI, Electron, VSCode | #510-#512, #1369-#1450, #1830-#1839 |
-| [gpu/](gpu/__index__.md) | SIMD, Vulkan | #400-#418, #1450-#1509 |
-| [graphics/](graphics/__index__.md) | 3D Graphics | #1780-#1829 |
-| [game_engine/](game_engine/__index__.md) | Godot, Unreal, Physics | #1520-#1649 |
-| [ml/](ml/__index__.md) | ML/PyTorch | #1650-#1729 |
-| [database/](database/__index__.md) | Database abstraction | #700-#799 |
-| [sdn/](sdn/__index__.md) | SDN format | #1051-#1060 |
-| [llm_friendly/](llm_friendly/__index__.md) | LLM-friendly features | #880-#919 |
-| [formatting/](formatting/__index__.md) | Formatter & lints | #1131-#1145 |
-| [ffi/](ffi/__index__.md) | FFI/ABI interface | #1116-#1130 |
-| [optimization/](optimization/__index__.md) | Startup, page locality | #1970-#2049 |
-| [math/](math/__index__.md) | Simple Math | #1910-#1969 |
+| [infrastructure/](infrastructure/__index__.md) | Core compiler infrastructure | #1-#2 |
+| [language/](language/__index__.md) | Language features (functions, classes) | #11-#12 |
+| [data_structures/](data_structures/__index__.md) | Arrays, dicts, collections | #20 |
+| [control_flow/](control_flow/__index__.md) | Match expressions, control flow | #90 |
+| [codegen/](codegen/__index__.md) | Code generation | #100 |
+
+*Note: Additional categories can be added by creating BDD spec tests.*
 
 ### BDD Test Generation
 
-Feature documentation is auto-generated from BDD system tests using executable assertions. The system replaces manual documentation with test-generated markdown files, ensuring living documentation that stays synchronized with implementation.
+Feature documentation is auto-generated from BDD spec tests. Each spec test defines feature metadata and executable assertions that verify the feature works correctly. The generated markdown replaces manual documentation.
 
-**Status:** ✅ Complete (Session 1: 2025-12-29)
-- **Tests:** 11 tests passing (4 features: Lexer, Parser, AOP Predicates, Functions)
-- **Infrastructure:** Metadata DSL, markdown generators, scaffolding tools, verification system
-- **Coverage:** All 4 existing numbered features migrated to BDD tests
+**Status:** ✅ Active (2025-12-30)
+- **Tests:** 53 tests passing across 7 feature specs
+- **Features:** Lexer (#1), Parser (#2), Classes (#11), Functions (#12), Arrays (#20), Match (#90), Cranelift (#100)
+- **Generated Docs:** 12 markdown files in 5 categories
 
 **Architecture:**
 ```
-BDD Test (.spl) → feature_metadata() → Global Registry → Markdown Generator → doc/features/*.md
+BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{category}/*.md
 ```
 
-**Key Components:**
-- `simple/std_lib/src/spec/feature_doc/` - Feature documentation framework (7 modules)
-  - `metadata.spl` - FeatureMetadata struct and validation
-  - `registry.spl` - Global singleton registry
-  - `generator.spl` - Markdown template renderer
-  - `index_generator.spl` - Category and master index generation
-  - `file_writer.spl` - File I/O and directory management
-  - `test_helpers.spl` - Test utilities for verification
-  - `feature_doc.spl` - Public API
-- `simple/std_lib/test/features/` - Feature test files
-  - `all_features_spec.spl` - All 4 feature tests (11 tests, 100% passing)
-  - `infrastructure_spec.spl` - Detailed infrastructure tests
-  - `aop_spec.spl` - Detailed AOP tests
-  - `language_core_spec.spl` - Detailed language tests
-- `scripts/` - Migration and verification tools
-  - `scaffold_feature_test.py` - Test template generator
-  - `compare_features.sh` - Migration progress tracker
-  - `verify_features.sh` - Quality verification
+**Current BDD Spec Tests:**
 
-**Documentation:**
-- [BDD_FEATURE_DOC_COMPLETE_2025-12-29.md](../report/BDD_FEATURE_DOC_COMPLETE_2025-12-29.md) - Session 1 completion report
-- [BDD_FEATURE_DOC_INFRASTRUCTURE_2025-12-29.md](../report/BDD_FEATURE_DOC_INFRASTRUCTURE_2025-12-29.md) - Phase 1-6 infrastructure report
-- [Test README](../../simple/std_lib/test/features/README.md) - Guidelines for writing feature tests
-- [Test template](../../simple/std_lib/test/system/features/_feature_spec_template.spl) - BDD test template
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `infrastructure/lexer_spec.spl` | #1 Lexer | 9 | ✅ |
+| `infrastructure/parser_spec.spl` | #2 Parser | 9 | ✅ |
+| `language/classes_spec.spl` | #11 Classes | 5 | ✅ |
+| `language/functions_spec.spl` | #12 Functions | 8 | ✅ |
+| `data_structures/arrays_spec.spl` | #20 Arrays | 11 | ✅ |
+| `control_flow/match_spec.spl` | #90 Match Expressions | 7 | ✅ |
+| `codegen/cranelift_spec.spl` | #100 Cranelift Backend | 4 | ✅ |
+
+**Key Files:**
+- `simple/std_lib/src/spec/feature_doc.spl` - Feature documentation framework
+- `simple/std_lib/test/features/` - BDD spec test files by category
+- `simple/std_lib/test/features/generate_docs.spl` - Documentation generator
 
 **Usage:**
 ```bash
-# Run all feature tests
-./target/debug/simple simple/std_lib/test/features/all_features_spec.spl
+# Run a specific feature spec test
+./target/debug/simple simple/std_lib/test/features/infrastructure/lexer_spec.spl
 
-# Track migration progress
-./scripts/compare_features.sh
+# Run all specs
+for f in simple/std_lib/test/features/**/*_spec.spl; do ./target/debug/simple "$f"; done
 
-# Generate test template from markdown
-python3 scripts/scaffold_feature_test.py doc/old_features/infrastructure/0001_lexer.md
+# Generate all documentation
+./target/debug/simple simple/std_lib/test/features/generate_docs.spl
 ```
 
 **Benefits:**
-- **Living documentation:** Tests generate docs automatically, ensuring sync with implementation
-- **Quality assurance:** Tests verify features actually work with real assertions
-- **Single source of truth:** Documentation derived from executable tests
-- **Scalable:** Easy to add new features using scaffolding tools
+- **Living documentation:** Tests generate docs, ensuring sync with implementation
+- **Quality assurance:** Executable assertions verify features work correctly
+- **Single source of truth:** Documentation derived from passing tests
+- **Scalable:** Add new features by creating spec tests
 
 ---
 

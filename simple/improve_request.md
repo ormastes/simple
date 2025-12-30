@@ -44,6 +44,108 @@ Track improvement ideas discovered while developing Simple standard library and 
 
 <!-- Add new improvement requests below this line -->
 
+### [Parser] Triple-Quoted F-String Support
+
+**Type:** Improvement
+**Category:** Feature
+**Priority:** Low
+**Proposed:** 2025-12-29
+**Status:** Proposed
+
+**Problem:**
+F-strings with triple quotes (`f"""..."""`) cause "Unterminated f-string" parse errors.
+
+**Current Spec Behavior:**
+- `"..."` or `f"..."` - Interpolated strings (supports `{expr}`)
+- `'...'` - Raw strings (NO interpolation, NO escapes)
+- `"""..."""` - Doc comments only (not string values)
+
+Triple-quoted strings are currently only for documentation comments, not multi-line string values with interpolation.
+
+**Proposed Solution:**
+Add parser support for `f"""..."""` (triple-quoted f-strings) to allow multi-line string templates with interpolation, without requiring `\n` escapes.
+
+**Example:**
+```simple
+# Works: Single-line f-string
+let msg = f"Hello, {name}!"
+
+# Works: F-string with \n escapes
+let markdown = f"# {name}\n\n**ID:** #{id}\n"
+
+# Doesn't work: Triple-quoted f-string
+let markdown = f"""# {name}
+
+**ID:** #{id}
+"""
+# Error: Unterminated f-string
+
+# Current workaround: Use \n escapes
+let markdown = f"# {name}\n\n**ID:** #{id}\n"
+```
+
+**Benefits:**
+- More readable multi-line templates
+- Consistent with Python f-strings
+- Natural formatting for markdown/HTML generation
+- Reduces need for `\n` escapes
+
+**Alternatives Considered:**
+- Use `\n` escapes - current workaround, works but less readable
+- Use string concatenation - more verbose
+- Regular triple-quoted strings - no interpolation
+
+**Impact:**
+- Breaking changes: No (new feature addition)
+- Files affected: Templates and documentation generators
+- Related: BDD Feature Documentation (#SESSION-6)
+
+**Note:** Single-line f-strings work perfectly. This is only about triple-quoted multi-line f-strings.
+
+---
+
+### [Core] String Multiplication Operator
+
+**Type:** Improvement
+**Category:** Feature
+**Priority:** Low
+**Proposed:** 2025-12-29
+**Status:** Proposed
+
+**Problem:**
+String multiplication syntax (`"x" * n`) is not supported, forcing manual repetition for common patterns like separators and padding.
+
+**Proposed Solution:**
+Implement string multiplication operator to repeat strings:
+
+**Example:**
+```simple
+# Desired syntax (doesn't work):
+separator = "=" * 60
+indent = " " * 4
+
+# Current workaround (manual):
+separator = "============================================================"
+indent = "    "
+```
+
+**Benefits:**
+- Cleaner code for repeated strings
+- Common pattern in Python and other languages
+- Useful for formatting and alignment
+- Reduces magic constants
+
+**Alternatives Considered:**
+- Repeat function: `String.repeat("x", n)` - more verbose but could work
+- Manual repetition - current approach, error-prone
+
+**Impact:**
+- Breaking changes: No (new feature)
+- Migration path: Optional, manual strings still work
+- Implementation: Operator overloading in interpreter/codegen
+
+---
+
 ### [Parser] Match Expression Arrow Syntax Support
 
 **Type:** Improvement

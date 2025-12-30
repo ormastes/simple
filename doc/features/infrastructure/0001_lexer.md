@@ -13,17 +13,11 @@
 
 ## Description
 
-The lexer tokenizes Simple language source code into a stream of tokens. It handles:
-- Keyword recognition
-- Identifier parsing
-- Literal values (strings, numbers, booleans)
-- Operators and punctuation
-- Python-style INDENT/DEDENT tokens for block structure
-- Comments (single-line `#`, multi-line `###...###`, doc `##`)
+Tokenizes Simple language source code into a stream of tokens. Handles indentation-based syntax with INDENT/DEDENT tokens, string literals, numbers, identifiers, operators, and keywords.
 
 ## Specification
 
-[spec/lexer_parser.md](../../spec/lexer_parser.md)
+[doc/spec/lexer_parser.md](../../doc/spec/lexer_parser.md)
 
 ## Implementation
 
@@ -31,47 +25,34 @@ The lexer tokenizes Simple language source code into a stream of tokens. It hand
 
 | File | Purpose |
 |------|---------|
-| `src/parser/src/lexer/mod.rs` | Main lexer implementation |
-| `src/parser/src/lexer/identifiers.rs` | Identifier and keyword handling |
-| `src/parser/src/lexer/strings.rs` | String literal parsing |
-| `src/parser/src/token.rs` | Token type definitions |
-
-### Key Components
-
-- **Tokenizer**: Converts source text to token stream
-- **INDENT/DEDENT State Machine**: Tracks indentation levels for block structure
-- **String Interpolation**: Handles f-string parsing with embedded expressions
-- **Error Recovery**: Produces meaningful error messages with source locations
+| `src/parser/src/lexer/mod.rs` | Implementation |
+| `src/parser/src/token.rs` | Implementation |
 
 ## Testing
 
-### Rust Tests
+### Test Files
 
 | Test File | Description |
 |-----------|-------------|
-| `src/parser/tests/lexer_tests.rs` | Comprehensive lexer tests |
+| `src/parser/tests/lexer_tests.rs` | Test suite |
 
 ## Examples
 
 ```simple
-# Basic tokenization
-fn greet(name: str) -> str:
-    return f"Hello, {name}!"
-
-# INDENT/DEDENT handling
-if condition:
-    # Block start (INDENT)
-    do_something()
-# Block end (DEDENT)
+# The lexer converts this:
+let x = 42
+if x > 0:
+    print(x)
+# Into tokens: LET, IDENT(x), EQ, INT(42), NEWLINE,
+# IF, IDENT(x), GT, INT(0), COLON, NEWLINE, INDENT,
+# IDENT(print), LPAREN, IDENT(x), RPAREN, DEDENT
 ```
 
 ## Dependencies
 
 - Depends on: None (foundational component)
-- Required by: #2 Parser, #3 AST
+- Required by: #2
 
 ## Notes
 
-- Lexer is the first stage of the compilation pipeline
-- INDENT/DEDENT tokens enable Python-style whitespace-sensitive syntax
-- Performance-critical: lexer speed affects overall compilation time
+First stage of compilation pipeline. Uses INDENT/DEDENT for Python-like significant whitespace.

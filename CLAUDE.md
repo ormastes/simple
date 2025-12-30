@@ -10,6 +10,23 @@
 - See `doc/architecture/memory_model_implementation.md`
 - use jj version contoll rather git.
 
+## String Literals
+
+**All double-quoted strings are interpolated by default** (like f-strings in Python):
+
+```simple
+let name = "World"
+let greeting = "Hello, {name}!"   # Interpolation works - outputs "Hello, World!"
+print("Value: {1 + 2}")           # Expressions work - outputs "Value: 3"
+```
+
+String types:
+- `"..."` - Interpolated string (default, supports `{expr}` interpolation)
+- `'...'` - Raw string (no interpolation, no escape sequences)
+- `"""..."""` - Triple-quoted docstring (multi-line, no interpolation)
+
+The `f` prefix (e.g., `f"..."`) is **optional and redundant** - all double-quoted strings already support interpolation. Do not use `f` prefix in new code.
+
 ## Implementing Applications in Simple Language
 
 **YES - Applications can and should be implemented in Simple!**
