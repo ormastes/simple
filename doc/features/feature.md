@@ -52,9 +52,9 @@ Feature documentation is organized into category folders for easier navigation. 
 Feature documentation is auto-generated from BDD spec tests. Each spec test defines feature metadata and executable assertions that verify the feature works correctly. The generated markdown replaces manual documentation.
 
 **Status:** ✅ Active (2025-12-30)
-- **Tests:** 62 tests passing across 8 feature specs
-- **Features:** Lexer (#1), Parser (#2), Basic Types (#10), Classes (#11), Functions (#12), Arrays (#20), Match (#90), Cranelift (#100)
-- **Generated Docs:** 14 markdown files in 6 categories
+- **Tests:** 121 tests passing across 15 feature specs
+- **Features:** Lexer (#1), Parser (#2), Basic Types (#10), Enums (#16), Classes (#11), Functions (#12), Structs (#14), Closures (#24), Arrays (#20), Dicts (#21), Strings (#25), Loops (#13), Match (#90), Conditionals (#91), Cranelift (#100)
+- **Generated Docs:** 21 markdown files in 6 categories
 
 **Architecture:**
 ```
@@ -68,10 +68,17 @@ BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{cat
 | `infrastructure/lexer_spec.spl` | #1 Lexer | 9 | ✅ |
 | `infrastructure/parser_spec.spl` | #2 Parser | 9 | ✅ |
 | `types/basic_types_spec.spl` | #10 Basic Types | 9 | ✅ |
+| `types/enums_spec.spl` | #16 Enums | 7 | ✅ |
 | `language/classes_spec.spl` | #11 Classes | 5 | ✅ |
 | `language/functions_spec.spl` | #12 Functions | 8 | ✅ |
+| `language/structs_spec.spl` | #14 Structs | 7 | ✅ |
+| `language/closures_spec.spl` | #24 Closures | 9 | ✅ |
 | `data_structures/arrays_spec.spl` | #20 Arrays | 11 | ✅ |
+| `data_structures/dicts_spec.spl` | #21 Dicts | 9 | ✅ |
+| `data_structures/strings_spec.spl` | #25 Strings | 10 | ✅ |
+| `control_flow/loops_spec.spl` | #13 Loops | 7 | ✅ |
 | `control_flow/match_spec.spl` | #90 Match Expressions | 7 | ✅ |
+| `control_flow/conditionals_spec.spl` | #91 Conditionals | 10 | ✅ |
 | `codegen/cranelift_spec.spl` | #100 Cranelift Backend | 4 | ✅ |
 
 **Key Files:**
