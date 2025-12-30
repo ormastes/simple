@@ -39,6 +39,7 @@ Feature documentation is organized into category folders for easier navigation. 
 | Folder | Description | Features |
 |--------|-------------|----------|
 | [infrastructure/](infrastructure/__index__.md) | Core compiler infrastructure | #1-#2 |
+| [types/](types/__index__.md) | Type system and primitives | #10 |
 | [language/](language/__index__.md) | Language features (functions, classes) | #11-#12 |
 | [data_structures/](data_structures/__index__.md) | Arrays, dicts, collections | #20 |
 | [control_flow/](control_flow/__index__.md) | Match expressions, control flow | #90 |
@@ -51,9 +52,9 @@ Feature documentation is organized into category folders for easier navigation. 
 Feature documentation is auto-generated from BDD spec tests. Each spec test defines feature metadata and executable assertions that verify the feature works correctly. The generated markdown replaces manual documentation.
 
 **Status:** ✅ Active (2025-12-30)
-- **Tests:** 53 tests passing across 7 feature specs
-- **Features:** Lexer (#1), Parser (#2), Classes (#11), Functions (#12), Arrays (#20), Match (#90), Cranelift (#100)
-- **Generated Docs:** 12 markdown files in 5 categories
+- **Tests:** 62 tests passing across 8 feature specs
+- **Features:** Lexer (#1), Parser (#2), Basic Types (#10), Classes (#11), Functions (#12), Arrays (#20), Match (#90), Cranelift (#100)
+- **Generated Docs:** 14 markdown files in 6 categories
 
 **Architecture:**
 ```
@@ -66,6 +67,7 @@ BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{cat
 |-----------|---------|-------|--------|
 | `infrastructure/lexer_spec.spl` | #1 Lexer | 9 | ✅ |
 | `infrastructure/parser_spec.spl` | #2 Parser | 9 | ✅ |
+| `types/basic_types_spec.spl` | #10 Basic Types | 9 | ✅ |
 | `language/classes_spec.spl` | #11 Classes | 5 | ✅ |
 | `language/functions_spec.spl` | #12 Functions | 8 | ✅ |
 | `data_structures/arrays_spec.spl` | #20 Arrays | 11 | ✅ |
