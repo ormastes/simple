@@ -226,6 +226,40 @@ let pair = (1, "hello")
 let (num, text) = pair
 ```
 
+### Unit Types (Postfix Literals)
+
+Type-safe units prevent mixing incompatible values:
+
+```simple
+# Define unit types with postfix syntax
+unit length(base: f64):
+    mm = 0.001, cm = 0.01, m = 1.0, km = 1000.0
+
+unit velocity(base: f64) = length / time:
+    mps = 1.0, kmph = 0.277778, mph = 0.44704
+
+unit UserId: i64 as uid
+unit OrderId: i64 as oid
+
+# Usage with postfix literals
+let height = 175_cm              # Length type
+let width = 10_cm + 5_mm         # Auto-converts to same base
+let speed = 200_kmph             # Velocity type
+let distance = 42_km             # Length type
+
+# Type safety - compile error:
+# let bad = height + speed       # Error: can't add Length + Velocity
+
+# Semantic IDs prevent mix-ups
+let user = 42_uid                # UserId
+let order = 100_oid              # OrderId
+# let wrong: UserId = 100_oid    # Error: OrderId ≠ UserId
+
+# Computed units
+let travel_time = distance / speed    # Returns Time type
+print("ETA: {travel_time.to_min()} minutes")
+```
+
 ### Pattern Matching
 
 ```simple

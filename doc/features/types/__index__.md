@@ -1,4 +1,4 @@
-# Types Features (#10-#10)
+# Types Features (#10-#16)
 
 Type system and primitive types.
 
@@ -7,10 +7,12 @@ Type system and primitive types.
 | ID | Feature | Difficulty | Status | Impl |
 |----|---------|------------|--------|------|
 | #10 | [Basic Types](0010_basic_types.md) | 2 | ✅ | Rust |
+| #16 | [Enums](0016_enums.md) | 3 | ✅ | Rust |
 
 ## Summary
 
-**Status:** 1/1 Complete (100%)
+**Status:** 2/2 Complete (100%)
+**Tests:** 16 passing
 
 ## Test Locations
 
