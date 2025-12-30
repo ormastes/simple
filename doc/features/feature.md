@@ -110,6 +110,69 @@ for f in simple/std_lib/test/features/**/*_spec.spl; do ./target/debug/simple "$
 - **Single source of truth:** Documentation derived from passing tests
 - **Scalable:** Add new features by creating spec tests
 
+### Planned BDD Specs (29 remaining)
+
+See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
+
+**High Priority (Core Language):**
+
+| ID | Feature | Category | Priority |
+|----|---------|----------|----------|
+| #29 | Macros | Language | High |
+| #31 | Traits | Language | High |
+| #32 | Generics | Language | High |
+| #35 | Error Handling | Control Flow | High |
+
+**Medium Priority (Infrastructure):**
+
+| ID | Feature | Category | Priority |
+|----|---------|----------|----------|
+| #3 | AST | Infrastructure | Medium |
+| #4 | HIR | Infrastructure | Medium |
+| #5 | MIR | Infrastructure | Medium |
+| #6 | RuntimeValue | Infrastructure | Medium |
+| #7 | GC | Infrastructure | Medium |
+| #8 | Package Manager | Infrastructure | Medium |
+| #9 | SMF | Infrastructure | Medium |
+
+**Medium Priority (Concurrency):**
+
+| ID | Feature | Category | Priority |
+|----|---------|----------|----------|
+| #40 | Actors | Concurrency | Medium |
+| #41 | Async/Await | Concurrency | Medium |
+| #42 | Generators | Concurrency | Medium |
+| #43 | Futures | Concurrency | Medium |
+
+**Lower Priority (Advanced):**
+
+| ID | Feature | Category | Priority |
+|----|---------|----------|----------|
+| #18 | Memory Types | Types | Low |
+| #19 | Borrowing | Types | Low |
+| #33 | Sets | Data Structures | Low |
+| #34 | Ranges | Data Structures | Low |
+
+**Testing Framework (Self-referential):**
+
+| ID | Feature | Category | Priority |
+|----|---------|----------|----------|
+| #180 | describe blocks | Testing | Low |
+| #181 | context blocks | Testing | Low |
+| #182 | it examples | Testing | Low |
+| #183 | before_each | Testing | Low |
+| #184 | after_each | Testing | Low |
+| #187 | expect matchers | Testing | Low |
+| #192 | Doctest | Testing | Low |
+
+**Codegen:**
+
+| ID | Feature | Category | Priority |
+|----|---------|----------|----------|
+| #95 | Capture Buffer | Codegen | Low |
+| #96 | Generator Codegen | Codegen | Low |
+| #97 | LLVM Backend | Codegen | Low |
+
 ---
 
 ## Feature ID Ranges
