@@ -493,7 +493,7 @@ Source Code (.spl)
 | Runtime/GC | Abfall-backed wrapper with optional logging |
 | Package Manager | Complete (UV-style: manifest, lock, cache, resolution) |
 | Module System | Parsing complete, resolution infrastructure ready |
-| BDD Framework | Sprint 1 Complete (DSL, matchers, runtime) |
+| BDD Framework | Sprint 1 Complete (DSL, matchers, runtime) + 21 Feature Specs (180 tests) |
 | Doctest | Sprint 2 Complete (parser, runner, discovery with FFI) |
 | JJ Integration | 67% Complete (8/12 tasks, build snapshots working) |
 
@@ -716,6 +716,7 @@ Use `shadow-terminal` for PTY simulation. Create temp dirs, spawn CLI, assert ex
 ### Documentation
 - `doc/feature_index.md` - Complete feature catalog (131+ features with status/difficulty)
 - `doc/features/feature.md` - Feature overview (links to feature_index.md)
+- `doc/features/BDD_SPEC_PROGRESS.md` - BDD spec generation progress (21/50 specs, 180 tests)
 - `doc/codegen_status.md` - MIR instruction coverage, runtime FFI functions
 - `doc/codegen_technical.md` - Codegen implementation details
 - `doc/import_export_and__init__.md` - Module system specification
