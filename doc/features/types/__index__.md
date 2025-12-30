@@ -1,4 +1,4 @@
-# Types Features (#10-#16)
+# Types Features (#10-#30)
 
 Type system and primitive types.
 
@@ -8,11 +8,13 @@ Type system and primitive types.
 |----|---------|------------|--------|------|
 | #10 | [Basic Types](0010_basic_types.md) | 2 | ✅ | Rust |
 | #16 | [Enums](0016_enums.md) | 3 | ✅ | Rust |
+| #27 | [Option/Result](0027_option_result.md) | 3 | ✅ | Rust |
+| #30 | [Operators](0030_operators.md) | 2 | ✅ | Rust |
 
 ## Summary
 
-**Status:** 2/2 Complete (100%)
-**Tests:** 16 passing
+**Status:** 4/4 Complete (100%)
+**Tests:** 40 passing
 
 ## Test Locations
 

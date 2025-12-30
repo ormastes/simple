@@ -1,4 +1,4 @@
-# Data Structures Features (#20-#25)
+# Data Structures Features (#20-#26)
 
 Built-in data structures and collections.
 
@@ -9,11 +9,12 @@ Built-in data structures and collections.
 | #20 | [Arrays](0020_arrays.md) | 2 | ✅ | Rust |
 | #21 | [Dicts](0021_dicts.md) | 3 | ✅ | Rust |
 | #25 | [Strings](0025_strings.md) | 2 | ✅ | Rust |
+| #26 | [Tuples](0026_tuples.md) | 2 | ✅ | Rust |
 
 ## Summary
 
-**Status:** 3/3 Complete (100%)
-**Tests:** 30 passing
+**Status:** 4/4 Complete (100%)
+**Tests:** 39 passing
 
 ## Test Locations
 

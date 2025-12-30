@@ -52,9 +52,9 @@ Feature documentation is organized into category folders for easier navigation. 
 Feature documentation is auto-generated from BDD spec tests. Each spec test defines feature metadata and executable assertions that verify the feature works correctly. The generated markdown replaces manual documentation.
 
 **Status:** ✅ Active (2025-12-30)
-- **Tests:** 121 tests passing across 15 feature specs
-- **Features:** Lexer (#1), Parser (#2), Basic Types (#10), Enums (#16), Classes (#11), Functions (#12), Structs (#14), Closures (#24), Arrays (#20), Dicts (#21), Strings (#25), Loops (#13), Match (#90), Conditionals (#91), Cranelift (#100)
-- **Generated Docs:** 21 markdown files in 6 categories
+- **Tests:** 180 tests passing across 21 feature specs
+- **Features:** Lexer (#1), Parser (#2), Basic Types (#10), Enums (#16), Option/Result (#27), Operators (#30), Classes (#11), Functions (#12), Structs (#14), Variables (#15), Methods (#17), Closures (#24), Imports (#28), Arrays (#20), Dicts (#21), Strings (#25), Tuples (#26), Loops (#13), Match (#90), Conditionals (#91), Cranelift (#100)
+- **Generated Docs:** 27 markdown files in 6 categories
 
 **Architecture:**
 ```
@@ -69,13 +69,19 @@ BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{cat
 | `infrastructure/parser_spec.spl` | #2 Parser | 9 | ✅ |
 | `types/basic_types_spec.spl` | #10 Basic Types | 9 | ✅ |
 | `types/enums_spec.spl` | #16 Enums | 7 | ✅ |
+| `types/option_result_spec.spl` | #27 Option/Result | 9 | ✅ |
+| `types/operators_spec.spl` | #30 Operators | 15 | ✅ |
 | `language/classes_spec.spl` | #11 Classes | 5 | ✅ |
 | `language/functions_spec.spl` | #12 Functions | 8 | ✅ |
 | `language/structs_spec.spl` | #14 Structs | 7 | ✅ |
+| `language/variables_spec.spl` | #15 Variables | 10 | ✅ |
+| `language/methods_spec.spl` | #17 Methods | 8 | ✅ |
 | `language/closures_spec.spl` | #24 Closures | 9 | ✅ |
+| `language/imports_spec.spl` | #28 Imports | 8 | ✅ |
 | `data_structures/arrays_spec.spl` | #20 Arrays | 11 | ✅ |
 | `data_structures/dicts_spec.spl` | #21 Dicts | 9 | ✅ |
 | `data_structures/strings_spec.spl` | #25 Strings | 10 | ✅ |
+| `data_structures/tuples_spec.spl` | #26 Tuples | 9 | ✅ |
 | `control_flow/loops_spec.spl` | #13 Loops | 7 | ✅ |
 | `control_flow/match_spec.spl` | #90 Match Expressions | 7 | ✅ |
 | `control_flow/conditionals_spec.spl` | #91 Conditionals | 10 | ✅ |
