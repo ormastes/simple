@@ -132,6 +132,16 @@ impl<'a> Parser<'a> {
             TokenKind::Type => "type".to_string(),
             TokenKind::Out => "out".to_string(),
             TokenKind::OutErr => "out_err".to_string(),
+            // Allow Gherkin keywords to be used as identifiers
+            // These are only keywords at the start of BDD test statements
+            TokenKind::Feature => "feature".to_string(),
+            TokenKind::Scenario => "scenario".to_string(),
+            TokenKind::Outline => "outline".to_string(),
+            TokenKind::Examples => "examples".to_string(),
+            TokenKind::Given => "given".to_string(),
+            TokenKind::When => "when".to_string(),
+            TokenKind::Then => "then".to_string(),
+            TokenKind::AndThen => "and_then".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

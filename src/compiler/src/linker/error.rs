@@ -49,6 +49,14 @@ pub enum LinkerError {
     /// Multiple definition error.
     #[error("multiple definition of symbol: {0}")]
     MultipleDefinition(String),
+
+    /// Linking failed with a message.
+    #[error("link failed: {0}")]
+    LinkFailed(String),
+
+    /// Unsupported target architecture.
+    #[error("unsupported target: {0}")]
+    UnsupportedTarget(String),
 }
 
 /// Result type for linker operations.

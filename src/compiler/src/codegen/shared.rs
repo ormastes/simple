@@ -69,7 +69,9 @@ pub fn declare_functions<M: Module>(
 
     for func in functions {
         let sig = build_mir_signature(func);
-        let linkage = if func.is_public() {
+        // Always export "main" for native binary compatibility
+        // Other functions are exported if marked public
+        let linkage = if func.is_public() || func.name == "main" {
             Linkage::Export
         } else {
             Linkage::Local

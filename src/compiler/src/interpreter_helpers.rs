@@ -555,6 +555,12 @@ pub(crate) fn handle_functional_update(
     }
 }
 
+/// Array methods that mutate and should update the binding
+const ARRAY_MUTATING_METHODS: &[&str] = &[
+    "append", "push", "pop", "insert", "remove", "reverse", "concat", "extend",
+    "sort", "sort_desc", "clear",
+];
+
 /// Handle method call on object with self-update tracking
 /// Returns (result, optional_updated_self) where updated_self is the object with mutations
 pub(crate) fn handle_method_call_with_self_update(
@@ -567,6 +573,7 @@ pub(crate) fn handle_method_call_with_self_update(
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
     if let Expr::MethodCall { receiver, method, args } = value_expr {
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
+            // Handle Object mutations
             if let Some(Value::Object { .. }) = env.get(obj_name) {
                 let (result, updated_self) = evaluate_method_call_with_self_update(
                     receiver, method, args, env, functions, classes, enums, impl_methods
@@ -575,6 +582,42 @@ pub(crate) fn handle_method_call_with_self_update(
                     return Ok((result, Some((obj_name.clone(), new_self))));
                 }
                 return Ok((result, None));
+            }
+            // Handle Array mutations for mutating methods
+            if let Some(Value::Array(_)) = env.get(obj_name) {
+                if ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
+                    // Check if variable is mutable
+                    let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
+                    if is_const {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot call mutating method '{}' on immutable array '{}'",
+                            method, obj_name
+                        )));
+                    }
+                    // Evaluate the method call - it returns the new array
+                    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                    if let Value::Array(new_arr) = &result {
+                        // Return the new array as the updated value
+                        return Ok((Value::Nil, Some((obj_name.clone(), Value::Array(new_arr.clone())))));
+                    }
+                }
+            }
+            // Handle Dict mutations for mutating methods
+            if let Some(Value::Dict(_)) = env.get(obj_name) {
+                let dict_mutating = ["set", "insert", "remove", "delete", "merge", "extend", "clear"];
+                if dict_mutating.contains(&method.as_str()) {
+                    let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
+                    if is_const {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot call mutating method '{}' on immutable dict '{}'",
+                            method, obj_name
+                        )));
+                    }
+                    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                    if let Value::Dict(new_dict) = &result {
+                        return Ok((Value::Nil, Some((obj_name.clone(), Value::Dict(new_dict.clone())))));
+                    }
+                }
             }
         }
     }

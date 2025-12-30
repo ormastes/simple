@@ -10,6 +10,7 @@ use test_helpers::*;
 
 use simple_compiler::hir::CapabilityEnv;
 use simple_parser::ast::ReferenceCapability;
+use simple_parser::Parser;
 
 #[test]
 fn test_parse_mut_capability() {

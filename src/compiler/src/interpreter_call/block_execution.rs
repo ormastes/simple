@@ -1,7 +1,7 @@
 // Block closure execution helpers for interpreter_call module
 
 use crate::error::CompileError;
-use crate::interpreter::{evaluate_expr, pattern_matches};
+use crate::interpreter::{evaluate_expr, pattern_matches, MODULE_GLOBALS};
 use crate::value::*;
 use simple_parser::ast::{Node, FunctionDef, ClassDef, EnumDef};
 use std::collections::HashMap;
@@ -77,7 +77,17 @@ pub(super) fn exec_block_closure(
             Node::Assignment(assign_stmt) => {
                 let val = evaluate_expr(&assign_stmt.value, &local_env, functions, classes, enums, impl_methods)?;
                 if let simple_parser::ast::Expr::Identifier(name) = &assign_stmt.target {
-                    local_env.insert(name.clone(), val);
+                    // Check if this is a module-level global variable
+                    let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
+                    if is_global && !local_env.contains_key(name) {
+                        // Update module-level global
+                        MODULE_GLOBALS.with(|cell| {
+                            cell.borrow_mut().insert(name.clone(), val);
+                        });
+                    } else {
+                        // Update or create local variable
+                        local_env.insert(name.clone(), val);
+                    }
                 }
                 last_value = Value::Nil;
             }
@@ -204,7 +214,17 @@ fn exec_block_closure_mut(
             Node::Assignment(assign_stmt) => {
                 let val = evaluate_expr(&assign_stmt.value, local_env, functions, classes, enums, impl_methods)?;
                 if let simple_parser::ast::Expr::Identifier(name) = &assign_stmt.target {
-                    local_env.insert(name.clone(), val);
+                    // Check if this is a module-level global variable
+                    let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
+                    if is_global && !local_env.contains_key(name) {
+                        // Update module-level global
+                        MODULE_GLOBALS.with(|cell| {
+                            cell.borrow_mut().insert(name.clone(), val);
+                        });
+                    } else {
+                        // Update or create local variable
+                        local_env.insert(name.clone(), val);
+                    }
                 }
                 last_value = Value::Nil;
             }

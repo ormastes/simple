@@ -131,6 +131,82 @@ pub fn list_targets() -> i32 {
     0
 }
 
+/// Compile a source file to a standalone native binary
+pub fn compile_file_native(
+    source: &PathBuf,
+    output: Option<PathBuf>,
+    target: Option<Target>,
+    linker: Option<simple_compiler::linker::NativeLinker>,
+    layout_optimize: bool,
+    strip: bool,
+    pie: bool,
+    shared: bool,
+    generate_map: bool,
+) -> i32 {
+    use simple_compiler::linker::{NativeBinaryOptions, NativeLinker};
+    use simple_compiler::pipeline::CompilerPipeline;
+
+    // Determine output path
+    let out_path = output.unwrap_or_else(|| {
+        // Default: remove extension for native binary
+        let stem = source.file_stem().unwrap_or_default();
+        source.with_file_name(stem)
+    });
+
+    // Read source
+    let source_content = match std::fs::read_to_string(source) {
+        Ok(content) => content,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {}", source.display(), e);
+            return 1;
+        }
+    };
+
+    // Build options
+    let mut options = NativeBinaryOptions::new()
+        .output(&out_path)
+        .layout_optimize(layout_optimize)
+        .strip(strip)
+        .pie(pie)
+        .shared(shared)
+        .map(generate_map);
+
+    // Set target if specified
+    if let Some(t) = target {
+        options = options.target(t);
+    }
+
+    // Set linker if specified
+    if let Some(l) = linker {
+        options = options.linker(l);
+    }
+
+    // Compile
+    let mut pipeline = match CompilerPipeline::new() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: failed to create compiler pipeline: {}", e);
+            return 1;
+        }
+    };
+
+    match pipeline.compile_to_native_binary(&source_content, &out_path, Some(options)) {
+        Ok(result) => {
+            println!(
+                "Compiled {} -> {} ({} bytes)",
+                source.display(),
+                result.output.display(),
+                result.size
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            1
+        }
+    }
+}
+
 /// List available native linkers and their status
 pub fn list_linkers() -> i32 {
     use simple_compiler::linker::NativeLinker;

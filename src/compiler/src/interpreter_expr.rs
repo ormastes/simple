@@ -62,8 +62,24 @@ fn evaluate_unit_binary_inner(
             (Value::Float(l), Value::Float(r)) => Ok(Value::Float(l * r)),
             (Value::Int(l), Value::Float(r)) => Ok(Value::Float(*l as f64 * r)),
             (Value::Float(l), Value::Int(r)) => Ok(Value::Float(l * *r as f64)),
+            // String repetition: "a" * 3 -> "aaa"
+            (Value::Str(s), Value::Int(n)) => {
+                if *n <= 0 {
+                    Ok(Value::Str(String::new()))
+                } else {
+                    Ok(Value::Str(s.repeat(*n as usize)))
+                }
+            }
+            // String repetition: 3 * "a" -> "aaa"
+            (Value::Int(n), Value::Str(s)) => {
+                if *n <= 0 {
+                    Ok(Value::Str(String::new()))
+                } else {
+                    Ok(Value::Str(s.repeat(*n as usize)))
+                }
+            }
             _ => Err(CompileError::Semantic(format!(
-                "cannot multiply unit values of types {} and {}",
+                "cannot multiply values of types {} and {}",
                 left.type_name(),
                 right.type_name()
             ))),
@@ -316,6 +332,11 @@ pub(crate) fn evaluate_expr(
                     class_name: name.clone(),
                 });
             }
+            // Check module-level globals (for functions accessing module-level let mut variables)
+            let global_val = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned());
+            if let Some(val) = global_val {
+                return Ok(val);
+            }
             // Collect all known names for typo suggestion
             let known_names: Vec<&str> = env
                 .keys()
@@ -444,10 +465,24 @@ pub(crate) fn evaluate_expr(
                     }
                 }
                 BinOp::Mul => {
-                    if use_float {
-                        Ok(Value::Float(left_val.as_float()? * right_val.as_float()?))
-                    } else {
-                        Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
+                    // String repetition: "a" * 3 -> "aaa" or 3 * "a" -> "aaa"
+                    match (&left_val, &right_val) {
+                        (Value::Str(s), Value::Int(n)) => {
+                            if *n <= 0 {
+                                Ok(Value::Str(String::new()))
+                            } else {
+                                Ok(Value::Str(s.repeat(*n as usize)))
+                            }
+                        }
+                        (Value::Int(n), Value::Str(s)) => {
+                            if *n <= 0 {
+                                Ok(Value::Str(String::new()))
+                            } else {
+                                Ok(Value::Str(s.repeat(*n as usize)))
+                            }
+                        }
+                        _ if use_float => Ok(Value::Float(left_val.as_float()? * right_val.as_float()?)),
+                        _ => Ok(Value::Int(left_val.as_int()? * right_val.as_int()?)),
                     }
                 }
                 BinOp::Div => {
