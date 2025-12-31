@@ -80,13 +80,80 @@ fn main() {
 
     // PHASE 2: Normal initialization (happens in parallel with prefetching)
     let log_start = std::time::Instant::now();
-    simple_log::init();
+
+    // Enable dual logging (stdout + file) by default
+    let log_dir = std::env::var("SIMPLE_LOG_DIR")
+        .ok()
+        .map(PathBuf::from);
+    let log_filter = std::env::var("SIMPLE_LOG")
+        .ok()
+        .or_else(|| std::env::var("RUST_LOG").ok());
+
+    if let Err(e) = simple_log::init_dual(
+        log_dir.as_deref(),
+        log_filter.as_deref(),
+    ) {
+        eprintln!("warning: failed to initialize file logging: {}", e);
+        simple_log::init(); // Fallback to stdout only
+    }
+
+    // Cleanup old logs (keep 7 days) - non-fatal if it fails
+    let _ = simple_log::cleanup_old_logs(
+        std::path::Path::new(".simple/logs"),
+        7,
+    );
+
     metrics.record(simple_driver::StartupPhase::LoggingInit, log_start.elapsed());
 
     // Initialize interpreter handlers for hybrid execution
     let handler_start = std::time::Instant::now();
     simple_compiler::interpreter_ffi::init_interpreter_handlers();
     metrics.record(simple_driver::StartupPhase::HandlerInit, handler_start.elapsed());
+
+    // Install panic hook for detailed crash diagnostics
+    let panic_start = std::time::Instant::now();
+    std::panic::set_hook(Box::new(|panic_info| {
+        use std::backtrace::Backtrace;
+        use std::io::Write;
+
+        let backtrace = Backtrace::force_capture();
+
+        let location = panic_info
+            .location()
+            .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
+            s.to_string()
+        } else if let Some(s) = panic_info.payload().downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+
+        // Log to file via tracing
+        tracing::error!(
+            message = %message,
+            location = %location,
+            backtrace = %backtrace,
+            "PANIC"
+        );
+
+        // Also print to stderr for immediate visibility
+        let mut stderr = std::io::stderr();
+        let _ = writeln!(stderr, "\n=== PANIC ===");
+        let _ = writeln!(stderr, "Message: {}", message);
+        let _ = writeln!(stderr, "Location: {}", location);
+        let _ = writeln!(stderr, "\nBacktrace:\n{}", backtrace);
+        let _ = writeln!(stderr, "=============\n");
+        let _ = stderr.flush();
+    }));
+    metrics.record(simple_driver::StartupPhase::PanicHookInit, panic_start.elapsed());
+
+    // Install signal handlers for graceful interrupt (Ctrl-C)
+    let signal_start = std::time::Instant::now();
+    simple_compiler::interpreter::init_signal_handlers();
+    metrics.record(simple_driver::StartupPhase::SignalHandlerInit, signal_start.elapsed());
 
     // Reconstruct args from early config for compatibility with existing code
     let args: Vec<String> = early_config.remaining_args.iter()

@@ -329,6 +329,9 @@ pub enum CompileError {
     /// Error from ? operator that should be propagated as a return value
     #[error("try: early return")]
     TryError(Value),
+    /// Execution was interrupted by user (Ctrl-C)
+    #[error("interrupted: execution stopped by user request")]
+    InterruptedByUser,
 
     // Rich variants with context (new API)
     #[error("io: {message}")]
@@ -463,6 +466,7 @@ impl CompileError {
             Self::LintWithContext { message, .. } => message,
             Self::RuntimeWithContext { message, .. } => message,
             Self::TryError(_) => "try: early return",
+            Self::InterruptedByUser => "interrupted: execution stopped by user request",
         }
     }
 

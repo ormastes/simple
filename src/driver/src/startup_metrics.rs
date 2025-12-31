@@ -33,6 +33,10 @@ pub enum StartupPhase {
     LoggingInit,
     /// Interpreter handler setup
     HandlerInit,
+    /// Panic hook installation
+    PanicHookInit,
+    /// Signal handler setup (Ctrl-C)
+    SignalHandlerInit,
     /// Main argument parsing
     MainArgParse,
     /// Sandbox application
@@ -55,6 +59,8 @@ impl StartupPhase {
             Self::GpuInit => "GPU Initialization",
             Self::LoggingInit => "Logging Init",
             Self::HandlerInit => "Handler Setup",
+            Self::PanicHookInit => "Panic Hook Init",
+            Self::SignalHandlerInit => "Signal Handler Init",
             Self::MainArgParse => "Main Argument Parsing",
             Self::SandboxSetup => "Sandbox Setup",
             Self::PrefetchWait => "Prefetch Wait",
