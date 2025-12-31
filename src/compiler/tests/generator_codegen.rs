@@ -1,4 +1,4 @@
-use simple_runtime::{
+use simple_runtime::value::{
     rt_generator_new, rt_generator_next, rt_value_as_int, rt_value_is_nil, RuntimeValue,
 };
 
@@ -20,6 +20,7 @@ fn jit_generator_dispatcher_yields_and_restores() {
         name: "generator".into(),
         ty: TypeId::I64,
         kind: LocalKind::Parameter,
+        is_ghost: false,
     });
 
     let mut b0 = MirBlock::new(BlockId(0));

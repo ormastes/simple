@@ -385,10 +385,10 @@ mod tests {
         let mut collector = VerificationDiagnostics::new();
 
         let span = Span::new(0, 10, 1, 1);
-        collector.error(VerificationErrorCode::IoInVerified, span)
-            .with_item("read_file");
-        collector.error(VerificationErrorCode::FfiInVerified, span)
-            .with_item("call_c_function");
+        collector.error(VerificationErrorCode::IoInVerified, span);
+        collector.diagnostics.last_mut().unwrap().item_name = Some("read_file".to_string());
+        collector.error(VerificationErrorCode::FfiInVerified, span);
+        collector.diagnostics.last_mut().unwrap().item_name = Some("call_c_function".to_string());
 
         assert!(collector.has_errors());
         assert_eq!(collector.error_count(), 2);

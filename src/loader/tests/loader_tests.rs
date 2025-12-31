@@ -126,7 +126,12 @@ impl SmfBuilder {
             entry_point: 0,
             module_hash: 0,
             source_hash: self.source_hash,
-            reserved: [0; 8],
+            app_type: 0,
+            window_width: 0,
+            window_height: 0,
+            prefetch_hint: 0,
+            prefetch_file_count: 0,
+            reserved: [0; 1],
         };
 
         let code_section = Self::make_section(

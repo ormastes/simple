@@ -1,5 +1,5 @@
 use simple_common::gc::GcAllocator;
-use crate::memory::no_gc::NoGcAllocator;
+use crate::NoGcAllocator;
 
 #[test]
 fn no_gc_allocator_allocates_without_tracing() {

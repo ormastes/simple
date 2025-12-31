@@ -24,7 +24,7 @@ use std::io::Cursor;
 #[test]
 fn test_smf_header_read_integration() {
     // Create a minimal valid header
-    let mut header = SmfHeader {
+    let header = SmfHeader {
         magic: *SMF_MAGIC,
         version_major: 0,
         version_minor: 1,
@@ -39,7 +39,12 @@ fn test_smf_header_read_integration() {
         entry_point: 0,
         module_hash: 0,
         source_hash: 0,
-        reserved: [0; 8],
+        app_type: 0,
+        window_width: 0,
+        window_height: 0,
+        prefetch_hint: 0,
+        prefetch_file_count: 0,
+        reserved: [0; 1],
     };
 
     // Serialize to bytes
@@ -76,7 +81,12 @@ fn test_smf_header_properties_integration() {
         entry_point: 0,
         module_hash: 12345,
         source_hash: 67890,
-        reserved: [0; 8],
+        app_type: 0,
+        window_width: 0,
+        window_height: 0,
+        prefetch_hint: 0,
+        prefetch_file_count: 0,
+        reserved: [0; 1],
     };
 
     assert!(header.is_executable());

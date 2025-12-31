@@ -489,7 +489,7 @@ mod jj_state_tests {
 
 mod diagnostic_tests {
     use simple_parser::diagnostic::*;
-    use simple_parser::token::Span;
+    use simple_common::diagnostic::Span;  // Use common Span for diagnostics
 
     #[test]
     fn test_severity_error_name() {

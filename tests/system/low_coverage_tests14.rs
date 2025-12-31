@@ -183,15 +183,16 @@ mod parser_lexer_tests {
 // ============================================================================
 // Parser Diagnostic Types Tests
 // ============================================================================
-mod parser_diagnostic_tests {
-    use simple_parser::Diagnostics;
-
-    #[test]
-    fn test_diagnostics_new() {
-        let diag = Diagnostics::new();
-        let _ = format!("{:?}", diag);
-    }
-}
+// NOTE: Diagnostics struct was refactored - now uses simple_common::diagnostic::Diagnostic
+// mod parser_diagnostic_tests {
+//     use simple_parser::Diagnostics;
+//
+//     #[test]
+//     fn test_diagnostics_new() {
+//         let diag = Diagnostics::new();
+//         let _ = format!("{:?}", diag);
+//     }
+// }
 
 // ============================================================================
 // Parser Doc Types Tests
