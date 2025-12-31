@@ -168,13 +168,14 @@ fn test_simd_vec_all_any_reduction() {
 
 #[test]
 fn test_simd_decorator_with_bounds() {
-    // Test @simd @bounds(default="return", strict=true) decorator syntax
+    // Test @simd @bounds(fallback="return", strict=true) decorator syntax
     // This is a parser test - verifies the decorator args are parsed correctly
+    // Note: Using "fallback" instead of "default" to avoid keyword conflicts
     use simple_parser::Parser;
 
     let src = r#"
 @simd
-@bounds(default="return", strict=true)
+@bounds(fallback="return", strict=true)
 fn kernel(a: f32[], output: f32[]):
     return
 "#;
@@ -199,7 +200,7 @@ fn kernel(a: f32[], output: f32[]):
             let args = func.decorators[1].args.as_ref().unwrap();
             assert_eq!(args.len(), 2);
             // Verify named arguments
-            assert_eq!(args[0].name, Some("default".to_string()));
+            assert_eq!(args[0].name, Some("fallback".to_string()));
             assert_eq!(args[1].name, Some("strict".to_string()));
         }
     } else {

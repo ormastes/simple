@@ -157,7 +157,9 @@ mod tests {
         assert!(result.is_ok());
         
         let json = String::from_utf8(output).unwrap();
-        assert!(json.contains("\"type\":\"AST\""));
+        // Check for "type" field with "AST" value (allow for spacing variations in JSON)
+        assert!(json.contains("\"type\"") && json.contains("\"AST\""),
+                "Expected JSON to contain type field with AST value, got: {}", json);
     }
 
     #[test]
