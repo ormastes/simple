@@ -8,6 +8,18 @@
 //! - Loop control (break, continue)
 
 use crate::error::CompileError;
+
+/// Check if user requested interrupt (Ctrl-C) and return error if so.
+///
+/// This macro should be called at the start of each loop iteration to allow
+/// graceful interruption of long-running computations.
+macro_rules! check_interrupt {
+    () => {
+        if crate::interpreter::is_interrupted() {
+            return Err(CompileError::InterruptedByUser);
+        }
+    };
+}
 use crate::value::{Env, Value, ATTR_STRONG, BUILTIN_ARRAY, BUILTIN_RANGE};
 use simple_parser::ast::{
     ClassDef, ContextStmt, EnumDef, Expr, ForStmt, FStringPart, FunctionDef, IfStmt, LoopStmt,
@@ -90,6 +102,7 @@ pub(super) fn exec_while(
     // Handle while-let: while let PATTERN = EXPR:
     if let Some(pattern) = &while_stmt.let_pattern {
         loop {
+            check_interrupt!();
             let value = evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?;
             let mut bindings = HashMap::new();
             if !pattern_matches(pattern, &value, &mut bindings, enums)? {
@@ -108,6 +121,7 @@ pub(super) fn exec_while(
 
     // Normal while loop
     loop {
+        check_interrupt!();
         if !evaluate_expr(&while_stmt.condition, env, functions, classes, enums, impl_methods)?.truthy() {
             break;
         }
@@ -127,6 +141,7 @@ pub(super) fn exec_loop(
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
     loop {
+        check_interrupt!();
         let ctrl = exec_block(&loop_stmt.body, env, functions, classes, enums, impl_methods)?;
         if matches!(ctrl, Control::Continue) { continue; }
         if let Some(result) = handle_loop_control(ctrl) { return result; }
@@ -302,6 +317,7 @@ pub(super) fn exec_for(
     let items = iter_to_vec(&iterable)?;
 
     for item in items {
+        check_interrupt!();
         // Use bind_pattern to handle all pattern types (identifier, tuple, etc.)
         if !bind_pattern(&for_stmt.pattern, &item, env) {
             // Pattern didn't match - skip this iteration
