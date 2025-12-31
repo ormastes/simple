@@ -1,0 +1,119 @@
+# FFI Bridge
+#
+# Bridge between interpreter and compiled code.
+
+import ..core.{Value, InterpreterError}
+
+export call_native, register_native, NativeFunction, NativeRegistry
+
+# Type alias for native function signature
+type NativeFunction = Fn(Array[Value]) -> Result[Value, InterpreterError]
+
+# Registry of native functions
+struct NativeRegistry:
+    functions: Dict[String, NativeFunction]
+
+impl NativeRegistry:
+    fn new() -> NativeRegistry:
+        return NativeRegistry {
+            functions: Dict::new()
+        }
+
+    fn register(self, name: String, func: NativeFunction):
+        self.functions.set(name, func)
+
+    fn get(self, name: &str) -> Option[&NativeFunction]:
+        return self.functions.get(name)
+
+    fn has(self, name: &str) -> bool:
+        return self.functions.contains_key(name)
+
+# Global native function registry
+static mut NATIVE_REGISTRY: Option[NativeRegistry] = None
+
+# Initialize the registry
+fn init_registry():
+    unsafe:
+        if NATIVE_REGISTRY.is_none():
+            NATIVE_REGISTRY = Some(NativeRegistry::new())
+
+# Register a native function
+fn register_native(name: String, func: NativeFunction):
+    init_registry()
+    unsafe:
+        if let Some(ref mut registry) = NATIVE_REGISTRY:
+            registry.register(name, func)
+
+# Call a native function by name
+fn call_native(name: &str, args: Array[Value]) -> Result[Value, InterpreterError]:
+    init_registry()
+    unsafe:
+        if let Some(ref registry) = NATIVE_REGISTRY:
+            match registry.get(name):
+                case Some(func):
+                    return func(args)
+                case None:
+                    return Err(InterpreterError::NameError("unknown native: {name}".to_string()))
+        else:
+            return Err(InterpreterError::RuntimeError("native registry not initialized".to_string()))
+
+# Check if a native function exists
+fn has_native(name: &str) -> bool:
+    init_registry()
+    unsafe:
+        if let Some(ref registry) = NATIVE_REGISTRY:
+            return registry.has(name)
+        return false
+
+# Convert interpreter Value to native representation
+fn value_to_native(val: &Value) -> NativeValue:
+    match val.data:
+        case RuntimeValue::Nil:
+            return NativeValue::Null
+        case RuntimeValue::Bool(b):
+            return NativeValue::Bool(b)
+        case RuntimeValue::Int(n):
+            return NativeValue::Int(n)
+        case RuntimeValue::Float(f):
+            return NativeValue::Float(f)
+        case RuntimeValue::String(s):
+            return NativeValue::String(s.clone())
+        case RuntimeValue::Array(arr):
+            let native_arr: Array[NativeValue] = arr.iter().map(|v| value_to_native(v)).collect()
+            return NativeValue::Array(native_arr)
+        case _:
+            return NativeValue::Opaque(Box::new(val.clone()))
+
+# Convert native representation back to Value
+fn native_to_value(native: NativeValue) -> Value:
+    match native:
+        case NativeValue::Null:
+            return Value::nil()
+        case NativeValue::Bool(b):
+            return Value::bool(b)
+        case NativeValue::Int(n):
+            return Value::int(n)
+        case NativeValue::Float(f):
+            return Value::float(f)
+        case NativeValue::String(s):
+            return Value::string(s)
+        case NativeValue::Array(arr):
+            let values: Array[Value] = arr.iter().map(|v| native_to_value(v.clone())).collect()
+            return Value::array(values)
+        case NativeValue::Opaque(val):
+            return *val
+
+# Native value representation for FFI
+enum NativeValue:
+    Null
+    Bool(bool)
+    Int(i64)
+    Float(f64)
+    String(String)
+    Array(Array[NativeValue])
+    Opaque(Box[Value])
+
+# Call into compiled Simple module
+fn call_compiled_function(module: &str, function: &str, args: Array[Value]) -> Result[Value, InterpreterError]:
+    # TODO: Load compiled module and call function
+    return Err(InterpreterError::NotImplemented("compiled module calls".to_string()))
