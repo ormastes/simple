@@ -2,6 +2,22 @@
 
 This directory contains reports documenting completed tasks and maintenance activities.
 
+## 2025-12-31: Large Files Analysis
+
+**[LARGE_FILES_ANALYSIS_2025-12-31.md](LARGE_FILES_ANALYSIS_2025-12-31.md)** 📊 **Code Quality Analysis**
+
+Identified and analyzed 11 files exceeding 1000 lines:
+- **Rust Files:** 7 files (largest: hir/lower/expr/lowering.rs at 1,699 lines)
+- **Simple Files:** 4 files (largest: verification/regenerate.spl at 2,555 lines)
+- **Priority Refactoring:** 2 high-priority candidates affecting hot paths
+- **Status:** ⚠️ Refactoring recommendations documented
+
+**Key Findings:**
+- `hir/lower/expr/lowering.rs` (1,699) - HIR compilation hot path
+- `interpreter_expr.rs` (1,416) - Runtime evaluation hot path
+- Several files already use modular organization (instr.rs, gpu_vulkan.rs)
+- Code generation scripts (regenerate.spl, generate_docs.spl) are acceptable
+
 ## 2025-12-29: Lean Verification Mode - 100% COMPLETE! 🎉
 
 **[LEAN_VERIFICATION_COMPLETE_2025-12-29.md](LEAN_VERIFICATION_COMPLETE_2025-12-29.md)** ✅ **70/70 FEATURES COMPLETE (#1840-#1909)**
