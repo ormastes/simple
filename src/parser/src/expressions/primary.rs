@@ -213,6 +213,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Identifier("and_then".to_string()))
             }
+            // Allow 'context' to be used as identifier in BDD DSL (context "description":)
+            TokenKind::Context => {
+                self.advance();
+                Ok(Expr::Identifier("context".to_string()))
+            }
             // Note: TokenKind::Result is handled above (line 96) for ContractResult
             // If needed as identifier, use method_name or a different syntax
             TokenKind::Backslash => {
