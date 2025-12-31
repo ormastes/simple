@@ -3,6 +3,8 @@
 
 use units.size.*
 use core.*
+use host.common.io.term_types.*
+use host.common.io.term_ffi.*
 
 # Terminal handle for I/O operations
 pub struct Terminal:
@@ -229,62 +231,6 @@ impl Terminal:
         if self.raw_mode:
             native_disable_raw_mode(self.stdin)
 
-# Terminal size
-pub struct TermSize:
-    rows: u16
-    cols: u16
-
-impl TermSize:
-    pub fn rows(self) -> u16:
-        return self.rows
-
-    pub fn cols(self) -> u16:
-        return self.cols
-
-    pub fn area(self) -> u32:
-        return (self.rows as u32) * (self.cols as u32)
-
-# Cursor position
-pub struct CursorPos:
-    row: u16
-    col: u16
-
-impl CursorPos:
-    pub fn row(self) -> u16:
-        return self.row
-
-    pub fn col(self) -> u16:
-        return self.col
-
-# Terminal error type
-enum TermError:
-    Io(i32)
-    NotTty
-    InvalidResponse
-    Eof
-    Timeout
-    Interrupted
-    Unknown
-
-impl TermError:
-    fn from_code(code: i32) -> TermError:
-        match code:
-            case -1: return TermError::Eof
-            case -2: return TermError::NotTty
-            case -3: return TermError::Timeout
-            case -4: return TermError::Interrupted
-            case _: return TermError::Io(code)
-
-    pub fn message(self) -> &str:
-        match self:
-            case Io(code): return "I/O error: {code}"
-            case NotTty: return "not a tty"
-            case InvalidResponse: return "invalid terminal response"
-            case Eof: return "end of file"
-            case Timeout: return "operation timed out"
-            case Interrupted: return "operation interrupted"
-            case Unknown: return "unknown error"
-
 # Parse cursor position response
 fn parse_cursor_response(buf: &[u8]) -> Result[CursorPos, TermError]:
     # Format: ESC [ rows ; cols R
@@ -310,48 +256,6 @@ fn parse_cursor_response(buf: &[u8]) -> Result[CursorPos, TermError]:
                 col = col * 10 + digit
 
     return Ok(CursorPos { row: row, col: col })
-
-# Keyboard input handling
-pub struct KeyEvent:
-    code: KeyCode
-    modifiers: KeyModifiers
-
-pub enum KeyCode:
-    Char(char)
-    Enter
-    Escape
-    Backspace
-    Tab
-    Delete
-    Insert
-    Home
-    End
-    PageUp
-    PageDown
-    Up
-    Down
-    Left
-    Right
-    F(u8)  # F1-F12
-    Null
-
-pub struct KeyModifiers:
-    shift: bool
-    ctrl: bool
-    alt: bool
-
-impl KeyModifiers:
-    pub fn none() -> KeyModifiers:
-        return KeyModifiers { shift: false, ctrl: false, alt: false }
-
-    pub fn shift() -> KeyModifiers:
-        return KeyModifiers { shift: true, ctrl: false, alt: false }
-
-    pub fn ctrl() -> KeyModifiers:
-        return KeyModifiers { shift: false, ctrl: true, alt: false }
-
-    pub fn alt() -> KeyModifiers:
-        return KeyModifiers { shift: false, ctrl: false, alt: true }
 
 # Read and parse a key event
 pub async fn read_key(term: &mut Terminal) -> Result[KeyEvent, TermError]:
@@ -458,23 +362,6 @@ async fn parse_ss3_sequence(term: &mut Terminal) -> Result[KeyEvent, TermError]:
         case 'H' as u8: return Ok(KeyEvent { code: KeyCode::Home, modifiers: KeyModifiers::none() })
         case 'F' as u8: return Ok(KeyEvent { code: KeyCode::End, modifiers: KeyModifiers::none() })
         case _: return Ok(KeyEvent { code: KeyCode::Null, modifiers: KeyModifiers::none() })
-
-# Raw handle type (platform-specific)
-type RawHandle = i64
-
-# Native function declarations
-extern fn native_stdin() -> RawHandle
-extern fn native_stdout() -> RawHandle
-extern fn native_stderr() -> RawHandle
-extern fn native_is_tty(handle: RawHandle) -> bool
-extern fn native_enable_raw_mode(handle: RawHandle) -> i32
-extern fn native_disable_raw_mode(handle: RawHandle) -> i32
-extern fn native_get_term_size(handle: RawHandle, rows: *mut u16, cols: *mut u16) -> i32
-extern fn native_term_write(handle: RawHandle, buf: *const u8, len: u64) -> i64
-extern fn native_term_read(handle: RawHandle, buf: *mut u8, len: u64) -> i64
-extern fn native_term_read_timeout(handle: RawHandle, buf: *mut u8, len: u64, timeout_ms: u64) -> i64
-extern fn native_term_flush(handle: RawHandle) -> i32
-extern fn native_term_poll(handle: RawHandle, timeout_ms: u64) -> i32
 
 # ============================================================================
 # Print Functions - Python-style print (parentheses optional at statement level)

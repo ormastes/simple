@@ -1,0 +1,151 @@
+# Actor System
+#
+# Lightweight actors with message passing.
+
+import ..core.{Interpreter, Value, InterpreterError}
+
+export eval_spawn, eval_send, eval_receive, Actor, ActorRef, Message
+
+# A message sent between actors
+struct Message:
+    sender: Option[ActorRef]
+    payload: Value
+
+# Reference to an actor
+struct ActorRef:
+    id: u64
+    mailbox: Channel[Message]
+
+impl ActorRef:
+    fn send(self, msg: Value):
+        self.mailbox.send(Message { sender: None, payload: msg })
+
+    fn send_from(self, sender: ActorRef, msg: Value):
+        self.mailbox.send(Message { sender: Some(sender), payload: msg })
+
+# An actor instance
+struct Actor:
+    id: u64
+    mailbox: Channel[Message]
+    handler: Box[Fn(Message) -> Result[(), InterpreterError]]
+
+impl Actor:
+    fn new(id: u64, handler: Fn(Message) -> Result[(), InterpreterError]) -> Actor:
+        return Actor {
+            id: id,
+            mailbox: Channel::new(),
+            handler: Box::new(handler)
+        }
+
+    fn get_ref(self) -> ActorRef:
+        return ActorRef {
+            id: self.id,
+            mailbox: self.mailbox.clone()
+        }
+
+    fn receive(self) -> Option[Message]:
+        return self.mailbox.try_recv()
+
+    fn receive_blocking(self) -> Message:
+        return self.mailbox.recv()
+
+# Global actor ID counter
+static mut NEXT_ACTOR_ID: u64 = 0
+
+# Spawn a new actor
+fn eval_spawn(interp: &Interpreter, handler: &Expr) -> Result[Value, InterpreterError]:
+    # Get next actor ID
+    let id = unsafe {
+        let id = NEXT_ACTOR_ID
+        NEXT_ACTOR_ID += 1
+        id
+    }
+
+    # Evaluate the handler function
+    let handler_val = interp.evaluate(handler)?
+
+    # Create actor
+    match handler_val.as_function():
+        case Some(func):
+            let actor = Actor::new(id, |msg| {
+                # TODO: Actually invoke the handler
+                Ok(())
+            })
+
+            let actor_ref = actor.get_ref()
+
+            # TODO: Register actor with runtime and start processing
+            # For now, just return the reference
+
+            return Ok(Value::actor_ref(actor_ref))
+
+        case None:
+            return Err(InterpreterError::TypeError("spawn requires function".to_string()))
+
+# Send a message to an actor
+fn eval_send(interp: &Interpreter, target: &Expr, message: &Expr) -> Result[Value, InterpreterError]:
+    let target_val = interp.evaluate(target)?
+    let msg_val = interp.evaluate(message)?
+
+    match target_val.as_actor_ref():
+        case Some(actor_ref):
+            actor_ref.send(msg_val)
+            return Ok(Value::nil())
+
+        case None:
+            return Err(InterpreterError::TypeError("send target must be actor ref".to_string()))
+
+# Receive a message (blocking)
+fn eval_receive(interp: &Interpreter, timeout: Option[&Expr]) -> Result[Value, InterpreterError]:
+    # Get current actor context
+    match interp.current_actor():
+        case Some(actor):
+            match timeout:
+                case Some(timeout_expr):
+                    let timeout_val = interp.evaluate(timeout_expr)?
+                    match timeout_val.as_int():
+                        case Some(ms):
+                            match actor.mailbox.recv_timeout(Duration::from_millis(ms as u64)):
+                                case Some(msg): return Ok(msg.payload)
+                                case None: return Ok(Value::nil())
+                        case None:
+                            return Err(InterpreterError::TypeError("timeout must be integer".to_string()))
+
+                case None:
+                    let msg = actor.receive_blocking()
+                    return Ok(msg.payload)
+
+        case None:
+            return Err(InterpreterError::RuntimeError("receive called outside actor".to_string()))
+
+# Receive with pattern matching
+fn eval_receive_match(interp: &Interpreter, patterns: &Array[MatchArm]) -> Result[Value, InterpreterError]:
+    match interp.current_actor():
+        case Some(actor):
+            # Keep receiving until we get a matching message
+            loop:
+                let msg = actor.receive_blocking()
+
+                # Try to match against patterns
+                for arm in patterns:
+                    if let Some(result) = try_match_message(interp, &msg.payload, arm)?:
+                        return Ok(result)
+
+                # No match, put message back (selective receive)
+                # TODO: Implement message requeuing
+
+        case None:
+            return Err(InterpreterError::RuntimeError("receive called outside actor".to_string()))
+
+# Helper to try matching a message
+fn try_match_message(interp: &Interpreter, msg: &Value, arm: &MatchArm) -> Result[Option[Value], InterpreterError]:
+    # TODO: Implement pattern matching on messages
+    return Ok(None)
+
+# Self reference - get current actor's ref
+fn eval_self(interp: &Interpreter) -> Result[Value, InterpreterError]:
+    match interp.current_actor():
+        case Some(actor):
+            return Ok(Value::actor_ref(actor.get_ref()))
+        case None:
+            return Err(InterpreterError::RuntimeError("self called outside actor".to_string()))

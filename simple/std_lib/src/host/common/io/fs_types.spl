@@ -1,0 +1,119 @@
+# Common File System Types
+# Shared across all host variants (async_nogc_mut, async_gc_mut, etc.)
+
+use units.file.*
+use units.size.*
+use host.common.io.types.*
+use host.common.io.error.IoError
+
+export MmapMode, MmapAdvice, StageMode, StagingStatus, StageState
+export ProcessHandle, ContextManager, AsyncContextManager, Exception
+
+# Memory map mode
+pub enum MmapMode:
+    ReadOnly        # MAP_PRIVATE | PROT_READ
+    ReadWrite       # MAP_SHARED | PROT_READ | PROT_WRITE
+    CopyOnWrite     # MAP_PRIVATE | PROT_READ | PROT_WRITE
+
+impl MmapMode:
+    # Get mmap protection flags (for sys_mmap)
+    pub fn get_prot_flags(self) -> i32:
+        # PROT_READ = 1, PROT_WRITE = 2
+        match self:
+            case MmapMode::ReadOnly:
+                return 1  # PROT_READ
+            case MmapMode::ReadWrite:
+                return 3  # PROT_READ | PROT_WRITE
+            case MmapMode::CopyOnWrite:
+                return 3  # PROT_READ | PROT_WRITE
+
+    # Get mmap flags (for sys_mmap)
+    pub fn get_map_flags(self) -> i32:
+        # MAP_SHARED = 1, MAP_PRIVATE = 2
+        match self:
+            case MmapMode::ReadOnly:
+                return 2  # MAP_PRIVATE
+            case MmapMode::ReadWrite:
+                return 1  # MAP_SHARED
+            case MmapMode::CopyOnWrite:
+                return 2  # MAP_PRIVATE
+
+# Memory access advice for madvise(2)
+pub enum MmapAdvice:
+    Normal          # MADV_NORMAL - No specific advice
+    Sequential      # MADV_SEQUENTIAL - Expect sequential access
+    Random          # MADV_RANDOM - Expect random access
+    WillNeed        # MADV_WILLNEED - Expect to access soon (prefault)
+    DontNeed        # MADV_DONTNEED - Don't expect to access soon
+
+# Staging mode for file operations
+pub enum StageMode:
+    # No staging - standard buffered I/O
+    None
+    # Memory-mapped file - fast random access (process-private)
+    Mmap
+    # Memory-mapped file - shared across processes
+    MmapShared
+    # Prefetch entire file into memory
+    Prefetch
+    # Adaptive - choose based on file size
+    Adaptive
+
+# Staging status for lifecycle tracking
+pub enum StagingStatus:
+    NotStaged    # No staging operation
+    Staging      # Staging in progress (async)
+    Staged       # Staging complete
+
+# File staging state
+pub struct StageState:
+    mode: StageMode
+    status: StagingStatus  # Current staging status
+    mmap_ptr: i64        # Memory-mapped region pointer
+    mmap_size: u64       # Size of mapped region
+    is_shared: bool      # True if mmap is shared across processes
+    prefetch_buf: Option[Bytes]  # Prefetched data
+    staged_files: Array[FilePath]  # Files staged together
+
+# Process handle for worker processes
+pub struct ProcessHandle:
+    pid: i64
+    staged_files: Array[FilePath]
+
+impl ProcessHandle:
+    # Wait for process to complete
+    pub async fn join(self) -> Result[i64, IoError]:
+        return native_process_wait(self.pid)
+
+    # Check if process is still running
+    pub fn is_alive(self) -> bool:
+        return native_process_is_alive(self.pid)
+
+    # Terminate process
+    pub fn kill(self) -> Result[(), IoError]:
+        return native_process_kill(self.pid)
+
+# Context manager traits for with...as syntax
+
+# Sync context manager trait
+pub trait ContextManager[T]:
+    fn __enter__(self) -> T
+    fn __exit__(self, exc: Option[Exception]) -> bool
+
+# Async context manager trait
+pub trait AsyncContextManager[T]:
+    async fn __aenter__(self) -> T
+    async fn __aexit__(self, exc: Option[Exception]) -> bool
+
+# Exception type for context managers
+pub struct Exception:
+    message: String
+
+impl Exception:
+    pub fn new(message: String) -> Exception:
+        return Exception { message: message }
+
+# Native process management declarations
+extern fn native_process_wait(pid: i64) -> Result[i64, IoError]
+extern fn native_process_is_alive(pid: i64) -> bool
+extern fn native_process_kill(pid: i64) -> Result[(), IoError]

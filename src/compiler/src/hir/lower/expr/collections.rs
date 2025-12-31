@@ -1,7 +1,7 @@
 //! Collection literal expression lowering
 //!
 //! This module contains expression lowering logic for collection literals:
-//! tuples, arrays, and vector literals.
+//! tuples, arrays, vector literals, and struct initialization.
 
 use simple_parser::Expr;
 
@@ -85,6 +85,50 @@ impl Lowerer {
         Ok(HirExpr {
             kind: HirExprKind::VecLiteral(hir_exprs),
             ty: vec_ty,
+        })
+    }
+
+    /// Lower a struct initialization expression to HIR
+    ///
+    /// Creates a struct instance with field initializers.
+    /// Supports "Self" keyword to refer to the current class/struct type.
+    pub(super) fn lower_struct_init(
+        &mut self,
+        name: &str,
+        fields: &[(String, Expr)],
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        use crate::hir::lower::error::LowerError;
+
+        // Resolve struct type (handle "Self" keyword)
+        let struct_ty = if name == "Self" {
+            if let Some(class_ty) = self.current_class_type {
+                class_ty
+            } else {
+                return Err(LowerError::UnknownType(
+                    "Self used outside of class/struct context".to_string()
+                ));
+            }
+        } else {
+            self.module
+                .types
+                .lookup(name)
+                .ok_or_else(|| LowerError::UnknownType(name.to_string()))?
+        };
+
+        // Lower field initializers (in order)
+        let mut fields_hir = Vec::new();
+        for (_field_name, field_expr) in fields {
+            let field_hir = self.lower_expr(field_expr, ctx)?;
+            fields_hir.push(field_hir);
+        }
+
+        Ok(HirExpr {
+            kind: HirExprKind::StructInit {
+                ty: struct_ty,
+                fields: fields_hir,
+            },
+            ty: struct_ty,
         })
     }
 }

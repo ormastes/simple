@@ -1,0 +1,159 @@
+# Memory-Mapped File Types
+#
+# Zero-copy memory-mapped file I/O with kernel optimization hints.
+
+use units.file.*
+use host.common.io.*
+
+export MmapRegion
+export open_mmap, open_mmap_with, open_mmap_sync, open_mmap_sync_with
+
+import file.exists
+
+# ===============================
+# Memory-Mapped File Types
+# ===============================
+
+# Memory-mapped region - represents a file mapped into memory (zero-copy)
+pub struct MmapRegion:
+    data: *u8              # Pointer to mapped memory
+    length: usize          # Size of mapped region in bytes
+    mode: MmapMode         # Access mode (read-only, read-write, etc.)
+    fd: i64                # File descriptor
+    path: FilePath         # Original file path (for debugging)
+
+impl MmapRegion:
+    # Get the mapped data as a byte slice
+    pub fn as_bytes(self) -> &[u8]:
+        # TODO: Implement via FFI - slice_from_raw_parts
+        return []
+
+    # Get the mapped data as a string (UTF-8 validated)
+    pub fn as_str(self) -> Result[Text, IoError]:
+        let bytes = self.as_bytes()
+        match bytes.to_utf8():
+            case Ok(s): return Ok(s_text)
+            case Err(_): return Err(IoError::InvalidData)
+
+    # Advise kernel on memory access pattern
+    pub fn advise(self, advice: MmapAdvice) -> Result[(), IoError]:
+        return native_madvise(self.data, self.length, advice)
+
+    # Get the length of the mapped region
+    pub fn len(self) -> usize:
+        return self.length
+
+    # Check if the region is empty
+    pub fn is_empty(self) -> bool:
+        return self.length == 0
+
+    # Get a slice of the mapped region
+    pub fn slice(self, start: usize, end: usize) -> Result[&[u8], IoError]:
+        if start > self.length or end > self.length or start > end:
+            return Err(IoError::InvalidArgument)
+        # TODO: Return slice
+        return Ok([])
+
+    # Close and unmap the region
+    pub fn close(self) -> Result[(), IoError]:
+        if self.data != null:
+            native_mmap_unmap(self.data as i64, self.length as u64)
+            native_file_close(self.fd)
+        return Ok(())
+
+# ===============================
+# Simple Mmap Convenience Functions
+# ===============================
+
+# Open file as memory-mapped region (async, returns immediately)
+pub async fn open_mmap(path: FilePath) -> Result[MmapRegion, IoError]:
+    return open_mmap_with(path, MmapMode::ReadOnly, MmapAdvice::Normal)
+
+# Open file as memory-mapped region with mode and advice
+pub async fn open_mmap_with(path: FilePath, mode: MmapMode, advice: MmapAdvice) -> Result[MmapRegion, IoError]:
+    # Resolve path
+    let resolved_path = native_path_resolve(path)?
+
+    # Check file existence
+    if not await exists(resolved_path):
+        return Err(IoError::NotFound)
+
+    # Open file
+    let open_mode = match mode:
+        case MmapMode::ReadOnly: OpenMode::Read
+        case MmapMode::ReadWrite: OpenMode::Write
+        case MmapMode::CopyOnWrite: OpenMode::Read
+
+    let fd = native_fs_open(resolved_path, open_mode)?
+
+    # Get file size
+    let size = native_file_get_size(fd)?
+
+    # Create memory mapping
+    let mmap_ptr = match mode:
+        case MmapMode::ReadWrite:
+            native_mmap_create_shared(fd, size)?  # Shared for read-write
+        case _:
+            native_mmap_create(fd, size)?  # Private for read-only/COW
+
+    # Create region
+    let region = MmapRegion {
+        data: mmap_ptr as *u8,
+        length: size as usize,
+        mode: mode,
+        fd: fd,
+        path: resolved_path
+    }
+
+    # Apply advice
+    if advice != MmapAdvice::Normal:
+        region.advise(advice)?
+
+    return Ok(region)
+
+# Open file as memory-mapped region (sync, blocks until ready)
+pub fn open_mmap_sync(path: FilePath) -> Result[MmapRegion, IoError]:
+    return open_mmap_sync_with(path, MmapMode::ReadOnly, MmapAdvice::Normal)
+
+# Open file as memory-mapped region (sync) with mode and advice
+pub fn open_mmap_sync_with(path: FilePath, mode: MmapMode, advice: MmapAdvice) -> Result[MmapRegion, IoError]:
+    # Resolve path
+    let resolved_path = native_path_resolve(path)?
+
+    # Check file existence (sync version)
+    let file_exists = native_file_exists_sync(resolved_path)
+    if not file_exists:
+        return Err(IoError::NotFound)
+
+    # Open file
+    let open_mode = match mode:
+        case MmapMode::ReadOnly: OpenMode::Read
+        case MmapMode::ReadWrite: OpenMode::Write
+        case MmapMode::CopyOnWrite: OpenMode::Read
+
+    let fd = native_fs_open(resolved_path, open_mode)?
+
+    # Get file size
+    let size = native_file_get_size(fd)?
+
+    # Create memory mapping
+    let mmap_ptr = match mode:
+        case MmapMode::ReadWrite:
+            native_mmap_create_shared(fd, size)?
+        case _:
+            native_mmap_create(fd, size)?
+
+    # Create region
+    let region = MmapRegion {
+        data: mmap_ptr as *u8,
+        length: size as usize,
+        mode: mode,
+        fd: fd,
+        path: resolved_path
+    }
+
+    # Apply advice
+    if advice != MmapAdvice::Normal:
+        region.advise(advice)?
+
+    return Ok(region)

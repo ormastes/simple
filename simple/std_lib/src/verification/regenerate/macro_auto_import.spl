@@ -1,0 +1,135 @@
+# Macro Auto Import - Macro import verification
+# Generates Lean verification for macro auto-import rules
+
+import verification.lean.codegen as codegen
+
+fn regenerate_macro_auto_import() -> String:
+    gen = codegen.LeanCodegen.create("MacroAutoImport")
+
+    # Namespace
+    gen = gen.add_namespace("MacroAutoImport")
+
+    # Block comment
+    gen = gen.add_block_comment([
+        "# Macro Auto-Import Model",
+        "",
+        "Key Properties:",
+        "1. Macros are NOT included in glob imports by default",
+        "2. Only macros listed in `auto import` participate in glob imports"
+    ])
+
+    # SymKind inductive
+    symkind = codegen.build_enum("SymKind", [
+        ("valueOrType", []),
+        ("macro", [])
+    ])
+    gen = gen.add_inductive(symkind)
+
+    # Symbol structure
+    symbol = codegen.build_class("Symbol", [
+        ("modulePath", codegen.make_string_type()),
+        ("name", codegen.make_string_type()),
+        ("kind", codegen.make_simple_type("SymKind"))
+    ]).with_deriving(["DecidableEq", "Repr"])
+    gen = gen.add_structure(symbol)
+
+    # AutoImport structure
+    autoimport = codegen.build_class("AutoImport", [
+        ("fromModule", codegen.make_string_type()),
+        ("macroName", codegen.make_string_type())
+    ]).with_deriving(["DecidableEq", "Repr"])
+    gen = gen.add_structure(autoimport)
+
+    # ModuleExports structure
+    exports = codegen.build_class("ModuleExports", [
+        ("nonMacros", codegen.make_list_type(codegen.make_simple_type("Symbol"))),
+        ("macros", codegen.make_list_type(codegen.make_simple_type("Symbol")))
+    ]).with_deriving(["Repr"])
+    gen = gen.add_structure(exports)
+
+    # DirManifest structure
+    manifest = codegen.build_class("DirManifest", [
+        ("name", codegen.make_string_type()),
+        ("autoImports", codegen.make_list_type(codegen.make_simple_type("AutoImport")))
+    ]).with_deriving(["Repr"])
+    gen = gen.add_structure(manifest)
+
+    # Functions
+    is_auto_imported = codegen.build_function(
+        "isAutoImported",
+        [("m", codegen.make_simple_type("DirManifest")), ("sym", codegen.make_simple_type("Symbol"))],
+        codegen.make_simple_type("Bool"),
+        "sym.kind == SymKind.macro &&\nm.autoImports.any (fun ai => ai.fromModule == sym.modulePath && ai.macroName == sym.name)"
+    )
+    gen = gen.add_function(is_auto_imported)
+
+    auto_imported_macros = codegen.build_function(
+        "autoImportedMacros",
+        [("m", codegen.make_simple_type("DirManifest")), ("exports", codegen.make_simple_type("ModuleExports"))],
+        codegen.make_list_type(codegen.make_simple_type("Symbol")),
+        "exports.macros.filter (isAutoImported m)"
+    )
+    gen = gen.add_function(auto_imported_macros)
+
+    glob_import = codegen.build_function(
+        "globImport",
+        [("m", codegen.make_simple_type("DirManifest")), ("exports", codegen.make_simple_type("ModuleExports"))],
+        codegen.make_list_type(codegen.make_simple_type("Symbol")),
+        "exports.nonMacros ++ autoImportedMacros m exports"
+    )
+    gen = gen.add_function(glob_import)
+
+    wellformed_exports = codegen.build_function(
+        "wellFormedExports",
+        [("exports", codegen.make_simple_type("ModuleExports"))],
+        codegen.make_simple_type("Prop"),
+        "(∀ s ∈ exports.nonMacros, s.kind = SymKind.valueOrType) ∧\n(∀ s ∈ exports.macros, s.kind = SymKind.macro)"
+    )
+    gen = gen.add_function(wellformed_exports)
+
+    # Theorems
+    gen = gen.add_theorem(codegen.build_theorem(
+        "glob_doesnt_leak_macros_wf",
+        [("m", "DirManifest"), ("exports", "ModuleExports"), ("hwf", "wellFormedExports exports"), ("sym", "Symbol")],
+        "sym.kind = SymKind.macro → isAutoImported m sym = false → sym ∉ globImport m exports",
+        "intro hkind hnotauto hmem\nunfold globImport at hmem\nrw [List.mem_append] at hmem\ncases hmem with\n| inl hnonmacro =>\n  have h := hwf.1 sym hnonmacro\n  rw [h] at hkind\n  contradiction\n| inr hauto =>\n  unfold autoImportedMacros at hauto\n  rw [List.mem_filter] at hauto\n  obtain ⟨_, hfilter⟩ := hauto\n  simp [hfilter] at hnotauto"
+    ))
+
+    gen = gen.add_theorem(codegen.build_theorem(
+        "nonmacros_always_globbed",
+        [("m", "DirManifest"), ("exports", "ModuleExports"), ("sym", "Symbol")],
+        "sym ∈ exports.nonMacros → sym ∈ globImport m exports",
+        "intro hmem\nunfold globImport\nrw [List.mem_append]\nleft\nexact hmem"
+    ))
+
+    gen = gen.add_theorem(codegen.build_theorem(
+        "auto_imported_in_glob",
+        [("m", "DirManifest"), ("exports", "ModuleExports"), ("sym", "Symbol")],
+        "sym ∈ exports.macros → isAutoImported m sym = true → sym ∈ globImport m exports",
+        "intro hmacro hauto\nunfold globImport\nrw [List.mem_append]\nright\nunfold autoImportedMacros\nrw [List.mem_filter]\nexact ⟨hmacro, hauto⟩"
+    ))
+
+    gen = gen.add_theorem(codegen.build_theorem(
+        "glob_subset",
+        [("m", "DirManifest"), ("exports", "ModuleExports"), ("sym", "Symbol")],
+        "sym ∈ globImport m exports → sym ∈ exports.nonMacros ∨ sym ∈ exports.macros",
+        "intro hmem\nunfold globImport at hmem\nrw [List.mem_append] at hmem\ncases hmem with\n| inl h => left; exact h\n| inr h =>\n  right\n  unfold autoImportedMacros at h\n  rw [List.mem_filter] at h\n  exact h.1"
+    ))
+
+    gen = gen.add_theorem(codegen.build_theorem(
+        "empty_auto_import_no_macros",
+        [("exports", "ModuleExports")],
+        "let m : DirManifest := ⟨\"\", []⟩\nautoImportedMacros m exports = []",
+        "simp [autoImportedMacros, isAutoImported, List.filter_eq_nil_iff]"
+    ))
+
+    # End namespace
+    gen = gen.end_namespace("MacroAutoImport")
+
+    return gen.emit()
+
+
+# ============================================================================
+# 8. Type Inference - TypeInferenceCompile.lean (99 lines)
+# ============================================================================
+
