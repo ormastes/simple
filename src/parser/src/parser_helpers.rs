@@ -142,6 +142,8 @@ impl<'a> Parser<'a> {
             TokenKind::When => "when".to_string(),
             TokenKind::Then => "then".to_string(),
             TokenKind::AndThen => "and_then".to_string(),
+            // Allow context keyword to be used as identifier in BDD DSL
+            TokenKind::Context => "context".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

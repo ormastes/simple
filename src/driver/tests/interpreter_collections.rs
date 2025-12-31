@@ -188,9 +188,10 @@ main = c.len()
 
 #[test]
 fn interpreter_array_slice() {
+    // Use Python-style slice syntax arr[start:end] instead of .slice() method
     let code = r#"
 arr = [0, 1, 2, 3, 4, 5]
-sliced = arr.slice(2, 5)
+sliced = arr[2:5]
 main = sliced.len()
 "#;
     let result = run_code(code, &[], "").unwrap();

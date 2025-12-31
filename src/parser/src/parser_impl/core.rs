@@ -157,7 +157,22 @@ impl<'a> Parser<'a> {
             TokenKind::Return => self.parse_return(),
             TokenKind::Break => self.parse_break(),
             TokenKind::Continue => self.parse_continue(),
-            TokenKind::Context => self.parse_context(),
+            TokenKind::Context => {
+                // Check if this is a context statement (context expr:) or BDD DSL (context "string":)
+                // BDD DSL uses string literals after 'context' keyword
+                let next = self
+                    .pending_token
+                    .clone()
+                    .unwrap_or_else(|| self.lexer.next_token());
+                self.pending_token = Some(next.clone());
+
+                // If next token is a string literal, treat as BDD expression (no-paren call)
+                if matches!(&next.kind, TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_)) {
+                    self.parse_expression_or_assignment()
+                } else {
+                    self.parse_context()
+                }
+            }
             TokenKind::With => self.parse_with(),
             // Gherkin-style system test DSL (Features #606-610)
             TokenKind::Feature => self.parse_feature(),
