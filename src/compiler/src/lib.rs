@@ -3,6 +3,9 @@
 //! This crate provides the main compilation pipeline for the Simple language,
 //! including interpretation, type checking, and code generation.
 
+#![allow(internal_features)]
+#![cfg_attr(not(target_env = "msvc"), feature(linkage))]
+
 pub mod codegen;
 pub mod compilability;
 pub mod coverage;
