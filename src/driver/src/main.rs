@@ -81,27 +81,34 @@ fn main() {
     // PHASE 2: Normal initialization (happens in parallel with prefetching)
     let log_start = std::time::Instant::now();
 
-    // Enable dual logging (stdout + file) by default
-    let log_dir = std::env::var("SIMPLE_LOG_DIR")
-        .ok()
-        .map(PathBuf::from);
-    let log_filter = std::env::var("SIMPLE_LOG")
-        .ok()
-        .or_else(|| std::env::var("RUST_LOG").ok());
+    // Enable dual logging (stdout + file) in debug mode only for diagnostics
+    #[cfg(debug_assertions)]
+    {
+        let log_dir = std::env::var("SIMPLE_LOG_DIR")
+            .ok()
+            .map(PathBuf::from);
+        let log_filter = std::env::var("SIMPLE_LOG")
+            .ok()
+            .or_else(|| std::env::var("RUST_LOG").ok());
 
-    if let Err(e) = simple_log::init_dual(
-        log_dir.as_deref(),
-        log_filter.as_deref(),
-    ) {
-        eprintln!("warning: failed to initialize file logging: {}", e);
-        simple_log::init(); // Fallback to stdout only
+        if let Err(e) = simple_log::init_dual(
+            log_dir.as_deref(),
+            log_filter.as_deref(),
+        ) {
+            eprintln!("warning: failed to initialize file logging: {}", e);
+            simple_log::init(); // Fallback to stdout only
+        }
+
+        // Cleanup old logs (keep 7 days) - non-fatal if it fails
+        let _ = simple_log::cleanup_old_logs(
+            std::path::Path::new(".simple/logs"),
+            7,
+        );
     }
 
-    // Cleanup old logs (keep 7 days) - non-fatal if it fails
-    let _ = simple_log::cleanup_old_logs(
-        std::path::Path::new(".simple/logs"),
-        7,
-    );
+    // In release mode, use simple stdout-only logging
+    #[cfg(not(debug_assertions))]
+    simple_log::init();
 
     metrics.record(simple_driver::StartupPhase::LoggingInit, log_start.elapsed());
 
@@ -110,8 +117,9 @@ fn main() {
     simple_compiler::interpreter_ffi::init_interpreter_handlers();
     metrics.record(simple_driver::StartupPhase::HandlerInit, handler_start.elapsed());
 
-    // Install panic hook for detailed crash diagnostics
+    // Install panic hook for detailed crash diagnostics (debug mode only)
     let panic_start = std::time::Instant::now();
+    #[cfg(debug_assertions)]
     std::panic::set_hook(Box::new(|panic_info| {
         use std::backtrace::Backtrace;
         use std::io::Write;
@@ -150,8 +158,9 @@ fn main() {
     }));
     metrics.record(simple_driver::StartupPhase::PanicHookInit, panic_start.elapsed());
 
-    // Install signal handlers for graceful interrupt (Ctrl-C)
+    // Install signal handlers for graceful interrupt (Ctrl-C) - debug mode only
     let signal_start = std::time::Instant::now();
+    #[cfg(debug_assertions)]
     simple_compiler::interpreter::init_signal_handlers();
     metrics.record(simple_driver::StartupPhase::SignalHandlerInit, signal_start.elapsed());
 

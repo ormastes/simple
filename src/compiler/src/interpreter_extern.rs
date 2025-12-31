@@ -48,7 +48,36 @@ extern "C" {
     fn ratatui_object_destroy(handle: u64);
 }
 
-// Extern declarations for REPL runner FFI functions (from driver crate)
+// REPL runner FFI functions - defined in driver crate (repl_runner_ffi.rs)
+// We use weak linkage to allow the driver to override these stubs at link time.
+// When running tests without the driver, these stubs return safe defaults.
+#[cfg(not(target_env = "msvc"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn simple_repl_runner_init() -> bool { false }
+
+#[cfg(not(target_env = "msvc"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn simple_repl_runner_cleanup() {}
+
+#[cfg(not(target_env = "msvc"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn simple_repl_runner_execute(_code_ptr: *const u8, _code_len: usize, _result_buffer: *mut u8, _result_capacity: usize) -> i32 { 1 }
+
+#[cfg(not(target_env = "msvc"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn simple_repl_runner_clear_prelude() -> bool { true }
+
+#[cfg(not(target_env = "msvc"))]
+#[linkage = "weak"]
+#[no_mangle]
+pub extern "C" fn simple_repl_runner_get_prelude(_buffer: *mut u8, _capacity: usize) -> usize { 0 }
+
+// MSVC doesn't support weak linkage, so we use extern declarations and handle missing symbols at runtime
+#[cfg(target_env = "msvc")]
 extern "C" {
     fn simple_repl_runner_init() -> bool;
     fn simple_repl_runner_cleanup();

@@ -13,11 +13,21 @@ use crate::error::CompileError;
 ///
 /// This macro should be called at the start of each loop iteration to allow
 /// graceful interruption of long-running computations.
+/// Only active in debug mode to avoid performance overhead in release builds.
+#[cfg(debug_assertions)]
 macro_rules! check_interrupt {
     () => {
         if crate::interpreter::is_interrupted() {
             return Err(CompileError::InterruptedByUser);
         }
+    };
+}
+
+/// No-op version for release builds (zero overhead)
+#[cfg(not(debug_assertions))]
+macro_rules! check_interrupt {
+    () => {
+        // No-op in release mode for maximum performance
     };
 }
 use crate::value::{Env, Value, ATTR_STRONG, BUILTIN_ARRAY, BUILTIN_RANGE};
