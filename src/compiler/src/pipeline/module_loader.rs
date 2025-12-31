@@ -175,6 +175,15 @@ fn extract_string_from_expr(expr: &Expr) -> Option<String> {
     match expr {
         Expr::String(s) => Some(s.clone()),
         Expr::TypedString(s, _) => Some(s.clone()),
+        // Handle FString (interpolated strings) - extract if it's just a literal
+        Expr::FString(parts) => {
+            if parts.len() == 1 {
+                if let simple_parser::ast::FStringPart::Literal(s) = &parts[0] {
+                    return Some(s.clone());
+                }
+            }
+            None
+        }
         _ => None,
     }
 }
