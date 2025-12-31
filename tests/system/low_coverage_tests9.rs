@@ -706,12 +706,14 @@ mod hir_types_tests {
 
     #[test]
     fn test_hir_type_pointer() {
+        use simple_parser::ast::ReferenceCapability;
         let ty = HirType::Pointer {
             kind: PointerKind::Borrow,
+            capability: ReferenceCapability::Shared,
             inner: TypeId::I64,
         };
         match ty {
-            HirType::Pointer { kind, inner } => {
+            HirType::Pointer { kind, inner, .. } => {
                 assert_eq!(kind, PointerKind::Borrow);
                 assert_eq!(inner, TypeId::I64);
             }

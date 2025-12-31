@@ -296,6 +296,8 @@ fn test_local_var_integration() {
         name: "x".to_string(),
         ty: TypeId::I64,
         mutability: Mutability::Mutable,
+        inject: false,
+        is_ghost: false,
     };
     assert!(mutable_var.is_mutable());
 
@@ -303,6 +305,8 @@ fn test_local_var_integration() {
         name: "y".to_string(),
         ty: TypeId::F64,
         mutability: Mutability::Immutable,
+        inject: false,
+        is_ghost: false,
     };
     assert!(!immutable_var.is_mutable());
 }
@@ -310,6 +314,7 @@ fn test_local_var_integration() {
 /// Test HirFunction construction
 #[test]
 fn test_hir_function_integration() {
+    use simple_compiler::hir::{ConcurrencyMode, VerificationMode};
     let func = HirFunction {
         name: "add".to_string(),
         params: vec![
@@ -317,11 +322,15 @@ fn test_hir_function_integration() {
                 name: "a".to_string(),
                 ty: TypeId::I64,
                 mutability: Mutability::Immutable,
+                inject: false,
+                is_ghost: false,
             },
             LocalVar {
                 name: "b".to_string(),
                 ty: TypeId::I64,
                 mutability: Mutability::Immutable,
+                inject: false,
+                is_ghost: false,
             },
         ],
         locals: vec![],
@@ -343,6 +352,13 @@ fn test_hir_function_integration() {
         visibility: Visibility::Public,
         contract: None,
         is_pure: false,
+        inject: false,
+        concurrency_mode: ConcurrencyMode::Actor,
+        module_path: String::new(),
+        attributes: vec![],
+        effects: vec![],
+        layout_hint: None,
+        verification_mode: VerificationMode::Unverified,
     };
 
     assert_eq!(func.name, "add");
@@ -372,6 +388,7 @@ fn test_hir_module_default_integration() {
 /// Test PointerKind variants
 #[test]
 fn test_pointer_kind_integration() {
+    use simple_parser::ast::ReferenceCapability;
     let kinds = [
         PointerKind::Unique,
         PointerKind::Shared,
@@ -384,9 +401,10 @@ fn test_pointer_kind_integration() {
     for kind in &kinds {
         let ptr_type = HirType::Pointer {
             kind: *kind,
+            capability: ReferenceCapability::Shared,
             inner: TypeId::I32,
         };
-        if let HirType::Pointer { kind: k, inner } = ptr_type {
+        if let HirType::Pointer { kind: k, inner, .. } = ptr_type {
             assert_eq!(k, *kind);
             assert_eq!(inner, TypeId::I32);
         }

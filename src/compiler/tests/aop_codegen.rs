@@ -6,7 +6,7 @@ use simple_compiler::mir::{
 use simple_compiler::mir::CallTarget;
 use simple_parser::Visibility;
 use simple_runtime::aop::{AopAroundFn, ProceedContext, rt_aop_proceed};
-use simple_runtime::RuntimeValue;
+use simple_runtime::value::RuntimeValue;
 
 extern "C" fn target_sum(argc: u64, argv: *const RuntimeValue) -> RuntimeValue {
     if argc == 0 || argv.is_null() {
@@ -46,6 +46,7 @@ fn jit_can_call_rt_aop_invoke_around() {
             name: name.into(),
             ty: TypeId::I64,
             kind: LocalKind::Parameter,
+            is_ghost: false,
         });
     }
 

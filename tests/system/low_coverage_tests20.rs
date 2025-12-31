@@ -170,14 +170,15 @@ mod parser_mode_tests {
 // ============================================================================
 // Parser Source Registry Types
 // ============================================================================
-mod parser_source_registry_tests {
-    use simple_parser::SourceRegistry;
-
-    #[test]
-    fn test_source_registry_size() {
-        let _ = std::mem::size_of::<SourceRegistry>();
-    }
-}
+// NOTE: SourceRegistry was refactored and removed from public API
+// mod parser_source_registry_tests {
+//     use simple_parser::SourceRegistry;
+//
+//     #[test]
+//     fn test_source_registry_size() {
+//         let _ = std::mem::size_of::<SourceRegistry>();
+//     }
+// }
 
 // ============================================================================
 // Loader Symbol Export/Import Types
@@ -240,19 +241,20 @@ mod compiler_generator_lowering_tests {
 // ============================================================================
 // Compiler Block Types
 // ============================================================================
-mod compiler_block_tests {
-    use simple_compiler::mir::{BlockState, BlockBuildError};
-
-    #[test]
-    fn test_block_state_size() {
-        let _ = std::mem::size_of::<BlockState>();
-    }
-
-    #[test]
-    fn test_block_build_error_size() {
-        let _ = std::mem::size_of::<BlockBuildError>();
-    }
-}
+// NOTE: BlockState is not publicly exported from mir module
+// mod compiler_block_tests {
+//     use simple_compiler::mir::{BlockState, BlockBuildError};
+//
+//     #[test]
+//     fn test_block_state_size() {
+//         let _ = std::mem::size_of::<BlockState>();
+//     }
+//
+//     #[test]
+//     fn test_block_build_error_size() {
+//         let _ = std::mem::size_of::<BlockBuildError>();
+//     }
+// }
 
 // ============================================================================
 // Compiler HIR Extended Types

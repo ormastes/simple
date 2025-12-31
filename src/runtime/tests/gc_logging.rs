@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex};
 
-use crate::gc::{GcLogEventKind, GcRuntime};
+use crate::gc::{GcLogEvent, GcLogEventKind, GcRuntime};
 
 #[test]
 fn verbose_logging_emits_collection_markers() {
     let events: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = {
         let events = events.clone();
-        move |event: crate::gc::GcLogEvent| {
+        move |event: GcLogEvent| {
             events.lock().unwrap().push(event.to_string());
         }
     };
@@ -31,7 +31,6 @@ fn verbose_logging_emits_collection_markers() {
 
 #[test]
 fn structured_events_are_emitted() {
-    use crate::gc::GcLogEvent;
     let events: Arc<Mutex<Vec<GcLogEvent>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = {
         let events = events.clone();
