@@ -305,6 +305,8 @@ impl<'a> Parser<'a> {
             TokenKind::NotTo => "not_to",
             // Allow 'with' as method name for SIMD v.with(idx, val)
             TokenKind::With => "with",
+            // Allow 'default' as method name (e.g., Type::default())
+            TokenKind::Default => "default",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
