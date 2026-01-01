@@ -44,6 +44,103 @@ Track improvement ideas discovered while developing Simple standard library and 
 
 <!-- Add new improvement requests below this line -->
 
+### [Parser] Multi-Line Method Chaining Support
+
+**Type:** Improvement
+**Category:** DX
+**Priority:** Medium
+**Proposed:** 2026-01-01
+**Status:** Proposed
+
+**Problem:**
+Method chaining across multiple lines fails to parse, forcing developers to use single-line chains or intermediate variables:
+
+**Current Behavior:**
+```simple
+# Doesn't work - parse error: "expected expression, found Indent"
+let parser = cli.ArgParser::new("test", "Test")
+    .flag("verbose", "v", "Enable verbose output")
+    .required_option("output", "o", "Output file")
+```
+
+**Proposed Solution:**
+Extend the postfix expression parser to recognize the pattern `NEWLINE → INDENT → DOT` as method chain continuation.
+
+**Example:**
+```simple
+# Should work: Multi-line builder pattern
+let parser = cli.ArgParser::new("test", "Test")
+    .flag("verbose", "v", "Enable verbose output")
+    .required_option("output", "o", "Output file")
+    .required_positional("input", "Input file")
+
+# Should work: Chained transformations
+let result = data
+    .filter(\x: x > 0)
+    .map(\x: x * 2)
+    .sum()
+
+# Current workaround 1: Single line (hard to read)
+let parser = cli.ArgParser::new("test", "Test").flag("verbose", "v", "Enable verbose output").required_option("output", "o", "Output file")
+
+# Current workaround 2: Intermediate variables (verbose)
+let parser = cli.ArgParser::new("test", "Test")
+let parser = parser.flag("verbose", "v", "Enable verbose output")
+let parser = parser.required_option("output", "o", "Output file")
+```
+
+**Benefits:**
+- Improved code readability for builder patterns
+- More natural API design (fluent interfaces)
+- Consistent with Rust, JavaScript, and other modern languages
+- Reduces need for horizontal scrolling
+- Better fits indentation-based syntax
+
+**Alternatives Considered:**
+1. **Require explicit continuation marker** (like `\` in Python)
+   - Pros: Explicit, no ambiguity
+   - Cons: Adds visual noise, breaks fluent interface feel
+
+2. **Use parentheses to group** (like some languages)
+   ```simple
+   let parser = (cli.ArgParser::new("test", "Test")
+       .flag("verbose", "v", "Enable verbose output"))
+   ```
+   - Pros: Clear grouping
+   - Cons: Breaks indentation-based syntax feel
+
+3. **Accept the limitation** (current state)
+   - Pros: No parser changes needed
+   - Cons: Poor developer experience, inconsistent with expectations
+
+**Technical Challenges:**
+- NEWLINE tokens serve dual purpose: expression terminators AND whitespace
+- Current `pending_token` mechanism can only store one token, but we need to lookahead through NEWLINE → INDENT → DOT (3 tokens)
+- Naively consuming NEWLINE in postfix loop breaks if-statement, match, and other statement parsing
+- Parser architecture doesn't support easy multi-token lookahead
+
+**Proposed Implementation:**
+1. Implement token buffer (instead of single `pending_token`) for multi-token lookahead
+2. In postfix expression loop, when encountering NEWLINE:
+   - Peek ahead through NEWLINE and any INDENT tokens
+   - If next non-whitespace token is DOT, consume the whitespace and continue
+   - Otherwise, break from postfix loop (NEWLINE terminates expression)
+3. Ensure this doesn't break statement parsing (if, match, let, etc.)
+4. Add comprehensive parser tests for regressions
+
+**Impact:**
+- Breaking changes: No (only adds new capability)
+- Files affected: ~20 stdlib test files currently work around this limitation
+- Parser files: `src/parser/src/expressions/mod.rs` (postfix loop), token buffer implementation
+- Migration path: Existing code continues to work, new code can use multi-line chaining
+
+**Related:**
+- Currently affects 20 stdlib test failures
+- Documented in `doc/report/PARSER_FIXES_2026-01-01.md`
+- Parser postfix loop: `src/parser/src/expressions/mod.rs:617-875`
+
+---
+
 ### [Parser] Triple-Quoted F-String Support
 
 **Type:** Improvement
