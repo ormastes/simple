@@ -842,6 +842,23 @@ impl<'a> Parser<'a> {
                         target_type,
                     };
                 }
+                TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent => {
+                    // Check for multi-line method chaining
+                    // If next non-whitespace token is '.', continue the chain
+                    if self.peek_through_whitespace_is(&TokenKind::Dot) {
+                        // Consume the newlines/indents/dedents to reach the dot
+                        while self.check(&TokenKind::Newline)
+                            || self.check(&TokenKind::Indent)
+                            || self.check(&TokenKind::Dedent) {
+                            self.advance();
+                        }
+                        // Continue the loop to parse the dot
+                        continue;
+                    } else {
+                        // Not a continuation, break the postfix loop
+                        break;
+                    }
+                }
                 _ => break,
             }
         }
