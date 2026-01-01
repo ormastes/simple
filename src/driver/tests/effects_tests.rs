@@ -17,7 +17,7 @@
 mod test_helpers;
 use test_helpers::{run_expect, run_expect_compile_error};
 
-include!("effects_tests_basic.rs");
-include!("effects_tests_parsing.rs");
-include!("effects_tests_propagation.rs");
-include!("effects_tests_validation.rs");
+include!("include/_effects_tests_basic.rs");
+include!("include/_effects_tests_parsing.rs");
+include!("include/_effects_tests_propagation.rs");
+include!("include/_effects_tests_validation.rs");

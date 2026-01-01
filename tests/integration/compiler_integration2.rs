@@ -538,6 +538,9 @@ fn test_smf_writer_multiple_sections() {
         section_index: 0,
         value: 0,
         size: 2,
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false,
     };
     writer.add_symbol(sym1);
 
@@ -548,6 +551,9 @@ fn test_smf_writer_multiple_sections() {
         section_index: 1,
         value: 0,
         size: 4,
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false,
     };
     writer.add_symbol(sym2);
 

@@ -415,7 +415,7 @@ class Config:
         self.retries >= 0
         self.retries <= 10
 
-    fn default() -> Config:
+    fn create_default() -> Config:
         return Config(timeout: 30, retries: 3)
 
     fn from_timeout(t: i64) -> Config:

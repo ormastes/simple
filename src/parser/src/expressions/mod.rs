@@ -842,20 +842,28 @@ impl<'a> Parser<'a> {
                         target_type,
                     };
                 }
-                TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent => {
-                    // Check for multi-line method chaining
-                    // If next non-whitespace token is '.', continue the chain
-                    if self.peek_through_whitespace_is(&TokenKind::Dot) {
-                        // Consume the newlines/indents/dedents to reach the dot
-                        while self.check(&TokenKind::Newline)
-                            || self.check(&TokenKind::Indent)
-                            || self.check(&TokenKind::Dedent) {
-                            self.advance();
-                        }
-                        // Continue the loop to parse the dot
+                TokenKind::Indent => {
+                    // Direct INDENT followed by DOT (less common but possible)
+                    let saved_current = self.current.clone();
+                    let saved_previous = self.previous.clone();
+
+                    self.advance(); // Look at token after INDENT
+                    let is_dot = self.check(&TokenKind::Dot);
+
+                    // Restore state - only set pending_token if we found a DOT
+                    if is_dot {
+                        self.pending_token = Some(self.current.clone());
+                    }
+                    self.current = saved_current;
+                    self.previous = saved_previous;
+
+                    if is_dot {
+                        // It's a method chain continuation, consume the INDENT
+                        self.advance();
+                        // Continue loop to parse the DOT
                         continue;
                     } else {
-                        // Not a continuation, break the postfix loop
+                        // Not a method chain, break out of postfix
                         break;
                     }
                 }

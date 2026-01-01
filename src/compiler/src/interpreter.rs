@@ -374,6 +374,7 @@ pub(crate) fn exec_node(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    eprintln!("DEBUG execute_node: {:?}", std::mem::discriminant(node));
     match node {
         Node::Let(let_stmt) => {
             if let Some(value_expr) = &let_stmt.value {
@@ -505,25 +506,32 @@ pub(crate) fn exec_node(
                     enums,
                     impl_methods,
                 )?;
-                if let Some((obj_name, new_self)) = update {
-                    env.insert(obj_name, new_self);
-                }
-                // Check if this is a module-level global variable (for function access)
-                let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
-                if is_global && !env.contains_key(name) {
-                    // Update module-level global
-                    MODULE_GLOBALS.with(|cell| {
-                        cell.borrow_mut().insert(name.clone(), value);
-                    });
+                // If the mutating method returned an updated object with the same name as target,
+                // the update already set the variable, so skip the normal assignment
+                let skip_assignment = if let Some((ref obj_name, ref new_self)) = update {
+                    env.insert(obj_name.clone(), new_self.clone());
+                    obj_name == name
                 } else {
-                    env.insert(name.clone(), value);
-                    // Also sync to MODULE_GLOBALS if it exists there (for module-level assignments)
-                    MODULE_GLOBALS.with(|cell| {
-                        let mut globals = cell.borrow_mut();
-                        if globals.contains_key(name) {
-                            globals.insert(name.clone(), env.get(name).unwrap().clone());
-                        }
-                    });
+                    false
+                };
+                if !skip_assignment {
+                    // Check if this is a module-level global variable (for function access)
+                    let is_global = MODULE_GLOBALS.with(|cell| cell.borrow().contains_key(name));
+                    if is_global && !env.contains_key(name) {
+                        // Update module-level global
+                        MODULE_GLOBALS.with(|cell| {
+                            cell.borrow_mut().insert(name.clone(), value);
+                        });
+                    } else {
+                        env.insert(name.clone(), value);
+                        // Also sync to MODULE_GLOBALS if it exists there (for module-level assignments)
+                        MODULE_GLOBALS.with(|cell| {
+                            let mut globals = cell.borrow_mut();
+                            if globals.contains_key(name) {
+                                globals.insert(name.clone(), env.get(name).unwrap().clone());
+                            }
+                        });
+                    }
                 }
                 Ok(Control::Next)
             } else if let Expr::FieldAccess { receiver, field } = &assign.target {

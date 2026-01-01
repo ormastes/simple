@@ -478,6 +478,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 });
             }
             Node::Let(let_stmt) => {
+                eprintln!("DEBUG: Node::Let {:?}", let_stmt.pattern);
                 use super::Control;
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
@@ -505,6 +506,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::Match(_)
             | Node::Context(_)
             | Node::With(_) => {
+                eprintln!("DEBUG eval: executing {:?}", std::mem::discriminant(item));
                 use super::Control;
                 if let Control::Return(val) =
                     exec_node(item, &mut env, &mut functions, &mut classes, &enums, &impl_methods)?
@@ -521,6 +523,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 return Ok(0);
             }
             Node::Expression(expr) => {
+                eprintln!("DEBUG: Node::Expression {:?}", expr);
                 if let Expr::FunctionalUpdate {
                     target,
                     method,

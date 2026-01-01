@@ -560,6 +560,9 @@ fn test_smf_writer_add_symbol() {
         section_index: 0,
         value: 0,
         size: 10,
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false,
     };
     let index = writer.add_symbol(symbol);
     assert_eq!(index, 0, "First symbol should have index 0");
@@ -595,6 +598,9 @@ fn test_smf_writer_write() {
         section_index: 0,
         value: 0,
         size: 6,
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false,
     };
     writer.add_symbol(symbol);
 
