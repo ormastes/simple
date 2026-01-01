@@ -34,7 +34,7 @@ pub struct Manifest {
 /// generate_stubs = true
 /// modules = ["core", "math"]
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerifyConfig {
     /// Enable Lean verification for this package
     #[serde(default)]
@@ -61,6 +61,20 @@ pub struct VerifyConfig {
 
 fn default_generate_stubs() -> bool {
     true
+}
+
+impl Default for VerifyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            lean_path: None,
+            output_dir: None,
+            generate_stubs: default_generate_stubs(),
+            modules: Vec::new(),
+            check_proofs: false,
+            strict: false,
+        }
+    }
 }
 
 impl VerifyConfig {
