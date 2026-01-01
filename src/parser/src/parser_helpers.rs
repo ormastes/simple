@@ -38,16 +38,16 @@ impl<'a> Parser<'a> {
         result
     }
 
-    /// Peek through newlines and indents to check if the next non-whitespace token matches the given kind.
+    /// Peek through newlines and indents to check if the next token is a dot.
     /// Used for multi-line method chaining: obj.method()\n    .another()
-    pub(crate) fn peek_through_whitespace_is(&mut self, kind: &TokenKind) -> bool {
+    /// Only peeks through NEWLINE and INDENT (NOT DEDENT) to avoid breaking if-else.
+    pub(crate) fn peek_through_newlines_and_indents_is(&mut self, kind: &TokenKind) -> bool {
         // Save current state
         let saved_current = self.current.clone();
         let saved_previous = self.previous.clone();
-        let saved_pending = self.pending_token.clone();
 
-        // Skip through newlines, indents, and dedents
-        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent | TokenKind::Dedent) {
+        // Skip through newlines and indents only (NOT dedents)
+        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
             self.advance();
         }
 
@@ -55,19 +55,13 @@ impl<'a> Parser<'a> {
         let result = self.check(kind);
 
         // Restore state
-        self.pending_token = Some(self.current.clone());
+        // Only set pending_token if we found what we're looking for
+        // This avoids polluting the token stream when the peek fails
+        if result {
+            self.pending_token = Some(self.current.clone());
+        }
         self.current = saved_current;
         self.previous = saved_previous;
-
-        // If there was a saved pending token, we need to restore it carefully
-        // The pending_token will be used by the next advance(), so we append to it
-        if let Some(old_pending) = saved_pending {
-            // This is tricky: we peeked ahead and now have pending_token set to what we saw
-            // But there was already a pending token before. We can only have one pending.
-            // In practice, this shouldn't happen during normal parsing, but to be safe:
-            // Keep the most recent pending (the one we just set) and discard the old one
-            // This matches the behavior of peek_is which doesn't preserve old pending
-        }
 
         result
     }

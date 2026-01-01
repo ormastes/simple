@@ -189,16 +189,16 @@ enum Maybe<T>:
     Just(T)
     Nothing
 
-fn get_or_default(m: Maybe[i64], default: i64) -> i64:
+fn get_or_fallback(m: Maybe[i64], fallback: i64) -> i64:
     match m:
         Maybe::Just(v) =>
             return v
         Maybe::Nothing =>
-            return default
-    return default
+            return fallback
+    return fallback
 
 let x = Maybe::Just(42)
-main = get_or_default(x, 0)
+main = get_or_fallback(x, 0)
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);

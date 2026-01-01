@@ -42,8 +42,8 @@ use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
 
-include!("dependency_tracker_tests_module_resolution.rs");
-include!("dependency_tracker_tests_visibility.rs");
-include!("dependency_tracker_tests_macro.rs");
-include!("dependency_tracker_tests_circular.rs");
-include!("dependency_tracker_tests_symbol.rs");
+include!("include/_dependency_tracker_tests_module_resolution.rs");
+include!("include/_dependency_tracker_tests_visibility.rs");
+include!("include/_dependency_tracker_tests_macro.rs");
+include!("include/_dependency_tracker_tests_circular.rs");
+include!("include/_dependency_tracker_tests_symbol.rs");
