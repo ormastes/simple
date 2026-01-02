@@ -15,7 +15,7 @@ use simple_common::{AbiVersion, RUNTIME_SYMBOL_NAMES};
 fn test_abi_version_current() {
     let v = AbiVersion::CURRENT;
     assert_eq!(v.major, 1);
-    assert_eq!(v.minor, 0);
+    assert_eq!(v.minor, 1);
 }
 
 #[test]

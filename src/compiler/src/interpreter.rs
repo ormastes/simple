@@ -374,7 +374,6 @@ pub(crate) fn exec_node(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
-    eprintln!("DEBUG execute_node: {:?}", std::mem::discriminant(node));
     match node {
         Node::Let(let_stmt) => {
             if let Some(value_expr) = &let_stmt.value {

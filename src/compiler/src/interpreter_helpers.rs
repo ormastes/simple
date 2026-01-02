@@ -571,11 +571,8 @@ pub(crate) fn handle_method_call_with_self_update(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
-    eprintln!("DEBUG: handle_method_call_with_self_update called with {:?}", value_expr);
     if let Expr::MethodCall { receiver, method, args } = value_expr {
-        eprintln!("DEBUG: it's a MethodCall, method = {}", method);
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
-            eprintln!("DEBUG: receiver is Identifier({}), env has it: {}", obj_name, env.contains_key(obj_name));
             // Handle Object mutations
             if let Some(Value::Object { .. }) = env.get(obj_name) {
                 let (result, updated_self) = evaluate_method_call_with_self_update(
@@ -599,14 +596,11 @@ pub(crate) fn handle_method_call_with_self_update(
                     }
                     // Evaluate the method call - it returns the new array
                     let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
-                    eprintln!("DEBUG: push result = {:?}", result);
                     if let Value::Array(new_arr) = &result {
                         // Return both the new array as result AND the update for self-mutation
                         let new_array_val = Value::Array(new_arr.clone());
-                        eprintln!("DEBUG: returning new_array_val with len {}", new_arr.len());
                         return Ok((new_array_val.clone(), Some((obj_name.clone(), new_array_val))));
                     }
-                    eprintln!("DEBUG: result is NOT an array!");
                 }
             }
             // Handle Dict mutations for mutating methods
