@@ -245,9 +245,13 @@ fn test_prefetch_empty_file() {
 
 #[test]
 fn test_prefetch_nonexistent_file() {
-    // Prefetching nonexistent file should return error
+    // Prefetching nonexistent file does not return error immediately
+    // because prefetch forks and handles errors in child process (fire-and-forget)
     let result = prefetch_file("/nonexistent/file/path");
-    assert!(result.is_err());
+    assert!(result.is_ok());
+    // Wait should still succeed (child exits normally even if file doesn't exist)
+    let handle = result.unwrap();
+    assert!(handle.wait().is_ok());
 }
 
 #[test]
