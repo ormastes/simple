@@ -22,15 +22,18 @@ impl<'a> Parser<'a> {
                 self.advance();
                 name
             }
-            // Accept 'allow' keyword as attribute name (used in architecture rules)
-            // Note: 'deny', 'warn', 'test', 'inline' are identifiers, not keywords
+            // Accept keywords that can be used as attribute names
             TokenKind::Allow => {
                 self.advance();
                 "allow".to_string()
             }
+            TokenKind::Default => {
+                self.advance();
+                "default".to_string()
+            }
             _ => {
                 return Err(ParseError::unexpected_token(
-                    "identifier or attribute keyword (allow)",
+                    "identifier or attribute keyword",
                     format!("{:?}", self.current.kind),
                     self.current.span,
                 ));

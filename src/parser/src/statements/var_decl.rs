@@ -59,9 +59,18 @@ impl Parser<'_> {
         storage_class: StorageClass,
         is_ghost: bool,
     ) -> Result<Node, ParseError> {
-        let pattern = self.parse_pattern()?;
+        let mut pattern = self.parse_pattern()?;
         let ty = self.parse_optional_type_annotation()?;
         let value = self.parse_optional_assignment()?;
+
+        // Wrap pattern in Pattern::Typed if there's a type annotation
+        // This provides the typed pattern that tests and code expect
+        if let Some(type_annotation) = ty {
+            pattern = Pattern::Typed {
+                pattern: Box::new(pattern),
+                ty: type_annotation,
+            };
+        }
 
         Ok(Node::Let(LetStmt {
             span: Span::new(
@@ -71,7 +80,7 @@ impl Parser<'_> {
                 start_span.column,
             ),
             pattern,
-            ty,
+            ty: None, // Type is now in the Pattern::Typed wrapper
             value,
             mutability,
             storage_class,
@@ -473,8 +482,10 @@ impl Parser<'_> {
             }
 
             // Parse rule: 'allow', 'repr', or 'fn'
-            // Note: 'allow' is parsed as identifier to avoid conflict with #[allow(...)] attributes
-            if matches!(&self.current.kind, TokenKind::Identifier(s) if s == "allow") {
+            // Note: 'allow' can be either an identifier or the Allow keyword
+            if matches!(&self.current.kind, TokenKind::Identifier(s) if s == "allow")
+                || self.check(&TokenKind::Allow)
+            {
                 self.advance(); // consume 'allow'
                 self.parse_arithmetic_rule(&mut binary_rules, &mut unary_rules)?;
             } else if self.check(&TokenKind::Repr) {
