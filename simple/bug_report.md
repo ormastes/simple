@@ -62,6 +62,39 @@ Define functions at module level instead of inside `it` blocks. However, this ca
 
 The spec framework appears to be evaluating or analyzing code after `it` block closures complete, trying to access variables that were only in scope during the closure execution.
 
+### Additional Symptom: Module-Level Helper Functions
+
+**Discovered:** 2026-01-02
+
+When a test file defines a helper function at module level that references imported names, the imports become "undefined" after the first test runs. Example:
+
+```simple
+import sdn.lexer.Lexer
+import sdn.token.TokenKind
+
+# Helper function at module level
+fn lex(source: String) -> List[TokenKind]:
+    let mut lexer = Lexer.new(source)  # Fails after first test
+    return lexer.tokenize()
+
+describe "SDN Lexer":
+    it "first test":
+        let kinds = lex("42")  # Works
+        expect kinds.len == 2
+
+    it "second test":
+        let kinds = lex("-17")  # Error: undefined variable: Lexer
+```
+
+**Workaround:** Don't use module-level helper functions. Inline the logic in each test (like `document_spec.spl` does) or define classes directly.
+
+**Affected Tests (110+ failing):**
+- `simple_stdlib_unit_sdn_lexer_spec`
+- `simple_stdlib_unit_sdn_document_spec` (works - no helper functions)
+- `simple_stdlib_unit_core_context_spec`
+- `simple_stdlib_unit_core_dsl_spec`
+- Many other `*_spec.spl` tests
+
 ### Status
 
 Investigating. Decorators are fully implemented (#1069-#1072) but cannot be tested until this is resolved.
@@ -1088,3 +1121,460 @@ The `import X as Y` syntax creates a Dict binding for Y, but class access throug
 ### Status
 
 Open - the `use` statement workaround works for individual imports.
+
+---
+
+## Parser Bug: /// Doc Comments Interfere with Import Parsing
+
+**Type:** Bug
+**Priority:** Medium
+**Discovered:** 2026-01-01
+**Component:** Parser (`src/parser/`)
+
+### Description
+
+When a `///` doc comment block appears before an import statement that imports identifiers starting with keywords (like `to_sdn`, `to_json`), the parser fails with "expected expression, found To".
+
+### Expected
+
+Doc comments should not interfere with subsequent import statements. The following should parse correctly:
+
+```simple
+///
+Module documentation
+///
+
+import sdn.serializer.{to_sdn, to_json}
+```
+
+### Actual
+
+Parser error: `Unexpected token: expected expression, found To`
+
+### Reproduction
+
+Create a file with this content:
+
+```simple
+///
+End-to-end tests
+
+Tests (JSON ↔ SDN)
+///
+
+import sdn.serializer.{to_sdn, to_json}
+
+fn main():
+    pass
+```
+
+Result: Parse error "expected expression, found To"
+
+Without the doc comment, the same code parses successfully.
+
+### Workaround
+
+Replace `///` doc comments with regular `#` comments:
+
+```simple
+# End-to-end tests
+#
+# Tests (JSON ↔ SDN)
+
+import sdn.serializer.{to_sdn, to_json}
+```
+
+### Files Affected
+
+- `simple/std_lib/test/system/sdn/cli_spec.spl` (fixed)
+- `simple/std_lib/test/system/sdn/workflow_spec.spl` (fixed)
+- `simple/std_lib/test/system/sdn/file_io_spec.spl` (fixed)
+
+### Files Involved
+
+- `src/parser/src/parser_impl/doc_comments.rs` - Doc comment parsing
+- `src/parser/src/statements/module_system.rs` - Import statement parsing
+- `src/parser/src/lexer/identifiers.rs` - Keyword tokenization
+
+### Root Cause (Hypothesis)
+
+The doc comment parser may be leaving the parser in an inconsistent state or consuming tokens in a way that affects subsequent parsing. The "To" keyword is being recognized when it should be part of an identifier like "to_sdn".
+
+### Status
+
+**Workaround applied** - All affected test files have been changed to use `#` comments instead of `///` doc comments. The parser bug remains open for investigation.
+
+---
+
+## Parser Bug: || Operator Parsed as Closure Syntax
+
+**Type:** Bug
+**Priority:** Medium
+**Discovered:** 2026-01-01
+**Component:** Parser (`src/parser/`)
+
+### Description
+
+Parser incorrectly treats `||` as the start of a closure when followed by field access or method calls, causing "expected Pipe, found Dot" or "expected expression, found Dot" errors.
+
+### Expected
+
+The `||` operator should be recognized as logical OR in expression contexts:
+
+```simple
+expect output.stderr.contains("error") || output.stdout.contains("error")
+```
+
+### Actual
+
+Parser error: `Unexpected token: expected Pipe, found Dot` or `expected expression, found Dot`
+
+The parser sees `||` and expects a closure parameter list `|params| body` instead of recognizing it as a binary operator.
+
+### Reproduction
+
+```simple
+import std.spec
+
+describe "test":
+    it "fails":
+        let output = {stderr: "error", stdout: ""}
+        expect output.stderr.contains("error") || output.stdout.contains("error")
+```
+
+Result: Parse error "expected Pipe, found Dot"
+
+### Workaround
+
+Split complex `||` expressions into separate boolean variables:
+
+```simple
+let stderr_has_error = output.stderr.contains("error")
+let stdout_has_error = output.stdout.contains("error")
+expect stderr_has_error || stdout_has_error
+```
+
+This works because simple boolean identifiers don't trigger the closure parsing issue.
+
+### Files Affected
+
+- `simple/std_lib/test/system/sdn/cli_spec.spl` (2 instances fixed)
+
+### Files Involved
+
+- `src/parser/src/expressions/mod.rs` - Binary operator parsing
+- `src/parser/src/parser_impl/core.rs` - Expression parsing
+- `src/parser/src/lexer/mod.rs` - Token recognition
+
+### Root Cause (Hypothesis)
+
+The expression parser may be checking for closure syntax `||` before checking for binary operator `||`. When it sees `||`, it enters closure-parsing mode and expects `|params|`, but encounters a `.` (field access) instead, causing the error.
+
+The fix would likely involve better lookahead or context awareness to distinguish between:
+- Closure: `|x| x.method()` (closure parameter + body)
+- Binary OR: `a.field || b.field` (expression + operator + expression)
+
+### Status
+
+**Workaround applied** - Affected test expressions have been split into separate variables. The parser bug remains open for investigation.
+
+---
+
+## Parser: 10 Named Argument Limit
+
+### Summary
+Parser fails with "expected Comma, found Colon" when function/method calls have more than 10 named arguments.
+
+**Type:** Bug
+**Priority:** High
+**Discovered:** 2026-01-02
+**Component:** Parser (expressions/method calls)
+
+### Description
+
+The parser has a hard limit of 10 named arguments in function/method calls. When a call has 11 or more named arguments, parsing fails with "expected Comma, found Colon" error. This appears to be a fixed limit in the parser's argument parsing logic, possibly related to lookahead or recursion depth.
+
+### Expected Behavior
+
+The parser should handle an arbitrary number of named arguments, limited only by practical considerations (memory, reasonable code style).
+
+Example that should work:
+```simple
+let x = Foo.new(
+    arg1: value1,
+    arg2: value2,
+    arg3: value3,
+    arg4: value4,
+    arg5: value5,
+    arg6: value6,
+    arg7: value7,
+    arg8: value8,
+    arg9: value9,
+    arg10: value10,
+    arg11: value11,  # 11th argument - should work but fails
+    arg12: value12
+)
+```
+
+### Actual Behavior
+
+Parser fails with "expected Comma, found Colon" when parsing the 11th named argument.
+
+### Reproduction
+
+Binary search testing confirms exact threshold:
+- 10 named arguments: ✅ Works
+- 11 named arguments: ❌ Fails with "expected Comma, found Colon"
+
+Test case with 11 args:
+```simple
+describe "test":
+    it "test":
+        let x = Foo.new(
+            id: 1,
+            name: "Test",
+            category: "Testing",
+            difficulty: 3,
+            status: "Complete",
+            impl_type: "R",
+            spec_ref: "doc/spec/test.md",
+            files: ["src/test.rs"],
+            tests: ["tests/test.rs"],
+            description: "Test description",
+            examples: []  # 11th argument - causes failure
+        )
+```
+
+Error:
+```
+error: compile failed: parse: Unexpected token: expected Comma, found Colon
+```
+
+### Test Results
+
+Systematic testing:
+- `/tmp/test_8_args.spl` (8 args): ✅ Passes
+- `/tmp/test_9_args.spl` (9 args): ✅ Passes
+- `/tmp/test_10_args.spl` (10 args): ✅ Passes
+- `/tmp/test_11_args.spl` (11 args): ❌ Fails
+- `/tmp/test_13_args.spl` (13 args): ❌ Fails
+- `/tmp/test_17_args.spl` (17 args): ❌ Fails
+
+### Files Affected
+
+All files with structs/classes that have more than 10 fields and use named argument initialization:
+
+1. `simple/std_lib/test/system/feature_doc_spec.spl`
+   - `FeatureMetadata.new()` with 14 named arguments
+   - Multiple instances throughout file
+
+### Workaround
+
+Split initialization into multiple steps or use builder pattern:
+
+```simple
+# Option 1: Split into two objects
+let base = Foo.new(
+    arg1: value1,
+    arg2: value2,
+    arg3: value3,
+    arg4: value4,
+    arg5: value5,
+    arg6: value6,
+    arg7: value7,
+    arg8: value8,
+    arg9: value9,
+    arg10: value10
+)
+base.set_remaining_fields(
+    arg11: value11,
+    arg12: value12
+)
+
+# Option 2: Use positional arguments (if supported)
+let x = Foo.new(value1, value2, value3, ..., value14)
+
+# Option 3: Reduce struct to <= 10 fields
+```
+
+### Root Cause Hypothesis
+
+Likely causes:
+1. **Fixed recursion depth** in `parse_arguments()` or similar function
+2. **Lookahead buffer limit** in tokenizer/parser
+3. **Stack-based parsing** with fixed-size limit
+4. **Hard-coded constant** limiting argument count
+
+The error message "expected Comma, found Colon" suggests the parser loses track of parsing context after the 10th argument and misinterprets the 11th argument's colon as something else.
+
+### Recommended Fix
+
+1. Investigate `src/parser/src/expressions/mod.rs` - argument parsing logic
+2. Look for hard-coded limits (constants like `MAX_ARGS = 10`)
+3. Check recursion depth or lookahead limits
+4. Increase or remove the limit
+5. Add regression test with 20+ named arguments
+
+### Status
+
+**Workaround Applied** - All affected files have been converted to use positional arguments instead of named arguments. All test files now parse successfully. Parser fix still required for long-term solution.
+
+**Files Fixed:**
+- `simple/std_lib/test/system/feature_doc_spec.spl` - 8 instances of FeatureMetadata.new() converted to positional args
+- `simple/std_lib/test/e2e/feature_generation_spec.spl` - 5 instances of feature_metadata() converted to positional args
+
+**Test Impact:** "expected Comma, found Colon" errors reduced from 2 to 0.
+
+---
+
+## Parser: `context` as Reserved Keyword
+
+### Summary
+The `context` keyword (used in BDD tests) cannot be used as a module name in imports or as a field name in member access expressions.
+
+**Type:** Bug
+**Priority:** High
+**Discovered:** 2026-01-02
+**Component:** Parser (lexer/keywords)
+
+### Description
+
+The BDD framework uses `context` as a keyword for test grouping:
+```simple
+describe "Test":
+    context "Subgroup":
+        it "does something":
+            expect true
+```
+
+However, this makes `context` a reserved keyword that cannot be used:
+1. As a module name in imports: `import core.context` or `use core.context.*`
+2. As a field name: `obj.context`
+3. As a variable name in match patterns (parser interprets as keyword)
+
+### Expected Behavior
+
+Keywords should be context-sensitive. `context` should only be treated as a keyword when used as a statement (like `describe` and `it`), not when used as:
+- Module/package names in import paths
+- Field/attribute names after the dot operator
+- Variable names in patterns or expressions
+
+### Actual Behavior
+
+**Import Error:**
+```simple
+import core.context  # Fails: "expected identifier, found Context"
+use core.context.*   # Fails: "expected identifier, found Context"
+```
+
+**Field Access Error:**
+```simple
+let ref_context = ref.context  # Fails: "expected identifier, found Context"
+```
+
+**Pattern Variable Error:**
+```simple
+case Mismatch(_, context):  # Fails: "expected pattern, found Context"
+```
+
+### Reproduction
+
+**Test Case 1 - Import:**
+```simple
+import spec
+import core.context  # ERROR: expected identifier, found Context
+
+describe "Test":
+    it "test": expect true
+```
+
+**Test Case 2 - Field Access:**
+```simple
+import spec
+
+describe "Test":
+    it "test":
+        let obj = SomeObject()
+        if obj.context == "value":  # ERROR: expected identifier, found Context
+            expect true
+```
+
+**Test Case 3 - Pattern Variable:**
+```simple
+match result:
+    case Mismatch(_, context):  # ERROR: expected pattern, found Context
+        expect context.value > 0
+```
+
+### Files Affected
+
+1. `simple/std_lib/test/unit/core/context_spec.spl`
+   - Line 5: `use core.context.*` - Cannot import module named `context`
+   
+2. `simple/std_lib/test/unit/lsp/references_spec.spl`
+   - Lines 72, 87, 156, 172: `ref.context` - Cannot access field named `context`
+   
+3. `simple/std_lib/test/system/snapshot/comparison_spec.spl` 
+   - Lines 187, 201, 215: `case Mismatch(_, context):` - Cannot use `context` as variable name
+
+### Workaround
+
+**For Imports:**
+```simple
+# Before (fails):
+import core.context
+
+# After (workaround):
+# Comment out import and handle undefined errors at runtime
+# import core.context  # FIXME: Cannot import - 'context' is reserved
+```
+
+**For Field Access:**
+```simple
+# Before (fails):
+if obj.context == "definition":
+    do_something()
+
+# After (workaround):
+let obj_context = obj.get_context()  # Use getter method
+if obj_context == "definition":
+    do_something()
+```
+
+**For Pattern Variables:**
+```simple
+# Before (fails):
+case Mismatch(_, context):
+    expect context.value > 0
+
+# After (workaround):
+case Mismatch(_, ctx):  # Rename variable
+    expect ctx.value > 0
+```
+
+### Root Cause Hypothesis
+
+The lexer/parser treats `context` as a keyword globally instead of only in specific grammatical positions. Likely causes:
+1. Keywords defined at lexer level, not parser level
+2. No context-sensitive keyword handling
+3. Dot operator doesn't disable keyword recognition for identifiers
+
+### Recommended Fix
+
+1. Make `context` (and `describe`, `it`, `expect`) context-sensitive keywords
+2. Only treat them as keywords when they appear at statement position
+3. Allow them as regular identifiers in:
+   - Module/import paths
+   - Field names (after `.`)
+   - Variable/parameter names
+   - Pattern bindings
+
+Alternative: Use `@context` or `context:` syntax to distinguish keyword from identifier
+
+### Status
+
+**Workaround applied** - Affected files have been modified to avoid using `context` as module name, field name, or variable name. Parser fix required for long-term solution.
+
+**Test Impact:**
+- "expected identifier, found Context": 2 → 0
+- "expected pattern, found Context": 2 → 1 (1 remaining in different file)
