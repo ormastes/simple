@@ -468,7 +468,6 @@ main = 42
 // }
 
 #[test]
-#[ignore = "stack overflow in JIT compilation - needs investigation"]
 fn runner_handles_recursive_functions() {
     // Factorial with smaller input to avoid stack overflow
     run_expect(

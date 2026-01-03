@@ -446,7 +446,6 @@ main = compute(10)
 }
 
 #[test]
-#[ignore = "stack overflow in JIT compilation - needs investigation"]
 fn parity_recursive_function() {
     // Recursive functions should work in both modes
     // Use small input to avoid stack overflow in test
