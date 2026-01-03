@@ -172,6 +172,8 @@ impl<'a> Parser<'a> {
             TokenKind::AndThen => "and_then".to_string(),
             // Allow context keyword to be used as identifier in BDD DSL
             TokenKind::Context => "context".to_string(),
+            // Allow 'default' to be used as trait name (e.g., Default trait)
+            TokenKind::Default => "Default".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -329,10 +331,10 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Parse generic type parameters: <T, U, V> or [T, U, V]
+    /// Parse generic type parameters: <T, U, V> or [T, U, V] or [T, const N: usize]
     /// Both angle brackets and square brackets are supported for compatibility
     /// Returns empty Vec if no generic parameters are present
-    pub(crate) fn parse_generic_params(&mut self) -> Result<Vec<String>, ParseError> {
+    pub(crate) fn parse_generic_params(&mut self) -> Result<Vec<GenericParam>, ParseError> {
         // Check for angle brackets <T> or square brackets [T]
         let use_brackets = if self.check(&TokenKind::Lt) {
             self.advance(); // consume '<'
@@ -352,8 +354,17 @@ impl<'a> Parser<'a> {
         };
 
         while !self.check(&end_token) {
-            let name = self.expect_identifier()?;
-            params.push(name);
+            // Check for const generic parameter: const N: usize
+            if self.check(&TokenKind::Const) {
+                self.advance(); // consume 'const'
+                let name = self.expect_identifier()?;
+                self.expect(&TokenKind::Colon)?;
+                let ty = self.parse_type()?;
+                params.push(GenericParam::Const { name, ty });
+            } else {
+                let name = self.expect_identifier()?;
+                params.push(GenericParam::Type(name));
+            }
 
             if !self.check(&end_token) {
                 self.expect(&TokenKind::Comma)?;
@@ -367,5 +378,17 @@ impl<'a> Parser<'a> {
         }
 
         Ok(params)
+    }
+
+    /// Parse generic type parameters as strings (for backward compatibility)
+    /// Ignores const parameters and returns only type parameter names
+    pub(crate) fn parse_generic_params_as_strings(&mut self) -> Result<Vec<String>, ParseError> {
+        let params = self.parse_generic_params()?;
+        Ok(params.into_iter().filter_map(|p| {
+            match p {
+                GenericParam::Type(name) => Some(name),
+                GenericParam::Const { .. } => None, // Skip const params for now
+            }
+        }).collect())
     }
 }

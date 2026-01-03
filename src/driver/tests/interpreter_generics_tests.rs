@@ -8,9 +8,7 @@ use simple_driver::interpreter::run_code;
 
 /// Test 1: Const generic parameters - const N: usize
 /// From: lib/std/core/array.spl line 1
-/// TODO: Parser doesn't support const generic parameters yet
 #[test]
-#[ignore = "const generic parameters not implemented in parser"]
 fn stdlib_const_generic_param() {
     let code = r#"
 struct Array[T, const N: usize]:
@@ -123,9 +121,7 @@ main = 0
 
 /// Test 7: Multiple trait bounds - T: Clone + Default
 /// From: various stdlib files
-/// TODO: Parser doesn't support where clauses or multiple trait bounds yet
 #[test]
-#[ignore = "where clauses and multiple trait bounds not implemented in parser"]
 fn stdlib_multiple_trait_bounds() {
     let code = r#"
 trait Clone:
