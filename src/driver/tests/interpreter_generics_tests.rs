@@ -27,9 +27,7 @@ main = 0
 
 /// Test 2: Where clause on function
 /// From: lib/std/core/array.spl line 22
-/// TODO: Parser doesn't support where clauses yet
 #[test]
-#[ignore = "where clauses not implemented in parser"]
 fn stdlib_where_clause_on_function() {
     let code = r#"
 fn filled(value: i64) -> i64 where i64: Copy:
@@ -46,9 +44,7 @@ main = filled(42)
 
 /// Test 3: impl Trait for Type syntax
 /// From: lib/std/core/array.spl line 50
-/// TODO: Parser doesn't support "impl Trait for Type" syntax yet
 #[test]
-#[ignore = "impl Trait for Type not implemented in parser"]
 fn stdlib_impl_trait_for_type() {
     let code = r#"
 trait Len:
@@ -72,9 +68,7 @@ main = 0
 
 /// Test 4: Generic impl with where clause
 /// From: lib/std/core/array.spl line 276
-/// TODO: Parser doesn't support "impl Trait for primitive" syntax yet
 #[test]
-#[ignore = "impl Trait for primitive type not implemented in parser"]
 fn stdlib_generic_impl_with_where() {
     let code = r#"
 trait Clone:
@@ -154,9 +148,7 @@ main = 0
 
 /// Test 8: Associated type syntax
 /// From: lib/std/core/traits.spl
-/// TODO: Parser doesn't support associated types in traits yet
 #[test]
-#[ignore = "associated types not implemented in parser"]
 fn stdlib_associated_type() {
     let code = r#"
 trait Iterator:

@@ -234,7 +234,6 @@ main = get_count()
 // ============= Type-Safe Unit Arithmetic Tests (#203) =============
 
 #[test]
-#[ignore = "Unit arithmetic allow syntax not fully implemented"]
 fn interpreter_unit_arithmetic_same_family_allowed() {
     // Same-family addition should work when explicitly allowed
     let code = r#"
@@ -251,7 +250,6 @@ main = (a + b).value()
 }
 
 #[test]
-#[ignore = "Unit arithmetic allow syntax not fully implemented"]
 fn interpreter_unit_arithmetic_subtraction_allowed() {
     // Same-family subtraction when allowed
     let code = r#"
@@ -267,7 +265,6 @@ main = (a - b).value()
 }
 
 #[test]
-#[ignore = "Unit arithmetic allow syntax not fully implemented"]
 fn interpreter_unit_arithmetic_default_deny() {
     // Operations not in explicit allow list should fail
     // This unit family only allows sub, so add should fail
@@ -283,7 +280,6 @@ main = (a + b).value()
 }
 
 #[test]
-#[ignore = "Unit arithmetic allow syntax not fully implemented"]
 fn interpreter_unit_arithmetic_cross_family_denied() {
     // Different families cannot be added even with allow on each
     let code = r#"
@@ -315,7 +311,6 @@ main = scaled.value()
 }
 
 #[test]
-#[ignore = "Unit arithmetic allow syntax not fully implemented"]
 fn interpreter_unit_negation_allowed() {
     // Unary negation when allowed
     let code = r#"
@@ -331,7 +326,6 @@ main = neg_t.value()
 }
 
 #[test]
-#[ignore = "Unit arithmetic allow syntax not fully implemented"]
 fn interpreter_unit_negation_default_deny() {
     // Negation not in explicit allow list should fail
     // This unit family only allows add, so neg should fail
