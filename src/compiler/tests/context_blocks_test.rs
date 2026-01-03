@@ -11,10 +11,12 @@ fn parse_and_eval(source: &str) -> Result<i32, Box<dyn std::error::Error>> {
 }
 
 #[test]
-#[ignore = "Stack overflow in context block parsing - needs investigation"]
+#[ignore = "Context block method dispatch not implemented - methods don't resolve to context receiver"]
 fn test_context_basic_method_dispatch() {
     let source = r#"
 class Builder:
+    count: int
+
     fn __init__(self):
         self.count = 0
 
@@ -39,10 +41,12 @@ main = builder.get_count()
 }
 
 #[test]
-#[ignore = "Stack overflow in context block parsing - needs investigation"]
+#[ignore = "Context block method dispatch not implemented - methods don't resolve to context receiver"]
 fn test_context_with_parameters() {
     let source = r#"
 class ConfigDSL:
+    port: int
+
     fn __init__(self):
         self.port = 0
 
@@ -65,10 +69,12 @@ main = cfg.get_port()
 }
 
 #[test]
-#[ignore = "Stack overflow in context block parsing - needs investigation"]
+#[ignore = "Context block method dispatch not implemented - methods don't resolve to context receiver"]
 fn test_context_fluent_chaining() {
     let source = r#"
 class Calculator:
+    value: int
+
     fn __init__(self):
         self.value = 0
 
@@ -97,10 +103,12 @@ main = calc.get()
 }
 
 #[test]
-#[ignore = "Stack overflow in context block parsing - needs investigation"]
+#[ignore = "Context block method dispatch not implemented - methods don't resolve to context receiver"]
 fn test_context_scope_isolation() {
     let source = r#"
 class Counter:
+    value: int
+
     fn __init__(self):
         self.value = 0
 
