@@ -11,7 +11,6 @@ fn parse_and_eval(source: &str) -> Result<i32, Box<dyn std::error::Error>> {
 }
 
 #[test]
-#[ignore = "Context block method dispatch not implemented - methods don't resolve to context receiver"]
 fn test_context_basic_method_dispatch() {
     let source = r#"
 class Builder:
@@ -41,7 +40,6 @@ main = builder.get_count()
 }
 
 #[test]
-#[ignore = "Context block method dispatch not implemented - methods don't resolve to context receiver"]
 fn test_context_with_parameters() {
     let source = r#"
 class ConfigDSL:
@@ -69,7 +67,6 @@ main = cfg.get_port()
 }
 
 #[test]
-#[ignore = "Context block method dispatch not implemented - methods don't resolve to context receiver"]
 fn test_context_fluent_chaining() {
     let source = r#"
 class Calculator:
@@ -103,7 +100,6 @@ main = calc.get()
 }
 
 #[test]
-#[ignore = "Context block method dispatch not implemented - methods don't resolve to context receiver"]
 fn test_context_scope_isolation() {
     let source = r#"
 class Counter:

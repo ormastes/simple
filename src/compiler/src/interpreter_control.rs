@@ -41,7 +41,7 @@ use std::collections::HashMap;
 // Import parent interpreter types and functions
 use super::{
     evaluate_expr, exec_block, Control, Enums, ImplMethods,
-    CONTEXT_OBJECT, BDD_CONTEXT_DEFS, BDD_INDENT, BDD_LAZY_VALUES,
+    CONTEXT_OBJECT, CONTEXT_VAR_NAME, BDD_CONTEXT_DEFS, BDD_INDENT, BDD_LAZY_VALUES,
 };
 
 // Import helpers for pattern binding
@@ -220,10 +220,30 @@ pub(super) fn exec_context(
         }
         _ => {
             // Non-BDD context: set context object and execute block
+            // Extract variable name if context is an identifier (for mutation persistence)
+            let var_name = if let Expr::Identifier(name) = &ctx_stmt.context {
+                Some(name.clone())
+            } else {
+                None
+            };
+
             let prev_context = CONTEXT_OBJECT.with(|cell| cell.borrow().clone());
+            let prev_var_name = CONTEXT_VAR_NAME.with(|cell| cell.borrow().clone());
+
             CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(context_obj));
+            CONTEXT_VAR_NAME.with(|cell| *cell.borrow_mut() = var_name.clone());
+
             let result = exec_block(&ctx_stmt.body, env, functions, classes, enums, impl_methods);
+
+            // After block execution, persist any mutations to the original variable
+            if let Some(name) = &var_name {
+                if let Some(updated_obj) = CONTEXT_OBJECT.with(|cell| cell.borrow().clone()) {
+                    env.insert(name.clone(), updated_obj);
+                }
+            }
+
             CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = prev_context);
+            CONTEXT_VAR_NAME.with(|cell| *cell.borrow_mut() = prev_var_name);
             result
         }
     }

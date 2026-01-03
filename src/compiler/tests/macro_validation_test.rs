@@ -29,7 +29,7 @@ fn expect_error(source: &str, expected_code: &str) -> bool {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_macro_defined_before_use_success() {
     let source = r#"
         macro greet(name):
@@ -49,7 +49,7 @@ fn test_macro_defined_before_use_success() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_macro_used_before_definition_error() {
     let source = r#"
         # Use macro before definition - should fail with E1402
@@ -70,7 +70,7 @@ fn test_macro_used_before_definition_error() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_shadowing_existing_variable() {
     let source = r#"
         let counter = 0
@@ -93,7 +93,7 @@ fn test_intro_shadowing_existing_variable() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_shadowing_existing_function() {
     let source = r#"
         fn my_func():
@@ -118,7 +118,7 @@ fn test_intro_shadowing_existing_function() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_no_shadowing_success() {
     let source = r#"
         let existing_var = 0
@@ -140,7 +140,7 @@ fn test_intro_no_shadowing_success() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_qident_template_with_const_param() {
     let source = r#"
         macro define_getter(const NAME):
@@ -160,7 +160,7 @@ fn test_qident_template_with_const_param() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_qident_template_without_const_param() {
     let source = r#"
         # Template variable {NAME} used without const qualifier - should fail
@@ -182,7 +182,7 @@ fn test_qident_template_without_const_param() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_type_annotation_required() {
     let source = r#"
         # intro let without type annotation - should fail
@@ -204,7 +204,7 @@ fn test_intro_type_annotation_required() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_with_type_annotation_success() {
     let source = r#"
         macro init_var():
@@ -223,7 +223,7 @@ fn test_intro_with_type_annotation_success() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_multiple_macros_ordering() {
     let source = r#"
         # Define macros in order
@@ -249,7 +249,7 @@ fn test_multiple_macros_ordering() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_multiple_symbols_no_conflict() {
     let source = r#"
         macro init_multiple():
@@ -273,7 +273,7 @@ fn test_intro_multiple_symbols_no_conflict() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_duplicate_symbols_within_macro() {
     let source = r#"
         # Macro introduces same symbol twice - should fail
@@ -295,7 +295,7 @@ fn test_intro_duplicate_symbols_within_macro() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_for_loop_with_const_range() {
     let source = r#"
         macro generate_vars(const COUNT):
@@ -316,7 +316,7 @@ fn test_intro_for_loop_with_const_range() {
 }
 
 #[test]
-#[ignore = "Macro validation not fully implemented"]
+#[ignore = "Advanced macro syntax (intro/emit blocks) not implemented in parser"]
 fn test_intro_conditional_with_const_condition() {
     let source = r#"
         macro conditional_intro(const FLAG):

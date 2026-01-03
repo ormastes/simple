@@ -9,7 +9,9 @@ use simple_parser::ast::{Argument, Expr, ClassDef, FunctionDef};
 use std::collections::HashMap;
 
 // Import parent interpreter types and functions
-use super::{Enums, ImplMethods, evaluate_expr, find_and_exec_method, try_method_missing};
+use super::{Enums, ImplMethods, evaluate_expr, CONTEXT_OBJECT};
+use super::interpreter_method::find_and_exec_method_with_self;
+use super::interpreter_helpers::try_method_missing;
 
 pub(super) fn dispatch_context_method(
     ctx: &Value,
@@ -22,12 +24,14 @@ pub(super) fn dispatch_context_method(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     if let Value::Object { class, fields } = ctx {
-        // Try to find and execute the method
-        if let Some(result) = find_and_exec_method(method, args, class, fields, env, functions, classes, enums, impl_methods)? {
+        // Try to find and execute the method, tracking self updates
+        if let Some((result, updated_self)) = find_and_exec_method_with_self(method, args, class.as_str(), fields, env, functions, classes, enums, impl_methods)? {
+            // Update the context object with the modified self
+            CONTEXT_OBJECT.with(|cell| *cell.borrow_mut() = Some(updated_self));
             return Ok(result);
         }
-        // Try method_missing hook
-        if let Some(result) = try_method_missing(method, args, class, fields, env, functions, classes, enums, impl_methods)? {
+        // Try method_missing hook if direct method not found
+        if let Some(result) = try_method_missing(method, args, class.as_str(), fields, env, functions, classes, enums, impl_methods)? {
             return Ok(result);
         }
         return Err(CompileError::Semantic(format!("context object has no method '{}'", method)));

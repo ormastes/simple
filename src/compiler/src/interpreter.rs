@@ -229,6 +229,8 @@ thread_local! {
     pub(crate) static EXTERN_FUNCTIONS: RefCell<std::collections::HashSet<String>> = RefCell::new(std::collections::HashSet::new());
     /// Current context object for context blocks (DSL support)
     pub(crate) static CONTEXT_OBJECT: RefCell<Option<Value>> = RefCell::new(None);
+    /// Name of the variable holding the context object (for mutation persistence)
+    pub(crate) static CONTEXT_VAR_NAME: RefCell<Option<String>> = RefCell::new(None);
     /// Accumulated yield values during generator execution
     pub(crate) static GENERATOR_YIELDS: RefCell<Option<Vec<Value>>> = RefCell::new(None);
     /// User-defined macros
