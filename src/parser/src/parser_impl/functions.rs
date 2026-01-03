@@ -41,7 +41,7 @@ impl<'a> Parser<'a> {
         // Allow keywords like 'new', 'type', etc. as function names
         let name = self.expect_method_name()?;
         // Parse optional generic parameters: fn foo<T, U>(...)
-        let generic_params = self.parse_generic_params()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
         let params = self.parse_parameters()?;
 
         let return_type = if self.check(&TokenKind::Arrow) {

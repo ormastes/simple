@@ -28,7 +28,7 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Struct)?;
         let name = self.expect_identifier()?;
-        let generic_params = self.parse_generic_params()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
         let where_clause = self.parse_where_clause()?;
         // Parse fields, optional inline methods, and optional invariant
         let (fields, methods, invariant) = self.parse_indented_fields_and_methods()?;
@@ -60,7 +60,7 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Class)?;
         let name = self.expect_identifier()?;
-        let generic_params = self.parse_generic_params()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
 
         let parent = if self.check(&TokenKind::LParen) {
             self.advance();
@@ -126,7 +126,7 @@ impl<'a> Parser<'a> {
         attributes: Vec<Attribute>,
     ) -> Result<Node, ParseError> {
         let name = self.expect_identifier()?;
-        let generic_params = self.parse_generic_params()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
         let where_clause = self.parse_where_clause()?;
 
         self.expect(&TokenKind::Colon)?;
@@ -272,7 +272,7 @@ impl<'a> Parser<'a> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Trait)?;
         let name = self.expect_identifier()?;
-        let generic_params = self.parse_generic_params()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
         let where_clause = self.parse_where_clause()?;
 
         let (associated_types, methods) = self.parse_indented_trait_body()?;
@@ -303,7 +303,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Impl)?;
 
         // Parse optional generic params for impl block: impl<T> Trait for Type<T>
-        let generic_params = self.parse_generic_params()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
 
         let first_name = self.expect_identifier()?;
 
@@ -587,7 +587,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Fn)?;
 
         let name = self.expect_identifier()?;
-        let generic_params = self.parse_generic_params()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
         let params = self.parse_parameters()?;
 
         let return_type = if self.check(&TokenKind::Arrow) {

@@ -219,6 +219,34 @@ pub struct WhereBound {
 /// A where clause containing multiple bounds
 pub type WhereClause = Vec<WhereBound>;
 
+/// A generic parameter: either a type parameter or a const parameter
+///
+/// Example:
+/// ```simple
+/// struct Array[T, const N: usize]:  // T is TypeParam, N is ConstParam
+///     data: T
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub enum GenericParam {
+    /// Type parameter: T, U, etc.
+    Type(String),
+    /// Const parameter: const N: usize
+    Const {
+        name: String,
+        ty: Type,
+    },
+}
+
+impl GenericParam {
+    /// Get the name of the parameter
+    pub fn name(&self) -> &str {
+        match self {
+            GenericParam::Type(name) => name,
+            GenericParam::Const { name, .. } => name,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Parameter {
     pub span: Span,
