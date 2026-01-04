@@ -10,8 +10,8 @@ impl<'a> Parser<'a> {
     pub(crate) fn advance(&mut self) {
         self.previous = std::mem::replace(
             &mut self.current,
-            self.pending_token
-                .take()
+            self.pending_tokens
+                .pop_front()
                 .unwrap_or_else(|| self.lexer.next_token()),
         );
     }
@@ -34,40 +34,60 @@ impl<'a> Parser<'a> {
         self.advance();
         let result = self.check(kind);
 
-        // Restore state
-        self.pending_token = Some(self.current.clone());
+        // Restore state - push current to front of pending tokens
+        self.pending_tokens.push_front(self.current.clone());
         self.current = saved_current;
         self.previous = saved_previous;
 
         result
     }
 
-    /// Peek through newlines and indents to check if the next token is a dot.
-    /// Used for multi-line method chaining: obj.method()\n    .another()
-    /// Only peeks through NEWLINE and INDENT (NOT DEDENT) to avoid breaking if-else.
+    /// Peek through newlines to check if the next meaningful token matches.
+    /// Used for multi-line method chaining: obj.method()\n.another()
+    /// Only peeks through NEWLINE (NOT INDENT/DEDENT) to preserve indentation structure.
     pub(crate) fn peek_through_newlines_and_indents_is(&mut self, kind: &TokenKind) -> bool {
-        // Save current state
-        let saved_current = self.current.clone();
-        let saved_previous = self.previous.clone();
+        // Count how many NEWLINE tokens are at current position
+        // We don't actually consume anything - just peek ahead using pending_tokens buffer
 
-        // Skip through newlines and indents only (NOT dedents)
-        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+        let mut lookahead_pos = 0;
+
+        // Look through existing pending_tokens and buffer more from lexer if needed
+        loop {
+            // Get the token at lookahead_pos
+            let token = if lookahead_pos == 0 {
+                &self.current
+            } else if lookahead_pos <= self.pending_tokens.len() {
+                &self.pending_tokens[lookahead_pos - 1]
+            } else {
+                // Need to buffer more tokens from lexer
+                let tok = self.lexer.next_token();
+                self.pending_tokens.push_back(tok);
+                self.pending_tokens.back().unwrap()
+            };
+
+            // Only skip through NEWLINE tokens, not INDENT/DEDENT
+            // This preserves indentation structure for block parsing
+            if matches!(token.kind, TokenKind::Newline) {
+                lookahead_pos += 1;
+            } else {
+                // Found non-NEWLINE token - check if it's what we want
+                return std::mem::discriminant(&token.kind) == std::mem::discriminant(kind);
+            }
+
+            // Safety limit to prevent infinite loops
+            if lookahead_pos > 100 {
+                return false;
+            }
+        }
+    }
+
+    /// Skip through newlines when we've confirmed a dot follows.
+    /// Used for multi-line method chaining: obj.method()\n.another()
+    /// Call this AFTER peek_through_newlines_and_indents_is returns true.
+    pub(crate) fn skip_newlines_and_indents_for_method_chain(&mut self) {
+        while matches!(self.current.kind, TokenKind::Newline) {
             self.advance();
         }
-
-        // Check if current token matches the target kind
-        let result = self.check(kind);
-
-        // Restore state
-        // Only set pending_token if we found what we're looking for
-        // This avoids polluting the token stream when the peek fails
-        if result {
-            self.pending_token = Some(self.current.clone());
-        }
-        self.current = saved_current;
-        self.previous = saved_previous;
-
-        result
     }
 
     /// Check if the next token after the current could start a type.
@@ -92,8 +112,8 @@ impl<'a> Parser<'a> {
                 | TokenKind::Ampersand
         );
 
-        // Restore state
-        self.pending_token = Some(self.current.clone());
+        // Restore state - push current to front of pending tokens
+        self.pending_tokens.push_front(self.current.clone());
         self.current = saved_current;
         self.previous = saved_previous;
 
@@ -242,6 +262,15 @@ impl<'a> Parser<'a> {
             TokenKind::False => "false",
             TokenKind::Crate => "crate",  // Allow "crate" keyword in paths
             TokenKind::Result => "result",  // Allow "result" keyword in paths
+            TokenKind::To => "to",  // Allow "to" in paths (e.g., to_sdn)
+            TokenKind::NotTo => "not_to",  // Allow "not_to" in paths
+            TokenKind::Context => "context",  // Allow "context" in paths
+            TokenKind::Feature => "feature",  // Allow BDD keywords in paths
+            TokenKind::Scenario => "scenario",
+            TokenKind::Given => "given",
+            TokenKind::When => "when",
+            TokenKind::Then => "then",
+            TokenKind::Old => "old",  // Allow "old" in paths
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -313,6 +342,13 @@ impl<'a> Parser<'a> {
             TokenKind::With => "with",
             // Allow 'default' as method name (e.g., Type::default())
             TokenKind::Default => "default",
+            // Allow BDD/Gherkin keywords as method/field names
+            TokenKind::Context => "context",
+            TokenKind::Feature => "feature",
+            TokenKind::Scenario => "scenario",
+            TokenKind::Given => "given",
+            TokenKind::When => "when",
+            TokenKind::Then => "then",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",

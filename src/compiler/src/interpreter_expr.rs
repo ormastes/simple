@@ -332,6 +332,12 @@ pub(crate) fn evaluate_expr(
                     class_name: name.clone(),
                 });
             }
+            // Check enums - return as EnumType for variant construction (EnumName.Variant)
+            if enums.contains_key(name) {
+                return Ok(Value::EnumType {
+                    enum_name: name.clone(),
+                });
+            }
             // Check module-level globals (for functions accessing module-level let mut variables)
             let global_val = MODULE_GLOBALS.with(|cell| cell.borrow().get(name).cloned());
             if let Some(val) = global_val {
@@ -856,6 +862,47 @@ pub(crate) fn evaluate_expr(
                         }
                     } else {
                         Err(CompileError::Semantic(format!("unknown class {class_name}")))
+                    }
+                }
+                // Enum type field access - construct enum variants
+                // EnumName.VariantName syntax
+                Value::EnumType { ref enum_name } => {
+                    if let Some(enum_def) = enums.get(enum_name).cloned() {
+                        // Check if the field is a valid variant name
+                        let variant_opt = enum_def.variants.iter().find(|v| v.name == *field);
+                        if let Some(variant) = variant_opt {
+                            // For unit variants (no fields), return the enum value directly
+                            // For variants with data, we'd need to return a constructor function
+                            let has_fields = variant.fields.as_ref().map_or(false, |f| !f.is_empty());
+                            if !has_fields {
+                                Ok(Value::Enum {
+                                    enum_name: enum_name.clone(),
+                                    variant: field.clone(),
+                                    payload: None,
+                                })
+                            } else {
+                                // Return a constructor-like callable for variants with data
+                                // For now, we return a lambda that creates the enum with payload
+                                // The actual payload will be provided when the result is called
+                                Ok(Value::EnumVariantConstructor {
+                                    enum_name: enum_name.clone(),
+                                    variant_name: field.clone(),
+                                })
+                            }
+                        } else {
+                            // Check for enum methods
+                            if let Some(method) = enum_def.methods.iter().find(|m| m.name == *field) {
+                                Ok(Value::Function {
+                                    name: method.name.clone(),
+                                    def: Box::new(method.clone()),
+                                    captured_env: Env::new(),
+                                })
+                            } else {
+                                Err(CompileError::Semantic(format!("unknown variant or method '{field}' on enum {enum_name}")))
+                            }
+                        }
+                    } else {
+                        Err(CompileError::Semantic(format!("unknown enum {enum_name}")))
                     }
                 }
                 // String property access (e.g., str.len, str.is_empty)

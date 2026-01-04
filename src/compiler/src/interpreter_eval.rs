@@ -264,6 +264,13 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             }
             Node::Enum(e) => {
                 enums.insert(e.name.clone(), e.clone());
+                // Also register in env so EnumName.VariantName syntax works
+                env.insert(
+                    e.name.clone(),
+                    Value::EnumType {
+                        enum_name: e.name.clone(),
+                    },
+                );
             }
             Node::Class(c) => {
                 // Process macro invocations in class body to get introduced fields
@@ -650,12 +657,15 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Try to load the module and merge its definitions into global state
                 match load_and_merge_module(use_stmt, None, &mut functions, &mut classes, &mut enums) {
                     Ok(value) => {
+                        eprintln!("[DEBUG] UseStmt: inserting '{}' with value type", binding_name);
                         env.insert(binding_name.clone(), value);
+                        eprintln!("[DEBUG] env now has '{}': {}", binding_name, env.contains_key(&binding_name));
                     }
-                    Err(_e) => {
+                    Err(e) => {
                         // Module loading failed - use empty dict as fallback
                         // This allows the program to continue, with errors appearing
                         // when the module members are accessed
+                        eprintln!("[DEBUG] UseStmt: module loading failed for '{}': {:?}", binding_name, e);
                         env.insert(binding_name.clone(), Value::Dict(HashMap::new()));
                     }
                 }

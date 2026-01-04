@@ -616,6 +616,31 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Identifier("gpu".to_string()))
             }
+            // Allow BDD/Gherkin keywords as identifiers in expressions
+            TokenKind::Context => {
+                self.advance();
+                Ok(Expr::Identifier("context".to_string()))
+            }
+            TokenKind::Feature => {
+                self.advance();
+                Ok(Expr::Identifier("feature".to_string()))
+            }
+            TokenKind::Scenario => {
+                self.advance();
+                Ok(Expr::Identifier("scenario".to_string()))
+            }
+            TokenKind::Given => {
+                self.advance();
+                Ok(Expr::Identifier("given".to_string()))
+            }
+            TokenKind::When => {
+                self.advance();
+                Ok(Expr::Identifier("when".to_string()))
+            }
+            TokenKind::Then => {
+                self.advance();
+                Ok(Expr::Identifier("then".to_string()))
+            }
             // Simple Math: Grid literal (#1910-#1919)
             TokenKind::Grid => self.parse_grid_literal(),
             // Simple Math: Tensor literal (#1910-#1919)

@@ -541,6 +541,17 @@ pub enum Value {
     Constructor {
         class_name: String,
     },
+    /// Enum type reference - allows EnumName.VariantName syntax
+    /// Used for enum variant construction: Color.Red, Option.Some(x)
+    EnumType {
+        enum_name: String,
+    },
+    /// Enum variant constructor - callable to create enum with payload
+    /// Used for variants with data: Option.Some(x), Result.Ok(value)
+    EnumVariantConstructor {
+        enum_name: String,
+        variant_name: String,
+    },
     /// Dynamic trait object - wraps a value with its trait for dynamic dispatch
     /// Enables polymorphism via trait implementations (dyn Trait syntax)
     TraitObject {

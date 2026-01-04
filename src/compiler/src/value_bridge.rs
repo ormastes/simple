@@ -326,6 +326,19 @@ impl From<&Value> for BridgeValue {
                 payload: 0,
                 extended: CString::new(class_name.as_str()).unwrap().into_raw() as *mut u8,
             },
+            Value::EnumType { enum_name } => BridgeValue {
+                tag: bridge_tags::ENUM,  // Use ENUM tag for enum types
+                payload: 0,
+                extended: CString::new(enum_name.as_str()).unwrap().into_raw() as *mut u8,
+            },
+            Value::EnumVariantConstructor { enum_name, variant_name } => {
+                let full_name = format!("{}::{}", enum_name, variant_name);
+                BridgeValue {
+                    tag: bridge_tags::ENUM,  // Use ENUM tag for variant constructors
+                    payload: 0,
+                    extended: CString::new(full_name).unwrap().into_raw() as *mut u8,
+                }
+            },
             Value::Actor(_) => BridgeValue {
                 tag: bridge_tags::ACTOR,
                 payload: 0,

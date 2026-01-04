@@ -242,6 +242,31 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Pattern::Identifier("not_to".to_string()))
             }
+            // Allow BDD/Gherkin keywords to be used as identifier patterns
+            TokenKind::Context => {
+                self.advance();
+                Ok(Pattern::Identifier("context".to_string()))
+            }
+            TokenKind::Feature => {
+                self.advance();
+                Ok(Pattern::Identifier("feature".to_string()))
+            }
+            TokenKind::Scenario => {
+                self.advance();
+                Ok(Pattern::Identifier("scenario".to_string()))
+            }
+            TokenKind::Given => {
+                self.advance();
+                Ok(Pattern::Identifier("given".to_string()))
+            }
+            TokenKind::When => {
+                self.advance();
+                Ok(Pattern::Identifier("when".to_string()))
+            }
+            TokenKind::Then => {
+                self.advance();
+                Ok(Pattern::Identifier("then".to_string()))
+            }
             _ => Err(ParseError::unexpected_token(
                 "pattern",
                 format!("{:?}", self.current.kind),

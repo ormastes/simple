@@ -252,7 +252,7 @@ impl<'a> Parser<'a> {
                     } else {
                         // Not a named field, backtrack and parse as type
                         // Restore position (put current token back)
-                        self.pending_token = Some(self.current.clone());
+                        self.pending_tokens.push_front(self.current.clone());
                         self.current = saved_current;
                         let ty = self.parse_type()?;
                         EnumField { name: None, ty }

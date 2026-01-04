@@ -60,12 +60,19 @@ use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn, with_effect_c
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
 use simple_parser::ast::{Argument, Parameter, Type, SelfMode, FunctionDef, ClassDef, EnumDef};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 type Enums = HashMap<String, EnumDef>;
+
+// Thread-local to track classes currently executing their `new` method.
+// This prevents infinite recursion when `new` method calls `ClassName(args)` internally.
+thread_local! {
+    static IN_NEW_METHOD: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 const METHOD_SELF: &str = "self";
@@ -407,86 +414,103 @@ pub(crate) fn instantiate_class(
         fields.insert(field.name.clone(), val);
     }
 
+    // Check if we're already inside this class's `new` method to prevent recursion
+    let already_in_new = IN_NEW_METHOD.with(|set| set.borrow().contains(class_name));
+
     if let Some(new_method) = class_def.methods.iter().find(|m| m.name == METHOD_NEW) {
-        let self_val = Value::Object {
-            class: class_name.to_string(),
-            fields: fields.clone(),
-        };
+        // If already in this class's `new` method, skip calling `new` again (prevents recursion)
+        if already_in_new {
+            // Fall through to field-based construction below
+        } else {
+            let self_val = Value::Object {
+                class: class_name.to_string(),
+                fields: fields.clone(),
+            };
 
-        let mut local_env = env.clone();
-        local_env.insert(METHOD_SELF.to_string(), self_val);
+            let mut local_env = env.clone();
+            local_env.insert(METHOD_SELF.to_string(), self_val);
 
-        for (k, v) in &fields {
-            local_env.insert(k.clone(), v.clone());
-        }
+            for (k, v) in &fields {
+                local_env.insert(k.clone(), v.clone());
+            }
 
-        let self_mode = SelfMode::SkipSelf;
-        let injected = if has_inject_attr(new_method) {
-            resolve_injected_args(
+            let self_mode = SelfMode::SkipSelf;
+            let injected = if has_inject_attr(new_method) {
+                resolve_injected_args(
+                    &new_method.params,
+                    args,
+                    class_name,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                    self_mode,
+                )?
+            } else {
+                HashMap::new()
+            };
+            let bound = bind_args_with_injected(
                 &new_method.params,
                 args,
-                class_name,
                 env,
                 functions,
                 classes,
                 enums,
                 impl_methods,
                 self_mode,
-            )?
-        } else {
-            HashMap::new()
-        };
-        let bound = bind_args_with_injected(
-            &new_method.params,
-            args,
-            env,
-            functions,
-            classes,
-            enums,
-            impl_methods,
-            self_mode,
-            &injected,
-        )?;
-        for (name, val) in bound {
-            local_env.insert(name, val);
-        }
-
-        match exec_block(&new_method.body, &mut local_env, functions, classes, enums, impl_methods) {
-            Ok(Control::Return(v)) => Ok(v),
-            Ok(_) => {
-                Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
-                    class: class_name.to_string(),
-                    fields,
-                }))
+                &injected,
+            )?;
+            for (name, val) in bound {
+                local_env.insert(name, val);
             }
-            Err(CompileError::TryError(val)) => Ok(val),
-            Err(e) => Err(e),
-        }
-    } else {
-        let mut positional_idx = 0;
-        for arg in args {
-            let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
-            if let Some(name) = &arg.name {
-                if !fields.contains_key(name) {
-                    bail_semantic!("unknown field {} for class {}", name, class_name);
-                }
-                fields.insert(name.clone(), val);
-            } else {
-                if positional_idx < class_def.fields.len() {
-                    let field_name = &class_def.fields[positional_idx].name;
-                    fields.insert(field_name.clone(), val);
-                    positional_idx += 1;
-                } else {
-                    bail_semantic!("too many arguments for class {}", class_name);
-                }
-            }
-        }
 
-        Ok(Value::Object {
-            class: class_name.to_string(),
-            fields,
-        })
+            // Mark this class as currently in its `new` method
+            IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
+
+            let result = match exec_block(&new_method.body, &mut local_env, functions, classes, enums, impl_methods) {
+                Ok(Control::Return(v)) => Ok(v),
+                Ok(_) => {
+                    Ok(local_env.get("self").cloned().unwrap_or(Value::Object {
+                        class: class_name.to_string(),
+                        fields,
+                    }))
+                }
+                Err(CompileError::TryError(val)) => Ok(val),
+                Err(e) => Err(e),
+            };
+
+            // Remove from tracking set
+            IN_NEW_METHOD.with(|set| set.borrow_mut().remove(class_name));
+
+            return result;
+        }
     }
+
+    // Field-based construction (no `new` method or already inside `new`)
+    let mut positional_idx = 0;
+    for arg in args {
+        let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+        if let Some(name) = &arg.name {
+            if !fields.contains_key(name) {
+                bail_semantic!("unknown field {} for class {}", name, class_name);
+            }
+            fields.insert(name.clone(), val);
+        } else {
+            if positional_idx < class_def.fields.len() {
+                let field_name = &class_def.fields[positional_idx].name;
+                fields.insert(field_name.clone(), val);
+                positional_idx += 1;
+            } else {
+                bail_semantic!("too many arguments for class {}", class_name);
+            }
+        }
+    }
+
+    Ok(Value::Object {
+        class: class_name.to_string(),
+        fields,
+    })
 }
 
 fn has_inject_attr(method: &FunctionDef) -> bool {

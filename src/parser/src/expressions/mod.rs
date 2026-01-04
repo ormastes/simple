@@ -266,6 +266,13 @@ impl<'a> Parser<'a> {
                 | TokenKind::Type       // 'type' can be used as variable name
                 | TokenKind::Out        // 'out' can be used as variable name
                 | TokenKind::OutErr     // 'out_err' can be used as variable name
+                // BDD/Gherkin keywords can be used as variable names
+                | TokenKind::Context
+                | TokenKind::Feature
+                | TokenKind::Scenario
+                | TokenKind::Given
+                | TokenKind::When
+                | TokenKind::Then
                 | TokenKind::LParen
                 | TokenKind::LBracket
                 | TokenKind::LBrace
@@ -365,9 +372,15 @@ impl<'a> Parser<'a> {
     // Binary expression parsing with precedence (using macros to reduce duplication)
     // Precedence (lowest to highest): or, and, equality, comparison, bitwise_or, bitwise_xor, bitwise_and, shift, term, factor, power
 
-    // Single-token operators
-    parse_binary_single!(parse_or, parse_and, Or, BinOp::Or);
-    parse_binary_single!(parse_and, parse_equality, And, BinOp::And);
+    // Logical operators (support both keyword and symbol forms: or/||, and/&&)
+    parse_binary_multi!(parse_or, parse_and,
+        Or => BinOp::Or,
+        DoublePipe => BinOp::Or,
+    );
+    parse_binary_multi!(parse_and, parse_equality,
+        And => BinOp::And,
+        DoubleAmp => BinOp::And,
+    );
     parse_binary_single!(parse_bitwise_or, parse_bitwise_xor, Pipe, BinOp::BitOr);
     parse_binary_single!(parse_bitwise_xor, parse_bitwise_and, Caret, BinOp::BitXor);
     parse_binary_single!(parse_bitwise_and, parse_shift, Ampersand, BinOp::BitAnd);
@@ -714,6 +727,11 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Dot => {
                     self.advance();
+                    // Skip only newlines after dot for multi-line chaining: obj.\nmethod()
+                    // Do NOT skip INDENT to preserve block structure
+                    while matches!(self.current.kind, TokenKind::Newline) {
+                        self.advance();
+                    }
                     // Support tuple element access: tuple.0, tuple.1
                     if let TokenKind::Integer(n) = &self.current.kind {
                         let index = *n;
@@ -848,28 +866,13 @@ impl<'a> Parser<'a> {
                         target_type,
                     };
                 }
-                TokenKind::Indent => {
-                    // Direct INDENT followed by DOT (less common but possible)
-                    let saved_current = self.current.clone();
-                    let saved_previous = self.previous.clone();
-
-                    self.advance(); // Look at token after INDENT
-                    let is_dot = self.check(&TokenKind::Dot);
-
-                    // Restore state - only set pending_token if we found a DOT
-                    if is_dot {
-                        self.pending_token = Some(self.current.clone());
-                    }
-                    self.current = saved_current;
-                    self.previous = saved_previous;
-
-                    if is_dot {
-                        // It's a method chain continuation, consume the INDENT
-                        self.advance();
-                        // Continue loop to parse the DOT
-                        continue;
+                TokenKind::Newline => {
+                    // Multi-line method chaining: obj.method()\n    .another()
+                    // Check if a dot follows after newlines/indents
+                    if self.peek_through_newlines_and_indents_is(&TokenKind::Dot) {
+                        self.skip_newlines_and_indents_for_method_chain();
+                        // Now self.current should be Dot, continue the loop
                     } else {
-                        // Not a method chain, break out of postfix
                         break;
                     }
                 }

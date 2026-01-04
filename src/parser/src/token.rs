@@ -197,9 +197,11 @@ pub enum TokenKind {
     StarAssign,  // *=
     SlashAssign, // /=
 
-    Ampersand,  // &
-    Pipe,       // |
-    Caret,      // ^
+    Ampersand,   // &
+    Pipe,        // |
+    DoublePipe,  // ||
+    DoubleAmp,   // &&
+    Caret,       // ^
     Tilde,      // ~
     ShiftLeft,  // <<
     ShiftRight, // >>
