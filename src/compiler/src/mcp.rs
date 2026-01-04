@@ -556,6 +556,7 @@ mod tests {
             attributes: vec![],
             doc_comment: None,
             invariant: None,
+            macro_invocations: vec![],
         })
     }
 
