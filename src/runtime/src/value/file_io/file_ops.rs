@@ -16,6 +16,27 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::io::IntoRawFd;
 
 // =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Extract string from RuntimeValue (heap pointer to RuntimeString)
+unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
+    if !val.is_heap() {
+        return None;
+    }
+
+    let ptr = val.as_heap_ptr() as *const super::super::collections::RuntimeString;
+    if ptr.is_null() {
+        return None;
+    }
+
+    // Get bytes from RuntimeString
+    let s = &*ptr;
+    let bytes = s.as_bytes();
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
+// =============================================================================
 // Standard File Operations
 // =============================================================================
 
@@ -30,31 +51,33 @@ use std::os::unix::io::IntoRawFd;
 #[no_mangle]
 pub extern "C" fn native_fs_open(path: RuntimeValue, mode: i64) -> RuntimeValue {
     // Extract path string from RuntimeValue
-    // TODO: Implement proper string extraction from RuntimeValue
-    let path_str = "/tmp/test.txt";
+    let path_str = match unsafe { runtime_value_to_string(path) } {
+        Some(s) => s,
+        None => return RuntimeValue::NIL,
+    };
 
     let file_result = match mode {
         0 => {
             // Read
-            std::fs::File::open(path_str)
+            std::fs::File::open(&path_str)
         }
         1 => {
             // Write
             std::fs::OpenOptions::new()
                 .write(true)
                 .truncate(true)
-                .open(path_str)
+                .open(&path_str)
         }
         2 => {
             // Create
-            std::fs::File::create(path_str)
+            std::fs::File::create(&path_str)
         }
         3 => {
             // Append
             std::fs::OpenOptions::new()
                 .write(true)
                 .append(true)
-                .open(path_str)
+                .open(&path_str)
         }
         _ => return RuntimeValue::NIL,
     };

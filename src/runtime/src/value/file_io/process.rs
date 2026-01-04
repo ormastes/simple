@@ -154,45 +154,68 @@ pub extern "C" fn native_process_kill(pid: i64) -> RuntimeValue {
 }
 
 // =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Extract string from RuntimeValue (heap pointer to RuntimeString)
+unsafe fn runtime_value_to_string(val: RuntimeValue) -> Option<String> {
+    if !val.is_heap() {
+        return None;
+    }
+
+    let ptr = val.as_heap_ptr() as *const super::super::collections::RuntimeString;
+    if ptr.is_null() {
+        return None;
+    }
+
+    // Get bytes from RuntimeString
+    let s = &*ptr;
+    let bytes = s.as_bytes();
+    String::from_utf8(bytes.to_vec()).ok()
+}
+
+/// Create RuntimeString from Rust String
+fn string_to_runtime_value(s: &str) -> RuntimeValue {
+    super::super::collections::rt_string_new(s.as_ptr(), s.len() as u64)
+}
+
+// =============================================================================
 // Path Resolution
 // =============================================================================
 
 /// Resolve relative path to absolute path
 ///
 /// Converts a potentially relative path to an absolute filesystem path.
-/// Currently a placeholder implementation pending RuntimeString extraction support.
 ///
 /// # Arguments
 /// * `path` - File path (potentially relative)
 ///
 /// # Returns
 /// Absolute path as RuntimeValue
-///
-/// # Implementation Notes
-/// This is a stub pending full implementation. Once RuntimeString extraction
-/// is implemented, this will:
-/// 1. Extract string from RuntimeValue
-/// 2. Resolve relative to current working directory
-/// 3. Return absolute path as RuntimeValue
 #[no_mangle]
 pub extern "C" fn native_path_resolve(path: RuntimeValue) -> RuntimeValue {
-    // TODO: Extract actual path from RuntimeValue (currently placeholder)
-    // For now, we just return the path as-is
-    // In a full implementation, this would:
-    // 1. Extract string from RuntimeValue
-    // 2. Resolve relative to current working directory
-    // 3. Return absolute path as RuntimeValue
+    // Extract path string from RuntimeValue
+    let path_str = match unsafe { runtime_value_to_string(path) } {
+        Some(s) => s,
+        None => return path, // Return as-is if not a valid string
+    };
 
-    #[cfg(target_family = "unix")]
-    {
-        // Placeholder: In real implementation, extract string from RuntimeValue
-        // For now, assume path is already absolute and return it
-        // This is a stub until RuntimeString extraction is implemented
-        path
-    }
+    // Resolve to absolute path
+    let resolved = match std::path::Path::new(&path_str).canonicalize() {
+        Ok(abs_path) => abs_path.to_string_lossy().to_string(),
+        Err(_) => {
+            // If canonicalize fails (path doesn't exist), try to resolve manually
+            if std::path::Path::new(&path_str).is_absolute() {
+                path_str
+            } else {
+                // Prepend current working directory
+                match std::env::current_dir() {
+                    Ok(cwd) => cwd.join(&path_str).to_string_lossy().to_string(),
+                    Err(_) => path_str,
+                }
+            }
+        }
+    };
 
-    #[cfg(not(target_family = "unix"))]
-    {
-        path
-    }
+    string_to_runtime_value(&resolved)
 }

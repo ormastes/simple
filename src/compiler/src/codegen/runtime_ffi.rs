@@ -480,6 +480,25 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // native_http_send(request_ptr: i64, timeout_ns: i64) -> (response_ptr: i64, error_code: i64)
     RuntimeFuncSpec::new("native_http_send", &[I64, I64], &[I64, I64]),
+    // =========================================================================
+    // Coverage instrumentation operations
+    // =========================================================================
+    // rt_coverage_decision_probe(decision_id: u32, result: bool, file: *const i8, line: u32, column: u32) -> ()
+    RuntimeFuncSpec::new("rt_coverage_decision_probe", &[I32, I8, I64, I32, I32], &[]),
+    // rt_coverage_condition_probe(decision_id: u32, condition_id: u32, result: bool, file: *const i8, line: u32, column: u32) -> ()
+    RuntimeFuncSpec::new("rt_coverage_condition_probe", &[I32, I32, I8, I64, I32, I32], &[]),
+    // rt_coverage_path_probe(path_id: u32, block_id: u32) -> ()
+    RuntimeFuncSpec::new("rt_coverage_path_probe", &[I32, I32], &[]),
+    // rt_coverage_path_finalize(path_id: u32) -> ()
+    RuntimeFuncSpec::new("rt_coverage_path_finalize", &[I32], &[]),
+    // rt_coverage_dump_sdn() -> *mut i8
+    RuntimeFuncSpec::new("rt_coverage_dump_sdn", &[], &[I64]),
+    // rt_coverage_free_sdn(ptr: *mut i8) -> ()
+    RuntimeFuncSpec::new("rt_coverage_free_sdn", &[I64], &[]),
+    // rt_coverage_clear() -> ()
+    RuntimeFuncSpec::new("rt_coverage_clear", &[], &[]),
+    // rt_coverage_enabled() -> bool
+    RuntimeFuncSpec::new("rt_coverage_enabled", &[], &[I8]),
 ];
 
 #[cfg(test)]
