@@ -657,15 +657,12 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Try to load the module and merge its definitions into global state
                 match load_and_merge_module(use_stmt, None, &mut functions, &mut classes, &mut enums) {
                     Ok(value) => {
-                        eprintln!("[DEBUG] UseStmt: inserting '{}' with value type", binding_name);
                         env.insert(binding_name.clone(), value);
-                        eprintln!("[DEBUG] env now has '{}': {}", binding_name, env.contains_key(&binding_name));
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         // Module loading failed - use empty dict as fallback
                         // This allows the program to continue, with errors appearing
                         // when the module members are accessed
-                        eprintln!("[DEBUG] UseStmt: module loading failed for '{}': {:?}", binding_name, e);
                         env.insert(binding_name.clone(), Value::Dict(HashMap::new()));
                     }
                 }

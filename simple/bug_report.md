@@ -19,12 +19,13 @@
 | Module-Level Mutable Globals | ✅ FIXED | High |
 | BDD Syntax Mismatch | ✅ FIXED | Medium |
 | Module Import Class via Alias | 🔴 OPEN | Medium |
-| Doc Comments before Imports | 🔴 OPEN | Medium |
+| Keywords in Import Paths | ✅ FIXED | Medium |
 | `||` Operator as Closure | ✅ FIXED | Medium |
 | Named Argument Limit | ✅ FIXED | High |
 | `context` Reserved Keyword | ✅ FIXED | High |
+| Multi-line Method Chaining | ✅ FIXED | Medium |
 
-**Summary:** 15 fixed, 3 open, 1 blocked
+**Summary:** 17 fixed, 2 open, 1 blocked
 
 ---
 
@@ -1057,85 +1058,52 @@ Open - the `use` statement workaround works for individual imports.
 
 ---
 
-## Parser Bug: /// Doc Comments Interfere with Import Parsing
+## Parser Bug: Keywords in Import Paths ✅ FIXED
 
 **Type:** Bug
 **Priority:** Medium
 **Discovered:** 2026-01-01
+**Resolved:** 2026-01-04
 **Component:** Parser (`src/parser/`)
 
 ### Description
 
-When a `///` doc comment block appears before an import statement that imports identifiers starting with keywords (like `to_sdn`, `to_json`), the parser fails with "expected expression, found To".
+When importing identifiers that start with keywords (like `to_sdn`, `to_json`, `context`), the parser failed with "expected expression, found To" because `to` is a keyword used in the BDD spec framework.
 
 ### Expected
 
-Doc comments should not interfere with subsequent import statements. The following should parse correctly:
+Keywords should be allowed as part of identifiers in import paths and groups:
 
 ```simple
-///
-Module documentation
-///
-
-import sdn.serializer.{to_sdn, to_json}
+import sdn.serializer.{to_sdn, to_json}  # Should work
+import core.context                       # Should work
 ```
 
-### Actual
+### Actual (Before Fix)
 
 Parser error: `Unexpected token: expected expression, found To`
 
-### Reproduction
+### Fix Applied
 
-Create a file with this content:
+Added keywords (`to`, `not_to`, `context`, BDD keywords like `feature`, `scenario`, `given`, `when`, `then`, `old`) to the `expect_path_segment()` function to allow them as valid path segments and import names.
 
-```simple
-///
-End-to-end tests
+### Files Changed
 
-Tests (JSON ↔ SDN)
-///
+- `src/parser/src/parser_helpers.rs` - Added keywords to `expect_path_segment()`
+- `src/parser/src/statements/module_system.rs` - Changed import group parsing to use `expect_path_segment()` instead of `expect_identifier()`
 
-import sdn.serializer.{to_sdn, to_json}
+### Note on `///...///` Syntax
 
-fn main():
-    pass
-```
+The original bug report mentioned `///...///` as multi-line doc comment delimiters. This syntax is **NOT supported**. Simple uses:
+- `/// text` - Single-line doc comment (content after `///` on same line)
+- `/** ... */` - Block doc comment
+- `"""..."""` - Triple-quoted docstring (for inline documentation)
 
-Result: Parse error "expected expression, found To"
-
-Without the doc comment, the same code parses successfully.
-
-### Workaround
-
-Replace `///` doc comments with regular `#` comments:
-
-```simple
-# End-to-end tests
-#
-# Tests (JSON ↔ SDN)
-
-import sdn.serializer.{to_sdn, to_json}
-```
-
-### Files Affected
-
-- `simple/std_lib/test/system/sdn/cli_spec.spl` (fixed)
-- `simple/std_lib/test/system/sdn/workflow_spec.spl` (fixed)
-- `simple/std_lib/test/system/sdn/file_io_spec.spl` (fixed)
-
-### Files Involved
-
-- `src/parser/src/parser_impl/doc_comments.rs` - Doc comment parsing
-- `src/parser/src/statements/module_system.rs` - Import statement parsing
-- `src/parser/src/lexer/identifiers.rs` - Keyword tokenization
-
-### Root Cause (Hypothesis)
-
-The doc comment parser may be leaving the parser in an inconsistent state or consuming tokens in a way that affects subsequent parsing. The "To" keyword is being recognized when it should be part of an identifier like "to_sdn".
+The `///` on a line by itself is just an empty doc comment, and text on subsequent lines is parsed as code, not documentation.
 
 ### Status
 
-**Workaround applied** - All affected test files have been changed to use `#` comments instead of `///` doc comments. The parser bug remains open for investigation.
+✅ **FIXED** (2026-01-04) - Keywords now work in import paths and groups.
 
 ---
 
@@ -1533,3 +1501,64 @@ Now `context` can be used as:
 - Field access: `obj.context`
 - Function arguments: `expect context == "hello"`
 - Pattern variables: `case {context: x} ->`
+
+---
+
+## Parser: Multi-line Method Chaining ✅ FIXED
+
+### Summary
+Parser now supports multi-line method chaining where dots can appear at the start or end of lines.
+
+**Type:** Feature/Bug Fix
+**Priority:** Medium
+**Discovered:** 2026-01-04
+**Resolved:** 2026-01-04
+**Component:** Parser (`src/parser/src/expressions/mod.rs`)
+
+### Description
+
+Method chaining across multiple lines was not supported. Users had to write all chained method calls on a single line.
+
+### Now Supported
+
+**Pattern 1: Dot at start of line (same indentation)**
+```simple
+let result = builder.new()
+.add(1)
+.mul(2)
+.build()
+```
+
+**Pattern 2: Dot at end of line**
+```simple
+let result = builder.new().
+add(1).
+mul(2).
+build()
+```
+
+**Pattern 3: Single line (always worked)**
+```simple
+let result = builder.new().add(1).mul(2).build()
+```
+
+### Limitation
+
+**NOT supported:** Indented dots (breaks block structure)
+```simple
+# This does NOT work:
+let result = builder.new()
+    .add(1)    # INDENT before dot causes issues
+    .mul(2)
+```
+
+For indented method chains, use parentheses or keep dots at same indentation level.
+
+### Files Changed
+
+- `src/parser/src/expressions/mod.rs` - Added `TokenKind::Newline` handling in `parse_postfix()` loop to check for dots after newlines
+- `src/parser/src/parser_helpers.rs` - Added `peek_through_newlines_and_indents_is()` and `skip_newlines_and_indents_for_method_chain()` helper functions
+
+### Status
+
+✅ **FIXED** (2026-01-04)

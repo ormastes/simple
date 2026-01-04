@@ -328,7 +328,11 @@ pub fn load_module_with_imports_validated(
                     }
                 }
 
+                // Add imported items for flattened access (functions/classes in global scope)
                 items.extend(imported.items);
+                // ALSO keep the UseStmt so evaluate_module can create the module binding
+                // This enables `import X as Y` and `Y.function()` syntax
+                items.push(item);
                 continue;
             }
         }
