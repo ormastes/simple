@@ -118,3 +118,57 @@ fn parse_struct_init_expression() {
     parse_ok("let p = Point { x: 1, y: 2 }");
     parse_ok("let p = Point {}");
 }
+
+// Doc comment parsing tests
+#[test]
+fn parse_struct_with_doc_comment() {
+    // Double-quoted strings become FStrings, which the parser handles
+    let items = parse("struct Person:\n    \"A person with a name and age.\"\n    name: str\n    age: i64");
+    if let Node::Struct(s) = &items[0] {
+        assert_eq!(s.name, "Person");
+        assert!(s.doc_comment.is_some(), "doc_comment should be present");
+        let doc = s.doc_comment.as_ref().unwrap();
+        assert_eq!(doc.content, "A person with a name and age.");
+        assert_eq!(s.fields.len(), 2);
+    } else {
+        panic!("expected struct");
+    }
+}
+
+#[test]
+fn parse_class_with_doc_comment() {
+    // Double-quoted strings become FStrings, which the parser handles
+    let items = parse("class Calculator:\n    \"A simple calculator class.\"\n    fn add(a, b):\n        return a + b");
+    if let Node::Class(c) = &items[0] {
+        assert_eq!(c.name, "Calculator");
+        assert!(c.doc_comment.is_some(), "doc_comment should be present");
+        let doc = c.doc_comment.as_ref().unwrap();
+        assert_eq!(doc.content, "A simple calculator class.");
+        assert_eq!(c.methods.len(), 1);
+    } else {
+        panic!("expected class");
+    }
+}
+
+#[test]
+fn parse_struct_without_doc_comment() {
+    let items = parse("struct Empty:\n    value: i64");
+    if let Node::Struct(s) = &items[0] {
+        assert_eq!(s.name, "Empty");
+        assert!(s.doc_comment.is_none(), "doc_comment should not be present");
+        assert_eq!(s.fields.len(), 1);
+    } else {
+        panic!("expected struct");
+    }
+}
+
+#[test]
+fn parse_class_without_doc_comment() {
+    let items = parse("class Basic:\n    fn method():\n        return 0");
+    if let Node::Class(c) = &items[0] {
+        assert_eq!(c.name, "Basic");
+        assert!(c.doc_comment.is_none(), "doc_comment should not be present");
+    } else {
+        panic!("expected class");
+    }
+}

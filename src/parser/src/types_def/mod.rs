@@ -30,8 +30,8 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params_as_strings()?;
         let where_clause = self.parse_where_clause()?;
-        // Parse fields, optional inline methods, and optional invariant
-        let (fields, methods, invariant) = self.parse_indented_fields_and_methods()?;
+        // Parse fields, optional inline methods, optional invariant, and doc comment
+        let (fields, methods, invariant, doc_comment) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Struct(StructDef {
             span: self.make_span(start_span),
@@ -42,7 +42,7 @@ impl<'a> Parser<'a> {
             methods,
             visibility: Visibility::Private,
             attributes,
-            doc_comment: None,
+            doc_comment,
             invariant,
         }))
     }
@@ -78,7 +78,7 @@ impl<'a> Parser<'a> {
         };
 
         let where_clause = self.parse_where_clause()?;
-        let (fields, methods, invariant, macro_invocations) = self.parse_class_body()?;
+        let (fields, methods, invariant, macro_invocations, doc_comment) = self.parse_class_body()?;
 
         Ok(Node::Class(ClassDef {
             span: self.make_span(start_span),
@@ -90,7 +90,7 @@ impl<'a> Parser<'a> {
             parent,
             visibility: Visibility::Private,
             attributes,
-            doc_comment: None,
+            doc_comment,
             invariant,
             macro_invocations,
         }))
@@ -350,7 +350,7 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Actor)?;
         let name = self.expect_identifier()?;
 
-        let (fields, methods, _invariant) = self.parse_indented_fields_and_methods()?;
+        let (fields, methods, _invariant, _doc_comment) = self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Actor(ActorDef {
             span: self.make_span(start_span),
@@ -661,20 +661,35 @@ impl<'a> Parser<'a> {
     /// Parse fields and methods in an indented block (class, actor, struct)
     fn parse_indented_fields_and_methods(
         &mut self,
-    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>), ParseError> {
+    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Option<DocComment>), ParseError> {
         self.debug_enter("parse_indented_fields_and_methods");
         self.expect_block_start()?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         let mut invariant = None;
+        let mut doc_comment = None;
 
-        // Skip docstring if present (first item after indent)
+        // Capture docstring if present (first item after indent)
+        // Accept both plain strings and FStrings (double-quoted strings become FStrings)
         self.skip_newlines();
-        if matches!(self.current.kind, TokenKind::String(_)) {
-            // This is a docstring, skip it for now (we don't store class-level docstrings)
-            // TODO: Store this as class.doc_comment
-            self.advance();
-            self.skip_newlines();
+        match &self.current.kind {
+            TokenKind::String(content) => {
+                doc_comment = Some(DocComment { content: content.clone() });
+                self.advance();
+                self.skip_newlines();
+            }
+            TokenKind::FString(parts) => {
+                // Extract text from FStringToken parts for doc comment
+                use crate::token::FStringToken;
+                let content: String = parts.iter().filter_map(|p| match p {
+                    FStringToken::Literal(s) => Some(s.clone()),
+                    FStringToken::Expr(_) => None, // Skip interpolated expressions
+                }).collect();
+                doc_comment = Some(DocComment { content });
+                self.advance();
+                self.skip_newlines();
+            }
+            _ => {}
         }
 
         let mut iterations = 0usize;
@@ -721,25 +736,42 @@ impl<'a> Parser<'a> {
         }
         self.consume_dedent();
         self.debug_exit("parse_indented_fields_and_methods");
-        Ok((fields, methods, invariant))
+        Ok((fields, methods, invariant, doc_comment))
     }
 
     /// Parse fields, methods, and macro invocations in a class body
     fn parse_class_body(
         &mut self,
-    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Vec<MacroInvocation>), ParseError> {
+    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Vec<MacroInvocation>, Option<DocComment>), ParseError> {
         self.debug_enter("parse_class_body");
         self.expect_block_start()?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         let mut invariant = None;
         let mut macro_invocations = Vec::new();
+        let mut doc_comment = None;
 
-        // Skip docstring if present (first item after indent)
+        // Capture docstring if present (first item after indent)
+        // Accept both plain strings and FStrings (double-quoted strings become FStrings)
         self.skip_newlines();
-        if matches!(self.current.kind, TokenKind::String(_)) {
-            self.advance();
-            self.skip_newlines();
+        match &self.current.kind {
+            TokenKind::String(content) => {
+                doc_comment = Some(DocComment { content: content.clone() });
+                self.advance();
+                self.skip_newlines();
+            }
+            TokenKind::FString(parts) => {
+                // Extract text from FStringToken parts for doc comment
+                use crate::token::FStringToken;
+                let content: String = parts.iter().filter_map(|p| match p {
+                    FStringToken::Literal(s) => Some(s.clone()),
+                    FStringToken::Expr(_) => None, // Skip interpolated expressions
+                }).collect();
+                doc_comment = Some(DocComment { content });
+                self.advance();
+                self.skip_newlines();
+            }
+            _ => {}
         }
 
         let mut iterations = 0usize;
@@ -786,7 +818,7 @@ impl<'a> Parser<'a> {
         }
         self.consume_dedent();
         self.debug_exit("parse_class_body");
-        Ok((fields, methods, invariant, macro_invocations))
+        Ok((fields, methods, invariant, macro_invocations, doc_comment))
     }
 
     /// Check if current position is at a macro invocation (identifier followed by !)

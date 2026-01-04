@@ -15,7 +15,8 @@ impl<'a> Parser<'a> {
     ) -> Result<Node, ParseError> {
         let mut node = self.parse_struct()?;
         if let Node::Struct(ref mut s) = node {
-            s.doc_comment = doc_comment;
+            // Prefer leading doc comment, fall back to inline docstring from body
+            s.doc_comment = doc_comment.or(s.doc_comment.take());
         }
         Ok(node)
     }
@@ -26,7 +27,8 @@ impl<'a> Parser<'a> {
     ) -> Result<Node, ParseError> {
         let mut node = self.parse_class()?;
         if let Node::Class(ref mut c) = node {
-            c.doc_comment = doc_comment;
+            // Prefer leading doc comment, fall back to inline docstring from body
+            c.doc_comment = doc_comment.or(c.doc_comment.take());
         }
         Ok(node)
     }
@@ -34,7 +36,8 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_enum_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_enum()?;
         if let Node::Enum(ref mut e) = node {
-            e.doc_comment = doc_comment;
+            // Prefer leading doc comment, fall back to inline docstring from body
+            e.doc_comment = doc_comment.or(e.doc_comment.take());
         }
         Ok(node)
     }
@@ -42,7 +45,8 @@ impl<'a> Parser<'a> {
     pub(super) fn parse_union_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
         let mut node = self.parse_union()?;
         if let Node::Enum(ref mut e) = node {
-            e.doc_comment = doc_comment;
+            // Prefer leading doc comment, fall back to inline docstring from body
+            e.doc_comment = doc_comment.or(e.doc_comment.take());
         }
         Ok(node)
     }
