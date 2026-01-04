@@ -7,6 +7,10 @@ use crate::error::ParseError;
 use crate::lexer::Lexer;
 use crate::token::{Span, Token, TokenKind};
 
+/// Maximum iterations allowed in a single parsing loop before detecting a potential infinite loop.
+/// This prevents hangs when the lexer doesn't emit proper tokens or token consumption fails.
+pub const MAX_LOOP_ITERATIONS: usize = 100_000;
+
 /// Parser mode controlling strictness of no-parentheses call syntax.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ParserMode {
@@ -17,6 +21,18 @@ pub enum ParserMode {
     /// Inner function calls within arguments must use parentheses.
     /// Used for GPU kernel code to prevent ambiguity.
     Strict,
+}
+
+/// Debug mode for parser diagnostics
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DebugMode {
+    /// No debug output
+    #[default]
+    Off,
+    /// Basic debug output (function entry/exit)
+    Basic,
+    /// Verbose debug output (every token consumed)
+    Verbose,
 }
 
 pub struct Parser<'a> {
@@ -30,6 +46,10 @@ pub struct Parser<'a> {
     pub(crate) mode: ParserMode,
     /// Depth of no-paren calls (for strict mode enforcement)
     pub(crate) no_paren_depth: u32,
+    /// Debug mode for diagnostics
+    pub(crate) debug_mode: DebugMode,
+    /// Call depth for debug tracing
+    pub(crate) debug_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -46,6 +66,8 @@ impl<'a> Parser<'a> {
             pending_token: None,
             mode: ParserMode::Normal,
             no_paren_depth: 0,
+            debug_mode: DebugMode::Off,
+            debug_depth: 0,
         }
     }
 
@@ -57,10 +79,89 @@ impl<'a> Parser<'a> {
         parser
     }
 
+    /// Create a parser with debug mode enabled.
+    /// Debug mode outputs parsing trace information to stderr.
+    pub fn with_debug(source: &'a str, debug_mode: DebugMode) -> Self {
+        let mut parser = Self::new(source);
+        parser.debug_mode = debug_mode;
+        parser
+    }
+
+    /// Set debug mode on an existing parser
+    pub fn set_debug_mode(&mut self, mode: DebugMode) {
+        self.debug_mode = mode;
+    }
+
+    /// Output debug trace message if debug mode is enabled
+    #[inline]
+    pub(crate) fn debug_trace(&self, msg: &str) {
+        if self.debug_mode != DebugMode::Off {
+            let indent = "  ".repeat(self.debug_depth);
+            eprintln!("[PARSER] {}{}", indent, msg);
+        }
+    }
+
+    /// Output verbose debug trace (token-level)
+    #[inline]
+    pub(crate) fn debug_verbose(&self, msg: &str) {
+        if self.debug_mode == DebugMode::Verbose {
+            let indent = "  ".repeat(self.debug_depth);
+            eprintln!("[PARSER] {}{}", indent, msg);
+        }
+    }
+
+    /// Enter a parsing function (for debug tracing)
+    #[inline]
+    pub(crate) fn debug_enter(&mut self, name: &str) {
+        if self.debug_mode != DebugMode::Off {
+            let indent = "  ".repeat(self.debug_depth);
+            eprintln!("[PARSER] {}> {} (token: {:?})", indent, name, self.current.kind);
+            self.debug_depth += 1;
+        }
+    }
+
+    /// Exit a parsing function (for debug tracing)
+    #[inline]
+    pub(crate) fn debug_exit(&mut self, name: &str) {
+        if self.debug_mode != DebugMode::Off {
+            if self.debug_depth > 0 {
+                self.debug_depth -= 1;
+            }
+            let indent = "  ".repeat(self.debug_depth);
+            eprintln!("[PARSER] {}< {}", indent, name);
+        }
+    }
+
+    /// Check for potential infinite loop in parsing
+    /// Returns an error if iteration count exceeds MAX_LOOP_ITERATIONS
+    #[inline]
+    pub(crate) fn check_loop_limit(&self, iterations: usize, context: &str) -> Result<(), ParseError> {
+        if iterations >= MAX_LOOP_ITERATIONS {
+            Err(ParseError::syntax_error_with_span(
+                format!(
+                    "Parser iteration limit exceeded in {} (possible infinite loop). \
+                     Current token: {:?} at line {}, col {}",
+                    context,
+                    self.current.kind,
+                    self.current.span.line,
+                    self.current.span.column
+                ),
+                self.current.span,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     pub fn parse(&mut self) -> Result<Module, ParseError> {
+        self.debug_trace("Starting parse()");
         let mut items = Vec::new();
+        let mut iterations = 0usize;
 
         while !self.is_at_end() {
+            self.check_loop_limit(iterations, "parse_module")?;
+            iterations += 1;
+
             // Skip newlines at top level
             while self.check(&TokenKind::Newline) {
                 self.advance();
@@ -69,9 +170,11 @@ impl<'a> Parser<'a> {
                 break;
             }
 
+            self.debug_verbose(&format!("Parsing item {}", iterations));
             items.push(self.parse_item()?);
         }
 
+        self.debug_trace(&format!("Finished parse(), {} items", items.len()));
         Ok(Module { name: None, items })
     }
 
@@ -196,11 +299,16 @@ impl<'a> Parser<'a> {
     /// Parse block body (assumes INDENT has already been consumed).
     /// Used when we need to manually handle what comes before the block body.
     pub(crate) fn parse_block_body(&mut self) -> Result<Block, ParseError> {
+        self.debug_enter("parse_block_body");
         let start_span = self.current.span;
 
         let mut statements = Vec::new();
+        let mut iterations = 0usize;
 
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "parse_block_body")?;
+            iterations += 1;
+
             // Skip empty lines
             while self.check(&TokenKind::Newline) {
                 self.advance();
@@ -221,6 +329,7 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
+        self.debug_exit("parse_block_body");
         Ok(Block {
             span: Span::new(
                 start_span.start,

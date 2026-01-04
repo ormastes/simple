@@ -222,7 +222,6 @@ class Transaction:
 // ============================================================================
 
 #[test]
-#[ignore] // Will implement in Phase 3
 fn test_inherited_invariants() {
     // Child classes should maintain parent invariants
     let source = r#"

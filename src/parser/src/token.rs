@@ -83,6 +83,7 @@ pub enum TokenKind {
     Trait,
     Impl,
     Actor,
+    Extends, // extends (class inheritance)
     Pub,
     Priv,
     Import,

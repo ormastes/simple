@@ -62,11 +62,17 @@ impl<'a> Parser<'a> {
         let name = self.expect_identifier()?;
         let generic_params = self.parse_generic_params_as_strings()?;
 
+        // Support both syntaxes for class inheritance:
+        // - class Child(Parent):      (legacy syntax)
+        // - class Child extends Parent:  (extends keyword syntax)
         let parent = if self.check(&TokenKind::LParen) {
             self.advance();
             let p = self.expect_identifier()?;
             self.expect(&TokenKind::RParen)?;
             Some(p)
+        } else if self.check(&TokenKind::Extends) {
+            self.advance();
+            Some(self.expect_identifier()?)
         } else {
             None
         };
@@ -152,10 +158,15 @@ impl<'a> Parser<'a> {
     fn parse_enum_variants_and_methods(
         &mut self,
     ) -> Result<(Vec<EnumVariant>, Vec<FunctionDef>), ParseError> {
+        self.debug_enter("parse_enum_variants_and_methods");
         let mut variants = Vec::new();
         let mut methods = Vec::new();
+        let mut iterations = 0usize;
 
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "parse_enum_variants_and_methods")?;
+            iterations += 1;
+
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) {
                 break;
@@ -186,6 +197,7 @@ impl<'a> Parser<'a> {
         }
 
         self.consume_dedent();
+        self.debug_exit("parse_enum_variants_and_methods");
         Ok((variants, methods))
     }
 
@@ -432,7 +444,11 @@ impl<'a> Parser<'a> {
         F: FnMut(&mut Self) -> Result<T, ParseError>,
     {
         let mut items = Vec::new();
+        let mut iterations = 0usize;
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "parse_indented_items")?;
+            iterations += 1;
+
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) {
                 break;
@@ -452,10 +468,15 @@ impl<'a> Parser<'a> {
     /// Parse methods in an indented block (impl only - all methods must have bodies)
     /// Parse impl body: associated type implementations and methods
     fn parse_indented_impl_body(&mut self) -> Result<(Vec<AssociatedTypeImpl>, Vec<FunctionDef>), ParseError> {
+        self.debug_enter("parse_indented_impl_body");
         self.expect_block_start()?;
         let mut associated_types = Vec::new();
         let mut methods = Vec::new();
+        let mut iterations = 0usize;
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "parse_indented_impl_body")?;
+            iterations += 1;
+
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) {
                 break;
@@ -479,6 +500,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.consume_dedent();
+        self.debug_exit("parse_indented_impl_body");
         Ok((associated_types, methods))
     }
 
@@ -514,7 +536,11 @@ impl<'a> Parser<'a> {
         self.expect_block_start()?;
         let mut associated_types = Vec::new();
         let mut methods = Vec::new();
+        let mut iterations = 0usize;
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "parse_indented_trait_body")?;
+            iterations += 1;
+
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) {
                 break;
@@ -635,6 +661,7 @@ impl<'a> Parser<'a> {
     fn parse_indented_fields_and_methods(
         &mut self,
     ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>), ParseError> {
+        self.debug_enter("parse_indented_fields_and_methods");
         self.expect_block_start()?;
         let mut fields = Vec::new();
         let mut methods = Vec::new();
@@ -649,7 +676,11 @@ impl<'a> Parser<'a> {
             self.skip_newlines();
         }
 
+        let mut iterations = 0usize;
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "parse_indented_fields_and_methods")?;
+            iterations += 1;
+
             self.skip_newlines();
             if self.check(&TokenKind::Dedent) {
                 break;
@@ -688,6 +719,7 @@ impl<'a> Parser<'a> {
             }
         }
         self.consume_dedent();
+        self.debug_exit("parse_indented_fields_and_methods");
         Ok((fields, methods, invariant))
     }
 }

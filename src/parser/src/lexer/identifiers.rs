@@ -52,6 +52,7 @@ impl<'a> super::Lexer<'a> {
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,
             "actor" => TokenKind::Actor,
+            "extends" => TokenKind::Extends,
             "pub" => TokenKind::Pub,
             "priv" => TokenKind::Priv,
             "import" => TokenKind::Import,
