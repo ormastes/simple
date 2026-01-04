@@ -229,8 +229,22 @@ impl<'a> Lexer<'a> {
                 }
             }
             '%' => TokenKind::Percent,
-            '&' => TokenKind::Ampersand,
-            '|' => TokenKind::Pipe,
+            '&' => {
+                if self.check('&') {
+                    self.advance();
+                    TokenKind::DoubleAmp
+                } else {
+                    TokenKind::Ampersand
+                }
+            }
+            '|' => {
+                if self.check('|') {
+                    self.advance();
+                    TokenKind::DoublePipe
+                } else {
+                    TokenKind::Pipe
+                }
+            }
 
             '=' => {
                 if self.check('=') {

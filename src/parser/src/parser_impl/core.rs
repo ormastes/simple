@@ -2,6 +2,8 @@
 //!
 //! This module contains the Parser struct, constructor methods, and main parse entry point.
 
+use std::collections::VecDeque;
+
 use crate::ast::*;
 use crate::error::ParseError;
 use crate::lexer::Lexer;
@@ -42,7 +44,8 @@ pub struct Parser<'a> {
     pub(crate) previous: Token,
     #[allow(dead_code)]
     source: &'a str,
-    pub(crate) pending_token: Option<Token>,
+    /// Buffer for lookahead tokens (used for multi-token peek operations)
+    pub(crate) pending_tokens: VecDeque<Token>,
     /// Parser mode (Normal or Strict)
     pub(crate) mode: ParserMode,
     /// Depth of no-paren calls (for strict mode enforcement)
@@ -68,7 +71,7 @@ impl<'a> Parser<'a> {
             current,
             previous,
             source,
-            pending_token: None,
+            pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,
             debug_mode: DebugMode::Off,
@@ -240,10 +243,14 @@ impl<'a> Parser<'a> {
                 // Simple heuristic: type alias names are PascalCase (start with uppercase)
                 // Expression context uses lowercase like "expect type to eq"
                 let next = self
-                    .pending_token
-                    .clone()
-                    .unwrap_or_else(|| self.lexer.next_token());
-                self.pending_token = Some(next.clone());
+                    .pending_tokens
+                    .front()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let tok = self.lexer.next_token();
+                        self.pending_tokens.push_back(tok.clone());
+                        tok
+                    });
 
                 // Check if next token is an uppercase identifier (type alias pattern)
                 if let TokenKind::Identifier(name) = &next.kind {
@@ -290,10 +297,14 @@ impl<'a> Parser<'a> {
                 // Check if this is a context statement (context expr:) or BDD DSL (context "string":)
                 // BDD DSL uses string literals after 'context' keyword
                 let next = self
-                    .pending_token
-                    .clone()
-                    .unwrap_or_else(|| self.lexer.next_token());
-                self.pending_token = Some(next.clone());
+                    .pending_tokens
+                    .front()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let tok = self.lexer.next_token();
+                        self.pending_tokens.push_back(tok.clone());
+                        tok
+                    });
 
                 // If next token is a string literal, treat as BDD expression (no-paren call)
                 if matches!(&next.kind, TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_)) {

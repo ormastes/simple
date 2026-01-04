@@ -273,6 +273,13 @@ impl Clone for Value {
             Value::Constructor { class_name } => Value::Constructor {
                 class_name: class_name.clone(),
             },
+            Value::EnumType { enum_name } => Value::EnumType {
+                enum_name: enum_name.clone(),
+            },
+            Value::EnumVariantConstructor { enum_name, variant_name } => Value::EnumVariantConstructor {
+                enum_name: enum_name.clone(),
+                variant_name: variant_name.clone(),
+            },
             Value::TraitObject { trait_name, inner } => Value::TraitObject {
                 trait_name: trait_name.clone(),
                 inner: inner.clone(),

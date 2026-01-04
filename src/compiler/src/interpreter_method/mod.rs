@@ -149,6 +149,60 @@ pub(crate) fn evaluate_method_call(
                 }
             }
         }
+        // EnumType method call = variant constructor call
+        // EnumName.VariantName(args) -> create enum with payload
+        Value::EnumType { enum_name } => {
+            if let Some(enum_def) = enums.get(enum_name).cloned() {
+                // Check if the method name is a variant name
+                let variant_opt = enum_def.variants.iter().find(|v| v.name == method);
+                if let Some(variant) = variant_opt {
+                    // Construct enum variant with payload
+                    let has_fields = variant.fields.as_ref().map_or(false, |f| !f.is_empty());
+                    if !has_fields && args.is_empty() {
+                        // Unit variant
+                        return Ok(Value::Enum {
+                            enum_name: enum_name.clone(),
+                            variant: method.to_string(),
+                            payload: None,
+                        });
+                    } else {
+                        // Variant with payload
+                        let payload = if args.is_empty() {
+                            None
+                        } else if args.len() == 1 {
+                            let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+                            Some(Box::new(val))
+                        } else {
+                            // Multiple args - wrap in tuple
+                            let vals: Result<Vec<Value>, _> = args
+                                .iter()
+                                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                                .collect();
+                            Some(Box::new(Value::Tuple(vals?)))
+                        };
+                        return Ok(Value::Enum {
+                            enum_name: enum_name.clone(),
+                            variant: method.to_string(),
+                            payload,
+                        });
+                    }
+                }
+
+                // Check if it's a static method on the enum
+                for m in &enum_def.methods {
+                    if m.name == method && m.params.first().map_or(true, |p| p.name != "self") {
+                        return exec_function(m, args, env, functions, classes, enums, impl_methods, None);
+                    }
+                }
+
+                return Err(CompileError::Semantic(format!(
+                    "unknown variant or method '{}' on enum {}",
+                    method, enum_name
+                )));
+            } else {
+                return Err(CompileError::Semantic(format!("unknown enum {}", enum_name)));
+            }
+        }
         Value::TraitObject { trait_name, inner } => {
             if let Some(result) = special::handle_trait_object_methods(trait_name, inner, method, args, env, functions, classes, enums, impl_methods)? {
                 return Ok(result);

@@ -219,6 +219,28 @@ pub(crate) fn evaluate_call(
         Value::Constructor { class_name } => {
             core::instantiate_class(&class_name, args, env, functions, classes, enums, impl_methods)
         }
+        Value::EnumVariantConstructor { enum_name, variant_name } => {
+            // Construct enum variant with payload
+            // Currently supports single payload value
+            let payload = if args.is_empty() {
+                None
+            } else if args.len() == 1 {
+                let val = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+                Some(Box::new(val))
+            } else {
+                // Multiple args - wrap in tuple
+                let vals: Result<Vec<Value>, _> = args
+                    .iter()
+                    .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                    .collect();
+                Some(Box::new(Value::Tuple(vals?)))
+            };
+            Ok(Value::Enum {
+                enum_name,
+                variant: variant_name,
+                payload,
+            })
+        }
         _ => Err(semantic_err!("unsupported callee")),
     }
 }

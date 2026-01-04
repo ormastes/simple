@@ -11,7 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use simple_parser::ast::{
-    ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, MacroDef, Node, Pattern, UseStmt,
+    ClassDef, EnumDef, Expr, ExportUseStmt, FunctionDef, ImportTarget, MacroDef, ModulePath, Node, Pattern, UseStmt,
 };
 
 use crate::error::CompileError;
@@ -42,7 +42,7 @@ pub(super) fn load_and_merge_module(
     enums: &mut Enums,
 ) -> Result<Value, CompileError> {
     // Build module path from segments (path only, not the import target)
-    let parts: Vec<String> = use_stmt
+    let mut parts: Vec<String> = use_stmt
         .path
         .segments
         .iter()
@@ -50,14 +50,52 @@ pub(super) fn load_and_merge_module(
         .cloned()
         .collect();
 
-    // Track what to extract from the module (if anything)
-    let import_item_name: Option<String> = match &use_stmt.target {
-        ImportTarget::Single(name) => Some(name.clone()),
-        ImportTarget::Aliased { name, .. } => Some(name.clone()),
-        ImportTarget::Glob => None,
-        ImportTarget::Group(_) => {
-            // Group imports need special handling
-            return Ok(Value::Dict(HashMap::new()));
+    // Handle the case where path is empty but target contains the module name
+    // e.g., `import spec as sp` has path=[], target=Aliased { name: "spec", alias: "sp" }
+    // In this case, "spec" is the module path, not an item to extract from a module
+    let import_item_name: Option<String> = if parts.is_empty() {
+        match &use_stmt.target {
+            ImportTarget::Single(name) => {
+                // `import spec` - name is the module path
+                parts.push(name.clone());
+                None // Import whole module
+            }
+            ImportTarget::Aliased { name, .. } => {
+                // `import spec as sp` - name is the module path
+                parts.push(name.clone());
+                None // Import whole module (aliased)
+            }
+            ImportTarget::Glob => None,
+            ImportTarget::Group(_) => {
+                return Ok(Value::Dict(HashMap::new()));
+            }
+        }
+    } else {
+        // Path is not empty - check if target is extracting a specific item
+        let last_path_segment = parts.last().cloned();
+        match &use_stmt.target {
+            ImportTarget::Single(name) => {
+                // Check if this is just a module import (name == last segment)
+                if last_path_segment.as_ref() == Some(name) {
+                    None // Import whole module
+                } else {
+                    Some(name.clone())
+                }
+            }
+            ImportTarget::Aliased { name, .. } => {
+                // Check if this is a whole-module alias (name == last segment)
+                // e.g., `import spec as sp` where path is ["spec"] and name is "spec"
+                if last_path_segment.as_ref() == Some(name) {
+                    None // Import whole module, just rename it
+                } else {
+                    Some(name.clone())
+                }
+            }
+            ImportTarget::Glob => None,
+            ImportTarget::Group(_) => {
+                // Group imports need special handling
+                return Ok(Value::Dict(HashMap::new()));
+            }
         }
     };
 
@@ -169,7 +207,10 @@ pub(super) fn evaluate_module_exports(
             Node::Enum(e) => {
                 local_enums.insert(e.name.clone(), e.clone());
                 global_enums.insert(e.name.clone(), e.clone());
-                exports.insert(e.name.clone(), Value::Str(format!("enum:{}", e.name)));
+                // Export enum as EnumType so EnumName.VariantName syntax works
+                exports.insert(e.name.clone(), Value::EnumType {
+                    enum_name: e.name.clone(),
+                });
             }
             Node::Macro(m) => {
                 // Register macro in exports with special prefix
@@ -223,6 +264,53 @@ pub(super) fn evaluate_module_exports(
                     }
                 }
             }
+            Node::ExportUseStmt(export_stmt) => {
+                // Handle re-exports: export X, Y from module
+                // Load the source module and add specified items to our exports
+                if let Ok(source_exports) = load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums) {
+                    match &export_stmt.target {
+                        ImportTarget::Single(name) => {
+                            if let Some(value) = source_exports.get(name) {
+                                exports.insert(name.clone(), value.clone());
+                                env.insert(name.clone(), value.clone());
+                            }
+                        }
+                        ImportTarget::Aliased { name, alias } => {
+                            if let Some(value) = source_exports.get(name) {
+                                exports.insert(alias.clone(), value.clone());
+                                env.insert(alias.clone(), value.clone());
+                            }
+                        }
+                        ImportTarget::Glob => {
+                            // Export everything from the source module
+                            for (name, value) in source_exports {
+                                exports.insert(name.clone(), value.clone());
+                                env.insert(name, value);
+                            }
+                        }
+                        ImportTarget::Group(items) => {
+                            // Export specific items
+                            for item in items {
+                                match item {
+                                    ImportTarget::Single(name) => {
+                                        if let Some(value) = source_exports.get(name) {
+                                            exports.insert(name.clone(), value.clone());
+                                            env.insert(name.clone(), value.clone());
+                                        }
+                                    }
+                                    ImportTarget::Aliased { name, alias } => {
+                                        if let Some(value) = source_exports.get(name) {
+                                            exports.insert(alias.clone(), value.clone());
+                                            env.insert(alias.clone(), value.clone());
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -253,6 +341,28 @@ pub(super) fn evaluate_module_exports(
     }
 
     Ok((env, exports))
+}
+
+/// Load a module for re-export (export X from Y)
+fn load_export_source(
+    export_stmt: &ExportUseStmt,
+    current_file: Option<&Path>,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &mut Enums,
+) -> Result<HashMap<String, Value>, CompileError> {
+    // Build a UseStmt to load the source module
+    let use_stmt = UseStmt {
+        span: export_stmt.span.clone(),
+        path: export_stmt.path.clone(),
+        target: ImportTarget::Glob, // Load entire module to get all exports
+    };
+
+    match load_and_merge_module(&use_stmt, current_file, functions, classes, enums) {
+        Ok(Value::Dict(dict)) => Ok(dict),
+        Ok(_) => Ok(HashMap::new()),
+        Err(_) => Ok(HashMap::new()),
+    }
 }
 
 /// Resolve module path from segments
@@ -357,8 +467,10 @@ pub(super) fn merge_module_definitions(
                 // Add to global enums map - this is critical for enum variant access
                 enums.insert(e.name.clone(), e.clone());
 
-                // Export the enum type name as well (for type access)
-                exports.insert(e.name.clone(), Value::Str(format!("enum:{}", e.name)));
+                // Export the enum as EnumType for variant construction (EnumName.Variant)
+                exports.insert(e.name.clone(), Value::EnumType {
+                    enum_name: e.name.clone(),
+                });
             }
             _ => {}
         }

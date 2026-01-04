@@ -1,9 +1,10 @@
 // Block closure execution helpers for interpreter_call module
 
 use crate::error::CompileError;
-use crate::interpreter::{evaluate_expr, pattern_matches, MODULE_GLOBALS};
+use crate::interpreter::{evaluate_expr, pattern_matches, MODULE_GLOBALS, EXTERN_FUNCTIONS};
+use super::super::interpreter_helpers::handle_method_call_with_self_update;
 use crate::value::*;
-use simple_parser::ast::{Node, FunctionDef, ClassDef, EnumDef};
+use simple_parser::ast::{Node, FunctionDef, ClassDef, EnumDef, Expr};
 use std::collections::HashMap;
 use super::bdd::{BDD_INDENT, BDD_CONTEXT_DEFS, BDD_BEFORE_EACH, BDD_AFTER_EACH};
 
@@ -61,7 +62,36 @@ pub(super) fn exec_block_closure(
     for node in nodes {
         match node {
             Node::Expression(expr) => {
-                last_value = evaluate_expr(expr, &local_env, functions, classes, enums, impl_methods)?;
+                // Handle functional update (e.g., list->append(3))
+                if let Expr::FunctionalUpdate { target, method, args } = expr {
+                    if let Some((name, new_value)) = super::super::interpreter_helpers::handle_functional_update(
+                        target,
+                        method,
+                        args,
+                        &local_env,
+                        functions,
+                        classes,
+                        enums,
+                        impl_methods,
+                    )? {
+                        local_env.insert(name, new_value);
+                        last_value = Value::Nil;
+                        continue;
+                    }
+                }
+                // Handle self-updating method calls (e.g., arr.append(3))
+                let (result, update) = handle_method_call_with_self_update(
+                    expr,
+                    &local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if let Some((name, new_self)) = update {
+                    local_env.insert(name, new_self);
+                }
+                last_value = result;
             }
             Node::Let(let_stmt) => {
                 if let Some(ref value_expr) = let_stmt.value {
@@ -173,6 +203,38 @@ pub(super) fn exec_block_closure(
                     }
                     last_value = exec_block_closure(&for_stmt.body.statements, &local_env, functions, classes, enums, impl_methods)?;
                 }
+            }
+            Node::Function(f) => {
+                // Handle function definitions inside block closures (like in `it` blocks)
+                // The function is added to the local environment with the current scope captured
+                local_env.insert(
+                    f.name.clone(),
+                    Value::Function {
+                        name: f.name.clone(),
+                        def: Box::new(f.clone()),
+                        captured_env: local_env.clone(), // Capture current scope
+                    },
+                );
+                last_value = Value::Nil;
+            }
+            Node::Class(class_def) => {
+                // Handle class definitions inside block closures (like in `it` blocks)
+                // The class is added to the classes map for the duration of this block
+                classes.insert(class_def.name.clone(), class_def.clone());
+                // Also add to local env as Constructor so it can be called like MyClass()
+                local_env.insert(
+                    class_def.name.clone(),
+                    Value::Constructor {
+                        class_name: class_def.name.clone(),
+                    },
+                );
+                last_value = Value::Nil;
+            }
+            Node::Extern(ext) => {
+                // Handle extern function declarations inside block closures (like in `it` blocks)
+                // Register the extern function so it can be called within this block
+                EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().insert(ext.name.clone()));
+                last_value = Value::Nil;
             }
             _ => {
                 last_value = Value::Nil;

@@ -45,7 +45,7 @@ if let Value::Str(ref s) = recv_val {
         }
         "to_upper" | "to_uppercase" => return Ok(Value::Str(s.to_uppercase())),
         "to_lower" | "to_lowercase" => return Ok(Value::Str(s.to_lowercase())),
-        "trim" | "trimmed" => return Ok(Value::Str(s.trim().to_string())),
+        "trim" | "trimmed" | "strip" => return Ok(Value::Str(s.trim().to_string())),
         "trim_start" | "trim_left" => return Ok(Value::Str(s.trim_start().to_string())),
         "trim_end" | "trim_right" => return Ok(Value::Str(s.trim_end().to_string())),
         "reversed" => return Ok(Value::Str(s.chars().rev().collect())),

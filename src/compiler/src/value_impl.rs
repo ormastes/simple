@@ -84,6 +84,8 @@ impl Value {
             | Value::BlockClosure { .. }
             | Value::Function { .. }
             | Value::Constructor { .. }
+            | Value::EnumType { .. }
+            | Value::EnumVariantConstructor { .. }
             | Value::TraitObject { .. }
             | Value::Actor(_)
             | Value::Future(_)
@@ -193,6 +195,8 @@ impl Value {
             Value::BorrowMut(_) => "borrow_mut",
             Value::Mock(_) => "mock",
             Value::Matcher(_) => "matcher",
+            Value::EnumType { .. } => "enum_type",
+            Value::EnumVariantConstructor { .. } => "enum_variant_constructor",
             Value::Nil => "nil",
         }
     }

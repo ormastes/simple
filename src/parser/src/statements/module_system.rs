@@ -90,10 +90,11 @@ impl<'a> Parser<'a> {
             let mut targets = Vec::new();
 
             while !self.check(&TokenKind::RBrace) {
-                let name = self.expect_identifier()?;
+                // Use expect_path_segment to allow keywords like 'to', 'context' as import names
+                let name = self.expect_path_segment()?;
                 let target = if self.check(&TokenKind::As) {
                     self.advance();
-                    let alias = self.expect_identifier()?;
+                    let alias = self.expect_path_segment()?;
                     ImportTarget::Aliased { name, alias }
                 } else {
                     ImportTarget::Single(name)
