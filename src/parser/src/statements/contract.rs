@@ -55,16 +55,22 @@ impl Parser<'_> {
 
     /// Helper to parse an indented contract clause block
     fn parse_contract_clause_block(&mut self, clauses: &mut Vec<ContractClause>) -> Result<(), ParseError> {
+        self.debug_enter("parse_contract_clause_block");
         self.expect(&TokenKind::Colon)?;
         self.expect(&TokenKind::Newline)?;
         self.expect(&TokenKind::Indent)?;
 
+        let mut iterations = 0usize;
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "contract_clause_block")?;
+            iterations += 1;
+
             let clause = self.parse_contract_clause()?;
             clauses.push(clause);
             self.skip_newlines();
         }
         self.expect(&TokenKind::Dedent)?;
+        self.debug_exit("parse_contract_clause_block");
         Ok(())
     }
 
@@ -105,7 +111,11 @@ impl Parser<'_> {
             self.expect(&TokenKind::Newline)?;
             self.expect(&TokenKind::Indent)?;
 
+            let mut iterations = 0usize;
             while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                self.check_loop_limit(iterations, "exit_contracts:out")?;
+                iterations += 1;
+
                 let clause = self.parse_contract_clause()?;
                 contract.postconditions.push(clause);
                 self.skip_newlines();
@@ -137,7 +147,11 @@ impl Parser<'_> {
             self.expect(&TokenKind::Newline)?;
             self.expect(&TokenKind::Indent)?;
 
+            let mut iterations = 0usize;
             while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+                self.check_loop_limit(iterations, "exit_contracts:out_err")?;
+                iterations += 1;
+
                 let clause = self.parse_contract_clause()?;
                 contract.error_postconditions.push(clause);
                 self.skip_newlines();
@@ -205,6 +219,7 @@ impl Parser<'_> {
             return Ok(None);
         }
 
+        self.debug_enter("parse_invariant_block");
         let start_span = self.current.span;
         self.advance();
         self.expect(&TokenKind::Colon)?;
@@ -212,14 +227,19 @@ impl Parser<'_> {
         self.expect(&TokenKind::Indent)?;
 
         let mut conditions = Vec::new();
+        let mut iterations = 0usize;
 
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "invariant_block")?;
+            iterations += 1;
+
             let clause = self.parse_contract_clause()?;
             conditions.push(clause);
             self.skip_newlines();
         }
 
         self.expect(&TokenKind::Dedent)?;
+        self.debug_exit("parse_invariant_block");
 
         Ok(Some(InvariantBlock {
             span: Span::new(

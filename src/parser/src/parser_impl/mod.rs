@@ -23,7 +23,7 @@ mod functions;
 mod definitions;
 mod attributes;
 
-// Re-export the Parser struct and ParserMode
-pub use core::{Parser, ParserMode};
+// Re-export the Parser struct, ParserMode, DebugMode, and constants
+pub use core::{Parser, ParserMode, DebugMode, MAX_LOOP_ITERATIONS};
 
 // Integration tests moved to tests/ directory - no longer using #[path] include

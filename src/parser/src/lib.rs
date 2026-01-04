@@ -26,6 +26,6 @@ pub use doc_gen::{generate as generate_docs, DocItem, DocItemKind, ModuleDocs};
 pub use error::*;
 pub use interner::*;
 pub use lexer::*;
-pub use parser_impl::{Parser, ParserMode};
+pub use parser_impl::{Parser, ParserMode, DebugMode, MAX_LOOP_ITERATIONS};
 pub use sui_parser::*;
 pub use token::*;

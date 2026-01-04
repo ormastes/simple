@@ -262,6 +262,10 @@ impl Lowerer {
     }
 
     /// Register a class type and its invariant
+    ///
+    /// Inherited invariants: If the class extends a parent class, the child class
+    /// inherits all invariants from the parent. This ensures Liskov Substitution
+    /// Principle - a child class must maintain all parent invariants.
     fn register_class(&mut self, c: &ast::ClassDef) -> LowerResult<TypeId> {
         let fields: Vec<_> = c
             .fields
@@ -283,11 +287,22 @@ impl Lowerer {
             },
         );
 
-        // Register class invariant if present
-        if let Some(ref invariant) = c.invariant {
-            let mut ctx = FunctionContext::new(TypeId::VOID);
-            let mut hir_invariant = HirTypeInvariant::default();
+        // Build combined invariant: parent invariants + child invariants
+        let mut hir_invariant = HirTypeInvariant::default();
+        let mut ctx = FunctionContext::new(TypeId::VOID);
 
+        // Inherit parent invariants if class extends another class
+        if let Some(ref parent_name) = c.parent {
+            if let Some(parent_invariant) = self.module.type_invariants.get(parent_name) {
+                // Clone parent invariant conditions into child
+                for clause in &parent_invariant.conditions {
+                    hir_invariant.conditions.push(clause.clone());
+                }
+            }
+        }
+
+        // Add child's own invariants
+        if let Some(ref invariant) = c.invariant {
             for clause in &invariant.conditions {
                 let condition = self.lower_expr(&clause.condition, &mut ctx)?;
                 hir_invariant.conditions.push(HirContractClause {
@@ -295,7 +310,10 @@ impl Lowerer {
                     message: clause.message.clone(),
                 });
             }
+        }
 
+        // Register combined invariant if non-empty
+        if !hir_invariant.conditions.is_empty() {
             self.module
                 .type_invariants
                 .insert(c.name.clone(), hir_invariant);
