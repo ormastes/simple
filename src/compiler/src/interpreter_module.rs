@@ -104,16 +104,25 @@ pub(super) fn load_and_merge_module(
         .and_then(|p| p.parent())
         .unwrap_or(Path::new("."));
 
+    eprintln!("[DEBUG] load_and_merge_module: parts={:?}, base_dir={:?}", parts, base_dir);
     let module_path = resolve_module_path(&parts, base_dir)?;
+    eprintln!("[DEBUG] resolved module_path={:?}", module_path);
 
     // Read and parse the module
     let source = fs::read_to_string(&module_path)
-        .map_err(|e| CompileError::Io(format!("Cannot read module: {}", e)))?;
+        .map_err(|e| {
+            eprintln!("[DEBUG] Failed to read module: {}", e);
+            CompileError::Io(format!("Cannot read module: {}", e))
+        })?;
 
     let mut parser = simple_parser::Parser::new(&source);
     let module = parser.parse()
-        .map_err(|e| CompileError::Parse(format!("Cannot parse module: {}", e)))?;
+        .map_err(|e| {
+            eprintln!("[DEBUG] Failed to parse module: {}", e);
+            CompileError::Parse(format!("Cannot parse module: {}", e))
+        })?;
 
+    eprintln!("[DEBUG] Calling evaluate_module_exports for {:?}", module_path);
     // Evaluate the module to get its environment (including imports)
     let (module_env, module_exports) = evaluate_module_exports(
         &module.items,
@@ -121,7 +130,12 @@ pub(super) fn load_and_merge_module(
         functions,
         classes,
         enums,
-    )?;
+    ).map_err(|e| {
+        eprintln!("[DEBUG] Failed to evaluate module: {:?}", e);
+        e
+    })?;
+
+    eprintln!("[DEBUG] module_exports keys: {:?}", module_exports.keys().collect::<Vec<_>>());
 
     // Create exports with the module's environment captured
     let mut exports: HashMap<String, Value> = HashMap::new();
