@@ -78,7 +78,7 @@ impl<'a> Parser<'a> {
         };
 
         let where_clause = self.parse_where_clause()?;
-        let (fields, methods, invariant) = self.parse_indented_fields_and_methods()?;
+        let (fields, methods, invariant, macro_invocations) = self.parse_class_body()?;
 
         Ok(Node::Class(ClassDef {
             span: self.make_span(start_span),
@@ -92,6 +92,7 @@ impl<'a> Parser<'a> {
             attributes,
             doc_comment: None,
             invariant,
+            macro_invocations,
         }))
     }
 
@@ -721,5 +722,98 @@ impl<'a> Parser<'a> {
         self.consume_dedent();
         self.debug_exit("parse_indented_fields_and_methods");
         Ok((fields, methods, invariant))
+    }
+
+    /// Parse fields, methods, and macro invocations in a class body
+    fn parse_class_body(
+        &mut self,
+    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Vec<MacroInvocation>), ParseError> {
+        self.debug_enter("parse_class_body");
+        self.expect_block_start()?;
+        let mut fields = Vec::new();
+        let mut methods = Vec::new();
+        let mut invariant = None;
+        let mut macro_invocations = Vec::new();
+
+        // Skip docstring if present (first item after indent)
+        self.skip_newlines();
+        if matches!(self.current.kind, TokenKind::String(_)) {
+            self.advance();
+            self.skip_newlines();
+        }
+
+        let mut iterations = 0usize;
+        while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
+            self.check_loop_limit(iterations, "parse_class_body")?;
+            iterations += 1;
+
+            self.skip_newlines();
+            if self.check(&TokenKind::Dedent) {
+                break;
+            }
+
+            if self.check(&TokenKind::Invariant) {
+                if invariant.is_some() {
+                    return Err(ParseError::syntax_error_with_span(
+                        "Multiple invariant blocks not allowed",
+                        self.current.span,
+                    ));
+                }
+                invariant = self.parse_invariant_block()?;
+            } else if self.check(&TokenKind::Fn)
+                || self.check(&TokenKind::Async)
+                || self.check(&TokenKind::At)
+                || self.check(&TokenKind::Hash)
+                || (self.check(&TokenKind::Pub)
+                    && (self.peek_is(&TokenKind::Fn) || self.peek_is(&TokenKind::Async)))
+            {
+                let start_span = self.current.span;
+                let item = self.parse_item()?;
+                if let Node::Function(f) = item {
+                    methods.push(f);
+                } else {
+                    return Err(ParseError::syntax_error_with_span(
+                        "Expected method definition in class body",
+                        start_span,
+                    ));
+                }
+            } else if self.is_macro_invocation_start() {
+                // Macro invocation: macro_name!(args)
+                macro_invocations.push(self.parse_class_body_macro_invocation()?);
+            } else {
+                fields.push(self.parse_field()?);
+            }
+        }
+        self.consume_dedent();
+        self.debug_exit("parse_class_body");
+        Ok((fields, methods, invariant, macro_invocations))
+    }
+
+    /// Check if current position is at a macro invocation (identifier followed by !)
+    fn is_macro_invocation_start(&mut self) -> bool {
+        if let TokenKind::Identifier(_) = &self.current.kind {
+            self.peek_is(&TokenKind::Bang)
+        } else {
+            false
+        }
+    }
+
+    /// Parse a macro invocation in a class body: name!(args)
+    fn parse_class_body_macro_invocation(&mut self) -> Result<MacroInvocation, ParseError> {
+        let start_span = self.current.span;
+        let name = self.expect_identifier()?;
+        self.expect(&TokenKind::Bang)?;
+        let args = self.parse_macro_args()?;
+
+        // Consume optional newline after macro invocation
+        if self.check(&TokenKind::Newline) {
+            self.advance();
+        }
+
+        Ok(MacroInvocation {
+            span: self.make_span(start_span),
+            name,
+            args,
+        })
     }
 }

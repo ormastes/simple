@@ -708,12 +708,29 @@ pub(crate) fn exec_block(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Control, CompileError> {
+    // Enter block scope for tail injection tracking
+    let _scope_depth = enter_block_scope();
+
     for stmt in &block.statements {
         match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
             Control::Next => {}
-            flow @ (Control::Return(_) | Control::Break(_) | Control::Continue) => return Ok(flow),
+            flow @ (Control::Return(_) | Control::Break(_) | Control::Continue) => {
+                // Execute pending tail injections before exiting the block
+                let tail_blocks = exit_block_scope();
+                for tail_block in tail_blocks {
+                    exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
+                }
+                return Ok(flow);
+            }
         }
     }
+
+    // Execute pending tail injections at normal block exit
+    let tail_blocks = exit_block_scope();
+    for tail_block in tail_blocks {
+        exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
+    }
+
     Ok(Control::Next)
 }
 
@@ -727,6 +744,9 @@ pub(crate) fn exec_block_fn(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Control, Option<Value>), CompileError> {
+    // Enter block scope for tail injection tracking
+    let _scope_depth = enter_block_scope();
+
     let len = block.statements.len();
     let mut last_expr_value: Option<Value> = None;
 
@@ -745,10 +765,22 @@ pub(crate) fn exec_block_fn(
         match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
             Control::Next => {}
             flow @ (Control::Return(_) | Control::Break(_) | Control::Continue) => {
+                // Execute pending tail injections before exiting the block
+                let tail_blocks = exit_block_scope();
+                for tail_block in tail_blocks {
+                    exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
+                }
                 return Ok((flow, None));
             }
         }
     }
+
+    // Execute pending tail injections at normal block exit
+    let tail_blocks = exit_block_scope();
+    for tail_block in tail_blocks {
+        exec_block(&tail_block, env, functions, classes, enums, impl_methods)?;
+    }
+
     Ok((Control::Next, last_expr_value))
 }
 

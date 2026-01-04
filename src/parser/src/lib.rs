@@ -5,6 +5,7 @@ pub mod doc_gen;
 pub mod error;
 pub mod interner;
 pub mod lexer;
+pub mod macro_registry;
 pub mod sui_parser;
 pub mod token;
 
@@ -26,6 +27,7 @@ pub use doc_gen::{generate as generate_docs, DocItem, DocItemKind, ModuleDocs};
 pub use error::*;
 pub use interner::*;
 pub use lexer::*;
+pub use macro_registry::*;
 pub use parser_impl::{Parser, ParserMode, DebugMode, MAX_LOOP_ITERATIONS};
 pub use sui_parser::*;
 pub use token::*;

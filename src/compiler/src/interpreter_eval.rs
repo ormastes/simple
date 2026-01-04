@@ -19,7 +19,7 @@ use crate::value::{Env, Value};
 
 use super::{
     bind_pattern_value, check_enum_exhaustiveness, control_to_value, create_range_object,
-    dispatch_context_method, evaluate_expr, evaluate_method_call_with_self_update,
+    dispatch_context_method, evaluate_expr, evaluate_macro_invocation, evaluate_method_call_with_self_update,
     exec_block, exec_context, exec_for, exec_function, exec_if, exec_loop, exec_match,
     exec_node, exec_while, exec_with, find_and_exec_method, get_di_config, get_import_alias,
     get_pattern_name, get_type_name, handle_functional_update,
@@ -258,6 +258,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         attributes: Vec::new(),
                         doc_comment: None,
                         invariant: None,
+                        macro_invocations: Vec::new(),
                     },
                 );
             }
@@ -265,12 +266,41 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 enums.insert(e.name.clone(), e.clone());
             }
             Node::Class(c) => {
-                classes.insert(c.name.clone(), c.clone());
+                // Process macro invocations in class body to get introduced fields
+                let mut additional_fields = Vec::new();
+                for macro_invoc in &c.macro_invocations {
+                    // Evaluate the macro invocation
+                    let _result = evaluate_macro_invocation(
+                        &macro_invoc.name,
+                        &macro_invoc.args,
+                        &env,
+                        &mut functions,
+                        &mut classes,
+                        &enums,
+                        &impl_methods,
+                    )?;
+
+                    // Check for introduced fields from macro contract
+                    if let Some(contract_result) = take_macro_introduced_symbols() {
+                        additional_fields.extend(contract_result.introduced_fields);
+                    }
+                }
+
+                // Create class with additional fields if any were introduced
+                let final_class = if additional_fields.is_empty() {
+                    c.clone()
+                } else {
+                    let mut updated = c.clone();
+                    updated.fields.extend(additional_fields);
+                    updated
+                };
+
+                classes.insert(final_class.name.clone(), final_class.clone());
                 // Store in env as Constructor value so it can be called like MyClass()
                 env.insert(
-                    c.name.clone(),
+                    final_class.name.clone(),
                     Value::Constructor {
-                        class_name: c.name.clone(),
+                        class_name: final_class.name.clone(),
                     },
                 );
             }
@@ -366,6 +396,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         attributes: vec![],
                         doc_comment: None,
                         invariant: None,
+                        macro_invocations: Vec::new(),
                     },
                 );
                 env.insert(

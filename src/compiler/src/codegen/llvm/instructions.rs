@@ -61,6 +61,15 @@ impl LlvmBackend {
                     BinOp::GtEq => builder
                         .build_int_compare(IntPredicate::SGE, l, r, "ge")
                         .map_err(|e| CompileError::Semantic(format!("build_int_compare: {}", e)))?,
+                    BinOp::Mod => builder
+                        .build_int_signed_rem(l, r, "mod")
+                        .map_err(|e| CompileError::Semantic(format!("build_int_signed_rem: {}", e)))?,
+                    BinOp::And => builder
+                        .build_and(l, r, "and")
+                        .map_err(|e| CompileError::Semantic(format!("build_and: {}", e)))?,
+                    BinOp::Or => builder
+                        .build_or(l, r, "or")
+                        .map_err(|e| CompileError::Semantic(format!("build_or: {}", e)))?,
                     _ => {
                         return Err(CompileError::Semantic(format!(
                             "Unsupported integer binop: {:?}",

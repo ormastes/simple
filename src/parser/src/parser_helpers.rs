@@ -1,6 +1,10 @@
 //! Parser helper methods - utility functions for tokenization, expectations, and generic parsing
 
+use std::collections::HashMap;
+
 use super::*;
+use crate::ast::{BinOp, UnaryOp};
+use crate::macro_registry::ConstValue;
 
 impl<'a> Parser<'a> {
     pub(crate) fn advance(&mut self) {
@@ -328,6 +332,107 @@ impl<'a> Parser<'a> {
             Type::Simple(name) => name.ends_with("_borrow"),
             Type::Generic { name, .. } => name.ends_with("_borrow"),
             _ => false,
+        }
+    }
+
+    /// Process a macro invocation's contract at parse time for LL(1) integration.
+    ///
+    /// This method:
+    /// 1. Looks up the macro definition from the registry
+    /// 2. Extracts const argument values from the invocation
+    /// 3. Processes the contract to register introduced symbols
+    ///
+    /// Any errors are silently ignored (the interpreter will catch them later).
+    pub(crate) fn process_macro_contract_ll1(&mut self, macro_name: &str, args: &[MacroArg]) {
+        // Look up the macro definition
+        let macro_def = match self.macro_registry.get_macro(macro_name) {
+            Some(def) => def.clone(),
+            None => return, // Unknown macro - will be caught later
+        };
+
+        // Extract const arguments
+        let mut const_args: HashMap<String, ConstValue> = HashMap::new();
+
+        for (idx, param) in macro_def.params.iter().enumerate() {
+            if param.is_const {
+                if let Some(MacroArg::Expr(expr)) = args.get(idx) {
+                    // Try to evaluate the expression as a const value
+                    if let Some(value) = self.try_eval_const_expr(expr) {
+                        const_args.insert(param.name.clone(), value);
+                    }
+                }
+            }
+        }
+
+        // Process the macro contract
+        let scope = self.current_scope.clone();
+        let _ = self.macro_registry.process_macro_invocation(macro_name, &const_args, &scope);
+    }
+
+    /// Try to evaluate an expression as a compile-time constant.
+    /// Returns None if the expression cannot be evaluated at compile time.
+    fn try_eval_const_expr(&self, expr: &Expr) -> Option<ConstValue> {
+        match expr {
+            Expr::Integer(n) => Some(ConstValue::Int(*n)),
+            Expr::String(s) => Some(ConstValue::Str(s.clone())),
+            Expr::Bool(b) => Some(ConstValue::Bool(*b)),
+            Expr::Identifier(name) => {
+                // Could look up in a const environment if we had one
+                None
+            }
+            Expr::Binary { left, op, right } => {
+                let l = self.try_eval_const_expr(left)?;
+                let r = self.try_eval_const_expr(right)?;
+                self.eval_const_binary_op(&l, op, &r)
+            }
+            Expr::Unary { op, operand } => {
+                let v = self.try_eval_const_expr(operand)?;
+                self.eval_const_unary_op(op, &v)
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate a binary operation on const values
+    fn eval_const_binary_op(&self, left: &ConstValue, op: &BinOp, right: &ConstValue) -> Option<ConstValue> {
+        match (left, right) {
+            (ConstValue::Int(l), ConstValue::Int(r)) => match op {
+                BinOp::Add => Some(ConstValue::Int(l + r)),
+                BinOp::Sub => Some(ConstValue::Int(l - r)),
+                BinOp::Mul => Some(ConstValue::Int(l * r)),
+                BinOp::Div if *r != 0 => Some(ConstValue::Int(l / r)),
+                BinOp::Mod if *r != 0 => Some(ConstValue::Int(l % r)),
+                BinOp::Eq => Some(ConstValue::Bool(l == r)),
+                BinOp::NotEq => Some(ConstValue::Bool(l != r)),
+                BinOp::Lt => Some(ConstValue::Bool(l < r)),
+                BinOp::LtEq => Some(ConstValue::Bool(l <= r)),
+                BinOp::Gt => Some(ConstValue::Bool(l > r)),
+                BinOp::GtEq => Some(ConstValue::Bool(l >= r)),
+                _ => None,
+            },
+            (ConstValue::Str(l), ConstValue::Str(r)) => match op {
+                BinOp::Add => Some(ConstValue::Str(format!("{}{}", l, r))),
+                BinOp::Eq => Some(ConstValue::Bool(l == r)),
+                BinOp::NotEq => Some(ConstValue::Bool(l != r)),
+                _ => None,
+            },
+            (ConstValue::Bool(l), ConstValue::Bool(r)) => match op {
+                BinOp::And => Some(ConstValue::Bool(*l && *r)),
+                BinOp::Or => Some(ConstValue::Bool(*l || *r)),
+                BinOp::Eq => Some(ConstValue::Bool(l == r)),
+                BinOp::NotEq => Some(ConstValue::Bool(l != r)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Evaluate a unary operation on a const value
+    fn eval_const_unary_op(&self, op: &UnaryOp, value: &ConstValue) -> Option<ConstValue> {
+        match (op, value) {
+            (UnaryOp::Neg, ConstValue::Int(n)) => Some(ConstValue::Int(-n)),
+            (UnaryOp::Not, ConstValue::Bool(b)) => Some(ConstValue::Bool(!b)),
+            _ => None,
         }
     }
 

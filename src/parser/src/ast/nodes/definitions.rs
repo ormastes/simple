@@ -301,6 +301,8 @@ pub struct ClassDef {
     pub doc_comment: Option<DocComment>,
     /// Class invariant (checked after constructor and public methods)
     pub invariant: Option<InvariantBlock>,
+    /// Macro invocations in class body (expanded at runtime to add fields/methods)
+    pub macro_invocations: Vec<MacroInvocation>,
 }
 
 impl ClassDef {
@@ -418,6 +420,8 @@ pub struct MacroParam {
     pub name: String,
     pub ty: Type,
     pub is_const: bool,
+    /// Whether this is a variadic parameter (...name)
+    pub is_variadic: bool,
 }
 
 /// Macro contract items (header-only declarations for symbol table)

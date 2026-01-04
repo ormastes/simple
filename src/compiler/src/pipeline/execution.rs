@@ -30,6 +30,54 @@ pub fn generate_smf_from_object(object_code: &[u8], gc: Option<&Arc<dyn GcAlloca
     crate::smf_builder::generate_smf_from_object(object_code, gc)
 }
 
+/// Link a WASM object file into a complete WASM module using wasm-ld.
+///
+/// LLVM emits WASM object files (.o) which are relocatable format.
+/// We need to link them into a complete WASM module that wasmer can execute.
+fn link_wasm_object(object_code: &[u8]) -> Result<Vec<u8>, CompileError> {
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    // Create temp directory for linking
+    let tmp = TempDir::new()
+        .map_err(|e| CompileError::Codegen(format!("Failed to create temp dir: {}", e)))?;
+
+    let obj_path = tmp.path().join("module.o");
+    let wasm_path = tmp.path().join("module.wasm");
+
+    // Write object file
+    fs::write(&obj_path, object_code)
+        .map_err(|e| CompileError::Codegen(format!("Failed to write object file: {}", e)))?;
+
+    // Run wasm-ld to link into a complete WASM module
+    // --no-entry: No _start entry point (we'll call main directly)
+    // --export-all: Export all symbols so we can call main
+    // --allow-undefined: Allow undefined symbols (for WASI imports)
+    let output = Command::new("wasm-ld")
+        .args([
+            "--no-entry",
+            "--export-all",
+            "--allow-undefined",
+            "-o",
+            wasm_path.to_str().unwrap(),
+            obj_path.to_str().unwrap(),
+        ])
+        .output()
+        .map_err(|e| CompileError::Codegen(format!("Failed to run wasm-ld: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CompileError::Codegen(format!(
+            "wasm-ld failed: {}",
+            stderr
+        )));
+    }
+
+    // Read the linked WASM module
+    fs::read(&wasm_path)
+        .map_err(|e| CompileError::Codegen(format!("Failed to read linked WASM: {}", e)))
+}
+
 impl CompilerPipeline {
     pub(super) fn evaluate_module_with_project(&self, items: &[Node]) -> Result<i32, CompileError> {
         let di_config = self.project.as_ref().and_then(|p| p.di_config.as_ref());
@@ -334,12 +382,18 @@ impl CompilerPipeline {
         // 9. Generate machine code via selected backend for the target architecture
         let object_code = self.compile_mir_to_object(&mir_module, target)?;
 
-        // 10. Wrap object code in SMF format for the target
-        Ok(generate_smf_from_object_for_target(
-            &object_code,
-            self.gc.as_ref(),
-            target,
-        ))
+        // 10. For WASM targets, link into a complete module; otherwise wrap in SMF
+        if target.arch.is_wasm() {
+            // Link WASM object file into a complete WASM module
+            link_wasm_object(&object_code)
+        } else {
+            // Wrap object code in SMF format for native targets
+            Ok(generate_smf_from_object_for_target(
+                &object_code,
+                self.gc.as_ref(),
+                target,
+            ))
+        }
     }
 
     /// Compile source to a standalone native binary.

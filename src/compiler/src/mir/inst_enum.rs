@@ -34,6 +34,14 @@ pub enum MirInst {
         operand: VReg,
     },
 
+    /// Type cast operation
+    Cast {
+        dest: VReg,
+        source: VReg,
+        from_ty: TypeId,
+        to_ty: TypeId,
+    },
+
     /// Function call with effect tracking
     Call {
         dest: Option<VReg>,

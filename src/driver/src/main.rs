@@ -90,6 +90,12 @@ fn main() {
     let gc_log = args.iter().any(|a| a == "--gc-log");
     let gc_off = args.iter().any(|a| a == "--gc=off" || a == "--gc=OFF");
     let use_notui = args.iter().any(|a| a == "--notui");
+    let macro_trace = args.iter().any(|a| a == "--macro-trace");
+
+    // Enable macro tracing if requested
+    if macro_trace {
+        simple_compiler::set_macro_trace(true);
+    }
 
     // Parse and apply sandbox configuration before running code (#916-919)
     let sandbox_start = std::time::Instant::now();
@@ -119,6 +125,10 @@ fn main() {
         }
 
         if arg == "--startup-metrics" {
+            continue;
+        }
+
+        if arg == "--macro-trace" {
             continue;
         }
 

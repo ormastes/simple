@@ -90,6 +90,7 @@ pub fn print_help() {
     eprintln!("  --notui        Use Normal REPL instead of TUI (TUI is default)");
     eprintln!("  --gc-log       Enable verbose GC logging");
     eprintln!("  --gc=off       Disable garbage collection");
+    eprintln!("  --macro-trace  Enable macro expansion tracing");
     eprintln!("  --target <arch>  Target architecture for cross-compilation");
     eprintln!("  --linker <name>  Native linker: mold, lld, ld (auto-detected if not set)");
     eprintln!("  --snapshot     Create JJ snapshot on successful build/test");

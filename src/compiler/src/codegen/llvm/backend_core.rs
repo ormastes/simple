@@ -289,13 +289,20 @@ impl LlvmBackend {
         })?;
 
         // Create target machine
+        // For WASM targets, use static relocation mode (no PIC needed)
+        let reloc_mode = if triple.contains("wasm") {
+            RelocMode::Static
+        } else {
+            RelocMode::PIC
+        };
+
         let target_machine = target
             .create_target_machine(
                 &target_triple,
                 "generic",
                 "",
                 OptimizationLevel::Default,
-                RelocMode::PIC,
+                reloc_mode,
                 CodeModel::Default,
             )
             .ok_or_else(|| CompileError::Semantic("Failed to create target machine".to_string()))?;
@@ -324,6 +331,15 @@ impl NativeBackend for LlvmBackend {
     fn compile(&mut self, module: &MirModule) -> Result<Vec<u8>, CompileError> {
         let module_name = module.name.as_deref().unwrap_or("module");
         self.create_module(module_name)?;
+
+        // First pass: forward-declare all function signatures
+        // This is necessary so that functions can call each other regardless of compilation order
+        for func in &module.functions {
+            let param_types: Vec<_> = func.params.iter().map(|p| p.ty).collect();
+            self.create_function_signature(&func.name, &param_types, &func.return_type)?;
+        }
+
+        // Second pass: compile all function bodies
         for func in &module.functions {
             self.compile_function(func)?;
         }

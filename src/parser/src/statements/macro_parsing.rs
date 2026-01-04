@@ -30,15 +30,18 @@ impl<'a> Parser<'a> {
             }
         }
         self.expect(&TokenKind::RParen)?;
+
+        // Required: -> (contract)
         self.expect(&TokenKind::Arrow)?;
         self.expect(&TokenKind::LParen)?;
         let contract = self.parse_macro_contract_items()?;
         self.expect(&TokenKind::RParen)?;
+
         self.expect(&TokenKind::Colon)?;
 
         let body = self.parse_macro_body()?;
 
-        Ok(Node::Macro(MacroDef {
+        let macro_def = MacroDef {
             span: Span::new(
                 start_span.start,
                 self.previous.span.end,
@@ -50,11 +53,24 @@ impl<'a> Parser<'a> {
             contract,
             body,
             visibility: Visibility::Private,
-        }))
+        };
+
+        // Register the macro in the registry for LL(1) integration
+        self.macro_registry.register_macro(macro_def.clone());
+
+        Ok(Node::Macro(macro_def))
     }
 
-    /// Parse a single macro parameter: name: Type [const]
+    /// Parse a single macro parameter: name: Type [const] or ...name: Type (variadic)
     pub(crate) fn parse_macro_param(&mut self) -> Result<MacroParam, ParseError> {
+        // Check for variadic prefix: ...name
+        let is_variadic = if self.check(&TokenKind::Ellipsis) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
         let name = self.expect_identifier()?;
         self.expect(&TokenKind::Colon)?;
         let ty = self.parse_type()?;
@@ -64,7 +80,16 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
-        Ok(MacroParam { name, ty, is_const })
+
+        // Variadic parameters cannot be const
+        if is_variadic && is_const {
+            return Err(ParseError::syntax_error_with_span(
+                "Variadic parameters cannot be const",
+                self.previous.span,
+            ));
+        }
+
+        Ok(MacroParam { name, ty, is_const, is_variadic })
     }
 
     pub(super) fn parse_macro_contract_items(

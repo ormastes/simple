@@ -35,33 +35,32 @@ impl LlvmBackend {
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Builder not created".to_string()))?;
 
-        // Map parameter types
-        let param_types: Result<Vec<_>, _> = func
-            .params
-            .iter()
-            .map(|p| self.llvm_type(&p.ty).map(|t| t.into()))
-            .collect();
-        let param_types = param_types?;
+        // Get the function that was forward-declared in the compile() pass
+        // If it doesn't exist, create it (for backwards compatibility)
+        let function = module.get_function(&func.name).unwrap_or_else(|| {
+            // Map parameter types
+            let param_types: Vec<_> = func
+                .params
+                .iter()
+                .filter_map(|p| self.llvm_type(&p.ty).ok().map(|t| t.into()))
+                .collect();
 
-        // Create function type
-        let fn_type = if func.return_type == TypeId::VOID {
-            self.context.void_type().fn_type(&param_types, false)
-        } else {
-            let ret_llvm = self.llvm_type(&func.return_type)?;
-            match ret_llvm {
-                BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
-                BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
-                BasicTypeEnum::PointerType(t) => t.fn_type(&param_types, false),
-                _ => {
-                    return Err(CompileError::Semantic(
-                        "Unsupported return type".to_string(),
-                    ))
+            // Create function type
+            let fn_type = if func.return_type == TypeId::VOID {
+                self.context.void_type().fn_type(&param_types, false)
+            } else if let Ok(ret_llvm) = self.llvm_type(&func.return_type) {
+                match ret_llvm {
+                    BasicTypeEnum::IntType(t) => t.fn_type(&param_types, false),
+                    BasicTypeEnum::FloatType(t) => t.fn_type(&param_types, false),
+                    BasicTypeEnum::PointerType(t) => t.fn_type(&param_types, false),
+                    _ => self.context.i64_type().fn_type(&param_types, false),
                 }
-            }
-        };
+            } else {
+                self.context.i64_type().fn_type(&param_types, false)
+            };
 
-        // Add function to module
-        let function = module.add_function(&func.name, fn_type, None);
+            module.add_function(&func.name, fn_type, None)
+        });
 
         // Create basic blocks for each MIR block
         let mut llvm_blocks = HashMap::new();
@@ -75,8 +74,46 @@ impl LlvmBackend {
         // Map virtual registers to LLVM values
         let mut vreg_map: VRegMap = HashMap::new();
 
-        // Map function parameters to virtual registers
-        for (i, param) in func.params.iter().enumerate() {
+        // Allocate stack space for parameters and locals at the entry block
+        // Parameters and locals share a combined index space: params at 0..param_count, locals at param_count..
+        let mut local_allocas: HashMap<usize, inkwell::values::PointerValue<'static>> = HashMap::new();
+        if !func.blocks.is_empty() {
+            let entry_bb = llvm_blocks[&func.blocks[0].id];
+            builder.position_at_end(entry_bb);
+
+            // Create allocas for parameters (index 0..param_count)
+            for (i, param) in func.params.iter().enumerate() {
+                let param_ty = self.llvm_type(&param.ty)?;
+                let alloca = builder
+                    .build_alloca(param_ty, &param.name)
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build param alloca: {}", e)))?;
+                local_allocas.insert(i, alloca);
+            }
+
+            // Create allocas for locals (index param_count..param_count+local_count)
+            let param_count = func.params.len();
+            for (i, local) in func.locals.iter().enumerate() {
+                let local_ty = self.llvm_type(&local.ty)?;
+                let alloca = builder
+                    .build_alloca(local_ty, &local.name)
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build local alloca: {}", e)))?;
+                local_allocas.insert(param_count + i, alloca);
+            }
+
+            // Store parameter values into their allocas
+            for (i, _param) in func.params.iter().enumerate() {
+                if let Some(llvm_param) = function.get_nth_param(i as u32) {
+                    if let Some(&alloca) = local_allocas.get(&i) {
+                        builder
+                            .build_store(alloca, llvm_param)
+                            .map_err(|e| CompileError::Semantic(format!("Failed to store param: {}", e)))?;
+                    }
+                }
+            }
+        }
+
+        // Map function parameters to virtual registers (for direct use before LocalAddr/Load)
+        for (i, _param) in func.params.iter().enumerate() {
             if let Some(llvm_param) = function.get_nth_param(i as u32) {
                 // Params are mapped to vregs starting from VReg(0)
                 vreg_map.insert(crate::mir::VReg(i as u32), llvm_param.into());
@@ -95,7 +132,7 @@ impl LlvmBackend {
 
             // Compile each instruction by dispatching to helper methods
             for inst in &block.instructions {
-                self.compile_instruction(inst, &mut vreg_map, builder, module)?;
+                self.compile_instruction(inst, &mut vreg_map, &local_allocas, builder, module)?;
             }
 
             // Compile terminator
@@ -111,6 +148,7 @@ impl LlvmBackend {
         &self,
         inst: &crate::mir::MirInst,
         vreg_map: &mut VRegMap,
+        local_allocas: &std::collections::HashMap<usize, inkwell::values::PointerValue<'static>>,
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
@@ -156,6 +194,11 @@ impl LlvmBackend {
                 let result = self.compile_unaryop(*op, operand_val, builder)?;
                 vreg_map.insert(*dest, result);
             }
+            MirInst::Cast { dest, source, from_ty, to_ty } => {
+                let source_val = self.get_vreg(source, vreg_map)?;
+                let result = self.compile_cast(source_val, from_ty, to_ty, builder)?;
+                vreg_map.insert(*dest, result);
+            }
 
             // Memory
             MirInst::Load { dest, addr, ty } => {
@@ -166,6 +209,11 @@ impl LlvmBackend {
             }
             MirInst::GcAlloc { dest, ty } => {
                 self.compile_gc_alloc(*dest, ty, vreg_map, builder)?;
+            }
+            MirInst::LocalAddr { dest, local_index } => {
+                let alloca = local_allocas.get(local_index)
+                    .ok_or_else(|| CompileError::Semantic(format!("Unknown local index: {}", local_index)))?;
+                vreg_map.insert(*dest, (*alloca).into());
             }
 
             // Collections
@@ -224,7 +272,7 @@ impl LlvmBackend {
                 self.compile_interp_call(*dest, func_name, args, vreg_map, builder, module)?;
             }
             MirInst::InterpEval { dest, expr_index } => {
-                self.compile_interp_eval(*dest, *expr_index, vreg_map, builder, module)?;
+                self.compile_interp_eval(*dest, *expr_index as usize, vreg_map, builder, module)?;
             }
 
             // Objects
@@ -410,6 +458,99 @@ impl LlvmBackend {
         global.set_constant(true);
         vreg_map.insert(dest, global.as_pointer_value().into());
         Ok(())
+    }
+
+    // ============================================================================
+    // Cast Instructions
+    // ============================================================================
+
+    #[cfg(feature = "llvm")]
+    fn compile_cast(
+        &self,
+        source_val: inkwell::values::BasicValueEnum<'static>,
+        from_type: &crate::hir::TypeId,
+        to_type: &crate::hir::TypeId,
+        builder: &Builder<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        use crate::hir::TypeId;
+
+        let i64_type = self.context.i64_type();
+        let f64_type = self.context.f64_type();
+
+        match (*from_type, *to_type) {
+            // Float to Int (f64 -> i64)
+            (TypeId::F64, TypeId::I64) | (TypeId::F32, TypeId::I64) | (TypeId::F32, TypeId::I32) | (TypeId::F64, TypeId::I32) => {
+                if let inkwell::values::BasicValueEnum::FloatValue(float_val) = source_val {
+                    let result = builder
+                        .build_float_to_signed_int(float_val, i64_type, "cast_f2i")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to cast float to int: {}", e)))?;
+                    Ok(result.into())
+                } else {
+                    Err(CompileError::Semantic("Expected float value for float-to-int cast".to_string()))
+                }
+            }
+            // Int to Float (i64 -> f64)
+            (TypeId::I64, TypeId::F64) | (TypeId::I32, TypeId::F64) | (TypeId::I32, TypeId::F32) | (TypeId::I64, TypeId::F32) => {
+                if let inkwell::values::BasicValueEnum::IntValue(int_val) = source_val {
+                    let result = builder
+                        .build_signed_int_to_float(int_val, f64_type, "cast_i2f")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to cast int to float: {}", e)))?;
+                    Ok(result.into())
+                } else {
+                    Err(CompileError::Semantic("Expected int value for int-to-float cast".to_string()))
+                }
+            }
+            // Int to Int (widening or truncation)
+            (TypeId::I32, TypeId::I64) => {
+                if let inkwell::values::BasicValueEnum::IntValue(int_val) = source_val {
+                    let result = builder
+                        .build_int_s_extend(int_val, i64_type, "cast_i32_i64")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to extend int: {}", e)))?;
+                    Ok(result.into())
+                } else {
+                    Err(CompileError::Semantic("Expected int value for int-to-int cast".to_string()))
+                }
+            }
+            (TypeId::I64, TypeId::I32) => {
+                if let inkwell::values::BasicValueEnum::IntValue(int_val) = source_val {
+                    let i32_type = self.context.i32_type();
+                    let result = builder
+                        .build_int_truncate(int_val, i32_type, "cast_i64_i32")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to truncate int: {}", e)))?;
+                    Ok(result.into())
+                } else {
+                    Err(CompileError::Semantic("Expected int value for int-to-int cast".to_string()))
+                }
+            }
+            // Float to Float (widening or truncation)
+            (TypeId::F32, TypeId::F64) => {
+                if let inkwell::values::BasicValueEnum::FloatValue(float_val) = source_val {
+                    let result = builder
+                        .build_float_ext(float_val, f64_type, "cast_f32_f64")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to extend float: {}", e)))?;
+                    Ok(result.into())
+                } else {
+                    Err(CompileError::Semantic("Expected float value for float-to-float cast".to_string()))
+                }
+            }
+            (TypeId::F64, TypeId::F32) => {
+                if let inkwell::values::BasicValueEnum::FloatValue(float_val) = source_val {
+                    let f32_type = self.context.f32_type();
+                    let result = builder
+                        .build_float_trunc(float_val, f32_type, "cast_f64_f32")
+                        .map_err(|e| CompileError::Semantic(format!("Failed to truncate float: {}", e)))?;
+                    Ok(result.into())
+                } else {
+                    Err(CompileError::Semantic("Expected float value for float-to-float cast".to_string()))
+                }
+            }
+            // Same type - no-op
+            _ if from_type == to_type => Ok(source_val),
+            // Unsupported cast
+            _ => Err(CompileError::Semantic(format!(
+                "Unsupported cast from {:?} to {:?}", from_type, to_type
+            ))),
+        }
     }
 
     // ============================================================================
@@ -752,7 +893,7 @@ impl LlvmBackend {
     fn compile_call(
         &self,
         dest: Option<crate::mir::VReg>,
-        target: &crate::hir::FunctionId,
+        target: &crate::mir::CallTarget,
         args: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
         builder: &Builder<'static>,

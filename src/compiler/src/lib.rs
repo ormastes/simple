@@ -68,7 +68,7 @@ pub use coverage::{
     CoverageSummary, Decision, ExecutionPath, FunctionCoverage, ModuleCoverage, SourceLoc,
 };
 pub use error::{codes as error_codes, typo, CompileError, ErrorContext};
-pub use interpreter::{evaluate_module, set_interpreter_args, get_interpreter_args};
+pub use interpreter::{evaluate_module, set_interpreter_args, get_interpreter_args, set_macro_trace};
 pub use lint::{LintChecker, LintConfig, LintDiagnostic, LintLevel, LintName};
 pub use module_resolver::{DirectoryManifest, ModuleResolver, ResolvedModule};
 pub use monomorphize::{

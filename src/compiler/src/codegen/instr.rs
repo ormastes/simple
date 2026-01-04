@@ -93,6 +93,36 @@ pub fn compile_instruction<M: Module>(
             ctx.vreg_values.insert(*dest, val);
         }
 
+        MirInst::Cast { dest, source, from_ty, to_ty } => {
+            let src_val = ctx.vreg_values[source];
+            // Determine source and target types
+            let is_from_float = *from_ty == crate::hir::TypeId::F64 || *from_ty == crate::hir::TypeId::F32;
+            let is_to_float = *to_ty == crate::hir::TypeId::F64 || *to_ty == crate::hir::TypeId::F32;
+            let is_to_i64 = *to_ty == crate::hir::TypeId::I64;
+
+            let val = if is_from_float && !is_to_float {
+                // Float to int conversion
+                builder.ins().fcvt_to_sint(types::I64, src_val)
+            } else if !is_from_float && is_to_float {
+                // Int to float conversion
+                builder.ins().fcvt_from_sint(types::F64, src_val)
+            } else if is_from_float && is_to_float {
+                // Float to float (F32 <-> F64)
+                if *from_ty == crate::hir::TypeId::F32 {
+                    builder.ins().fpromote(types::F64, src_val)
+                } else {
+                    builder.ins().fdemote(types::F32, src_val)
+                }
+            } else if is_to_i64 {
+                // Int to i64 (no-op or sign extension)
+                src_val
+            } else {
+                // Default: just copy the value
+                src_val
+            };
+            ctx.vreg_values.insert(*dest, val);
+        }
+
         MirInst::LocalAddr { dest, local_index } => {
             let addr_val = builder.ins().iconst(types::I64, *local_index as i64);
             ctx.vreg_values.insert(*dest, addr_val);

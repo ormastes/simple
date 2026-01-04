@@ -56,6 +56,8 @@ impl Lowerer {
             Expr::TensorLiteral { dtype, dims, mode, device } => {
                 self.lower_tensor_literal(dtype, dims, mode, device, ctx)
             }
+            // Type cast expression: expr as Type
+            Expr::Cast { expr, target_type } => self.lower_cast(expr, target_type, ctx),
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }

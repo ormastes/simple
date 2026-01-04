@@ -591,10 +591,15 @@ impl<'a> MirLowerer<'a> {
             self.lower_stmt(stmt, func.contract.as_ref())?;
         }
 
-        // Ensure we have a return
-        self.with_func(|func, current_block| {
-            if let Some(block) = func.block_mut(current_block) {
-                if matches!(block.terminator, Terminator::Unreachable) {
+        // Ensure void functions have a return (non-void functions should have explicit returns)
+        // Only convert Unreachable to Return(None) for void functions.
+        // For non-void functions, if we reach an Unreachable block, it means all paths
+        // returned earlier (e.g., if/else with returns in both branches), so we leave
+        // the terminator as Unreachable (dead code).
+        let is_void = func.return_type == TypeId::VOID;
+        self.with_func(|mir_func, current_block| {
+            if let Some(block) = mir_func.block_mut(current_block) {
+                if matches!(block.terminator, Terminator::Unreachable) && is_void {
                     block.terminator = Terminator::Return(None);
                 }
             }

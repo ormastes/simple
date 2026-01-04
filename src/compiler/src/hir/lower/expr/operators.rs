@@ -114,4 +114,26 @@ impl Lowerer {
             }),
         }
     }
+
+    /// Lower a cast expression to HIR
+    ///
+    /// Handles type cast expressions like `expr as i64`.
+    /// Supports casting between numeric types (int/float).
+    pub(super) fn lower_cast(
+        &mut self,
+        expr: &Expr,
+        target_type: &ast::Type,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        let expr_hir = Box::new(self.lower_expr(expr, ctx)?);
+        let target = self.resolve_type(target_type)?;
+
+        Ok(HirExpr {
+            kind: HirExprKind::Cast {
+                expr: expr_hir,
+                target,
+            },
+            ty: target,
+        })
+    }
 }

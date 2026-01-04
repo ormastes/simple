@@ -19,6 +19,7 @@ impl HasEffects for MirInst {
             | MirInst::Copy { .. }
             | MirInst::BinOp { .. }
             | MirInst::UnaryOp { .. }
+            | MirInst::Cast { .. }
             | MirInst::Load { .. }
             | MirInst::Store { .. }
             | MirInst::LocalAddr { .. }

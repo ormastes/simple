@@ -30,6 +30,7 @@ impl MirInst {
             | MirInst::Copy { dest, .. }
             | MirInst::BinOp { dest, .. }
             | MirInst::UnaryOp { dest, .. }
+            | MirInst::Cast { dest, .. }
             | MirInst::Load { dest, .. }
             | MirInst::LocalAddr { dest, .. }
             | MirInst::GetElementPtr { dest, .. }
@@ -134,6 +135,7 @@ impl MirInst {
             MirInst::Copy { src, .. } => vec![*src],
             MirInst::BinOp { left, right, .. } => vec![*left, *right],
             MirInst::UnaryOp { operand, .. } => vec![*operand],
+            MirInst::Cast { source, .. } => vec![*source],
             MirInst::Load { addr, .. } => vec![*addr],
             MirInst::Store { addr, value, .. } => vec![*addr, *value],
             MirInst::LocalAddr { .. } => vec![],
