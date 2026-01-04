@@ -1,5 +1,6 @@
 // Macro invocation and expansion (part of interpreter module)
 
+use simple_parser::ast::MacroAnchor;
 use crate::macro_contracts::{process_macro_contract, MacroContractResult};
 use crate::macro_validation::validate_macro_defined_before_use;
 
@@ -7,15 +8,210 @@ use crate::macro_validation::validate_macro_defined_before_use;
 mod helpers;
 use helpers::{build_macro_const_bindings, const_value_to_string};
 
+/// Maximum depth for recursive macro expansion (prevents stack overflow)
+const MAX_MACRO_EXPANSION_DEPTH: usize = 128;
+
 thread_local! {
     /// Accumulates symbols introduced by macro expansion
     /// These need to be registered by the caller after macro invocation
     static MACRO_INTRODUCED_SYMBOLS: RefCell<Option<MacroContractResult>> = RefCell::new(None);
+
+    /// Flag to enable macro expansion tracing
+    static MACRO_TRACE_ENABLED: RefCell<bool> = RefCell::new(false);
+
+    /// Current macro expansion depth (for recursion limit)
+    static MACRO_EXPANSION_DEPTH: RefCell<usize> = RefCell::new(0);
+
+    /// Pending tail injections - blocks to execute at the end of the current block
+    /// Each entry is (depth, block) where depth is the block nesting level
+    static PENDING_TAIL_INJECTIONS: RefCell<Vec<(usize, Block)>> = RefCell::new(Vec::new());
+
+    /// Current block nesting depth for tail injection tracking
+    static BLOCK_DEPTH: RefCell<usize> = RefCell::new(0);
+}
+
+/// Enable or disable macro expansion tracing
+pub fn set_macro_trace(enabled: bool) {
+    MACRO_TRACE_ENABLED.with(|cell| {
+        *cell.borrow_mut() = enabled;
+    });
+}
+
+/// Check if macro tracing is enabled
+fn is_macro_trace_enabled() -> bool {
+    MACRO_TRACE_ENABLED.with(|cell| *cell.borrow())
+}
+
+/// Print a macro trace message if tracing is enabled
+fn macro_trace(msg: &str) {
+    if is_macro_trace_enabled() {
+        eprintln!("[macro] {}", msg);
+    }
+}
+
+/// Increment macro expansion depth and check for overflow
+fn push_macro_depth(macro_name: &str) -> Result<(), CompileError> {
+    let depth = MACRO_EXPANSION_DEPTH.with(|cell| {
+        let mut d = cell.borrow_mut();
+        *d += 1;
+        *d
+    });
+
+    if depth > MAX_MACRO_EXPANSION_DEPTH {
+        MACRO_EXPANSION_DEPTH.with(|cell| *cell.borrow_mut() -= 1);
+        return Err(CompileError::Semantic(format!(
+            "macro expansion depth exceeded maximum of {} (recursive macro invocation of '{}')",
+            MAX_MACRO_EXPANSION_DEPTH, macro_name
+        )));
+    }
+
+    if is_macro_trace_enabled() && depth > 1 {
+        macro_trace(&format!("  (depth: {})", depth));
+    }
+
+    Ok(())
+}
+
+/// Decrement macro expansion depth
+fn pop_macro_depth() {
+    MACRO_EXPANSION_DEPTH.with(|cell| {
+        let mut d = cell.borrow_mut();
+        if *d > 0 {
+            *d -= 1;
+        }
+    });
 }
 
 /// Get and clear introduced symbols from last macro expansion
 pub fn take_macro_introduced_symbols() -> Option<MacroContractResult> {
     MACRO_INTRODUCED_SYMBOLS.with(|cell| cell.borrow_mut().take())
+}
+
+/// Enter a new block scope for tail injection tracking
+pub fn enter_block_scope() -> usize {
+    BLOCK_DEPTH.with(|cell| {
+        let mut d = cell.borrow_mut();
+        *d += 1;
+        *d
+    })
+}
+
+/// Exit a block scope and return any pending tail injections for this depth
+pub fn exit_block_scope() -> Vec<Block> {
+    let current_depth = BLOCK_DEPTH.with(|cell| {
+        let mut d = cell.borrow_mut();
+        let depth = *d;
+        if *d > 0 {
+            *d -= 1;
+        }
+        depth
+    });
+
+    // Collect and remove all pending injections at this depth
+    let result = PENDING_TAIL_INJECTIONS.with(|cell| {
+        let mut pending = cell.borrow_mut();
+        let mut result = Vec::new();
+        pending.retain(|(depth, block)| {
+            if *depth == current_depth {
+                result.push(block.clone());
+                false // Remove from pending
+            } else {
+                true // Keep in pending
+            }
+        });
+        result
+    });
+
+    if is_macro_trace_enabled() && !result.is_empty() {
+        macro_trace(&format!("  executing {} tail injection(s) at depth {}", result.len(), current_depth));
+    }
+
+    result
+}
+
+/// Queue a block for tail injection at the current block scope
+pub fn queue_tail_injection(block: Block) {
+    let current_depth = BLOCK_DEPTH.with(|cell| *cell.borrow());
+    if is_macro_trace_enabled() {
+        macro_trace(&format!("  queuing tail injection at depth {}", current_depth));
+    }
+    PENDING_TAIL_INJECTIONS.with(|cell| {
+        cell.borrow_mut().push((current_depth, block));
+    });
+}
+
+/// Convert an expression to its source code string representation
+fn expr_to_source_string(expr: &Expr) -> String {
+    use simple_parser::ast::BinOp;
+
+    match expr {
+        Expr::Integer(i) => i.to_string(),
+        Expr::Float(f) => f.to_string(),
+        Expr::Bool(b) => b.to_string(),
+        Expr::String(s) => format!("\"{}\"", s),
+        Expr::Identifier(name) => name.clone(),
+        Expr::Binary { op, left, right } => {
+            let op_str = match op {
+                BinOp::Add => "+",
+                BinOp::Sub => "-",
+                BinOp::Mul => "*",
+                BinOp::Div => "/",
+                BinOp::Mod => "%",
+                BinOp::Eq => "==",
+                BinOp::NotEq => "!=",
+                BinOp::Lt => "<",
+                BinOp::LtEq => "<=",
+                BinOp::Gt => ">",
+                BinOp::GtEq => ">=",
+                BinOp::And => "and",
+                BinOp::Or => "or",
+                _ => "?",
+            };
+            format!("({} {} {})", expr_to_source_string(left), op_str, expr_to_source_string(right))
+        }
+        Expr::Unary { op, operand } => {
+            let op_str = match op {
+                simple_parser::ast::UnaryOp::Neg => "-",
+                simple_parser::ast::UnaryOp::Not => "not ",
+                _ => "?",
+            };
+            format!("{}{}", op_str, expr_to_source_string(operand))
+        }
+        Expr::Call { callee, args } => {
+            let args_str: Vec<String> = args.iter().map(|a| expr_to_source_string(&a.value)).collect();
+            format!("{}({})", expr_to_source_string(callee), args_str.join(", "))
+        }
+        Expr::MethodCall { receiver, method, args } => {
+            let args_str: Vec<String> = args.iter().map(|a| expr_to_source_string(&a.value)).collect();
+            format!("{}.{}({})", expr_to_source_string(receiver), method, args_str.join(", "))
+        }
+        Expr::FieldAccess { receiver, field } => {
+            format!("{}.{}", expr_to_source_string(receiver), field)
+        }
+        Expr::Index { receiver, index } => {
+            format!("{}[{}]", expr_to_source_string(receiver), expr_to_source_string(index))
+        }
+        Expr::Array(items) => {
+            let items_str: Vec<String> = items.iter().map(|i| expr_to_source_string(i)).collect();
+            format!("[{}]", items_str.join(", "))
+        }
+        Expr::Tuple(items) => {
+            let items_str: Vec<String> = items.iter().map(|i| expr_to_source_string(i)).collect();
+            format!("({})", items_str.join(", "))
+        }
+        Expr::Lambda { params, body, .. } => {
+            let params_str: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            format!("fn({}) -> ...", params_str.join(", "))
+        }
+        Expr::If { condition, then_branch, else_branch } => {
+            let else_str = else_branch.as_ref()
+                .map(|e| format!(" else {}", expr_to_source_string(e)))
+                .unwrap_or_default();
+            format!("if {}: ...{}", expr_to_source_string(condition), else_str)
+        }
+        Expr::Nil => "nil".to_string(),
+        _ => format!("{:?}", expr), // Fallback for complex expressions
+    }
 }
 
 fn evaluate_macro_invocation(
@@ -151,6 +347,14 @@ fn evaluate_macro_invocation(
                 Ok(Value::Nil)
             }
         }
+        "stringify" => {
+            // Convert expression to its source code string representation
+            if let Some(MacroArg::Expr(e)) = macro_args.first() {
+                Ok(Value::Str(expr_to_source_string(e)))
+            } else {
+                Ok(Value::Str(String::new()))
+            }
+        }
         _ => {
             let macro_def = USER_MACROS.with(|cell| cell.borrow().get(name).cloned());
             if let Some(m) = macro_def {
@@ -172,6 +376,27 @@ fn expand_user_macro(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Check and increment macro expansion depth (prevents infinite recursion)
+    push_macro_depth(&macro_def.name)?;
+
+    // Use inner function to ensure we always pop depth, even on error
+    let result = expand_user_macro_inner(macro_def, args, env, functions, classes, enums, impl_methods);
+    pop_macro_depth();
+    result
+}
+
+/// Inner implementation of expand_user_macro (separated for depth tracking)
+fn expand_user_macro_inner(
+    macro_def: &MacroDef,
+    args: &[MacroArg],
+    env: &Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    macro_trace(&format!("expanding {}!(...)", macro_def.name));
+
     // Validate ordering: macro must be defined before use (#1304)
     let definition_order = MACRO_DEFINITION_ORDER.with(|cell| cell.borrow().clone());
     validate_macro_defined_before_use(&macro_def.name, 0, &definition_order)?;
@@ -182,16 +407,29 @@ fn expand_user_macro(
 
     // Process macro contracts to determine introduced symbols (#1303)
     // Also performs shadowing validation (#1304)
-    let contract_result = process_macro_contract(macro_def, &const_bindings, env, functions, classes)?;
+    let mut contract_result = process_macro_contract(macro_def, &const_bindings, env, functions, classes)?;
 
-    // Store introduced symbols in thread-local for caller to register
-    // This is necessary because symbol tables are immutable during evaluation
-    MACRO_INTRODUCED_SYMBOLS.with(|cell| {
-        *cell.borrow_mut() = Some(contract_result);
-    });
+    // Find if there's a variadic parameter (must be last if present)
+    if let Some(variadic_idx) = macro_def.params.iter().position(|p| p.is_variadic) {
+        if variadic_idx != macro_def.params.len() - 1 {
+            return Err(CompileError::Semantic(
+                "Variadic parameter must be the last parameter".to_string()
+            ));
+        }
+    }
 
     for (idx, param) in macro_def.params.iter().enumerate() {
-        if let Some(MacroArg::Expr(e)) = args.get(idx) {
+        if param.is_variadic {
+            // Variadic parameter: collect all remaining arguments into an array
+            let mut variadic_values = Vec::new();
+            for arg in args.iter().skip(idx) {
+                if let MacroArg::Expr(e) = arg {
+                    let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
+                    variadic_values.push(val);
+                }
+            }
+            local_env.insert(param.name.clone(), Value::Array(variadic_values));
+        } else if let Some(MacroArg::Expr(e)) = args.get(idx) {
             let val = evaluate_expr(e, env, functions, classes, enums, impl_methods)?;
             local_env.insert(param.name.clone(), val);
         }
@@ -218,10 +456,82 @@ fn expand_user_macro(
                 }
             }
             MacroStmt::Emit { label, block } => {
+                // Check if this emit block is for an inject (code injection)
+                let inject_anchor = contract_result.inject_labels.get(label).cloned();
+
+                // Snapshot current functions in local_env before executing emit block
+                let functions_before: HashSet<String> = local_env.iter()
+                    .filter_map(|(k, v)| if matches!(v, Value::Function { .. }) { Some(k.clone()) } else { None })
+                    .collect();
+
                 let expanded_block = substitute_block_templates(block, &const_bindings);
                 let hygienic_block = apply_macro_hygiene_block(&expanded_block, &mut hygiene_ctx, false);
-                let (control, maybe_value) =
-                    exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?;
+
+                // Handle inject blocks specially based on anchor type
+                let (control, maybe_value) = if let Some(anchor) = inject_anchor {
+                    match anchor {
+                        MacroAnchor::Tail => {
+                            // Queue for execution at block exit
+                            queue_tail_injection(hygienic_block.clone());
+                            (Control::Next, None)
+                        }
+                        MacroAnchor::Head => {
+                            // Head injection cannot go back in time in an interpreter model
+                            // Execute immediately as a fallback (with a warning in trace mode)
+                            if is_macro_trace_enabled() {
+                                macro_trace("  [warning] 'head' inject executes at callsite (cannot rewind)");
+                            }
+                            exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
+                        }
+                        MacroAnchor::Here => {
+                            // Execute immediately at the callsite
+                            exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
+                        }
+                    }
+                } else {
+                    // Not an inject block - execute normally
+                    exec_block_fn(&hygienic_block, &mut local_env, functions, classes, enums, impl_methods)?
+                };
+
+                // Find new functions defined in this emit block and match to intro stubs
+                // Track which stubs were matched by name (for for-loop cases)
+                let mut matched_by_name = false;
+                for (name, value) in local_env.iter() {
+                    if let Value::Function { def, .. } = value {
+                        // Check if this function was newly defined in this emit block
+                        if !functions_before.contains(name) {
+                            // Strip gensym suffix to get the original function name
+                            let original_name = strip_gensym_suffix(&def.name);
+
+                            // Check if this matches an intro stub by name
+                            if contract_result.introduced_functions.contains_key(&original_name) {
+                                // Replace stub with real function definition
+                                let mut real_func = (**def).clone();
+                                real_func.name = original_name.clone();
+                                contract_result.introduced_functions.insert(original_name, real_func);
+                                matched_by_name = true;
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: if no name-based match, use label-based matching
+                // This handles cases where emit function name differs from intro stub name
+                if !matched_by_name {
+                    if let Some(public_name) = contract_result.intro_function_labels.get(label) {
+                        for (name, value) in local_env.iter() {
+                            if let Value::Function { def, .. } = value {
+                                if !functions_before.contains(name) {
+                                    // Register with the public name from intro contract
+                                    let mut real_func = (**def).clone();
+                                    real_func.name = public_name.clone();
+                                    contract_result.introduced_functions.insert(public_name.clone(), real_func);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if let Control::Return(v) = control {
                     return Ok(v);
                 }
@@ -247,7 +557,56 @@ fn expand_user_macro(
         }
     }
 
+    // Extract functions from local_env and update contract_result
+    // Functions defined in emit blocks are now in local_env as Value::Function
+    extract_introduced_functions(&local_env, &mut contract_result);
+
+    // Trace introduced functions
+    if is_macro_trace_enabled() && !contract_result.introduced_functions.is_empty() {
+        let func_names: Vec<_> = contract_result.introduced_functions.keys().collect();
+        macro_trace(&format!("  intro functions: {:?}", func_names));
+    }
+
+    // Store contract result in thread-local for caller to retrieve
+    MACRO_INTRODUCED_SYMBOLS.with(|cell| {
+        *cell.borrow_mut() = Some(contract_result);
+    });
+
     Ok(last_value)
+}
+
+/// Extract function definitions from local_env and add to contract result
+fn extract_introduced_functions(local_env: &Env, contract_result: &mut MacroContractResult) {
+    for (name, value) in local_env.iter() {
+        if let Value::Function { name: func_name, def, .. } = value {
+            // Strip gensym suffix to get the original function name
+            let original_name = strip_gensym_suffix(func_name);
+
+            // Check if this function matches an intro stub (by original name)
+            if contract_result.introduced_functions.contains_key(&original_name) {
+                // Replace stub with real function definition
+                contract_result.introduced_functions.insert(original_name, (**def).clone());
+            } else {
+                // Check if the env key (which might also be gensym'd) matches an intro stub
+                let original_key = strip_gensym_suffix(name);
+                if contract_result.introduced_functions.contains_key(&original_key) {
+                    // Replace stub with real function, using original key as the public name
+                    let mut real_func = (**def).clone();
+                    real_func.name = original_key.clone();
+                    contract_result.introduced_functions.insert(original_key, real_func);
+                }
+            }
+        }
+    }
+}
+
+/// Strip the _gensym_N suffix from a name
+fn strip_gensym_suffix(name: &str) -> String {
+    if let Some(pos) = name.find("_gensym_") {
+        name[..pos].to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -883,11 +1242,93 @@ fn substitute_block_templates(
 ) -> Block {
     let mut statements = Vec::new();
     for stmt in &block.statements {
-        statements.push(substitute_node_templates(stmt, const_bindings));
+        // Check if this is a for-loop that can be unrolled at const-eval time
+        if let Some(unrolled) = try_unroll_const_for_loop(stmt, const_bindings) {
+            statements.extend(unrolled);
+        } else {
+            statements.push(substitute_node_templates(stmt, const_bindings));
+        }
     }
     Block {
         span: block.span,
         statements,
+    }
+}
+
+/// Try to unroll a for-loop at const-eval time if it has const bounds
+/// Returns None if the loop can't be unrolled (not a const range)
+fn try_unroll_const_for_loop(
+    node: &Node,
+    const_bindings: &HashMap<String, String>,
+) -> Option<Vec<Node>> {
+    // Only handle Node::For
+    let for_stmt = match node {
+        Node::For(stmt) => stmt,
+        _ => return None,
+    };
+
+    // Check if the iterable is a range expression with const bounds
+    let (start, end) = match &for_stmt.iterable {
+        Expr::Range { start, end, bound: RangeBound::Exclusive } => {
+            let start_val = eval_const_expr_to_i64(start.as_ref()?, const_bindings)?;
+            let end_val = eval_const_expr_to_i64(end.as_ref()?, const_bindings)?;
+            (start_val, end_val)
+        }
+        Expr::Range { start, end, bound: RangeBound::Inclusive } => {
+            let start_val = eval_const_expr_to_i64(start.as_ref()?, const_bindings)?;
+            let end_val = eval_const_expr_to_i64(end.as_ref()?, const_bindings)?;
+            (start_val, end_val + 1) // Inclusive, so add 1 to end
+        }
+        _ => return None,
+    };
+
+    // Get the loop variable name from the pattern
+    let loop_var = match &for_stmt.pattern {
+        Pattern::Identifier(name) => name.clone(),
+        _ => return None, // Only simple identifier patterns for now
+    };
+
+    // Unroll the loop
+    let mut unrolled_statements = Vec::new();
+    for i in start..end {
+        // Create new bindings with the loop variable
+        let mut iter_bindings = const_bindings.clone();
+        iter_bindings.insert(loop_var.clone(), i.to_string());
+
+        // Substitute and add all statements from the loop body
+        for body_stmt in &for_stmt.body.statements {
+            // Recursively try to unroll nested const for-loops
+            if let Some(nested_unrolled) = try_unroll_const_for_loop(body_stmt, &iter_bindings) {
+                unrolled_statements.extend(nested_unrolled);
+            } else {
+                unrolled_statements.push(substitute_node_templates(body_stmt, &iter_bindings));
+            }
+        }
+    }
+
+    Some(unrolled_statements)
+}
+
+/// Evaluate a const expression to i64
+fn eval_const_expr_to_i64(expr: &Expr, const_bindings: &HashMap<String, String>) -> Option<i64> {
+    match expr {
+        Expr::Integer(i) => Some(*i),
+        Expr::Identifier(name) => {
+            const_bindings.get(name).and_then(|v| v.parse::<i64>().ok())
+        }
+        Expr::Binary { op, left, right } => {
+            let l = eval_const_expr_to_i64(left, const_bindings)?;
+            let r = eval_const_expr_to_i64(right, const_bindings)?;
+            match op {
+                BinOp::Add => Some(l + r),
+                BinOp::Sub => Some(l - r),
+                BinOp::Mul => Some(l * r),
+                BinOp::Div => Some(l / r),
+                BinOp::Mod => Some(l % r),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
@@ -987,6 +1428,28 @@ fn substitute_node_templates(
             body: substitute_block_templates(&stmt.body, const_bindings),
         }),
         Node::Break(_) | Node::Continue(_) => node.clone(),
+        Node::Function(def) => {
+            // Substitute templates in function name, body, and parameters
+            let mut new_def = def.clone();
+            // Substitute template in function name (e.g., "get_{i}" -> "get_0")
+            // Also strip quotes if the name was quoted in the source (for templated names)
+            let substituted_name = substitute_template_string(&def.name, const_bindings);
+            new_def.name = if substituted_name.starts_with('"') && substituted_name.ends_with('"') && substituted_name.len() > 2 {
+                substituted_name[1..substituted_name.len()-1].to_string()
+            } else {
+                substituted_name
+            };
+            new_def.body = substitute_block_templates(&def.body, const_bindings);
+            // Also substitute in default parameter values
+            new_def.params = def.params.iter().map(|param| {
+                let mut new_param = param.clone();
+                new_param.default = param.default
+                    .as_ref()
+                    .map(|expr| substitute_expr_templates(expr, const_bindings));
+                new_param
+            }).collect();
+            Node::Function(new_def)
+        }
         _ => node.clone(),
     }
 }
@@ -1219,6 +1682,20 @@ fn substitute_expr_templates(
                 .collect(),
         },
         Expr::Try(expr) => Expr::Try(Box::new(substitute_expr_templates(expr, const_bindings))),
+        // Handle bare identifiers that match const parameters
+        Expr::Identifier(name) => {
+            if let Some(value) = const_bindings.get(name) {
+                // Try to parse as integer first, then as string
+                if let Ok(i) = value.parse::<i64>() {
+                    Expr::Integer(i)
+                } else {
+                    // Keep as string literal if it's a string const
+                    Expr::String(value.clone())
+                }
+            } else {
+                expr.clone()
+            }
+        }
         _ => expr.clone(),
     }
 }

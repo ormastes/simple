@@ -14,7 +14,7 @@ use simple_loader::{create_executable, Settlement, SettlementConfig};
 use simple_runtime::gc::GcRuntime;
 use simple_runtime::value::{
     rt_capture_stderr_start, rt_capture_stderr_stop, rt_capture_stdout_start,
-    rt_capture_stdout_stop,
+    rt_capture_stdout_stop, rt_set_stdin, rt_clear_stdin,
 };
 
 use crate::Runner;
@@ -98,9 +98,14 @@ impl Interpreter {
     /// * `Ok(RunResult)` - Execution result with exit code and captured output
     /// * `Err(String)` - Error message if compilation or execution failed
     pub fn run(&self, code: &str, config: RunConfig) -> Result<RunResult, String> {
-        // NOTE: args/stdin/timeout are accepted but not yet wired to the runtime.
-        // Requires: (1) I/O builtins in runtime, (2) stdin/args context in interpreter
-        let _ = (&config.args, &config.stdin, config.timeout_ms);
+        // NOTE: args/timeout are accepted but not yet wired to the runtime.
+        // Requires: (1) args context in interpreter
+        let _ = (&config.args, config.timeout_ms);
+
+        // Set up mock stdin if provided
+        if !config.stdin.is_empty() {
+            rt_set_stdin(&config.stdin);
+        }
 
         // Start capture if enabled
         if config.capture_output {
@@ -185,6 +190,9 @@ impl Interpreter {
             (String::new(), String::new())
         };
 
+        // Clear mock stdin
+        rt_clear_stdin();
+
         Ok(RunResult {
             exit_code,
             stdout,
@@ -210,6 +218,11 @@ impl Interpreter {
         path: &std::path::Path,
         config: RunConfig,
     ) -> Result<RunResult, String> {
+        // Set up mock stdin if provided
+        if !config.stdin.is_empty() {
+            rt_set_stdin(&config.stdin);
+        }
+
         // Start capture if enabled
         if config.capture_output {
             rt_capture_stdout_start();
@@ -224,6 +237,9 @@ impl Interpreter {
         } else {
             (String::new(), String::new())
         };
+
+        // Clear mock stdin
+        rt_clear_stdin();
 
         Ok(RunResult {
             exit_code,

@@ -3,23 +3,26 @@
 //! Provides utilities for deferring expensive initialization until actually needed.
 //! This helps improve startup time by only initializing components when they're first used.
 
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 use parking_lot::{Mutex, MutexGuard};
 
 /// Lazy initialized value with thread-safe initialization
 ///
 /// # Example
-/// ```ignore
-/// use simple_driver::LazyInit;
+/// ```
+/// use simple_driver::lazy_init::LazyInit;
 ///
-/// static EXPENSIVE_RESOURCE: LazyInit<Database> = LazyInit::new(|| {
-///     Database::connect("localhost").unwrap()
-/// });
+/// static COUNTER: LazyInit<i32> = LazyInit::new();
 ///
-/// fn use_database() {
-///     let db = EXPENSIVE_RESOURCE.get();
-///     db.query("SELECT * FROM users");
-/// }
+/// // Value is not initialized yet
+/// assert!(!COUNTER.is_initialized());
+///
+/// // Initialize on first access
+/// let guard = COUNTER.get_or_init(|| 42);
+/// assert_eq!(*guard, Some(42));
+///
+/// // Now it's initialized
+/// assert!(COUNTER.is_initialized());
 /// ```
 pub struct LazyInit<T> {
     cell: Mutex<Option<T>>,
@@ -77,28 +80,98 @@ impl<T> Default for LazyInit<T> {
     }
 }
 
-/// Macro for declaring static lazy-initialized values
+/// Lazy static value that returns `&'static T` references
+///
+/// This uses `OnceLock` internally to provide proper `&'static T` semantics,
+/// unlike `LazyInit` which returns a `MutexGuard`.
 ///
 /// # Example
-/// ```ignore
+/// ```
+/// use simple_driver::lazy_init::LazyStatic;
+///
+/// static VALUE: LazyStatic<i32> = LazyStatic::new();
+///
+/// // Get or initialize the value
+/// let v = VALUE.get_or_init(|| 42);
+/// assert_eq!(*v, 42);
+///
+/// // Subsequent calls return the same reference
+/// let v2 = VALUE.get_or_init(|| 99); // init fn is ignored
+/// assert_eq!(*v2, 42);
+/// ```
+pub struct LazyStatic<T> {
+    cell: OnceLock<T>,
+}
+
+impl<T> LazyStatic<T> {
+    /// Create a new lazy static value
+    pub const fn new() -> Self {
+        Self {
+            cell: OnceLock::new(),
+        }
+    }
+
+    /// Get the value, initializing it if necessary
+    ///
+    /// Returns a static reference to the value.
+    pub fn get_or_init<F>(&self, init_fn: F) -> &T
+    where
+        F: FnOnce() -> T,
+    {
+        self.cell.get_or_init(init_fn)
+    }
+
+    /// Try to get the value without initializing
+    pub fn get(&self) -> Option<&T> {
+        self.cell.get()
+    }
+
+    /// Check if the value has been initialized
+    pub fn is_initialized(&self) -> bool {
+        self.cell.get().is_some()
+    }
+}
+
+impl<T> Default for LazyStatic<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// SAFETY: LazyStatic is Sync if T is Send + Sync because OnceLock provides thread-safe initialization
+unsafe impl<T: Send + Sync> Sync for LazyStatic<T> {}
+
+/// Macro for declaring static lazy-initialized values
+///
+/// Uses `LazyStatic` internally which provides proper `&'static T` semantics
+/// via `OnceLock`.
+///
+/// # Example
+/// ```
+/// use simple_driver::lazy_static;
+///
 /// lazy_static! {
-///     static ref LOGGER: Logger = Logger::new();
-///     static ref CONFIG: Config = Config::load();
+///     static ref ANSWER: i32 = 42;
+///     static ref MESSAGE: String = String::from("Hello");
 /// }
+///
+/// // Values are lazily initialized on first access
+/// assert_eq!(*ANSWER(), 42);
+/// assert_eq!(MESSAGE().as_str(), "Hello");
 /// ```
 #[macro_export]
 macro_rules! lazy_static {
     ($(static ref $name:ident: $ty:ty = $init:expr;)+) => {
-        $(
-            static $name: $crate::LazyInit<$ty> = $crate::LazyInit::new();
+        paste::paste! {
+            $(
+                static [<__LAZY_ $name>]: $crate::lazy_init::LazyStatic<$ty> = $crate::lazy_init::LazyStatic::new();
 
-            #[allow(non_snake_case)]
-            fn $name() -> &'static $ty {
-                $name.get_or_init(|| $init)
-                    .as_ref()
-                    .expect("lazy_static initialization failed")
-            }
-        )+
+                #[allow(non_snake_case)]
+                fn $name() -> &'static $ty {
+                    [<__LAZY_ $name>].get_or_init(|| $init)
+                }
+            )+
+        }
     };
 }
 

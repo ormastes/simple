@@ -300,39 +300,48 @@ pub fn run_expect_wasm_output(src: &str, expected_stdout: &str) {
 #[cfg(feature = "wasm")]
 #[allow(dead_code)]
 pub fn run_expect_all_including_wasm(src: &str, expected: i32) {
-    // Run interpreter
-    let interp_result = run_interpreter(src).expect("interpreter ok");
-    assert_eq!(
-        interp_result.exit_code, expected,
-        "Interpreter: expected {}, got {}",
-        expected, interp_result.exit_code
-    );
+    // Run interpreter (in block scope to ensure GC context is dropped before next)
+    let interp_result = {
+        let result = run_interpreter(src).expect("interpreter ok");
+        assert_eq!(
+            result.exit_code, expected,
+            "Interpreter: expected {}, got {}",
+            expected, result.exit_code
+        );
+        result
+    };
 
-    // Run JIT compiler
-    let interpreter = Interpreter::new();
-    let jit_result = interpreter
-        .run(
-            src,
-            RunConfig {
-                running_type: RunningType::Compiler,
-                in_memory: true,
-                ..Default::default()
-            },
-        )
-        .expect("jit ok");
-    assert_eq!(
-        jit_result.exit_code, expected,
-        "JIT: expected {}, got {}",
-        expected, jit_result.exit_code
-    );
+    // Run JIT compiler (in block scope to ensure GC context is dropped before WASM)
+    let jit_result = {
+        let interpreter = Interpreter::new();
+        let result = interpreter
+            .run(
+                src,
+                RunConfig {
+                    running_type: RunningType::Compiler,
+                    in_memory: true,
+                    ..Default::default()
+                },
+            )
+            .expect("jit ok");
+        assert_eq!(
+            result.exit_code, expected,
+            "JIT: expected {}, got {}",
+            expected, result.exit_code
+        );
+        result
+    };
 
-    // Run WASM
-    let wasm_result = run_wasm(src).expect("wasm ok");
-    assert_eq!(
-        wasm_result.exit_code, expected,
-        "WASM: expected {}, got {}",
-        expected, wasm_result.exit_code
-    );
+    // Run WASM (in block scope for consistency)
+    let wasm_result = {
+        let result = run_wasm(src).expect("wasm ok");
+        assert_eq!(
+            result.exit_code, expected,
+            "WASM: expected {}, got {}",
+            expected, result.exit_code
+        );
+        result
+    };
 
     // Verify all results match
     assert_eq!(

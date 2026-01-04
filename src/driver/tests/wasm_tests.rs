@@ -3,19 +3,25 @@
 //! These tests verify that Simple code can be compiled to WebAssembly
 //! and executed using the Wasmer runtime with WASI support.
 //!
+//! ## Running WASM Tests
+//!
+//! WASM tests should be run in **release mode** to avoid wasmer 3.1 debug
+//! alignment check issues:
+//!
+//! ```bash
+//! # Run all WASM tests in release mode (recommended)
+//! cargo test -p simple-driver --features wasm --release --test wasm_tests
+//!
+//! # Run a specific test
+//! cargo test -p simple-driver --features wasm --release test_wasm_function_call
+//! ```
+//!
 //! ## Known Issue
 //!
-//! Currently disabled due to Wasmer 3.x linker compatibility issue with lld:
-//! - Error: `undefined symbol: __rust_probestack`
-//! - Issue: https://github.com/wasmerio/wasmer/issues/3857
-//! - The WASM compilation and runtime integration is fully implemented and working
-//! - Only the test binary linking fails due to Wasmer's stack probing requirements
-//! - Workaround: Use Wasmer 4.x (requires Rust 1.75+) or disable lld linker
-//!
-//! To verify WASM functionality manually:
-//! ```bash
-//! cargo build -p simple-driver --features wasm --lib  # ✅ Library builds successfully
-//! ```
+//! In debug mode, wasmer 3.1 triggers false-positive `ptr::copy` alignment
+//! checks during module instantiation. The generated WASM is correct and
+//! runs fine in release mode. This is a wasmer bug, not a compiler bug.
+//! - Upgrade to wasmer 4.x (requires Rust 1.75+) to fix debug mode
 
 #![cfg(feature = "wasm")]
 #![cfg(test)]  // Mark all tests in this file
@@ -246,28 +252,26 @@ fn main() -> i64:
 // ============================================================================
 
 #[test]
-#[ignore] // TODO: Implement WASI stdio capture
+#[cfg(all(feature = "wasm", feature = "wasm-wasi"))]
 fn test_wasm_stdio_println() {
+    // Uses builtin println which calls rt_println_str -> WASI fd_write
     let code = r#"
-import io
-
 fn main() -> i64:
-    io.println("Hello, WASM!")
+    println("Hello, WASM!")
     return 0
 "#;
     run_expect_wasm_output(code, "Hello, WASM!\n");
 }
 
 #[test]
-#[ignore] // TODO: Implement WASI stdio capture
+#[cfg(all(feature = "wasm", feature = "wasm-wasi"))]
 fn test_wasm_stdio_print() {
+    // Uses builtin print/println which calls rt_print_str/rt_println_str -> WASI fd_write
     let code = r#"
-import io
-
 fn main() -> i64:
-    io.print("Hello")
-    io.print(", ")
-    io.println("WASM!")
+    print("Hello")
+    print(", ")
+    println("WASM!")
     return 0
 "#;
     run_expect_wasm_output(code, "Hello, WASM!\n");

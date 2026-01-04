@@ -99,6 +99,11 @@ impl TargetArch {
         matches!(self.pointer_size(), PointerSize::Bits32)
     }
 
+    /// Check if this is a WebAssembly architecture.
+    pub const fn is_wasm(&self) -> bool {
+        matches!(self, TargetArch::Wasm32 | TargetArch::Wasm64)
+    }
+
     /// Get the Cranelift target triple string.
     pub const fn triple_str(&self) -> &'static str {
         match self {

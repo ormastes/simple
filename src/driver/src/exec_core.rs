@@ -323,6 +323,23 @@ impl ExecCore {
             .run_wasm_file(&wasm_path, "main", &[])
             .map_err(|e| format!("wasm execution: {e}"))?;
 
+        // Push WASM captured output to runtime capture buffers
+        // This allows rt_capture_stdout_stop() / rt_capture_stderr_stop() to retrieve them
+        if let Ok(stdout) = runner.config().get_stdout_string() {
+            if !stdout.is_empty() {
+                use simple_runtime::value::rt_print_str;
+                // Write to capture buffer (rt_print_str checks if capture is active)
+                unsafe { rt_print_str(stdout.as_ptr(), stdout.len() as u64); }
+            }
+        }
+        if let Ok(stderr) = runner.config().get_stderr_string() {
+            if !stderr.is_empty() {
+                use simple_runtime::value::rt_eprint_str;
+                // Write to capture buffer (rt_eprint_str checks if capture is active)
+                unsafe { rt_eprint_str(stderr.as_ptr(), stderr.len() as u64); }
+            }
+        }
+
         // Convert RuntimeValue to i32 exit code
         let exit_code = if result.is_int() {
             result.as_int() as i32

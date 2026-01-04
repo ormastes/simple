@@ -526,6 +526,24 @@ impl<'a> MirLowerer<'a> {
                 })
             }
 
+            // Type cast expression
+            HirExprKind::Cast { expr, target } => {
+                let source_reg = self.lower_expr(expr)?;
+                let target_ty = *target;
+
+                self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Cast {
+                        dest,
+                        source: source_reg,
+                        from_ty: expr.ty,
+                        to_ty: target_ty,
+                    });
+                    dest
+                })
+            }
+
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),
         }
     }

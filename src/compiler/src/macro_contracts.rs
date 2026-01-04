@@ -9,7 +9,7 @@
 use std::collections::{HashMap, HashSet};
 
 use simple_parser::ast::{
-    Block, ClassDef, Expr, FunctionDef, MacroAnchor, MacroCodeKind, MacroConstRange,
+    Block, ClassDef, Expr, Field, FunctionDef, MacroAnchor, MacroCodeKind, MacroConstRange,
     MacroContractItem, MacroDeclStub, MacroDef, MacroFieldStub, MacroFnStub, MacroInject,
     MacroInjectSpec, MacroIntro, MacroIntroDecl, MacroIntroKind, MacroIntroSpec, MacroParamSig,
     MacroReturns, MacroTarget, MacroTypeStub, MacroVarStub, Parameter, Type, Visibility,
@@ -35,6 +35,9 @@ pub struct MacroContractResult {
     /// Type aliases introduced by the macro
     pub introduced_types: HashMap<String, Type>,
 
+    /// Fields introduced by the macro (for enclosing class)
+    pub introduced_fields: Vec<Field>,
+
     /// Variables introduced at callsite block
     pub introduced_vars: Vec<(String, Type, bool)>, // (name, type, is_const)
 
@@ -43,6 +46,10 @@ pub struct MacroContractResult {
 
     /// Mapping from emit label to inject anchor (for code extraction)
     pub inject_labels: HashMap<String, MacroAnchor>,
+
+    /// Mapping from intro label to expected public function name
+    /// Used to rename functions from emit blocks to their public names
+    pub intro_function_labels: HashMap<String, String>,
 
     /// Return type of the macro (if declared)
     pub return_type: Option<Type>,
@@ -104,7 +111,8 @@ fn process_intro_item(
     introduced_symbols: &mut HashSet<String>,
     result: &mut MacroContractResult,
 ) -> Result<(), CompileError> {
-    process_intro_spec(&intro.spec, const_bindings, env, existing_symbols, introduced_symbols, result)
+    // Pass the intro label through to track emit label -> function name mapping
+    process_intro_spec(&intro.spec, const_bindings, env, existing_symbols, introduced_symbols, &intro.label, result)
 }
 
 /// Process an intro spec (handles Decl, For, If recursively)
@@ -114,11 +122,12 @@ fn process_intro_spec(
     env: &Env,
     existing_symbols: &SymbolScope,
     introduced_symbols: &mut HashSet<String>,
+    intro_label: &str,
     result: &mut MacroContractResult,
 ) -> Result<(), CompileError> {
     match spec {
         MacroIntroSpec::Decl(decl) => {
-            process_intro_decl(decl, const_bindings, existing_symbols, introduced_symbols, result)
+            process_intro_decl(decl, const_bindings, existing_symbols, introduced_symbols, intro_label, result)
         }
         MacroIntroSpec::For { name, range, body } => {
             // Const-eval the range and expand the body for each iteration
@@ -131,7 +140,7 @@ fn process_intro_spec(
 
                 // Process each intro spec in the body
                 for spec in body {
-                    process_intro_spec(spec, &iter_bindings, env, existing_symbols, introduced_symbols, result)?;
+                    process_intro_spec(spec, &iter_bindings, env, existing_symbols, introduced_symbols, intro_label, result)?;
                 }
             }
             Ok(())
@@ -143,7 +152,7 @@ fn process_intro_spec(
             // Process the appropriate branch
             let body = if cond_result { then_body } else { else_body };
             for spec in body {
-                process_intro_spec(spec, const_bindings, env, existing_symbols, introduced_symbols, result)?;
+                process_intro_spec(spec, const_bindings, env, existing_symbols, introduced_symbols, intro_label, result)?;
             }
             Ok(())
         }
@@ -156,6 +165,7 @@ fn process_intro_decl(
     const_bindings: &HashMap<String, String>,
     existing_symbols: &SymbolScope,
     introduced_symbols: &mut HashSet<String>,
+    intro_label: &str,
     result: &mut MacroContractResult,
 ) -> Result<(), CompileError> {
     match &decl.target {
@@ -168,17 +178,20 @@ fn process_intro_decl(
                     validate_intro_no_shadowing(&func_def.name, existing_symbols, introduced_symbols)?;
                     introduced_symbols.insert(func_def.name.clone());
 
+                    // Record the mapping from intro label to public function name
+                    // This allows functions in emit blocks to be registered with the correct public name
+                    result.intro_function_labels.insert(intro_label.to_string(), func_def.name.clone());
+
                     result.introduced_functions.insert(func_def.name.clone(), func_def);
                 }
                 MacroDeclStub::Field(field_stub) => {
-                    // Fields require a class context - will be handled when macro is in a class
-                    // For now, store as pending
-                    // TODO: Implement field introduction in enclosing class
-                    let field_name = substitute_template(&field_stub.name, const_bindings);
+                    let field = create_field_from_stub(field_stub, const_bindings)?;
 
                     // Validate shadowing for field names
-                    validate_intro_no_shadowing(&field_name, existing_symbols, introduced_symbols)?;
-                    introduced_symbols.insert(field_name);
+                    validate_intro_no_shadowing(&field.name, existing_symbols, introduced_symbols)?;
+                    introduced_symbols.insert(field.name.clone());
+
+                    result.introduced_fields.push(field);
                 }
                 MacroDeclStub::Type(type_stub) => {
                     let type_name = substitute_template(&type_stub.name, const_bindings);
@@ -379,6 +392,23 @@ fn create_function_from_stub(
         contract: None,
         is_abstract: false,
         bounds_block: None,
+    })
+}
+
+/// Create a Field from a MacroFieldStub
+fn create_field_from_stub(
+    stub: &MacroFieldStub,
+    const_bindings: &HashMap<String, String>,
+) -> Result<Field, CompileError> {
+    let name = substitute_template(&stub.name, const_bindings);
+
+    Ok(Field {
+        span: Span::new(0, 0, 0, 0),
+        name,
+        ty: stub.ty.clone(),
+        default: None,
+        mutability: Mutability::Mutable,
+        visibility: Visibility::Private,
     })
 }
 

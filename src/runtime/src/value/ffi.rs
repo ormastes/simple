@@ -496,6 +496,8 @@ thread_local! {
     static STDOUT_CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
     /// Captured stderr buffer (when capture mode is enabled)
     static STDERR_CAPTURE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Mock stdin buffer (for testing - reads from this instead of real stdin)
+    static STDIN_BUFFER: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Enable stdout capture mode. All print output will be buffered instead of printed.
@@ -561,6 +563,78 @@ pub fn rt_is_stdout_capturing() -> bool {
 /// Check if stderr capture is currently enabled.
 pub fn rt_is_stderr_capturing() -> bool {
     STDERR_CAPTURE.with(|buf| buf.borrow().is_some())
+}
+
+// ============================================================================
+// Stdin Mock Functions (for testing)
+// ============================================================================
+
+/// Set mock stdin content. When set, input() reads from this instead of real stdin.
+/// Pass empty string to clear the buffer and revert to real stdin.
+pub fn rt_set_stdin(content: &str) {
+    STDIN_BUFFER.with(|buf| {
+        if content.is_empty() {
+            *buf.borrow_mut() = None;
+        } else {
+            *buf.borrow_mut() = Some(content.to_string());
+        }
+    });
+}
+
+/// Read a line from mock stdin buffer, or None if buffer is empty/not set.
+/// Removes the line from the buffer (including the newline).
+pub fn rt_read_stdin_line() -> Option<String> {
+    STDIN_BUFFER.with(|buf| {
+        let mut guard = buf.borrow_mut();
+        if let Some(ref mut content) = *guard {
+            if content.is_empty() {
+                return None;
+            }
+            // Find the first newline
+            if let Some(pos) = content.find('\n') {
+                let line = content[..pos].to_string();
+                *content = content[pos + 1..].to_string();
+                Some(line)
+            } else {
+                // No newline - return remaining content and clear buffer
+                let line = std::mem::take(content);
+                Some(line)
+            }
+        } else {
+            None
+        }
+    })
+}
+
+/// Check if mock stdin is currently active.
+pub fn rt_has_mock_stdin() -> bool {
+    STDIN_BUFFER.with(|buf| buf.borrow().is_some())
+}
+
+/// Clear mock stdin buffer.
+pub fn rt_clear_stdin() {
+    STDIN_BUFFER.with(|buf| {
+        *buf.borrow_mut() = None;
+    });
+}
+
+/// Read a single character from mock stdin buffer, or None if buffer is empty/not set.
+pub fn rt_read_stdin_char() -> Option<char> {
+    STDIN_BUFFER.with(|buf| {
+        let mut guard = buf.borrow_mut();
+        if let Some(ref mut content) = *guard {
+            if content.is_empty() {
+                return None;
+            }
+            let ch = content.chars().next();
+            if ch.is_some() {
+                *content = content[ch.unwrap().len_utf8()..].to_string();
+            }
+            ch
+        } else {
+            None
+        }
+    })
 }
 
 // ============================================================================

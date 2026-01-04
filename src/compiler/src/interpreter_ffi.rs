@@ -129,6 +129,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         attributes: vec![],
                         doc_comment: None,
                         invariant: None,
+                        macro_invocations: Vec::new(),
                     },
                 );
             }

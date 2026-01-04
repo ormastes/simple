@@ -627,6 +627,12 @@ impl<'a> Parser<'a> {
                     if let Expr::Identifier(name) = expr {
                         self.advance(); // consume !
                         let args = self.parse_macro_args()?;
+
+                        // In LL(1) mode, process the macro contract to register introduced symbols
+                        if self.macro_registry.is_ll1_mode() {
+                            self.process_macro_contract_ll1(&name, &args);
+                        }
+
                         expr = Expr::MacroInvocation { name, args };
                     } else {
                         break;

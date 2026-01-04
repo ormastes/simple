@@ -11,13 +11,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use simple_parser::ast::{
-    ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, Node, Pattern, UseStmt,
+    ClassDef, EnumDef, Expr, FunctionDef, ImportTarget, MacroDef, Node, Pattern, UseStmt,
 };
 
 use crate::error::CompileError;
 use crate::value::{Env, Value};
 
 type Enums = HashMap<String, EnumDef>;
+type Macros = HashMap<String, MacroDef>;
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 
 // Import evaluate_expr from parent module
@@ -169,6 +170,12 @@ pub(super) fn evaluate_module_exports(
                 local_enums.insert(e.name.clone(), e.clone());
                 global_enums.insert(e.name.clone(), e.clone());
                 exports.insert(e.name.clone(), Value::Str(format!("enum:{}", e.name)));
+            }
+            Node::Macro(m) => {
+                // Register macro in exports with special prefix
+                exports.insert(format!("macro:{}", m.name), Value::Str(format!("macro:{}", m.name)));
+                // Also register in the thread-local USER_MACROS
+                super::USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
             }
             _ => {}
         }

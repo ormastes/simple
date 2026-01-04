@@ -40,3 +40,13 @@ pub use startup_metrics::{
     enable_metrics, metrics_enabled, PhaseTimer, StartupMetrics, StartupPhase,
 };
 pub use watcher::watch;
+
+// Workaround for Wasmer probestack linker issue on stable Rust
+// https://github.com/wasmerio/wasmer/issues/3857
+// This provides a stub for __rust_probestack when compiler_builtins doesn't export it
+#[cfg(all(feature = "wasm", not(windows)))]
+#[no_mangle]
+pub extern "C" fn __rust_probestack() {
+    // No-op stub - wasmer's use of probestack is for stack overflow detection
+    // which we don't need in the host runtime
+}

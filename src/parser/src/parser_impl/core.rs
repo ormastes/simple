@@ -5,6 +5,7 @@
 use crate::ast::*;
 use crate::error::ParseError;
 use crate::lexer::Lexer;
+use crate::macro_registry::MacroRegistry;
 use crate::token::{Span, Token, TokenKind};
 
 /// Maximum iterations allowed in a single parsing loop before detecting a potential infinite loop.
@@ -50,6 +51,10 @@ pub struct Parser<'a> {
     pub(crate) debug_mode: DebugMode,
     /// Call depth for debug tracing
     pub(crate) debug_depth: usize,
+    /// Macro registry for LL(1) macro integration
+    pub(crate) macro_registry: MacroRegistry,
+    /// Current scope for macro symbol registration (e.g., "module", "class:ClassName")
+    pub(crate) current_scope: String,
 }
 
 impl<'a> Parser<'a> {
@@ -68,7 +73,28 @@ impl<'a> Parser<'a> {
             no_paren_depth: 0,
             debug_mode: DebugMode::Off,
             debug_depth: 0,
+            macro_registry: MacroRegistry::new(),
+            current_scope: "module".to_string(),
         }
+    }
+
+    /// Create a parser with LL(1) macro integration enabled.
+    /// When enabled, macro contracts are processed at parse time and
+    /// introduced symbols are immediately registered in the symbol table.
+    pub fn with_ll1_macros(source: &'a str) -> Self {
+        let mut parser = Self::new(source);
+        parser.macro_registry.set_ll1_mode(true);
+        parser
+    }
+
+    /// Get a reference to the macro registry
+    pub fn macro_registry(&self) -> &MacroRegistry {
+        &self.macro_registry
+    }
+
+    /// Get a mutable reference to the macro registry
+    pub fn macro_registry_mut(&mut self) -> &mut MacroRegistry {
+        &mut self.macro_registry
     }
 
     /// Create a parser with a specific mode (Normal or Strict).

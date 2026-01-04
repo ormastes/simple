@@ -139,6 +139,9 @@ pub use ffi::{
     rt_get_captured_stderr, rt_get_captured_stdout, rt_is_stderr_capturing, rt_is_stdout_capturing,
 };
 
+// Re-export stdin mock functions (for testing)
+pub use ffi::{rt_clear_stdin, rt_has_mock_stdin, rt_read_stdin_char, rt_read_stdin_line, rt_set_stdin};
+
 // Re-export print FFI functions
 pub use ffi::{
     rt_eprint_str, rt_eprint_value, rt_eprintln_str, rt_eprintln_value, rt_print_str,
