@@ -15,12 +15,13 @@
 
 ---
 
-## Core Language (9 specs)
+## Core Language (10 specs)
 
 | Spec | Status | Feature IDs | Description |
 |------|--------|-------------|-------------|
 | [Syntax](syntax.md) | ✅ | #10-19 | Execution modes, lexical structure, operators |
 | [Types](types.md) | ✅ | #20-29 | Type system, mutability, unit types |
+| [Type Inference](type_inference.md) | ✅ | #13 | Hindley-Milner type inference, unification |
 | [Units](units.md) | 🔨 | #30-34 | Semantic unit types |
 | [Data Structures](data_structures.md) | ✅ | #35-39 | Structs, classes, enums, unions |
 | [Functions](functions.md) | ✅ | #40-44 | Functions, pattern matching, constructors |

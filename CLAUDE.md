@@ -8,7 +8,47 @@
 - Formatter/linter: Simple-based tools in `simple/app/`
 - AOP & Unified Predicates: Compile-time weaving, architecture rules (19/51 features, 611 tests)
 - See `doc/architecture/memory_model_implementation.md`
-- use jj version contoll rather git.
+
+## Version Control - IMPORTANT
+
+**⚠️ CRITICAL: This project uses Jujutsu (jj), NOT git!**
+
+### DO NOT Use Git Commands
+
+- ❌ NEVER use `git add`, `git commit`, `git push`, `git checkout`, `git stash`, etc.
+- ✅ ALWAYS use `jj` commands for all version control operations
+- The `.git` directory exists only for remote sync - all local operations use `jj`
+
+### Common Command Mappings
+
+| Task | ❌ DON'T USE (git) | ✅ USE (jj) |
+|------|-------------------|-------------|
+| Check status | `git status` | `jj status` |
+| Create/update commit | `git add . && git commit -m "msg"` | `jj describe -m "msg"` |
+| Amend last commit | `git commit --amend` | `jj describe` |
+| Push changes | `git push` | `jj git push` |
+| View history | `git log` | `jj log` |
+| Create branch | `git checkout -b name` | `jj bookmark create name` |
+| Show diff | `git diff` | `jj diff` |
+| New change | `git stash` | `jj new` |
+| Abandon change | `git reset --hard` | `jj abandon` |
+| Squash changes | `git rebase -i` | `jj squash` |
+
+### Jujutsu Workflow for Commits
+
+When making changes:
+1. Make your code changes
+2. `jj status` - See what changed
+3. `jj diff` - Review changes
+4. `jj describe -m "your commit message"` - Describe the current change
+5. `jj log` - Verify commit
+6. `jj git push` - Push to remote (when ready)
+
+**Key Differences:**
+- In jj, you're always working on a change (like a draft commit)
+- `jj describe` updates the current change's description
+- `jj new` creates a new change on top of current
+- No staging area - all changes are automatically tracked
 
 ## String Literals
 
