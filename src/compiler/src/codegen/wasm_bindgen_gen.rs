@@ -331,6 +331,7 @@ mod tests {
             doc_comment: None,
             contract: None,
             is_abstract: false,
+            is_sync: false,
             bounds_block: None,
         }
     }

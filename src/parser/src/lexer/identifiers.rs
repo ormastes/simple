@@ -44,6 +44,26 @@ impl<'a> super::Lexer<'a> {
             }
         }
 
+        // Check for suspension keywords with tilde suffix (if~, while~, for~)
+        // These must be checked before regular keyword matching
+        if self.check('~') {
+            match name.as_str() {
+                "if" => {
+                    self.advance(); // consume '~'
+                    return TokenKind::IfSuspend;
+                }
+                "while" => {
+                    self.advance(); // consume '~'
+                    return TokenKind::WhileSuspend;
+                }
+                "for" => {
+                    self.advance(); // consume '~'
+                    return TokenKind::ForSuspend;
+                }
+                _ => {} // Not a suspension keyword, continue to regular keyword matching
+            }
+        }
+
         // Check for keywords
         match name.as_str() {
             "fn" => TokenKind::Fn,
@@ -93,6 +113,7 @@ impl<'a> super::Lexer<'a> {
             "super" => TokenKind::Super,
             "async" => TokenKind::Async,
             "await" => TokenKind::Await,
+            "sync" => TokenKind::Sync,
             "yield" => TokenKind::Yield,
             "move" => TokenKind::Move,
             "const" => TokenKind::Const,

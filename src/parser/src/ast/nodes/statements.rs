@@ -53,11 +53,12 @@ pub struct AssignmentStmt {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignOp {
-    Assign,    // =
-    AddAssign, // +=
-    SubAssign, // -=
-    MulAssign, // *=
-    DivAssign, // /=
+    Assign,        // =
+    AddAssign,     // +=
+    SubAssign,     // -=
+    MulAssign,     // *=
+    DivAssign,     // /=
+    SuspendAssign, // ~= (suspension assignment for async-by-default)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +76,8 @@ pub struct IfStmt {
     pub then_block: Block,
     pub elif_branches: Vec<(Expr, Block)>,
     pub else_block: Option<Block>,
+    /// Suspension if statement (if~) for explicit suspension points in async-by-default
+    pub is_suspend: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +93,8 @@ pub struct ForStmt {
     pub pattern: Pattern,
     pub iterable: Expr,
     pub body: Block,
+    /// Suspension for loop (for~) for explicit suspension points in async-by-default
+    pub is_suspend: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -99,6 +104,8 @@ pub struct WhileStmt {
     pub let_pattern: Option<Pattern>,
     pub condition: Expr,
     pub body: Block,
+    /// Suspension while loop (while~) for explicit suspension points in async-by-default
+    pub is_suspend: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

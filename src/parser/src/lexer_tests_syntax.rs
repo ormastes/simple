@@ -28,6 +28,7 @@ fn test_assignment_operators() {
     assert_eq!(tokenize("-="), vec![TokenKind::MinusAssign, TokenKind::Eof]);
     assert_eq!(tokenize("*="), vec![TokenKind::StarAssign, TokenKind::Eof]);
     assert_eq!(tokenize("/="), vec![TokenKind::SlashAssign, TokenKind::Eof]);
+    assert_eq!(tokenize("~="), vec![TokenKind::TildeAssign, TokenKind::Eof]);
 }
 
 #[test]

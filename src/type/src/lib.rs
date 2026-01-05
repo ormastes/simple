@@ -9,12 +9,14 @@ pub mod bitfield;
 pub mod http_status;
 pub mod response_builder;
 pub mod route_params;
+pub mod effects;
 
 pub use tagged_union::{TaggedUnion, UnionVariant};
 pub use bitfield::{Bitfield, BitfieldField, BackingType};
 pub use http_status::{StatusCode, StatusCodeCategory};
 pub use response_builder::{Response, ResponseBuilder};
 pub use route_params::{RouteParams, RouteParamError, ParamValue};
+pub use effects::{Effect, EffectEnv, infer_function_effect, build_effect_env, validate_sync_constraint};
 
 //==============================================================================
 // Pure Type Inference (for formal verification)

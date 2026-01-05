@@ -747,6 +747,7 @@ fn apply_macro_hygiene_node(
                     elif_branches,
                     else_block,
                     let_pattern: Some(new_pattern),
+                    is_suspend: stmt.is_suspend,
                 })
             } else {
                 Node::If(IfStmt {
@@ -768,6 +769,7 @@ fn apply_macro_hygiene_node(
                         .as_ref()
                         .map(|block| apply_macro_hygiene_block(block, ctx, true)),
                     let_pattern: None,
+                    is_suspend: stmt.is_suspend,
                 })
             }
         }
@@ -806,6 +808,7 @@ fn apply_macro_hygiene_node(
                 pattern,
                 iterable,
                 body,
+                is_suspend: stmt.is_suspend,
             })
         }
         Node::While(stmt) => {
@@ -824,6 +827,7 @@ fn apply_macro_hygiene_node(
                 condition,
                 body,
                 let_pattern,
+                is_suspend: stmt.is_suspend,
             })
         }
         Node::Loop(stmt) => Node::Loop(LoopStmt {
@@ -1382,6 +1386,7 @@ fn substitute_node_templates(
                 .as_ref()
                 .map(|block| substitute_block_templates(block, const_bindings)),
             let_pattern: stmt.let_pattern.clone(),
+            is_suspend: stmt.is_suspend,
         }),
         Node::Match(stmt) => Node::Match(MatchStmt {
             span: stmt.span,
@@ -1405,12 +1410,14 @@ fn substitute_node_templates(
             pattern: stmt.pattern.clone(),
             iterable: substitute_expr_templates(&stmt.iterable, const_bindings),
             body: substitute_block_templates(&stmt.body, const_bindings),
+            is_suspend: stmt.is_suspend,
         }),
         Node::While(stmt) => Node::While(WhileStmt {
             span: stmt.span,
             condition: substitute_expr_templates(&stmt.condition, const_bindings),
             body: substitute_block_templates(&stmt.body, const_bindings),
             let_pattern: stmt.let_pattern.clone(),
+            is_suspend: stmt.is_suspend,
         }),
         Node::Loop(stmt) => Node::Loop(LoopStmt {
             span: stmt.span,

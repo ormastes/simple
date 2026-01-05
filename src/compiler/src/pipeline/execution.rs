@@ -156,6 +156,9 @@ impl CompilerPipeline {
         // Check trait coherence (orphan rule, overlap, associated types, blanket conflicts)
         self.check_trait_coherence(&module.items)?;
 
+        // Validate sync functions don't contain suspension operators (async-by-default #44)
+        self.validate_sync_constraints(&module.items)?;
+
         // If HIR or MIR export is requested, generate them even in interpreter mode (#886-887)
         if self.emit_hir.is_some() || self.emit_mir.is_some() {
             // Type check is required for HIR/MIR lowering
@@ -256,6 +259,9 @@ impl CompilerPipeline {
         // 5. Check trait coherence
         self.check_trait_coherence(&ast_module.items)?;
 
+        // 6. Validate sync constraints (async-by-default #44)
+        self.validate_sync_constraints(&ast_module.items)?;
+
         // If script-style statements exist, interpret directly and wrap result.
         if has_script_statements(&ast_module.items) {
             let main_value = self.evaluate_module_with_project(&ast_module.items)?;
@@ -333,6 +339,9 @@ impl CompilerPipeline {
 
         // 5. Check trait coherence
         self.check_trait_coherence(&ast_module.items)?;
+
+        // 6. Validate sync constraints (async-by-default #44)
+        self.validate_sync_constraints(&ast_module.items)?;
 
         // If script-style statements exist, interpret directly and wrap result.
         if has_script_statements(&ast_module.items) {
@@ -444,6 +453,9 @@ impl CompilerPipeline {
 
         // Check trait coherence
         self.check_trait_coherence(&ast_module.items)?;
+
+        // Validate sync constraints (async-by-default #44)
+        self.validate_sync_constraints(&ast_module.items)?;
 
         // Type check and lower to MIR
         let mir_module = self.type_check_and_lower(&ast_module)?;

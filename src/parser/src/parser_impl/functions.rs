@@ -19,6 +19,15 @@ impl<'a> Parser<'a> {
         Ok(func)
     }
 
+    pub(crate) fn parse_sync_function(&mut self) -> Result<Node, ParseError> {
+        self.advance(); // consume 'sync'
+        let mut func = self.parse_function()?;
+        if let Node::Function(ref mut f) = func {
+            f.is_sync = true;
+        }
+        Ok(func)
+    }
+
     pub(crate) fn parse_function(&mut self) -> Result<Node, ParseError> {
         self.parse_function_with_decorators(vec![])
     }
@@ -113,6 +122,7 @@ impl<'a> Parser<'a> {
             doc_comment: None,
             contract,
             is_abstract: false,
+            is_sync: false,
             bounds_block,
         }))
     }
@@ -182,6 +192,17 @@ impl<'a> Parser<'a> {
         doc_comment: Option<DocComment>,
     ) -> Result<Node, ParseError> {
         let mut node = self.parse_async_function()?;
+        if let Node::Function(ref mut f) = node {
+            f.doc_comment = doc_comment;
+        }
+        Ok(node)
+    }
+
+    pub(super) fn parse_sync_function_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
+        let mut node = self.parse_sync_function()?;
         if let Node::Function(ref mut f) = node {
             f.doc_comment = doc_comment;
         }

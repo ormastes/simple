@@ -1,9 +1,10 @@
 # #45 Suspension Operator (~)
 
-**Status:** 📋 Planned
+**Status:** 🔄 Planning
 **Difficulty:** 3 (Medium)
 **Implementation:** Rust
 **Spec:** [suspension_operator.md](../../spec/suspension_operator.md)
+**Plan:** [async_default_implementation.md](../../plans/async_default_implementation.md)
 
 ## Description
 

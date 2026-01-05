@@ -120,4 +120,21 @@ impl CompilerPipeline {
 
         Ok(())
     }
+
+    /// Validate that sync-annotated functions don't contain suspension operators.
+    ///
+    /// This implements the async-by-default semantics check (#44):
+    /// - Functions marked with `sync fn` cannot contain await, ~=, if~, while~, for~ operators
+    /// - This ensures sync functions are truly non-suspending
+    pub(super) fn validate_sync_constraints(&self, items: &[Node]) -> Result<(), CompileError> {
+        for item in items {
+            if let Node::Function(func) = item {
+                // Use the type checker's validation function
+                if let Err(err_msg) = simple_type::validate_sync_constraint(func) {
+                    return Err(CompileError::Semantic(err_msg));
+                }
+            }
+        }
+        Ok(())
+    }
 }

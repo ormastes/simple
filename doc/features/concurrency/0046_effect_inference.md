@@ -1,9 +1,10 @@
 # #46 Effect Inference
 
-**Status:** 📋 Planned
+**Status:** 🔄 Planning (Lean ✅)
 **Difficulty:** 4 (Hard)
 **Implementation:** Rust + Lean
 **Spec:** [async_default.md](../../spec/async_default.md#effect-inference-automatic-asyncsync-detection)
+**Plan:** [async_default_implementation.md](../../plans/async_default_implementation.md)
 
 ## Description
 
@@ -63,12 +64,30 @@ fn pong(n: i64) -> i64:
 
 ## Lean 4 Verification
 
+**Status:** ✅ Complete (265 lines, 10 theorems)
+
 Formal properties verified in `AsyncEffectInference.lean`:
 
+### Effect Inference (Theorems 1-5)
 - **Effect Determinism**: Each function has exactly one inferred effect
 - **Suspension Implies Async**: `~=` always makes function async
 - **Sync Safety**: `sync fn` with suspension is a compile error
 - **Effect Propagation**: Calling async fn makes caller async
+- **Literals are Sync**: Constants never suspend
+
+### Promise Type System (Theorems 6-10)
+- **Async Returns Promise**: Async functions implicitly wrap return type in `Promise[T]`
+- **Sync No Promise Wrap**: Sync functions return `T` directly
+- **No Double-Wrap**: Explicit `Promise[T]` return prevents `Promise[Promise[T]]`
+- **Await Inference Sound**: Type-driven await insertion is correct
+- **Promise Unwrap Correct**: `Promise[T]` → `T` unwrapping is safe
+
+**Models:**
+- Type system with `Promise[T]`
+- `transformReturnType: Effect × Type → Type`
+- `shouldInsertAwait: Type × Type → Bool`
+- `canUnwrapPromise: Type × Type → Bool`
+- Fixed-point iteration for mutual recursion
 
 ## Test Locations
 
