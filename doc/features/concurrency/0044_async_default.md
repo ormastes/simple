@@ -1,9 +1,10 @@
 # #44 Async Default
 
-**Status:** 📋 Planned
+**Status:** 🔄 Planning
 **Difficulty:** 3 (Medium)
 **Implementation:** Rust
 **Spec:** [async_default.md](../../spec/async_default.md)
+**Plan:** [async_default_implementation.md](../../plans/async_default_implementation.md)
 
 ## Description
 

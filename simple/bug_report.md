@@ -4,6 +4,7 @@
 
 | Bug | Status | Priority |
 |-----|--------|----------|
+| Macro System Missing `is_suspend` Field | ✅ FIXED | Critical |
 | BDD Spec Framework Scoping Issue | ✅ FIXED | High |
 | BDD Mutable Variable Issue | ✅ FIXED | Medium |
 | Formatter/Linter Compilation | ✅ FIXED | Medium |
@@ -39,7 +40,42 @@
 | Dict `contains()` Method Missing | 🔄 WORKAROUND | Low |
 | Verification Module Reserved Keywords | 🐛 OPEN | High |
 
-**Summary:** 27 fixed, 4 open, 1 investigating, 3 workarounds
+**Summary:** 28 fixed, 4 open, 1 investigating, 3 workarounds
+
+---
+
+## Macro System Missing `is_suspend` Field ✅ FIXED
+
+**Type:** Bug - Compilation Error
+**Priority:** Critical
+**Discovered:** 2026-01-05
+**Resolved:** 2026-01-05
+**Component:** Macro System (`src/compiler/src/interpreter_macro.rs`)
+
+### Description
+
+After the async-by-default suspension operator feature added the `is_suspend` field to `IfStmt`, `ForStmt`, and `WhileStmt` AST nodes, the macro system's hygiene and template substitution functions failed to compile because they didn't initialize this field when creating new statement nodes.
+
+### Status
+
+✅ **FIXED** (2026-01-05)
+
+**Root Cause:** The `is_suspend` field was added to support suspension operators (`if~`, `for~`, `while~`) but 7 struct initializations in `interpreter_macro.rs` were not updated.
+
+**Fix:** Added `is_suspend: stmt.is_suspend` to all 7 struct initializations:
+- 3x `IfStmt` (lines 743, 753, 1370)
+- 2x `ForStmt` (lines 806, 1408)
+- 2x `WhileStmt` (lines 825, 1415)
+
+**Files Changed:**
+- `src/compiler/src/interpreter_macro.rs` - Added `is_suspend` field to 7 struct initializations
+
+### Verification
+
+```bash
+cargo build -p simple-compiler  # Now compiles successfully
+./target/release/simple -c 'print("Hello World")'  # Works correctly
+```
 
 ---
 

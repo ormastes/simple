@@ -75,6 +75,7 @@ impl<'a> Parser<'a> {
             then_block,
             elif_branches,
             else_block,
+            is_suspend: false,
         }))
     }
 
@@ -98,6 +99,7 @@ impl<'a> Parser<'a> {
             pattern,
             iterable,
             body,
+            is_suspend: false,
         }))
     }
 
@@ -119,6 +121,7 @@ impl<'a> Parser<'a> {
             let_pattern,
             condition,
             body,
+            is_suspend: false,
         }))
     }
 
@@ -300,5 +303,109 @@ impl<'a> Parser<'a> {
             guard,
             body,
         })
+    }
+
+    // Suspension control flow (async-by-default #45)
+
+    pub(crate) fn parse_if_suspend(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::IfSuspend)?;
+
+        let (let_pattern, condition) = self.parse_optional_let_pattern()?;
+        self.expect(&TokenKind::Colon)?;
+        let then_block = self.parse_block()?;
+
+        let mut elif_branches = Vec::new();
+        while self.check(&TokenKind::Elif) {
+            self.advance();
+            let elif_condition = self.parse_expression()?;
+            self.expect(&TokenKind::Colon)?;
+            let elif_block = self.parse_block()?;
+            elif_branches.push((elif_condition, elif_block));
+        }
+
+        let mut else_block = None;
+        if self.check(&TokenKind::Else) {
+            self.advance();
+            while self.check(&TokenKind::If) {
+                self.advance();
+                let elif_condition = self.parse_expression()?;
+                self.expect(&TokenKind::Colon)?;
+                let elif_block = self.parse_block()?;
+                elif_branches.push((elif_condition, elif_block));
+
+                if self.check(&TokenKind::Else) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+
+            if self.check(&TokenKind::Colon) {
+                self.expect(&TokenKind::Colon)?;
+                else_block = Some(self.parse_block()?);
+            }
+        }
+
+        Ok(Node::If(IfStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            let_pattern,
+            condition,
+            then_block,
+            elif_branches,
+            else_block,
+            is_suspend: true,
+        }))
+    }
+
+    pub(crate) fn parse_for_suspend(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::ForSuspend)?;
+
+        let pattern = self.parse_pattern()?;
+        self.expect(&TokenKind::In)?;
+        let iterable = self.parse_expression()?;
+        self.expect(&TokenKind::Colon)?;
+        let body = self.parse_block()?;
+
+        Ok(Node::For(ForStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            pattern,
+            iterable,
+            body,
+            is_suspend: true,
+        }))
+    }
+
+    pub(crate) fn parse_while_suspend(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::WhileSuspend)?;
+
+        let (let_pattern, condition) = self.parse_optional_let_pattern()?;
+        self.expect(&TokenKind::Colon)?;
+        let body = self.parse_block()?;
+
+        Ok(Node::While(WhileStmt {
+            span: Span::new(
+                start_span.start,
+                self.previous.span.end,
+                start_span.line,
+                start_span.column,
+            ),
+            let_pattern,
+            condition,
+            body,
+            is_suspend: true,
+        }))
     }
 }

@@ -67,3 +67,63 @@ fn parse_match_with_patterns() {
 fn parse_loop_statement() {
     parse_ok("loop:\n    x = x + 1\n    if x > 10:\n        break\n");
 }
+
+// Suspension control flow (async-by-default #45)
+#[test]
+fn parse_if_suspend_statement() {
+    let items = parse("if~ x > 0:\n    y = 1");
+    if let Node::If(if_stmt) = &items[0] {
+        assert!(if_stmt.is_suspend);
+    } else {
+        panic!("Expected If node");
+    }
+}
+
+#[test]
+fn parse_while_suspend_loop() {
+    let items = parse("while~ x < 10:\n    x = x + 1");
+    if let Node::While(while_stmt) = &items[0] {
+        assert!(while_stmt.is_suspend);
+    } else {
+        panic!("Expected While node");
+    }
+}
+
+#[test]
+fn parse_for_suspend_loop() {
+    let items = parse("for~ i in range(0, 10):\n    sum = sum + i");
+    if let Node::For(for_stmt) = &items[0] {
+        assert!(for_stmt.is_suspend);
+    } else {
+        panic!("Expected For node");
+    }
+}
+
+#[test]
+fn parse_suspend_assignment() {
+    let items = parse("x ~= async_function()");
+    if let Node::Assignment(assign) = &items[0] {
+        assert!(matches!(assign.op, simple_parser::ast::AssignOp::SuspendAssign));
+    } else {
+        panic!("Expected Assignment node");
+    }
+}
+
+#[test]
+fn parse_regular_vs_suspend_if() {
+    // Regular if
+    let items = parse("if x > 0:\n    y = 1");
+    if let Node::If(if_stmt) = &items[0] {
+        assert!(!if_stmt.is_suspend);
+    } else {
+        panic!("Expected If node");
+    }
+
+    // Suspension if
+    let items = parse("if~ x > 0:\n    y = 1");
+    if let Node::If(if_stmt) = &items[0] {
+        assert!(if_stmt.is_suspend);
+    } else {
+        panic!("Expected If node");
+    }
+}

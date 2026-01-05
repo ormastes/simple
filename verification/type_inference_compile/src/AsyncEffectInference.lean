@@ -1,4 +1,3 @@
-/-
   ============================================================================
   AUTO-GENERATED - DO NOT EDIT MANUALLY
   ============================================================================
@@ -17,39 +16,17 @@
   2. Effect Propagation: Calling async function makes caller async
   3. Suspension Detection: ~=, if~, while~ operators indicate async
   4. Sync Safety: sync-annotated functions cannot contain suspension
+  5. Promise Wrapping: Async functions implicitly return Promise[T]
+  6. Await Inference: Promise[T] → T assignment inserts implicit await
+  7. No Double-Wrap: Explicit Promise[T] return prevents wrapping
 
   Generated from: simple/std_lib/src/verification/regenerate/async_effect_inference.spl
 -/
 
 namespace AsyncEffectInference
-
 /-- Effect annotation for functions -/
-inductive Effect
-  | sync   -- Non-suspending, direct return T
-  | async  -- May suspend, returns Promise[T]
-  deriving DecidableEq, Repr
-
 /-- Suspension operators in the language -/
-inductive SuspensionOp
-  | suspendAssign      -- ~=
-  | suspendIf          -- if~
-  | suspendWhile       -- while~
-  | suspendFor         -- for~
-  | suspendAnd         -- and~
-  | suspendOr          -- or~
-  deriving DecidableEq, Repr
-
 /-- Expression with effect tracking -/
-inductive Expr
-  | lit (n : Nat)                           -- Literal (sync)
-  | var (name : String)                      -- Variable reference
-  | binOp (a b : Expr)                       -- Binary operation
-  | call (fn : String) (args : List Expr)    -- Function call
-  | suspend (op : SuspensionOp) (e : Expr)   -- Suspension operator
-  | lambda (body : Expr)                     -- Lambda expression
-  | ifExpr (cond : Expr) (t e : Expr)        -- If expression
-  deriving Repr
-
 /-- Function declaration with optional explicit effect annotation -/
 structure FnDecl where
   name : String
@@ -108,39 +85,44 @@ def validateSyncConstraint (fn : FnDecl) : Bool :=
   | _ => true
 
 /-- Effect is deterministic: inference yields exactly one effect -/
-theorem effect_deterministic (env : Env) (e : Expr) :
-    ∃! eff : Effect, inferExprEffect env e = eff := by
-  exists inferExprEffect env e
-  simp only [and_iff_right]
-  intros y hy
-  exact hy.symm
-
 /-- Suspension implies async: any suspension operator makes expression async -/
-theorem suspension_implies_async (env : Env) (op : SuspensionOp) (e : Expr) :
-    inferExprEffect env (Expr.suspend op e) = Effect.async := by
-  simp [inferExprEffect]
-
 /-- Sync safety: if validateSyncConstraint passes, no suspension in body -/
-theorem sync_safety (fn : FnDecl) :
-    fn.explicitEffect = some Effect.sync →
-    validateSyncConstraint fn = true →
-    !containsSuspension fn.body = true := by
-  intro h_explicit h_valid
-  simp [validateSyncConstraint, h_explicit] at h_valid
-  exact h_valid
-
 /-- Effect propagation: calling async function in body makes caller async -/
-theorem async_propagation (env : Env) (fn_name : String) (args : List Expr) :
-    env fn_name = some Effect.async →
-    inferExprEffect env (Expr.call fn_name args) = Effect.async := by
-  intro h_async
-  simp [inferExprEffect, h_async]
-
 /-- Literals are always sync -/
-theorem lit_is_sync (env : Env) (n : Nat) :
-    inferExprEffect env (Expr.lit n) = Effect.sync := by
-  simp [inferExprEffect]
+/-- Type representation in the type system -/
+inductive Type
+  | int
+  | string
+  | bool
+  | promise (inner : Type)
+  | fn (param : Type) (ret : Type)
+  | generic (name : String)
+  deriving DecidableEq, Repr
 
+/-- Transform return type based on effect: async wraps in Promise[T] -/
+def transformReturnType (eff : Effect) (retType : Type) : Type :=
+  match eff, retType with
+  | Effect.async, Type.promise _ => retType  -- Already Promise, no double-wrap
+  | Effect.async, t => Type.promise t  -- Wrap in Promise
+  | Effect.sync, t => t  -- No wrapping for sync
+
+/-- Check if implicit await should be inserted based on type mismatch -/
+def shouldInsertAwait (expectedType : Type) (actualType : Type) : Bool :=
+  match expectedType, actualType with
+  | t, Type.promise inner => t == inner  -- Promise[T] → T needs await
+  | _, _ => false
+
+/-- Check if Promise[T] can be unwrapped to T -/
+def canUnwrapPromise (promiseType : Type) (targetType : Type) : Bool :=
+  match promiseType with
+  | Type.promise inner => inner == targetType
+  | _ => false
+
+/-- Async functions implicitly wrap return type in Promise -/
+/-- Sync functions return types unchanged -/
+/-- Promise[T] is not wrapped again to Promise[Promise[T]] -/
+/-- Await inference is sound: only inserts when types match -/
+/-- Promise can be unwrapped to its inner type -/
 /-- Build environment from list of function declarations -/
 def buildEnv (fns : List FnDecl) : Env :=
   fun name => (fns.find? (fun f => f.name == name)).map (inferFnEffect (fun _ => none))
@@ -160,29 +142,125 @@ partial def inferMutualEffects (fns : List FnDecl) (maxIter : Nat := 100) : Env 
   iterate (fun _ => none) maxIter
 
 /-- Example: sync function -/
-def syncExample : FnDecl := {
+def syncExample : FnDecl := \{
   name := "double"
   body := Expr.binOp (Expr.var "x") (Expr.lit 2)
   explicitEffect := none
-}
+\}
 
 /-- Example: async function with suspension -/
-def asyncExample : FnDecl := {
+def asyncExample : FnDecl := \{
   name := "fetchUser"
   body := Expr.suspend SuspensionOp.suspendAssign (Expr.call "http_get" [Expr.var "url"])
   explicitEffect := none
-}
+\}
 
 /-- Example: explicit sync constraint -/
-def explicitSyncExample : FnDecl := {
+def explicitSyncExample : FnDecl := \{
   name := "compute"
   body := Expr.binOp (Expr.var "x") (Expr.var "x")
   explicitEffect := some Effect.sync
-}
+\}
+
+/-- Example: type-driven await inference -/
+example : shouldInsertAwait Type.int (Type.promise Type.int) = true := by
+  simp [shouldInsertAwait]
+
+/-- Example: Promise wrapping for async function -/
+example : transformReturnType Effect.async Type.int = Type.promise Type.int := by
+  simp [transformReturnType]
+
+/-- Example: No double-wrap for explicit Promise return -/
+example : transformReturnType Effect.async (Type.promise Type.string) = Type.promise Type.string := by
+  simp [transformReturnType]
 
 #check effect_deterministic
 #check suspension_implies_async
 #check sync_safety
 #check async_propagation
+#check lit_is_sync
+#check async_returns_promise
+#check sync_no_promise_wrap
+#check no_double_wrap
+#check await_inference_sound
+#check promise_unwrap_correct
+
+inductive Effect
+  | sync
+  | async
+deriving DecidableEq, Repr
+
+inductive SuspensionOp
+  | suspendAssign
+  | suspendIf
+  | suspendWhile
+  | suspendFor
+  | suspendAnd
+  | suspendOr
+deriving DecidableEq, Repr
+
+inductive Expr
+  | lit : Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Nat")) } → Expr
+  | var : Enum { enum_name: "SimpleType", variant: "StringType", payload: None } → Expr
+  | binOp : Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Expr")) } → Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Expr")) } → Expr
+  | call : Enum { enum_name: "SimpleType", variant: "StringType", payload: None } → Enum { enum_name: "SimpleType", variant: "ListType", payload: Some(Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Expr")) }) } → Expr
+  | suspend : Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("SuspensionOp")) } → Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Expr")) } → Expr
+  | lambda : Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Expr")) } → Expr
+  | ifExpr : Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Expr")) } → Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Expr")) } → Enum { enum_name: "SimpleType", variant: "NamedType", payload: Some(Str("Expr")) } → Expr
+deriving Repr
+
+theorem effect_deterministic (env : Env) (e : Expr) :
+  ∃! eff : Effect, inferExprEffect env e = eff := by
+  exists inferExprEffect env e
+simp only [and_iff_right]
+intros y hy
+exact hy.symm
+
+theorem suspension_implies_async (env : Env) (op : SuspensionOp) (e : Expr) :
+  inferExprEffect env (Expr.suspend op e) = Effect.async := by
+  simp [inferExprEffect]
+
+theorem sync_safety (fn : FnDecl) :
+  fn.explicitEffect = some Effect.sync → validateSyncConstraint fn = true → !containsSuspension fn.body = true := by
+  intro h_explicit h_valid
+simp [validateSyncConstraint, h_explicit] at h_valid
+exact h_valid
+
+theorem async_propagation (env : Env) (fn_name : String) (args : List Expr) :
+  env fn_name = some Effect.async → inferExprEffect env (Expr.call fn_name args) = Effect.async := by
+  intro h_async
+simp [inferExprEffect, h_async]
+
+theorem lit_is_sync (env : Env) (n : Nat) :
+  inferExprEffect env (Expr.lit n) = Effect.sync := by
+  simp [inferExprEffect]
+
+theorem async_returns_promise (retType : Type) :
+  transformReturnType Effect.async retType = Type.promise retType ∨ (∃ t, retType = Type.promise t ∧ transformReturnType Effect.async retType = retType) := by
+  cases retType with
+| promise _ => right; exists _; simp [transformReturnType]
+| _ => left; simp [transformReturnType]
+
+theorem sync_no_promise_wrap (retType : Type) :
+  transformReturnType Effect.sync retType = retType := by
+  cases retType <;> simp [transformReturnType]
+
+theorem no_double_wrap (t : Type) :
+  transformReturnType Effect.async (Type.promise t) = Type.promise t := by
+  simp [transformReturnType]
+
+theorem await_inference_sound (t : Type) (inner : Type) :
+  shouldInsertAwait t (Type.promise inner) = true → t = inner := by
+  intro h
+simp [shouldInsertAwait] at h
+exact h
+
+theorem promise_unwrap_correct (inner : Type) (target : Type) :
+  canUnwrapPromise (Type.promise inner) target = true → inner = target := by
+  intro h
+simp [canUnwrapPromise] at h
+exact h
 
 end AsyncEffectInference
+
+Generated content successfully

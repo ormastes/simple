@@ -337,3 +337,19 @@ fn test_keywords() {
     assert_eq!(tokenize("spawn"), vec![TokenKind::Spawn, TokenKind::Eof]);
 }
 
+#[test]
+fn test_suspension_keywords() {
+    // Suspension control flow keywords (async-by-default #45)
+    assert_eq!(tokenize("if~"), vec![TokenKind::IfSuspend, TokenKind::Eof]);
+    assert_eq!(tokenize("while~"), vec![TokenKind::WhileSuspend, TokenKind::Eof]);
+    assert_eq!(tokenize("for~"), vec![TokenKind::ForSuspend, TokenKind::Eof]);
+
+    // Verify that regular keywords without ~ are still parsed correctly
+    assert_eq!(tokenize("if"), vec![TokenKind::If, TokenKind::Eof]);
+    assert_eq!(tokenize("while"), vec![TokenKind::While, TokenKind::Eof]);
+    assert_eq!(tokenize("for"), vec![TokenKind::For, TokenKind::Eof]);
+
+    // Verify that ~ alone is still a tilde operator
+    assert_eq!(tokenize("~"), vec![TokenKind::Tilde, TokenKind::Eof]);
+}
+

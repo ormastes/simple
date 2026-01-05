@@ -31,6 +31,10 @@ pub struct FunctionDef {
     pub contract: Option<ContractBlock>,
     /// Whether this is an abstract method (trait method without body)
     pub is_abstract: bool,
+    /// Whether this function is explicitly marked as sync (non-suspending)
+    /// sync fn = cannot contain suspension operators (~=, if~, while~, for~)
+    /// Default (false) = async-by-default, may suspend
+    pub is_sync: bool,
     /// Bounds block for @simd kernels (trailing bounds: clause)
     pub bounds_block: Option<BoundsBlock>,
 }

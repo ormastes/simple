@@ -1,0 +1,240 @@
+/**
+Promise[T] Specification Tests
+
+Tests for the Promise type implementing async-by-default semantics.
+*/
+
+import concurrency.promise
+import spec
+
+describe "Promise[T] - Basic Operations":
+    it "creates a resolved promise":
+        let p = Promise.resolved(42)
+        expect(await p).to_equal(42)
+
+    it "creates a rejected promise":
+        let p = Promise.rejected("error")
+        let caught = false
+        try:
+            await p
+        catch e:
+            caught = true
+            expect(e).to_equal("error")
+        expect(caught).to_be_true()
+
+    it "creates a promise with executor":
+        let p = Promise.new(\resolve, reject: resolve(100))
+        expect(await p).to_equal(100)
+
+    it "handles executor rejection":
+        let p = Promise.new(\resolve, reject: reject("failed"))
+        let caught = false
+        try:
+            await p
+        catch e:
+            caught = true
+            expect(e).to_equal("failed")
+        expect(caught).to_be_true()
+
+    it "handles executor exceptions":
+        let p = Promise.new(\resolve, reject:
+            raise "oops"
+        )
+        let caught = false
+        try:
+            await p
+        catch e:
+            caught = true
+        expect(caught).to_be_true()
+
+describe "Promise[T] - Chaining":
+    it "chains with then()":
+        let p1 = Promise.resolved(5)
+        let p2 = p1.then(\x: x * 2)
+        expect(await p2).to_equal(10)
+
+    it "chains multiple then() calls":
+        let p = Promise.resolved(2)
+            .then(\x: x + 3)
+            .then(\x: x * 4)
+        expect(await p).to_equal(20)
+
+    it "maps over promise value":
+        let p1 = Promise.resolved(3)
+        let p2 = p1.map(\x: x * 3)
+        expect(await p2).to_equal(9)
+
+    it "flat_maps promises":
+        let p1 = Promise.resolved(5)
+        let p2 = p1.flat_map(\x: Promise.resolved(x + 10))
+        expect(await p2).to_equal(15)
+
+    it "catches errors":
+        let p = Promise.rejected("error")
+            .catch(\e: "recovered: " + e)
+        expect(await p).to_equal("recovered: error")
+
+    it "chains catch after then":
+        let p = Promise.resolved(10)
+            .then(\x: raise "fail")
+            .catch(\e: "caught")
+        expect(await p).to_equal("caught")
+
+describe "Promise[T] - Multiple Promises":
+    it "waits for all promises with Promise.all()":
+        let promises = [
+            Promise.resolved(1),
+            Promise.resolved(2),
+            Promise.resolved(3)
+        ]
+        let results = await all(promises)
+        expect(results).to_equal([1, 2, 3])
+
+    it "rejects if any promise rejects with Promise.all()":
+        let promises = [
+            Promise.resolved(1),
+            Promise.rejected("fail"),
+            Promise.resolved(3)
+        ]
+        let caught = false
+        try:
+            await all(promises)
+        catch e:
+            caught = true
+            expect(e).to_equal("fail")
+        expect(caught).to_be_true()
+
+    it "races promises with Promise.race()":
+        let promises = [
+            Promise.resolved(1),
+            Promise.resolved(2)
+        ]
+        let result = await race(promises)
+        expect(result).to_equal(1)
+
+    it "handles empty race":
+        let caught = false
+        try:
+            await race([])
+        catch e:
+            caught = true
+        expect(caught).to_be_true()
+
+    it "waits for all settled promises":
+        let promises = [
+            Promise.resolved(1),
+            Promise.rejected("fail"),
+            Promise.resolved(3)
+        ]
+        let results = await all_settled(promises)
+        expect(results.len()).to_equal(3)
+        expect(results[0]).to_be_ok()
+        expect(results[1]).to_be_err()
+        expect(results[2]).to_be_ok()
+
+describe "Promise[T] - State Management":
+    it "resolves only once":
+        let resolve_count = 0
+        let p = Promise.new(\resolve, reject:
+            resolve(1)
+            resolve(2)  # Should be ignored
+        )
+        expect(await p).to_equal(1)
+
+    it "rejects only once":
+        let reject_count = 0
+        let p = Promise.new(\resolve, reject:
+            reject("first")
+            reject("second")  # Should be ignored
+        )
+        let error = nil
+        try:
+            await p
+        catch e:
+            error = e
+        expect(error).to_equal("first")
+
+    it "cannot resolve after reject":
+        let p = Promise.new(\resolve, reject:
+            reject("error")
+            resolve(42)  # Should be ignored
+        )
+        let caught = false
+        try:
+            await p
+        catch e:
+            caught = true
+        expect(caught).to_be_true()
+
+    it "cannot reject after resolve":
+        let p = Promise.new(\resolve, reject:
+            resolve(42)
+            reject("error")  # Should be ignored
+        )
+        expect(await p).to_equal(42)
+
+describe "Promise[T] - Type Safety":
+    it "preserves types through then":
+        let p1: Promise[Int] = Promise.resolved(42)
+        let p2: Promise[String] = p1.then(\x: x.to_string())
+        expect(await p2).to_equal("42")
+
+    it "preserves types through map":
+        let p1: Promise[Int] = Promise.resolved(10)
+        let p2: Promise[Int] = p1.map(\x: x * 2)
+        expect(await p2).to_equal(20)
+
+    it "handles generic promise lists":
+        let promises: List[Promise[Int]] = [
+            Promise.resolved(1),
+            Promise.resolved(2),
+            Promise.resolved(3)
+        ]
+        let result: Promise[List[Int]] = all(promises)
+        expect(await result).to_equal([1, 2, 3])
+
+describe "Promise[T] - Edge Cases":
+    it "handles empty promise list":
+        let results = await all([])
+        expect(results).to_equal([])
+
+    it "handles single promise":
+        let p = await all([Promise.resolved(42)])
+        expect(p).to_equal([42])
+
+    it "delays execution":
+        let p = delay(100, "done")
+        expect(await p).to_equal("done")
+
+    it "chains deeply nested promises":
+        let p = Promise.resolved(1)
+        for i in range(10):
+            p = p.then(\x: x + 1)
+        expect(await p).to_equal(11)
+
+describe "Promise[T] - Integration with Async Functions":
+    # This tests integration with the async-by-default system
+
+    it "async function returns Promise[T]":
+        fn async_add(a: Int, b: Int) -> Int:
+            return a + b
+
+        let result = async_add(10, 20)
+        # Result should be Promise[Int], not Int
+        expect(await result).to_equal(30)
+
+    it "sync function returns T directly":
+        sync fn sync_add(a: Int, b: Int) -> Int:
+            return a + b
+
+        let result = sync_add(10, 20)
+        # Result should be Int, not Promise[Int]
+        expect(result).to_equal(30)
+
+    it "async function can await promises":
+        fn fetch_value() -> Int:
+            let p = Promise.resolved(42)
+            return await p
+
+        let result = await fetch_value()
+        expect(result).to_equal(42)

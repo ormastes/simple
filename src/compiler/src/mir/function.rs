@@ -12,6 +12,36 @@ use super::blocks::MirBlock;
 use super::effects::{EffectSet, LocalKind};
 use super::instructions::{BlockId, VReg};
 
+/// Inferred effect from type checker for async-by-default semantics.
+/// This mirrors simple_type::Effect but is defined here to avoid circular dependencies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum InferredEffect {
+    /// Non-suspending function, returns T directly
+    Sync,
+    /// May suspend, returns Promise[T]
+    Async,
+}
+
+impl InferredEffect {
+    /// Check if this effect is async (may suspend)
+    pub fn is_async(&self) -> bool {
+        matches!(self, InferredEffect::Async)
+    }
+
+    /// Check if this effect is sync (cannot suspend)
+    pub fn is_sync(&self) -> bool {
+        matches!(self, InferredEffect::Sync)
+    }
+
+    /// Get the name of this effect for error messages
+    pub fn name(&self) -> &'static str {
+        match self {
+            InferredEffect::Sync => "sync",
+            InferredEffect::Async => "async",
+        }
+    }
+}
+
 /// Local variable in MIR function
 #[derive(Debug, Clone)]
 pub struct MirLocal {
@@ -63,6 +93,9 @@ pub struct MirFunction {
     pub attributes: Vec<String>,
     /// Effects declared for this function (e.g., ["io", "async"])
     pub effects: Vec<String>,
+    /// Inferred effect from type checker (Sync/Async for async-by-default)
+    /// Maps to simple_type::Effect enum
+    pub inferred_effect: Option<InferredEffect>,
     /// Layout phase for code locality optimization.
     /// Determines which 4KB page group this function belongs to.
     pub layout_phase: LayoutPhase,
@@ -92,6 +125,7 @@ impl MirFunction {
             module_path: String::new(),
             attributes: Vec::new(),
             effects: Vec::new(),
+            inferred_effect: None,
             layout_phase: LayoutPhase::default(),
             is_event_loop_anchor: false,
             next_vreg: 0,

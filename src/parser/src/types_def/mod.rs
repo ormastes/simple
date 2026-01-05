@@ -668,6 +668,7 @@ impl<'a> Parser<'a> {
             doc_comment: None,
             contract: None,
             is_abstract,
+            is_sync: false,
             bounds_block: None,
         })
     }

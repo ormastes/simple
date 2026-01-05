@@ -173,7 +173,7 @@ impl<'a> Lexer<'a> {
                 TokenKind::Backslash
             }
             '^' => TokenKind::Caret,
-            '~' => TokenKind::Tilde,
+            '~' => self.match_char('=', TokenKind::TildeAssign, TokenKind::Tilde),
             '?' => TokenKind::Question,
 
             // Multi-character operators

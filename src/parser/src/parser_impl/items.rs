@@ -28,6 +28,13 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            TokenKind::Sync => {
+                let mut node = self.parse_sync_function_with_doc(doc_comment)?;
+                if let Node::Function(ref mut f) = node {
+                    f.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
             TokenKind::Struct => {
                 let mut node = self.parse_struct_with_doc(doc_comment)?;
                 if let Node::Struct(ref mut s) = node {
@@ -78,6 +85,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Async => {
                 let mut node = self.parse_async_function()?;
+                if let Node::Function(ref mut f) = node {
+                    f.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
+            TokenKind::Sync => {
+                let mut node = self.parse_sync_function()?;
                 if let Node::Function(ref mut f) = node {
                     f.visibility = Visibility::Public;
                 }
@@ -261,6 +275,14 @@ impl<'a> Parser<'a> {
                 let mut func = self.parse_function_with_attrs(vec![], attributes)?;
                 if let Node::Function(ref mut f) = func {
                     f.effects.push(Effect::Async);
+                }
+                Ok(func)
+            }
+            TokenKind::Sync => {
+                self.advance();
+                let mut func = self.parse_function_with_attrs(vec![], attributes)?;
+                if let Node::Function(ref mut f) = func {
+                    f.is_sync = true;
                 }
                 Ok(func)
             }

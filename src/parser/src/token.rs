@@ -76,6 +76,11 @@ pub enum TokenKind {
     Return,
     Match,
     Case,
+
+    // Suspension control flow (async-by-default #45)
+    IfSuspend,    // if~ (suspension if statement)
+    WhileSuspend, // while~ (suspension while loop)
+    ForSuspend,   // for~ (suspension for loop)
     Struct,
     Class,
     Enum,
@@ -108,6 +113,7 @@ pub enum TokenKind {
     Super,
     Async,
     Await,
+    Sync,
     Yield,
     Move,
     Const,
@@ -191,20 +197,21 @@ pub enum TokenKind {
     LtEq,  // <=
     GtEq,  // >=
 
-    Assign,      // =
-    PlusAssign,  // +=
-    MinusAssign, // -=
-    StarAssign,  // *=
-    SlashAssign, // /=
+    Assign,       // =
+    PlusAssign,   // +=
+    MinusAssign,  // -=
+    StarAssign,   // *=
+    SlashAssign,  // /=
+    TildeAssign,  // ~= (suspension assignment for async-by-default)
 
     Ampersand,   // &
     Pipe,        // |
     DoublePipe,  // ||
     DoubleAmp,   // &&
     Caret,       // ^
-    Tilde,      // ~
-    ShiftLeft,  // <<
-    ShiftRight, // >>
+    Tilde,       // ~
+    ShiftLeft,   // <<
+    ShiftRight,  // >>
 
     Arrow,    // ->
     FatArrow, // =>

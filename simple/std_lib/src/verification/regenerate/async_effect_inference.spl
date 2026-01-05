@@ -36,6 +36,9 @@ fn regenerate_async_effect_inference() -> String:
     gen = gen.add_raw_line("  2. Effect Propagation: Calling async function makes caller async")
     gen = gen.add_raw_line("  3. Suspension Detection: ~=, if~, while~ operators indicate async")
     gen = gen.add_raw_line("  4. Sync Safety: sync-annotated functions cannot contain suspension")
+    gen = gen.add_raw_line("  5. Promise Wrapping: Async functions implicitly return Promise[T]")
+    gen = gen.add_raw_line("  6. Await Inference: Promise[T] → T assignment inserts implicit await")
+    gen = gen.add_raw_line("  7. No Double-Wrap: Explicit Promise[T] return prevents wrapping")
     gen = gen.add_raw_line("")
     gen = gen.add_raw_line("  Generated from: simple/std_lib/src/verification/regenerate/async_effect_inference.spl")
     gen = gen.add_raw_line("-/")
@@ -222,6 +225,100 @@ fn regenerate_async_effect_inference() -> String:
     ))
 
     # =========================================================================
+    # Type System with Promise
+    # =========================================================================
+
+    gen = gen.add_doc_comment("Type representation in the type system")
+    gen = gen.add_raw_line("inductive Type")
+    gen = gen.add_raw_line("  | int")
+    gen = gen.add_raw_line("  | string")
+    gen = gen.add_raw_line("  | bool")
+    gen = gen.add_raw_line("  | promise (inner : Type)")
+    gen = gen.add_raw_line("  | fn (param : Type) (ret : Type)")
+    gen = gen.add_raw_line("  | generic (name : String)")
+    gen = gen.add_raw_line("  deriving DecidableEq, Repr")
+    gen = gen.add_blank()
+
+    # =========================================================================
+    # Return Type Transformation
+    # =========================================================================
+
+    gen = gen.add_doc_comment("Transform return type based on effect: async wraps in Promise[T]")
+    gen = gen.add_raw_line("def transformReturnType (eff : Effect) (retType : Type) : Type :=")
+    gen = gen.add_raw_line("  match eff, retType with")
+    gen = gen.add_raw_line("  | Effect.async, Type.promise _ => retType  -- Already Promise, no double-wrap")
+    gen = gen.add_raw_line("  | Effect.async, t => Type.promise t  -- Wrap in Promise")
+    gen = gen.add_raw_line("  | Effect.sync, t => t  -- No wrapping for sync")
+    gen = gen.add_blank()
+
+    # =========================================================================
+    # Type-Driven Await Inference
+    # =========================================================================
+
+    gen = gen.add_doc_comment("Check if implicit await should be inserted based on type mismatch")
+    gen = gen.add_raw_line("def shouldInsertAwait (expectedType : Type) (actualType : Type) : Bool :=")
+    gen = gen.add_raw_line("  match expectedType, actualType with")
+    gen = gen.add_raw_line("  | t, Type.promise inner => t == inner  -- Promise[T] → T needs await")
+    gen = gen.add_raw_line("  | _, _ => false")
+    gen = gen.add_blank()
+
+    gen = gen.add_doc_comment("Check if Promise[T] can be unwrapped to T")
+    gen = gen.add_raw_line("def canUnwrapPromise (promiseType : Type) (targetType : Type) : Bool :=")
+    gen = gen.add_raw_line("  match promiseType with")
+    gen = gen.add_raw_line("  | Type.promise inner => inner == targetType")
+    gen = gen.add_raw_line("  | _ => false")
+    gen = gen.add_blank()
+
+    # =========================================================================
+    # Promise Type Theorems
+    # =========================================================================
+
+    # Theorem 6: Async functions return Promise
+    gen = gen.add_doc_comment("Async functions implicitly wrap return type in Promise")
+    gen = gen.add_theorem(codegen.build_theorem(
+        "async_returns_promise",
+        [("retType", "Type")],
+        "transformReturnType Effect.async retType = Type.promise retType ∨ (∃ t, retType = Type.promise t ∧ transformReturnType Effect.async retType = retType)",
+        "cases retType with\n| promise _ => right; exists _; simp [transformReturnType]\n| _ => left; simp [transformReturnType]"
+    ))
+
+    # Theorem 7: Sync functions don't wrap in Promise
+    gen = gen.add_doc_comment("Sync functions return types unchanged")
+    gen = gen.add_theorem(codegen.build_theorem(
+        "sync_no_promise_wrap",
+        [("retType", "Type")],
+        "transformReturnType Effect.sync retType = retType",
+        "cases retType <;> simp [transformReturnType]"
+    ))
+
+    # Theorem 8: No double-wrapping
+    gen = gen.add_doc_comment("Promise[T] is not wrapped again to Promise[Promise[T]]")
+    gen = gen.add_theorem(codegen.build_theorem(
+        "no_double_wrap",
+        [("t", "Type")],
+        "transformReturnType Effect.async (Type.promise t) = Type.promise t",
+        "simp [transformReturnType]"
+    ))
+
+    # Theorem 9: Await inference soundness
+    gen = gen.add_doc_comment("Await inference is sound: only inserts when types match")
+    gen = gen.add_theorem(codegen.build_theorem(
+        "await_inference_sound",
+        [("t", "Type"), ("inner", "Type")],
+        "shouldInsertAwait t (Type.promise inner) = true → t = inner",
+        "intro h\nsimp [shouldInsertAwait] at h\nexact h"
+    ))
+
+    # Theorem 10: Promise unwrapping correctness
+    gen = gen.add_doc_comment("Promise can be unwrapped to its inner type")
+    gen = gen.add_theorem(codegen.build_theorem(
+        "promise_unwrap_correct",
+        [("inner", "Type"), ("target", "Type")],
+        "canUnwrapPromise (Type.promise inner) target = true → inner = target",
+        "intro h\nsimp [canUnwrapPromise] at h\nexact h"
+    ))
+
+    # =========================================================================
     # Helper Functions
     # =========================================================================
 
@@ -273,6 +370,21 @@ fn regenerate_async_effect_inference() -> String:
     gen = gen.add_raw_line('\}')
     gen = gen.add_blank()
 
+    gen = gen.add_doc_comment("Example: type-driven await inference")
+    gen = gen.add_raw_line('example : shouldInsertAwait Type.int (Type.promise Type.int) = true := by')
+    gen = gen.add_raw_line('  simp [shouldInsertAwait]')
+    gen = gen.add_blank()
+
+    gen = gen.add_doc_comment("Example: Promise wrapping for async function")
+    gen = gen.add_raw_line('example : transformReturnType Effect.async Type.int = Type.promise Type.int := by')
+    gen = gen.add_raw_line('  simp [transformReturnType]')
+    gen = gen.add_blank()
+
+    gen = gen.add_doc_comment("Example: No double-wrap for explicit Promise return")
+    gen = gen.add_raw_line('example : transformReturnType Effect.async (Type.promise Type.string) = Type.promise Type.string := by')
+    gen = gen.add_raw_line('  simp [transformReturnType]')
+    gen = gen.add_blank()
+
     # =========================================================================
     # Check statements
     # =========================================================================
@@ -281,6 +393,12 @@ fn regenerate_async_effect_inference() -> String:
     gen = gen.add_raw_line("#check suspension_implies_async")
     gen = gen.add_raw_line("#check sync_safety")
     gen = gen.add_raw_line("#check async_propagation")
+    gen = gen.add_raw_line("#check lit_is_sync")
+    gen = gen.add_raw_line("#check async_returns_promise")
+    gen = gen.add_raw_line("#check sync_no_promise_wrap")
+    gen = gen.add_raw_line("#check no_double_wrap")
+    gen = gen.add_raw_line("#check await_inference_sound")
+    gen = gen.add_raw_line("#check promise_unwrap_correct")
     gen = gen.add_blank()
 
     # End namespace

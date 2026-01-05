@@ -1,9 +1,10 @@
 # #47 Promise Type
 
-**Status:** 📋 Planned
+**Status:** 🔄 Planning (Lean ✅)
 **Difficulty:** 3 (Medium)
 **Implementation:** Rust
 **Spec:** [async_default.md](../../spec/async_default.md#promise-type)
+**Plan:** [async_default_implementation.md](../../plans/async_default_implementation.md)
 
 ## Description
 

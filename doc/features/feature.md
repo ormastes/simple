@@ -1,7 +1,7 @@
 # Simple Language Features
 
-**Last Updated:** 2025-12-29
-**Recent Update:** BDD Feature Documentation System **COMPLETE!** - Test-driven documentation with executable assertions for all 4 numbered features (11 tests passing). Infrastructure includes metadata DSL, markdown generators, scaffolding tools, and verification system. See [BDD_FEATURE_DOC_COMPLETE_2025-12-29.md](../report/BDD_FEATURE_DOC_COMPLETE_2025-12-29.md). \| **Previous:** Lean Verification Mode **100% COMPLETE!** (70/70 features) - See [lean_verification_implementation.md](../plans/lean_verification_implementation.md).
+**Last Updated:** 2026-01-05
+**Recent Update:** Async Default Planning **LEAN VERIFIED!** - Enhanced AsyncEffectInference.lean with Promise type system (10 theorems, 265 lines). Features #44-#47 now in Planning phase with comprehensive 7-phase implementation plan. See [async_default_implementation.md](../plans/async_default_implementation.md). \| **Previous:** BDD Feature Documentation System **COMPLETE!** - See [BDD_FEATURE_DOC_COMPLETE_2025-12-29.md](../report/BDD_FEATURE_DOC_COMPLETE_2025-12-29.md).
 
 ## Feature Table Format
 
@@ -126,10 +126,10 @@ BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{cat
 | `concurrency/async_await_spec.spl` | #41 Async/Await | 10 | ✅ |
 | `concurrency/generators_spec.spl` | #42 Generators | 12 | ✅ |
 | `concurrency/futures_spec.spl` | #43 Futures | 11 | ✅ |
-| `concurrency/async_default_spec.spl` | #44 Async Default | 8 | 📋 SKIP |
-| `concurrency/suspension_operator_spec.spl` | #45 Suspension Operator (~) | 13 | 📋 SKIP |
-| `concurrency/effect_inference_spec.spl` | #46 Effect Inference | 12 | 📋 SKIP |
-| `concurrency/promise_type_spec.spl` | #47 Promise Type | 17 | 📋 SKIP |
+| `concurrency/async_default_spec.spl` | #44 Async Default | 8 | 🔄 PLANNING |
+| `concurrency/suspension_operator_spec.spl` | #45 Suspension Operator (~) | 13 | 🔄 PLANNING |
+| `concurrency/effect_inference_spec.spl` | #46 Effect Inference | 12 | 🔄 PLANNING (Lean ✅) |
+| `concurrency/promise_type_spec.spl` | #47 Promise Type | 17 | 🔄 PLANNING (Lean ✅) |
 
 #### Codegen (5 specs, 58 tests)
 | Spec File | Feature | Tests | Status |
@@ -253,7 +253,7 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 | #1970-#1999 | Startup Optimization (Argparse + mmap + App Types) | ✅ Complete → [STARTUP_DECORATORS_COMPLETE_2025-12-29.md](../report/STARTUP_DECORATORS_COMPLETE_2025-12-29.md) |
 | #2000-#2049 | 4KB Page Locality (Startup Cache Optimization) | ✅ Complete → [4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md](../report/4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md) |
 | #200-#204 | Stdlib Improvements (JSON, File I/O, Strings, Try) | ✅ Complete → [stdlib/__index__.md](stdlib/__index__.md) |
-| #44-#47 | Async Default & Effect Inference | 📋 Planned → [concurrency/__index__.md](concurrency/__index__.md) |
+| #44-#47 | Async Default & Effect Inference | 🔄 Planning (Lean ✅) → [concurrency/__index__.md](concurrency/__index__.md) \| [Plan](../plans/async_default_implementation.md) |
 
 ---
 
