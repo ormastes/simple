@@ -23,6 +23,7 @@ use std::time::Instant;
 use walkdir::WalkDir;
 
 use crate::{Interpreter, RunConfig};
+use simple_compiler::interpreter::clear_module_cache;
 
 /// Category of test based on location in test directory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,6 +242,9 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
     // Initialize coverage if enabled (but don't initialize global singleton here,
     // let the test runner handle that)
     // Coverage will be collected via interpreter hooks
+
+    // Clear module cache to ensure tests don't share stale cached modules
+    clear_module_cache();
 
     // Run the test with output capture, using file path for proper import resolution
     let interpreter = Interpreter::new();

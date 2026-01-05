@@ -9,6 +9,7 @@
 // - Parsing: parse_int, parse_float, to_int, to_float
 // - Padding: pad_left, pad_right
 // - Type checking: is_numeric, is_alpha, is_alphanumeric, is_whitespace
+// - Character codes: ord, codepoint (returns Unicode code point of first char)
 
 // Built-in methods for String
 if let Value::Str(ref s) = recv_val {
@@ -168,6 +169,13 @@ if let Value::Str(ref s) = recv_val {
             match s.chars().nth(idx) {
                 Some(c) => return Ok(Value::Str(c.to_string())),
                 None => return Ok(Value::Nil),
+            }
+        }
+        "ord" | "codepoint" => {
+            // Return the Unicode code point of the first character
+            match s.chars().next() {
+                Some(c) => return Ok(Value::Int(c as i64)),
+                None => return Ok(Value::Int(0)),
             }
         }
         "pad_left" | "pad_start" => {

@@ -13,15 +13,25 @@ pub enum RefKind:
     Instantiates    # Type() / Type.new()
     Overrides       # method override
 
-    fn to_string(self) -> String:
-        match self:
-            Import => "import"
-            Call => "call"
-            Implements => "implements"
-            Inherits => "inherits"
-            Uses => "uses"
-            Instantiates => "instantiates"
-            Overrides => "overrides"
+# Convert RefKind to string (workaround for enum method matching bug)
+pub fn refkind_to_string(kind: RefKind) -> String:
+    match kind:
+        RefKind.Import:
+            return "import"
+        RefKind.Call:
+            return "call"
+        RefKind.Implements:
+            return "implements"
+        RefKind.Inherits:
+            return "inherits"
+        RefKind.Uses:
+            return "uses"
+        RefKind.Instantiates:
+            return "instantiates"
+        RefKind.Overrides:
+            return "overrides"
+        _:
+            return "unknown"
 
 # Location in source code
 pub class SourceLocation:
@@ -55,7 +65,9 @@ pub class Reference:
         }
 
     pub fn to_string(self) -> String:
-        return "{self.from_symbol} --[{self.kind.to_string()}]--> {self.to_symbol} at {self.location.to_string()}"
+        kind_str = refkind_to_string(self.kind)
+        loc_str = self.location.to_string()
+        return self.from_symbol + " --[" + kind_str + "]--> " + self.to_symbol + " at " + loc_str
 
 # Qualified symbol with module path
 pub class QualifiedSymbol:
@@ -100,32 +112,33 @@ pub class SymbolTable:
     # Add a symbol to the table
     pub fn add_symbol(self, qsym: QualifiedSymbol):
         fqn = qsym.fully_qualified_name()
-        self.symbols.set(fqn, qsym)
+        self.symbols = self.symbols.set(fqn, qsym)
 
         # Track file -> symbols mapping
         file = qsym.module_path
-        if self.files.contains(file):
+        if self.files.contains_key(file):
             syms = self.files.get(file)
-            syms.append(fqn)
+            syms = syms.append(fqn)
+            self.files = self.files.set(file, syms)
         else:
-            self.files.set(file, [fqn])
+            self.files = self.files.set(file, [fqn])
 
     # Add a reference between symbols
     pub fn add_reference(self, ref: Reference):
-        self.references.append(ref)
+        self.references = self.references.append(ref)
 
     # Add reference with shorthand
     pub fn add_ref(self, from_sym: String, to_sym: String, kind: RefKind, file: String, line: i64):
         loc = SourceLocation.new(file, line, 0)
         ref = Reference.new(from_sym, to_sym, kind, loc)
-        self.references.append(ref)
+        self.references = self.references.append(ref)
 
     # Find all references TO a symbol
     pub fn find_references(self, symbol_name: String) -> List[Reference]:
         result = []
         for ref in self.references:
             if ref.to_symbol == symbol_name:
-                result.append(ref)
+                result = result.append(ref)
         return result
 
     # Find all references FROM a symbol
@@ -133,7 +146,7 @@ pub class SymbolTable:
         result = []
         for ref in self.references:
             if ref.from_symbol == symbol_name:
-                result.append(ref)
+                result = result.append(ref)
         return result
 
     # Find all implementations of a trait
@@ -141,8 +154,8 @@ pub class SymbolTable:
         result = []
         for ref in self.references:
             if ref.to_symbol == trait_name and ref.kind == RefKind.Implements:
-                if self.symbols.contains(ref.from_symbol):
-                    result.append(self.symbols.get(ref.from_symbol))
+                if self.symbols.contains_key(ref.from_symbol):
+                    result = result.append(self.symbols.get(ref.from_symbol))
         return result
 
     # Find all subclasses of a class
@@ -150,8 +163,8 @@ pub class SymbolTable:
         result = []
         for ref in self.references:
             if ref.to_symbol == class_name and ref.kind == RefKind.Inherits:
-                if self.symbols.contains(ref.from_symbol):
-                    result.append(self.symbols.get(ref.from_symbol))
+                if self.symbols.contains_key(ref.from_symbol):
+                    result = result.append(self.symbols.get(ref.from_symbol))
         return result
 
     # Find all callers of a function/method
@@ -159,7 +172,7 @@ pub class SymbolTable:
         result = []
         for ref in self.references:
             if ref.to_symbol == func_name and ref.kind == RefKind.Call:
-                result.append(ref)
+                result = result.append(ref)
         return result
 
     # Find all functions/methods called by a symbol
@@ -167,7 +180,7 @@ pub class SymbolTable:
         result = []
         for ref in self.references:
             if ref.from_symbol == func_name and ref.kind == RefKind.Call:
-                result.append(ref)
+                result = result.append(ref)
         return result
 
     # Find all usages of a type
@@ -175,7 +188,7 @@ pub class SymbolTable:
         result = []
         for ref in self.references:
             if ref.to_symbol == type_name and ref.kind == RefKind.Uses:
-                result.append(ref)
+                result = result.append(ref)
         return result
 
     # Find all instantiations of a type
@@ -183,23 +196,23 @@ pub class SymbolTable:
         result = []
         for ref in self.references:
             if ref.to_symbol == type_name and ref.kind == RefKind.Instantiates:
-                result.append(ref)
+                result = result.append(ref)
         return result
 
     # Get symbol by fully qualified name
     pub fn get_symbol(self, fqn: String) -> Option[QualifiedSymbol]:
-        if self.symbols.contains(fqn):
+        if self.symbols.contains_key(fqn):
             return Some(self.symbols.get(fqn))
         return None
 
     # Get all symbols in a file/module
     pub fn get_symbols_in_file(self, file: String) -> List[QualifiedSymbol]:
         result = []
-        if self.files.contains(file):
+        if self.files.contains_key(file):
             fqns = self.files.get(file)
             for fqn in fqns:
-                if self.symbols.contains(fqn):
-                    result.append(self.symbols.get(fqn))
+                if self.symbols.contains_key(fqn):
+                    result = result.append(self.symbols.get(fqn))
         return result
 
     # Get all symbols of a specific kind
@@ -208,7 +221,7 @@ pub class SymbolTable:
         for fqn in self.symbols.keys():
             qsym = self.symbols.get(fqn)
             if qsym.symbol.kind == kind:
-                result.append(qsym)
+                result = result.append(qsym)
         return result
 
     # Get all public symbols
@@ -217,7 +230,7 @@ pub class SymbolTable:
         for fqn in self.symbols.keys():
             qsym = self.symbols.get(fqn)
             if qsym.symbol.visibility == Visibility.Public:
-                result.append(qsym)
+                result = result.append(qsym)
         return result
 
     # Build call graph (function -> [called functions])
@@ -225,12 +238,13 @@ pub class SymbolTable:
         graph = {}
         for ref in self.references:
             if ref.kind == RefKind.Call:
-                if graph.contains(ref.from_symbol):
+                if graph.contains_key(ref.from_symbol):
                     callees = graph.get(ref.from_symbol)
                     if not callees.contains(ref.to_symbol):
-                        callees.append(ref.to_symbol)
+                        callees = callees.append(ref.to_symbol)
+                        graph = graph.set(ref.from_symbol, callees)
                 else:
-                    graph.set(ref.from_symbol, [ref.to_symbol])
+                    graph = graph.set(ref.from_symbol, [ref.to_symbol])
         return graph
 
     # Build reverse call graph (function -> [calling functions])
@@ -238,12 +252,13 @@ pub class SymbolTable:
         graph = {}
         for ref in self.references:
             if ref.kind == RefKind.Call:
-                if graph.contains(ref.to_symbol):
+                if graph.contains_key(ref.to_symbol):
                     callers = graph.get(ref.to_symbol)
                     if not callers.contains(ref.from_symbol):
-                        callers.append(ref.from_symbol)
+                        callers = callers.append(ref.from_symbol)
+                        graph = graph.set(ref.to_symbol, callers)
                 else:
-                    graph.set(ref.to_symbol, [ref.from_symbol])
+                    graph = graph.set(ref.to_symbol, [ref.from_symbol])
         return graph
 
     # Get inheritance tree for a class
@@ -257,7 +272,7 @@ pub class SymbolTable:
             found = false
             for ref in self.references:
                 if ref.from_symbol == current and ref.kind == RefKind.Inherits:
-                    chain.append(ref.to_symbol)
+                    chain = chain.append(ref.to_symbol)
                     current = ref.to_symbol
                     found = true
                     break
@@ -267,9 +282,9 @@ pub class SymbolTable:
     # Get statistics about the symbol table
     pub fn stats(self) -> Dict[String, i64]:
         result = {}
-        result.set("total_symbols", self.symbols.len())
-        result.set("total_references", self.references.len())
-        result.set("total_files", self.files.len())
+        result = result.set("total_symbols", self.symbols.len())
+        result = result.set("total_references", self.references.len())
+        result = result.set("total_files", self.files.len())
 
         # Count by kind
         let mut classes = 0
@@ -291,10 +306,10 @@ pub class SymbolTable:
                 _:
                     pass
 
-        result.set("classes", classes)
-        result.set("functions", functions)
-        result.set("traits", traits)
-        result.set("methods", methods)
+        result = result.set("classes", classes)
+        result = result.set("functions", functions)
+        result = result.set("traits", traits)
+        result = result.set("methods", methods)
 
         # Count by reference kind
         let mut imports = 0
@@ -318,11 +333,11 @@ pub class SymbolTable:
                 _:
                     pass
 
-        result.set("import_refs", imports)
-        result.set("call_refs", calls)
-        result.set("implements_refs", implements)
-        result.set("inherits_refs", inherits)
-        result.set("uses_refs", uses)
+        result = result.set("import_refs", imports)
+        result = result.set("call_refs", calls)
+        result = result.set("implements_refs", implements)
+        result = result.set("inherits_refs", inherits)
+        result = result.set("uses_refs", uses)
 
         return result
 
@@ -341,7 +356,7 @@ pub fn extract_references(source: String, module_path: String, symbols: List[Sym
             if imported != "":
                 loc = SourceLocation.new(module_path, line_num, 0)
                 ref = Reference.new(module_path, imported, RefKind.Import, loc)
-                refs.append(ref)
+                refs = refs.append(ref)
 
         # Track class inheritance
         if stripped.starts_with("class ") or stripped.starts_with("pub class "):
@@ -351,7 +366,7 @@ pub fn extract_references(source: String, module_path: String, symbols: List[Sym
                 fqn = "{module_path}.{class_name}"
                 loc = SourceLocation.new(module_path, line_num, 0)
                 ref = Reference.new(fqn, parent, RefKind.Inherits, loc)
-                refs.append(ref)
+                refs = refs.append(ref)
 
         # Track trait implementations
         if stripped.starts_with("impl "):
@@ -360,7 +375,7 @@ pub fn extract_references(source: String, module_path: String, symbols: List[Sym
                 fqn = "{module_path}.{impl_info.type_name}"
                 loc = SourceLocation.new(module_path, line_num, 0)
                 ref = Reference.new(fqn, impl_info.trait_name, RefKind.Implements, loc)
-                refs.append(ref)
+                refs = refs.append(ref)
 
         line_num = line_num + 1
 

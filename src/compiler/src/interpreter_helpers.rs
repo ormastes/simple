@@ -22,6 +22,147 @@ use super::{
     ACTOR_SPAWNER, ACTOR_INBOX, ACTOR_OUTBOX,
 };
 
+use crate::value::{OptionVariant, ResultVariant};
+
+/// Call a method directly on a Value (without an Expr receiver).
+/// This is used for nested method calls where the receiver is the result of
+/// another method call (e.g., `self.advance().unwrap()`).
+///
+/// This handles the most common cases for chained method calls.
+/// For full method support, use evaluate_method_call with an Expr.
+pub(crate) fn call_method_on_value(
+    recv_val: Value,
+    method: &str,
+    _args: &[Value],
+    _env: &Env,
+    _functions: &mut HashMap<String, FunctionDef>,
+    _classes: &mut HashMap<String, ClassDef>,
+    _enums: &Enums,
+    _impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
+    let recv_val = recv_val.deref_pointer();
+
+    // Handle common methods for chained calls
+    match &recv_val {
+        // String methods
+        Value::Str(s) => {
+            match method {
+                "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
+                "is_empty" => return Ok(Value::Bool(s.is_empty())),
+                "to_string" => return Ok(Value::Str(s.clone())),
+                "chars" => return Ok(Value::Array(s.chars().map(|c| Value::Str(c.to_string())).collect())),
+                "trim" | "strip" => return Ok(Value::Str(s.trim().to_string())),
+                "to_upper" | "upper" | "uppercase" => return Ok(Value::Str(s.to_uppercase())),
+                "to_lower" | "lower" | "lowercase" => return Ok(Value::Str(s.to_lowercase())),
+                _ => {}
+            }
+        }
+
+        // Option methods (most common in chained calls)
+        Value::Enum { enum_name, variant, payload } if enum_name == "Option" => {
+            let opt_variant = OptionVariant::from_name(variant);
+            match method {
+                "is_some" => return Ok(Value::Bool(opt_variant == Some(OptionVariant::Some))),
+                "is_none" => return Ok(Value::Bool(opt_variant == Some(OptionVariant::None))),
+                "unwrap" => {
+                    if opt_variant == Some(OptionVariant::Some) {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    return Err(CompileError::Semantic("called unwrap on None".into()));
+                }
+                "unwrap_or" => {
+                    if opt_variant == Some(OptionVariant::Some) {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    // Return the default value from args if provided
+                    if let Some(default) = _args.first() {
+                        return Ok(default.clone());
+                    }
+                    return Ok(Value::Nil);
+                }
+                _ => {}
+            }
+        }
+
+        // Result methods
+        Value::Enum { enum_name, variant, payload } if enum_name == "Result" => {
+            let res_variant = ResultVariant::from_name(variant);
+            match method {
+                "is_ok" => return Ok(Value::Bool(res_variant == Some(ResultVariant::Ok))),
+                "is_err" => return Ok(Value::Bool(res_variant == Some(ResultVariant::Err))),
+                "unwrap" => {
+                    if res_variant == Some(ResultVariant::Ok) {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    if let Some(err_val) = payload {
+                        return Err(CompileError::Semantic(format!("called unwrap on Err: {}", err_val.to_display_string())));
+                    }
+                    return Err(CompileError::Semantic("called unwrap on Err".into()));
+                }
+                "unwrap_err" => {
+                    if res_variant == Some(ResultVariant::Err) {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    return Err(CompileError::Semantic("called unwrap_err on Ok".into()));
+                }
+                _ => {}
+            }
+        }
+
+        // Array methods
+        Value::Array(arr) => {
+            match method {
+                "len" | "length" => return Ok(Value::Int(arr.len() as i64)),
+                "is_empty" => return Ok(Value::Bool(arr.is_empty())),
+                "first" => {
+                    return Ok(arr.first().map(|v| Value::some(v.clone())).unwrap_or_else(Value::none));
+                }
+                "last" => {
+                    return Ok(arr.last().map(|v| Value::some(v.clone())).unwrap_or_else(Value::none));
+                }
+                _ => {}
+            }
+        }
+
+        // Int methods
+        Value::Int(n) => {
+            match method {
+                "abs" => return Ok(Value::Int(n.abs())),
+                "to_string" => return Ok(Value::Str(n.to_string())),
+                _ => {}
+            }
+        }
+
+        // Float methods
+        Value::Float(f) => {
+            match method {
+                "abs" => return Ok(Value::Float(f.abs())),
+                "floor" => return Ok(Value::Float(f.floor())),
+                "ceil" => return Ok(Value::Float(f.ceil())),
+                "round" => return Ok(Value::Float(f.round())),
+                "to_string" => return Ok(Value::Str(f.to_string())),
+                _ => {}
+            }
+        }
+
+        _ => {}
+    }
+
+    Err(CompileError::Semantic(format!(
+        "method '{}' not found on value of type {} in nested call context",
+        method,
+        recv_val.type_name()
+    )))
+}
+
 /// Build method_missing arguments from method name and original args
 pub(crate) fn build_method_missing_args(
     method: &str,
@@ -572,6 +713,41 @@ pub(crate) fn handle_method_call_with_self_update(
     impl_methods: &ImplMethods,
 ) -> Result<(Value, Option<(String, Value)>), CompileError> {
     if let Expr::MethodCall { receiver, method, args } = value_expr {
+        // Handle nested method calls like self.advance().unwrap()
+        // The receiver itself might be a method call that mutates an object
+        if let Expr::MethodCall { .. } = receiver.as_ref() {
+            // Recursively handle the inner method call first
+            let (inner_result, inner_update) = handle_method_call_with_self_update(
+                receiver, env, functions, classes, enums, impl_methods
+            )?;
+
+            // If there was an update from the inner method call, we need to use
+            // the updated environment for the outer method call
+            let working_env = if let Some((ref obj_name, ref new_self)) = inner_update {
+                let mut temp_env = env.clone();
+                temp_env.insert(obj_name.clone(), new_self.clone());
+                temp_env
+            } else {
+                env.clone()
+            };
+
+            // Now call the outer method on the inner result
+            // Evaluate the arguments first
+            let mut eval_args = Vec::new();
+            for arg in args {
+                let val = evaluate_expr(&arg.value, &working_env, functions, classes, enums, impl_methods)?;
+                eval_args.push(val);
+            }
+
+            // Call the method on the inner_result value
+            let outer_result = call_method_on_value(
+                inner_result, method, &eval_args, &working_env, functions, classes, enums, impl_methods
+            )?;
+
+            // Return the outer result but propagate the inner update
+            return Ok((outer_result, inner_update));
+        }
+
         if let Expr::Identifier(obj_name) = receiver.as_ref() {
             // Handle Object mutations
             if let Some(Value::Object { .. }) = env.get(obj_name) {

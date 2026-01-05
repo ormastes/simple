@@ -201,7 +201,8 @@ pub(super) fn exec_block_closure(
                     } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
                         local_env.insert(name.clone(), val);
                     }
-                    last_value = exec_block_closure(&for_stmt.body.statements, &local_env, functions, classes, enums, impl_methods)?;
+                    // Use mutable env version so assignments inside the loop persist
+                    last_value = exec_block_closure_mut(&for_stmt.body.statements, &mut local_env, functions, classes, enums, impl_methods)?;
                 }
             }
             Node::Function(f) => {
@@ -246,7 +247,7 @@ pub(super) fn exec_block_closure(
 }
 
 /// Execute statements in an already-existing mutable environment.
-/// Used for if-let blocks where assignments should propagate to the outer scope.
+/// Used for if-let blocks and for loop bodies where assignments should propagate to the outer scope.
 fn exec_block_closure_mut(
     nodes: &[Node],
     local_env: &mut Env,
@@ -260,7 +261,19 @@ fn exec_block_closure_mut(
     for node in nodes {
         match node {
             Node::Expression(expr) => {
-                last_value = evaluate_expr(expr, local_env, functions, classes, enums, impl_methods)?;
+                // Handle self-updating method calls (e.g., arr.append(3))
+                let (result, update) = handle_method_call_with_self_update(
+                    expr,
+                    local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if let Some((name, new_self)) = update {
+                    local_env.insert(name, new_self);
+                }
+                last_value = result;
             }
             Node::Let(let_stmt) => {
                 if let Some(ref value_expr) = let_stmt.value {
@@ -289,6 +302,42 @@ fn exec_block_closure_mut(
                     }
                 }
                 last_value = Value::Nil;
+            }
+            Node::If(if_stmt) => {
+                if let Some(pattern) = &if_stmt.let_pattern {
+                    let value = evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
+                    let mut bindings = std::collections::HashMap::new();
+                    if pattern_matches(pattern, &value, &mut bindings, enums)? {
+                        for (name, val) in bindings {
+                            local_env.insert(name, val);
+                        }
+                        last_value = exec_block_closure_mut(&if_stmt.then_block.statements, local_env, functions, classes, enums, impl_methods)?;
+                    } else if let Some(ref else_block) = if_stmt.else_block {
+                        last_value = exec_block_closure_mut(&else_block.statements, local_env, functions, classes, enums, impl_methods)?;
+                    } else {
+                        last_value = Value::Nil;
+                    }
+                } else {
+                    if evaluate_expr(&if_stmt.condition, local_env, functions, classes, enums, impl_methods)?.truthy() {
+                        last_value = exec_block_closure_mut(&if_stmt.then_block.statements, local_env, functions, classes, enums, impl_methods)?;
+                    } else if let Some(ref else_block) = if_stmt.else_block {
+                        last_value = exec_block_closure_mut(&else_block.statements, local_env, functions, classes, enums, impl_methods)?;
+                    } else {
+                        last_value = Value::Nil;
+                    }
+                }
+            }
+            Node::For(for_stmt) => {
+                let iterable = evaluate_expr(&for_stmt.iterable, local_env, functions, classes, enums, impl_methods)?;
+                let iter_values = get_iterator_values(&iterable)?;
+                for val in iter_values {
+                    if let simple_parser::ast::Pattern::Identifier(ref name) = for_stmt.pattern {
+                        local_env.insert(name.clone(), val);
+                    } else if let simple_parser::ast::Pattern::MutIdentifier(ref name) = for_stmt.pattern {
+                        local_env.insert(name.clone(), val);
+                    }
+                    last_value = exec_block_closure_mut(&for_stmt.body.statements, local_env, functions, classes, enums, impl_methods)?;
+                }
             }
             _ => {
                 last_value = Value::Nil;

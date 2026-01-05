@@ -619,7 +619,19 @@ pub(crate) fn exec_node(
         Node::For(for_stmt) => exec_for(for_stmt, env, functions, classes, enums, impl_methods),
         Node::Return(ret) => {
             let value = if let Some(expr) = &ret.value {
-                evaluate_expr(expr, env, functions, classes, enums, impl_methods)?
+                // Handle method calls on objects - need to persist mutations to self
+                let (val, update) = handle_method_call_with_self_update(
+                    expr,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if let Some((name, new_self)) = update {
+                    env.insert(name, new_self);
+                }
+                val
             } else {
                 Value::Nil
             };
@@ -923,6 +935,7 @@ use interpreter_module::{
     evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions,
     resolve_module_path,
 };
+pub use interpreter_module::clear_module_cache;
 
 // Type-related utilities
 #[path = "interpreter_types.rs"]

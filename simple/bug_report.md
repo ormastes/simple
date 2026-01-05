@@ -32,8 +32,13 @@
 | Struct init with `:` syntax | ✅ FIXED | Medium |
 | `@async` blocking `print` test | ✅ FIXED | Low |
 | Test harness module resolution | 🔍 INVESTIGATING | Medium |
+| Nested Method Mutations Not Persisting | 🐛 OPEN | Critical |
+| Method Chaining Drops Mutations | 🐛 OPEN | Critical |
+| Enum Method `self` Match Fails | 🐛 OPEN | High |
+| String `>=` `<=` Comparison Unsupported | 🔄 WORKAROUND | Medium |
+| Dict `contains()` Method Missing | 🔄 WORKAROUND | Low |
 
-**Summary:** 27 fixed, 0 open, 1 investigating
+**Summary:** 27 fixed, 3 open, 1 investigating, 3 workarounds
 
 ---
 
@@ -1737,4 +1742,211 @@ When importing a module path containing `common` (e.g., `host.common.io.fs_types
 
 ```simple
 use host.common.io.fs_types.*  # Works - "common" is just a directory name
+```
+
+---
+
+## Nested Method Mutations Not Persisting 🐛 OPEN
+
+**Type:** Bug
+**Priority:** Critical
+**Discovered:** 2026-01-05
+**Component:** Interpreter (method dispatch)
+
+### Description
+
+When a method calls another method on `self`, the mutations made by the inner method are lost. Only the last method's mutations persist.
+
+### Reproduction
+
+```simple
+class Counter:
+    value: i64
+    
+    fn new() -> Counter:
+        return Counter { value: 0 }
+    
+    fn increment(self):
+        self.value = self.value + 1
+    
+    fn double_increment(self):
+        self.increment()  # This mutation is lost!
+        self.increment()  # Only this mutation persists
+
+c = Counter.new()
+c.double_increment()
+print(c.value.to_string())  # Expected: 2, Actual: 1
+```
+
+### Impact
+
+This breaks any code that uses helper methods that modify object state, including:
+- JSON parser (parse_value calls parse_number, parse_string, etc.)
+- Symbol table (add_symbol, add_reference methods)
+- Any class with modular/composable methods
+
+### Workaround
+
+Inline all mutation logic into a single method, or restructure to avoid nested method calls on self.
+
+---
+
+## Method Chaining Drops Mutations 🐛 OPEN
+
+**Type:** Bug
+**Priority:** Critical  
+**Discovered:** 2026-01-05
+**Component:** Interpreter (method dispatch)
+
+### Description
+
+When chaining method calls like `self.method().unwrap()`, the mutations made by `method()` are not persisted to the original object.
+
+### Reproduction
+
+```simple
+class Counter:
+    value: i64
+    
+    fn new() -> Counter:
+        return Counter { value: 0 }
+    
+    fn increment(self) -> Counter:
+        self.value = self.value + 1
+        return self
+    
+    fn get(self) -> i64:
+        return self.value
+
+c = Counter.new()
+c.increment()
+print("After direct: " + c.value.to_string())  # 1 - works
+
+result = c.increment().get()  # Chain drops mutation
+print("Chained result: " + result.to_string())  # 2 - sees mutated value
+print("After chain: " + c.value.to_string())    # 1 - mutation lost!
+```
+
+### Impact
+
+Any code using method chaining with state mutation fails:
+- `self.advance().unwrap()` in JSON parser
+- Fluent builder patterns
+- Any `option.unwrap()` or `result.unwrap()` after a mutating method
+
+### Workaround
+
+Split chained calls into separate statements:
+```simple
+# Instead of: ch = self.advance().unwrap()
+ch_opt = self.advance()
+ch = ch_opt.unwrap()
+```
+
+---
+
+## Enum Method `self` Match Fails 🐛 OPEN
+
+**Type:** Bug
+**Priority:** High
+**Discovered:** 2026-01-05
+**Component:** Interpreter (enum methods)
+
+### Description
+
+When an enum has a method that matches on `self`, the match never succeeds - all patterns return false or the default.
+
+### Reproduction
+
+```simple
+pub enum Color:
+    Red
+    Green
+    Blue
+    
+    fn to_string(self) -> String:
+        match self:
+            Color.Red:
+                return "red"
+            Color.Green:
+                return "green"
+            Color.Blue:
+                return "blue"
+
+c = Color.Blue
+print(c.to_string())  # Expected: "blue", Actual: nil
+```
+
+### Workaround
+
+Use a standalone function instead of an enum method:
+
+```simple
+pub fn color_to_string(c: Color) -> String:
+    match c:
+        Color.Red:
+            return "red"
+        Color.Green:
+            return "green"
+        Color.Blue:
+            return "blue"
+
+print(color_to_string(Color.Blue))  # Works: "blue"
+```
+
+---
+
+## String `>=` `<=` Comparison Unsupported 🔄 WORKAROUND
+
+**Type:** Missing Feature / Bug
+**Priority:** Medium
+**Discovered:** 2026-01-05
+**Component:** Interpreter (operators)
+
+### Description
+
+The `>=` and `<=` operators don't work on string values, returning "expected int, got string" error.
+
+### Reproduction
+
+```simple
+ch = "4"
+if ch >= "0" and ch <= "9":  # Error: expected int, got string
+    print("Is digit")
+```
+
+### Workaround
+
+Use `.ord()` to compare character codes:
+
+```simple
+fn is_digit(ch: String) -> bool:
+    if ch.len() == 0:
+        return false
+    code = ch.ord()
+    return code >= 48 and code <= 57  # '0' is 48, '9' is 57
+```
+
+---
+
+## Dict `contains()` Method Missing 🔄 WORKAROUND
+
+**Type:** API Gap
+**Priority:** Low
+**Discovered:** 2026-01-05
+**Component:** Interpreter (collections)
+
+### Description
+
+Dict has `contains_key()` but not `contains()`. Code using `dict.contains(key)` fails with "method call on unsupported type: contains".
+
+### Workaround
+
+Use `contains_key()` instead:
+
+```simple
+d = {"a": 1}
+# Instead of: d.contains("a")
+if d.contains_key("a"):
+    print("Has key")
 ```
