@@ -172,7 +172,11 @@ impl Lowerer {
         // Fourth pass: lower import statements for dependency tracking
         for item in &ast_module.items {
             if let Node::UseStmt(use_stmt) = item {
-                let import = self.lower_import(&use_stmt.path, &use_stmt.target);
+                let import = self.lower_import(
+                    &use_stmt.path,
+                    &use_stmt.target,
+                    use_stmt.is_type_only,
+                );
                 self.module.imports.push(import);
             }
         }
@@ -228,6 +232,7 @@ impl Lowerer {
         &self,
         path: &ast::ModulePath,
         target: &ast::ImportTarget,
+        is_type_only: bool,
     ) -> crate::hir::HirImport {
         let from_path = path.segments.clone();
         let (items, is_glob) = self.flatten_import_target(target);
@@ -236,6 +241,7 @@ impl Lowerer {
             from_path,
             items,
             is_glob,
+            is_type_only,
         }
     }
 

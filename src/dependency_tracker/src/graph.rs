@@ -25,6 +25,9 @@ pub enum ImportKind {
     CommonUse,
     /// `export use` re-export.
     ExportUse,
+    /// Type-only import (`use type`). Does not create runtime dependency.
+    /// These imports are excluded from circular dependency detection.
+    TypeUse,
 }
 
 /// Error when a circular dependency is detected.
@@ -57,22 +60,36 @@ impl ImportGraph {
     }
 
     /// Add an import edge.
+    ///
+    /// Type-only imports (ImportKind::TypeUse) are excluded from cycle detection
+    /// but are still tracked in detailed_edges for analysis.
     pub fn add_import(&mut self, from: impl Into<String>, to: impl Into<String>, kind: ImportKind) {
         let from = from.into();
         let to = to.into();
 
-        self.edges
-            .entry(from.clone())
-            .or_default()
-            .insert(to.clone());
-        self.edges.entry(to.clone()).or_default(); // Ensure target exists
+        // Only add to cycle detection graph if NOT a TypeUse import
+        if kind != ImportKind::TypeUse {
+            self.edges
+                .entry(from.clone())
+                .or_default()
+                .insert(to.clone());
+            self.edges.entry(to.clone()).or_default(); // Ensure target exists
+        }
 
+        // Always store detailed edge for analysis/tooling
         self.detailed_edges.push(ImportEdge { from, to, kind });
     }
 
     /// Add a `use` import edge.
     pub fn add_use(&mut self, from: impl Into<String>, to: impl Into<String>) {
         self.add_import(from, to, ImportKind::Use);
+    }
+
+    /// Add a type-only import edge (`use type`).
+    /// Type-only imports don't create runtime dependencies and are excluded
+    /// from circular dependency detection.
+    pub fn add_type_use(&mut self, from: impl Into<String>, to: impl Into<String>) {
+        self.add_import(from, to, ImportKind::TypeUse);
     }
 
     /// Get all modules that a module imports.
@@ -380,5 +397,99 @@ mod tests {
         assert!(edges
             .iter()
             .any(|e| e.from == "a" && e.to == "d" && e.kind == ImportKind::ExportUse));
+    }
+
+    // ===== Type-Only Import Tests =====
+
+    #[test]
+    fn type_use_no_cycle_detection() {
+        let mut graph = ImportGraph::new();
+
+        // Normal imports form a potential cycle: a -> b -> c
+        graph.add_import("a", "b", ImportKind::Use);
+        graph.add_import("b", "c", ImportKind::Use);
+
+        // TypeUse back-reference should NOT cause cycle
+        graph.add_import("c", "a", ImportKind::TypeUse);
+
+        // Should not detect cycle because TypeUse is excluded
+        assert!(graph.check_cycles().is_ok());
+    }
+
+    #[test]
+    fn type_use_in_detailed_edges() {
+        let mut graph = ImportGraph::new();
+        graph.add_type_use("a", "b");
+
+        // Should appear in detailed edges
+        let edges = graph.all_edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from, "a");
+        assert_eq!(edges[0].to, "b");
+        assert_eq!(edges[0].kind, ImportKind::TypeUse);
+
+        // But NOT in cycle-detection edges
+        assert_eq!(graph.imports_of("a").count(), 0);
+    }
+
+    #[test]
+    fn type_use_allows_circular_type_references() {
+        let mut graph = ImportGraph::new();
+
+        // Mutual type-only references
+        graph.add_type_use("a", "b");
+        graph.add_type_use("b", "a");
+
+        // Should not detect cycle
+        assert!(graph.check_cycles().is_ok());
+
+        // But both should be in detailed edges
+        let edges = graph.all_edges();
+        assert_eq!(edges.len(), 2);
+    }
+
+    #[test]
+    fn mixed_use_and_type_use() {
+        let mut graph = ImportGraph::new();
+
+        // a -> b (normal use)
+        graph.add_use("a", "b");
+
+        // b -> c (type-only)
+        graph.add_type_use("b", "c");
+
+        // c -> a (type-only) - completes a "cycle" but all type-only
+        graph.add_type_use("c", "a");
+
+        // Should not detect cycle because type-only edges are excluded
+        assert!(graph.check_cycles().is_ok());
+    }
+
+    #[test]
+    fn type_use_with_real_cycle_still_detects() {
+        let mut graph = ImportGraph::new();
+
+        // Real cycle with normal Use imports
+        graph.add_use("a", "b");
+        graph.add_use("b", "c");
+        graph.add_use("c", "a"); // Real cycle
+
+        // Additional type-only import shouldn't affect detection
+        graph.add_type_use("a", "d");
+
+        // Should still detect the real cycle
+        assert!(graph.check_cycles().is_err());
+    }
+
+    #[test]
+    fn add_type_use_convenience_method() {
+        let mut graph = ImportGraph::new();
+
+        // Test the convenience method
+        graph.add_type_use("module_a", "module_b");
+
+        let edges = graph.all_edges();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].kind, ImportKind::TypeUse);
     }
 }

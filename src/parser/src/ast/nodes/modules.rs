@@ -50,11 +50,20 @@ pub struct ModDecl {
 /// use crate.core.{Option, Result}
 /// use crate.core.*
 /// use crate.core.Option as Opt
+///
+/// Type-only imports (don't create runtime dependency, only for type checking):
+/// use type crate.core.Option
+/// use type crate.core.{Option, Result}
+/// use type crate.core.*
 #[derive(Debug, Clone, PartialEq)]
 pub struct UseStmt {
     pub span: Span,
     pub path: ModulePath,
     pub target: ImportTarget,
+    /// If true, this is a type-only import that doesn't create a runtime dependency.
+    /// Type-only imports are excluded from circular dependency detection.
+    /// Syntax: `use type module.Type`
+    pub is_type_only: bool,
 }
 
 /// Common use statement: common use module.path.*
