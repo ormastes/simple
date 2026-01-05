@@ -242,31 +242,40 @@ Self-hosted DAP server for debugging Simple programs.
 
 ## Roadmap
 
-### Phase 1: Formatter & Linter (Current)
+### Phase 1: Formatter & Linter (Done)
 - ✅ Line-by-line formatter
 - ✅ Pattern-based linter
 - ✅ Command-line interface
 - ✅ Build infrastructure
 
-### Phase 2: LSP & DAP Implementation (In Progress)
+### Phase 2: Essential Utilities (Planned)
+- ⏳ `simple_doc` - Generate markdown from docstrings
+- ⏳ `simple_todo` - Extract TODO/FIXME comments
+- ⏳ `simple_stats` - Code statistics (LOC, functions, classes)
+- ⏳ `simple_new` - Project scaffolding
+
+### Phase 3: Quality Tools (Planned)
+- ⏳ `simple_test` - BDD test runner with nice output
+- ⏳ `simple_grep` - AST-aware code search
+- ⏳ `simple_deps` - Import dependency graph
+- ⏳ `simple_dead` - Dead code detector
+
+### Phase 4: LSP & DAP Implementation (In Progress)
 - 🔄 LSP: JSON-RPC transport
 - 🔄 LSP: Document sync and diagnostics
 - 🔄 DAP: Protocol handling
 - 🔄 DAP: Breakpoint management
-- ⏳ LSP: Completion and navigation
-- ⏳ DAP: Interpreter integration
 
-### Phase 3: AST Integration
-- ⏳ Parse .spl files to AST
-- ⏳ AST-based formatting
-- ⏳ Semantic analysis for lints
-- ⏳ Control flow analysis
+### Phase 5: Advanced Tools (Future)
+- ⏳ `simple_repl` - Interactive shell
+- ⏳ `simple_bench` - Benchmark runner
+- ⏳ `simple_cov` - Code coverage
+- ⏳ `simple_refactor` - Rename/extract/inline
+- ⏳ `simple_security` - SAST scanner
 
-### Phase 4: Advanced Features
-- ⏳ Auto-fix (`simple fix`)
-- ⏳ LSP/DAP feature completion
-- ⏳ Configuration in simple.sdn
-- ⏳ Lint explanation (`--explain`)
+## Tool Specifications
+
+See `spec/` directory for detailed specifications.
 
 ## Testing
 
