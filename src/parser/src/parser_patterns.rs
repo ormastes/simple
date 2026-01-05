@@ -267,6 +267,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Pattern::Identifier("then".to_string()))
             }
+            // Allow 'common' as identifier pattern (stdlib directory name)
+            TokenKind::Common => {
+                self.advance();
+                Ok(Pattern::Identifier("common".to_string()))
+            }
             _ => Err(ParseError::unexpected_token(
                 "pattern",
                 format!("{:?}", self.current.kind),

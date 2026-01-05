@@ -2,9 +2,13 @@ use crate::token::TokenKind;
 
 impl<'a> super::Lexer<'a> {
     pub(super) fn scan_identifier(&mut self, first: char) -> TokenKind {
-        // Check for f-string: f"..."
+        // Check for f-string: f"..." or f"""..."""
         if first == 'f' && self.check('"') {
             self.advance(); // consume the opening "
+            // Check for triple-quoted f-string: f"""..."""
+            if self.check('"') && self.check_ahead(1, '"') {
+                return self.scan_triple_fstring();
+            }
             return self.scan_fstring();
         }
 

@@ -212,6 +212,11 @@ pub(crate) fn extract_open_mode(args: &[Value], idx: usize) -> Result<String, Co
 // Filesystem Operations
 //==============================================================================
 
+pub fn native_fs_exists(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    Ok(Value::Bool(std::path::Path::new(&path).exists()))
+}
+
 pub fn native_fs_read(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
 
@@ -220,6 +225,28 @@ pub fn native_fs_read(args: &[Value]) -> Result<Value, CompileError> {
             let arr: Vec<Value> = bytes.into_iter().map(|b| Value::Int(b as i64)).collect();
             Ok(io_ok(Value::Array(arr)))
         }
+        Err(e) => Ok(io_err(e)),
+    }
+}
+
+pub fn native_fs_read_string(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+
+    match std::fs::read_to_string(&path) {
+        Ok(content) => Ok(io_ok(Value::Str(content))),
+        Err(e) => Ok(io_err(e)),
+    }
+}
+
+pub fn native_fs_write_string(args: &[Value]) -> Result<Value, CompileError> {
+    let path = extract_path(args, 0)?;
+    let content = match args.get(1) {
+        Some(Value::Str(s)) => s.clone(),
+        _ => return Err(CompileError::Semantic("native_fs_write_string: content must be a string".into())),
+    };
+
+    match std::fs::write(&path, &content) {
+        Ok(()) => Ok(io_ok(Value::Int(content.len() as i64))),
         Err(e) => Ok(io_err(e)),
     }
 }

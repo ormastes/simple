@@ -364,3 +364,229 @@ impl File:
         match self.stage_state:
             case Some(state): return state.mode
             case None: return StageMode::None
+
+    # ===============================
+    # Synchronous Operations
+    # ===============================
+
+    # Open file (sync, blocking)
+    pub fn open_sync(path: FilePath, mode: OpenMode) -> Result[File, IoError]:
+        # Resolve relative paths to absolute paths
+        let resolved_path = native_path_resolve(path)?
+
+        # Check file existence for read mode
+        if mode == OpenMode::Read:
+            if not native_file_exists_sync(resolved_path):
+                return Err(IoError::NotFound)
+
+        # Open file handle
+        let handle = native_fs_open(resolved_path, mode)?
+        let file = File {
+            handle: handle,
+            path: resolved_path,
+            mode: mode,
+            stage_state: None
+        }
+
+        return Ok(file)
+
+    # Read convenience methods (sync)
+    pub fn open_read_sync(path: FilePath) -> Result[File, IoError]:
+        return File::open_sync(path, OpenMode::Read)
+
+    pub fn open_write_sync(path: FilePath) -> Result[File, IoError]:
+        return File::open_sync(path, OpenMode::Write)
+
+    pub fn create_sync(path: FilePath) -> Result[File, IoError]:
+        return File::open_sync(path, OpenMode::Create)
+
+    # Read bytes (sync)
+    pub fn read_sync(self, buf: &mut Bytes) -> Result[ByteCount, IoError]:
+        # If mmap staged, use mmap for reading
+        if let Some(state) = self.stage_state:
+            if state.status == StagingStatus::Staged:
+                match state.mode:
+                    case StageMode::Mmap | StageMode::MmapShared:
+                        let pos = native_file_seek_sync(self.handle, SeekFrom::Current(0))?
+                        let pos_u64 = pos as u64
+                        let to_read = buf.len().min(state.mmap_size - pos_u64)
+                        if to_read > 0:
+                            native_mmap_read(state.mmap_ptr, pos_u64, buf, to_read)
+                            native_file_seek_sync(self.handle, SeekFrom::Current(to_read as i64))?
+                        return Ok(to_read_bytes)
+                    case _:
+                        pass
+
+        return native_file_read_sync(self.handle, buf)
+
+    # Read exact bytes (sync)
+    pub fn read_exact_sync(self, buf: &mut Bytes) -> Result[(), IoError]:
+        let mut read_total: u64 = 0
+        let target = buf.len()
+        while read_total < target:
+            let slice = buf.slice_mut(read_total, target)
+            let n = self.read_sync(&mut slice)?
+            if (n as u64) == 0:
+                return Err(IoError::UnexpectedEof)
+            read_total = read_total + (n as u64)
+        return Ok(())
+
+    # Write bytes (sync)
+    pub fn write_sync(self, data: &Bytes) -> Result[ByteCount, IoError]:
+        return native_file_write_sync(self.handle, data)
+
+    # Write all bytes (sync)
+    pub fn write_all_sync(self, data: &Bytes) -> Result[(), IoError]:
+        let mut written: u64 = 0
+        let total = data.len()
+        while written < total:
+            let slice = data.slice(written, total)
+            let n = self.write_sync(&slice)?
+            written = written + (n as u64)
+        return Ok(())
+
+    # Flush buffers (sync)
+    pub fn flush_sync(self) -> Result[(), IoError]:
+        return native_file_flush_sync(self.handle)
+
+    # Seek position (sync)
+    pub fn seek_sync(self, pos: SeekFrom) -> Result[ByteCount, IoError]:
+        return native_file_seek_sync(self.handle, pos)
+
+    # Get current position (sync)
+    pub fn position_sync(self) -> Result[ByteCount, IoError]:
+        return self.seek_sync(SeekFrom::Current(0))
+
+    # Get file size (sync)
+    pub fn size_sync(self) -> Result[ByteCount, IoError]:
+        let current = self.position_sync()?
+        let end = self.seek_sync(SeekFrom::End(0))?
+        self.seek_sync(SeekFrom::Start(current as u64))?
+        return Ok(end)
+
+    # Sync to disk (sync)
+    pub fn sync_all_sync(self) -> Result[(), IoError]:
+        return native_file_sync_sync(self.handle)
+
+    # Close file (sync)
+    pub fn close_sync(self) -> Result[(), IoError]:
+        if let Some(state) = self.stage_state:
+            if state.mode == StageMode::Mmap and state.mmap_ptr != 0:
+                native_mmap_unmap(state.mmap_ptr, state.mmap_size)
+        return native_file_close(self.handle)
+
+    # ===============================
+    # Positioned I/O (pread/pwrite)
+    # ===============================
+
+    # Read at offset without changing file position (thread-safe)
+    pub fn pread(self, buf: &mut Bytes, offset: u64) -> Result[ByteCount, IoError]:
+        # If mmap staged, use mmap directly
+        if let Some(state) = self.stage_state:
+            if state.status == StagingStatus::Staged:
+                match state.mode:
+                    case StageMode::Mmap | StageMode::MmapShared:
+                        let to_read = buf.len().min(state.mmap_size - offset)
+                        if to_read > 0:
+                            native_mmap_read(state.mmap_ptr, offset, buf, to_read)
+                        return Ok(to_read_bytes)
+                    case _:
+                        pass
+
+        return native_file_pread(self.handle, buf, offset)
+
+    # Write at offset without changing file position (thread-safe)
+    pub fn pwrite(self, data: &Bytes, offset: u64) -> Result[ByteCount, IoError]:
+        return native_file_pwrite(self.handle, data, offset)
+
+    # ===============================
+    # Sync Staging with Preload
+    # ===============================
+
+    # Stage file with mmap preload (sync, for use before parallel processing)
+    pub fn stage_mmap_sync(self) -> Result[(), IoError]:
+        let size = self.size_sync()?
+        let size_u64 = size as u64
+
+        if size_u64 == 0:
+            self.stage_state = Some(StageState {
+                mode: StageMode::Mmap,
+                status: StagingStatus::Staged,
+                mmap_ptr: 0, mmap_size: 0,
+                is_shared: false, prefetch_buf: None,
+                staged_files: Array[FilePath]::new()
+            })
+            return Ok(())
+
+        let mmap_ptr = native_mmap_create(self.handle, size_u64)?
+
+        self.stage_state = Some(StageState {
+            mode: StageMode::Mmap,
+            status: StagingStatus::Staged,
+            mmap_ptr: mmap_ptr,
+            mmap_size: size_u64,
+            is_shared: false,
+            prefetch_buf: None,
+            staged_files: Array[FilePath]::new()
+        })
+        return Ok(())
+
+    # Stage file with shared mmap (sync, for multi-process access)
+    pub fn stage_mmap_shared_sync(self) -> Result[(), IoError]:
+        let size = self.size_sync()?
+        let size_u64 = size as u64
+
+        if size_u64 == 0:
+            self.stage_state = Some(StageState {
+                mode: StageMode::MmapShared,
+                status: StagingStatus::Staged,
+                mmap_ptr: 0, mmap_size: 0,
+                is_shared: true, prefetch_buf: None,
+                staged_files: Array[FilePath]::new()
+            })
+            return Ok(())
+
+        let mmap_ptr = native_mmap_create_shared(self.handle, size_u64)?
+
+        self.stage_state = Some(StageState {
+            mode: StageMode::MmapShared,
+            status: StagingStatus::Staged,
+            mmap_ptr: mmap_ptr,
+            mmap_size: size_u64,
+            is_shared: true,
+            prefetch_buf: None,
+            staged_files: Array[FilePath]::new()
+        })
+        return Ok(())
+
+    # Stage file by prefetching entire content (sync)
+    pub fn stage_prefetch_sync(self) -> Result[(), IoError]:
+        let size = self.size_sync()?
+        let size_u64 = size as u64
+
+        if size_u64 == 0:
+            self.stage_state = Some(StageState {
+                mode: StageMode::Prefetch,
+                status: StagingStatus::Staged,
+                mmap_ptr: 0, mmap_size: 0,
+                is_shared: false, prefetch_buf: None,
+                staged_files: Array[FilePath]::new()
+            })
+            return Ok(())
+
+        self.seek_sync(SeekFrom::Start(0))?
+        let mut buffer = Bytes::with_capacity(size_u64)
+        self.read_exact_sync(&mut buffer)?
+        self.seek_sync(SeekFrom::Start(0))?
+
+        self.stage_state = Some(StageState {
+            mode: StageMode::Prefetch,
+            status: StagingStatus::Staged,
+            mmap_ptr: 0, mmap_size: 0,
+            is_shared: false,
+            prefetch_buf: Some(buffer),
+            staged_files: Array[FilePath]::new()
+        })
+
+        native_fadvise_sequential(self.handle)
+        return Ok(())

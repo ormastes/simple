@@ -2,8 +2,19 @@
 # Semantic lints for code quality and safety
 # Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
 
-import sys
-import io.fs as fs
+# Native file I/O functions
+extern fn native_fs_read_string(path: String) -> Any
+extern fn native_fs_exists(path: String) -> Bool
+extern fn sys_get_args() -> List[String]
+
+# Async file I/O wrapper
+async fn read_file(path: String) -> Result[String, String]:
+    let file_content = native_fs_read_string(path)
+    match file_content:
+        case Ok(content):
+            return Ok(content)
+        case Err(e):
+            return Err("Failed to read: " + e.to_string())
 
 # Lint levels
 enum LintLevel:
@@ -24,7 +35,7 @@ class Lint:
     level: LintLevel
     category: LintCategory
     message: String
-    fix_hint: Option<String>
+    fix_hint: Option[String]
     
     fn new(code: String, level: LintLevel, category: LintCategory, message: String) -> Lint:
         Lint(
@@ -59,24 +70,28 @@ class LintResult:
         )
     
     fn format(self) -> String:
-        let level_str = match self.lint.level:
-            case Allow: "allow"
-            case Warn: "warning"
-            case Deny: "error"
-        
-        let mut output = "{self.file_path}:{self.line}:{self.column}: {level_str}[{self.lint.code}]: {self.lint.message}"
-        
+        let mut level_str = "unknown"
+        match self.lint.level:
+            case Allow:
+                level_str = "allow"
+            case Warn:
+                level_str = "warning"
+            case Deny:
+                level_str = "error"
+
+        let mut output = self.file_path + ":" + self.line.to_string() + ":" + self.column.to_string() + ": " + level_str + "[" + self.lint.code + "]: " + self.lint.message
+
         match self.lint.fix_hint:
             case Some(hint):
-                output = output + "\n  hint: {hint}"
+                output = output + "\n  hint: " + hint
             case None:
-                pass
-        
-        output
+                let _ = 0
+
+        return output
 
 class Linter:
-    lints: List<Lint>
-    results: List<LintResult>
+    lints: List[Lint]
+    results: List[LintResult]
     
     fn new() -> Linter:
         let mut lints = []
@@ -122,18 +137,22 @@ class Linter:
         Linter(lints: lints, results: [])
     
     async fn lint_file(self, path: String) -> Result[List[LintResult], String]:
-        # Read file using new io.fs API
-        let path_fp = FilePath::from(path)
-        let content = await fs.read_text(path_fp)?
+        # Read file using async file I/O
+        let file_content = await read_file(path)
+        match file_content:
+            case Err(e):
+                return Err(e)
+            case Ok(content):
+                # Run simple pattern-based lints
+                # TODO: Use AST-based linting when compiler integration is available
+                let lines = content.split("\n")
+                let mut line_num = 1
 
-        # Run simple pattern-based lints
-        # TODO: Use AST-based linting when compiler integration is available
-        let lines = content.split("\n")
+                for line in lines:
+                    self.check_line(path, line_num, line)
+                    line_num = line_num + 1
 
-        for (line_num, line) in lines.enumerate():
-            self.check_line(path, line_num + 1, line)
-
-        Ok(self.results)
+                return Ok(self.results)
     
     fn check_line(self, path: String, line_num: Int, line: String):
         let trimmed = line.trim()
@@ -149,7 +168,7 @@ class Linter:
         if trimmed.starts_with("return "):
             # Next non-empty line after return is potentially unreachable
             # (This is oversimplified - needs proper control flow analysis)
-            pass
+            let _ = 0
         
         # Check naming conventions (if enabled)
         if trimmed.starts_with("fn "):
@@ -199,8 +218,8 @@ class Linter:
         # Convert to snake_case (simplified)
         name.to_lowercase()
 
-async fn main():
-    let args = sys.args()
+async fn main() -> Int:
+    let args = sys_get_args()
 
     if args.len() < 2:
         print("Usage: simple_lint <file.spl> [options]")
@@ -216,48 +235,52 @@ async fn main():
         print("  Warning (W): Potential issues")
         print("  Style (ST): Code style")
         print("  Concurrency (CC): Thread safety")
-        sys.exit(1)
+        return 1
 
     let file_path = args[1]
     let deny_all = args.contains("--deny-all")
 
     # Verify file exists
-    let file_path_fp = FilePath::from(file_path)
-    if not await fs.exists(file_path_fp):
-        print("Error: File not found: {file_path}")
-        sys.exit(1)
-    
+    if not native_fs_exists(file_path):
+        print("Error: File not found: " + file_path)
+        return 1
+
     # Run linter
     let linter = Linter.new()
 
-    match await linter.lint_file(file_path):
+    let lint_result = await linter.lint_file(file_path)
+    match lint_result:
         case Ok(results):
             if results.is_empty():
-                print("✓ No issues found in {file_path}")
-                sys.exit(0)
+                print("No issues found in " + file_path)
+                return 0
             else:
                 let mut error_count = 0
                 let mut warning_count = 0
 
-                for result in results:
-                    print(result.format())
+                for lint_item in results:
+                    print(lint_item.format())
 
-                    match result.lint.level:
-                        case Deny: error_count = error_count + 1
+                    match lint_item.lint.level:
+                        case Deny:
+                            error_count = error_count + 1
                         case Warn:
                             warning_count = warning_count + 1
                             if deny_all:
                                 error_count = error_count + 1
-                        case Allow: pass
+                        case Allow:
+                            let _ = 0
 
                 print("")
-                print("Found {error_count} error(s) and {warning_count} warning(s)")
+                print("Found " + error_count.to_string() + " error(s) and " + warning_count.to_string() + " warning(s)")
 
                 if error_count > 0:
-                    sys.exit(1)
+                    return 1
                 else:
-                    sys.exit(0)
+                    return 0
 
         case Err(error):
-            print("Error: {error}")
-            sys.exit(1)
+            print("Error: " + error)
+            return 1
+
+    return 0

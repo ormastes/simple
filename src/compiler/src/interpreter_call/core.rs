@@ -71,7 +71,7 @@ type Enums = HashMap<String, EnumDef>;
 // Thread-local to track classes currently executing their `new` method.
 // This prevents infinite recursion when `new` method calls `ClassName(args)` internally.
 thread_local! {
-    static IN_NEW_METHOD: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    pub(crate) static IN_NEW_METHOD: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
 }
 type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 

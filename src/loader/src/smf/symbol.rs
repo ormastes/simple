@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use tracing::{trace, warn};
+
 /// Layout phase encoding in symbol flags (bits 0-1)
 /// Used for 4KB page locality optimization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +110,12 @@ pub struct SymbolTable {
 
 impl SymbolTable {
     pub fn new(symbols: Vec<SmfSymbol>, string_table: Vec<u8>) -> Self {
+        trace!(
+            symbol_count = symbols.len(),
+            string_table_size = string_table.len(),
+            "Building symbol hash table"
+        );
+
         let mut hash_table = HashMap::new();
 
         for (i, sym) in symbols.iter().enumerate() {
@@ -116,6 +124,11 @@ impl SymbolTable {
                 .or_insert_with(Vec::new)
                 .push(i);
         }
+
+        trace!(
+            unique_hashes = hash_table.len(),
+            "Symbol hash table built"
+        );
 
         Self {
             symbols,
@@ -128,7 +141,7 @@ impl SymbolTable {
     pub fn lookup(&self, name: &str) -> Option<&SmfSymbol> {
         let hash = hash_name(name);
 
-        self.hash_table.get(&hash).and_then(|indices| {
+        let result = self.hash_table.get(&hash).and_then(|indices| {
             indices.iter().find_map(|&i| {
                 let sym = &self.symbols[i];
                 if self.symbol_name(sym) == name {
@@ -137,18 +150,59 @@ impl SymbolTable {
                     None
                 }
             })
-        })
+        });
+
+        if result.is_none() {
+            trace!(name, hash, "Symbol not found");
+        }
+
+        result
     }
 
+    /// Get symbol name from string table with bounds checking
     pub fn symbol_name(&self, sym: &SmfSymbol) -> &str {
         let start = sym.name_offset as usize;
+
+        // Bounds check on start offset
+        if start >= self.string_table.len() {
+            warn!(
+                name_offset = start,
+                string_table_len = self.string_table.len(),
+                "Symbol name offset exceeds string table bounds"
+            );
+            return "";
+        }
+
+        // Find null terminator
         let end = self
             .string_table
             .get(start..)
             .and_then(|rest| rest.iter().position(|&b| b == 0).map(|i| start + i))
             .unwrap_or(self.string_table.len());
 
-        std::str::from_utf8(&self.string_table[start..end]).unwrap_or("")
+        // Validate range before slicing
+        if end > self.string_table.len() {
+            warn!(
+                start,
+                end,
+                string_table_len = self.string_table.len(),
+                "Symbol name end exceeds string table bounds"
+            );
+            return "";
+        }
+
+        match std::str::from_utf8(&self.string_table[start..end]) {
+            Ok(name) => name,
+            Err(e) => {
+                warn!(
+                    start,
+                    end,
+                    error = %e,
+                    "Invalid UTF-8 in symbol name"
+                );
+                ""
+            }
+        }
     }
 
     /// Get all exported symbols

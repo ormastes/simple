@@ -11,7 +11,7 @@ pub(crate) use bdd::{BDD_INDENT, BDD_COUNTS, BDD_SHARED_EXAMPLES, BDD_CONTEXT_DE
                       BDD_BEFORE_EACH, BDD_AFTER_EACH, BDD_LAZY_VALUES, exec_block_value};
 pub(crate) use core::{exec_function, exec_function_with_values, exec_function_with_captured_env,
                       bind_args, bind_args_with_injected, exec_lambda, instantiate_class,
-                      ProceedContext};
+                      ProceedContext, IN_NEW_METHOD};
 
 use crate::value::*;
 use crate::error::CompileError;

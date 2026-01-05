@@ -218,6 +218,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(Expr::Identifier("context".to_string()))
             }
+            // Allow 'common' to be used as identifier (stdlib directory name)
+            TokenKind::Common => {
+                self.advance();
+                Ok(Expr::Identifier("common".to_string()))
+            }
             // Note: TokenKind::Result is handled above (line 96) for ContractResult
             // If needed as identifier, use method_name or a different syntax
             TokenKind::Backslash => {
@@ -640,6 +645,11 @@ impl<'a> Parser<'a> {
             TokenKind::Then => {
                 self.advance();
                 Ok(Expr::Identifier("then".to_string()))
+            }
+            // Allow 'common' as identifier (stdlib directory name)
+            TokenKind::Common => {
+                self.advance();
+                Ok(Expr::Identifier("common".to_string()))
             }
             // Simple Math: Grid literal (#1910-#1919)
             TokenKind::Grid => self.parse_grid_literal(),

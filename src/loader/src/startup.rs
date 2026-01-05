@@ -8,6 +8,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
+use tracing::{debug, error, instrument, trace, warn};
+
 use crate::memory::{ExecutableMemory, MemoryAllocator, PlatformAllocator, Protection};
 use crate::settlement::{FunctionTable, GlobalTable, NativeLibManager, TableIndex};
 use crate::smf::settlement::{
@@ -126,130 +128,225 @@ impl StartupLoader {
     }
 
     /// Load a settlement from a file path.
-    pub fn load<P: AsRef<Path>>(&self, path: P) -> Result<LoadedSettlement, StartupError> {
-        let mut file = File::open(path)?;
+    #[instrument(skip(self))]
+    pub fn load<P: AsRef<Path> + std::fmt::Debug>(&self, path: P) -> Result<LoadedSettlement, StartupError> {
+        debug!(path = ?path.as_ref(), "Loading settlement from file");
+        let mut file = File::open(path.as_ref()).map_err(|e| {
+            error!(path = ?path.as_ref(), error = %e, "Failed to open settlement file");
+            StartupError::IoError(e)
+        })?;
         self.load_from_file(&mut file, 0)
     }
 
     /// Load a settlement from the current executable.
     ///
     /// This finds the settlement data appended after the PE/ELF executable.
+    #[instrument]
     pub fn load_from_self() -> Result<LoadedSettlement, StartupError> {
-        let exe_path = std::env::current_exe()?;
-        let loader = Self::new();
+        let exe_path = std::env::current_exe().map_err(|e| {
+            error!(error = %e, "Failed to get current executable path");
+            StartupError::IoError(e)
+        })?;
+        debug!(exe_path = ?exe_path, "Loading settlement from self");
 
-        let mut file = File::open(&exe_path)?;
+        let loader = Self::new();
+        let mut file = File::open(&exe_path).map_err(|e| {
+            error!(exe_path = ?exe_path, error = %e, "Failed to open executable");
+            StartupError::IoError(e)
+        })?;
+
         let offset = Self::find_settlement_offset(&mut file)?;
+        debug!(offset, "Found settlement at offset");
 
         loader.load_from_file(&mut file, offset)
     }
 
     /// Find the offset where settlement data begins in an executable.
+    #[instrument(skip(file))]
     fn find_settlement_offset(file: &mut File) -> Result<u64, StartupError> {
         // Read file size
-        let file_size = file.seek(SeekFrom::End(0))?;
+        let file_size = file.seek(SeekFrom::End(0)).map_err(|e| {
+            error!(error = %e, "Failed to seek to end of file");
+            StartupError::IoError(e)
+        })?;
+        trace!(file_size, "Checking for settlement trailer");
 
         // For settlement executables, we store the offset at the end of the file
         // Format: [executable stub][settlement data][8-byte offset to settlement][8-byte magic "SSMFOFFS"]
         const TRAILER_SIZE: u64 = 16;
 
         if file_size < TRAILER_SIZE {
+            warn!(file_size, trailer_size = TRAILER_SIZE, "File too small for trailer");
             return Err(StartupError::InvalidHeader);
         }
 
         // Read the trailer
-        file.seek(SeekFrom::End(-(TRAILER_SIZE as i64)))?;
+        file.seek(SeekFrom::End(-(TRAILER_SIZE as i64))).map_err(|e| {
+            error!(error = %e, "Failed to seek to trailer");
+            StartupError::IoError(e)
+        })?;
         let mut trailer = [0u8; 16];
-        file.read_exact(&mut trailer)?;
+        file.read_exact(&mut trailer).map_err(|e| {
+            error!(error = %e, "Failed to read trailer");
+            StartupError::IoError(e)
+        })?;
 
         // Check magic
         if &trailer[8..16] != b"SSMFOFFS" {
             // No appended settlement - assume the file IS the settlement
+            debug!("No SSMFOFFS trailer found, assuming file is raw settlement");
             return Ok(0);
         }
 
-        // Read offset
-        let offset = u64::from_le_bytes(trailer[0..8].try_into().unwrap());
+        // Read offset - use proper error handling instead of unwrap
+        let offset_bytes: [u8; 8] = trailer[0..8].try_into().map_err(|_| {
+            error!("Failed to convert trailer bytes to offset array");
+            StartupError::InvalidHeader
+        })?;
+        let offset = u64::from_le_bytes(offset_bytes);
 
+        debug!(offset, "Found settlement offset in trailer");
         Ok(offset)
     }
 
     /// Load a settlement from an open file at the given offset.
+    #[instrument(skip(self, file))]
     fn load_from_file(
         &self,
         file: &mut File,
         offset: u64,
     ) -> Result<LoadedSettlement, StartupError> {
+        debug!(offset, "Loading settlement from file");
+
         // Seek to settlement start
-        file.seek(SeekFrom::Start(offset))?;
+        file.seek(SeekFrom::Start(offset)).map_err(|e| {
+            error!(offset, error = %e, "Failed to seek to settlement start");
+            StartupError::IoError(e)
+        })?;
 
         // Read header
         let header = self.read_header(file)?;
+        trace!(
+            magic = ?header.magic,
+            flags = header.flags,
+            code_size = header.code_size,
+            data_size = header.data_size,
+            "Read settlement header"
+        );
 
         // Validate
         if header.magic != SSMF_MAGIC {
+            error!(
+                expected = ?SSMF_MAGIC,
+                got = ?header.magic,
+                "Invalid magic number"
+            );
             return Err(StartupError::InvalidMagic);
         }
         if header.flags & SSMF_FLAG_EXECUTABLE == 0 {
+            error!(flags = header.flags, "Settlement not marked as executable");
             return Err(StartupError::NotExecutable);
         }
 
         // Allocate code memory
+        debug!(size = header.code_size, "Allocating code memory");
         let code_mem = self
             .allocator
             .allocate(header.code_size as usize, 4096)
-            .map_err(|_| StartupError::MemoryAllocationFailed)?;
+            .map_err(|e| {
+                error!(size = header.code_size, error = %e, "Failed to allocate code memory");
+                StartupError::MemoryAllocationFailed
+            })?;
 
         // Allocate data memory
+        debug!(size = header.data_size, "Allocating data memory");
         let data_mem = self
             .allocator
             .allocate(header.data_size as usize, 4096)
-            .map_err(|_| StartupError::MemoryAllocationFailed)?;
+            .map_err(|e| {
+                error!(size = header.data_size, error = %e, "Failed to allocate data memory");
+                StartupError::MemoryAllocationFailed
+            })?;
 
         // Read code section
-        file.seek(SeekFrom::Start(offset + header.code_offset))?;
+        let code_offset = offset + header.code_offset;
+        trace!(code_offset, size = header.code_size, "Reading code section");
+        file.seek(SeekFrom::Start(code_offset)).map_err(|e| {
+            error!(offset = code_offset, error = %e, "Failed to seek to code section");
+            StartupError::IoError(e)
+        })?;
         let code_slice = unsafe {
             std::slice::from_raw_parts_mut(code_mem.as_mut_ptr(), header.code_size as usize)
         };
-        file.read_exact(code_slice)?;
+        file.read_exact(code_slice).map_err(|e| {
+            error!(size = header.code_size, error = %e, "Failed to read code section");
+            StartupError::IoError(e)
+        })?;
 
         // Make code executable
+        debug!("Setting code memory protection to ReadExecute");
         self.allocator
             .protect(&code_mem, Protection::ReadExecute)
-            .map_err(|_| StartupError::MemoryAllocationFailed)?;
+            .map_err(|e| {
+                error!(error = %e, "Failed to set code memory protection");
+                StartupError::MemoryAllocationFailed
+            })?;
 
         // Read data section
-        file.seek(SeekFrom::Start(offset + header.data_offset))?;
+        let data_offset = offset + header.data_offset;
+        trace!(data_offset, size = header.data_size, "Reading data section");
+        file.seek(SeekFrom::Start(data_offset)).map_err(|e| {
+            error!(offset = data_offset, error = %e, "Failed to seek to data section");
+            StartupError::IoError(e)
+        })?;
         let data_slice = unsafe {
             std::slice::from_raw_parts_mut(data_mem.as_mut_ptr(), header.data_size as usize)
         };
-        file.read_exact(data_slice)?;
+        file.read_exact(data_slice).map_err(|e| {
+            error!(size = header.data_size, error = %e, "Failed to read data section");
+            StartupError::IoError(e)
+        })?;
 
         // Make data read-write
+        debug!("Setting data memory protection to ReadWrite");
         self.allocator
             .protect(&data_mem, Protection::ReadWrite)
-            .map_err(|_| StartupError::MemoryAllocationFailed)?;
+            .map_err(|e| {
+                error!(error = %e, "Failed to set data memory protection");
+                StartupError::MemoryAllocationFailed
+            })?;
 
         // Read function table with code base for address fixup
         let loaded_code_base = code_mem.as_ptr() as u64;
+        debug!(code_base = format!("{:#x}", loaded_code_base), "Reading function table");
         let func_table = self.read_function_table(file, offset, &header, loaded_code_base)?;
+        trace!(functions = func_table.len(), "Function table loaded");
 
         // Read global table with data base for address fixup
         let loaded_data_base = data_mem.as_ptr() as u64;
+        debug!(data_base = format!("{:#x}", loaded_data_base), "Reading global table");
         let global_table = self.read_global_table(file, offset, &header, loaded_data_base)?;
+        trace!(globals = global_table.len(), "Global table loaded");
 
         // Load native libraries
+        debug!(count = header.native_lib_count, "Loading native libraries");
         let native_libs = self.load_native_libs(file, offset, &header)?;
 
         // Calculate entry point
         let entry_fn = if header.entry_func_idx != u32::MAX {
-            func_table
-                .get_code_ptr(TableIndex(header.entry_func_idx))
-                .map(|p| p as *const u8)
+            let ptr = func_table.get_code_ptr(TableIndex(header.entry_func_idx));
+            debug!(
+                entry_idx = header.entry_func_idx,
+                entry_ptr = ?ptr.map(|p| format!("{:#x}", p)),
+                "Entry point resolved"
+            );
+            ptr.map(|p| p as *const u8)
         } else {
+            warn!("No entry point defined (entry_func_idx = MAX)");
             None
         };
 
+        debug!("Settlement loaded successfully");
         Ok(LoadedSettlement {
             code_mem,
             data_mem,

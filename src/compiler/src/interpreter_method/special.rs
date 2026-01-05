@@ -696,11 +696,27 @@ pub fn handle_constructor_methods(
                 }
             }
 
-            return match exec_block(&method_def.body, &mut local_env, functions, classes, enums, impl_methods) {
-                Ok(Control::Return(v)) => Ok(Some(v)),
-                Ok(_) => Ok(Some(Value::Nil)),
+            // If this is the `new` method, mark it to prevent recursion when the body
+            // calls the class constructor (e.g., `ClassName(args)` inside `new()`)
+            let is_new_method = method == "new";
+            if is_new_method {
+                super::super::interpreter_call::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
+            }
+
+            // Use exec_block_fn to properly capture implicit returns
+            let result = match exec_block_fn(&method_def.body, &mut local_env, functions, classes, enums, impl_methods) {
+                Ok((Control::Return(v), _)) => Ok(Some(v)),
+                Ok((_, Some(implicit_val))) => Ok(Some(implicit_val)), // Implicit return from last expression
+                Ok((_, None)) => Ok(Some(Value::Nil)),
                 Err(e) => Err(e),
             };
+
+            // Remove from tracking set
+            if is_new_method {
+                super::super::interpreter_call::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(class_name));
+            }
+
+            return result;
         }
         // Collect available static methods for suggestion
         let available: Vec<&str> = class_def

@@ -1,20 +1,20 @@
 # BDD Feature Spec Progress
 
-**Last Updated:** 2025-12-30
+**Last Updated:** 2026-01-05
 **Goal:** Replace all old feature documentation with BDD-generated documentation
 
 ## Progress Summary
 
 | Status | Count | Percentage |
 |--------|-------|------------|
-| ✅ Complete | 51 | 100% |
-| **Total** | **51** | - |
+| ✅ Complete | 56 | 100% |
+| **Total** | **56** | - |
 
-**Current:** 51 specs, 615 tests 🎉 **ALL COMPLETE!**
+**Current:** 56 specs, 690 tests 🎉 **ALL COMPLETE!**
 
 ---
 
-## Completed BDD Specs (51)
+## Completed BDD Specs (56)
 
 ### Infrastructure (9/9) - 147 tests
 
@@ -107,11 +107,21 @@
 | #187 | Expect Matchers | 15 | ✅ |
 | #192 | Doctest | 11 | ✅ |
 
+### Stdlib (5/5) - 75 tests
+
+| ID | Feature | Tests | Status |
+|----|---------|-------|--------|
+| #200 | JSON Library | 15 | ✅ |
+| #201 | File I/O API | 11 | ✅ |
+| #202 | Symbol Table Cross-Refs | 18 | ✅ |
+| #203 | Enhanced String Methods | 20 | ✅ |
+| #204 | Try Operator (?) | 11 | ✅ |
+
 ---
 
 ## All Complete! 🎉
 
-All 51 BDD feature specs have been implemented with 615 passing tests.
+All 56 BDD feature specs have been implemented with 690 passing tests.
 
 ### Category Summary
 
@@ -125,7 +135,8 @@ All 51 BDD feature specs have been implemented with 615 passing tests.
 | Concurrency | 4 | 41 |
 | Codegen | 5 | 58 |
 | Testing Framework | 7 | 73 |
-| **Total** | **51** | **615** |
+| Stdlib | 5 | 75 |
+| **Total** | **56** | **690** |
 
 ---
 
@@ -143,6 +154,7 @@ All 51 BDD feature specs have been implemented with 615 passing tests.
 | 2025-12-30 (TEST) | 7 | 66 | 44 | 466 |
 | 2025-12-30 (PKG) | 2 | 34 | 46 | 500 |
 | 2025-12-30 (FINAL) | 5 | 115 | 51 | 615 |
+| 2026-01-05 (STDLIB) | 5 | 75 | 56 | 690 |
 
 ---
 

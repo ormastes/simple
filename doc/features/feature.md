@@ -46,22 +46,23 @@ Feature documentation is organized into category folders for easier navigation. 
 | [concurrency/](concurrency/__index__.md) | Async, actors, generators | #40-#43 |
 | [codegen/](codegen/__index__.md) | Code generation backends | #95-#97, #100-#101 |
 | [testing_framework/](testing_framework/__index__.md) | BDD testing framework | #180-#184, #187, #192 |
+| [stdlib/](stdlib/__index__.md) | Standard library improvements | #200-#204 |
 
 ### BDD Test Generation
 
 Feature documentation is auto-generated from BDD spec tests. Each spec test defines feature metadata and executable assertions that verify the feature works correctly. The generated markdown replaces manual documentation.
 
-**Status:** ✅ **COMPLETE** (2025-12-30)
-- **Tests:** 615 tests passing across 51 feature specs
-- **Categories:** Infrastructure (9), Types (7), Language (9), Data Structures (6), Control Flow (4), Concurrency (4), Codegen (5), Testing Framework (7)
-- **Generated Docs:** 51 markdown files in 8 categories
+**Status:** ✅ **COMPLETE** (2026-01-05)
+- **Tests:** 690 tests passing across 56 feature specs
+- **Categories:** Infrastructure (9), Types (7), Language (9), Data Structures (6), Control Flow (4), Concurrency (4), Codegen (5), Testing Framework (7), Stdlib (5)
+- **Generated Docs:** 56 markdown files in 9 categories
 
 **Architecture:**
 ```
 BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{category}/*.md
 ```
 
-**Current BDD Spec Tests (51 specs, 615 tests):**
+**Current BDD Spec Tests (56 specs, 690 tests):**
 
 #### Infrastructure (9 specs, 147 tests)
 | Spec File | Feature | Tests | Status |
@@ -146,6 +147,15 @@ BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{cat
 | `testing_framework/expect_matchers_spec.spl` | #187 Expect Matchers | 15 | ✅ |
 | `testing_framework/doctest_spec.spl` | #192 Doctest | 11 | ✅ |
 
+#### Stdlib (5 specs, 75 tests)
+| Spec File | Feature | Tests | Status |
+|-----------|---------|-------|--------|
+| `stdlib/json_spec.spl` | #200 JSON Library | 15 | ✅ |
+| `stdlib/file_io_spec.spl` | #201 File I/O API | 11 | ✅ |
+| `stdlib/symbol_table_spec.spl` | #202 Symbol Table Cross-Refs | 18 | ✅ |
+| `stdlib/string_methods_spec.spl` | #203 Enhanced String Methods | 20 | ✅ |
+| `stdlib/try_operator_spec.spl` | #204 Try Operator (?) | 11 | ✅ |
+
 **Key Files:**
 - `simple/std_lib/src/spec/feature_doc.spl` - Feature documentation framework
 - `simple/std_lib/test/features/` - BDD spec test files by category
@@ -171,7 +181,7 @@ for f in simple/std_lib/test/features/**/*_spec.spl; do ./target/debug/simple "$
 
 ### BDD Specs Complete! 🎉
 
-All 51 BDD feature specs have been implemented with 615 passing tests.
+All 56 BDD feature specs have been implemented with 690 passing tests.
 
 See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 
@@ -187,7 +197,8 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 | Concurrency | 4 | 41 |
 | Codegen | 5 | 58 |
 | Testing Framework | 7 | 73 |
-| **Total** | **51** | **615** |
+| Stdlib | 5 | 75 |
+| **Total** | **56** | **690** |
 
 ---
 
@@ -237,6 +248,7 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 | #1910-#1969 | Simple Math (SDN Grid/Tensor + PyTorch) | ✅ Complete → [SIMPLE_MATH_100_PERCENT_COMPLETE_2025-12-28.md](../report/SIMPLE_MATH_100_PERCENT_COMPLETE_2025-12-28.md) |
 | #1970-#1999 | Startup Optimization (Argparse + mmap + App Types) | ✅ Complete → [STARTUP_DECORATORS_COMPLETE_2025-12-29.md](../report/STARTUP_DECORATORS_COMPLETE_2025-12-29.md) |
 | #2000-#2049 | 4KB Page Locality (Startup Cache Optimization) | ✅ Complete → [4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md](../report/4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md) |
+| #200-#204 | Stdlib Improvements (JSON, File I/O, Strings, Try) | ✅ Complete → [stdlib/__index__.md](stdlib/__index__.md) |
 
 ---
 
@@ -301,10 +313,11 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 | Simple Math (SDN Grid/Tensor) | 60 | 60 | 0 | ✅ 100% |
 | Startup Optimization | 30 | 30 | 0 | ✅ 100% |
 | 4KB Page Locality | 50 | 50 | 0 | ✅ 100% |
-| **TOTAL** | **1196** | **1196** | **0** | **100%** |
+| Stdlib Improvements | 5 | 5 | 0 | ✅ 100% |
+| **TOTAL** | **1201** | **1201** | **0** | **100%** |
 
 ### Overall Progress
-**100% Complete** - 1196 of 1196 features implemented
+**100% Complete** - 1201 of 1201 features implemented
 - All features complete and production-ready
 - 0 features remaining
 - 219 features archived in `done/feature_done_*.md` files

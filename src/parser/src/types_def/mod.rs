@@ -493,7 +493,12 @@ impl<'a> Parser<'a> {
                 } else {
                     crate::ast::Visibility::Private
                 };
-                let item = self.parse_function()?;
+                // Handle async functions in impl blocks
+                let item = if self.check(&TokenKind::Async) {
+                    self.parse_async_function()?
+                } else {
+                    self.parse_function()?
+                };
                 if let Node::Function(mut f) = item {
                     f.visibility = visibility;
                     methods.push(f);
@@ -550,7 +555,16 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Type) {
                 associated_types.push(self.parse_associated_type_def()?);
             } else {
-                methods.push(self.parse_trait_method()?);
+                // Handle async methods in trait blocks
+                let is_async = self.check(&TokenKind::Async);
+                if is_async {
+                    self.advance();
+                }
+                let mut method = self.parse_trait_method()?;
+                if is_async {
+                    method.effects.push(crate::ast::Effect::Async);
+                }
+                methods.push(method);
             }
         }
         self.consume_dedent();

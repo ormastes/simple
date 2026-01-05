@@ -151,6 +151,20 @@ impl<'a> super::Lexer<'a> {
     }
 
     pub(super) fn scan_fstring(&mut self) -> TokenKind {
+        self.scan_fstring_impl(false)
+    }
+
+    /// Scan a triple-quoted f-string: f"""..."""
+    /// Multi-line interpolated string with escape sequence support
+    pub(super) fn scan_triple_fstring(&mut self) -> TokenKind {
+        // Consume the three opening quotes (first " already consumed by caller)
+        self.advance(); // Second "
+        self.advance(); // Third "
+        self.scan_fstring_impl(true)
+    }
+
+    /// Common implementation for f-strings (single and triple-quoted)
+    fn scan_fstring_impl(&mut self, is_triple: bool) -> TokenKind {
         use crate::token::FStringToken;
         let mut parts: Vec<FStringToken> = Vec::new();
         let mut current_literal = String::new();
@@ -158,21 +172,40 @@ impl<'a> super::Lexer<'a> {
 
         while let Some(ch) = self.peek() {
             if ch == '"' {
-                // End of f-string
-                self.advance();
-                if !current_literal.is_empty() {
-                    parts.push(FStringToken::Literal(current_literal.clone()));
-                }
-
-                // Check for unit suffix (only allowed if no interpolation)
-                if !has_interpolation {
-                    if let Some(suffix) = self.scan_string_unit_suffix() {
-                        // Simple string with unit suffix: "127.0.0.1"_ip
-                        return TokenKind::TypedString(current_literal, suffix);
+                if is_triple {
+                    // Check for closing """
+                    if self.peek_ahead(1) == Some('"') && self.peek_ahead(2) == Some('"') {
+                        // Found closing """
+                        self.advance(); // First "
+                        self.advance(); // Second "
+                        self.advance(); // Third "
+                        if !current_literal.is_empty() {
+                            parts.push(FStringToken::Literal(current_literal));
+                        }
+                        return TokenKind::FString(parts);
+                    } else {
+                        // Single " inside the string - treat as literal
+                        self.advance();
+                        current_literal.push('"');
+                        continue;
                     }
-                }
+                } else {
+                    // End of single-quoted f-string
+                    self.advance();
+                    if !current_literal.is_empty() {
+                        parts.push(FStringToken::Literal(current_literal.clone()));
+                    }
 
-                return TokenKind::FString(parts);
+                    // Check for unit suffix (only allowed if no interpolation)
+                    if !has_interpolation {
+                        if let Some(suffix) = self.scan_string_unit_suffix() {
+                            // Simple string with unit suffix: "127.0.0.1"_ip
+                            return TokenKind::TypedString(current_literal, suffix);
+                        }
+                    }
+
+                    return TokenKind::FString(parts);
+                }
             } else if ch == '{' {
                 self.advance();
                 // Check for escaped {{ -> literal {
@@ -226,14 +259,24 @@ impl<'a> super::Lexer<'a> {
                     }
                 }
             } else if ch == '\n' {
-                return TokenKind::Error("Unterminated f-string".to_string());
+                if is_triple {
+                    // Newlines are allowed in triple-quoted f-strings
+                    self.advance();
+                    current_literal.push(ch);
+                } else {
+                    return TokenKind::Error("Unterminated f-string".to_string());
+                }
             } else {
                 self.advance();
                 current_literal.push(ch);
             }
         }
 
-        TokenKind::Error("Unterminated f-string".to_string())
+        if is_triple {
+            TokenKind::Error("Unterminated triple-quoted f-string".to_string())
+        } else {
+            TokenKind::Error("Unterminated f-string".to_string())
+        }
     }
 
 }

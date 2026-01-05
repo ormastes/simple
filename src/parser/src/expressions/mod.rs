@@ -273,6 +273,8 @@ impl<'a> Parser<'a> {
                 | TokenKind::Given
                 | TokenKind::When
                 | TokenKind::Then
+                // 'common' can be used as identifier (stdlib directory name)
+                | TokenKind::Common
                 | TokenKind::LParen
                 | TokenKind::LBracket
                 | TokenKind::LBrace
@@ -629,6 +631,8 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
+        // Track indents consumed for multi-line method chaining
+        let mut consumed_indents: usize = 0;
 
         loop {
             match &self.current.kind {
@@ -727,9 +731,11 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Dot => {
                     self.advance();
-                    // Skip only newlines after dot for multi-line chaining: obj.\nmethod()
-                    // Do NOT skip INDENT to preserve block structure
-                    while matches!(self.current.kind, TokenKind::Newline) {
+                    // Skip newlines and indents after dot for multi-line chaining: obj.\n    method()
+                    while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+                        if matches!(self.current.kind, TokenKind::Indent) {
+                            consumed_indents += 1;
+                        }
                         self.advance();
                     }
                     // Support tuple element access: tuple.0, tuple.1
@@ -870,13 +876,40 @@ impl<'a> Parser<'a> {
                     // Multi-line method chaining: obj.method()\n    .another()
                     // Check if a dot follows after newlines/indents
                     if self.peek_through_newlines_and_indents_is(&TokenKind::Dot) {
-                        self.skip_newlines_and_indents_for_method_chain();
+                        consumed_indents += self.skip_newlines_and_indents_for_method_chain();
                         // Now self.current should be Dot, continue the loop
                     } else {
                         break;
                     }
                 }
                 _ => break,
+            }
+        }
+
+        // Don't consume DEDENTs here - leave them for the statement parser.
+        // The INDENTs we consumed are "continuation indents" that don't create new blocks.
+        // We need to peek and consume them if they're immediately after NEWLINEs.
+        if consumed_indents > 0 {
+            // Peek through NEWLINEs to consume matching DEDENTs
+            while consumed_indents > 0 {
+                if matches!(self.current.kind, TokenKind::Newline) {
+                    // Look ahead to see if DEDENT follows
+                    let next_is_dedent = self.pending_tokens.front()
+                        .map(|t| matches!(t.kind, TokenKind::Dedent))
+                        .unwrap_or(false);
+                    if next_is_dedent {
+                        self.advance(); // consume NEWLINE
+                        self.advance(); // consume DEDENT
+                        consumed_indents -= 1;
+                    } else {
+                        break;
+                    }
+                } else if matches!(self.current.kind, TokenKind::Dedent) {
+                    self.advance();
+                    consumed_indents -= 1;
+                } else {
+                    break;
+                }
             }
         }
 

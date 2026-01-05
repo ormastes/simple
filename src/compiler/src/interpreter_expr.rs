@@ -1104,6 +1104,54 @@ pub(crate) fn evaluate_expr(
             let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?
                 .deref_pointer();
             let idx_val = evaluate_expr(index, env, functions, classes, enums, impl_methods)?;
+
+            // Check if idx_val is a range object for slicing
+            if let Value::Object { class, fields } = &idx_val {
+                if class == crate::value::BUILTIN_RANGE {
+                    // Extract range bounds
+                    let start = fields.get("start").and_then(|v| v.as_int().ok()).unwrap_or(0);
+                    let end = fields.get("end").and_then(|v| v.as_int().ok());
+                    let inclusive = fields.get("inclusive").and_then(|v| {
+                        if let Value::Bool(b) = v { Some(*b) } else { None }
+                    }).unwrap_or(false);
+
+                    return match recv_val {
+                        Value::Array(arr) => {
+                            let len = arr.len() as i64;
+                            let start_idx = if start < 0 { (len + start).max(0) as usize } else { start as usize };
+                            let end_idx = match end {
+                                Some(e) => {
+                                    let e = if e < 0 { (len + e).max(0) as i64 } else { e };
+                                    if inclusive { (e + 1).min(len) as usize } else { e.min(len) as usize }
+                                }
+                                None => len as usize,
+                            };
+                            let sliced: Vec<Value> = arr.get(start_idx..end_idx.min(arr.len()))
+                                .map(|s| s.to_vec())
+                                .unwrap_or_default();
+                            Ok(Value::Array(sliced))
+                        }
+                        Value::Str(s) => {
+                            let chars: Vec<char> = s.chars().collect();
+                            let len = chars.len() as i64;
+                            let start_idx = if start < 0 { (len + start).max(0) as usize } else { start as usize };
+                            let end_idx = match end {
+                                Some(e) => {
+                                    let e = if e < 0 { (len + e).max(0) as i64 } else { e };
+                                    if inclusive { (e + 1).min(len) as usize } else { e.min(len) as usize }
+                                }
+                                None => len as usize,
+                            };
+                            let sliced: String = chars.get(start_idx..end_idx.min(chars.len()))
+                                .map(|s| s.iter().collect())
+                                .unwrap_or_default();
+                            Ok(Value::Str(sliced))
+                        }
+                        _ => Err(CompileError::Semantic("slice on non-sliceable type".into())),
+                    };
+                }
+            }
+
             match recv_val {
                 Value::Array(arr) => {
                     let raw_idx = idx_val.as_int()?;

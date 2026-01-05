@@ -1,3 +1,5 @@
+use tracing::{debug, error, trace, warn};
+
 use super::symbol::{SymbolBinding, SymbolTable};
 
 #[repr(C)]
@@ -20,7 +22,7 @@ pub enum RelocationType {
     GotPcRel = 4,
 }
 
-/// Apply relocations to loaded code
+/// Apply relocations to loaded code with bounds checking
 pub fn apply_relocations(
     code: &mut [u8],
     relocs: &[SmfRelocation],
@@ -28,57 +30,122 @@ pub fn apply_relocations(
     base_address: usize,
     imports: &dyn Fn(&str) -> Option<usize>,
 ) -> Result<(), String> {
-    for reloc in relocs {
+    let code_len = code.len();
+    debug!(
+        code_len,
+        reloc_count = relocs.len(),
+        base_address = format!("{:#x}", base_address),
+        "Applying relocations"
+    );
+
+    for (reloc_idx, reloc) in relocs.iter().enumerate() {
         let sym = symbols
             .symbols
             .get(reloc.symbol_index as usize)
             .ok_or_else(|| {
-                format!(
-                    "Relocation references missing symbol {}",
-                    reloc.symbol_index
-                )
+                let msg = format!(
+                    "Relocation {} references missing symbol index {} (max: {})",
+                    reloc_idx,
+                    reloc.symbol_index,
+                    symbols.symbols.len()
+                );
+                error!("{}", msg);
+                msg
             })?;
         let sym_name = symbols.symbol_name(sym);
+
+        trace!(
+            reloc_idx,
+            symbol = sym_name,
+            reloc_type = ?reloc.reloc_type,
+            offset = reloc.offset,
+            "Processing relocation"
+        );
 
         // Resolve symbol address
         let sym_addr = if sym.binding == SymbolBinding::Local {
             base_address.wrapping_add(sym.value as usize)
         } else {
-            imports(sym_name).ok_or_else(|| format!("Undefined symbol: {}", sym_name))?
+            match imports(sym_name) {
+                Some(addr) => {
+                    trace!(symbol = sym_name, addr = format!("{:#x}", addr), "Resolved external symbol");
+                    addr
+                }
+                None => {
+                    let msg = format!("Undefined symbol: {} (required by relocation {})", sym_name, reloc_idx);
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+            }
         };
 
-        let patch_addr = base_address.wrapping_add(reloc.offset as usize);
-        let patch_ptr = code.as_mut_ptr().wrapping_add(reloc.offset as usize);
+        let offset = reloc.offset as usize;
 
+        // Bounds check for the relocation offset
         match reloc.reloc_type {
             RelocationType::Abs64 => {
+                // Abs64 needs 8 bytes
+                if offset.checked_add(8).map_or(true, |end| end > code_len) {
+                    let msg = format!(
+                        "Relocation {} (Abs64) at offset {} exceeds code buffer size {} (needs 8 bytes)",
+                        reloc_idx, offset, code_len
+                    );
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+
+                let patch_ptr = code.as_mut_ptr().wrapping_add(offset);
                 let value = sym_addr.wrapping_add(reloc.addend as usize);
+                trace!(
+                    reloc_idx,
+                    offset,
+                    value = format!("{:#x}", value),
+                    "Applying Abs64 relocation"
+                );
                 unsafe {
                     *(patch_ptr as *mut u64) = value as u64;
                 }
             }
 
-            RelocationType::Pc32 => {
+            RelocationType::Pc32 | RelocationType::Plt32 => {
+                // Pc32/Plt32 needs 4 bytes
+                if offset.checked_add(4).map_or(true, |end| end > code_len) {
+                    let msg = format!(
+                        "Relocation {} ({:?}) at offset {} exceeds code buffer size {} (needs 4 bytes)",
+                        reloc_idx, reloc.reloc_type, offset, code_len
+                    );
+                    error!("{}", msg);
+                    return Err(msg);
+                }
+
+                let patch_addr = base_address.wrapping_add(offset);
+                let patch_ptr = code.as_mut_ptr().wrapping_add(offset);
                 let value = (sym_addr as i64)
                     .wrapping_sub(patch_addr as i64)
                     .wrapping_add(reloc.addend) as i32;
+
+                trace!(
+                    reloc_idx,
+                    offset,
+                    value,
+                    reloc_type = ?reloc.reloc_type,
+                    "Applying PC-relative relocation"
+                );
                 unsafe {
                     *(patch_ptr as *mut i32) = value;
                 }
             }
 
-            RelocationType::Plt32 => {
-                let value = (sym_addr as i64)
-                    .wrapping_sub(patch_addr as i64)
-                    .wrapping_add(reloc.addend) as i32;
-                unsafe {
-                    *(patch_ptr as *mut i32) = value;
-                }
+            RelocationType::None => {
+                trace!(reloc_idx, "Skipping None relocation type");
             }
 
-            RelocationType::None | RelocationType::GotPcRel => {}
+            RelocationType::GotPcRel => {
+                warn!(reloc_idx, "GotPcRel relocation not yet implemented, skipping");
+            }
         }
     }
 
+    debug!(applied = relocs.len(), "Relocations applied successfully");
     Ok(())
 }
