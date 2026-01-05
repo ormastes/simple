@@ -153,6 +153,30 @@ pub fn cache_module_exports(path: &Path, exports: Value) {
     });
 }
 
+/// Recursively filter out Function values from a Value.
+/// This is used to prevent exponential memory growth when building captured environments.
+/// For Dict values (imported modules), we recursively filter their contents.
+/// For other values, we return them as-is unless they are functions.
+fn filter_functions_from_value(value: &Value) -> Value {
+    match value {
+        Value::Function { .. } => {
+            // Return a placeholder for functions to indicate they exist but without the heavy captured_env
+            Value::Str("__function__".to_string())
+        }
+        Value::Dict(dict) => {
+            // Recursively filter functions from dict values (imported modules)
+            let filtered: HashMap<String, Value> = dict
+                .iter()
+                .filter(|(_, v)| !matches!(v, Value::Function { .. }))
+                .map(|(k, v)| (k.clone(), filter_functions_from_value(v)))
+                .collect();
+            Value::Dict(filtered)
+        }
+        // For all other values, clone them as-is
+        other => other.clone(),
+    }
+}
+
 /// Get the import alias from a UseStmt if it exists
 pub(super) fn get_import_alias(use_stmt: &UseStmt) -> Option<String> {
     match &use_stmt.target {
@@ -466,6 +490,12 @@ pub(super) fn evaluate_module_exports(
     for (idx, item) in items.iter().enumerate() {
         match item {
             Node::UseStmt(use_stmt) => {
+                // Skip type-only imports at runtime - they're only for compile-time type checking
+                if use_stmt.is_type_only {
+                    trace!("Skipping type-only import: {:?}", use_stmt.path);
+                    continue;
+                }
+
                 // Recursively load imported modules
                 let binding_name = match &use_stmt.target {
                     ImportTarget::Single(name) => name.clone(),
@@ -566,18 +596,31 @@ pub(super) fn evaluate_module_exports(
         });
     }
 
-    // Second pass: Export functions with COMPLETE module environment captured
-    // The captured_env now includes globals AND all other functions
-    trace!(functions = local_functions.len(), env_size = env.len(), "Second pass: exporting functions");
+    // Create a filtered environment that excludes Function values from imported modules.
+    // This prevents exponential memory growth when modules import other modules.
+    // Functions can still call imported module functions through global lookups.
+    // NOTE: We also recursively filter Dict values (imported modules) to remove functions.
+    let filtered_env: Env = env
+        .iter()
+        .filter(|(_, v)| !matches!(v, Value::Function { .. }))
+        .map(|(k, v)| {
+            let filtered_value = filter_functions_from_value(v);
+            (k.clone(), filtered_value)
+        })
+        .collect();
+
+    // Second pass: Export functions with filtered environment captured
+    // The captured_env includes non-function values (classes, enums, imported modules as dicts)
+    trace!(functions = local_functions.len(), env_size = filtered_env.len(), "Second pass: exporting functions");
     for (name, f) in &local_functions {
         let func_with_env = Value::Function {
             name: name.clone(),
             def: Box::new(f.clone()),
-            captured_env: env.clone(), // Capture complete environment
+            captured_env: filtered_env.clone(), // Capture filtered environment
         };
         exports.insert(name.clone(), func_with_env.clone());
 
-        // Update env with the function that has the complete captured_env
+        // Update env with the function that has the captured_env
         // so inter-function calls work correctly
         env.insert(name.clone(), func_with_env);
     }
@@ -609,6 +652,7 @@ fn load_export_source(
         span: export_stmt.span.clone(),
         path: export_stmt.path.clone(),
         target: ImportTarget::Glob, // Load entire module to get all exports
+        is_type_only: false, // Runtime export loading is never type-only
     };
 
     match load_and_merge_module(&use_stmt, current_file, functions, classes, enums) {
@@ -642,6 +686,41 @@ pub(super) fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<P
     init_resolved.set_extension("spl");
     if init_resolved.exists() {
         return Ok(init_resolved);
+    }
+
+    // Try resolving from parent directories (for project-root-relative imports)
+    // This handles cases like importing "verification.lean.codegen" from within
+    // "verification/regenerate/" - we need to go up to find the "verification/" root
+    let mut parent_dir = base_dir.to_path_buf();
+    for _ in 0..10 {
+        if let Some(parent) = parent_dir.parent() {
+            parent_dir = parent.to_path_buf();
+
+            // Try module.spl
+            let mut parent_resolved = parent_dir.clone();
+            for part in parts {
+                parent_resolved = parent_resolved.join(part);
+            }
+            parent_resolved.set_extension("spl");
+            if parent_resolved.exists() {
+                trace!(path = ?parent_resolved, "Found module in parent directory");
+                return Ok(parent_resolved);
+            }
+
+            // Try __init__.spl
+            let mut parent_init_resolved = parent_dir.clone();
+            for part in parts {
+                parent_init_resolved = parent_init_resolved.join(part);
+            }
+            parent_init_resolved = parent_init_resolved.join("__init__");
+            parent_init_resolved.set_extension("spl");
+            if parent_init_resolved.exists() {
+                trace!(path = ?parent_init_resolved, "Found module __init__.spl in parent directory");
+                return Ok(parent_init_resolved);
+            }
+        } else {
+            break;
+        }
     }
 
     // Try stdlib location - walk up directory tree

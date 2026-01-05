@@ -193,6 +193,18 @@ impl ModuleResolver {
         self.import_graph.add_import(from_module, to_module, kind);
     }
 
+    /// Record an import from HIR representation.
+    /// Automatically determines the ImportKind based on whether the import is type-only.
+    pub fn record_import_from_hir(&mut self, from_module: &str, import: &crate::hir::HirImport) {
+        let to_module = import.from_path.join(".");
+        let kind = if import.is_type_only {
+            ImportKind::TypeUse
+        } else {
+            ImportKind::Use
+        };
+        self.import_graph.add_import(from_module, &to_module, kind);
+    }
+
     /// Check for circular dependencies in the import graph.
     pub fn check_circular_dependencies(&self) -> ResolveResult<()> {
         self.import_graph

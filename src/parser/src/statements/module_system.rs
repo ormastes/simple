@@ -131,22 +131,42 @@ impl<'a> Parser<'a> {
     /// use crate.module.{A, B}
     /// use crate.module.*
     /// use crate.module.Item as Alias
+    /// use type crate.module.Item (type-only import)
     pub(crate) fn parse_use(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Use)?;
-        self.parse_use_or_import_body(start_span)
+
+        // Check for 'type' keyword after 'use'
+        let is_type_only = if self.check(&TokenKind::Type) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        self.parse_use_or_import_body(start_span, is_type_only)
     }
 
     /// Parse import statement (alias for use): import module.Item
     /// This is syntactic sugar for `use` - both work identically.
+    /// import type module.Item is also supported.
     pub(crate) fn parse_import(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Import)?;
-        self.parse_use_or_import_body(start_span)
+
+        // Check for 'type' keyword after 'import'
+        let is_type_only = if self.check(&TokenKind::Type) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        self.parse_use_or_import_body(start_span, is_type_only)
     }
 
     /// Common body for use/import statements
-    pub(super) fn parse_use_or_import_body(&mut self, start_span: Span) -> Result<Node, ParseError> {
+    pub(super) fn parse_use_or_import_body(&mut self, start_span: Span, is_type_only: bool) -> Result<Node, ParseError> {
         let (path, target) = self.parse_use_path_and_target()?;
         Ok(Node::UseStmt(UseStmt {
             span: Span::new(
@@ -157,6 +177,7 @@ impl<'a> Parser<'a> {
             ),
             path,
             target,
+            is_type_only,
         }))
     }
 

@@ -10,6 +10,10 @@ pub struct HirImport {
     pub items: Vec<(String, Option<String>)>,
     /// Whether this is a glob import (import *)
     pub is_glob: bool,
+    /// Whether this is a type-only import (`use type`)
+    /// Type-only imports don't create runtime dependencies and are excluded
+    /// from circular dependency detection.
+    pub is_type_only: bool,
 }
 
 /// HIR module
