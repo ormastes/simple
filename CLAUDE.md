@@ -182,8 +182,9 @@ simple/                            # Project root - Rust compiler implementation
 │       │   ├── core_nogc/         # Variant-agnostic, #[no_gc] (mutable)
 │       │   ├── core_nogc_immut/   # Variant-agnostic, #[no_gc] + #[immutable]
 │       │   ├── simd/              # Cross-platform SIMD & vector math
-│       │   ├── host/              # OS-based stdlib overlays
+│       │   ├── host/              # OS-based stdlib overlays (see Variant System below)
 │       │   │   └── async_nogc_mut/    # DEFAULT: async + no_gc + mutable
+│       │   ├── concurrency/       # Concurrency primitives (actors, channels, threads)
 │       │   ├── bare/              # Baremetal (single variant: async+nogc+immut)
 │       │   ├── gpu/               # GPU device & host APIs
 │       │   │   ├── kernel/        # Device-side (single: async+nogc+immut)
@@ -427,6 +428,44 @@ simple/                            # Project root - Rust compiler implementation
                                         # control, expressions, extern, jit,
                                         # macros, memory, oop, strings, types
 ```
+
+## Stdlib Variant System
+
+The standard library supports multiple runtime variants organized by three dimensions:
+
+### Memory Model (GC vs NoGC)
+
+| Directory | GC | Mutable | Description |
+|-----------|-----|---------|-------------|
+| `core/` | Yes | Yes | Default, garbage collected |
+| `core_immut/` | Yes | No | Persistent data structures |
+| `core_nogc/` | No | Yes | Arena, bump, fixed-size allocators |
+| `core_nogc_immut/` | No | No | Static allocation |
+
+### Host Variants (Async/Sync × GC/NoGC × Mut/Immut)
+
+```
+host/
+├── async_gc_mut/      # Async + GC + Mutable
+├── async_gc_immut/    # Async + GC + Immutable
+├── async_nogc_mut/    # Async + NoGC + Mutable (DEFAULT)
+├── sync_nogc_mut/     # Sync + NoGC + Mutable
+└── common/            # Shared implementations
+```
+
+### Concurrency Model (Message vs Lock)
+
+| Module | Model | Description |
+|--------|-------|-------------|
+| `actors.spl` | Message | Actor model, isolated state |
+| `channels.spl` | Message | CSP-style typed channels |
+| `threads.spl` | Lock | Mutex, RwLock, shared state |
+| `futures.spl` | Async | Works with both models |
+| `generators.spl` | Coroutines | Lazy sequences |
+
+**Default Profile:** `async_nogc_mut` (Async + NoGC + Mutable + Message-passing)
+
+See `simple/std_lib/README.md` for full details.
 
 ## Compilation Pipeline
 
