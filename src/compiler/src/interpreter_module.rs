@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use tracing::{debug, error, instrument, trace, warn};
+
 use simple_parser::ast::{
     ClassDef, EnumDef, Expr, ExportUseStmt, FunctionDef, ImportTarget, MacroDef, ModulePath, Node, Pattern, UseStmt,
 };
@@ -27,19 +29,6 @@ use super::evaluate_expr;
 
 /// Maximum depth for recursive module loading to prevent infinite loops
 const MAX_MODULE_DEPTH: usize = 50;
-
-/// Check if debug logging is enabled (set SIMPLE_DEBUG_IMPORTS=1)
-fn debug_imports_enabled() -> bool {
-    std::env::var("SIMPLE_DEBUG_IMPORTS").map(|v| v == "1").unwrap_or(false)
-}
-
-macro_rules! debug_import {
-    ($($arg:tt)*) => {
-        if debug_imports_enabled() {
-            eprintln!("[IMPORT] {}", format!($($arg)*));
-        }
-    };
-}
 
 // Thread-local cache for module exports to avoid re-parsing modules
 // Key: normalized module path, Value: module exports dict
@@ -96,7 +85,7 @@ fn is_module_loading(path: &Path) -> bool {
     let key = normalize_path_key(path);
     MODULES_LOADING.with(|loading| {
         let result = loading.borrow().contains(&key);
-        debug_import!("is_module_loading({:?}) = {} (set size: {})", key, result, loading.borrow().len());
+        trace!(path = ?key, is_loading = result, set_size = loading.borrow().len(), "Checking if module is loading");
         result
     })
 }
@@ -104,7 +93,7 @@ fn is_module_loading(path: &Path) -> bool {
 /// Mark a module as currently loading
 fn mark_module_loading(path: &Path) {
     let key = normalize_path_key(path);
-    debug_import!("mark_module_loading: {:?}", key);
+    trace!(path = ?key, "Marking module as loading");
     MODULES_LOADING.with(|loading| {
         loading.borrow_mut().insert(key);
     });
@@ -113,7 +102,7 @@ fn mark_module_loading(path: &Path) {
 /// Unmark a module as loading (finished loading)
 fn unmark_module_loading(path: &Path) {
     let key = normalize_path_key(path);
-    debug_import!("unmark_module_loading: {:?}", key);
+    trace!(path = ?key, "Unmarking module as loading");
     MODULES_LOADING.with(|loading| {
         loading.borrow_mut().remove(&key);
     });
@@ -149,7 +138,7 @@ pub fn get_cached_module_exports(path: &Path) -> Option<Value> {
     MODULE_EXPORTS_CACHE.with(|cache| {
         let result = cache.borrow().get(&key).cloned();
         if result.is_some() {
-            debug_import!("cache hit for: {:?}", key);
+            trace!(path = ?key, "Module cache hit");
         }
         result
     })
@@ -158,7 +147,7 @@ pub fn get_cached_module_exports(path: &Path) -> Option<Value> {
 /// Cache module exports for a path
 pub fn cache_module_exports(path: &Path, exports: Value) {
     let key = normalize_path_key(path);
-    debug_import!("caching exports for: {:?}", key);
+    trace!(path = ?key, "Caching module exports");
     MODULE_EXPORTS_CACHE.with(|cache| {
         cache.borrow_mut().insert(key, exports);
     });
@@ -174,6 +163,7 @@ pub(super) fn get_import_alias(use_stmt: &UseStmt) -> Option<String> {
 
 /// Load a module file, evaluate it, and return exports with captured environment
 /// This is needed so that module-level imports are accessible in exported functions
+#[instrument(skip(use_stmt, current_file, functions, classes, enums), fields(path = ?use_stmt.path.segments))]
 pub(super) fn load_and_merge_module(
     use_stmt: &UseStmt,
     current_file: Option<&Path>,
@@ -185,6 +175,7 @@ pub(super) fn load_and_merge_module(
     let depth = increment_load_depth();
     if depth > MAX_MODULE_DEPTH {
         decrement_load_depth();
+        error!(depth, max = MAX_MODULE_DEPTH, "Module import depth exceeded");
         return Err(CompileError::Runtime(format!(
             "Maximum module import depth ({}) exceeded. Possible circular import or very deep module hierarchy.",
             MAX_MODULE_DEPTH
@@ -200,7 +191,7 @@ pub(super) fn load_and_merge_module(
         .cloned()
         .collect();
 
-    debug_import!("load_and_merge_module: parts={:?}, target={:?}, depth={}", parts, use_stmt.target, depth);
+    debug!(parts = ?parts, target = ?use_stmt.target, depth, "Loading module");
 
     // Handle the case where path is empty but target contains the module name
     // e.g., `import spec as sp` has path=[], target=Aliased { name: "spec", alias: "sp" }
@@ -219,7 +210,7 @@ pub(super) fn load_and_merge_module(
             }
             ImportTarget::Glob => {
                 // Glob with empty path is invalid - can't do `import *` with no module
-                debug_import!("Glob import with empty path - skipping");
+                warn!("Glob import with empty path - skipping");
                 decrement_load_depth();
                 return Ok(Value::Dict(HashMap::new()));
             }
@@ -229,25 +220,26 @@ pub(super) fn load_and_merge_module(
             }
         }
     } else {
-        // Path is not empty - check if target is extracting a specific item
-        let last_path_segment = parts.last().cloned();
+        // Path is not empty - the target 'name' is the final component of the module path
         match &use_stmt.target {
             ImportTarget::Single(name) => {
-                // Check if this is just a module import (name == last segment)
-                if last_path_segment.as_ref() == Some(name) {
-                    None // Import whole module
-                } else {
-                    Some(name.clone())
-                }
+                // `import X.Y.Z` - import the whole module X.Y.Z, bind to "Z"
+                // The target 'name' is the final component of the module path.
+                // e.g., `import verification.lean.types`:
+                //   - Parser produces: path=["verification", "lean"], name="types"
+                //   - We need: parts=["verification", "lean", "types"], import_item_name=None
+                parts.push(name.clone());
+                None // Import whole module
             }
             ImportTarget::Aliased { name, .. } => {
-                // Check if this is a whole-module alias (name == last segment)
-                // e.g., `import spec as sp` where path is ["spec"] and name is "spec"
-                if last_path_segment.as_ref() == Some(name) {
-                    None // Import whole module, just rename it
-                } else {
-                    Some(name.clone())
-                }
+                // `import X.Y.Z as alias` - import the whole module X.Y.Z, bind to alias
+                // The target 'name' is the final component of the module path that was
+                // separated by the parser. We need to add it back to get the full path.
+                // e.g., `import verification.lean.types as types`:
+                //   - Parser produces: path=["verification", "lean"], name="types"
+                //   - We need: parts=["verification", "lean", "types"], import_item_name=None
+                parts.push(name.clone());
+                None // Import whole module
             }
             ImportTarget::Glob => None,
             ImportTarget::Group(_) => {
@@ -267,11 +259,11 @@ pub(super) fn load_and_merge_module(
         Ok(p) => p,
         Err(e) => {
             decrement_load_depth();
-            debug_import!("Failed to resolve module: {:?} - {}", parts.join("."), e);
+            debug!(module = %parts.join("."), error = %e, "Failed to resolve module");
             return Err(e);
         }
     };
-    debug_import!("Resolved module path: {:?} -> {:?}", parts.join("."), module_path);
+    debug!(module = %parts.join("."), path = ?module_path, "Resolved module path");
 
     // Check cache first - if we've already loaded this module, return cached exports
     if let Some(cached_exports) = get_cached_module_exports(&module_path) {
@@ -295,7 +287,7 @@ pub(super) fn load_and_merge_module(
     // return an empty dict to break the cycle. The actual exports will be
     // available after the module finishes loading.
     if is_module_loading(&module_path) {
-        debug_import!("Circular import detected for: {:?}, returning empty dict", module_path);
+        warn!(path = ?module_path, "Circular import detected, returning empty dict");
         decrement_load_depth();
         // Circular import detected - return empty dict as placeholder
         // This allows the current load to complete, and the cache will be populated
@@ -303,7 +295,7 @@ pub(super) fn load_and_merge_module(
     }
 
     // Mark this module as currently loading
-    debug_import!("Loading module: {:?} (depth={})", module_path, depth);
+    debug!(path = ?module_path, depth, "Loading module");
     mark_module_loading(&module_path);
 
     // Read and parse the module
@@ -316,19 +308,20 @@ pub(super) fn load_and_merge_module(
         }
     };
 
-    debug_import!("Parsing module: {:?} ({} bytes)", module_path, source.len());
+    trace!(path = ?module_path, bytes = source.len(), "Parsing module");
     let mut parser = simple_parser::Parser::new(&source);
     let module = match parser.parse() {
         Ok(m) => m,
         Err(e) => {
             unmark_module_loading(&module_path);
             decrement_load_depth();
+            error!(path = ?module_path, error = %e, "Failed to parse module");
             return Err(CompileError::Parse(format!("Cannot parse module {:?}: {}", module_path, e)));
         }
     };
 
     // Evaluate the module to get its environment (including imports)
-    debug_import!("Evaluating module exports: {:?}", module_path);
+    debug!(path = ?module_path, "Evaluating module exports");
     let (module_env, module_exports) = match evaluate_module_exports(
         &module.items,
         Some(&module_path),
@@ -336,7 +329,9 @@ pub(super) fn load_and_merge_module(
         classes,
         enums,
     ) {
-        Ok(result) => result,
+        Ok(result) => {
+            result
+        }
         Err(e) => {
             unmark_module_loading(&module_path);
             decrement_load_depth();
@@ -345,15 +340,25 @@ pub(super) fn load_and_merge_module(
     };
 
     // Create exports with the module's environment captured
+    // IMPORTANT: Filter out Function values from captured_env to avoid exponential cloning.
+    // Functions can call other module functions through the global `functions` HashMap,
+    // so they don't need functions in their captured_env. Only capture non-function values
+    // (variables, classes, enums, etc.) that functions might need to access.
+    let filtered_env: Env = module_env
+        .iter()
+        .filter(|(_, v)| !matches!(v, Value::Function { .. }))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
     let mut exports: HashMap<String, Value> = HashMap::new();
     for (name, value) in module_exports {
         match value {
             Value::Function { name: fn_name, def, .. } => {
-                // Re-create function with module's env as captured_env
+                // Re-create function with filtered env (excludes function values to avoid cycles)
                 exports.insert(name, Value::Function {
                     name: fn_name,
                     def,
-                    captured_env: module_env.clone(),
+                    captured_env: filtered_env.clone(),
                 });
             }
             other => {
@@ -369,7 +374,7 @@ pub(super) fn load_and_merge_module(
     // Mark module as done loading
     unmark_module_loading(&module_path);
     decrement_load_depth();
-    debug_import!("Successfully loaded module: {:?} ({} exports)", module_path, exports.len());
+    debug!(path = ?module_path, exports = exports.len(), "Successfully loaded module");
 
     // If importing a specific item, extract it from exports
     if let Some(item_name) = import_item_name {
@@ -417,7 +422,7 @@ pub(super) fn evaluate_module_exports(
     env.insert("Err".to_string(), Value::Constructor { class_name: "Err".to_string() });
 
     // First pass: register functions and types
-    for item in items {
+    for (idx, item) in items.iter().enumerate() {
         match item {
             Node::Function(f) => {
                 local_functions.insert(f.name.clone(), f.clone());
@@ -448,12 +453,17 @@ pub(super) fn evaluate_module_exports(
                 // Also register in the thread-local USER_MACROS
                 super::USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
             }
+            Node::Extern(ext) => {
+                // Register extern function declarations in the global EXTERN_FUNCTIONS
+                // This is critical for making extern functions accessible when module functions are called
+                super::EXTERN_FUNCTIONS.with(|cell| cell.borrow_mut().insert(ext.name.clone()));
+            }
             _ => {}
         }
     }
 
     // Second pass: process imports and assignments to build the environment
-    for item in items {
+    for (idx, item) in items.iter().enumerate() {
         match item {
             Node::UseStmt(use_stmt) => {
                 // Recursively load imported modules
@@ -547,7 +557,7 @@ pub(super) fn evaluate_module_exports(
 
     // First pass: Add all module functions to env with empty captured_env
     // This allows functions to reference each other
-    debug_import!("First pass: adding {} functions to env", local_functions.len());
+    trace!(functions = local_functions.len(), "First pass: adding functions to env");
     for (name, f) in &local_functions {
         env.insert(name.clone(), Value::Function {
             name: name.clone(),
@@ -558,7 +568,7 @@ pub(super) fn evaluate_module_exports(
 
     // Second pass: Export functions with COMPLETE module environment captured
     // The captured_env now includes globals AND all other functions
-    debug_import!("Second pass: exporting {} functions (env has {} entries)", local_functions.len(), env.len());
+    trace!(functions = local_functions.len(), env_size = env.len(), "Second pass: exporting functions");
     for (name, f) in &local_functions {
         let func_with_env = Value::Function {
             name: name.clone(),
@@ -571,12 +581,13 @@ pub(super) fn evaluate_module_exports(
         // so inter-function calls work correctly
         env.insert(name.clone(), func_with_env);
     }
-    debug_import!("Finished exporting, {} total exports", exports.len());
+    trace!(exports = exports.len(), "Finished exporting functions");
 
     Ok((env, exports))
 }
 
 /// Load a module for re-export (export X from Y)
+#[instrument(skip(export_stmt, current_file, functions, classes, enums), fields(path = ?export_stmt.path.segments))]
 fn load_export_source(
     export_stmt: &ExportUseStmt,
     current_file: Option<&Path>,
@@ -584,12 +595,12 @@ fn load_export_source(
     classes: &mut HashMap<String, ClassDef>,
     enums: &mut Enums,
 ) -> Result<HashMap<String, Value>, CompileError> {
-    debug_import!("load_export_source: path={:?}, target={:?}", export_stmt.path.segments, export_stmt.target);
+    trace!(path = ?export_stmt.path.segments, target = ?export_stmt.target, "Loading export source");
 
     // Skip if path is empty - this happens with bare exports like `export X`
     // which mark local symbols for export, not re-exports from other modules
     if export_stmt.path.segments.is_empty() {
-        debug_import!("Skipping export with empty path (bare export)");
+        trace!("Skipping export with empty path (bare export)");
         return Ok(HashMap::new());
     }
 
@@ -604,7 +615,7 @@ fn load_export_source(
         Ok(Value::Dict(dict)) => Ok(dict),
         Ok(_) => Ok(HashMap::new()),
         Err(e) => {
-            debug_import!("load_export_source error: {}", e);
+            warn!(error = %e, "Failed to load export source");
             Ok(HashMap::new())
         }
     }

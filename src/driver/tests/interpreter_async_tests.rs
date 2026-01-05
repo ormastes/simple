@@ -155,41 +155,34 @@ main = compute(21)
 }
 
 #[test]
-fn interpreter_async_blocks_print() {
-    // async fn cannot use print (blocking I/O)
+fn interpreter_async_allows_print() {
+    // async fn CAN use print (async-compatible I/O)
+    // Print is async-aware and doesn't block the async runtime
     let code = r#"
 extern fn print(msg)
 
-async fn bad():
+async fn greet():
     print("hello")
-    return 0
+    return 42
 
-main = bad()
+main = greet()
 "#;
-    let result = run_code(code, &[], "");
-    assert!(result.is_err(), "Expected error but got: {:?}", result);
-    let err = result.unwrap_err();
-    assert!(
-        err.contains("blocking operation 'print' not allowed in async function"),
-        "Error: {}",
-        err
-    );
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
 }
 
 #[test]
-fn interpreter_async_blocks_await() {
-    // async fn cannot use await
+fn interpreter_async_allows_await() {
+    // async fn CAN use await - that's the whole point of async!
     let code = r#"
-async fn bad():
+async fn compute():
     let f = future(42)
     return await f
 
-main = bad()
+main = compute()
 "#;
-    let result = run_code(code, &[], "");
-    assert!(result.is_err());
-    let err = result.unwrap_err();
-    assert!(err.contains("blocking operation 'await' not allowed in async function"));
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
 }
 
 #[test]

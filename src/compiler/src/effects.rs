@@ -11,16 +11,12 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 /// Operations that are considered "blocking" and not allowed in @async functions
+/// Note: await is NOT blocking in async - it yields control. Only truly blocking ops here.
 const BLOCKING_OPERATIONS: &[&str] = &[
-    "recv",      // Blocking receive from channel
-    "join",      // Blocking wait for actor/future
-    "await",     // Blocking await (in this context)
-    "sleep",     // Thread sleep
-    "read_file", // File I/O
-    "write_file",
-    "print", // I/O operations
-    "println",
-    "input", // User input
+    "recv_blocking", // Blocking receive from channel (sync version)
+    "join_blocking", // Blocking wait for actor/future (sync version)
+    "sleep_blocking", // Thread sleep (sync version)
+    // Note: await, print, read_file etc are OK in async - they're async-aware
 ];
 
 /// Operations that require @io effect (console I/O)

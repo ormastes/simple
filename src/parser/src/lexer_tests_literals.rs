@@ -186,6 +186,70 @@ fn test_triple_quoted_strings() {
 }
 
 #[test]
+fn test_triple_fstring_literals() {
+    use crate::token::FStringToken;
+    // Triple-quoted f-strings support interpolation and multi-line
+    assert_eq!(
+        tokenize(r#"f"""hello""""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("hello".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    // Interpolation in triple-quoted f-strings
+    assert_eq!(
+        tokenize(r#"f"""hello {name}""""#),
+        vec![
+            TokenKind::FString(vec![
+                FStringToken::Literal("hello ".to_string()),
+                FStringToken::Expr("name".to_string()),
+            ]),
+            TokenKind::Eof
+        ]
+    );
+    // Multi-line triple-quoted f-strings
+    assert_eq!(
+        tokenize("f\"\"\"line1\nline2\"\"\""),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("line1\nline2".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    // Multi-line f-string with interpolation
+    assert_eq!(
+        tokenize("f\"\"\"Hello {name}!\nWelcome!\"\"\""),
+        vec![
+            TokenKind::FString(vec![
+                FStringToken::Literal("Hello ".to_string()),
+                FStringToken::Expr("name".to_string()),
+                FStringToken::Literal("!\nWelcome!".to_string()),
+            ]),
+            TokenKind::Eof
+        ]
+    );
+    // Double quotes inside triple f-string
+    assert_eq!(
+        tokenize(r#"f"""He said "hello""""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("He said \"hello".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    // Escaped braces in triple f-string
+    assert_eq!(
+        tokenize(r#"f"""JSON: {{"key": {value}}}""""#),
+        vec![
+            TokenKind::FString(vec![
+                FStringToken::Literal("JSON: {\"key\": ".to_string()),
+                FStringToken::Expr("value".to_string()),
+                FStringToken::Literal("}".to_string()),
+            ]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
 fn test_interpolated_strings() {
     use crate::token::FStringToken;
     // Test interpolation in double-quoted strings

@@ -1,0 +1,296 @@
+# Symbol Table Cross-Reference Tests
+
+import std.spec
+use mcp.simple_lang.symbol_table.*
+
+describe "RefKind":
+    it "has all reference types":
+        # Test that all RefKind variants exist
+        expect RefKind.Import != RefKind.Call
+        expect RefKind.Call != RefKind.Implements
+        expect RefKind.Implements != RefKind.Inherits
+        expect RefKind.Inherits != RefKind.Uses
+        expect RefKind.Uses != RefKind.Instantiates
+        expect RefKind.Instantiates != RefKind.Overrides
+
+    it "converts to string":
+        expect RefKind.Import.to_string() == "import"
+        expect RefKind.Call.to_string() == "call"
+        expect RefKind.Implements.to_string() == "implements"
+        expect RefKind.Inherits.to_string() == "inherits"
+        expect RefKind.Uses.to_string() == "uses"
+        expect RefKind.Instantiates.to_string() == "instantiates"
+        expect RefKind.Overrides.to_string() == "overrides"
+
+describe "SourceLocation":
+    it "creates location with file, line, column":
+        loc = SourceLocation.new("test.spl", 10, 5)
+        expect loc.file == "test.spl"
+        expect loc.line == 10
+        expect loc.column == 5
+
+    it "formats as string":
+        loc = SourceLocation.new("src/main.spl", 42, 8)
+        expect loc.to_string() == "src/main.spl:42:8"
+
+describe "Reference":
+    it "creates reference between symbols":
+        loc = SourceLocation.new("a.spl", 1, 0)
+        ref = Reference.new("module.func_a", "module.func_b", RefKind.Call, loc)
+        expect ref.from_symbol == "module.func_a"
+        expect ref.to_symbol == "module.func_b"
+        expect ref.kind == RefKind.Call
+
+    it "formats as readable string":
+        loc = SourceLocation.new("test.spl", 5, 0)
+        ref = Reference.new("Main", "Helper", RefKind.Uses, loc)
+        result = ref.to_string()
+        expect result.contains("Main")
+        expect result.contains("Helper")
+        expect result.contains("uses")
+
+describe "QualifiedSymbol":
+    it "creates symbol with module path":
+        sym = Symbol.new(SymbolKind.Function, "parse", Visibility.Public)
+        qsym = QualifiedSymbol.new("parser.core", sym)
+        expect qsym.module_path == "parser.core"
+        expect qsym.symbol.name == "parse"
+
+    it "generates fully qualified name":
+        sym = Symbol.new(SymbolKind.Class, "Parser", Visibility.Public)
+        qsym = QualifiedSymbol.new("mcp.simple_lang", sym)
+        expect qsym.fully_qualified_name() == "mcp.simple_lang.Parser"
+
+    it "includes parent in qualified name for methods":
+        sym = Symbol.new(SymbolKind.Method, "parse_class", Visibility.Public)
+        qsym = QualifiedSymbol.with_parent("mcp", sym, "Parser")
+        expect qsym.fully_qualified_name() == "mcp.Parser.parse_class"
+
+describe "SymbolTable":
+    context "basic operations":
+        it "creates empty symbol table":
+            table = SymbolTable.new()
+            expect table.symbols.len() == 0
+            expect table.references.len() == 0
+
+        it "adds symbols":
+            table = SymbolTable.new()
+            sym = Symbol.new(SymbolKind.Class, "MyClass", Visibility.Public)
+            qsym = QualifiedSymbol.new("test.module", sym)
+            table.add_symbol(qsym)
+            expect table.symbols.len() == 1
+
+        it "adds references":
+            table = SymbolTable.new()
+            table.add_ref("module.A", "module.B", RefKind.Call, "test.spl", 10)
+            expect table.references.len() == 1
+
+        it "gets symbol by fully qualified name":
+            table = SymbolTable.new()
+            sym = Symbol.new(SymbolKind.Function, "helper", Visibility.Private)
+            qsym = QualifiedSymbol.new("utils", sym)
+            table.add_symbol(qsym)
+
+            result = table.get_symbol("utils.helper")
+            match result:
+                Some(s):
+                    expect s.symbol.name == "helper"
+                None:
+                    expect false
+
+    context "find_references":
+        it "finds all references to a symbol":
+            table = SymbolTable.new()
+            table.add_ref("a.func1", "b.Target", RefKind.Call, "a.spl", 1)
+            table.add_ref("c.func2", "b.Target", RefKind.Call, "c.spl", 5)
+            table.add_ref("a.func1", "d.Other", RefKind.Call, "a.spl", 2)
+
+            refs = table.find_references("b.Target")
+            expect refs.len() == 2
+
+        it "finds outgoing references from a symbol":
+            table = SymbolTable.new()
+            table.add_ref("a.main", "b.helper", RefKind.Call, "a.spl", 1)
+            table.add_ref("a.main", "c.util", RefKind.Call, "a.spl", 2)
+            table.add_ref("other.x", "d.y", RefKind.Call, "other.spl", 3)
+
+            refs = table.find_outgoing_references("a.main")
+            expect refs.len() == 2
+
+    context "find_implementations":
+        it "finds all implementations of a trait":
+            table = SymbolTable.new()
+
+            # Add implementing types
+            sym1 = Symbol.new(SymbolKind.Class, "JsonSerializer", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("json", sym1))
+
+            sym2 = Symbol.new(SymbolKind.Class, "XmlSerializer", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("xml", sym2))
+
+            # Add impl references
+            table.add_ref("json.JsonSerializer", "Serializer", RefKind.Implements, "json.spl", 1)
+            table.add_ref("xml.XmlSerializer", "Serializer", RefKind.Implements, "xml.spl", 1)
+
+            impls = table.find_implementations("Serializer")
+            expect impls.len() == 2
+
+    context "find_subclasses":
+        it "finds all subclasses of a class":
+            table = SymbolTable.new()
+
+            # Add child classes
+            sym1 = Symbol.new(SymbolKind.Class, "Cat", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("animals", sym1))
+
+            sym2 = Symbol.new(SymbolKind.Class, "Dog", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("animals", sym2))
+
+            # Add inheritance references
+            table.add_ref("animals.Cat", "animals.Animal", RefKind.Inherits, "animals.spl", 1)
+            table.add_ref("animals.Dog", "animals.Animal", RefKind.Inherits, "animals.spl", 5)
+
+            subs = table.find_subclasses("animals.Animal")
+            expect subs.len() == 2
+
+    context "call graph":
+        it "builds call graph":
+            table = SymbolTable.new()
+            table.add_ref("main", "helper", RefKind.Call, "main.spl", 1)
+            table.add_ref("main", "util", RefKind.Call, "main.spl", 2)
+            table.add_ref("helper", "util", RefKind.Call, "helper.spl", 1)
+
+            graph = table.build_call_graph()
+            expect graph.contains("main")
+            expect graph.get("main").len() == 2
+
+        it "builds reverse call graph":
+            table = SymbolTable.new()
+            table.add_ref("a", "target", RefKind.Call, "a.spl", 1)
+            table.add_ref("b", "target", RefKind.Call, "b.spl", 1)
+            table.add_ref("c", "other", RefKind.Call, "c.spl", 1)
+
+            graph = table.build_reverse_call_graph()
+            expect graph.contains("target")
+            expect graph.get("target").len() == 2
+
+    context "inheritance chain":
+        it "gets inheritance chain":
+            table = SymbolTable.new()
+            table.add_ref("C", "B", RefKind.Inherits, "c.spl", 1)
+            table.add_ref("B", "A", RefKind.Inherits, "b.spl", 1)
+
+            chain = table.get_inheritance_chain("C")
+            expect chain.len() == 3
+            expect chain[0] == "C"
+            expect chain[1] == "B"
+            expect chain[2] == "A"
+
+    context "filtering":
+        it "gets symbols by kind":
+            table = SymbolTable.new()
+
+            sym1 = Symbol.new(SymbolKind.Class, "MyClass", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("mod", sym1))
+
+            sym2 = Symbol.new(SymbolKind.Function, "my_func", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("mod", sym2))
+
+            sym3 = Symbol.new(SymbolKind.Class, "OtherClass", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("mod", sym3))
+
+            classes = table.get_symbols_by_kind(SymbolKind.Class)
+            expect classes.len() == 2
+
+            funcs = table.get_symbols_by_kind(SymbolKind.Function)
+            expect funcs.len() == 1
+
+        it "gets public symbols only":
+            table = SymbolTable.new()
+
+            sym1 = Symbol.new(SymbolKind.Function, "public_fn", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("mod", sym1))
+
+            sym2 = Symbol.new(SymbolKind.Function, "private_fn", Visibility.Private)
+            table.add_symbol(QualifiedSymbol.new("mod", sym2))
+
+            pub_syms = table.get_public_symbols()
+            expect pub_syms.len() == 1
+            expect pub_syms[0].symbol.name == "public_fn"
+
+    context "statistics":
+        it "returns symbol table stats":
+            table = SymbolTable.new()
+
+            sym1 = Symbol.new(SymbolKind.Class, "A", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("mod", sym1))
+
+            sym2 = Symbol.new(SymbolKind.Function, "b", Visibility.Public)
+            table.add_symbol(QualifiedSymbol.new("mod", sym2))
+
+            table.add_ref("mod.A", "mod.b", RefKind.Call, "mod.spl", 1)
+            table.add_ref("mod", "other", RefKind.Import, "mod.spl", 1)
+
+            stats = table.stats()
+            expect stats.get("total_symbols") == 2
+            expect stats.get("total_references") == 2
+            expect stats.get("classes") == 1
+            expect stats.get("functions") == 1
+            expect stats.get("call_refs") == 1
+            expect stats.get("import_refs") == 1
+
+describe "Reference Extraction":
+    it "extracts import references":
+        source = "import core.json\nuse std.spec.*"
+        refs = extract_references(source, "test.module", [])
+
+        expect refs.len() == 2
+        expect refs[0].kind == RefKind.Import
+        expect refs[0].to_symbol == "core.json"
+        expect refs[1].to_symbol == "std.spec"
+
+    it "extracts inheritance references":
+        source = "class Child(Parent):\n    pass"
+        refs = extract_references(source, "test.module", [])
+
+        # Should find the inheritance reference
+        found_inherits = false
+        for ref in refs:
+            if ref.kind == RefKind.Inherits:
+                expect ref.to_symbol == "Parent"
+                found_inherits = true
+        expect found_inherits
+
+    it "extracts impl references":
+        source = "impl Serializer for JsonParser:\n    pass"
+        refs = extract_references(source, "test.module", [])
+
+        found_impl = false
+        for ref in refs:
+            if ref.kind == RefKind.Implements:
+                expect ref.to_symbol == "Serializer"
+                found_impl = true
+        expect found_impl
+
+describe "build_symbol_table":
+    it "builds table from file contexts":
+        source1 = "pub class Parser:\n    pass"
+        source2 = "import parser\n\npub fn use_parser():\n    pass"
+
+        ctx1 = FileContext.new("parser.spl", source1)
+        ctx1.symbols = parse_file(source1)
+
+        ctx2 = FileContext.new("main.spl", source2)
+        ctx2.symbols = parse_file(source2)
+
+        table = build_symbol_table([ctx1, ctx2])
+
+        # Should have symbols from both files
+        expect table.symbols.len() >= 2
+
+        # Should have import reference
+        import_found = false
+        for ref in table.references:
+            if ref.kind == RefKind.Import:
+                import_found = true
+        expect import_found

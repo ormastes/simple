@@ -229,13 +229,24 @@ pub(crate) fn call_extern_function(
         // =====================================================================
         // Native Filesystem Operations (simple/std_lib/src/host/async_nogc/io/fs.spl)
         // =====================================================================
+        "native_fs_exists" => {
+            native_fs_exists(&evaluated)
+        }
         "native_fs_read" => {
             check_effect_violations("native_fs_read")?;
             native_fs_read(&evaluated)
         }
+        "native_fs_read_string" => {
+            check_effect_violations("native_fs_read_string")?;
+            native_fs_read_string(&evaluated)
+        }
         "native_fs_write" => {
             check_effect_violations("native_fs_write")?;
             native_fs_write(&evaluated)
+        }
+        "native_fs_write_string" => {
+            check_effect_violations("native_fs_write_string")?;
+            native_fs_write_string(&evaluated)
         }
         "native_fs_append" => {
             check_effect_violations("native_fs_append")?;

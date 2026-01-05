@@ -43,12 +43,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Peek through newlines to check if the next meaningful token matches.
-    /// Used for multi-line method chaining: obj.method()\n.another()
-    /// Only peeks through NEWLINE (NOT INDENT/DEDENT) to preserve indentation structure.
+    /// Used for multi-line method chaining:
+    ///   - obj.method()\n.another()  (dot at same indentation level)
+    ///
+    /// Peeks through NEWLINE and INDENT tokens to find if a specific token follows.
+    /// Used for multi-line method chaining where we need to see if a dot follows
+    /// after newlines and indentation.
     pub(crate) fn peek_through_newlines_and_indents_is(&mut self, kind: &TokenKind) -> bool {
-        // Count how many NEWLINE tokens are at current position
-        // We don't actually consume anything - just peek ahead using pending_tokens buffer
-
         let mut lookahead_pos = 0;
 
         // Look through existing pending_tokens and buffer more from lexer if needed
@@ -65,13 +66,19 @@ impl<'a> Parser<'a> {
                 self.pending_tokens.back().unwrap()
             };
 
-            // Only skip through NEWLINE tokens, not INDENT/DEDENT
-            // This preserves indentation structure for block parsing
-            if matches!(token.kind, TokenKind::Newline) {
-                lookahead_pos += 1;
-            } else {
-                // Found non-NEWLINE token - check if it's what we want
-                return std::mem::discriminant(&token.kind) == std::mem::discriminant(kind);
+            match &token.kind {
+                // Skip through NEWLINE and INDENT tokens for method chaining
+                TokenKind::Newline | TokenKind::Indent => {
+                    lookahead_pos += 1;
+                }
+                // DEDENT signals end of indented block - stop here
+                TokenKind::Dedent => {
+                    return false;
+                }
+                // Found a meaningful token - check if it's what we want
+                _ => {
+                    return std::mem::discriminant(&token.kind) == std::mem::discriminant(kind);
+                }
             }
 
             // Safety limit to prevent infinite loops
@@ -81,12 +88,36 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Skip through newlines when we've confirmed a dot follows.
-    /// Used for multi-line method chaining: obj.method()\n.another()
+    /// Skip through newlines and indents when we've confirmed a dot follows.
+    /// Used for multi-line method chaining.
     /// Call this AFTER peek_through_newlines_and_indents_is returns true.
-    pub(crate) fn skip_newlines_and_indents_for_method_chain(&mut self) {
-        while matches!(self.current.kind, TokenKind::Newline) {
+    /// Returns the number of INDENT tokens skipped (need to consume matching DEDENTs later).
+    pub(crate) fn skip_newlines_and_indents_for_method_chain(&mut self) -> usize {
+        let mut indent_count = 0;
+        while matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+            if matches!(self.current.kind, TokenKind::Indent) {
+                indent_count += 1;
+            }
             self.advance();
+        }
+        indent_count
+    }
+
+    /// Consume DEDENT tokens to balance INDENTs consumed during method chaining.
+    /// Also skips NEWLINEs before DEDENTs since they often appear between.
+    pub(crate) fn consume_dedents_for_method_chain(&mut self, count: usize) {
+        let mut remaining = count;
+        while remaining > 0 {
+            match &self.current.kind {
+                TokenKind::Newline => {
+                    self.advance();
+                }
+                TokenKind::Dedent => {
+                    self.advance();
+                    remaining -= 1;
+                }
+                _ => break,
+            }
         }
     }
 
@@ -198,6 +229,8 @@ impl<'a> Parser<'a> {
             TokenKind::Context => "context".to_string(),
             // Allow 'default' to be used as trait name (e.g., Default trait)
             TokenKind::Default => "Default".to_string(),
+            // Allow 'common' to be used as identifier (directory name in stdlib)
+            TokenKind::Common => "common".to_string(),
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -276,6 +309,7 @@ impl<'a> Parser<'a> {
             TokenKind::AndThen => "and_then",  // Allow "and_then" in export statements
             TokenKind::Examples => "examples",  // Allow "examples" in export statements
             TokenKind::Outline => "outline",  // Allow "outline" in export statements
+            TokenKind::Common => "common",  // Allow "common" in paths (stdlib directory name)
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
@@ -354,6 +388,10 @@ impl<'a> Parser<'a> {
             TokenKind::Given => "given",
             TokenKind::When => "when",
             TokenKind::Then => "then",
+            // Allow 'from' as method name (e.g., FilePath::from(path))
+            TokenKind::From => "from",
+            // Allow 'common' as method/field name (e.g., obj.common)
+            TokenKind::Common => "common",
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
