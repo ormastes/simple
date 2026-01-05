@@ -124,3 +124,33 @@ fn test_double_slash_still_floor_div() {
     );
 }
 
+#[test]
+fn test_triple_slash_multiline_doc_block() {
+    // ///.../// is a multi-line doc block
+    // First, let's just test what tokens are produced
+    let tokens = tokenize("///\nHello\n///\nx");
+    eprintln!("Tokens: {:#?}", tokens);
+    assert_eq!(
+        tokens,
+        vec![
+            TokenKind::DocComment("Hello".to_string()),
+            TokenKind::Identifier("x".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
+fn test_triple_slash_multiline_with_import() {
+    // ///.../// before import should work
+    assert_eq!(
+        tokenize("///\nModule docs\n///\nimport foo"),
+        vec![
+            TokenKind::DocComment("Module docs".to_string()),
+            TokenKind::Import,
+            TokenKind::Identifier("foo".to_string()),
+            TokenKind::Eof,
+        ]
+    );
+}
+

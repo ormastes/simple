@@ -130,9 +130,7 @@ impl<'a> super::Lexer<'a> {
         start_line: usize,
         start_column: usize,
     ) -> Token {
-        // Read doc comment content until end of line
-        let mut content = String::new();
-        // Skip leading whitespace after ##
+        // Skip leading whitespace after ///
         while let Some(ch) = self.peek() {
             if ch == ' ' || ch == '\t' {
                 self.advance();
@@ -140,7 +138,15 @@ impl<'a> super::Lexer<'a> {
                 break;
             }
         }
-        // Read until newline
+
+        // Check if this is a multi-line doc block (/// on its own line)
+        if self.peek() == Some('\n') || self.peek().is_none() {
+            // This might be a multi-line doc block opener: ///\n...\n///
+            return self.read_doc_block_triple_slash(start_pos, start_line, start_column);
+        }
+
+        // Single-line doc comment: read until newline
+        let mut content = String::new();
         while let Some(ch) = self.peek() {
             if ch == '\n' {
                 break;
@@ -150,6 +156,115 @@ impl<'a> super::Lexer<'a> {
         }
         Token::new(
             TokenKind::DocComment(content.trim().to_string()),
+            Span::new(start_pos, self.current_pos, start_line, start_column),
+            self.source[start_pos..self.current_pos].to_string(),
+        )
+    }
+
+    /// Read a multi-line doc block delimited by /// on separate lines
+    /// Format:
+    /// ///
+    /// Content line 1
+    /// Content line 2
+    /// ///
+    pub(super) fn read_doc_block_triple_slash(
+        &mut self,
+        start_pos: usize,
+        start_line: usize,
+        start_column: usize,
+    ) -> Token {
+        let mut content = String::new();
+
+        // Consume the opening newline
+        if self.peek() == Some('\n') {
+            self.advance();
+            self.line += 1;
+            self.column = 1;
+        }
+
+        // Read lines until we find a closing ///
+        loop {
+            // Check for closing /// at start of line (with optional leading whitespace)
+            let line_start_pos = self.current_pos;
+            let mut leading_spaces = 0;
+
+            // Skip leading whitespace
+            while self.peek() == Some(' ') || self.peek() == Some('\t') {
+                self.advance();
+                leading_spaces += 1;
+            }
+
+            // Check for ///
+            if self.peek() == Some('/') {
+                self.advance();
+                if self.peek() == Some('/') {
+                    self.advance();
+                    if self.peek() == Some('/') {
+                        self.advance();
+                        // Check that it's /// followed by newline or whitespace then newline or EOF
+                        let mut only_whitespace = true;
+                        while let Some(ch) = self.peek() {
+                            if ch == '\n' || ch == '\r' {
+                                break;
+                            } else if ch != ' ' && ch != '\t' {
+                                only_whitespace = false;
+                                break;
+                            }
+                            self.advance();
+                        }
+                        if only_whitespace {
+                            // Found closing ///, consume the newline if present
+                            if self.peek() == Some('\n') {
+                                self.advance();
+                                self.line += 1;
+                                self.column = 1;
+                            }
+                            break;
+                        } else {
+                            // Not a closing ///, this is content
+                            // Need to include what we consumed as content
+                            content.push_str(&self.source[line_start_pos..self.current_pos]);
+                        }
+                    } else {
+                        // Just // - include as content
+                        content.push_str(&self.source[line_start_pos..self.current_pos]);
+                    }
+                } else {
+                    // Just / - include as content
+                    content.push_str(&self.source[line_start_pos..self.current_pos]);
+                }
+            } else {
+                // Not a /, restore position and read line normally
+                // We need to include the whitespace we skipped
+                if leading_spaces > 0 {
+                    content.push_str(&" ".repeat(leading_spaces));
+                }
+            }
+
+            // Read rest of line
+            while let Some(ch) = self.peek() {
+                if ch == '\n' {
+                    content.push('\n');
+                    self.advance();
+                    self.line += 1;
+                    self.column = 1;
+                    break;
+                }
+                content.push(ch);
+                self.advance();
+            }
+
+            // Check for EOF
+            if self.peek().is_none() {
+                break;
+            }
+        }
+
+        // Trim trailing whitespace from content
+        let trimmed = content.trim().to_string();
+
+        Token::new(
+            TokenKind::DocComment(trimmed),
             Span::new(start_pos, self.current_pos, start_line, start_column),
             self.source[start_pos..self.current_pos].to_string(),
         )

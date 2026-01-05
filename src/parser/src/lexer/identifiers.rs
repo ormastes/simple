@@ -8,6 +8,17 @@ impl<'a> super::Lexer<'a> {
             return self.scan_fstring();
         }
 
+        // Check for raw string: r"..." or r"""..."""
+        if first == 'r' && self.check('"') {
+            self.advance(); // consume the first "
+            // Check for triple-quoted raw string: r"""..."""
+            if self.check('"') && self.check_ahead(1, '"') {
+                return self.scan_triple_quoted_string();
+            }
+            // Single raw string: r"..."
+            return self.scan_raw_double_string();
+        }
+
         // Check for pc{...} pointcut syntax
         if first == 'p' && self.peek() == Some('c') {
             // Peek ahead to see if this is followed by {

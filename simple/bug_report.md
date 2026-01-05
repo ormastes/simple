@@ -1,6 +1,6 @@
 # Bug Reports
 
-## Summary (Updated 2026-01-04)
+## Summary (Updated 2026-01-05)
 
 | Bug | Status | Priority |
 |-----|--------|----------|
@@ -10,7 +10,7 @@
 | File I/O in Standard Library | ✅ FIXED | High |
 | String Methods | ✅ FIXED | Medium |
 | Enum/Union Type Parsing | ✅ FIXED | Critical |
-| Module Import Alias Empty Dict | 🔴 OPEN | High |
+| Module Import Alias Empty Dict | 🔴 OPEN (analyzed) | High |
 | List Concatenation with + | ✅ FIXED | Medium |
 | Static Method `new` Recursion | ✅ FIXED | High |
 | Module Function Export | ✅ FIXED | Catastrophic |
@@ -24,8 +24,10 @@
 | Named Argument Limit | ✅ FIXED | High |
 | `context` Reserved Keyword | ✅ FIXED | High |
 | Multi-line Method Chaining | ✅ FIXED | Medium |
+| Multi-line Doc Comments (///...///) | ✅ FIXED | Medium |
+| Module Import Hangs for core.json | 🔴 OPEN | High |
 
-**Summary:** 17 fixed, 2 open, 1 blocked
+**Summary:** 18 fixed, 3 open, 1 blocked
 
 ---
 
@@ -378,9 +380,40 @@ result = types.make_simple_type("Test")  # Error: method call on unsupported typ
 
 The `gen-lean` command falls back to reading existing Lean files when regeneration fails.
 
+### Root Cause Analysis (2026-01-04)
+
+Investigation revealed multiple issues in the module loading pipeline:
+
+1. **Module Inlining vs. Binding Creation**
+   - `load_module_with_imports` (in `module_loader.rs`) inlines imported module items and REMOVES the `UseStmt` node
+   - When `evaluate_module` runs, the `UseStmt` is no longer present, so no module binding is created
+   - Functions/classes work because they're merged into global scope, but the module namespace binding is never created
+
+2. **Keyword Conflicts in Export Statements**
+   - spec/__init__.spl uses `let` and `mock` as function names in exports
+   - Parser treats these as keywords, causing parse errors when trying to re-parse modules
+   - `export let from dsl` fails because `let` is parsed as the keyword, not identifier
+
+3. **Duplicate Loading and Recursion**
+   - If UseStmt is kept in items, `evaluate_module` tries to reload via `load_and_merge_module`
+   - This causes infinite recursion as modules are loaded repeatedly
+
+**Potential Fix Approaches:**
+
+1. **Pass module exports from loader to evaluator** - Refactor to pass the loaded module's exports dictionary along with items, so `evaluate_module` can create bindings without reloading
+2. **Fix parser to allow contextual keywords** - Allow keywords like `let`, `mock`, `class` as identifiers in export statement contexts
+3. **Cache loaded modules** - Add a module cache to prevent duplicate loading
+
 ### Status
 
-Open - needs investigation in `interpreter_expr.rs` or module loading code.
+🔴 **OPEN** - Requires significant refactoring of module loading pipeline
+
+### Files Involved
+
+- `src/compiler/src/pipeline/module_loader.rs` - `load_module_with_imports` function
+- `src/compiler/src/interpreter_eval.rs` - `Node::UseStmt` handling
+- `src/compiler/src/interpreter_module.rs` - `load_and_merge_module` function
+- `src/parser/src/lexer/identifiers.rs` - Keyword definitions
 
 ## List Concatenation with + Operator Broken
 
@@ -1094,12 +1127,7 @@ Added keywords (`to`, `not_to`, `context`, BDD keywords like `feature`, `scenari
 
 ### Note on `///...///` Syntax
 
-The original bug report mentioned `///...///` as multi-line doc comment delimiters. This syntax is **NOT supported**. Simple uses:
-- `/// text` - Single-line doc comment (content after `///` on same line)
-- `/** ... */` - Block doc comment
-- `"""..."""` - Triple-quoted docstring (for inline documentation)
-
-The `///` on a line by itself is just an empty doc comment, and text on subsequent lines is parsed as code, not documentation.
+The multi-line doc comment syntax (`///...///`) is now **SUPPORTED** as of 2026-01-05. See "Multi-line Doc Comments (///...///)" section below for details.
 
 ### Status
 
@@ -1562,3 +1590,139 @@ For indented method chains, use parentheses or keep dots at same indentation lev
 ### Status
 
 ✅ **FIXED** (2026-01-04)
+
+---
+
+## Multi-line Doc Comments (///...///) ✅ FIXED
+
+### Summary
+Multi-line documentation can now be written using `///` delimiters on separate lines.
+
+**Type:** Feature/Bug Fix
+**Priority:** Medium
+**Discovered:** 2026-01-04
+**Resolved:** 2026-01-05
+**Component:** Lexer (`src/parser/src/lexer/`)
+
+### Description
+
+Previously, `///` doc comments only supported single-line content. A `///` on its own line produced an empty doc comment, and subsequent lines were parsed as code.
+
+### Now Supported
+
+**Multi-line doc block format:**
+```simple
+///
+This is a multi-line
+module documentation block
+///
+
+fn main():
+    print("Hello!")
+```
+
+The content between the opening `///` (followed by newline) and closing `///` is captured as a single `DocComment` token.
+
+### Single-line Format (Still Works)
+
+```simple
+/// This is a single-line doc comment
+fn my_function():
+    pass
+```
+
+### Implementation
+
+Modified both the indentation handler and the regular lexer to detect when `///` is followed by a newline. In this case, it enters multi-line mode and reads all content until a closing `///` is found on its own line.
+
+### Files Changed
+
+- `src/parser/src/lexer/indentation.rs` - Added multi-line detection in `handle_indentation()` for `///` at line start
+- `src/parser/src/lexer/comments.rs` - Added `read_doc_block_triple_slash()` function to parse multi-line content
+- `src/parser/src/lexer_tests_comments.rs` - Added tests for multi-line doc blocks
+
+### Status
+
+✅ **FIXED** (2026-01-05)
+
+---
+
+## Module Import Hangs for core.json
+
+**Type:** Bug
+**Priority:** High
+**Discovered:** 2026-01-05
+**Component:** Interpreter / Module System (`src/compiler/src/interpreter.rs`)
+
+### Description
+
+Importing the `core.json` module causes the interpreter to hang indefinitely. The import statement begins processing but never completes, requiring manual termination.
+
+### Reproduction
+
+```simple
+import core.json
+
+fn test():
+    result = json.parse("42")
+    return 0
+
+main = test()
+```
+
+Run: `timeout 10 ./target/debug/simple /tmp/test_json.spl`
+
+Output:
+```
+[DEBUG] Processing UseStmt: binding_name=json, path=["core"], target=Single("json")
+<hangs indefinitely>
+```
+
+### Expected Behavior
+
+The `core.json` module should load and make `json.parse()`, `json.stringify()`, etc. available for use.
+
+### Actual Behavior
+
+The interpreter enters an infinite loop or blocking state during module resolution. Debug output shows the UseStmt is being processed but never completes.
+
+### Impact
+
+- **BLOCKS** JSON library tests (`simple/std_lib/test/unit/core/json_spec.spl`)
+- **BLOCKS** any code that needs JSON parsing/serialization
+- The JSON library implementation itself is complete and parses correctly standalone
+
+### Module Status
+
+The `core.json` module file itself is valid:
+- `simple/std_lib/src/core/json.spl` parses successfully when run directly
+- Contains complete JSON parser, serializer, and builder API
+- 445 lines of working Simple code
+
+### Root Cause Hypothesis
+
+Likely causes:
+1. **Circular dependency** - json.spl may trigger imports that re-import json
+2. **Module resolver deadlock** - Some lock or state is not properly released
+3. **Infinite recursion in import resolution** - Path resolution loops back on itself
+4. **Generic type handling** - `Dict[String, JsonValue]` or `List[JsonValue]` may cause issues
+
+### Related Issues
+
+- "Module Import Alias Empty Dict" - Similar module loading issues
+- "Module Import Class via Alias" - Module namespace binding problems
+
+### Files Involved
+
+- `src/compiler/src/interpreter.rs` - Module loading entry point
+- `src/compiler/src/pipeline/module_loader.rs` - `load_module_with_imports`
+- `src/compiler/src/interpreter_module.rs` - `load_and_merge_module`
+- `simple/std_lib/src/core/json.spl` - The JSON module itself
+
+### Workaround
+
+None currently. The JSON library cannot be imported as a module. Users must copy-paste the JSON code directly into their files or wait for the bug fix.
+
+### Status
+
+🔴 **OPEN** - Requires investigation of module loading pipeline

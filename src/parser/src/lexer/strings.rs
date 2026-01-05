@@ -24,6 +24,30 @@ impl<'a> super::Lexer<'a> {
         TokenKind::Error("Unterminated raw string".to_string())
     }
 
+    /// Scan a raw double-quoted string: r"..." - no escapes, no interpolation
+    /// Similar to single-quoted strings but with double quotes
+    pub(super) fn scan_raw_double_string(&mut self) -> TokenKind {
+        let mut value = String::new();
+
+        while let Some(ch) = self.peek() {
+            if ch == '"' {
+                self.advance();
+                // Check for unit suffix after closing quote
+                if let Some(suffix) = self.scan_string_unit_suffix() {
+                    return TokenKind::TypedRawString(value, suffix);
+                }
+                return TokenKind::RawString(value);
+            } else if ch == '\n' {
+                return TokenKind::Error("Unterminated raw string".to_string());
+            } else {
+                self.advance();
+                value.push(ch);
+            }
+        }
+
+        TokenKind::Error("Unterminated raw string".to_string())
+    }
+
     /// Check for and consume a unit suffix after a string literal (e.g., _ip, _file)
     /// Returns Some(suffix) if found, None otherwise
     pub(super) fn scan_string_unit_suffix(&mut self) -> Option<String> {
