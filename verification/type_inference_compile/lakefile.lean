@@ -14,3 +14,5 @@ lean_lib GenericsTest
 lean_lib Contracts
 
 lean_lib ContractsTest
+
+lean_lib AsyncEffectInference

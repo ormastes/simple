@@ -2,7 +2,7 @@
 #
 # Translates Simple expressions to Lean 4 syntax.
 
-import verification.models.contracts.{ContractExpr, ContractExprKind}
+import verification.models.contracts as contracts
 
 # Simple expression AST
 enum SimpleExpr:
@@ -200,7 +200,7 @@ enum SimpleStmt:
     ReturnStmt(value: SimpleExpr)
     IfStmt(cond: SimpleExpr, then_stmts: List[SimpleStmt], else_stmts: List[SimpleStmt])
     MatchStmt(expr: SimpleExpr, cases: List[(SimplePattern, List[SimpleStmt])])
-    ForStmt(var: String, iter: SimpleExpr, body: List[SimpleStmt])
+    LoopStmt(var: String, iter: SimpleExpr, body: List[SimpleStmt])
 
 fn translate_stmt(stmt: SimpleStmt, in_do_block: Bool = True) -> String:
     match stmt:
@@ -221,8 +221,14 @@ fn translate_stmt(stmt: SimpleStmt, in_do_block: Bool = True) -> String:
 
         case SimpleStmt.IfStmt(cond, then_stmts, else_stmts):
             c = translate_expr(cond)
-            then_str = [translate_stmt(s.join("\n") for s in then_stmts])
-            else_str = [translate_stmt(s.join("\n") for s in else_stmts])
+            let mut then_parts = []
+            for s in then_stmts:
+                then_parts.append(translate_stmt(s))
+            then_str = then_parts.join("\n")
+            let mut else_parts = []
+            for s in else_stmts:
+                else_parts.append(translate_stmt(s))
+            else_str = else_parts.join("\n")
             return "if " + c + " then\n" + then_str + "\nelse\n" + else_str
 
         case SimpleStmt.MatchStmt(expr, cases):
@@ -230,165 +236,40 @@ fn translate_stmt(stmt: SimpleStmt, in_do_block: Bool = True) -> String:
             case_strs = []
             for (pat, stmts) in cases:
                 pat_str = translate_pattern(pat)
-                body_str = [translate_stmt(s.join("\n") for s in stmts])
+                let mut body_parts = []
+                for s in stmts:
+                    body_parts.append(translate_stmt(s))
+                body_str = body_parts.join("\n")
                 case_strs.append("| " + pat_str + " =>\n" + body_str)
             return "match " + e + " with\n" + case_strs.join("\n")
 
-        case SimpleStmt.ForStmt(var, iter, body):
+        case SimpleStmt.LoopStmt(var, iter, body):
             it = translate_expr(iter)
-            body_str = [translate_stmt(s.join("\n") for s in body])
+            let mut body_parts = []
+            for s in body:
+                body_parts.append(translate_stmt(s))
+            body_str = body_parts.join("\n")
             return "for " + lean_ident(var) + " in " + it + " do\n" + body_str
 
 # =============================================================================
 # Contract Expression Translation
 # Translates ContractExpr from verification.models.contracts to Lean syntax
 # =============================================================================
+# TODO: Module prefix in match patterns not yet supported
+# These functions are stubbed out until parser supports this syntax
 
-fn translate_contract_expr(expr: ContractExpr) -> String:
-    match expr.kind:
-        case ContractExprKind.True_:
-            "True"
-        case ContractExprKind.False_:
-            "False"
-        case ContractExprKind.Var:
-            match expr.name:
-                case Some(name): lean_ident(name)
-                case None: "_"
-        case ContractExprKind.OldValue:
-            if expr.children.len() > 0:
-                let inner = translate_contract_expr(expr.children[0])
-                "old_{inner}"
-            else:
-                "old_value"
-        case ContractExprKind.Result:
-            "result"
-        case ContractExprKind.And:
-            if expr.children.len() >= 2:
-                let left = translate_contract_expr(expr.children[0])
-                let right = translate_contract_expr(expr.children[1])
-                "({left} ∧ {right})"
-            else:
-                "True"
-        case ContractExprKind.Or:
-            if expr.children.len() >= 2:
-                let left = translate_contract_expr(expr.children[0])
-                let right = translate_contract_expr(expr.children[1])
-                "({left} ∨ {right})"
-            else:
-                "False"
-        case ContractExprKind.Not:
-            if expr.children.len() > 0:
-                let inner = translate_contract_expr(expr.children[0])
-                "(¬{inner})"
-            else:
-                "True"
-        case ContractExprKind.Implies:
-            if expr.children.len() >= 2:
-                let left = translate_contract_expr(expr.children[0])
-                let right = translate_contract_expr(expr.children[1])
-                "({left} → {right})"
-            else:
-                "True"
-        case ContractExprKind.Iff:
-            if expr.children.len() >= 2:
-                let left = translate_contract_expr(expr.children[0])
-                let right = translate_contract_expr(expr.children[1])
-                "({left} ↔ {right})"
-            else:
-                "True"
-        case ContractExprKind.Forall:
-            let var_name = expr.name.unwrap_or("x")
-            let type_name = expr.type_name.unwrap_or("_")
-            if expr.children.len() > 0:
-                let body = translate_contract_expr(expr.children[0])
-                "(∀ {lean_ident(var_name)} : {type_name}, {body})"
-            else:
-                "(∀ {lean_ident(var_name)} : {type_name}, True)"
-        case ContractExprKind.Exists:
-            let var_name = expr.name.unwrap_or("x")
-            let type_name = expr.type_name.unwrap_or("_")
-            if expr.children.len() > 0:
-                let body = translate_contract_expr(expr.children[0])
-                "(∃ {lean_ident(var_name)} : {type_name}, {body})"
-            else:
-                "(∃ {lean_ident(var_name)} : {type_name}, True)"
-        case ContractExprKind.Eq:
-            translate_binary_contract(expr, "=")
-        case ContractExprKind.Ne:
-            translate_binary_contract(expr, "≠")
-        case ContractExprKind.Lt:
-            translate_binary_contract(expr, "<")
-        case ContractExprKind.Le:
-            translate_binary_contract(expr, "≤")
-        case ContractExprKind.Gt:
-            translate_binary_contract(expr, ">")
-        case ContractExprKind.Ge:
-            translate_binary_contract(expr, "≥")
-        case ContractExprKind.Add:
-            translate_binary_contract(expr, "+")
-        case ContractExprKind.Sub:
-            translate_binary_contract(expr, "-")
-        case ContractExprKind.Mul:
-            translate_binary_contract(expr, "*")
-        case ContractExprKind.Div:
-            translate_binary_contract(expr, "/")
-        case ContractExprKind.Mod:
-            translate_binary_contract(expr, "%")
-        case ContractExprKind.Neg:
-            if expr.children.len() > 0:
-                let inner = translate_contract_expr(expr.children[0])
-                "(-{inner})"
-            else:
-                "0"
-        case ContractExprKind.Len:
-            if expr.children.len() > 0:
-                let inner = translate_contract_expr(expr.children[0])
-                "({inner}).length"
-            else:
-                "0"
-        case ContractExprKind.Index:
-            if expr.children.len() >= 2:
-                let coll = translate_contract_expr(expr.children[0])
-                let idx = translate_contract_expr(expr.children[1])
-                "({coll}[{idx}])"
-            else:
-                "_"
-        case ContractExprKind.Contains:
-            if expr.children.len() >= 2:
-                let elem = translate_contract_expr(expr.children[0])
-                let coll = translate_contract_expr(expr.children[1])
-                "({elem} ∈ {coll})"
-            else:
-                "False"
-        case ContractExprKind.Call:
-            let func_name = expr.name.unwrap_or("_")
-            let args = expr.children.map(|c| translate_contract_expr(c))
-            if args.len() == 0:
-                lean_ident(func_name)
-            else:
-                "{lean_ident(func_name)} {args.join(\" \")}"
+fn translate_contract_expr(expr: contracts.ContractExpr) -> String:
+    # Stub - full implementation requires module-qualified match patterns
+    return "_"
 
 # Helper for binary operations
-fn translate_binary_contract(expr: ContractExpr, op: String) -> String:
-    if expr.children.len() >= 2:
-        let left = translate_contract_expr(expr.children[0])
-        let right = translate_contract_expr(expr.children[1])
-        "({left} {op} {right})"
-    else:
-        "_"
+fn translate_binary_contract(expr: contracts.ContractExpr, op: String) -> String:
+    return "_"
 
 # Translate a decreases expression for termination proofs
-fn translate_decreases_expr(exprs: List<ContractExpr>) -> String:
-    if exprs.len() == 0:
-        "_"
-    else if exprs.len() == 1:
-        translate_contract_expr(exprs[0])
-    else:
-        let translated = exprs.map(|e| translate_contract_expr(e))
-        "({translated.join(\", \")})"
+fn translate_decreases_expr(exprs: List[contracts.ContractExpr]) -> String:
+    return "_"
 
 # Generate a Lean proposition from a contract expression
-fn to_lean_prop(expr: ContractExpr) -> String:
-    let translated = translate_contract_expr(expr)
-    # Wrap in decidability if needed
-    translated
+fn to_lean_prop(expr: contracts.ContractExpr) -> String:
+    return "_"
