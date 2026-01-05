@@ -6,6 +6,7 @@
 //! - Evaluating module exports
 //! - Merging module definitions into global state
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -24,6 +25,145 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 // Import evaluate_expr from parent module
 use super::evaluate_expr;
 
+/// Maximum depth for recursive module loading to prevent infinite loops
+const MAX_MODULE_DEPTH: usize = 50;
+
+/// Check if debug logging is enabled (set SIMPLE_DEBUG_IMPORTS=1)
+fn debug_imports_enabled() -> bool {
+    std::env::var("SIMPLE_DEBUG_IMPORTS").map(|v| v == "1").unwrap_or(false)
+}
+
+macro_rules! debug_import {
+    ($($arg:tt)*) => {
+        if debug_imports_enabled() {
+            eprintln!("[IMPORT] {}", format!($($arg)*));
+        }
+    };
+}
+
+// Thread-local cache for module exports to avoid re-parsing modules
+// Key: normalized module path, Value: module exports dict
+thread_local! {
+    pub static MODULE_EXPORTS_CACHE: RefCell<HashMap<PathBuf, Value>> = RefCell::new(HashMap::new());
+    // Track modules currently being loaded to prevent circular import infinite recursion
+    pub static MODULES_LOADING: RefCell<std::collections::HashSet<PathBuf>> = RefCell::new(std::collections::HashSet::new());
+    // Track current loading depth to prevent infinite recursion
+    pub static MODULE_LOAD_DEPTH: RefCell<usize> = RefCell::new(0);
+}
+
+/// Clear the module exports cache (useful between test runs)
+pub fn clear_module_cache() {
+    MODULE_EXPORTS_CACHE.with(|cache| cache.borrow_mut().clear());
+    MODULES_LOADING.with(|loading| loading.borrow_mut().clear());
+    MODULE_LOAD_DEPTH.with(|depth| *depth.borrow_mut() = 0);
+}
+
+/// Normalize a path to a consistent key for caching/tracking.
+/// Uses canonicalize if the file exists, otherwise normalizes the path string.
+fn normalize_path_key(path: &Path) -> PathBuf {
+    // First try to canonicalize (works if file exists)
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    // If file doesn't exist yet, normalize the path manually
+    // This handles cases like "./foo/../bar" -> "./bar"
+    let mut components: Vec<std::path::Component> = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                // Go up one level if possible
+                if !components.is_empty() {
+                    if let Some(std::path::Component::Normal(_)) = components.last() {
+                        components.pop();
+                        continue;
+                    }
+                }
+                components.push(component);
+            }
+            std::path::Component::CurDir => {
+                // Skip "." components
+            }
+            _ => components.push(component),
+        }
+    }
+
+    components.iter().collect()
+}
+
+/// Check if a module is currently being loaded (circular import detection)
+fn is_module_loading(path: &Path) -> bool {
+    let key = normalize_path_key(path);
+    MODULES_LOADING.with(|loading| {
+        let result = loading.borrow().contains(&key);
+        debug_import!("is_module_loading({:?}) = {} (set size: {})", key, result, loading.borrow().len());
+        result
+    })
+}
+
+/// Mark a module as currently loading
+fn mark_module_loading(path: &Path) {
+    let key = normalize_path_key(path);
+    debug_import!("mark_module_loading: {:?}", key);
+    MODULES_LOADING.with(|loading| {
+        loading.borrow_mut().insert(key);
+    });
+}
+
+/// Unmark a module as loading (finished loading)
+fn unmark_module_loading(path: &Path) {
+    let key = normalize_path_key(path);
+    debug_import!("unmark_module_loading: {:?}", key);
+    MODULES_LOADING.with(|loading| {
+        loading.borrow_mut().remove(&key);
+    });
+}
+
+/// Increment the module load depth and return the new depth
+fn increment_load_depth() -> usize {
+    MODULE_LOAD_DEPTH.with(|depth| {
+        let mut d = depth.borrow_mut();
+        *d += 1;
+        *d
+    })
+}
+
+/// Decrement the module load depth
+fn decrement_load_depth() {
+    MODULE_LOAD_DEPTH.with(|depth| {
+        let mut d = depth.borrow_mut();
+        if *d > 0 {
+            *d -= 1;
+        }
+    });
+}
+
+/// Get current module load depth
+fn get_load_depth() -> usize {
+    MODULE_LOAD_DEPTH.with(|depth| *depth.borrow())
+}
+
+/// Get cached module exports for a path, if available
+pub fn get_cached_module_exports(path: &Path) -> Option<Value> {
+    let key = normalize_path_key(path);
+    MODULE_EXPORTS_CACHE.with(|cache| {
+        let result = cache.borrow().get(&key).cloned();
+        if result.is_some() {
+            debug_import!("cache hit for: {:?}", key);
+        }
+        result
+    })
+}
+
+/// Cache module exports for a path
+pub fn cache_module_exports(path: &Path, exports: Value) {
+    let key = normalize_path_key(path);
+    debug_import!("caching exports for: {:?}", key);
+    MODULE_EXPORTS_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, exports);
+    });
+}
+
 /// Get the import alias from a UseStmt if it exists
 pub(super) fn get_import_alias(use_stmt: &UseStmt) -> Option<String> {
     match &use_stmt.target {
@@ -41,6 +181,16 @@ pub(super) fn load_and_merge_module(
     classes: &mut HashMap<String, ClassDef>,
     enums: &mut Enums,
 ) -> Result<Value, CompileError> {
+    // Check depth limit to prevent infinite recursion
+    let depth = increment_load_depth();
+    if depth > MAX_MODULE_DEPTH {
+        decrement_load_depth();
+        return Err(CompileError::Runtime(format!(
+            "Maximum module import depth ({}) exceeded. Possible circular import or very deep module hierarchy.",
+            MAX_MODULE_DEPTH
+        )));
+    }
+
     // Build module path from segments (path only, not the import target)
     let mut parts: Vec<String> = use_stmt
         .path
@@ -49,6 +199,8 @@ pub(super) fn load_and_merge_module(
         .filter(|s| s.as_str() != "crate")
         .cloned()
         .collect();
+
+    debug_import!("load_and_merge_module: parts={:?}, target={:?}, depth={}", parts, use_stmt.target, depth);
 
     // Handle the case where path is empty but target contains the module name
     // e.g., `import spec as sp` has path=[], target=Aliased { name: "spec", alias: "sp" }
@@ -65,8 +217,14 @@ pub(super) fn load_and_merge_module(
                 parts.push(name.clone());
                 None // Import whole module (aliased)
             }
-            ImportTarget::Glob => None,
+            ImportTarget::Glob => {
+                // Glob with empty path is invalid - can't do `import *` with no module
+                debug_import!("Glob import with empty path - skipping");
+                decrement_load_depth();
+                return Ok(Value::Dict(HashMap::new()));
+            }
             ImportTarget::Group(_) => {
+                decrement_load_depth();
                 return Ok(Value::Dict(HashMap::new()));
             }
         }
@@ -94,6 +252,7 @@ pub(super) fn load_and_merge_module(
             ImportTarget::Glob => None,
             ImportTarget::Group(_) => {
                 // Group imports need special handling
+                decrement_load_depth();
                 return Ok(Value::Dict(HashMap::new()));
             }
         }
@@ -104,38 +263,86 @@ pub(super) fn load_and_merge_module(
         .and_then(|p| p.parent())
         .unwrap_or(Path::new("."));
 
-    eprintln!("[DEBUG] load_and_merge_module: parts={:?}, base_dir={:?}", parts, base_dir);
-    let module_path = resolve_module_path(&parts, base_dir)?;
-    eprintln!("[DEBUG] resolved module_path={:?}", module_path);
+    let module_path = match resolve_module_path(&parts, base_dir) {
+        Ok(p) => p,
+        Err(e) => {
+            decrement_load_depth();
+            debug_import!("Failed to resolve module: {:?} - {}", parts.join("."), e);
+            return Err(e);
+        }
+    };
+    debug_import!("Resolved module path: {:?} -> {:?}", parts.join("."), module_path);
+
+    // Check cache first - if we've already loaded this module, return cached exports
+    if let Some(cached_exports) = get_cached_module_exports(&module_path) {
+        decrement_load_depth();
+        // If importing a specific item, extract it from cached exports
+        if let Some(item_name) = import_item_name {
+            if let Value::Dict(exports_dict) = &cached_exports {
+                if let Some(value) = exports_dict.get(&item_name) {
+                    return Ok(value.clone());
+                }
+            }
+            return Err(CompileError::Runtime(format!(
+                "Module does not export '{}'",
+                item_name
+            )));
+        }
+        return Ok(cached_exports);
+    }
+
+    // Check for circular import - if this module is currently being loaded,
+    // return an empty dict to break the cycle. The actual exports will be
+    // available after the module finishes loading.
+    if is_module_loading(&module_path) {
+        debug_import!("Circular import detected for: {:?}, returning empty dict", module_path);
+        decrement_load_depth();
+        // Circular import detected - return empty dict as placeholder
+        // This allows the current load to complete, and the cache will be populated
+        return Ok(Value::Dict(HashMap::new()));
+    }
+
+    // Mark this module as currently loading
+    debug_import!("Loading module: {:?} (depth={})", module_path, depth);
+    mark_module_loading(&module_path);
 
     // Read and parse the module
-    let source = fs::read_to_string(&module_path)
-        .map_err(|e| {
-            eprintln!("[DEBUG] Failed to read module: {}", e);
-            CompileError::Io(format!("Cannot read module: {}", e))
-        })?;
+    let source = match fs::read_to_string(&module_path) {
+        Ok(s) => s,
+        Err(e) => {
+            unmark_module_loading(&module_path);
+            decrement_load_depth();
+            return Err(CompileError::Io(format!("Cannot read module {:?}: {}", module_path, e)));
+        }
+    };
 
+    debug_import!("Parsing module: {:?} ({} bytes)", module_path, source.len());
     let mut parser = simple_parser::Parser::new(&source);
-    let module = parser.parse()
-        .map_err(|e| {
-            eprintln!("[DEBUG] Failed to parse module: {}", e);
-            CompileError::Parse(format!("Cannot parse module: {}", e))
-        })?;
+    let module = match parser.parse() {
+        Ok(m) => m,
+        Err(e) => {
+            unmark_module_loading(&module_path);
+            decrement_load_depth();
+            return Err(CompileError::Parse(format!("Cannot parse module {:?}: {}", module_path, e)));
+        }
+    };
 
-    eprintln!("[DEBUG] Calling evaluate_module_exports for {:?}", module_path);
     // Evaluate the module to get its environment (including imports)
-    let (module_env, module_exports) = evaluate_module_exports(
+    debug_import!("Evaluating module exports: {:?}", module_path);
+    let (module_env, module_exports) = match evaluate_module_exports(
         &module.items,
         Some(&module_path),
         functions,
         classes,
         enums,
-    ).map_err(|e| {
-        eprintln!("[DEBUG] Failed to evaluate module: {:?}", e);
-        e
-    })?;
-
-    eprintln!("[DEBUG] module_exports keys: {:?}", module_exports.keys().collect::<Vec<_>>());
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            unmark_module_loading(&module_path);
+            decrement_load_depth();
+            return Err(e);
+        }
+    };
 
     // Create exports with the module's environment captured
     let mut exports: HashMap<String, Value> = HashMap::new();
@@ -155,6 +362,15 @@ pub(super) fn load_and_merge_module(
         }
     }
 
+    // Cache the full module exports for future use
+    let exports_value = Value::Dict(exports.clone());
+    cache_module_exports(&module_path, exports_value);
+
+    // Mark module as done loading
+    unmark_module_loading(&module_path);
+    decrement_load_depth();
+    debug_import!("Successfully loaded module: {:?} ({} exports)", module_path, exports.len());
+
     // If importing a specific item, extract it from exports
     if let Some(item_name) = import_item_name {
         // Look up the specific item in the module's exports
@@ -162,8 +378,8 @@ pub(super) fn load_and_merge_module(
             return Ok(value.clone());
         } else {
             return Err(CompileError::Runtime(format!(
-                "Module does not export '{}'",
-                item_name
+                "Module {:?} does not export '{}'",
+                module_path, item_name
             )));
         }
     }
@@ -331,6 +547,7 @@ pub(super) fn evaluate_module_exports(
 
     // First pass: Add all module functions to env with empty captured_env
     // This allows functions to reference each other
+    debug_import!("First pass: adding {} functions to env", local_functions.len());
     for (name, f) in &local_functions {
         env.insert(name.clone(), Value::Function {
             name: name.clone(),
@@ -341,6 +558,7 @@ pub(super) fn evaluate_module_exports(
 
     // Second pass: Export functions with COMPLETE module environment captured
     // The captured_env now includes globals AND all other functions
+    debug_import!("Second pass: exporting {} functions (env has {} entries)", local_functions.len(), env.len());
     for (name, f) in &local_functions {
         let func_with_env = Value::Function {
             name: name.clone(),
@@ -353,6 +571,7 @@ pub(super) fn evaluate_module_exports(
         // so inter-function calls work correctly
         env.insert(name.clone(), func_with_env);
     }
+    debug_import!("Finished exporting, {} total exports", exports.len());
 
     Ok((env, exports))
 }
@@ -365,6 +584,15 @@ fn load_export_source(
     classes: &mut HashMap<String, ClassDef>,
     enums: &mut Enums,
 ) -> Result<HashMap<String, Value>, CompileError> {
+    debug_import!("load_export_source: path={:?}, target={:?}", export_stmt.path.segments, export_stmt.target);
+
+    // Skip if path is empty - this happens with bare exports like `export X`
+    // which mark local symbols for export, not re-exports from other modules
+    if export_stmt.path.segments.is_empty() {
+        debug_import!("Skipping export with empty path (bare export)");
+        return Ok(HashMap::new());
+    }
+
     // Build a UseStmt to load the source module
     let use_stmt = UseStmt {
         span: export_stmt.span.clone(),
@@ -375,7 +603,10 @@ fn load_export_source(
     match load_and_merge_module(&use_stmt, current_file, functions, classes, enums) {
         Ok(Value::Dict(dict)) => Ok(dict),
         Ok(_) => Ok(HashMap::new()),
-        Err(_) => Ok(HashMap::new()),
+        Err(e) => {
+            debug_import!("load_export_source error: {}", e);
+            Ok(HashMap::new())
+        }
     }
 }
 

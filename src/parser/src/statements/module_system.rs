@@ -222,18 +222,66 @@ impl<'a> Parser<'a> {
                 path,
                 target,
             }))
+        } else if self.check(&TokenKind::LBrace) {
+            // Style 3: export { X, Y, Z } from module (JS-style with braces)
+            self.advance(); // consume '{'
+
+            let mut items = Vec::new();
+            // Skip leading newlines inside braces
+            self.skip_newlines();
+
+            while !self.check(&TokenKind::RBrace) {
+                // Use expect_path_segment to allow keywords like 'let', 'mock' in exports
+                items.push(self.expect_path_segment()?);
+
+                // Skip newlines after item
+                self.skip_newlines();
+
+                if !self.check(&TokenKind::RBrace) {
+                    // Allow trailing comma before closing brace
+                    if self.check(&TokenKind::Comma) {
+                        self.advance();
+                        self.skip_newlines();
+                    }
+                }
+            }
+            self.expect(&TokenKind::RBrace)?;
+
+            // 'from' should follow
+            self.expect(&TokenKind::From)?;
+
+            // Parse module path
+            let module_path = self.parse_module_path()?;
+
+            // Create export use statement with group import
+            let targets: Vec<ImportTarget> = items
+                .into_iter()
+                .map(|name| ImportTarget::Single(name))
+                .collect();
+
+            Ok(Node::ExportUseStmt(ExportUseStmt {
+                span: Span::new(
+                    start_span.start,
+                    self.previous.span.end,
+                    start_span.line,
+                    start_span.column,
+                ),
+                path: module_path,
+                target: ImportTarget::Group(targets),
+            }))
         } else {
             // Two styles:
             // 1. export X, Y, Z from module (with 'from')
             // 2. export X, Y, Z (bare export, no 'from')
 
             // Parse list of identifiers
+            // Use expect_path_segment to allow keywords like 'let', 'mock' in exports
             let mut items = Vec::new();
-            items.push(self.expect_identifier()?);
+            items.push(self.expect_path_segment()?);
 
             while self.check(&TokenKind::Comma) {
                 self.advance(); // consume ','
-                items.push(self.expect_identifier()?);
+                items.push(self.expect_path_segment()?);
             }
 
             // Check if 'from' keyword is present

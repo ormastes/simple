@@ -654,15 +654,20 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     }
                 };
 
+                eprintln!("[DEBUG] Processing UseStmt: binding_name={}, path={:?}, target={:?}",
+                    binding_name, use_stmt.path.segments, use_stmt.target);
+
                 // Try to load the module and merge its definitions into global state
                 match load_and_merge_module(use_stmt, None, &mut functions, &mut classes, &mut enums) {
                     Ok(value) => {
+                        eprintln!("[DEBUG] Module loaded successfully for '{}', value type: {:?}", binding_name, std::mem::discriminant(&value));
                         env.insert(binding_name.clone(), value);
                     }
-                    Err(_e) => {
+                    Err(e) => {
                         // Module loading failed - use empty dict as fallback
                         // This allows the program to continue, with errors appearing
                         // when the module members are accessed
+                        eprintln!("[DEBUG] Module loading failed for '{}': {:?}", binding_name, e);
                         env.insert(binding_name.clone(), Value::Dict(HashMap::new()));
                     }
                 }

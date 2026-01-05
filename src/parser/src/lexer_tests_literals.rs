@@ -109,6 +109,83 @@ fn test_raw_string_literals() {
 }
 
 #[test]
+fn test_raw_double_string_literals() {
+    // r"..." prefix creates raw double-quoted strings (no escapes, no interpolation)
+    assert_eq!(
+        tokenize(r#"r"hello""#),
+        vec![TokenKind::RawString("hello".to_string()), TokenKind::Eof]
+    );
+    // Backslashes are literal in r"..." strings
+    assert_eq!(
+        tokenize(r#"r"hello\nworld""#),
+        vec![
+            TokenKind::RawString("hello\\nworld".to_string()),
+            TokenKind::Eof
+        ]
+    );
+    // Braces are literal in r"..." strings (no interpolation)
+    assert_eq!(
+        tokenize(r#"r"{name}""#),
+        vec![TokenKind::RawString("{name}".to_string()), TokenKind::Eof]
+    );
+    // Escape sequences are not processed
+    assert_eq!(
+        tokenize(r#"r"tab\there""#),
+        vec![
+            TokenKind::RawString("tab\\there".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_raw_triple_string_literals() {
+    // r"""...""" prefix creates raw triple-quoted strings
+    assert_eq!(
+        tokenize(r#"r"""hello""""#),
+        vec![TokenKind::String("hello".to_string()), TokenKind::Eof]
+    );
+    // Multi-line raw triple-quoted strings
+    assert_eq!(
+        tokenize("r\"\"\"line1\nline2\"\"\""),
+        vec![
+            TokenKind::String("line1\nline2".to_string()),
+            TokenKind::Eof
+        ]
+    );
+    // Backslashes are literal in r"""...""" strings
+    assert_eq!(
+        tokenize(r#"r"""hello\nworld""""#),
+        vec![
+            TokenKind::String("hello\\nworld".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_triple_quoted_strings() {
+    // Triple-quoted strings are raw by default (no interpolation)
+    assert_eq!(
+        tokenize(r#""""hello""""#),
+        vec![TokenKind::String("hello".to_string()), TokenKind::Eof]
+    );
+    // Braces are literal in triple-quoted strings
+    assert_eq!(
+        tokenize(r#""""{name}""""#),
+        vec![TokenKind::String("{name}".to_string()), TokenKind::Eof]
+    );
+    // Multi-line triple-quoted strings
+    assert_eq!(
+        tokenize("\"\"\"line1\nline2\"\"\""),
+        vec![
+            TokenKind::String("line1\nline2".to_string()),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
 fn test_interpolated_strings() {
     use crate::token::FStringToken;
     // Test interpolation in double-quoted strings

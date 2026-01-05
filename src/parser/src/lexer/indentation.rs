@@ -144,14 +144,21 @@ impl<'a> super::Lexer<'a> {
                         if self.peek() == Some('/') {
                             // Doc comment /// ...
                             self.advance(); // Consume third '/'
-                            let start_pos = self.current_pos;
-                            let start_line = self.line;
-                            let start_col = self.column;
+                            let start_pos = slash_start;
+                            let start_line = slash_start_line;
+                            let start_col = slash_start_col;
                             // Skip leading whitespace
                             while self.peek() == Some(' ') || self.peek() == Some('\t') {
                                 self.advance();
                             }
-                            // Read to end of line
+
+                            // Check if this is a multi-line doc block (/// on its own line)
+                            if self.peek() == Some('\n') || self.peek().is_none() {
+                                // Multi-line doc block: ///\n...\n///
+                                return Some(self.read_doc_block_triple_slash(start_pos, start_line, start_col));
+                            }
+
+                            // Read to end of line (single-line doc comment)
                             let content_start = self.current_pos;
                             while let Some(c) = self.peek() {
                                 if c == '\n' {
@@ -163,12 +170,12 @@ impl<'a> super::Lexer<'a> {
                             return Some(Token::new(
                                 TokenKind::DocComment(content),
                                 Span::new(
-                                    start_pos - 3,
+                                    start_pos,
                                     self.current_pos,
                                     start_line,
-                                    start_col - 3,
+                                    start_col,
                                 ),
-                                self.source[start_pos - 3..self.current_pos].to_string(),
+                                self.source[start_pos..self.current_pos].to_string(),
                             ));
                         } else {
                             // Double slash // - return DoubleSlash token

@@ -271,6 +271,11 @@ impl<'a> Parser<'a> {
             TokenKind::When => "when",
             TokenKind::Then => "then",
             TokenKind::Old => "old",  // Allow "old" in paths
+            TokenKind::Let => "let",  // Allow "let" in export statements
+            TokenKind::Mock => "mock",  // Allow "mock" in export/path contexts
+            TokenKind::AndThen => "and_then",  // Allow "and_then" in export statements
+            TokenKind::Examples => "examples",  // Allow "examples" in export statements
+            TokenKind::Outline => "outline",  // Allow "outline" in export statements
             _ => {
                 return Err(ParseError::unexpected_token(
                     "identifier",
