@@ -31,11 +31,13 @@
 
 ---
 
-## Advanced Features (8 specs)
+## Advanced Features (10 specs)
 
 | Spec | Status | Feature IDs | Description |
 |------|--------|-------------|-------------|
 | [Concurrency](concurrency.md) | 🔨 | #65-74 | Actors, async/await, futures |
+| [Async Default](async_default.md) | 📝 | #276-285 | Async-by-default, explicit sync |
+| [Suspension Operator](suspension_operator.md) | 📝 | #270-275 | Explicit `~` suspension syntax |
 | [Metaprogramming](metaprogramming.md) | ✅ | #75-84 | Macros, decorators, comprehensions |
 | [Macro System](macro.md) | 🔨 | #400-450 | Advanced macro specification |
 | [Invariants](invariant.md) | 🔨 | #451-470 | Contracts and invariants |
@@ -134,6 +136,11 @@ types.md → units.md → primitive_as_obj.md → data_structures.md
 **Memory Management:**
 ```
 memory.md → capability_effects.md → concurrency.md
+```
+
+**Async/Concurrency:**
+```
+concurrency.md → async_default.md → suspension_operator.md → capability_effects.md
 ```
 
 **Macros:**
@@ -327,7 +334,7 @@ gpu_simd/README.md → gpu_simd/gpu.md → gpu_simd/kernels.md
 ## Total Specifications
 
 - **Core Language:** 9 specs
-- **Advanced Features:** 8 specs
+- **Advanced Features:** 10 specs
 - **Testing & Quality:** 6 specs
 - **Tooling & Development:** 5 specs
 - **Parser Implementation:** 8 specs
@@ -335,9 +342,9 @@ gpu_simd/README.md → gpu_simd/gpu.md → gpu_simd/kernels.md
 - **UI & Interfaces:** 3 specs
 - **Data Formats:** 1 spec
 
-**Total:** 53 specification documents
+**Total:** 55 specification documents
 
 ---
 
-*Last updated: 2025-12-28*
+*Last updated: 2026-01-05*
 *For questions or improvements, see [CLAUDE.md](../../CLAUDE.md)*

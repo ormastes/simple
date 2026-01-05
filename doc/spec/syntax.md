@@ -264,6 +264,37 @@ See [Unit Types](units.md) for the complete specification of string unit types.
 
 Standard arithmetic and comparison operators (`+`, `-`, `*`, `/`, `==`, `!=`, `<`, `>` etc.), logical operators (`and`, `or`, `not`), and the method chaining arrow operator (`->`) are available.
 
+### Suspension Operator (`~`)
+
+The `~` operator marks explicit suspension points for async operations:
+
+| Syntax | Context | Meaning |
+|--------|---------|---------|
+| `x ~= expr` | Assignment | Await `expr` and assign to `x` |
+| `if~ cond:` | Guard | Suspending condition |
+| `while~ cond:` | Guard | Suspending loop condition |
+| `for~ x in iter:` | Loop | Async iterator |
+| `and~`, `or~` | Boolean | Suspending operand |
+| `~+=`, `~-=` | Compound | Suspending modify-assign |
+
+```simple
+# Suspending assignment
+let user ~= fetch_user(id)
+
+# Suspending guard
+if~ is_ready():
+    proceed()
+
+# Suspending loop
+while~ not done():
+    _ ~= timer.sleep(100_ms)
+
+# Discard result
+_ ~= timer.sleep(100_ms)
+```
+
+See [Suspension Operator](suspension_operator.md) for complete specification.
+
 ---
 
 ## Functional Update Syntax (`->`)

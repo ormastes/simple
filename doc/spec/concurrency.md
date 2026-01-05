@@ -620,6 +620,8 @@ See [Unit Types](units.md) for the complete type safety policy.
 
 ## Related Specifications
 
+- [Async Default](async_default.md) - Async-by-default function model
+- [Suspension Operator](suspension_operator.md) - Explicit `~` suspension syntax
 - [Memory and Ownership](memory.md)
 - [Functions](functions.md)
 - [Data Structures](data_structures.md)

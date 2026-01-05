@@ -37,8 +37,9 @@
 | Enum Method `self` Match Fails | 🐛 OPEN | High |
 | String `>=` `<=` Comparison Unsupported | 🔄 WORKAROUND | Medium |
 | Dict `contains()` Method Missing | 🔄 WORKAROUND | Low |
+| Verification Module Reserved Keywords | 🐛 OPEN | High |
 
-**Summary:** 27 fixed, 3 open, 1 investigating, 3 workarounds
+**Summary:** 27 fixed, 4 open, 1 investigating, 3 workarounds
 
 ---
 
@@ -1950,3 +1951,57 @@ d = {"a": 1}
 if d.contains_key("a"):
     print("Has key")
 ```
+
+---
+
+## Verification Module Reserved Keywords 🐛 OPEN
+
+**Type:** Bug
+**Priority:** High
+**Discovered:** 2026-01-05
+**Component:** Parser / Verification Module
+
+### Description
+
+The verification module (`simple/std_lib/src/verification/`) uses several identifiers that are reserved keywords in Simple, causing parse failures when trying to run the regeneration scripts.
+
+Affected files and keywords:
+- `verification/lean/codegen.spl` - Used `requires` as field name (fixed to `preconditions`)
+- `verification/lean/emitter.spl` - Unknown LParen issue
+- `verification/lean/types.spl` - RBracket parse error
+- `verification/lean/expressions.spl` - `For` keyword used as identifier
+- `io/fs.spl` - `Default` keyword used as identifier
+
+### Error Messages
+
+```
+error: parse: Unexpected token: expected identifier, found LParen
+error: parse: Unexpected token: expected Comma, found RBracket
+error: parse: Unexpected token: expected Comma, found For
+error: parse: Unexpected token: expected expression, found Default
+```
+
+### Reproduction
+
+```bash
+./target/debug/simple simple/std_lib/src/verification/test_codegen.spl
+./target/debug/simple simple/std_lib/src/verification/regenerate/__init__.spl
+```
+
+### Expected
+
+The verification regeneration module should run successfully, generating Lean files from Simple sources.
+
+### Actual
+
+Multiple parse errors prevent the verification module from loading.
+
+### Partial Fix Applied
+
+Changed `contract.requires` to `contract.preconditions` and `contract.ensures` to `contract.postconditions` in:
+- `verification/lean/codegen.spl`
+- `verification/models/contracts.spl`
+
+### Remaining Issues
+
+Other files in the verification module still use syntax not supported by the parser.

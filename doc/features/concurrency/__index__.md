@@ -1,4 +1,4 @@
-# Concurrency Features (#40-#43)
+# Concurrency Features (#40-#49)
 
 Async, parallel, and concurrent programming features.
 
@@ -10,10 +10,14 @@ Async, parallel, and concurrent programming features.
 | #41 | [Async/Await](0041_async_await.md) | 4 | Complete | Rust |
 | #42 | [Generators](0042_generators.md) | 4 | Complete | Rust |
 | #43 | [Futures](0043_futures.md) | 3 | Complete | Rust |
+| #44 | [Async Default](0044_async_default.md) | 3 | Planned | Rust |
+| #45 | [Suspension Operator (~)](0045_suspension_operator.md) | 3 | Planned | Rust |
+| #46 | [Effect Inference](0046_effect_inference.md) | 4 | Planned | Rust+Lean |
+| #47 | [Promise Type](0047_promise_type.md) | 3 | Planned | Rust |
 
 ## Summary
 
-**Status:** 3/4 Complete (75%)
+**Status:** 3/8 Complete (37.5%)
 
 ## Test Locations
 

@@ -46,7 +46,27 @@ Simple is statically typed, but it features type inference to reduce verbosity. 
 | Fixed arrays | `[T; N]` | `Array[T, N]` | Fixed-size homogeneous collections |
 | Dictionaries | `{Key: Value}` | `Map[K, V]` | Key-value mappings |
 | Functions | `fn(T1, T2) -> R` | `Fn[Args, R]` | Function types |
+| Sync functions | `sync fn(T1, T2) -> R` | `SyncFn[Args, R]` | Non-suspending functions |
+| Promises | `Promise[T]` | `Promise[T]` | Async computation result |
 | Generics | `List[T]` | - | Parameterized types |
+
+### Promise Type
+
+Async functions implicitly return `Promise[T]` instead of `T`:
+
+```simple
+# Declared return type: User
+# Actual return type: Promise[User]
+fn fetch_user(id: UserId) -> User:
+    let resp ~= http.get("/users/{id}")
+    return parse(resp)
+
+# Using the promise
+let user ~= fetch_user(1_uid)      # user: User (awaited)
+let promise = fetch_user(1_uid)     # promise: Promise[User]
+```
+
+See [Async Default](async_default.md) for complete Promise specification.
 
 **Note:** Primitive syntax like `[]` and `[T; N]` is promoted to full object types. See [Primitive as Object](primitive_as_obj.md) for details.
 

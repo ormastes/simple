@@ -119,13 +119,17 @@ BDD Spec Test (.spl) → FeatureMetadata → Doc Generator → doc/features/{cat
 | `control_flow/match_spec.spl` | #90 Match Expressions | 10 | ✅ |
 | `control_flow/conditionals_spec.spl` | #91 Conditionals | 11 | ✅ |
 
-#### Concurrency (4 specs, 41 tests)
+#### Concurrency (8 specs, 41+ tests)
 | Spec File | Feature | Tests | Status |
 |-----------|---------|-------|--------|
 | `concurrency/actors_spec.spl` | #40 Actors | 8 | ✅ |
 | `concurrency/async_await_spec.spl` | #41 Async/Await | 10 | ✅ |
 | `concurrency/generators_spec.spl` | #42 Generators | 12 | ✅ |
 | `concurrency/futures_spec.spl` | #43 Futures | 11 | ✅ |
+| `concurrency/async_default_spec.spl` | #44 Async Default | 8 | 📋 SKIP |
+| `concurrency/suspension_operator_spec.spl` | #45 Suspension Operator (~) | 13 | 📋 SKIP |
+| `concurrency/effect_inference_spec.spl` | #46 Effect Inference | 12 | 📋 SKIP |
+| `concurrency/promise_type_spec.spl` | #47 Promise Type | 17 | 📋 SKIP |
 
 #### Codegen (5 specs, 58 tests)
 | Spec File | Feature | Tests | Status |
@@ -194,11 +198,11 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 | Language | 9 | 91 |
 | Data Structures | 6 | 73 |
 | Control Flow | 4 | 43 |
-| Concurrency | 4 | 41 |
+| Concurrency | 8 | 91 |
 | Codegen | 5 | 58 |
 | Testing Framework | 7 | 73 |
 | Stdlib | 5 | 75 |
-| **Total** | **56** | **690** |
+| **Total** | **60** | **740** |
 
 ---
 
@@ -249,6 +253,7 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 | #1970-#1999 | Startup Optimization (Argparse + mmap + App Types) | ✅ Complete → [STARTUP_DECORATORS_COMPLETE_2025-12-29.md](../report/STARTUP_DECORATORS_COMPLETE_2025-12-29.md) |
 | #2000-#2049 | 4KB Page Locality (Startup Cache Optimization) | ✅ Complete → [4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md](../report/4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md) |
 | #200-#204 | Stdlib Improvements (JSON, File I/O, Strings, Try) | ✅ Complete → [stdlib/__index__.md](stdlib/__index__.md) |
+| #44-#47 | Async Default & Effect Inference | 📋 Planned → [concurrency/__index__.md](concurrency/__index__.md) |
 
 ---
 

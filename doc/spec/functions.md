@@ -2,6 +2,14 @@
 
 This document covers functions, lambdas, closures, pattern matching, and constructor polymorphism.
 
+## Related Specifications
+
+- [Async Default](async_default.md) - Async-by-default function model
+- [Suspension Operator](suspension_operator.md) - Explicit `~` suspension syntax
+- [Concurrency](concurrency.md) - Futures, actors, channels
+
+---
+
 ## Functions
 
 Functions in Simple are defined with the `fn` keyword. The syntax is inspired by Python's definition style and Rust's explicitness.
@@ -14,6 +22,40 @@ fn add(a: i64, b: i64) -> i64:
 ```
 
 This defines a function `add` that takes two Ints and returns an Int. If the return type can be inferred, it might be optional. If a function does not explicitly return a value, it returns `nil` (unit type).
+
+### Async/Sync Effect Modifiers
+
+Functions have an **inferred async/sync effect** based on their body:
+
+```simple
+# Inferred as SYNC: only pure computation
+fn double(x: i64) -> i64:
+    return x * 2
+
+# Inferred as ASYNC: uses suspension operator
+fn fetch_user(id: UserId) -> User:
+    let user ~= http.get("/users/{id}")
+    return user
+
+# Explicit SYNC: compiler verifies no suspension
+sync fn compute(x: i64) -> i64:
+    return x * x
+
+# Explicit ASYNC: documentation, no behavioral change
+async fn load_data() -> Data:
+    let d ~= read_file(path)
+    return d
+```
+
+**Effect Inference Rules:**
+
+| Body Contains | Inferred Effect | Return Type |
+|---------------|-----------------|-------------|
+| `~=`, `if~`, `while~` | async | `Promise[T]` |
+| Calls to async functions | async | `Promise[T]` |
+| Only sync operations | sync | `T` directly |
+
+See [Async Default](async_default.md) for complete effect inference specification.
 
 ### First-Class Functions
 
