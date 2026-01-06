@@ -464,8 +464,9 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 ## Next Priorities
 
 ### Immediate (Sprint)
-1. **Collection mutation** - Fix Array/List/Dict persistence
-2. **Type annotation scope** - Fix variable accessibility bug
+1. **Multi-Mode Spec Test Execution** (#2050-#2054) - Run tests across interpreter, JIT, SMF backends
+2. **Collection mutation** - Fix Array/List/Dict persistence
+3. **Type annotation scope** - Fix variable accessibility bug
 
 ### Short Term (Month)
 1. ~~SDN implementation (#601-605)~~ ✅ Complete

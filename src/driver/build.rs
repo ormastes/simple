@@ -10,7 +10,7 @@
 
 use std::env;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use walkdir::WalkDir;
 
@@ -91,6 +91,10 @@ fn generate_test_file(test_root: &Path, dest_path: &Path, prefix: &str) {
             }
             // Skip fixture files
             if path.to_string_lossy().contains("fixture") {
+                return false;
+            }
+            // Skip language/ directory (contains unimplemented syntax specs)
+            if path.to_string_lossy().contains("/language/") || path.to_string_lossy().contains("\\language\\") {
                 return false;
             }
             true
