@@ -2,6 +2,41 @@
 
 This directory contains reports documenting completed tasks and maintenance activities.
 
+## 2026-01-06: Actor Reply Compilation Support ✅
+
+**[ACTOR_REPLY_COMPILE_2026-01-06.md](ACTOR_REPLY_COMPILE_2026-01-06.md)**
+
+Implemented full compilation support for the actor `reply` operation. All actor operations (spawn, send, recv, join, reply) are now compilable.
+
+**What Was Implemented:**
+- Runtime FFI function `rt_actor_reply`
+- Complete compilation pipeline: HIR → MIR → Codegen
+- MIR instruction: `ActorReply { message: VReg }`
+- Effect classification: Non-blocking I/O (Effect::Io)
+- Updated compilability to enable reply compilation
+
+**Test Results:**
+- Test with worker actor using reply: Exit code 100 ✅
+- Both debug and release builds working correctly
+
+**Impact:** All actor operations now have native code compilation support, improving performance.
+
+## 2026-01-06: Actor Join Operation Fixed ✅
+
+**[ACTOR_JOIN_FIX_2026-01-06.md](ACTOR_JOIN_FIX_2026-01-06.md)**
+
+Fixed actor `join` operation to return correct success value (1) instead of `nil`. Root cause was in interpreter implementation returning `Value::Nil` instead of `Value::Int(1)` on successful join.
+
+**What Was Fixed:**
+- Changed return value in `src/compiler/src/interpreter_call/builtins.rs` line 120
+- Removed debug eprintln statements from HIR lowering, MIR lowering, and runtime
+
+**Test Results:**
+- Before: Exit code 88 (join returned nil)
+- After: Exit code 77 (join returned 1) ✅
+
+**Related:** See [ACTOR_JOIN_ISSUE_2026-01-06.md](ACTOR_JOIN_ISSUE_2026-01-06.md) for the investigation report.
+
 ## 2026-01-06: Class and Trait Type Inference - PHASES 1-2 COMPLETE! 🎯
 
 **[CLASS_TRAIT_TYPE_INFERENCE_PROGRESS_2026-01-06.md](CLASS_TRAIT_TYPE_INFERENCE_PROGRESS_2026-01-06.md)** 🎯 **TEST-FIRST WITH FORMAL VERIFICATION**
@@ -45,6 +80,96 @@ Implementing comprehensive type inference for classes and traits using test-driv
 **Current Status:** Phase 1-2 complete (2/7), Phase 3 in progress
 **Next Steps:** Fix Lean compilation issues, begin theorem proofs (Phase 4)
 **Expected Timeline:** 14 days remaining (16 days total)
+
+## 2026-01-06: FFI Implementation Status Analysis 🔍
+
+**[FFI_IMPLEMENTATION_STATUS_2026-01-06.md](FFI_IMPLEMENTATION_STATUS_2026-01-06.md)**
+
+**Type:** Technical Analysis & Audit
+**Scope:** Comprehensive audit of all FFI function implementations
+
+**Summary:**
+Complete analysis of FFI function implementation status across the Simple compiler and runtime:
+- **136 functions** declared in `runtime_ffi.rs` but not implemented
+- **25+ locations** with stub/incomplete implementations
+- **130+ functions** implemented but possibly missing from FFI spec
+
+**Critical Findings:**
+1. **Async/Await Broken:** `rt_future_await` is a stub - returns NIL for pending futures
+2. **Async File I/O Incomplete:** No handle registry, all 5 functions stubbed
+3. **SIMD Non-Functional:** All 11 SIMD MIR instructions are stubs returning 0
+4. **Coverage Broken:** All 3 coverage probe types are no-ops
+
+**Missing Function Categories:**
+- Executor (9 functions) - Thread pool async runtime
+- Thread Isolation (9 functions) - OS thread management
+- Parallel Operations (4 functions) - Data parallelism
+- Coverage Instrumentation (7 functions) - MC/DC coverage
+- SIMD Operations (15 functions + 11 codegen stubs)
+- GPU Atomics (33 functions)
+- Network Operations (37 functions - TCP/UDP/HTTP)
+- Doctest Utils (7 functions)
+- AOP Runtime (2 functions)
+
+**Implementation Roadmap:**
+- **Phase 1 (Week 1):** Fix async/await, async file I/O
+- **Phase 2 (Weeks 2-3):** Executor + thread isolation
+- **Phase 3 (Weeks 4-5):** SIMD codegen + parallel ops
+- **Phase 4 (Week 6):** Coverage infrastructure
+- **Phase 5 (Future):** Network, GPU atomics, AOP, Vulkan
+
+**Priority:** 🔴 **CRITICAL** - Blocks async/await, SIMD, testing infrastructure
+
+**Files to Create:**
+- `src/runtime/src/value/executor.rs`
+- `src/runtime/src/value/threads.rs`
+- `src/runtime/src/value/parallel.rs`
+- `src/runtime/src/value/coverage.rs`
+- `src/runtime/src/value/simd.rs`
+- `src/runtime/src/value/network/{tcp,udp,http}.rs`
+- `src/compiler/src/codegen/instr_simd.rs`
+
+**Impact:** Enables async/await, SIMD performance, parallel processing, complete test coverage
+
+## 2026-01-06: Actor Implementation Status Report 🎭
+
+**[ACTOR_IMPLEMENTATION_STATUS_2026-01-06.md](ACTOR_IMPLEMENTATION_STATUS_2026-01-06.md)**
+
+**Type:** Implementation Analysis & Status Report
+**Scope:** Complete analysis of actor implementation across all layers
+
+**Key Findings:**
+- **Three Actor Models Identified:**
+  1. Declarative syntax (`actor Name: on Msg():`) - Parsed only, no codegen
+  2. Functional actors (`spawn(fn)`, `send()`, `recv()`) - ✅ Working in interpreter
+  3. Runtime FFI - ✅ 100% complete
+
+- **Body Outlining Infrastructure:** ✅ 100% Complete
+  - `expand_with_outlined()` creates outlined functions
+  - `get_func_block_addr()` provides function pointers
+  - Capture packaging implemented
+  - Called in compilation pipeline
+
+- **Implementation Status:**
+  - Runtime FFI: 100% (6/6 functions)
+  - Body outlining: 100% complete
+  - Codegen integration: 100% complete
+  - Interpreter: 100% functional
+  - Compiled mode: Infrastructure ready
+  - Declarative syntax: 0% (future work)
+
+**Working Pattern:**
+```simple
+fn worker():
+    return 42
+
+let pid = spawn(worker)  # Works in interpreter
+```
+
+**Test File Created:** `simple/std_lib/test/unit/concurrency/actor_body_spec.spl`
+- 12 spec tests covering spawn, messaging, lifecycle
+
+**Conclusion:** Actor implementation is 95% complete. Functional pattern works today in interpreter mode. Declarative syntax is future work.
 
 ## 2026-01-06: Multi-Mode Spec Test Execution - PLANNED! 🧪
 

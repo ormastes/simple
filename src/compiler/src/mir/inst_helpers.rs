@@ -85,6 +85,7 @@ impl MirInst {
             | MirInst::Await { dest, .. }
             | MirInst::ActorSpawn { dest, .. }
             | MirInst::ActorRecv { dest, .. }
+            | MirInst::ActorJoin { dest, .. }
             | MirInst::GeneratorCreate { dest, .. }
             | MirInst::GeneratorNext { dest, .. }
             | MirInst::TryUnwrap { dest, .. }
@@ -162,6 +163,8 @@ impl MirInst {
             MirInst::ActorSpawn { .. } => vec![],
             MirInst::ActorSend { actor, message } => vec![*actor, *message],
             MirInst::ActorRecv { .. } => vec![],
+            MirInst::ActorJoin { actor, .. } => vec![*actor],
+            MirInst::ActorReply { message } => vec![*message],
             MirInst::GeneratorCreate { .. } => vec![],
             MirInst::Yield { value } => vec![*value],
             MirInst::GeneratorNext { generator, .. } => vec![*generator],

@@ -18,6 +18,7 @@
 //! - 100-111: Reserved for future use
 
 mod actors;
+mod args;
 mod async_gen;
 #[cfg(feature = "ratatui-tui")]
 pub mod ratatui_tui;
@@ -131,6 +132,11 @@ pub use ffi::{
 
 // Re-export interpreter bridge handler setters (for compiler crate)
 pub use ffi::{set_interp_call_handler, set_interp_eval_handler, InterpCallFn, InterpEvalFn};
+
+// Re-export argument handling functions
+pub use args::{
+    rt_clear_args, rt_get_argc, rt_get_args, rt_set_args, rt_set_args_vec,
+};
 
 // Re-export I/O capture functions (for testing)
 pub use ffi::{

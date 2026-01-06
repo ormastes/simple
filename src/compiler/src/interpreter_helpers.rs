@@ -276,14 +276,50 @@ pub(crate) fn spawn_actor_with_expr(
     let mut classes_clone = classes.clone();
     let enums_clone = enums.clone();
     let impls_clone = impl_methods.clone();
+
     let handle = ACTOR_SPAWNER.with(|s| s.spawn(move |inbox, outbox| {
+        // Initialize thread-local EXTERN_FUNCTIONS with prelude functions
+        super::EXTERN_FUNCTIONS.with(|cell| {
+            let mut externs = cell.borrow_mut();
+            externs.clear();
+            for &name in super::interpreter_eval::PRELUDE_EXTERN_FUNCTIONS {
+                externs.insert(name.to_string());
+            }
+        });
+
         let inbox = Arc::new(Mutex::new(inbox));
         ACTOR_INBOX.with(|cell| *cell.borrow_mut() = Some(inbox.clone()));
         ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = Some(outbox.clone()));
-        let _ = evaluate_expr(&expr_clone, &env_clone, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
+
+        // Evaluate the expression to get the function/lambda, then call it
+        match evaluate_expr(&expr_clone, &env_clone, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone) {
+            Ok(value) => {
+                // If it's a function or lambda, call it with no arguments
+                match value {
+                    Value::Function { def, captured_env, .. } => {
+                        let mut local_env = captured_env.clone();
+                        let _ = super::exec_block(&def.body, &mut local_env, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
+                    }
+                    Value::Lambda { body, env: lambda_env, .. } => {
+                        let _ = super::evaluate_expr(&body, &lambda_env, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
+                    }
+                    _ => {
+                        // Not a callable - just ignore
+                    }
+                }
+            }
+            Err(_) => {
+                // Error evaluating - ignore
+            }
+        }
+
         ACTOR_INBOX.with(|cell| *cell.borrow_mut() = None);
         ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
     }));
+
+    // Give the actor thread a moment to start
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
     Value::Actor(handle)
 }
 

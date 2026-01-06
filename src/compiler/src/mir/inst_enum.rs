@@ -538,6 +538,14 @@ pub enum MirInst {
     /// Receive a message from the current actor's mailbox
     ActorRecv { dest: VReg },
 
+    /// Join an actor, waiting for it to complete
+    /// Returns 1 on success, 0 on failure
+    ActorJoin { dest: VReg, actor: VReg },
+
+    /// Reply to parent actor by sending a message
+    /// Returns NIL (void operation)
+    ActorReply { message: VReg },
+
     /// Create a generator
     GeneratorCreate {
         dest: VReg,

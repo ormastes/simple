@@ -648,6 +648,26 @@ pub fn compile_instruction<M: Module>(
             ctx.vreg_values.insert(*dest, result);
         }
 
+        MirInst::ActorJoin { dest, actor } => {
+            let join_id = ctx.runtime_funcs["rt_actor_join"];
+            let join_ref = ctx.module.declare_func_in_func(join_id, builder.func);
+            let actor_val = ctx.vreg_values[actor];
+            let call = builder.ins().call(join_ref, &[actor_val]);
+            let raw_result = builder.inst_results(call)[0];
+            // Convert i64 to RuntimeValue by tagging (shift left 3 bits)
+            let tagged_result = builder.ins().ishl_imm(raw_result, 3);
+            ctx.vreg_values.insert(*dest, tagged_result);
+        }
+
+        MirInst::ActorReply { message } => {
+            let reply_id = ctx.runtime_funcs["rt_actor_reply"];
+            let reply_ref = ctx.module.declare_func_in_func(reply_id, builder.func);
+            let message_val = ctx.vreg_values[message];
+            builder.ins().call(reply_ref, &[message_val]);
+            // Reply returns RuntimeValue (NIL), but we don't need to store it
+            // The result is handled by the ConstNil instruction that follows
+        }
+
         MirInst::GeneratorCreate { dest, body_block } => {
             compile_generator_create(ctx, builder, *dest, *body_block);
         }

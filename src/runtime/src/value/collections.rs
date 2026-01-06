@@ -447,6 +447,12 @@ pub extern "C" fn rt_dict_new(capacity: u64) -> RuntimeValue {
         (*ptr).len = 0;
         (*ptr).capacity = capacity;
 
+        // Initialize all key-value slots to NIL (NIL is not 0!)
+        let data_ptr = ptr.add(1) as *mut RuntimeValue;
+        for i in 0..(capacity * 2) {
+            *data_ptr.add(i as usize) = RuntimeValue::NIL;
+        }
+
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
 }
@@ -458,17 +464,70 @@ pub extern "C" fn rt_dict_len(dict: RuntimeValue) -> i64 {
     unsafe { (*d).len as i64 }
 }
 
-/// Simple hash function for RuntimeValue
+/// Hash function for RuntimeValue (handles strings specially)
 fn hash_value(v: RuntimeValue) -> u64 {
-    // Use the raw bits for hashing
+    // For strings, use the pre-computed hash
+    if v.is_heap() {
+        unsafe {
+            let ptr = v.as_heap_ptr();
+            if (*ptr).object_type == HeapObjectType::String {
+                let str_ptr = ptr as *const RuntimeString;
+                return (*str_ptr).hash;
+            }
+        }
+    }
+
+    // For other types, hash the raw bits
     let bits = v.to_raw();
-    // Simple FNV-1a-like hash
     let mut hash = 0xcbf29ce484222325u64;
     for i in 0..8 {
         hash ^= (bits >> (i * 8)) & 0xff;
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+/// Value-based equality for dictionary keys (handles strings specially)
+fn keys_equal(a: RuntimeValue, b: RuntimeValue) -> bool {
+    // Fast path: same raw value
+    if a == b {
+        return true;
+    }
+
+    // String comparison by content
+    if a.is_heap() && b.is_heap() {
+        unsafe {
+            let ptr_a = a.as_heap_ptr();
+            let ptr_b = b.as_heap_ptr();
+
+            if (*ptr_a).object_type == HeapObjectType::String
+                && (*ptr_b).object_type == HeapObjectType::String
+            {
+                let str_a = ptr_a as *const RuntimeString;
+                let str_b = ptr_b as *const RuntimeString;
+
+                // First check hash (fast reject)
+                if (*str_a).hash != (*str_b).hash {
+                    return false;
+                }
+
+                // Check length
+                let len_a = (*str_a).len;
+                let len_b = (*str_b).len;
+                if len_a != len_b {
+                    return false;
+                }
+
+                // Compare bytes
+                let data_a = (str_a as *const u8).add(std::mem::size_of::<RuntimeString>());
+                let data_b = (str_b as *const u8).add(std::mem::size_of::<RuntimeString>());
+                return std::slice::from_raw_parts(data_a, len_a as usize)
+                    == std::slice::from_raw_parts(data_b, len_b as usize);
+            }
+        }
+    }
+
+    false
 }
 
 /// Get a value from a dictionary by key
@@ -491,7 +550,7 @@ pub extern "C" fn rt_dict_get(dict: RuntimeValue, key: RuntimeValue) -> RuntimeV
             if k.is_nil() {
                 return RuntimeValue::NIL;
             }
-            if k == key {
+            if keys_equal(k, key) {
                 return *data_ptr.add(idx * 2 + 1);
             }
         }
@@ -523,7 +582,7 @@ pub extern "C" fn rt_dict_set(dict: RuntimeValue, key: RuntimeValue, value: Runt
         for i in 0..capacity {
             let idx = ((hash + i) % capacity) as usize;
             let k = *data_ptr.add(idx * 2);
-            if k.is_nil() || k == key {
+            if k.is_nil() || keys_equal(k, key) {
                 if k.is_nil() {
                     (*d).len += 1;
                 }
@@ -806,3 +865,7 @@ pub extern "C" fn rt_contains(collection: RuntimeValue, value: RuntimeValue) -> 
         }
     }
 }
+
+#[cfg(test)]
+#[path = "collection_tests.rs"]
+mod tests;

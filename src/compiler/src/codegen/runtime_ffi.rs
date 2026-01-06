@@ -215,6 +215,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_actor_send", &[I64, I64], &[]),
     RuntimeFuncSpec::new("rt_actor_recv", &[], &[I64]),
     RuntimeFuncSpec::new("rt_actor_join", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_actor_reply", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_actor_id", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_actor_is_alive", &[I64], &[I64]),
     // =========================================================================

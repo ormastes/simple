@@ -463,13 +463,62 @@ pub(super) fn evaluate_module_exports(
                     class_name: c.name.clone(),
                 });
             }
+            Node::Struct(s) => {
+                // Treat structs like classes for export purposes
+                local_classes.insert(s.name.clone(), ClassDef {
+                    span: s.span.clone(),
+                    name: s.name.clone(),
+                    generic_params: vec![],
+                    where_clause: vec![],
+                    fields: s.fields.clone(),
+                    methods: vec![],
+                    parent: None,
+                    visibility: simple_parser::ast::Visibility::Public,
+                    attributes: vec![],
+                    doc_comment: None,
+                    invariant: None,
+                    macro_invocations: vec![],
+                });
+                global_classes.insert(s.name.clone(), ClassDef {
+                    span: s.span.clone(),
+                    name: s.name.clone(),
+                    generic_params: vec![],
+                    where_clause: vec![],
+                    fields: s.fields.clone(),
+                    methods: vec![],
+                    parent: None,
+                    visibility: simple_parser::ast::Visibility::Public,
+                    attributes: vec![],
+                    doc_comment: None,
+                    invariant: None,
+                    macro_invocations: vec![],
+                });
+                exports.insert(s.name.clone(), Value::Constructor {
+                    class_name: s.name.clone(),
+                });
+            }
+            Node::Impl(impl_block) => {
+                // Add impl block methods to the corresponding class/struct
+                // Extract type name from target_type (e.g., Type::Simple("ModeSet"))
+                if let simple_parser::ast::Type::Simple(type_name) = &impl_block.target_type {
+                    if let Some(class_def) = local_classes.get_mut(type_name) {
+                        class_def.methods.extend(impl_block.methods.clone());
+                    }
+                    if let Some(class_def) = global_classes.get_mut(type_name) {
+                        class_def.methods.extend(impl_block.methods.clone());
+                    }
+                }
+            }
             Node::Enum(e) => {
                 local_enums.insert(e.name.clone(), e.clone());
                 global_enums.insert(e.name.clone(), e.clone());
                 // Export enum as EnumType so EnumName.VariantName syntax works
-                exports.insert(e.name.clone(), Value::EnumType {
+                let enum_type = Value::EnumType {
                     enum_name: e.name.clone(),
-                });
+                };
+                exports.insert(e.name.clone(), enum_type.clone());
+                // CRITICAL FIX: Also add to env so it's available in closures
+                env.insert(e.name.clone(), enum_type);
             }
             Node::Macro(m) => {
                 // Register macro in exports with special prefix
@@ -490,9 +539,11 @@ pub(super) fn evaluate_module_exports(
     for (idx, item) in items.iter().enumerate() {
         match item {
             Node::UseStmt(use_stmt) => {
+                eprintln!("DEBUG: Processing import: {:?}", use_stmt.path);
                 // Skip type-only imports at runtime - they're only for compile-time type checking
                 if use_stmt.is_type_only {
                     trace!("Skipping type-only import: {:?}", use_stmt.path);
+                    eprintln!("DEBUG: Skipping type-only import");
                     continue;
                 }
 
@@ -507,6 +558,16 @@ pub(super) fn evaluate_module_exports(
 
                 match load_and_merge_module(use_stmt, module_path, global_functions, global_classes, global_enums) {
                     Ok(value) => {
+                        // Unpack module exports into current namespace
+                        // This allows direct access like: import std.spec; ExecutionMode.Variant
+                        if let Value::Dict(exports) = &value {
+                            eprintln!("DEBUG: Unpacking {} exports from {}", exports.len(), binding_name);
+                            for (name, export_value) in exports {
+                                eprintln!("DEBUG:   - {}", name);
+                                env.insert(name.clone(), export_value.clone());
+                            }
+                        }
+                        // Also keep the module dict under its name for qualified access
                         env.insert(binding_name.clone(), value);
                     }
                     Err(_e) => {
@@ -730,25 +791,36 @@ pub(super) fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<P
         for stdlib_subpath in &["simple/std_lib/src", "std_lib/src"] {
             let stdlib_candidate = current.join(stdlib_subpath);
             if stdlib_candidate.exists() {
-            // Try resolving from stdlib
-            let mut stdlib_path = stdlib_candidate.clone();
-            for part in parts {
-                stdlib_path = stdlib_path.join(part);
-            }
-            stdlib_path.set_extension("spl");
-            if stdlib_path.exists() {
-                return Ok(stdlib_path);
-            }
+            // When importing from stdlib, "std" represents the stdlib root itself, not a subdirectory.
+            // So "import std.spec" should resolve to "std_lib/src/spec/__init__.spl", not "std_lib/src/std/spec/__init__.spl".
+            // Strip the "std" prefix if present.
+            let stdlib_parts: Vec<String> = if parts.len() > 0 && parts[0] == "std" {
+                parts[1..].to_vec()
+            } else {
+                parts.to_vec()
+            };
 
-            // Also try __init__.spl in stdlib
-            let mut stdlib_init_path = stdlib_candidate.clone();
-            for part in parts {
-                stdlib_init_path = stdlib_init_path.join(part);
-            }
-            stdlib_init_path = stdlib_init_path.join("__init__");
-            stdlib_init_path.set_extension("spl");
-            if stdlib_init_path.exists() {
-                return Ok(stdlib_init_path);
+            // Try resolving from stdlib (only if we have parts after stripping "std")
+            if !stdlib_parts.is_empty() {
+                let mut stdlib_path = stdlib_candidate.clone();
+                for part in &stdlib_parts {
+                    stdlib_path = stdlib_path.join(part);
+                }
+                stdlib_path.set_extension("spl");
+                if stdlib_path.exists() {
+                    return Ok(stdlib_path);
+                }
+
+                // Also try __init__.spl in stdlib
+                let mut stdlib_init_path = stdlib_candidate.clone();
+                for part in &stdlib_parts {
+                    stdlib_init_path = stdlib_init_path.join(part);
+                }
+                stdlib_init_path = stdlib_init_path.join("__init__");
+                stdlib_init_path.set_extension("spl");
+                if stdlib_init_path.exists() {
+                    return Ok(stdlib_init_path);
+                }
             }
             }  // End of if stdlib_candidate.exists()
         }  // End of for stdlib_subpath

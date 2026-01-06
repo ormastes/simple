@@ -42,7 +42,10 @@ pub struct RuntimeFuture {
     pub done: u64,
 }
 
-/// Create a new future. Eagerly executes the body and stores result.
+/// Create a new future with lazy execution (executes when awaited).
+///
+/// For eager execution (JavaScript Promise-style), use rt_future_resolve.
+/// For lazy execution (Rust Future-style), the body will execute on first await.
 #[no_mangle]
 pub extern "C" fn rt_future_new(body_func: u64, ctx: RuntimeValue) -> RuntimeValue {
     let size = std::mem::size_of::<RuntimeFuture>();
@@ -55,30 +58,27 @@ pub extern "C" fn rt_future_new(body_func: u64, ctx: RuntimeValue) -> RuntimeVal
         }
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Future, size as u32);
-        (*ptr).state = 0; // pending
+        (*ptr).state = 0; // pending (will execute on await)
         (*ptr).result = RuntimeValue::NIL;
         (*ptr).body_func = body_func;
         (*ptr).async_state = 0; // initial state
         (*ptr).ctx = ctx;
         (*ptr).done = 0;
 
-        // Eagerly execute body if provided and capture return value
-        if body_func != 0 {
-            // Body function signature: fn(ctx: RuntimeValue) -> RuntimeValue
-            let func: extern "C" fn(RuntimeValue) -> RuntimeValue =
-                std::mem::transmute(body_func as usize);
-            let result = func(ctx);
-            (*ptr).state = 1; // ready
-            (*ptr).result = result;
-            (*ptr).done = 1;
-        }
+        // Lazy execution: body_func will be executed when rt_future_await is called
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
 }
 
-/// Await a future. For now, immediately returns NIL (stub).
-/// Full implementation needs async runtime integration.
+/// Await a future, integrating with the global executor.
+///
+/// Behavior depends on execution mode:
+/// - **Threaded mode**: If the future is pending, submit its body_func to the executor
+///   and wait for completion.
+/// - **Manual mode**: If the future is pending, you must call `rt_executor_poll()`
+///   to make progress.
+/// - **Eager mode**: If body_func was already executed in rt_future_new, returns result immediately.
 #[no_mangle]
 pub extern "C" fn rt_future_await(future: RuntimeValue) -> RuntimeValue {
     if !future.is_heap() {
@@ -90,13 +90,51 @@ pub extern "C" fn rt_future_await(future: RuntimeValue) -> RuntimeValue {
         if (*ptr).object_type != HeapObjectType::Future {
             return RuntimeValue::NIL;
         }
-        let f = ptr as *const RuntimeFuture;
+        let f = ptr as *mut RuntimeFuture;
+
+        // If already ready, return the result immediately
         if (*f).state == 1 {
-            // Already ready
             return (*f).result;
         }
-        // Stub: return NIL for pending futures
-        RuntimeValue::NIL
+
+        // Future is pending - need to execute the body
+        if (*f).body_func == 0 {
+            // No body function to execute
+            return RuntimeValue::NIL;
+        }
+
+        // Create a promise to track completion
+        use crate::executor::Promise;
+        let promise = Promise::<RuntimeValue>::new();
+        let promise_clone = promise.clone();
+
+        // Capture the body function and context (copy for thread safety)
+        let body_func = (*f).body_func;
+        let ctx = (*f).ctx;
+
+        // Submit the task to the executor
+        crate::executor::spawn(move || {
+            // Execute the future's body function
+            let func: extern "C" fn(RuntimeValue) -> RuntimeValue =
+                unsafe { std::mem::transmute(body_func) };
+            let result = func(ctx);
+
+            // Resolve the promise with the result
+            promise_clone.resolve(result);
+        });
+
+        // Wait for the promise to resolve (blocks in Threaded mode)
+        let result = match promise.wait() {
+            Ok(result) => result,
+            Err(_) => RuntimeValue::NIL,
+        };
+
+        // Store the result in the future and mark it as ready
+        (*f).state = 1; // ready
+        (*f).result = result;
+        (*f).done = 1;
+
+        result
     }
 }
 
@@ -395,3 +433,11 @@ pub extern "C" fn rt_future_reject(error: RuntimeValue) -> RuntimeValue {
     // A proper implementation would track rejection state separately
     rt_future_resolve(error)
 }
+
+#[cfg(test)]
+#[path = "async_gen_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "generator_tests.rs"]
+mod generator_tests;

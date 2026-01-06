@@ -122,13 +122,15 @@ impl HasEffects for MirInst {
             // Blocking operations
             MirInst::Await { .. }
             | MirInst::ActorRecv { .. }
+            | MirInst::ActorJoin { .. }
             | MirInst::GeneratorNext { .. }
             | MirInst::TryUnwrap { .. } => Effect::Wait,
 
             // Non-blocking I/O
-            MirInst::ActorSpawn { .. } | MirInst::ActorSend { .. } | MirInst::Yield { .. } => {
-                Effect::Io
-            }
+            MirInst::ActorSpawn { .. }
+            | MirInst::ActorSend { .. }
+            | MirInst::ActorReply { .. }
+            | MirInst::Yield { .. } => Effect::Io,
 
             // Interpreter fallback (temporary - will be removed)
             MirInst::InterpCall { .. } | MirInst::InterpEval { .. } => Effect::Io,

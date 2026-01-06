@@ -630,8 +630,54 @@ pub fn runtime_to_value(rv: RuntimeValue) -> Value {
             }
         }
         rt_tags::TAG_HEAP => {
-            // Complex types need decoding - return Nil for now
-            Value::Nil
+            // Decode heap objects
+            use simple_runtime::value::{HeapObjectType, rt_array_len, rt_array_get, rt_string_data, rt_string_len};
+
+            let ptr = rv.as_heap_ptr();
+            if ptr.is_null() {
+                return Value::Nil;
+            }
+
+            // Read heap object type
+            unsafe {
+                let header = ptr.cast::<simple_runtime::value::HeapHeader>();
+                let obj_type = (*header).object_type;
+
+                match obj_type {
+                    HeapObjectType::Array => {
+                        // Decode array
+                        let len = rt_array_len(rv) as usize;
+                        let mut elements = Vec::with_capacity(len);
+
+                        for i in 0..len {
+                            let elem_rv = rt_array_get(rv, i as i64);
+                            let elem_val = runtime_to_value(elem_rv);
+                            elements.push(elem_val);
+                        }
+
+                        Value::Array(elements)
+                    }
+                    HeapObjectType::String => {
+                        // Decode string
+                        let len = rt_string_len(rv) as usize;
+                        let data_ptr = rt_string_data(rv);
+
+                        if data_ptr.is_null() || len == 0 {
+                            Value::Str(String::new())
+                        } else {
+                            let slice = std::slice::from_raw_parts(data_ptr, len);
+                            match std::str::from_utf8(slice) {
+                                Ok(s) => Value::Str(s.to_string()),
+                                Err(_) => Value::Nil,
+                            }
+                        }
+                    }
+                    _ => {
+                        // Other heap types not yet supported
+                        Value::Nil
+                    }
+                }
+            }
         }
         _ => Value::Nil,
     }

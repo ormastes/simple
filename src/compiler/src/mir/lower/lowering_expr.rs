@@ -305,6 +305,35 @@ impl<'a> MirLowerer<'a> {
             }
 
             HirExprKind::BuiltinCall { name, args } => {
+                // Special handling for join
+                if name == "join" && args.len() == 1 {
+                    let actor_reg = self.lower_expr(&args[0])?;
+                    return self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::ActorJoin {
+                            dest,
+                            actor: actor_reg,
+                        });
+                        dest
+                    });
+                }
+
+                // Special handling for reply
+                if name == "reply" && args.len() == 1 {
+                    let message_reg = self.lower_expr(&args[0])?;
+                    return self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::ActorReply {
+                            message: message_reg,
+                        });
+                        // Reply returns nil (represented as 0)
+                        block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                        dest
+                    });
+                }
+
                 // Lower all arguments
                 let mut arg_regs = Vec::new();
                 for arg in args {

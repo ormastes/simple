@@ -495,11 +495,14 @@ pub(crate) fn call_extern_function(
         // System Operations (simple/app/mcp/main.spl)
         // =====================================================================
         "sys_get_args" => {
-            // Get command line arguments passed to the Simple interpreter
-            // The args are stored in a thread-local during execution
-            let args = get_interpreter_args();
-            let list: Vec<Value> = args.iter().map(|s| Value::Str(s.clone())).collect();
-            Ok(Value::Array(list))
+            // Get command line arguments from runtime FFI (unified approach)
+            use simple_runtime::value::rt_get_args;
+            use crate::value_bridge::runtime_to_value;
+
+            let runtime_array = rt_get_args();
+            let value = runtime_to_value(runtime_array);
+
+            Ok(value)
         }
         "sys_exit" => {
             let code = evaluated.first()

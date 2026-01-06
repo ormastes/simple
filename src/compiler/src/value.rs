@@ -77,6 +77,12 @@ pub const BUILTIN_CHANNEL: &str = "Channel";
 /// Spawn function name for actor creation
 pub const BUILTIN_SPAWN: &str = "spawn";
 
+/// Join function name for actor synchronization
+pub const BUILTIN_JOIN: &str = "join";
+
+/// Reply function name for actor message response
+pub const BUILTIN_REPLY: &str = "reply";
+
 /// User-facing Range class name (alias for BUILTIN_RANGE)
 pub const CLASS_RANGE: &str = "Range";
 
