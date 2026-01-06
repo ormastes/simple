@@ -491,3 +491,27 @@ pub fn check(items: &[Node]) -> Result<(), TypeError> {
     let mut checker = TypeChecker::new();
     checker.check_items(items)
 }
+
+//==============================================================================
+// Tests
+//==============================================================================
+
+#[cfg(test)]
+mod class_inference_spec {
+    include!("../tests/class_inference_spec.rs");
+}
+
+#[cfg(test)]
+mod trait_inference_spec {
+    include!("../tests/trait_inference_spec.rs");
+}
+
+#[cfg(test)]
+mod impl_block_spec {
+    include!("../tests/impl_block_spec.rs");
+}
+
+#[cfg(test)]
+mod trait_bounds_spec {
+    include!("../tests/trait_bounds_spec.rs");
+}

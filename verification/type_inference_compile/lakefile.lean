@@ -16,3 +16,9 @@ lean_lib Contracts
 lean_lib ContractsTest
 
 lean_lib AsyncEffectInference
+
+lean_lib Classes
+
+lean_lib Traits
+
+lean_lib ClassTraitIntegration
