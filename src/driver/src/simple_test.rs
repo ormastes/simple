@@ -244,7 +244,8 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
     // Coverage will be collected via interpreter hooks
 
     // Clear module cache to ensure tests don't share stale cached modules
-    clear_module_cache();
+    // DISABLED: Investigating if this causes test failures
+    // clear_module_cache();
 
     // Run the test with output capture, using file path for proper import resolution
     let interpreter = Interpreter::new();
@@ -263,11 +264,16 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
             parse_test_output(file_name, &result.stdout, &result.stderr, duration_ms, result.exit_code)
         }
         Err(error) => {
+            // Try to get any captured output before the error
+            // Note: When run_file returns Err, we don't have access to RunResult
+            // so we can't get stdout. This is a limitation of the current design.
+
             // Check if this is a compile error or runtime error
             if error.contains("parse error")
                 || error.contains("type error")
                 || error.contains("HIR")
                 || error.contains("MIR")
+                || error.contains("semantic:")  // Add semantic errors as compile errors
             {
                 SimpleTestResult::CompileError {
                     file: file_name.to_string(),
@@ -277,7 +283,7 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
                 SimpleTestResult::RuntimeError {
                     file: file_name.to_string(),
                     error,
-                    stdout: String::new(),
+                    stdout: String::new(),  // Can't capture stdout when run_file returns Err
                 }
             }
         }

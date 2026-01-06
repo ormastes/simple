@@ -655,7 +655,9 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 };
 
                 // Try to load the module and merge its definitions into global state
-                match load_and_merge_module(use_stmt, None, &mut functions, &mut classes, &mut enums) {
+                // Use the current file path from thread-local storage for module resolution
+                let current_file = super::get_current_file();
+                match load_and_merge_module(use_stmt, current_file.as_deref(), &mut functions, &mut classes, &mut enums) {
                     Ok(value) => {
                         env.insert(binding_name.clone(), value.clone());
                         // Sync module binding to MODULE_GLOBALS so functions can access it

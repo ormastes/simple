@@ -83,10 +83,12 @@ This directory contains in-depth research documents exploring:
 | [memory_model_sc_drf.md](memory_model_sc_drf.md) | Sequential consistency memory model | Specification |
 | [reference_capabilities_design.md](reference_capabilities_design.md) | Pony-style reference capabilities | Design |
 
-### Language Features (7 documents)
+### Language Features (9 documents)
 
 | Document | Topic | Status |
 |----------|-------|--------|
+| [code_shortening_grammar_analysis.md](code_shortening_grammar_analysis.md) | High-leverage syntax features analysis | Analysis |
+| [statement_container_grammars.md](statement_container_grammars.md) | Cross-language grammar comparison | Research |
 | [aop.md](aop.md) | Aspect-oriented programming | Design |
 | [dependency_injection.md](dependency_injection.md) | DI container design | Design |
 | [metaprogramming_design.md](metaprogramming_design.md) | Macro system architecture | Design |
@@ -186,4 +188,4 @@ When adding new research documents:
 
 ---
 
-**Total:** 43 markdown files + 2 subdirectories
+**Total:** 45 markdown files + 2 subdirectories
