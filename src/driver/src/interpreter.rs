@@ -229,9 +229,9 @@ impl Interpreter {
             rt_capture_stderr_start();
         }
 
-        let exit_code = self.runner.run_file_interpreted(path)?;
+        let exit_code_result = self.runner.run_file_interpreted(path);
 
-        // Stop capture and collect output
+        // Stop capture and collect output BEFORE returning error
         let (stdout, stderr) = if config.capture_output {
             (rt_capture_stdout_stop(), rt_capture_stderr_stop())
         } else {
@@ -240,6 +240,16 @@ impl Interpreter {
 
         // Clear mock stdin
         rt_clear_stdin();
+
+        // Now check for error and include captured output
+        let exit_code = exit_code_result.map_err(|e| {
+            // Include captured output in error message if there was any
+            if !stdout.is_empty() {
+                format!("{}\n\nCaptured output:\n{}", e, stdout)
+            } else {
+                e
+            }
+        })?;
 
         Ok(RunResult {
             exit_code,

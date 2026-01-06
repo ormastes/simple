@@ -10,6 +10,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 
@@ -43,6 +44,8 @@ thread_local! {
     pub(crate) static AOP_CONFIG: RefCell<Option<Arc<AopConfig>>> = RefCell::new(None);
     /// Command line arguments passed to the Simple interpreter
     pub(crate) static INTERPRETER_ARGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
+    /// Current file being evaluated (for module resolution)
+    pub(crate) static CURRENT_FILE: RefCell<Option<PathBuf>> = RefCell::new(None);
 }
 
 /// Global interrupt flag for Ctrl-C handling.
@@ -126,6 +129,18 @@ pub fn set_interpreter_args(args: Vec<String>) {
 /// Get the command line arguments passed to the interpreter
 pub fn get_interpreter_args() -> Vec<String> {
     INTERPRETER_ARGS.with(|cell| cell.borrow().clone())
+}
+
+/// Set the current file being evaluated (for module resolution)
+pub fn set_current_file(path: Option<PathBuf>) {
+    CURRENT_FILE.with(|cell| {
+        *cell.borrow_mut() = path;
+    });
+}
+
+/// Get the current file being evaluated
+pub fn get_current_file() -> Option<PathBuf> {
+    CURRENT_FILE.with(|cell| cell.borrow().clone())
 }
 
 //==============================================================================
