@@ -117,7 +117,7 @@ pub(super) fn eval_builtin(
             let handle_val = evaluate_expr(&handle_arg.value, env, functions, classes, enums, impl_methods)?;
             if let Value::Actor(handle) = handle_val {
                 handle.join().map_err(|e| semantic_err!("{}", e))?;
-                return Ok(Some(Value::Nil));
+                return Ok(Some(Value::Int(1)));
             }
             bail_semantic!("join target must be actor");
         }

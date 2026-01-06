@@ -40,7 +40,7 @@ use std::collections::HashMap;
 
 // Import parent interpreter types and functions
 use super::{
-    evaluate_expr, exec_block, Control, Enums, ImplMethods,
+    evaluate_expr, exec_block, exec_block_fn, Control, Enums, ImplMethods,
     CONTEXT_OBJECT, CONTEXT_VAR_NAME, BDD_CONTEXT_DEFS, BDD_INDENT, BDD_LAZY_VALUES,
 };
 
@@ -416,7 +416,18 @@ pub(super) fn exec_match(
                 env.insert(name, value);
             }
 
-            return exec_block(&arm.body, env, functions, classes, enums, impl_methods);
+            // Use exec_block_fn to capture implicit return value from match arms
+            let (flow, last_val) = exec_block_fn(&arm.body, env, functions, classes, enums, impl_methods)?;
+            match flow {
+                Control::Return(_) | Control::Break(_) | Control::Continue => return Ok(flow),
+                Control::Next => {
+                    // If arm body has implicit return (last expression), return it
+                    if let Some(val) = last_val {
+                        return Ok(Control::Return(val));
+                    }
+                    return Ok(Control::Next);
+                }
+            }
         }
     }
 

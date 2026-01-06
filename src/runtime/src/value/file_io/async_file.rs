@@ -38,6 +38,7 @@ pub enum FileLoadState {
 }
 
 /// Async file handle for background loading
+#[derive(Clone)]
 pub struct AsyncFileHandle {
     path: String,
     state: Arc<RwLock<FileLoadState>>,
@@ -197,6 +198,41 @@ lazy_static::lazy_static! {
     };
 }
 
+// Global handle registry for async file handles
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicI64, Ordering};
+
+lazy_static::lazy_static! {
+    static ref ASYNC_FILE_REGISTRY: Arc<RwLock<HashMap<i64, AsyncFileHandle>>> = {
+        Arc::new(RwLock::new(HashMap::new()))
+    };
+}
+
+static NEXT_HANDLE_ID: AtomicI64 = AtomicI64::new(1);
+
+/// Extract a string from a RuntimeValue
+fn runtime_value_to_string(value: RuntimeValue) -> Option<String> {
+    if !value.is_heap() {
+        return None;
+    }
+
+    unsafe {
+        let ptr = value.as_heap_ptr();
+        use crate::value::heap::HeapObjectType;
+
+        if (*ptr).object_type != HeapObjectType::String {
+            return None;
+        }
+
+        // RuntimeString has an as_bytes() method
+        use crate::value::RuntimeString;
+        let string_ptr = ptr as *const RuntimeString;
+        let bytes = (*string_ptr).as_bytes();
+
+        String::from_utf8(bytes.to_vec()).ok()
+    }
+}
+
 /// Load a file using mmap (blocking operation)
 ///
 /// This performs a blocking file load operation suitable for thread pool execution.
@@ -340,15 +376,24 @@ fn progressive_prefault(ptr: *mut u8, size: usize) {
 /// Handle ID (as i64) for the async file handle
 #[no_mangle]
 pub extern "C" fn native_async_file_create(path: RuntimeValue, mode: i32, prefault: i32) -> i64 {
-    // TODO: Extract string from RuntimeValue
-    // For now, use placeholder path
-    let path_str = "placeholder.txt".to_string();
+    // Extract string from RuntimeValue
+    let path_str = match runtime_value_to_string(path) {
+        Some(s) => s,
+        None => {
+            eprintln!("Error: Failed to extract string from RuntimeValue");
+            return 0;
+        }
+    };
 
     let handle = AsyncFileHandle::new(path_str, mode, prefault != 0);
 
-    // Store handle in registry and return ID
-    // TODO: Implement handle registry
-    0
+    // Generate new handle ID
+    let handle_id = NEXT_HANDLE_ID.fetch_add(1, Ordering::SeqCst);
+
+    // Store handle in registry
+    ASYNC_FILE_REGISTRY.write().insert(handle_id, handle);
+
+    handle_id
 }
 
 /// Start loading a file asynchronously
@@ -357,7 +402,11 @@ pub extern "C" fn native_async_file_create(path: RuntimeValue, mode: i32, prefau
 /// * `handle_id` - ID of the async file handle returned by native_async_file_create
 #[no_mangle]
 pub extern "C" fn native_async_file_start_loading(handle_id: i64) {
-    // TODO: Retrieve handle from registry and start loading
+    if let Some(handle) = ASYNC_FILE_REGISTRY.read().get(&handle_id) {
+        handle.start_loading();
+    } else {
+        eprintln!("Error: Invalid async file handle ID: {}", handle_id);
+    }
 }
 
 /// Check if async file is ready (non-blocking)
@@ -369,8 +418,11 @@ pub extern "C" fn native_async_file_start_loading(handle_id: i64) {
 /// 1 if ready, 0 otherwise
 #[no_mangle]
 pub extern "C" fn native_async_file_is_ready(handle_id: i64) -> i32 {
-    // TODO: Retrieve handle from registry and check state
-    0
+    if let Some(handle) = ASYNC_FILE_REGISTRY.read().get(&handle_id) {
+        if handle.is_ready() { 1 } else { 0 }
+    } else {
+        0 // Invalid handle
+    }
 }
 
 /// Get async file loading state
@@ -382,8 +434,11 @@ pub extern "C" fn native_async_file_is_ready(handle_id: i64) -> i32 {
 /// FileLoadState value (0=Pending, 1=Loading, 2=Ready, 3=Failed)
 #[no_mangle]
 pub extern "C" fn native_async_file_get_state(handle_id: i64) -> i32 {
-    // TODO: Retrieve handle from registry and return state
-    FileLoadState::Pending as i32
+    if let Some(handle) = ASYNC_FILE_REGISTRY.read().get(&handle_id) {
+        handle.get_state() as i32
+    } else {
+        FileLoadState::Failed as i32 // Invalid handle = failed state
+    }
 }
 
 /// Wait for async file to load (blocking)
@@ -392,12 +447,31 @@ pub extern "C" fn native_async_file_get_state(handle_id: i64) -> i32 {
 /// * `handle_id` - ID of the async file handle
 ///
 /// # Returns
-/// RuntimeValue containing the MmapRegion pointer or error code
+/// RuntimeValue containing the MmapRegion pointer or error code (0 on error)
 #[no_mangle]
 pub extern "C" fn native_async_file_wait(handle_id: i64) -> RuntimeValue {
-    // TODO: Retrieve handle, wait for completion, return region or error
-    RuntimeValue::from_int(0)
+    let handle = match ASYNC_FILE_REGISTRY.read().get(&handle_id).cloned() {
+        Some(h) => h,
+        None => {
+            eprintln!("Error: Invalid async file handle ID: {}", handle_id);
+            return RuntimeValue::from_int(0);
+        }
+    };
+
+    // Wait for completion
+    match handle.wait() {
+        Ok(region) => {
+            // Return pointer to mmap region as an integer
+            // The caller should interpret this as a pointer to memory-mapped data
+            RuntimeValue::from_int(region.ptr as i64)
+        }
+        Err(e) => {
+            eprintln!("Error loading file: {}", e);
+            RuntimeValue::from_int(0)
+        }
+    }
 }
+
 
 // =============================================================================
 // Async Primitives
@@ -414,28 +488,5 @@ pub extern "C" fn async_yield() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_async_file_handle_creation() {
-        let handle = AsyncFileHandle::new("/tmp/test.txt".to_string(), 0, false);
-        assert_eq!(handle.get_state(), FileLoadState::Pending);
-        assert!(!handle.is_ready());
-        assert!(!handle.is_failed());
-    }
-
-    #[test]
-    fn test_file_load_state_repr() {
-        assert_eq!(FileLoadState::Pending as i32, 0);
-        assert_eq!(FileLoadState::Loading as i32, 1);
-        assert_eq!(FileLoadState::Ready as i32, 2);
-        assert_eq!(FileLoadState::Failed as i32, 3);
-    }
-
-    #[test]
-    fn test_async_yield() {
-        // Just verify it doesn't crash
-        async_yield();
-    }
-}
+#[path = "async_file_tests.rs"]
+mod tests;

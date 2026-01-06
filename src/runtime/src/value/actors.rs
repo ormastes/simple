@@ -1,7 +1,8 @@
 //! Actor operations and FFI functions.
 
 use std::cell::RefCell;
-use std::sync::{mpsc, Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use super::collections::rt_string_new;
@@ -14,14 +15,20 @@ thread_local! {
     pub(crate) static CURRENT_ACTOR_OUTBOX: RefCell<Option<mpsc::Sender<Message>>> = RefCell::new(None);
 }
 
-/// A heap-allocated actor handle
+// Global registry for ActorHandles (avoids storing Arc/Mutex in heap memory)
+lazy_static::lazy_static! {
+    static ref ACTOR_REGISTRY: Arc<RwLock<HashMap<usize, ActorHandle>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+}
+
+/// A heap-allocated actor reference (stores only the ID, not the full handle)
 #[repr(C)]
 pub struct RuntimeActor {
     pub header: HeapHeader,
-    pub handle: ActorHandle,
+    pub actor_id: usize,
 }
 
-fn alloc_actor(handle: ActorHandle) -> RuntimeValue {
+fn alloc_actor(actor_id: usize) -> RuntimeValue {
     let size = std::mem::size_of::<RuntimeActor>();
     let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
 
@@ -32,7 +39,7 @@ fn alloc_actor(handle: ActorHandle) -> RuntimeValue {
         }
 
         (*ptr).header = HeapHeader::new(HeapObjectType::Actor, size as u32);
-        (*ptr).handle = handle;
+        (*ptr).actor_id = actor_id;
 
         RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
     }
@@ -50,6 +57,14 @@ fn as_actor_ptr(value: RuntimeValue) -> Option<*mut RuntimeActor> {
         }
         Some(ptr as *mut RuntimeActor)
     }
+}
+
+fn get_actor_handle(actor_id: usize) -> Option<ActorHandle> {
+    ACTOR_REGISTRY
+        .read()
+        .ok()?
+        .get(&actor_id)
+        .cloned()
 }
 
 /// Spawn a new actor. `body_func` is a pointer to the actor body.
@@ -86,7 +101,14 @@ pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeVa
         CURRENT_ACTOR_OUTBOX.with(|cell| *cell.borrow_mut() = None);
     });
 
-    alloc_actor(handle)
+    let actor_id = handle.id();
+
+    // Store handle in registry
+    if let Ok(mut registry) = ACTOR_REGISTRY.write() {
+        registry.insert(actor_id, handle);
+    }
+
+    alloc_actor(actor_id)
 }
 
 /// Send a runtime value to an actor. Messages are transported as raw bits.
@@ -94,9 +116,12 @@ pub extern "C" fn rt_actor_spawn(body_func: u64, ctx: RuntimeValue) -> RuntimeVa
 pub extern "C" fn rt_actor_send(actor: RuntimeValue, message: RuntimeValue) {
     if let Some(actor_ptr) = as_actor_ptr(actor) {
         unsafe {
-            let bits = message.to_raw();
-            let payload = Message::Bytes(bits.to_le_bytes().to_vec());
-            let _ = (*actor_ptr).handle.send(payload);
+            let actor_id = (*actor_ptr).actor_id;
+            if let Some(handle) = get_actor_handle(actor_id) {
+                let bits = message.to_raw();
+                let payload = Message::Bytes(bits.to_le_bytes().to_vec());
+                let _ = handle.send(payload);
+            }
         }
     }
 }
@@ -123,6 +148,20 @@ pub extern "C" fn rt_actor_recv() -> RuntimeValue {
     }
 }
 
+/// Reply to parent actor by sending a message through the outbox.
+/// Returns NIL. This is a void operation.
+#[no_mangle]
+pub extern "C" fn rt_actor_reply(message: RuntimeValue) -> RuntimeValue {
+    CURRENT_ACTOR_OUTBOX.with(|cell| {
+        if let Some(tx) = cell.borrow().as_ref() {
+            let bits = message.to_raw();
+            let payload = Message::Bytes(bits.to_le_bytes().to_vec());
+            let _ = tx.send(payload);
+        }
+    });
+    RuntimeValue::NIL
+}
+
 /// Wait on a value (for futures/channels). Currently returns the value immediately.
 /// In the future, this will block until the value is ready.
 #[no_mangle]
@@ -137,22 +176,31 @@ pub extern "C" fn rt_wait(target: RuntimeValue) -> RuntimeValue {
 pub extern "C" fn rt_actor_join(actor: RuntimeValue) -> i64 {
     if let Some(actor_ptr) = as_actor_ptr(actor) {
         unsafe {
-            let id = (*actor_ptr).handle.id();
-            match crate::concurrency::join_actor(id) {
-                Ok(()) => 1,
-                Err(_) => 0,
+            let actor_id = (*actor_ptr).actor_id;
+            if let Some(handle) = get_actor_handle(actor_id) {
+                match handle.join() {
+                    Ok(()) => {
+                        // Remove from registry after joining
+                        if let Ok(mut registry) = ACTOR_REGISTRY.write() {
+                            registry.remove(&actor_id);
+                        }
+                        return 1;
+                    }
+                    Err(_) => {
+                        return 0;
+                    }
+                }
             }
         }
-    } else {
-        0
     }
+    0
 }
 
 /// Get the actor ID.
 #[no_mangle]
 pub extern "C" fn rt_actor_id(actor: RuntimeValue) -> i64 {
     if let Some(actor_ptr) = as_actor_ptr(actor) {
-        unsafe { (*actor_ptr).handle.id() as i64 }
+        unsafe { (*actor_ptr).actor_id as i64 }
     } else {
         0
     }
@@ -164,15 +212,17 @@ pub extern "C" fn rt_actor_id(actor: RuntimeValue) -> i64 {
 pub extern "C" fn rt_actor_is_alive(actor: RuntimeValue) -> i64 {
     if let Some(actor_ptr) = as_actor_ptr(actor) {
         unsafe {
-            // Check if the inbox sender can still send
-            // This is an approximation - a proper implementation would track state
-            if (*actor_ptr).handle.id() > 0 {
-                1
-            } else {
-                0
+            let actor_id = (*actor_ptr).actor_id;
+            if let Some(handle) = get_actor_handle(actor_id) {
+                if handle.is_running() {
+                    return 1;
+                }
             }
         }
-    } else {
-        0
     }
+    0
 }
+
+#[cfg(test)]
+#[path = "actor_tests.rs"]
+mod tests;

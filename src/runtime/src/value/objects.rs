@@ -751,3 +751,7 @@ pub extern "C" fn rt_handle_is_valid(handle: RuntimeValue) -> RuntimeValue {
         RuntimeValue::from_bool((*handle_ptr).valid != 0)
     }
 }
+
+#[cfg(test)]
+#[path = "object_tests.rs"]
+mod tests;

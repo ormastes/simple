@@ -121,9 +121,13 @@ pub(crate) fn get_aop_config() -> Option<Arc<AopConfig>> {
 
 /// Set the command line arguments for the interpreter
 pub fn set_interpreter_args(args: Vec<String>) {
+    // Set thread-local storage (for backward compatibility)
     INTERPRETER_ARGS.with(|cell| {
-        *cell.borrow_mut() = args;
+        *cell.borrow_mut() = args.clone();
     });
+
+    // ALSO set global runtime storage (unified approach)
+    simple_runtime::value::rt_set_args_vec(&args);
 }
 
 /// Get the command line arguments passed to the interpreter

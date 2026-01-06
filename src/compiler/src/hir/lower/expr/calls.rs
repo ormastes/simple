@@ -5,7 +5,7 @@
 
 use simple_parser::{self as ast, Expr};
 
-use crate::value::BUILTIN_SPAWN;
+use crate::value::{BUILTIN_SPAWN, BUILTIN_JOIN, BUILTIN_REPLY};
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
@@ -51,6 +51,30 @@ impl Lowerer {
                 return Ok(HirExpr {
                     kind: HirExprKind::ActorSpawn { body: body_hir },
                     ty: TypeId::I64,
+                });
+            }
+
+            // Check for join
+            if name == BUILTIN_JOIN && args.len() == 1 {
+                let actor_hir = self.lower_expr(&args[0].value, ctx)?;
+                return Ok(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "join".to_string(),
+                        args: vec![actor_hir],
+                    },
+                    ty: TypeId::I64,
+                });
+            }
+
+            // Check for reply
+            if name == BUILTIN_REPLY && args.len() == 1 {
+                let message_hir = self.lower_expr(&args[0].value, ctx)?;
+                return Ok(HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "reply".to_string(),
+                        args: vec![message_hir],
+                    },
+                    ty: TypeId::NIL,
                 });
             }
 

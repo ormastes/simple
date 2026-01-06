@@ -275,7 +275,9 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>) {
                 if is_blocking_builtin(name) {
                     add_reason(reasons, FallbackReason::AsyncAwait);
                 }
-                if is_actor_builtin(name) {
+                // Actor operations: spawn, send, recv are compilable
+                // Only join and reply need interpreter fallback
+                if is_non_compilable_actor_builtin(name) {
                     add_reason(reasons, FallbackReason::ActorOps);
                 }
                 if is_generator_builtin(name) {
@@ -574,6 +576,12 @@ fn is_blocking_builtin(name: &str) -> bool {
 /// Check if a builtin is an actor operation
 fn is_actor_builtin(name: &str) -> bool {
     ACTOR_BUILTINS.contains(&name)
+}
+
+/// Check if an actor builtin requires interpreter fallback
+/// All actor operations (spawn, send, recv, join, reply) are now compilable
+fn is_non_compilable_actor_builtin(_name: &str) -> bool {
+    false
 }
 
 /// Check if a builtin is a generator operation

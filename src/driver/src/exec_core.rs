@@ -288,12 +288,28 @@ impl ExecCore {
 
     /// Run SMF from memory buffer
     pub fn run_smf_from_memory(&self, bytes: &[u8]) -> Result<i32, String> {
+        self.run_smf_from_memory_with_args(bytes, vec![])
+    }
+
+    /// Run SMF from memory buffer with arguments
+    pub fn run_smf_from_memory_with_args(&self, bytes: &[u8], args: Vec<String>) -> Result<i32, String> {
+        // Set arguments in runtime before loading module
+        simple_runtime::value::rt_set_args_vec(&args);
+
         let module = self.load_module_from_memory(bytes)?;
         self.execute_and_gc(&module)
     }
 
     /// Run a pre-compiled SMF file directly
     pub fn run_smf(&self, path: &Path) -> Result<i32, String> {
+        self.run_smf_with_args(path, vec![])
+    }
+
+    /// Run a pre-compiled SMF file with arguments
+    pub fn run_smf_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
+        // Set arguments in runtime before loading module
+        simple_runtime::value::rt_set_args_vec(&args);
+
         let module = self.load_module(path)?;
         self.execute_and_gc(&module)
     }
