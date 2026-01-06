@@ -17,6 +17,7 @@
 
 pub mod analysis;
 mod smf_writer;
+mod object_parser;
 mod error;
 mod interner;
 mod native;
@@ -27,6 +28,7 @@ mod native_binary;
 
 // SMF exports
 pub use smf_writer::*;
+pub use object_parser::{ObjectParseError, ParseResult, ParsedObject};
 
 // Native linker exports
 pub use error::{LinkerError, LinkerResult};
