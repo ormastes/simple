@@ -224,6 +224,7 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 | #1180-#1199 | Multi-Language Tooling | ✅ Complete → [feature_done_20.md](done/feature_done_20.md) |
 | #1200-#1209 | Language Model Server | ✅ Complete → [feature_done_18.md](done/feature_done_18.md) |
 | #1210-#1299 | MCP-MCP (Model Context Preview) | ✅ Complete → [feature_done_20.md](done/feature_done_20.md) |
+| #2050-#2054 | Multi-Mode Spec Test Execution | 📋 Planned → [Multi-Mode Testing](#multi-mode-spec-test-execution-2050-2054) |
 | #1300-#1324 | Metaprogramming | ✅ Complete → [feature_done_11.md](done/feature_done_11.md) |
 | #1325-#1329 | Pattern Matching Safety | ✅ Complete → [feature_done_10.md](done/feature_done_10.md) |
 | #1330-#1342 | Type System Extensions | ✅ Complete → [feature_done_18.md](done/feature_done_18.md) |
@@ -254,6 +255,267 @@ See [BDD_SPEC_PROGRESS.md](BDD_SPEC_PROGRESS.md) for detailed progress tracking.
 | #2000-#2049 | 4KB Page Locality (Startup Cache Optimization) | ✅ Complete → [4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md](../report/4KB_PAGE_LOCALITY_PHASE5_2025-12-28.md) |
 | #200-#204 | Stdlib Improvements (JSON, File I/O, Strings, Try) | ✅ Complete → [stdlib/__index__.md](stdlib/__index__.md) |
 | #44-#47 | Async Default & Effect Inference | 🔄 Planning (Lean ✅) → [concurrency/__index__.md](concurrency/__index__.md) \| [Plan](../plans/async_default_implementation.md) |
+
+---
+
+## Multi-Mode Spec Test Execution (#2050-#2054)
+
+**Status:** 📋 Planned
+**Priority:** Immediate (Sprint)
+**Difficulty:** 3 (Medium)
+
+### Overview
+
+Enable spec tests to run across all execution modes (Interpreter, JIT, SMF Cranelift, SMF LLVM) with configurable mode selection at multiple granularity levels.
+
+### Features
+
+| Feature ID | Feature | Difficulty | Status | Impl | Doc | S-Test | R-Test |
+|------------|---------|------------|--------|------|-----|--------|--------|
+| #2050 | Execution Mode API | 3 | 📋 | S | - | `system/spec/` | - |
+| #2051 | Multi-Level Mode Configuration | 3 | 📋 | S | - | `system/spec/` | - |
+| #2052 | Mode Skip Configuration | 2 | 📋 | S | - | `system/spec/` | - |
+| #2053 | Mode Failure Handling | 2 | 📋 | S | - | `system/spec/` | - |
+| #2054 | Mode Reporting & Diagnostics | 3 | 📋 | S | - | `system/spec/` | - |
+
+### Feature Details
+
+#### #2050: Execution Mode API
+
+**Purpose:** Core API for defining and managing execution modes in spec tests.
+
+**Components:**
+- `ExecutionMode` enum: `Interpreter`, `JIT`, `SMF_Cranelift`, `SMF_LLVM`
+- `ModeSet` type: Set of modes to execute
+- `run_in_modes(modes: ModeSet, fn)`: Execute test block in specified modes
+- Default mode set: All available modes
+
+**Example:**
+```simple
+import std.spec
+
+describe("Array operations"):
+    # Run in all modes by default
+    it("supports push"):
+        let arr = []
+        arr.push(1)
+        expect(arr.len()).to_equal(1)
+
+    # Run only in compiled modes
+    run_in_modes([ExecutionMode.SMF_Cranelift, ExecutionMode.SMF_LLVM]):
+        it("optimizes hot loops"):
+            # Performance-sensitive test
+            pass
+```
+
+#### #2051: Multi-Level Mode Configuration
+
+**Purpose:** Allow mode specification at project, directory, file, block, and test levels.
+
+**Configuration Levels (precedence order, highest to lowest):**
+1. **Test level** - Individual `it` block
+2. **Block level** - `describe`/`context` block
+3. **File level** - File-level attribute
+4. **Directory level** - Directory config file
+5. **Project level** - `simple.toml` default
+
+**Syntax:**
+```simple
+# File level
+#[modes(interpreter, jit, smf_cranelift)]
+
+# Directory level (.spec_config.sdn)
+modes: [interpreter, jit, smf_cranelift]
+
+# simple.toml
+[test]
+default_modes = ["interpreter", "jit", "smf_cranelift", "smf_llvm"]
+
+# Block level
+describe("Feature", modes=[ExecutionMode.Interpreter]):
+    it("test"):
+        pass
+
+# Test level
+it("specific test", modes=[ExecutionMode.JIT]):
+    pass
+```
+
+**Inheritance:**
+- Child blocks inherit parent mode configuration
+- More specific levels override broader levels
+- Empty mode set = inherit from parent
+
+#### #2052: Mode Skip Configuration
+
+**Purpose:** Allow selective skipping of modes at any configuration level.
+
+**API:**
+- `skip_modes`: Modes to skip (additive with parent skips)
+- `only_modes`: Exclusive mode list (overrides skip)
+- `skip_on_fail`: Continue with other modes on failure (default: true)
+
+**Example:**
+```simple
+# Directory config: skip LLVM (not implemented yet)
+skip_modes: [smf_llvm]
+
+# File level: only interpreter and JIT
+#[only_modes(interpreter, jit)]
+
+# Block level: skip JIT for known issue
+describe("Problematic feature", skip_modes=[ExecutionMode.JIT]):
+    it("works in interpreter"):
+        pass
+
+# Test level: skip specific mode
+it("needs interpreter", skip_modes=[ExecutionMode.SMF_Cranelift, ExecutionMode.SMF_LLVM]):
+    # Interpreter-specific test
+    pass
+```
+
+#### #2053: Mode Failure Handling
+
+**Purpose:** Control test behavior when execution fails in specific modes.
+
+**Strategies:**
+1. **Skip remaining modes** (default) - Continue with next mode on failure
+2. **Fail all** - Stop all modes if any mode fails
+3. **Collect all** - Run all modes, report all failures at end
+
+**Configuration:**
+```simple
+# simple.toml
+[test]
+mode_failure_strategy = "skip_remaining"  # or "fail_all", "collect_all"
+
+# File level
+#[mode_failure_strategy(fail_all)]
+
+# Block level
+describe("Critical feature", mode_failure=FailureStrategy.FailAll):
+    it("must work everywhere"):
+        pass
+
+# Test level
+it("optional optimization", mode_failure=FailureStrategy.SkipRemaining):
+    pass
+```
+
+**Behavior:**
+- `skip_remaining`: Mark mode as skipped, continue with next mode
+- `fail_all`: Stop test execution, mark all modes as failed
+- `collect_all`: Run all modes, aggregate results
+
+#### #2054: Mode Reporting & Diagnostics
+
+**Purpose:** Clear reporting of mode execution results and mode-specific failures.
+
+**Output Format:**
+```
+Array operations
+  ✓ supports push [interpreter] (12ms)
+  ✓ supports push [jit] (8ms)
+  ✓ supports push [smf_cranelift] (5ms)
+  ⊘ supports push [smf_llvm] (skipped: not implemented)
+
+  ✓ optimizes hot loops [smf_cranelift] (3ms)
+  ✓ optimizes hot loops [smf_llvm] (2ms)
+
+Summary: 6 passed, 0 failed, 1 skipped (3 modes × 2 tests)
+```
+
+**Diagnostic Information:**
+- Mode-specific failure messages
+- Performance comparison across modes
+- Mode availability status
+- Configuration source (which level set the mode)
+
+**API:**
+```simple
+# Get mode execution results
+results = SpecRunner.get_results()
+for result in results:
+    print("{result.test_name} [{result.mode}]: {result.status}")
+    if result.status == TestStatus.Failed:
+        print("  Error: {result.error}")
+        print("  Config source: {result.config_source}")
+```
+
+### Implementation Plan
+
+**Phase 1: Core Infrastructure**
+1. Define `ExecutionMode` enum and `ModeSet` type
+2. Implement mode configuration parsing (SDN)
+3. Add mode metadata to spec framework
+
+**Phase 2: Configuration System**
+1. Implement multi-level configuration hierarchy
+2. Add configuration precedence resolution
+3. Support file/directory/project config files
+
+**Phase 3: Execution Engine**
+1. Modify spec runner to execute tests in multiple modes
+2. Implement mode switching (compile/load/interpret)
+3. Add mode isolation (separate execution contexts)
+
+**Phase 4: Skip & Failure Handling**
+1. Implement skip logic with inheritance
+2. Add failure strategy handling
+3. Support mode availability detection
+
+**Phase 5: Reporting**
+1. Enhanced output formatting with mode labels
+2. Mode-specific error reporting
+3. Performance comparison metrics
+4. Summary statistics by mode
+
+### Affected Test Files
+
+**All spec test files will support multi-mode execution:**
+- `simple/std_lib/test/**/*_spec.spl` (~100 files)
+
+**Priority test files for initial implementation:**
+1. `system/spec/spec_framework_spec.spl` - Framework tests
+2. `unit/core/arithmetic_spec.spl` - Simple compilation target
+3. `unit/core/collections_spec.spl` - Runtime behavior tests
+4. `features/codegen/cranelift_spec.spl` - Backend-specific tests
+5. `features/codegen/llvm_backend_spec.spl` - LLVM mode tests
+
+**Files that may need mode restrictions:**
+- `system/doctest/*_spec.spl` - May only work in interpreter (parsing/reflection)
+- `unit/concurrency/*_spec.spl` - May have mode-specific behavior
+- `features/testing_framework/*_spec.spl` - Framework meta-tests
+
+### Testing Strategy
+
+**Unit Tests (Rust):**
+- Mode configuration parsing
+- Configuration precedence resolution
+- Mode set operations
+- Failure strategy logic
+
+**System Tests (Simple):**
+- Multi-mode execution scenarios
+- Configuration inheritance
+- Skip behavior validation
+- Failure handling strategies
+- Reporting output verification
+
+**Integration Tests:**
+- End-to-end mode switching
+- Cross-mode result consistency
+- Performance comparison accuracy
+
+### Success Criteria
+
+1. ✅ All execution modes supported in spec tests
+2. ✅ Configuration works at all levels (project → test)
+3. ✅ Skip logic prevents unnecessary mode execution
+4. ✅ Failure strategies work as documented
+5. ✅ Clear reporting distinguishes mode results
+6. ✅ Performance overhead < 5% per mode
+7. ✅ Zero breaking changes to existing spec tests
 
 ---
 

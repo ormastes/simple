@@ -46,7 +46,45 @@ Implementing comprehensive type inference for classes and traits using test-driv
 **Next Steps:** Fix Lean compilation issues, begin theorem proofs (Phase 4)
 **Expected Timeline:** 14 days remaining (16 days total)
 
-This directory contains reports documenting completed tasks and maintenance activities.
+## 2026-01-06: Multi-Mode Spec Test Execution - PLANNED! 🧪
+
+**[MULTI_MODE_SPEC_TESTS_PLAN_2026-01-06.md](MULTI_MODE_SPEC_TESTS_PLAN_2026-01-06.md)** 📋 **FEATURE PLANNING**
+
+Comprehensive plan for multi-mode spec test execution across all execution backends:
+
+**Execution Modes:**
+1. **Interpreter** - Direct execution (current default) ✅
+2. **JIT (Cranelift)** - Runtime in-memory compilation 🔄
+3. **SMF Standalone (Cranelift)** - AOT compiled binaries ✅
+4. **SMF Standalone (LLVM)** - LLVM backend (future) 📋
+
+**Features (#2050-#2054):**
+- #2050: Execution Mode API - Core mode management
+- #2051: Multi-Level Configuration - Project/dir/file/block/test levels
+- #2052: Mode Skip Configuration - Selective mode skipping
+- #2053: Mode Failure Handling - Skip/fail-all/collect-all strategies
+- #2054: Mode Reporting & Diagnostics - Enhanced mode-aware output
+
+**Configuration Hierarchy:**
+- Test Level → Block Level → File Level → Directory Level → Project Level
+- Supports: `modes`, `skip_modes`, `only_modes`, `mode_failure_strategy`
+
+**Affected Files:**
+- **~100 spec test files** in `simple/std_lib/test/`
+- **Priority tests:** arithmetic, collections, framework, codegen specs
+- **Restrictions:** Doctest specs (interpreter-only), concurrency (mode-specific)
+
+**Implementation (4 weeks):**
+- Week 1: Core infrastructure + configuration system
+- Week 2-3: Execution engine + skip/failure handling
+- Week 4: Reporting + rollout to all tests
+
+**Success Criteria:**
+- ✅ All 4 execution modes supported
+- ✅ Configuration at all 5 levels
+- ✅ Performance overhead < 5% per mode
+- ✅ Zero breaking changes to existing tests
+- ✅ All ~100 tests pass in applicable modes
 
 ## 2026-01-06: Code Shortening Grammar Research - COMPREHENSIVE ANALYSIS! 📊
 
