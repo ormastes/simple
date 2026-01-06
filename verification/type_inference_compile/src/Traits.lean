@@ -10,21 +10,9 @@
   - Coherence checking (no overlapping implementations)
 -/
 
--- Type variables for polymorphism
-inductive TyVar where
-  | mk (id : Nat)
-  deriving DecidableEq, Repr
+import Classes
 
--- Types in the trait system
-inductive Ty where
-  | int
-  | bool
-  | str
-  | var (v : TyVar)
-  | named (name : String)
-  | arrow (params : List Ty) (ret : Ty)
-  | generic (name : String) (args : List Ty)
-  deriving BEq, Repr
+-- Using types from Classes: TyVar, Ty, Subst, applySubst
 
 -- Associated type binding
 structure AssocType where
@@ -64,22 +52,6 @@ def TraitEnv := List (String × TraitDef)
 
 -- Implementation registry
 def ImplRegistry := List TraitImpl
-
--- Substitution for type variables
-def Subst := List (TyVar × Ty)
-
--- Apply substitution to a type
-def applySubst (subst : Subst) (ty : Ty) : Ty :=
-  match ty with
-  | Ty.var v =>
-      match subst.find? (fun (v', _) => v == v') with
-      | some (_, ty') => ty'
-      | none => Ty.var v
-  | Ty.arrow params ret =>
-      Ty.arrow (params.map (applySubst subst)) (applySubst subst ret)
-  | Ty.generic name args =>
-      Ty.generic name (args.map (applySubst subst))
-  | ty => ty
 
 -- Look up a trait definition
 def lookupTrait (env : TraitEnv) (name : String) : Option TraitDef :=

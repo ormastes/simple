@@ -192,6 +192,66 @@ impl SmfWriter {
 
     /// Write SMF file to a writer
     pub fn write<W: Write>(&mut self, writer: &mut W) -> SmfWriteResult<()> {
+        // Build symbol table section if we have symbols
+        if !self.symbols.is_empty() {
+            // First, collect all symbol names and add to string table
+            let name_offsets: Vec<u32> = self
+                .symbols
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|name| self.add_string(&name))
+                .collect();
+
+            let mut symtab_data = Vec::new();
+            for (i, symbol) in self.symbols.iter().enumerate() {
+                let name_offset = name_offsets[i];
+                symtab_data.extend_from_slice(&name_offset.to_le_bytes());
+                symtab_data.push(symbol.binding as u8);
+                symtab_data.push(symbol.sym_type as u8);
+                symtab_data.extend_from_slice(&[0u8; 2]); // Padding
+                symtab_data.extend_from_slice(&symbol.section_index.to_le_bytes());
+                symtab_data.extend_from_slice(&[0u8; 2]); // Padding
+                symtab_data.extend_from_slice(&symbol.value.to_le_bytes());
+                symtab_data.extend_from_slice(&symbol.size.to_le_bytes());
+                symtab_data.push(symbol.layout_phase);
+                symtab_data.push(if symbol.is_event_loop_anchor { 1 } else { 0 });
+                symtab_data.push(if symbol.layout_pinned { 1 } else { 0 });
+                symtab_data.extend_from_slice(&[0u8; 5]); // Padding to 32 bytes
+            }
+
+            let symtab_section = SmfSection {
+                name: ".symtab".to_string(),
+                section_type: SectionType::SymTab,
+                flags: 0,
+                data: symtab_data,
+                alignment: 8,
+            };
+            self.sections.push(symtab_section);
+        }
+
+        // Build relocation sections if we have relocations
+        if !self.relocations.is_empty() {
+            let mut rela_data = Vec::new();
+            for reloc in &self.relocations {
+                rela_data.extend_from_slice(&reloc.offset.to_le_bytes());
+                rela_data.extend_from_slice(&reloc.symbol_index.to_le_bytes());
+                rela_data.push(reloc.reloc_type as u8);
+                rela_data.extend_from_slice(&[0u8; 3]); // Padding
+                rela_data.extend_from_slice(&reloc.addend.to_le_bytes());
+            }
+
+            let rela_section = SmfSection {
+                name: ".rela".to_string(),
+                section_type: SectionType::Reloc,
+                flags: 0,
+                data: rela_data,
+                alignment: 8,
+            };
+            self.sections.push(rela_section);
+        }
+
         // Build string table section
         let strtab_section = SmfSection {
             name: ".strtab".to_string(),
@@ -272,31 +332,53 @@ impl SmfWriter {
 
     /// Create SMF from object code and MIR module
     pub fn from_object_code(object_code: &[u8], mir: &MirModule) -> SmfWriteResult<Self> {
+        use crate::linker::object_parser::ParsedObject;
+        use std::collections::HashMap;
+
         let mut writer = Self::new();
 
-        // Add code section with object code
-        // Note: In a real implementation, we'd parse the object file and extract sections
-        writer.add_code_section(".text", object_code.to_vec());
+        // Parse object file to extract sections, symbols, and relocations
+        let parsed = ParsedObject::parse(object_code)
+            .map_err(|e| SmfWriteError::InvalidData(format!("Failed to parse object file: {}", e)))?;
 
-        // Add symbols for each function
-        for (_i, func) in mir.functions.iter().enumerate() {
-            let symbol = SmfSymbol {
-                name: func.name.clone(),
-                binding: if func.is_public() {
-                    SymbolBinding::Global
-                } else {
-                    SymbolBinding::Local
-                },
-                sym_type: SymbolType::Function,
-                section_index: 0, // .text section
-                value: 0,         // Would need to get from object file
-                size: 0,
-                // Propagate layout information from MIR for 4KB page locality optimization
-                layout_phase: func.layout_phase.priority(),
-                is_event_loop_anchor: func.is_event_loop_anchor,
-                layout_pinned: false, // Could be extracted from HIR if needed
-            };
-            writer.add_symbol(symbol);
+        // Build mapping from MIR function names to layout info
+        let mut mir_func_info: HashMap<String, _> = HashMap::new();
+        for func in &mir.functions {
+            mir_func_info.insert(
+                func.name.clone(),
+                (func.layout_phase.priority(), func.is_event_loop_anchor),
+            );
+        }
+
+        // Track section index mapping (object section idx -> SMF section idx)
+        let mut section_mapping: HashMap<usize, usize> = HashMap::new();
+
+        // Add all sections from parsed object
+        for (obj_idx, section) in parsed.sections.iter().enumerate() {
+            let smf_idx = writer.sections.len();
+            section_mapping.insert(obj_idx, smf_idx);
+            writer.sections.push(section.clone());
+        }
+
+        // Add all symbols with layout information from MIR
+        for mut symbol in parsed.symbols.into_iter() {
+            // Update section index to SMF numbering
+            if let Some(&smf_idx) = section_mapping.get(&(symbol.section_index as usize)) {
+                symbol.section_index = smf_idx as u16;
+            }
+
+            // Merge layout info from MIR if available
+            if let Some(&(layout_phase, is_anchor)) = mir_func_info.get(&symbol.name) {
+                symbol.layout_phase = layout_phase;
+                symbol.is_event_loop_anchor = is_anchor;
+            }
+
+            writer.symbols.push(symbol);
+        }
+
+        // Add all relocations
+        for reloc in parsed.relocations {
+            writer.relocations.push(reloc);
         }
 
         Ok(writer)
