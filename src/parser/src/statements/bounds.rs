@@ -60,14 +60,9 @@ impl Parser<'_> {
     fn parse_bounds_or(&mut self) -> Result<BoundsPattern, ParseError> {
         let mut left = self.parse_bounds_and()?;
 
-        // Check for || (two pipes) or 'or' keyword
-        while self.check(&TokenKind::Or) || self.is_double_pipe() {
-            if self.is_double_pipe() {
-                self.advance(); // consume first |
-                self.advance(); // consume second |
-            } else {
-                self.advance(); // consume 'or'
-            }
+        // Check for || (DoublePipe token) or 'or' keyword
+        while self.check(&TokenKind::Or) || self.check(&TokenKind::DoublePipe) {
+            self.advance(); // consume 'or' or '||'
             let right = self.parse_bounds_and()?;
             left = BoundsPattern::Or(Box::new(left), Box::new(right));
         }
@@ -79,14 +74,9 @@ impl Parser<'_> {
     fn parse_bounds_and(&mut self) -> Result<BoundsPattern, ParseError> {
         let mut left = self.parse_bounds_primary()?;
 
-        // Check for && (two ampersands) or 'and' keyword
-        while self.check(&TokenKind::And) || self.is_double_amp() {
-            if self.is_double_amp() {
-                self.advance(); // consume first &
-                self.advance(); // consume second &
-            } else {
-                self.advance(); // consume 'and'
-            }
+        // Check for && (DoubleAmp token) or 'and' keyword
+        while self.check(&TokenKind::And) || self.check(&TokenKind::DoubleAmp) {
+            self.advance(); // consume 'and' or '&&'
             let right = self.parse_bounds_primary()?;
             left = BoundsPattern::And(Box::new(left), Box::new(right));
         }
@@ -159,22 +149,6 @@ impl Parser<'_> {
             variable,
             kind,
         }))
-    }
-
-    /// Check if current token is double pipe ||
-    fn is_double_pipe(&mut self) -> bool {
-        if !self.check(&TokenKind::Pipe) {
-            return false;
-        }
-        self.peek_is(&TokenKind::Pipe)
-    }
-
-    /// Check if current token is double ampersand &&
-    fn is_double_amp(&mut self) -> bool {
-        if !self.check(&TokenKind::Ampersand) {
-            return false;
-        }
-        self.peek_is(&TokenKind::Ampersand)
     }
 
     /// Check if current token is an identifier with specific name (for bounds kind)
