@@ -18,9 +18,9 @@ pub(super) fn eval_call_expr(
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Option<Result<Value, CompileError>> {
+) -> Result<Option<Value>, CompileError> {
     match expr {
-        Expr::Call { callee, args } => Some(evaluate_call(
+        Expr::Call { callee, args } => Ok(Some(evaluate_call(
             callee,
             args,
             env,
@@ -28,8 +28,8 @@ pub(super) fn eval_call_expr(
             classes,
             enums,
             impl_methods,
-        )),
-        Expr::MethodCall { receiver, method, args } => Some(evaluate_method_call(
+        )?)),
+        Expr::MethodCall { receiver, method, args } => Ok(Some(evaluate_method_call(
             receiver,
             method,
             args,
@@ -38,20 +38,20 @@ pub(super) fn eval_call_expr(
             classes,
             enums,
             impl_methods,
-        )),
+        )?)),
         Expr::FieldAccess { receiver, field } => {
             // Support module-style access (lib.foo) by resolving directly to functions/classes
             if let Expr::Identifier(module_name) = receiver.as_ref() {
                 if env.get(module_name).is_none() {
                     if let Some(func) = functions.get(field).cloned() {
-                        return Some(Ok(Value::Function {
+                        return Ok(Some(Value::Function {
                             name: field.clone(),
                             def: Box::new(func.clone()),
                             captured_env: Env::new(),
                         }));
                     }
                     if classes.contains_key(field) {
-                        return Some(Ok(Value::Constructor {
+                        return Ok(Some(Value::Constructor {
                             class_name: field.clone(),
                         }));
                     }
@@ -65,11 +65,11 @@ pub(super) fn eval_call_expr(
                 Value::Object { ref fields, ref class, .. } => {
                     // First, try direct field access
                     if let Some(val) = fields.get(field) {
-                        return Some(Ok(val.clone()));
+                        return Ok(Some(val.clone()));
                     }
                     // Auto-initializing internal fields: fields starting with '_' default to 0
                     if field.starts_with('_') {
-                        return Some(Ok(Value::Int(0)));
+                        return Ok(Some(Value::Int(0)));
                     }
                     // Auto-forwarding: try get_<field>() or is_<field>() methods
                     let getter_name = format!("get_{}", field);
@@ -85,7 +85,7 @@ pub(super) fn eval_call_expr(
                                 class: class.clone(),
                                 fields: fields.clone(),
                             };
-                            return Some(exec_method_function(
+                            return Ok(Some(exec_method_function(
                                 method,
                                 &[],
                                 &self_val,
@@ -94,7 +94,7 @@ pub(super) fn eval_call_expr(
                                 classes,
                                 enums,
                                 impl_methods,
-                            ));
+                            )?));
                         }
                         // Try is_<field>
                         if let Some(method) =
@@ -104,7 +104,7 @@ pub(super) fn eval_call_expr(
                                 class: class.clone(),
                                 fields: fields.clone(),
                             };
-                            return Some(exec_method_function(
+                            return Ok(Some(exec_method_function(
                                 method,
                                 &[],
                                 &self_val,
@@ -113,7 +113,7 @@ pub(super) fn eval_call_expr(
                                 classes,
                                 enums,
                                 impl_methods,
-                            ));
+                            )?));
                         }
                     }
                     Err(CompileError::Semantic(format!("unknown field {field}")))
@@ -246,7 +246,7 @@ pub(super) fn eval_call_expr(
                 }
                 _ => Err(CompileError::Semantic("field access on non-object".into())),
             };
-            Some(result)
+            Ok(Some(result?))
         }
         Expr::FunctionalUpdate { target, method, args } => {
             let method_call = Expr::MethodCall {
@@ -254,15 +254,15 @@ pub(super) fn eval_call_expr(
                 method: method.clone(),
                 args: args.clone(),
             };
-            Some(evaluate_expr(
+            Ok(Some(evaluate_expr(
                 &method_call,
                 env,
                 functions,
                 classes,
                 enums,
                 impl_methods,
-            ))
+            )?))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }

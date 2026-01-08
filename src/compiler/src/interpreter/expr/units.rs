@@ -1,10 +1,9 @@
 use simple_parser::ast::{BinOp, UnaryOp};
 
 use crate::error::CompileError;
-use crate::interpreter_unit::decompose_si_prefix;
+use crate::interpreter_unit::{decompose_si_prefix, UNIT_SUFFIX_TO_FAMILY};
 use crate::value::Value;
 
-use super::super::UNIT_SUFFIX_TO_FAMILY;
 
 /// Look up the family name for a unit suffix from the thread-local registry
 pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {

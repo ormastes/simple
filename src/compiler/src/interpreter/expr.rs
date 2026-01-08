@@ -31,55 +31,55 @@ pub(crate) fn evaluate_expr(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Some(result) = literals::eval_literal_expr(
+    if let Some(value) = literals::eval_literal_expr(
         expr,
         env,
         functions,
         classes,
         enums,
         impl_methods,
-    ) {
-        return result;
+    )? {
+        return Ok(value);
     }
-    if let Some(result) = ops::eval_op_expr(
+    if let Some(value) = ops::eval_op_expr(
         expr,
         env,
         functions,
         classes,
         enums,
         impl_methods,
-    ) {
-        return result;
+    )? {
+        return Ok(value);
     }
-    if let Some(result) = control::eval_control_expr(
+    if let Some(value) = control::eval_control_expr(
         expr,
         env,
         functions,
         classes,
         enums,
         impl_methods,
-    ) {
-        return result;
+    )? {
+        return Ok(value);
     }
-    if let Some(result) = calls::eval_call_expr(
+    if let Some(value) = calls::eval_call_expr(
         expr,
         env,
         functions,
         classes,
         enums,
         impl_methods,
-    ) {
-        return result;
+    )? {
+        return Ok(value);
     }
-    if let Some(result) = collections::eval_collection_expr(
+    if let Some(value) = collections::eval_collection_expr(
         expr,
         env,
         functions,
         classes,
         enums,
         impl_methods,
-    ) {
-        return result;
+    )? {
+        return Ok(value);
     }
 
     match expr {
