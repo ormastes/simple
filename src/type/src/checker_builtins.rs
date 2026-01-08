@@ -11,6 +11,7 @@ impl TypeChecker {
             trait_impls: HashMap::new(),
             mixins: HashMap::new(),
             compositions: HashMap::new(),
+            interface_bindings: HashMap::new(),
         };
         // Add built-in functions to environment
         tc.add_builtins();
