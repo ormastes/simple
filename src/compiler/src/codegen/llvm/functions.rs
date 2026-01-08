@@ -28,6 +28,10 @@ type VRegMap = std::collections::HashMap<
     inkwell::values::BasicValueEnum<'static>,
 >;
 
+/// Fallback VRegMap when LLVM is not enabled
+#[cfg(not(feature = "llvm"))]
+type VRegMap = std::collections::HashMap<crate::mir::VReg, ()>;
+
 impl LlvmBackend {
     /// Compile a MIR function to LLVM IR (feature-gated)
     #[cfg(feature = "llvm")]
