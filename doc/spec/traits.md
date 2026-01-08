@@ -268,6 +268,87 @@ See [Unit Types](units.md) for the complete type safety policy.
 
 ---
 
+## Interface Bindings (Static Polymorphism)
+
+Interface bindings allow you to declare that a specific implementation type should be used for all instances of a trait type within a module. This enables **static dispatch** for trait method calls, eliminating vtable lookup overhead.
+
+### Syntax
+
+```simple
+bind TraitName = ImplTypeName
+```
+
+### Example
+
+```simple
+trait Logger:
+    fn log(self, msg: str) -> str
+
+class ConsoleLogger:
+    fn log(self, msg: str) -> str:
+        return "Console: " + msg
+
+class FileLogger:
+    fn log(self, msg: str) -> str:
+        return "File: " + msg
+
+# Bind Logger to ConsoleLogger for this module
+bind Logger = ConsoleLogger
+
+fn create_logger() -> Logger:
+    return ConsoleLogger()
+
+fn main():
+    let logger: Logger = create_logger()
+    # With binding, this dispatches statically to ConsoleLogger::log
+    # No vtable lookup required
+    let result = logger.log("Hello")
+    # result is "Console: Hello"
+```
+
+### How It Works
+
+1. **Compile-time**: The `bind` declaration is processed during parsing
+2. **AST Rewriting**: The binding specializer rewrites method calls on bound trait types
+3. **HIR/MIR Lowering**: Trait info includes vtable slot mappings for proper dispatch
+4. **Interpreter**: Thread-local bindings enable static dispatch at runtime
+
+### Benefits
+
+- **Performance**: Eliminates vtable indirection for trait method calls
+- **Inlining**: Enables the compiler to inline bound implementation methods
+- **Deterministic Dispatch**: The exact implementation is known at compile time
+
+### Scope Rules
+
+- Bindings are module-local (scoped to the declaring module)
+- Multiple modules can have different bindings for the same trait
+- Bindings are resolved during compilation, not at runtime
+
+### Use Cases
+
+1. **Dependency Injection**: Bind interfaces to concrete implementations
+2. **Testing**: Bind to mock implementations in test modules
+3. **Performance-Critical Code**: Eliminate dynamic dispatch overhead
+4. **Configuration**: Different builds can use different bindings
+
+### Comparison with Dynamic Dispatch
+
+| Aspect | `bind Interface = Impl` | `dyn Interface` |
+|--------|------------------------|-----------------|
+| Dispatch | Static (compile-time) | Dynamic (runtime) |
+| Performance | No vtable overhead | Vtable lookup |
+| Flexibility | Fixed at compile time | Can vary at runtime |
+| Inlining | Possible | Not possible |
+
+### Limitations
+
+- Only one binding per trait per module
+- Cannot change binding at runtime
+- Binding must be to a concrete type that implements the trait
+
+---
+
 ## Collection Traits
 
 Simple provides a hierarchy of traits for collections that enable generic programming over `List`, `Array`, `Slice`, and `String`.

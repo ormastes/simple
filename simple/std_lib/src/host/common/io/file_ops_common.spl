@@ -210,3 +210,39 @@ pub fn close_with_staging(handle: i64, stage_state: Option[StageState]) -> Resul
 pub fn file_exists_sync(path: FilePath) -> bool:
     return native_file_exists_sync(path)
 
+# ===============================
+# Sync I/O Loop Helpers
+# ===============================
+
+# Read with staging support (returns None if not staged, delegating to native read)
+pub fn read_sync_with_staging(
+    handle: i64,
+    buf: &mut Bytes,
+    stage_state: Option[StageState]
+) -> Result[ByteCount, IoError]:
+    if let Some(state) = stage_state:
+        if let Some(result) = read_from_staged_sync(handle, buf, state):
+            return result
+    return native_file_read_sync(handle, buf)
+
+# Write all bytes to file handle (sync loop)
+pub fn write_all_sync_impl(handle: i64, data: &Bytes) -> Result[(), IoError]:
+    let mut written: u64 = 0
+    let total = data.len()
+    while written < total:
+        let slice = data.slice(written, total)
+        let n = native_file_write_sync(handle, &slice)?
+        written = written + (n as u64)
+    return Ok(())
+
+# Close file with mmap cleanup (handles both Mmap and MmapShared)
+pub fn close_sync_with_staging(handle: i64, stage_state: Option[StageState]) -> Result[(), IoError]:
+    if let Some(state) = stage_state:
+        match state.mode:
+            case StageMode::Mmap | StageMode::MmapShared:
+                if state.mmap_ptr != 0:
+                    native_mmap_unmap(state.mmap_ptr, state.mmap_size)
+            case _:
+                pass
+    return native_file_close(handle)
+

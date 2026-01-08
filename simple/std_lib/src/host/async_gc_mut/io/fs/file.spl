@@ -315,22 +315,7 @@ impl File:
 
     # Read bytes (sync)
     pub fn read_sync(self, buf: &mut Bytes) -> Result[ByteCount, IoError]:
-        # If mmap staged, use mmap for reading
-        if let Some(state) = self.stage_state:
-            if state.status == StagingStatus::Staged:
-                match state.mode:
-                    case StageMode::Mmap | StageMode::MmapShared:
-                        let pos = native_file_seek_sync(self.handle, SeekFrom::Current(0))?
-                        let pos_u64 = pos as u64
-                        let to_read = buf.len().min(state.mmap_size - pos_u64)
-                        if to_read > 0:
-                            native_mmap_read(state.mmap_ptr, pos_u64, buf, to_read)
-                            native_file_seek_sync(self.handle, SeekFrom::Current(to_read as i64))?
-                        return Ok(to_read_bytes)
-                    case _:
-                        pass
-
-        return native_file_read_sync(self.handle, buf)
+        return read_sync_with_staging(self.handle, buf, self.stage_state)
 
     # Read exact bytes (sync)
     pub fn read_exact_sync(self, buf: &mut Bytes) -> Result[(), IoError]:
@@ -350,13 +335,7 @@ impl File:
 
     # Write all bytes (sync)
     pub fn write_all_sync(self, data: &Bytes) -> Result[(), IoError]:
-        let mut written: u64 = 0
-        let total = data.len()
-        while written < total:
-            let slice = data.slice(written, total)
-            let n = self.write_sync(&slice)?
-            written = written + (n as u64)
-        return Ok(())
+        return write_all_sync_impl(self.handle, data)
 
     # Flush buffers (sync)
     pub fn flush_sync(self) -> Result[(), IoError]:
@@ -383,10 +362,7 @@ impl File:
 
     # Close file (sync)
     pub fn close_sync(self) -> Result[(), IoError]:
-        if let Some(state) = self.stage_state:
-            if state.mode == StageMode::Mmap and state.mmap_ptr != 0:
-                native_mmap_unmap(state.mmap_ptr, state.mmap_size)
-        return native_file_close(self.handle)
+        return close_sync_with_staging(self.handle, self.stage_state)
 
     # ===============================
     # Positioned I/O (pread/pwrite)
