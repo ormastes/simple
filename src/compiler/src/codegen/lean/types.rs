@@ -224,6 +224,37 @@ impl<'a> TypeTranslator<'a> {
                     deriving: vec!["Repr".to_string(), "DecidableEq".to_string()],
                 })
             }
+            HirType::Mixin { name, type_params, fields, methods, .. } => {
+                let lean_fields: Result<Vec<_>, _> = fields
+                    .iter()
+                    .map(|(n, tid)| self.translate(*tid).map(|t| (n.clone(), t)))
+                    .collect();
+                let lean_methods: Result<Vec<_>, _> = methods
+                    .iter()
+                    .map(|m| {
+                        let params: Result<Vec<_>, _> = m.params
+                            .iter()
+                            .map(|tid| self.translate(*tid))
+                            .collect();
+                        let ret = self.translate(m.ret)?;
+                        params.map(|p| {
+                            (
+                                self.to_lean_name(&m.name),
+                                LeanType::Function {
+                                    params: p,
+                                    result: Box::new(ret),
+                                },
+                            )
+                        })
+                    })
+                    .collect();
+                Ok(LeanType::Mixin {
+                    name: self.to_lean_name(name),
+                    fields: lean_fields?,
+                    methods: lean_methods?,
+                    type_params: type_params.clone(),
+                })
+            }
             HirType::Array { element, .. } => {
                 let inner = self.translate(*element)?;
                 Ok(LeanType::List(Box::new(inner)))

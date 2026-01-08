@@ -5,7 +5,7 @@
 //! actors, pointers, and collections.
 
 use super::lowering_core::{MirLowerer, MirLowerResult, MirLowerError};
-use crate::hir::{HirExpr, HirExprKind, HirType, PointerKind, TypeId};
+use crate::hir::{DispatchMode, HirExpr, HirExprKind, HirType, PointerKind, TypeId};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
 
@@ -571,6 +571,55 @@ impl<'a> MirLowerer<'a> {
                     });
                     dest
                 })
+            }
+
+            // Method call with dispatch mode (static vs dynamic)
+            HirExprKind::MethodCall { receiver, method, args, dispatch } => {
+                let receiver_reg = self.lower_expr(receiver)?;
+                let mut arg_regs = Vec::new();
+                for arg in args {
+                    arg_regs.push(self.lower_expr(arg)?);
+                }
+
+                match dispatch {
+                    DispatchMode::Static => {
+                        // Static dispatch: direct function call (monomorphized)
+                        // The method name should be fully qualified as Type::method
+                        let func_name = method.clone();
+                        self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::MethodCallStatic {
+                                dest: Some(dest),
+                                receiver: receiver_reg,
+                                func_name,
+                                args: arg_regs,
+                            });
+                            dest
+                        })
+                    }
+                    DispatchMode::Dynamic => {
+                        // Dynamic dispatch: vtable lookup at runtime
+                        // For now, we need to resolve the vtable slot from the method name
+                        // This would be done by the type checker in a full implementation
+                        let vtable_slot = 0; // TODO: Resolve from type info
+                        let param_types = vec![]; // TODO: Get from method signature
+                        let return_type = expr_ty;
+                        self.with_func(|func, current_block| {
+                            let dest = func.new_vreg();
+                            let block = func.block_mut(current_block).unwrap();
+                            block.instructions.push(MirInst::MethodCallVirtual {
+                                dest: Some(dest),
+                                receiver: receiver_reg,
+                                vtable_slot,
+                                param_types,
+                                return_type,
+                                args: arg_regs,
+                            });
+                            dest
+                        })
+                    }
+                }
             }
 
             _ => Err(MirLowerError::Unsupported(format!("{:?}", expr_kind))),

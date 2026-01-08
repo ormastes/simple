@@ -2,10 +2,11 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::hir::LayoutPhase;
 
+#[derive(Debug, Clone, Default)]
 pub struct FunctionStats {
     /// Function name
     pub name: String,
