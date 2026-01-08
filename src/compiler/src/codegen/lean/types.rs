@@ -301,19 +301,6 @@ impl<'a> TypeTranslator<'a> {
                     Ok(LeanType::Primitive("Unit".to_string())) // Placeholder
                 }
             }
-            HirType::Mixin { name, fields, .. } => {
-                // Mixins become structure types in Lean
-                let lean_fields: Result<Vec<_>, _> = fields.iter()
-                    .map(|(n, tid)| {
-                        self.translate(*tid).map(|t| (n.clone(), t))
-                    })
-                    .collect();
-                Ok(LeanType::Structure {
-                    name: format!("Mixin{}", self.to_lean_name(name)),
-                    fields: lean_fields?,
-                    deriving: vec!["Repr".to_string()],
-                })
-            }
             HirType::Unknown => {
                 Ok(LeanType::Primitive("Unit".to_string()))
             }
