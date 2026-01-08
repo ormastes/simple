@@ -6,6 +6,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 
 use super::symbol::AnalyzedSymbol;
+use super::stats::AnalysisStats;
 use super::types::{RefKind, SymbolVisibility};
 
 pub struct SymbolGraph {
@@ -270,7 +271,7 @@ impl SymbolGraph {
 
     /// Get analysis statistics.
     pub fn stats(&self) -> AnalysisStats {
-        self.stats.read().clone()
+        (*self.stats.read()).clone()
     }
 
     /// Get total number of symbols.

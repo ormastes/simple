@@ -34,9 +34,7 @@ mod substitution;
 pub(crate) use helpers::{build_macro_const_bindings, const_value_to_string};
 pub(crate) use invocation::evaluate_macro_invocation;
 pub(crate) use state::{
-    enter_block_scope, exit_block_scope, queue_tail_injection, set_macro_trace,
+    enter_block_scope, exit_block_scope, queue_tail_injection,
     take_macro_introduced_symbols,
 };
-
-// Internal API (used by expansion module)
-pub(super) use expansion::expand_user_macro;
+pub use state::set_macro_trace;

@@ -9,7 +9,7 @@ use crate::mir::{FStringPart, VReg};
 use super::{InstrContext, InstrResult};
 
 /// Helper to create a string literal in stack slot and get ptr/len
-fn create_stack_string(
+pub(super) fn create_stack_string(
     builder: &mut FunctionBuilder,
     value: &str,
 ) -> (cranelift_codegen::ir::Value, cranelift_codegen::ir::Value) {
@@ -57,7 +57,7 @@ const TUPLE_SPEC: CollectionSpec = CollectionSpec {
 };
 
 /// Compile a collection literal (array or tuple) using the given spec
-fn compile_collection_lit<M: Module>(
+pub(super) fn compile_collection_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -94,7 +94,7 @@ fn compile_collection_lit<M: Module>(
     ctx.vreg_values.insert(dest, collection);
 }
 
-fn compile_array_lit<M: Module>(
+pub(super) fn compile_array_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -103,7 +103,7 @@ fn compile_array_lit<M: Module>(
     compile_collection_lit(ctx, builder, dest, elements, &ARRAY_SPEC);
 }
 
-fn compile_tuple_lit<M: Module>(
+pub(super) fn compile_tuple_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -115,7 +115,7 @@ fn compile_tuple_lit<M: Module>(
 /// Compile a SIMD vector literal
 /// For now, we represent vectors as arrays. A full implementation would use
 /// Cranelift's SIMD vector types for better performance.
-fn compile_vec_lit<M: Module>(
+pub(super) fn compile_vec_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -128,7 +128,7 @@ fn compile_vec_lit<M: Module>(
 
 /// Compile a SIMD vector reduction operation (sum, product, min, max, all, any)
 /// Takes a vector and reduces it to a scalar value using the specified runtime function.
-fn compile_vec_reduction<M: Module>(
+pub(super) fn compile_vec_reduction<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -144,7 +144,7 @@ fn compile_vec_reduction<M: Module>(
 }
 
 /// Compile SIMD lane extract: v[idx] -> element
-fn compile_vec_extract<M: Module>(
+pub(super) fn compile_vec_extract<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -161,7 +161,7 @@ fn compile_vec_extract<M: Module>(
 }
 
 /// Compile SIMD lane insert: v.with(idx, val) -> new vector
-fn compile_vec_with<M: Module>(
+pub(super) fn compile_vec_with<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -183,7 +183,7 @@ fn compile_vec_with<M: Module>(
 
 /// Compile SIMD element-wise math operation (sqrt, abs, floor, ceil, round)
 /// Takes a vector and returns a vector with the operation applied to each element.
-fn compile_vec_math<M: Module>(
+pub(super) fn compile_vec_math<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -312,7 +312,7 @@ pub(super) fn compile_gpu_atomic_cmpxchg<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-fn compile_dict_lit<M: Module>(
+pub(super) fn compile_dict_lit<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -342,7 +342,7 @@ fn compile_dict_lit<M: Module>(
     ctx.vreg_values.insert(dest, dict);
 }
 
-fn compile_index_get<M: Module>(
+pub(super) fn compile_index_get<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -364,7 +364,7 @@ fn compile_index_get<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-fn compile_index_set<M: Module>(
+pub(super) fn compile_index_set<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     collection: VReg,
@@ -387,7 +387,7 @@ fn compile_index_set<M: Module>(
     builder.ins().call(index_set_ref, &[coll_val, wrapped_idx, wrapped_val]);
 }
 
-fn compile_slice_op<M: Module>(
+pub(super) fn compile_slice_op<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -415,7 +415,7 @@ fn compile_slice_op<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-fn compile_const_string<M: Module>(
+pub(super) fn compile_const_string<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -435,7 +435,7 @@ fn compile_const_string<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-fn compile_fstring_format<M: Module>(
+pub(super) fn compile_fstring_format<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

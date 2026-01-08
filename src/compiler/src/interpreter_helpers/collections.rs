@@ -1,14 +1,16 @@
 //! Collection operations (map, filter, reduce, etc.)
 
 use crate::error::CompileError;
-use crate::value::{Env, Value};
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, LambdaParam};
+use crate::value::{Env, Value, BUILTIN_RANGE};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, LambdaParam, Pattern};
 use std::collections::HashMap;
 
 use super::super::{
     evaluate_expr, exec_function,
     Control, Enums, ImplMethods,
 };
+use super::patterns::bind_pattern;
+use super::args::apply_lambda_to_vec;
 
 pub(crate) fn eval_array_map(
     arr: &[Value],
@@ -250,7 +252,7 @@ pub(crate) fn iter_to_vec(val: &Value) -> Result<Vec<Value>, CompileError> {
 }
 
 /// Helper for binding sequence patterns (Tuple and Array) during comprehensions
-fn bind_sequence_pattern(value: &Value, patterns: &[Pattern], env: &mut Env, allow_tuple: bool) -> bool {
+pub(crate) fn bind_sequence_pattern(value: &Value, patterns: &[Pattern], env: &mut Env, allow_tuple: bool) -> bool {
     let values = match value {
         Value::Tuple(vals) if allow_tuple => vals,
         Value::Array(vals) => vals,

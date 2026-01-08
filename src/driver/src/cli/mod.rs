@@ -12,6 +12,8 @@ pub mod init;
 pub mod llm_tools;
 pub mod repl;
 pub mod sandbox;
+pub mod test_discovery;
+pub mod test_output;
 pub mod test_runner;
 #[cfg(feature = "tui")]
 pub mod tui;

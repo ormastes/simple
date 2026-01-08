@@ -3,12 +3,14 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{exec_block_fn, evaluate_expr, Control, Enums, ImplMethods};
-use crate::interpreter::interpreter_call::IN_NEW_METHOD;
-use crate::interpreter_helpers::find_and_exec_method;
+use crate::interpreter::{exec_block_fn, evaluate_expr, find_and_exec_method, Control, Enums, ImplMethods};
 use crate::value::{Value, Env, SpecialEnumType, OptionVariant, ResultVariant};
 use simple_parser::ast::{Argument, FunctionDef, ClassDef};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+
+// Import IN_NEW_METHOD from interpreter_call module
+use crate::interpreter::IN_NEW_METHOD;
 
 pub fn handle_trait_object_methods(
     trait_name: &str,

@@ -10,7 +10,7 @@ use crate::mir::{BlockId, VReg};
 use super::{InstrContext, InstrResult};
 use super::super::shared::get_func_block_addr;
 
-fn build_ctx_array<M: Module>(
+pub(super) fn build_ctx_array<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     body_block: BlockId,
@@ -37,7 +37,7 @@ fn build_ctx_array<M: Module>(
     }
 }
 
-fn compile_future_create<M: Module>(
+pub(super) fn compile_future_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -53,7 +53,7 @@ fn compile_future_create<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-fn compile_actor_spawn<M: Module>(
+pub(super) fn compile_actor_spawn<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -69,7 +69,7 @@ fn compile_actor_spawn<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-fn compile_generator_create<M: Module>(
+pub(super) fn compile_generator_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -89,7 +89,7 @@ fn compile_generator_create<M: Module>(
     ctx.vreg_values.insert(dest, result);
 }
 
-fn compile_yield<M: Module>(
+pub(super) fn compile_yield<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     value: VReg,
@@ -127,7 +127,7 @@ fn compile_yield<M: Module>(
 
 /// Compile an Await instruction with state machine support.
 /// Similar to Yield but for async functions: saves state, returns suspended future.
-fn compile_await<M: Module>(
+pub(super) fn compile_await<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

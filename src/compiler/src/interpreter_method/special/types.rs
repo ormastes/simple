@@ -3,7 +3,14 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
-use crate::interpreter::{UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY};
+use crate::interpreter::{
+    eval_arg, evaluate_expr, exec_block_fn, Control, Enums, ImplMethods,
+    UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
+};
+use crate::interpreter::interpreter_helpers::{
+    eval_option_map, eval_option_and_then, eval_option_or_else, eval_option_filter,
+    eval_result_map, eval_result_map_err, eval_result_and_then, eval_result_or_else,
+};
 use crate::interpreter_unit::decompose_si_prefix;
 use crate::value::{Value, Env, SpecialEnumType, OptionVariant, ResultVariant};
 use simple_parser::ast::{Argument, FunctionDef, ClassDef};

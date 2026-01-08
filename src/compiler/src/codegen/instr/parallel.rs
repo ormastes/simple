@@ -19,7 +19,7 @@ fn backend_to_i32(backend: Option<ParallelBackend>) -> i32 {
 }
 
 /// Compile a parallel map operation
-fn compile_par_map<M: Module>(
+pub(super) fn compile_par_map<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -46,7 +46,7 @@ fn compile_par_map<M: Module>(
 }
 
 /// Compile a parallel reduce operation
-fn compile_par_reduce<M: Module>(
+pub(super) fn compile_par_reduce<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -73,7 +73,7 @@ fn compile_par_reduce<M: Module>(
 }
 
 /// Compile a parallel filter operation
-fn compile_par_filter<M: Module>(
+pub(super) fn compile_par_filter<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -98,7 +98,7 @@ fn compile_par_filter<M: Module>(
 }
 
 /// Compile a parallel for_each operation
-fn compile_par_for_each<M: Module>(
+pub(super) fn compile_par_for_each<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     input: VReg,

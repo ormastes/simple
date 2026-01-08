@@ -1,9 +1,9 @@
 use crate::error::CompileError;
-use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn, exec_node, ClassDef, Enums, FunctionDef, ImplMethods};
+use crate::interpreter::{evaluate_expr, exec_block, exec_block_fn, exec_node, Control, Enums, ImplMethods};
 use crate::macro_contracts::{process_macro_contract, MacroContractResult};
 use crate::macro_validation::validate_macro_defined_before_use;
-use crate::value::{Control, Env, Value};
-use simple_parser::ast::{MacroAnchor, MacroArg, MacroContractItem, MacroDef, MacroStmt};
+use crate::value::{Env, Value};
+use simple_parser::ast::{ClassDef, FunctionDef, MacroAnchor, MacroArg, MacroContractItem, MacroDef, MacroStmt};
 use std::collections::{HashMap, HashSet};
 
 use super::helpers::build_macro_const_bindings;

@@ -267,20 +267,16 @@ impl File:
 
     # Remove staging
     pub fn unstage(self):
-        if let Some(state) = self.stage_state:
-            if state.mode == StageMode::Mmap and state.mmap_ptr != 0:
-                native_mmap_unmap(state.mmap_ptr, state.mmap_size)
+        unstage_cleanup(self.stage_state)
         self.stage_state = None
 
     # Check if file is staged
     pub fn is_staged(self) -> bool:
-        return self.stage_state.is_some()
+        return is_staged(self.stage_state)
 
     # Get staging mode
-    pub fn stage_mode(self) -> StageMode:
-        match self.stage_state:
-            case Some(state): return state.mode
-            case None: return StageMode::None
+    pub fn get_stage_mode(self) -> StageMode:
+        return get_stage_mode(self.stage_state)
 
     # ===============================
     # Synchronous Operations
@@ -398,23 +394,11 @@ impl File:
 
     # Read at offset without changing file position (thread-safe)
     pub fn pread(self, buf: &mut Bytes, offset: u64) -> Result[ByteCount, IoError]:
-        # If mmap staged, use mmap directly
-        if let Some(state) = self.stage_state:
-            if state.status == StagingStatus::Staged:
-                match state.mode:
-                    case StageMode::Mmap | StageMode::MmapShared:
-                        let to_read = buf.len().min(state.mmap_size - offset)
-                        if to_read > 0:
-                            native_mmap_read(state.mmap_ptr, offset, buf, to_read)
-                        return Ok(to_read_bytes)
-                    case _:
-                        pass
-
-        return native_file_pread(self.handle, buf, offset)
+        return pread_with_staging(self.handle, buf, offset, self.stage_state)
 
     # Write at offset without changing file position (thread-safe)
     pub fn pwrite(self, data: &Bytes, offset: u64) -> Result[ByteCount, IoError]:
-        return native_file_pwrite(self.handle, data, offset)
+        return pwrite_impl(self.handle, data, offset)
 
     # ===============================
     # Sync Staging with Preload

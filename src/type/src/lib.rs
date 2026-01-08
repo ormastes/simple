@@ -632,6 +632,9 @@ pub struct TypeChecker {
 include!("checker_builtins.rs");
 include!("checker_unify.rs");
 include!("checker_check.rs");
+include!("macro_checker.rs");
+include!("mixin_checker.rs");
+include!("dispatch_checker.rs");
 include!("checker_infer.rs");
 
 /// Check a list of AST nodes for type errors

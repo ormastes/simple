@@ -2,13 +2,15 @@
 
 use crate::error::CompileError;
 use crate::value::{Env, FutureValue, Value};
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
 use std::collections::HashMap;
 
 use super::super::{
     evaluate_expr, exec_block, exec_function,
     Control, Enums, ImplMethods,
 };
+use super::collections::iter_to_vec;
+use super::patterns::bind_pattern;
 
 pub(crate) fn normalize_index(idx: i64, len: i64) -> i64 {
     if idx < 0 {

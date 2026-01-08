@@ -11,6 +11,8 @@ use super::super::{
 };
 
 use crate::value::{OptionVariant, ResultVariant};
+use super::collections::bind_sequence_pattern;
+use super::method_dispatch::call_method_on_value;
 
 pub(crate) fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
     match pattern {

@@ -1,6 +1,6 @@
 //! Analysis statistics
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct AnalysisStats {
     /// Total number of symbols.
     pub total_symbols: usize,

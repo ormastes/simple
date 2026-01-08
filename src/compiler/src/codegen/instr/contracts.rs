@@ -11,7 +11,7 @@ use super::helpers::create_string_constant;
 
 /// Compile a contract check instruction.
 /// This checks the condition and calls a runtime function to panic if it fails.
-fn compile_contract_check<M: Module>(
+pub(super) fn compile_contract_check<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     condition: VReg,

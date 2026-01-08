@@ -10,7 +10,7 @@ use crate::mir::VReg;
 use super::{InstrContext, InstrResult};
 
 /// Compile a PointerNew instruction - allocate a pointer wrapping a value.
-fn compile_pointer_new<M: Module>(
+pub(super) fn compile_pointer_new<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -56,7 +56,7 @@ fn compile_pointer_new<M: Module>(
 }
 
 /// Compile a PointerRef instruction - create a borrow reference.
-fn compile_pointer_ref<M: Module>(
+pub(super) fn compile_pointer_ref<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     _builder: &mut FunctionBuilder,
     dest: VReg,
@@ -71,7 +71,7 @@ fn compile_pointer_ref<M: Module>(
 }
 
 /// Compile a PointerDeref instruction - dereference a pointer to get its value.
-fn compile_pointer_deref<M: Module>(
+pub(super) fn compile_pointer_deref<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

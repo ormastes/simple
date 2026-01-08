@@ -1,7 +1,7 @@
 //! Method dispatch and method_missing hooks
 
 use crate::error::CompileError;
-use crate::value::{Env, Value, METHOD_MISSING};
+use crate::value::{Env, Value, METHOD_MISSING, OptionVariant, ResultVariant};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
