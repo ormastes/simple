@@ -1,6 +1,6 @@
 # Static Polymorphism Specification
 
-*Source: `tests/system/static_polymorphism_spec.spl`*
+*Source: `./tests/system/static_polymorphism_spec.spl`*
 
 ---
 

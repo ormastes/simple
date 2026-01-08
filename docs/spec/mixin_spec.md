@@ -1,6 +1,6 @@
 # Mixin Feature Specification
 
-*Source: `tests/system/mixin_spec.spl`*
+*Source: `./tests/system/mixin_spec.spl`*
 
 ---
 
