@@ -4,7 +4,7 @@ use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
-use crate::mir::VReg;
+use crate::mir::{BlockId, VReg};
 
 use super::{InstrContext, InstrResult};
 

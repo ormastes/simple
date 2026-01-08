@@ -4,7 +4,7 @@ use simple_parser::ast::Block;
 
 use crate::macro_contracts::MacroContractResult;
 
-use super::CompileError;
+use crate::error::CompileError;
 
 /// Maximum depth for recursive macro expansion (prevents stack overflow)
 const MAX_MACRO_EXPANSION_DEPTH: usize = 128;

@@ -41,6 +41,7 @@ pub mod interpreter_unit;
 pub mod linker;
 pub mod lint;
 pub mod macro_contracts;
+pub mod r#macro;
 pub mod spec_coverage;
 pub mod macro_validation;
 pub mod mir;

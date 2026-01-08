@@ -7,6 +7,7 @@ use cranelift_module::Module;
 use crate::hir::BinOp;
 use crate::mir::VReg;
 
+use super::helpers::create_string_constant;
 use super::{InstrContext, InstrResult};
 
 fn compile_binop<M: Module>(

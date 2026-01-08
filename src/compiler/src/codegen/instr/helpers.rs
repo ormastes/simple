@@ -4,6 +4,7 @@ use cranelift_codegen::ir::{types, InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
+use crate::mir::VReg;
 use super::{InstrContext, InstrResult};
 
 /// Helper to create a string constant in module data and return (ptr, len) values
