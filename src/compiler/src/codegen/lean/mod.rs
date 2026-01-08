@@ -28,6 +28,7 @@ mod emitter;
 mod verification_diagnostics;
 mod verification_checker;
 mod runner;
+mod traits;
 
 pub use types::{LeanType, TypeTranslator};
 pub use functions::{FunctionTranslator, LeanFunction};
@@ -39,9 +40,14 @@ pub use verification_diagnostics::{
 };
 pub use verification_checker::{VerificationChecker, check_module};
 pub use runner::{LeanRunner, LeanCheckResult, VerificationSummary};
+pub use traits::{
+    TraitTranslator, LeanClass, LeanInstance, LeanBinding, LeanMethodSig,
+    BindingMode, StaticPolyTheorems
+};
 
 use crate::hir::{HirModule, HirFunction};
 use crate::CompileError;
+use simple_parser::ast::{TraitDef, ImplBlock};
 
 /// Lean code generator
 pub struct LeanCodegen {
@@ -129,6 +135,158 @@ impl LeanCodegen {
         let lean_func = func_translator.translate_function(func)?;
         emitter.emit_function(&lean_func);
 
+        Ok(emitter.finish())
+    }
+
+    /// Generate Lean type class from a Simple trait definition
+    pub fn generate_trait(&self, trait_def: &TraitDef, module: &HirModule) -> Result<String, CompileError> {
+        let mut emitter = LeanEmitter::new();
+        let type_translator = TypeTranslator::new(&module.types);
+        let trait_translator = TraitTranslator::new(&type_translator);
+
+        let lean_class = trait_translator.translate_trait(trait_def)?;
+        emitter.emit_class(&lean_class);
+
+        Ok(emitter.finish())
+    }
+
+    /// Generate Lean instance from a Simple impl block
+    pub fn generate_impl(&self, impl_block: &ImplBlock, module: &HirModule) -> Result<String, CompileError> {
+        let mut emitter = LeanEmitter::new();
+        let type_translator = TypeTranslator::new(&module.types);
+        let trait_translator = TraitTranslator::new(&type_translator);
+
+        let lean_instance = trait_translator.translate_impl(impl_block)?;
+        emitter.emit_instance(&lean_instance, self.generate_stubs);
+
+        Ok(emitter.finish())
+    }
+
+    /// Generate Lean binding for static dispatch
+    pub fn generate_binding(
+        &self,
+        interface_name: &str,
+        impl_type: LeanType,
+        mode: BindingMode,
+    ) -> Result<String, CompileError> {
+        let mut emitter = LeanEmitter::new();
+
+        let binding = LeanBinding {
+            interface_name: interface_name.to_string(),
+            impl_type,
+            mode,
+            doc: None,
+        };
+
+        emitter.emit_binding(&binding);
+        emitter.emit_binding_theorem(&binding);
+
+        Ok(emitter.finish())
+    }
+
+    /// Generate complete module with traits, impls, and bindings from AST
+    pub fn generate_module_with_traits(
+        &self,
+        module: &HirModule,
+        traits: &[TraitDef],
+        impls: &[ImplBlock],
+        bindings: &[(String, LeanType, BindingMode)],
+    ) -> Result<String, CompileError> {
+        let mut emitter = LeanEmitter::new();
+
+        // Generate module header
+        let module_name = self.module_name.clone()
+            .or_else(|| module.name.clone())
+            .unwrap_or_else(|| "Main".to_string());
+
+        emitter.emit_header(&module_name);
+
+        // Generate type definitions from structs and enums
+        let type_translator = TypeTranslator::new(&module.types);
+        let trait_translator = TraitTranslator::new(&type_translator);
+
+        // Emit type classes from traits
+        if !traits.is_empty() {
+            emitter.emit_comment("Type classes (from traits)");
+            for trait_def in traits {
+                let lean_class = trait_translator.translate_trait(trait_def)?;
+                emitter.emit_class(&lean_class);
+            }
+            emitter.emit_blank();
+        }
+
+        // Emit instances from impls
+        if !impls.is_empty() {
+            emitter.emit_comment("Instances (from impl blocks)");
+            for impl_block in impls {
+                let lean_instance = trait_translator.translate_impl(impl_block)?;
+                emitter.emit_instance(&lean_instance, self.generate_stubs);
+            }
+            emitter.emit_blank();
+        }
+
+        // Emit interface bindings for static dispatch
+        if !bindings.is_empty() {
+            emitter.emit_comment("Interface bindings (static dispatch)");
+            for (interface_name, impl_type, mode) in bindings {
+                let binding = LeanBinding {
+                    interface_name: interface_name.clone(),
+                    impl_type: impl_type.clone(),
+                    mode: *mode,
+                    doc: None,
+                };
+                emitter.emit_binding(&binding);
+                emitter.emit_binding_theorem(&binding);
+            }
+            emitter.emit_blank();
+        }
+
+        // Generate function definitions (only verified ones)
+        let func_translator = FunctionTranslator::new(&type_translator);
+        let contract_translator = ContractTranslator::new(&type_translator);
+
+        for func in &module.functions {
+            if func.verification_mode.is_verified() {
+                // Generate function
+                let lean_func = func_translator.translate_function(func)?;
+                emitter.emit_function(&lean_func);
+
+                // Generate contracts as theorems
+                if let Some(ref contract) = func.contract {
+                    let theorems = contract_translator.translate_contract(func, contract)?;
+                    for theorem in theorems {
+                        emitter.emit_theorem(&theorem, self.generate_stubs);
+                    }
+                }
+            }
+        }
+
+        // Emit static polymorphism verification theorems
+        if !traits.is_empty() && !impls.is_empty() {
+            emitter.emit_blank();
+            emitter.emit_comment("Static polymorphism verification theorems");
+
+            // Generate coherence theorem for each trait
+            for trait_def in traits {
+                let impl_types: Vec<&str> = impls.iter()
+                    .filter(|i| i.trait_name.as_ref() == Some(&trait_def.name))
+                    .filter_map(|i| {
+                        if let simple_parser::ast::Type::Simple(name) = &i.target_type {
+                            Some(name.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                if !impl_types.is_empty() {
+                    let coherence = StaticPolyTheorems::coherence_theorem(&trait_def.name, &impl_types);
+                    emitter.emit_raw(&coherence);
+                }
+            }
+        }
+
+        emitter.emit_footer(&module_name);
         Ok(emitter.finish())
     }
 }

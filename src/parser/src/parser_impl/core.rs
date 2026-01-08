@@ -228,6 +228,7 @@ impl<'a> Parser<'a> {
             TokenKind::Union => self.parse_union_with_doc(doc_comment),
             TokenKind::Trait => self.parse_trait_with_doc(doc_comment),
             TokenKind::Mixin => self.parse_mixin(),
+            TokenKind::Bind => self.parse_interface_binding(),
             TokenKind::Impl => self.parse_impl(),
             TokenKind::Actor => self.parse_actor(),
             TokenKind::Pub => {

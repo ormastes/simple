@@ -10,6 +10,7 @@
 use super::types::LeanType;
 use super::functions::LeanFunction;
 use super::contracts::{LeanTheorem, LeanClassInvariant};
+use super::traits::{LeanClass, LeanInstance, LeanBinding};
 
 /// A complete Lean module
 #[derive(Debug, Clone)]
@@ -26,6 +27,12 @@ pub struct LeanModule {
     pub theorems: Vec<LeanTheorem>,
     /// Class invariants
     pub invariants: Vec<LeanClassInvariant>,
+    /// Type classes (from traits)
+    pub classes: Vec<LeanClass>,
+    /// Instances (from impl blocks)
+    pub instances: Vec<LeanInstance>,
+    /// Interface bindings (static dispatch)
+    pub bindings: Vec<LeanBinding>,
 }
 
 /// Lean code emitter
@@ -85,6 +92,12 @@ impl LeanEmitter {
                     self.output.push('\n');
                 }
             }
+            LeanType::Mixin { .. } => {
+                if let Some(def) = ty.emit_mixin() {
+                    self.output.push_str(&def);
+                    self.output.push('\n');
+                }
+            }
             _ => {
                 // Primitive and named types don't need definitions
             }
@@ -118,6 +131,34 @@ impl LeanEmitter {
     /// Emit a class invariant
     pub fn emit_invariant(&mut self, inv: &LeanClassInvariant) {
         self.output.push_str(&inv.to_lean());
+        self.output.push('\n');
+    }
+
+    /// Emit a Lean type class (from Simple trait)
+    pub fn emit_class(&mut self, class: &LeanClass) {
+        self.output.push_str(&class.to_lean());
+        self.output.push('\n');
+    }
+
+    /// Emit a Lean instance (from Simple impl block)
+    pub fn emit_instance(&mut self, instance: &LeanInstance, use_sorry: bool) {
+        if use_sorry {
+            self.output.push_str(&instance.to_lean_with_sorry());
+        } else {
+            self.output.push_str(&instance.to_lean());
+        }
+        self.output.push('\n');
+    }
+
+    /// Emit an interface binding (static dispatch)
+    pub fn emit_binding(&mut self, binding: &LeanBinding) {
+        self.output.push_str(&binding.to_lean());
+        self.output.push('\n');
+    }
+
+    /// Emit a binding validity theorem
+    pub fn emit_binding_theorem(&mut self, binding: &LeanBinding) {
+        self.output.push_str(&binding.to_validity_theorem());
         self.output.push('\n');
     }
 
@@ -199,6 +240,34 @@ impl LeanEmitter {
             self.emit_comment("Type definitions");
             for ty in &module.types {
                 self.emit_type(ty);
+            }
+            self.emit_blank();
+        }
+
+        // Emit type classes (from traits)
+        if !module.classes.is_empty() {
+            self.emit_comment("Type classes");
+            for class in &module.classes {
+                self.emit_class(class);
+            }
+            self.emit_blank();
+        }
+
+        // Emit instances (from impl blocks)
+        if !module.instances.is_empty() {
+            self.emit_comment("Instances");
+            for instance in &module.instances {
+                self.emit_instance(instance, use_sorry);
+            }
+            self.emit_blank();
+        }
+
+        // Emit interface bindings (static dispatch)
+        if !module.bindings.is_empty() {
+            self.emit_comment("Interface bindings");
+            for binding in &module.bindings {
+                self.emit_binding(binding);
+                self.emit_binding_theorem(binding);
             }
             self.emit_blank();
         }
@@ -363,6 +432,9 @@ mod tests {
             ],
             theorems: vec![],
             invariants: vec![],
+            classes: vec![],
+            instances: vec![],
+            bindings: vec![],
         };
 
         let mut emitter = LeanEmitter::new();

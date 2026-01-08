@@ -38,6 +38,13 @@ pub enum LeanType {
     List(Box<LeanType>),
     /// Tuple type (A × B)
     Tuple(Vec<LeanType>),
+    /// Mixin definition (reusable structure extension)
+    Mixin {
+        name: String,
+        fields: Vec<(String, LeanType)>,
+        methods: Vec<(String, LeanType)>,
+        type_params: Vec<String>,
+    },
 }
 
 impl LeanType {
@@ -48,6 +55,7 @@ impl LeanType {
             LeanType::Named(name) => name.clone(),
             LeanType::Structure { name, .. } => name.clone(),
             LeanType::Inductive { name, .. } => name.clone(),
+            LeanType::Mixin { name, .. } => name.clone(),
             LeanType::Function { params, result } => {
                 let params_str = params.iter()
                     .map(|p| p.to_lean())
@@ -84,6 +92,42 @@ impl LeanType {
         }
     }
 
+    /// Emit mixin definition
+    pub fn emit_mixin(&self) -> Option<String> {
+        match self {
+            LeanType::Mixin { name, fields, methods, type_params } => {
+                let mut out = String::new();
+                
+                // Generate type parameter list
+                let params = if type_params.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", type_params.iter()
+                        .map(|p| format!("({} : Type)", p))
+                        .collect::<Vec<_>>()
+                        .join(" "))
+                };
+                
+                out.push_str(&format!("/-- Mixin: {} --/\n", name));
+                out.push_str(&format!("structure {}{} where\n", name, params));
+                
+                // Emit fields
+                for (field_name, field_type) in fields {
+                    out.push_str(&format!("  {} : {}\n", field_name, field_type.to_lean()));
+                }
+                
+                // Emit method signatures as function fields
+                for (method_name, method_type) in methods {
+                    out.push_str(&format!("  {} : {}\n", method_name, method_type.to_lean()));
+                }
+                
+                out.push_str("deriving Repr\n");
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+    
     /// Emit inductive definition
     pub fn emit_inductive(&self) -> Option<String> {
         match self {

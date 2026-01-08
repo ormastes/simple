@@ -19,6 +19,7 @@ pub enum Node {
     Enum(EnumDef),
     Trait(TraitDef),
     Impl(ImplBlock),
+    InterfaceBinding(InterfaceBinding),
     Mixin(MixinDef),
     Actor(ActorDef),
     TypeAlias(TypeAliasDef),

@@ -85,6 +85,12 @@ pub(crate) fn take_macro_introduced_symbols() -> Option<MacroContractResult> {
     MACRO_INTRODUCED_SYMBOLS.with(|cell| cell.borrow_mut().take())
 }
 
+pub(crate) fn store_macro_introduced_symbols(contract_result: MacroContractResult) {
+    MACRO_INTRODUCED_SYMBOLS.with(|cell| {
+        *cell.borrow_mut() = Some(contract_result);
+    });
+}
+
 /// Enter a new block scope for tail injection tracking
 pub(crate) fn enter_block_scope() -> usize {
     BLOCK_DEPTH.with(|cell| {

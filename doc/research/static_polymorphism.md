@@ -20,11 +20,18 @@ The current type system has:
 - **LeanTy/LeanExpr**: Types matching Lean4 verification model
 - **lean_infer()**: Pure type inference function (verified in Lean4)
 - **Full Type enum**: `Int`, `Bool`, `Str`, `Generic`, `Named`, `Function`, etc.
+- **DynTrait(String)**: Already exists! Dynamic trait object type
+- **TypeScheme**: For let-polymorphism (∀vars. ty)
+- **Substitution**: Type variable substitution
+- **TraitImplRegistry**: Tracks blanket/specific impls with coherence checking
 
-Missing for static polymorphism:
-- No `dyn T` / `static T` type modifiers
-- No trait bound resolution in type inference
-- No interface binding mechanism
+**Already exists:**
+- `Type::DynTrait(String)` - dynamic trait object type
+
+**Missing for static polymorphism:**
+- `Type::StaticTrait(String)` - static trait type
+- `Type::DispatchableTrait(String)` - compiler-chosen dispatch
+- Interface binding mechanism (`BindingEnv`)
 
 ### 2.2 Trait System (Lean4 Models)
 
@@ -39,7 +46,41 @@ Missing for static polymorphism:
 - `inferFieldAccess`, `inferMethodCall`: Type inference
 - `isSubtype`: Inheritance checking
 
-### 2.3 Module System
+### 2.3 Existing Lean Generation System (`src/compiler/src/codegen/lean/`)
+
+**The codebase already has comprehensive Lean4 code generation:**
+
+| Module | Purpose |
+|--------|---------|
+| `mod.rs` | `LeanCodegen` - Main generator from HIR |
+| `types.rs` | `TypeTranslator` - Simple → Lean type translation |
+| `functions.rs` | `FunctionTranslator` - Function → Lean def |
+| `contracts.rs` | `ContractTranslator` - Contracts → Lean theorems |
+| `expressions.rs` | `ExprTranslator` - Expressions → Lean expressions |
+| `emitter.rs` | `LeanEmitter` - Code writer |
+| `runner.rs` | `LeanRunner` - Run Lean, check proofs |
+| `verification_checker.rs` | Verification checking |
+
+**CLI Integration** (`src/driver/src/cli/gen_lean.rs`):
+```bash
+simple gen-lean generate    # Generate Lean files to stdout
+simple gen-lean compare     # Compare generated vs existing
+simple gen-lean write       # Write generated files
+```
+
+**What exists:**
+- Type translation (primitives, structs, enums → structure/inductive)
+- Function translation (Simple → Lean def)
+- Contract translation (requires/ensures → theorems)
+- Lean runner for proof checking
+
+**What needs to be added for static polymorphism:**
+- Trait class generation (`class Logger (α : Type)`)
+- Instance generation (`instance : Logger Console`)
+- Binding generation (`abbrev Logger.Bound := Console`)
+- Binding validity theorems
+
+### 2.4 Module System
 
 **`__init__.spl`** serves as package root manifest:
 - `mod X` declarations for child modules
@@ -476,24 +517,202 @@ Simple Code (.spl)
 **Key Principle:** Lean code is GENERATED from Simple source, not hand-written.
 The generator ensures that the Lean model exactly matches the Simple semantics.
 
-### 6.2 Lean Generation Rules
+### 6.2 Lean4 Code Generator Module
 
-| Simple Construct | Lean Equivalent |
-|------------------|-----------------|
-| `trait I` | `structure TraitDef` + `class I` |
-| `impl I for T` | `instance : I T` |
-| `bind I = T` | `abbrev I_Sel := T` + canonical instance |
-| `dyn I` | `∃ t, I t` (existential) |
-| `static I` | `I_Sel` (resolved alias) |
-| `I` (dispatchable) | `I α` with `α` resolved at monomorphization |
+**Location:** `src/compiler/src/lean_gen/` (new module)
 
-### 6.3 Verification Properties
+```rust
+// lean_gen/mod.rs
+pub mod types;
+pub mod traits;
+pub mod bindings;
+pub mod proofs;
+pub mod writer;
 
-Generated Lean code should prove:
-1. **Binding uniqueness**: Each interface has at most one binding per package
-2. **Implementation completeness**: Bound type implements all trait methods
-3. **Type safety**: `static I` values are always of the bound type
-4. **Coherence**: No overlapping implementations after binding resolution
+use simple_parser::ast::{TraitDef, ImplBlock, ClassDef, BindStmt};
+
+pub struct LeanGenerator {
+    output_dir: PathBuf,
+    project_name: String,
+}
+
+impl LeanGenerator {
+    /// Generate Lean4 code from Simple AST
+    pub fn generate(&self, modules: &[Module]) -> Result<(), LeanGenError> {
+        // 1. Collect all traits, impls, classes, bindings
+        let context = self.collect_definitions(modules)?;
+
+        // 2. Generate type definitions
+        self.generate_types(&context)?;
+
+        // 3. Generate trait classes
+        self.generate_traits(&context)?;
+
+        // 4. Generate instances (implementations)
+        self.generate_instances(&context)?;
+
+        // 5. Generate binding constraints
+        self.generate_bindings(&context)?;
+
+        // 6. Generate proof obligations
+        self.generate_proofs(&context)?;
+
+        // 7. Generate lakefile.lean
+        self.generate_lakefile()?;
+
+        Ok(())
+    }
+}
+```
+
+### 6.3 Simple → Lean Translation Rules
+
+| Simple Construct | Lean4 Generated Code |
+|------------------|---------------------|
+| `trait Logger` | `class Logger (α : Type) where` |
+| `fn log(msg: Str)` (in trait) | `log : String → α → IO Unit` |
+| `impl Logger for Console` | `instance : Logger Console where` |
+| `class Point { x: Int, y: Int }` | `structure Point where x : Int; y : Int` |
+| `bind Logger = Console` | `abbrev Logger.Bound := Console` |
+| `dyn Logger` | `∃ α, Logger α × α` |
+| `static Logger` | `Logger.Bound` |
+| `x: Logger` (dispatchable) | `{α : Type} → [Logger α] → α` |
+
+### 6.4 Example: Simple to Lean4 Translation
+
+**Simple Source (`infra/log.spl`):**
+```spl
+trait Logger:
+    fn log(msg: Str)
+    fn level() -> Int
+
+class ConsoleLogger impl Logger:
+    fn log(msg: Str):
+        print(msg)
+
+    fn level() -> Int:
+        return 1
+
+class FileLogger impl Logger:
+    path: Str
+
+    fn log(msg: Str):
+        file.append(self.path, msg)
+
+    fn level() -> Int:
+        return 2
+```
+
+**Generated Lean4 (`verification/generated/InfraLog.lean`):**
+```lean
+/-
+  Auto-generated from infra/log.spl
+  DO NOT EDIT - regenerate with: simple --gen-lean infra/log.spl
+-/
+
+-- Trait definition
+class Logger (α : Type) where
+  log : α → String → IO Unit
+  level : α → Int
+
+-- ConsoleLogger structure
+structure ConsoleLogger where
+  deriving Repr
+
+-- ConsoleLogger implements Logger
+instance : Logger ConsoleLogger where
+  log _ msg := IO.println msg
+  level _ := 1
+
+-- FileLogger structure
+structure FileLogger where
+  path : String
+  deriving Repr
+
+-- FileLogger implements Logger
+instance : Logger FileLogger where
+  log self msg := IO.FS.appendFile self.path msg
+  level _ := 2
+
+-- Prove that both implementations are valid
+theorem consoleLogger_valid : Logger ConsoleLogger := inferInstance
+theorem fileLogger_valid : Logger FileLogger := inferInstance
+```
+
+**Simple Source (`app/__init__.spl`):**
+```spl
+mod app:
+    bind Logger = ConsoleLogger
+```
+
+**Generated Lean4 (`verification/generated/AppBindings.lean`):**
+```lean
+/-
+  Auto-generated from app/__init__.spl
+  DO NOT EDIT
+-/
+
+import InfraLog
+
+-- Interface binding: Logger is bound to ConsoleLogger
+abbrev Logger.Bound := ConsoleLogger
+
+-- The bound type satisfies the interface
+instance Logger.BoundInstance : Logger Logger.Bound := inferInstance
+
+-- Theorem: Using the binding is type-safe
+theorem binding_sound : Logger Logger.Bound := Logger.BoundInstance
+
+-- Theorem: Dispatch to bound type is deterministic
+theorem binding_deterministic (x : Logger.Bound) (y : Logger.Bound) :
+    Logger.log x = Logger.log y ∧ Logger.level x = Logger.level y := by
+  simp [Logger.log, Logger.level]
+```
+
+### 6.5 Verification Properties (Auto-Generated)
+
+The generator produces proofs for:
+1. **Binding validity**: Bound type implements the interface
+2. **Implementation completeness**: All trait methods are implemented
+3. **Method signature match**: Impl method types match trait declaration
+4. **Coherence**: No overlapping instances for the same type
+
+### 6.6 Generator CLI Integration
+
+```bash
+# Generate Lean from a single file
+simple --gen-lean src/infra/log.spl -o verification/generated/
+
+# Generate Lean from entire project
+simple --gen-lean . -o verification/generated/
+
+# Generate and verify in one step
+simple --verify src/  # Generates Lean, runs lake build, reports results
+
+# CI integration
+simple --verify --fail-on-unproven src/
+```
+
+### 6.7 Incremental Generation
+
+```rust
+// Track which Simple files have changed
+pub struct LeanGenCache {
+    file_hashes: HashMap<PathBuf, u64>,
+    last_generated: HashMap<PathBuf, PathBuf>,  // .spl → .lean mapping
+}
+
+impl LeanGenCache {
+    /// Only regenerate Lean for changed Simple files
+    pub fn generate_incremental(&mut self, changed: &[PathBuf]) -> Result<(), Error> {
+        for spl_file in changed {
+            let lean_file = self.lean_path_for(spl_file);
+            self.generate_single(spl_file, &lean_file)?;
+            self.update_hash(spl_file)?;
+        }
+        Ok(())
+    }
+}
 
 ## 7. Component Interaction Flow
 
