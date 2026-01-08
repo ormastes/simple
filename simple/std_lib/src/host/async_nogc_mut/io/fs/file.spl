@@ -490,57 +490,13 @@ impl File:
     # Stage file with mmap preload (sync, for use before parallel processing)
     pub fn stage_mmap_sync(self) -> Result[(), IoError]:
         let size = self.size_sync()?
-        let size_u64 = size as u64
-
-        if size_u64 == 0:
-            self.stage_state = Some(StageState {
-                mode: StageMode::Mmap,
-                status: StagingStatus::Staged,
-                mmap_ptr: 0, mmap_size: 0,
-                is_shared: false, prefetch_buf: None,
-                staged_files: Array[FilePath]::new()
-            })
-            return Ok(())
-
-        let mmap_ptr = native_mmap_create(self.handle, size_u64)?
-
-        self.stage_state = Some(StageState {
-            mode: StageMode::Mmap,
-            status: StagingStatus::Staged,
-            mmap_ptr: mmap_ptr,
-            mmap_size: size_u64,
-            is_shared: false,
-            prefetch_buf: None,
-            staged_files: Array[FilePath]::new()
-        })
+        self.stage_state = Some(stage_mmap_sync_impl(self.handle, size as u64)?)
         return Ok(())
 
     # Stage file with shared mmap (sync, for multi-process access)
     pub fn stage_mmap_shared_sync(self) -> Result[(), IoError]:
         let size = self.size_sync()?
-        let size_u64 = size as u64
-
-        if size_u64 == 0:
-            self.stage_state = Some(StageState {
-                mode: StageMode::MmapShared,
-                status: StagingStatus::Staged,
-                mmap_ptr: 0, mmap_size: 0,
-                is_shared: true, prefetch_buf: None,
-                staged_files: Array[FilePath]::new()
-            })
-            return Ok(())
-
-        let mmap_ptr = native_mmap_create_shared(self.handle, size_u64)?
-
-        self.stage_state = Some(StageState {
-            mode: StageMode::MmapShared,
-            status: StagingStatus::Staged,
-            mmap_ptr: mmap_ptr,
-            mmap_size: size_u64,
-            is_shared: true,
-            prefetch_buf: None,
-            staged_files: Array[FilePath]::new()
-        })
+        self.stage_state = Some(stage_mmap_shared_sync_impl(self.handle, size as u64)?)
         return Ok(())
 
     # Stage file by prefetching entire content (sync)
@@ -549,13 +505,7 @@ impl File:
         let size_u64 = size as u64
 
         if size_u64 == 0:
-            self.stage_state = Some(StageState {
-                mode: StageMode::Prefetch,
-                status: StagingStatus::Staged,
-                mmap_ptr: 0, mmap_size: 0,
-                is_shared: false, prefetch_buf: None,
-                staged_files: Array[FilePath]::new()
-            })
+            self.stage_state = Some(create_empty_staged_state(StageMode::Prefetch, false))
             return Ok(())
 
         self.seek_sync(SeekFrom::Start(0))?
@@ -563,14 +513,6 @@ impl File:
         self.read_exact_sync(&mut buffer)?
         self.seek_sync(SeekFrom::Start(0))?
 
-        self.stage_state = Some(StageState {
-            mode: StageMode::Prefetch,
-            status: StagingStatus::Staged,
-            mmap_ptr: 0, mmap_size: 0,
-            is_shared: false,
-            prefetch_buf: Some(buffer),
-            staged_files: Array[FilePath]::new()
-        })
-
+        self.stage_state = Some(create_staged_prefetch_state(buffer))
         native_fadvise_sequential(self.handle)
         return Ok(())

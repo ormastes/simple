@@ -22,6 +22,7 @@ pub mod di;
 pub mod mcp;
 pub mod ir_export;
 pub mod semantic_diff;
+pub mod symbol_analyzer;
 pub mod mock;
 pub mod pattern_analysis;
 pub mod predicate;

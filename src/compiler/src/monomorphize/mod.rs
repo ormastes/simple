@@ -17,8 +17,15 @@
 //!
 //! main = identity[Int](42)  // Generates identity_Int
 //! ```
+//!
+//! ## Interface Binding Specialization
+//!
+//! This module also handles static polymorphism via interface bindings.
+//! When `bind Logger = ConsoleLogger` is declared, method calls on Logger-typed
+//! values can be specialized to directly call ConsoleLogger methods.
 
 mod analyzer;
+pub mod binding_specializer;
 pub mod cache;
 mod engine;
 pub mod parallel;
@@ -28,6 +35,7 @@ mod types;
 mod util;
 
 pub use analyzer::CallSiteAnalyzer;
+pub use binding_specializer::{specialize_bindings, BindingSpecializer};
 pub use cache::{
     CacheEntryMeta, CachedClass, CachedFunction, CachedStruct, LocalMonoCache, MonoCache,
     MonoCacheConfig, MonoCacheStats,

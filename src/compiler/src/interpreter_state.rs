@@ -33,6 +33,10 @@ thread_local! {
     pub(crate) static INTERPRETER_ARGS: RefCell<Vec<String>> = RefCell::new(Vec::new());
     /// Current file being evaluated (for module resolution)
     pub(crate) static CURRENT_FILE: RefCell<Option<PathBuf>> = RefCell::new(None);
+    /// Interface bindings for static polymorphism (trait_name -> impl_type_name)
+    /// When a binding exists, method calls on trait objects use static dispatch
+    /// to the bound implementation type.
+    pub(crate) static INTERFACE_BINDINGS: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
 }
 
 /// Global interrupt flag for Ctrl-C handling.

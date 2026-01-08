@@ -702,6 +702,22 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                     }
                 }
             }
+            Node::InterfaceBinding(binding) => {
+                // Store interface binding for static polymorphism dispatch
+                // bind Interface = ImplType
+                use crate::interpreter::INTERFACE_BINDINGS;
+                let impl_type_name = match &binding.impl_type {
+                    simple_parser::ast::Type::Simple(name) => name.clone(),
+                    simple_parser::ast::Type::Generic { name, .. } => name.clone(),
+                    _ => format!("{:?}", binding.impl_type),
+                };
+                INTERFACE_BINDINGS.with(|bindings| {
+                    bindings.borrow_mut().insert(
+                        binding.interface_name.clone(),
+                        impl_type_name,
+                    );
+                });
+            }
             Node::ModDecl(_)
             | Node::CommonUseStmt(_)
             | Node::ExportUseStmt(_)
@@ -713,13 +729,11 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::DiBinding(_)
             | Node::ArchitectureRule(_)
             | Node::MockDecl(_)
-            | Node::InterfaceBinding(_)
             | Node::Mixin(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access
                 // AOP nodes are declarative configuration handled at compile time
-                // InterfaceBinding affects dispatch mode at compile time
                 // Mixin composition is handled at compile time
                 // These are no-ops in the interpreter
             }

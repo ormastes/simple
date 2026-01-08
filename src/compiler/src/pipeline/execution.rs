@@ -16,7 +16,7 @@ use crate::compilability::analyze_module;
 use crate::import_loader::{has_script_statements, load_module_with_imports};
 use crate::interpreter::evaluate_module_with_di_and_aop;
 use crate::mir;
-use crate::monomorphize::monomorphize_module;
+use crate::monomorphize::{monomorphize_module, specialize_bindings};
 use crate::value::FUNC_MAIN;
 use crate::CompileError;
 
@@ -144,6 +144,9 @@ impl CompilerPipeline {
         // Validate release mode configuration (#1034-1035)
         self.validate_release_config()?;
 
+        // Interface binding specialization: rewrite method calls based on `bind Interface = Impl`
+        let module = specialize_bindings(&module);
+
         // Monomorphization: specialize generic functions for concrete types
         let module = monomorphize_module(&module);
 
@@ -246,6 +249,9 @@ impl CompilerPipeline {
 
         // Validate release mode configuration (#1034-1035)
         self.validate_release_config()?;
+
+        // 1. Interface binding specialization: rewrite method calls based on `bind Interface = Impl`
+        let ast_module = specialize_bindings(&ast_module);
 
         // 2. Monomorphization: specialize generic functions for concrete types
         let ast_module = monomorphize_module(&ast_module);

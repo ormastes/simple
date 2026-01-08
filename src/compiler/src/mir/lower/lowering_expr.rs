@@ -600,10 +600,26 @@ impl<'a> MirLowerer<'a> {
                     }
                     DispatchMode::Dynamic => {
                         // Dynamic dispatch: vtable lookup at runtime
-                        // For now, we need to resolve the vtable slot from the method name
-                        // This would be done by the type checker in a full implementation
-                        let vtable_slot = 0; // TODO: Resolve from type info
-                        let param_types = vec![]; // TODO: Get from method signature
+                        // Try to resolve vtable slot from trait info
+                        let receiver_type = receiver.ty;
+
+                        // Try to get trait name from receiver type
+                        let trait_name = self.type_registry
+                            .and_then(|reg| reg.get_type_name(receiver_type))
+                            .map(|s| s.to_string());
+
+                        // Resolve vtable slot and param types from trait info
+                        let (vtable_slot, param_types) = if let Some(ref tname) = trait_name {
+                            let slot = self.get_vtable_slot(tname, method).unwrap_or(0);
+                            let params = self.get_trait_method_signature(tname, method)
+                                .map(|(p, _)| p)
+                                .unwrap_or_default();
+                            (slot, params)
+                        } else {
+                            // Fallback: slot 0, no param types
+                            (0, vec![])
+                        };
+
                         let return_type = expr_ty;
                         self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
