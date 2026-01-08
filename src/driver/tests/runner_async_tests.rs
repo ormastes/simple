@@ -194,14 +194,15 @@ main = r1 + r2 + r3
 
 #[test]
 fn runner_await_non_future() {
-    // Await on a non-future value should just return it
-    run_expect(
+    // Await on a non-future value now produces a semantic error
+    use test_helpers::run_expect_compile_error;
+    run_expect_compile_error(
         r#"
 let x = 42
 let res = await x
 main = res
 "#,
-        42,
+        "await requires a Future or Actor handle",
     );
 }
 
@@ -223,13 +224,13 @@ main = res
 
 #[test]
 fn runner_async_fn_basic() {
-    // async fn returns a result that can be awaited
+    // async fn returns a result - auto-awaited at top level
     run_expect(
         r#"
 async fn fetch():
     return 42
 
-main = await fetch()
+main = fetch()
 "#,
         42,
     );
