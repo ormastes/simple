@@ -119,25 +119,18 @@ pub enum Node {
 
 ### Step 1.5: Parse Bind Statement
 
-**File:** `src/parser/src/parser_impl/core.rs` (or new file)
+**File:** `src/parser/src/parser_impl/core.rs`
 
+**Current Implementation (Simplified):**
 ```rust
 impl Parser<'_> {
-    /// Parse: [pub|common] bind [static|dyn|auto] Interface = Type
+    /// Parse: bind Interface = Type
+    /// Note: No static/dyn/auto modifiers in current implementation
     fn parse_bind_stmt(&mut self) -> Result<BindStmt, ParseError> {
         let start = self.current_span();
 
-        // Optional visibility prefix
-        let visibility = self.parse_visibility()?;
-
         // 'bind' keyword
         self.expect(TokenKind::Bind)?;
-
-        // Optional dispatch mode
-        let mode = if self.check(TokenKind::Static) {
-            self.advance();
-            DispatchMode::Static
-        } else if self.check(TokenKind::Dyn) {
             self.advance();
             DispatchMode::Dynamic
         } else {

@@ -94,11 +94,12 @@ This is the natural location for `bind` statements.
 
 ### 3.1 Syntax: `bind I = T`
 
+**Current Implementation (Simplified):**
 ```
-bind_stmt ::= bind_prefix? "bind" dispatch_mode? trait_path "=" type_path
-bind_prefix ::= "common" | "pub"
-dispatch_mode ::= "static" | "dyn" | "auto"
+bind_stmt ::= "bind" trait_path "=" type_path
 ```
+
+**Note:** The current implementation does **not** support `static`/`dyn`/`auto` modifiers. The `bind` statement always creates a static binding. Dynamic dispatch is the default when no binding exists.
 
 **Examples:**
 ```spl
@@ -106,24 +107,18 @@ dispatch_mode ::= "static" | "dyn" | "auto"
 mod my_app:
     export use prelude.*
 
-    # Interface bindings
+    # Interface bindings (always static dispatch)
     bind Logger = infra.log.ConsoleLogger
     bind Storage = infra.store.SqliteStorage
-
-    # Explicit mode
-    bind static Scheduler = concurrency.WorkStealingScheduler
-
-    # Public binding (part of API surface)
-    pub bind Crypto = infra.crypto.RingCrypto
 ```
 
-### 3.2 Type Forms
+### 3.2 Dispatch Behavior
 
-| Type Form | Representation | Dispatch | When to Use |
-|-----------|---------------|----------|-------------|
-| `dyn I` | `{ data_ptr, vtbl_ptr }` | Always dynamic | Need runtime polymorphism |
-| `static I` | Concrete type `T` | Always static | Performance-critical code |
-| `I` (unqualified) | Compiler chooses | Dispatchable | Default, let compiler decide |
+**Current Implementation:**
+- `bind Interface = ImplType` → **Always static dispatch**
+- No binding → **Always dynamic dispatch** (default)
+
+**There is no `dyn` or `static` keyword in the current implementation.**
 
 ### 3.3 Semantic Rules
 
@@ -132,17 +127,11 @@ mod my_app:
 ```spl
 # Given: bind Logger = ConsoleLogger
 
-let x: Logger = ConsoleLogger()    # OK - bound type
-let y: Logger = FileLogger()       # ERROR - not the bound type
-let z: dyn Logger = FileLogger()   # OK - explicit dynamic dispatch
+let x: Logger = ConsoleLogger()    # OK - uses static dispatch
+# Other implementations would require dynamic dispatch (no binding)
 ```
 
-**Resolution order for unqualified `I`:**
-1. If `bind I = T` exists in package root: use static dispatch
-2. If optimizer proves single implementor: devirtualize
-3. Else: use dynamic dispatch
-
-### 3.4 Build-Mode Overrides
+### 3.4 Future: Build-Mode Overrides (Not Implemented)
 
 ```bash
 --iface-dispatch=auto    # Default: use bindings + optimization

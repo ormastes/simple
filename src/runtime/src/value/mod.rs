@@ -25,6 +25,7 @@ pub mod ratatui_tui;
 mod channels;
 mod collections;
 mod contracts;
+mod dict;
 mod core;
 mod doctest_io;
 mod ffi;
@@ -48,7 +49,8 @@ pub use core::RuntimeValue;
 pub use heap::{HeapHeader, HeapObjectType};
 
 // Re-export collection types
-pub use collections::{RuntimeArray, RuntimeDict, RuntimeString, RuntimeTuple};
+pub use collections::{RuntimeArray, RuntimeString, RuntimeTuple};
+pub use dict::RuntimeDict;
 
 // Re-export object types
 pub use objects::{RuntimeClosure, RuntimeEnum, RuntimeObject, RuntimeShared, RuntimeUnique, RuntimeWeak};
@@ -59,10 +61,14 @@ pub use channels::RuntimeChannel;
 // Re-export collection FFI functions
 pub use collections::{
     rt_array_clear, rt_array_get, rt_array_len, rt_array_new, rt_array_pop, rt_array_push,
-    rt_array_set, rt_contains, rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new,
-    rt_dict_set, rt_dict_values, rt_index_get, rt_index_set, rt_slice, rt_string_concat,
+    rt_array_set, rt_contains, rt_index_get, rt_index_set, rt_slice, rt_string_concat,
     rt_string_data, rt_string_len, rt_string_new, rt_tuple_get, rt_tuple_len, rt_tuple_new,
     rt_tuple_set,
+};
+
+// Re-export dict FFI functions
+pub use dict::{
+    rt_dict_clear, rt_dict_get, rt_dict_keys, rt_dict_len, rt_dict_new, rt_dict_set, rt_dict_values,
 };
 
 // Re-export object FFI functions

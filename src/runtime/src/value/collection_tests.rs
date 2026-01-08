@@ -8,10 +8,12 @@ use super::{
     rt_tuple_new, rt_tuple_len, rt_tuple_get, rt_tuple_set,
     // String functions
     rt_string_new, rt_string_len, rt_string_data, rt_string_concat,
-    // Dict functions
-    rt_dict_new, rt_dict_len, rt_dict_get, rt_dict_set, rt_dict_clear,
 };
-use crate::value::RuntimeValue;
+// Dict functions are in a sibling module, import via crate path
+use crate::value::{
+    rt_dict_new, rt_dict_len, rt_dict_get, rt_dict_set, rt_dict_clear,
+    RuntimeValue,
+};
 
 // ============================================================================
 // Array Tests
