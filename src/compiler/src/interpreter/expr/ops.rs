@@ -335,14 +335,14 @@ pub(super) fn eval_op_expr(
             }
 
             let result = match op {
-                UnaryOp::Neg => Ok(Value::Int(-val.as_int()?)),
-                UnaryOp::Not => Ok(Value::Bool(!val.truthy())),
-                UnaryOp::BitNot => Ok(Value::Int(!val.as_int()?)),
-                UnaryOp::Ref => Ok(Value::Borrow(BorrowValue::new(val))),
-                UnaryOp::RefMut => Ok(Value::BorrowMut(BorrowMutValue::new(val))),
-                UnaryOp::Deref => Ok(val.deref_pointer()),
+                UnaryOp::Neg => Value::Int(-val.as_int()?),
+                UnaryOp::Not => Value::Bool(!val.truthy()),
+                UnaryOp::BitNot => Value::Int(!val.as_int()?),
+                UnaryOp::Ref => Value::Borrow(BorrowValue::new(val)),
+                UnaryOp::RefMut => Value::BorrowMut(BorrowMutValue::new(val)),
+                UnaryOp::Deref => val.deref_pointer(),
             };
-            Ok(Some(result?))
+            Ok(Some(result))
         }
         Expr::Cast { expr: inner, target_type } => {
             let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;

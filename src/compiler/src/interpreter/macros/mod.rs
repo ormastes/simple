@@ -13,7 +13,7 @@ use helpers::{build_macro_const_bindings, const_value_to_string};
 mod state;
 pub(crate) use state::{
     enter_block_scope, exit_block_scope, queue_tail_injection, set_macro_trace,
-    take_macro_introduced_symbols,
+    store_macro_introduced_symbols, take_macro_introduced_symbols,
 };
 use state::{is_macro_trace_enabled, macro_trace, pop_macro_depth, push_macro_depth};
 
@@ -445,9 +445,7 @@ fn expand_user_macro_inner(
     }
 
     // Store contract result in thread-local for caller to retrieve
-    MACRO_INTRODUCED_SYMBOLS.with(|cell| {
-        *cell.borrow_mut() = Some(contract_result);
-    });
+    store_macro_introduced_symbols(contract_result);
 
     Ok(last_value)
 }

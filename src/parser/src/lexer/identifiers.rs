@@ -131,6 +131,7 @@ impl<'a> super::Lexer<'a> {
             "gpu" => TokenKind::Gpu,
             "bounds" => TokenKind::Bounds,
             "dyn" => TokenKind::Dyn,
+            "bind" => TokenKind::Bind,
             "repr" => TokenKind::Repr,
             // Note: "allow" is NOT a keyword - it's parsed contextually in unit definitions
             // to avoid conflicts with #[allow(...)] attributes

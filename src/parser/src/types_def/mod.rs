@@ -368,6 +368,43 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    // === Interface Binding (Static Polymorphism) ===
+
+    /// Parse an interface binding: `bind Interface = ImplType`
+    /// Or with mode: `bind static Interface = ImplType`, `bind dyn Interface = ImplType`
+    pub(crate) fn parse_interface_binding(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Bind)?;
+
+        // Check for optional dispatch mode: static or dyn
+        let dispatch_mode = if self.check(&TokenKind::Static) {
+            self.advance();
+            DispatchMode::Static
+        } else if self.check(&TokenKind::Dyn) {
+            self.advance();
+            DispatchMode::Dynamic
+        } else {
+            DispatchMode::Auto
+        };
+
+        // Parse interface name
+        let interface_name = self.expect_identifier()?;
+
+        // Expect '='
+        self.expect(&TokenKind::Assign)?;
+
+        // Parse implementation type
+        let impl_type = self.parse_type()?;
+
+        Ok(Node::InterfaceBinding(InterfaceBinding {
+            span: self.make_span(start_span),
+            interface_name,
+            impl_type,
+            dispatch_mode,
+            doc_comment: None,
+        }))
+    }
+
     // === Actor ===
 
     pub(crate) fn parse_actor(&mut self) -> Result<Node, ParseError> {

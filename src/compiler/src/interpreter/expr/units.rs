@@ -1,7 +1,8 @@
 use simple_parser::ast::{BinOp, UnaryOp};
 
 use crate::error::CompileError;
-use crate::interpreter_unit::{decompose_si_prefix, UNIT_SUFFIX_TO_FAMILY};
+use crate::interpreter::UNIT_SUFFIX_TO_FAMILY;
+use crate::interpreter_unit::decompose_si_prefix;
 use crate::value::Value;
 
 

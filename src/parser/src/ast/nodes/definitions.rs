@@ -374,6 +374,49 @@ pub struct ImplBlock {
     pub methods: Vec<FunctionDef>,
 }
 
+/// Interface binding for static polymorphism
+/// Syntax: `bind Interface = ImplType` or `bind static Interface = ImplType`
+///
+/// Binds an interface (trait) to a specific implementation type at package scope,
+/// enabling static dispatch optimization while preserving type safety.
+///
+/// Example:
+/// ```simple
+/// # In __init__.spl
+/// bind Logger = ConsoleLogger        # Default (compiler chooses)
+/// bind static Logger = ConsoleLogger # Force static dispatch
+/// bind dyn Logger = ConsoleLogger    # Force dynamic dispatch
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct InterfaceBinding {
+    pub span: Span,
+    /// The interface/trait name being bound
+    pub interface_name: String,
+    /// The implementation type to bind to
+    pub impl_type: Type,
+    /// Dispatch mode (static, dynamic, or auto)
+    pub dispatch_mode: DispatchMode,
+    /// Optional documentation
+    pub doc_comment: Option<DocComment>,
+}
+
+/// Dispatch mode for interface bindings
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchMode {
+    /// Compiler chooses optimal dispatch (default)
+    Auto,
+    /// Force static dispatch (monomorphization)
+    Static,
+    /// Force dynamic dispatch (vtable)
+    Dynamic,
+}
+
+impl Default for DispatchMode {
+    fn default() -> Self {
+        DispatchMode::Auto
+    }
+}
+
 /// Mixin definition: mixin Name[T] requires Trait: fields and methods
 /// Mixins provide reusable field and method compositions for classes and structs.
 /// Feature #2200: Mixin Declaration Syntax
