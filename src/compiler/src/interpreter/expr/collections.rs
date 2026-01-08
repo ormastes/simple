@@ -18,18 +18,15 @@ pub(super) fn eval_collection_expr(
     classes: &mut HashMap<String, ClassDef>,
     enums: &Enums,
     impl_methods: &ImplMethods,
-) -> Option<Result<Value, CompileError>> {
+) -> Result<Option<Value>, CompileError> {
     match expr {
         Expr::StructInit { name, fields } => {
             let mut map = HashMap::new();
             for (fname, fexpr) in fields {
-                let v = match evaluate_expr(fexpr, env, functions, classes, enums, impl_methods) {
-                    Ok(val) => val,
-                    Err(err) => return Some(Err(err)),
-                };
+                let v = evaluate_expr(fexpr, env, functions, classes, enums, impl_methods)?;
                 map.insert(fname.clone(), v);
             }
-            Some(Ok(Value::Object {
+            Ok(Some(Value::Object {
                 class: name.clone(),
                 fields: map,
             }))
@@ -72,7 +69,7 @@ pub(super) fn eval_collection_expr(
                     segments
                 )))
             };
-            Some(result)
+            Ok(Some(result?))
         }
         Expr::Dict(entries) => {
             let mut map = HashMap::new();
@@ -80,33 +77,23 @@ pub(super) fn eval_collection_expr(
                 // Handle dict spread: **expr
                 if let Expr::DictSpread(inner) = k {
                     let spread_val =
-                        match evaluate_expr(inner, env, functions, classes, enums, impl_methods) {
-                            Ok(val) => val,
-                            Err(err) => return Some(Err(err)),
-                        };
+                        evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
                     if let Value::Dict(spread_map) = spread_val {
                         for (sk, sv) in spread_map {
                             map.insert(sk, sv);
                         }
                     } else {
-                        return Some(Err(CompileError::Semantic(
+                        return Err(CompileError::Semantic(
                             "dict spread requires dict value".into(),
-                        )));
+                        ));
                     }
                 } else {
-                    let key_val =
-                        match evaluate_expr(k, env, functions, classes, enums, impl_methods) {
-                            Ok(val) => val,
-                            Err(err) => return Some(Err(err)),
-                        };
-                    let val = match evaluate_expr(v, env, functions, classes, enums, impl_methods) {
-                        Ok(val) => val,
-                        Err(err) => return Some(Err(err)),
-                    };
+                    let key_val = evaluate_expr(k, env, functions, classes, enums, impl_methods)?;
+                    let val = evaluate_expr(v, env, functions, classes, enums, impl_methods)?;
                     map.insert(key_val.to_key_string(), val);
                 }
             }
-            Some(Ok(Value::Dict(map)))
+            Ok(Some(Value::Dict(map)))
         }
         Expr::Range { start, end, bound } => {
             let start = match start
@@ -115,7 +102,7 @@ pub(super) fn eval_collection_expr(
                 .transpose()
             {
                 Ok(val) => val,
-                Err(err) => return Some(Err(err)),
+                Err(err) => return Err(err),
             }
             .unwrap_or(Value::Int(0))
             .as_int()?;
@@ -125,11 +112,11 @@ pub(super) fn eval_collection_expr(
                 .transpose()
             {
                 Ok(val) => val,
-                Err(err) => return Some(Err(err)),
+                Err(err) => return Err(err),
             }
             .unwrap_or(Value::Int(0))
             .as_int()?;
-            Some(Ok(create_range_object(start, end, *bound)))
+            Ok(Some(create_range_object(start, end, *bound)))
         }
         Expr::Array(items) => {
             let mut arr = Vec::new();
@@ -137,41 +124,28 @@ pub(super) fn eval_collection_expr(
                 // Handle spread operator: *expr
                 if let Expr::Spread(inner) = item {
                     let spread_val =
-                        match evaluate_expr(inner, env, functions, classes, enums, impl_methods) {
-                            Ok(val) => val,
-                            Err(err) => return Some(Err(err)),
-                        };
+                        evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
                     match spread_val {
                         Value::Array(spread_arr) => arr.extend(spread_arr),
                         Value::Tuple(tup) => arr.extend(tup),
                         _ => {
-                            return Some(Err(CompileError::Semantic(
+                            return Err(CompileError::Semantic(
                                 "spread operator requires array or tuple".into(),
-                            )))
+                            ))
                         }
                     }
                 } else {
-                    arr.push(
-                        match evaluate_expr(item, env, functions, classes, enums, impl_methods) {
-                            Ok(val) => val,
-                            Err(err) => return Some(Err(err)),
-                        },
-                    );
+                    arr.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
                 }
             }
-            Some(Ok(Value::Array(arr)))
+            Ok(Some(Value::Array(arr)))
         }
         Expr::Tuple(items) => {
             let mut tup = Vec::new();
             for item in items {
-                tup.push(
-                    match evaluate_expr(item, env, functions, classes, enums, impl_methods) {
-                        Ok(val) => val,
-                        Err(err) => return Some(Err(err)),
-                    },
-                );
+                tup.push(evaluate_expr(item, env, functions, classes, enums, impl_methods)?);
             }
-            Some(Ok(Value::Tuple(tup)))
+            Ok(Some(Value::Tuple(tup)))
         }
         Expr::Index { receiver, index } => {
             let recv_val =
@@ -191,7 +165,7 @@ pub(super) fn eval_collection_expr(
                         .and_then(|v| if let Value::Bool(b) = v { Some(*b) } else { None })
                         .unwrap_or(false);
 
-                    return Some(match recv_val {
+                    return Ok(Some(match recv_val {
                         Value::Array(arr) => {
                             let len = arr.len() as i64;
                             let start_idx = if start < 0 {
@@ -242,7 +216,7 @@ pub(super) fn eval_collection_expr(
                             Ok(Value::Str(sliced))
                         }
                         _ => Err(CompileError::Semantic("slice on non-sliceable type".into())),
-                    });
+                    }?));
                 }
             }
 
@@ -306,7 +280,7 @@ pub(super) fn eval_collection_expr(
                     "index access on non-indexable type".into(),
                 )),
             };
-            Some(result)
+            Ok(Some(result?))
         }
         Expr::TupleIndex { receiver, index } => {
             let recv_val =
@@ -320,7 +294,7 @@ pub(super) fn eval_collection_expr(
                     "tuple index access on non-tuple type".into(),
                 )),
             };
-            Some(result)
+            Ok(Some(result?))
         }
         Expr::ListComprehension {
             expr,
@@ -347,7 +321,7 @@ pub(super) fn eval_collection_expr(
                     evaluate_expr(expr, &mut inner_env, functions, classes, enums, impl_methods)?;
                 result.push(val);
             }
-            Some(Ok(Value::Array(result)))
+            Ok(Some(Value::Array(result)))
         }
         Expr::DictComprehension {
             key,
@@ -383,7 +357,7 @@ pub(super) fn eval_collection_expr(
                 )?;
                 result.insert(k.to_key_string(), v);
             }
-            Some(Ok(Value::Dict(result)))
+            Ok(Some(Value::Dict(result)))
         }
         Expr::Slice { receiver, start, end, step } => {
             let recv_val =
@@ -393,7 +367,11 @@ pub(super) fn eval_collection_expr(
                 Value::Array(arr) => arr.len() as i64,
                 Value::Str(s) => s.len() as i64,
                 Value::Tuple(t) => t.len() as i64,
-                _ => return Some(Err(CompileError::Semantic("slice on non-sliceable type".into()))),
+                _ => {
+                    return Err(CompileError::Semantic(
+                        "slice on non-sliceable type".into(),
+                    ))
+                }
             };
 
             // Parse start, end, step with Python-style semantics
@@ -418,9 +396,9 @@ pub(super) fn eval_collection_expr(
             };
 
             if step_val == 0 {
-                return Some(Err(CompileError::Semantic(
+                return Err(CompileError::Semantic(
                     "slice step cannot be zero".into(),
-                )));
+                ));
             }
 
             let result = match recv_val {
@@ -437,16 +415,20 @@ pub(super) fn eval_collection_expr(
                 ))),
                 _ => Err(CompileError::Semantic("slice on non-sliceable type".into())),
             };
-            Some(result)
+            Ok(Some(result?))
         }
         Expr::Spread(inner) => {
             // Spread is handled by Array/Dict evaluation, but standalone should work too
-            Some(evaluate_expr(inner, env, functions, classes, enums, impl_methods))
+            Ok(Some(
+                evaluate_expr(inner, env, functions, classes, enums, impl_methods)?,
+            ))
         }
         Expr::DictSpread(inner) => {
             // DictSpread is handled by Dict evaluation
-            Some(evaluate_expr(inner, env, functions, classes, enums, impl_methods))
+            Ok(Some(
+                evaluate_expr(inner, env, functions, classes, enums, impl_methods)?,
+            ))
         }
-        _ => None,
+        _ => Ok(None),
     }
 }

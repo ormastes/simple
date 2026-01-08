@@ -185,3 +185,46 @@ fn test_wrong_type_arg_count() {
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("expects 1 type arguments, got 2"));
 }
+
+//==============================================================================
+// Step 3: Composition Registration Tests (Feature #2201)
+//==============================================================================
+
+#[test]
+fn test_apply_simple_mixin() {
+    // Test: Class applying a simple mixin
+    let source = r#"
+mixin Timestamped:
+    created_at: i64
+    updated_at: i64
+
+class User:
+    mixin Timestamped
+    name: str
+"#;
+
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("Parse should succeed");
+    
+    let result = check(&module.items);
+    assert!(result.is_ok(), "Type checking should succeed: {:?}", result);
+}
+
+#[test]
+fn test_apply_generic_mixin() {
+    // Test: Class applying a generic mixin with type args
+    let source = r#"
+mixin Container[T]:
+    items: [T]
+
+class UserList:
+    mixin Container[str]
+    count: i32
+"#;
+
+    let mut parser = Parser::new(source);
+    let module = parser.parse().expect("Parse should succeed");
+    
+    let result = check(&module.items);
+    assert!(result.is_ok(), "Type checking should succeed: {:?}", result);
+}
