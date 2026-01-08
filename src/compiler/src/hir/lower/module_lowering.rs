@@ -417,8 +417,8 @@ impl Lowerer {
             let params: Vec<TypeId> = method
                 .params
                 .iter()
-                .map(|p| self.resolve_type(&p.ty).unwrap_or(TypeId::VOID))
-                .collect();
+                .map(|p| self.resolve_type_opt(&p.ty))
+                .collect::<LowerResult<Vec<_>>>()?;
             let ret = self.resolve_type_opt(&method.return_type)?;
             
             methods.push(HirMixinMethod {

@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
+    use crate::hir::LayoutPhase;
 
     #[test]
     fn test_collect_metrics() {

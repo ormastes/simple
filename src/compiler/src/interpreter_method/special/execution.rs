@@ -3,9 +3,24 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
+use crate::interpreter::{exec_block_fn, Control, Enums, ImplMethods};
+use crate::interpreter::interpreter_call::bind_args;
 use crate::value::{Value, Env, SpecialEnumType, OptionVariant, ResultVariant};
 use simple_parser::ast::{Argument, FunctionDef, ClassDef};
 use std::collections::HashMap;
+
+/// Extract result from exec_block_fn return value
+macro_rules! extract_block_result {
+    ($block_exec:expr) => {
+        match $block_exec {
+            Ok((Control::Return(v), _)) => v,
+            Ok((_, Some(v))) => v,
+            Ok((_, None)) => Value::Nil,
+            Err(CompileError::TryError(val)) => val,
+            Err(e) => return Err(e),
+        }
+    };
+}
 
 pub fn find_and_exec_method_with_self(
     method: &str,

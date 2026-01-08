@@ -1,14 +1,16 @@
 // Closure and struct initialization helpers.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
+use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use crate::hir::TypeId;
-use crate::mir::{BlockId, VReg};
+use crate::mir::VReg;
 
 use super::{InstrContext, InstrResult};
-use super::super::shared::get_func_block_addr;
+use super::helpers::{create_string_constant, indirect_call_with_result};
+use super::super::types_util::type_id_to_cranelift;
 
 fn compile_closure_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,

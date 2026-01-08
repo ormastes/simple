@@ -44,7 +44,7 @@ pub(crate) fn spawn_actor_with_expr(
     let handle = ACTOR_SPAWNER.with(|s| s.spawn(move |inbox, outbox| {
         // Initialize thread-local EXTERN_FUNCTIONS with prelude functions
         super::super::EXTERN_FUNCTIONS.with(|cell| {
-            let mut externs = cell.borrow_mut();
+            let mut externs: std::cell::RefMut<std::collections::HashSet<String>> = cell.borrow_mut();
             externs.clear();
             for &name in super::interpreter_eval::PRELUDE_EXTERN_FUNCTIONS {
                 externs.insert(name.to_string());

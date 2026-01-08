@@ -3,6 +3,9 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
+use crate::interpreter::{exec_block_fn, evaluate_expr, Control, Enums, ImplMethods};
+use crate::interpreter::interpreter_call::IN_NEW_METHOD;
+use crate::interpreter_helpers::find_and_exec_method;
 use crate::value::{Value, Env, SpecialEnumType, OptionVariant, ResultVariant};
 use simple_parser::ast::{Argument, FunctionDef, ClassDef};
 use std::collections::HashMap;
@@ -81,7 +84,7 @@ pub fn handle_constructor_methods(
             // calls the class constructor (e.g., `ClassName(args)` inside `new()`)
             let is_new_method = method == "new";
             if is_new_method {
-                super::super::interpreter_call::IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
+                IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
             }
 
             // Use exec_block_fn to properly capture implicit returns
@@ -94,7 +97,7 @@ pub fn handle_constructor_methods(
 
             // Remove from tracking set
             if is_new_method {
-                super::super::interpreter_call::IN_NEW_METHOD.with(|set| set.borrow_mut().remove(class_name));
+                IN_NEW_METHOD.with(|set| set.borrow_mut().remove(class_name));
             }
 
             return result;
