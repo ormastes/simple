@@ -13,6 +13,14 @@ use super::config::ProfileConfig;
 use super::stats::{FunctionStats, RuntimeMetrics};
 use super::feedback::LayoutFeedback;
 
+#[derive(Debug)]
+struct ProfileEntry {
+    call_count: AtomicU64,
+    total_time_ns: AtomicU64,
+    first_call_ns: AtomicU64,
+    last_call_ns: AtomicU64,
+}
+
 impl ProfileEntry {
     fn new() -> Self {
         Self {

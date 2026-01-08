@@ -70,6 +70,14 @@ impl SymbolGraph {
         self.reverse_refs.get(name)
     }
 
+    /// Record a reverse reference (who references a symbol).
+    pub fn add_reverse_ref(&mut self, from: &str, to: &str) {
+        self.reverse_refs
+            .entry(to.to_string())
+            .or_insert_with(HashSet::new)
+            .insert(from.to_string());
+    }
+
     /// Perform reachability analysis from entry points.
     pub fn analyze_reachability(&mut self) {
         // Reset reachability
@@ -281,4 +289,3 @@ impl Default for SymbolGraph {
         Self::new()
     }
 }
-

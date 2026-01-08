@@ -61,6 +61,16 @@ pub enum HirExprKind {
         args: Vec<HirExpr>,
     },
 
+    /// Method call with dispatch mode
+    /// Static dispatch: direct call to monomorphized function
+    /// Dynamic dispatch: vtable lookup at runtime
+    MethodCall {
+        receiver: Box<HirExpr>,
+        method: String,
+        args: Vec<HirExpr>,
+        dispatch: DispatchMode,
+    },
+
     // Struct/field access
     FieldAccess {
         receiver: Box<HirExpr>,
@@ -164,6 +174,23 @@ pub enum NeighborDirection {
     Right,
 }
 
+/// Dispatch mode for method calls - determines static vs dynamic dispatch
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchMode {
+    /// Static dispatch - monomorphized call, direct function invocation
+    /// Used when there's a `bind Interface = ImplType` declaration
+    Static,
+    /// Dynamic dispatch - vtable lookup at runtime
+    /// Default behavior when no binding exists
+    Dynamic,
+}
+
+impl Default for DispatchMode {
+    fn default() -> Self {
+        DispatchMode::Dynamic
+    }
+}
+
 impl HirExprKind {
     /// Substitute local variable references (CTR-012)
     pub fn substitute_local(&self, from_idx: usize, to_idx: usize) -> HirExprKind {
@@ -184,6 +211,12 @@ impl HirExprKind {
             HirExprKind::Call { func, args } => HirExprKind::Call {
                 func: Box::new(func.substitute_local(from_idx, to_idx)),
                 args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
+            },
+            HirExprKind::MethodCall { receiver, method, args, dispatch } => HirExprKind::MethodCall {
+                receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
+                method: method.clone(),
+                args: args.iter().map(|a| a.substitute_local(from_idx, to_idx)).collect(),
+                dispatch: *dispatch,
             },
             HirExprKind::FieldAccess { receiver, field_index } => HirExprKind::FieldAccess {
                 receiver: Box::new(receiver.substitute_local(from_idx, to_idx)),
@@ -257,6 +290,12 @@ impl HirExprKind {
             HirExprKind::Call { func, args } => HirExprKind::Call {
                 func: Box::new(func.substitute_self_with_result()),
                 args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
+            },
+            HirExprKind::MethodCall { receiver, method, args, dispatch } => HirExprKind::MethodCall {
+                receiver: Box::new(receiver.substitute_self_with_result()),
+                method: method.clone(),
+                args: args.iter().map(|a| a.substitute_self_with_result()).collect(),
+                dispatch: *dispatch,
             },
             HirExprKind::FieldAccess { receiver, field_index } => HirExprKind::FieldAccess {
                 receiver: Box::new(receiver.substitute_self_with_result()),

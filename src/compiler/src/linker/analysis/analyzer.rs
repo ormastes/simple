@@ -1,6 +1,6 @@
 //! Symbol analyzer
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
@@ -43,11 +43,7 @@ impl SymbolAnalyzer {
         }
 
         // Update reverse refs
-        self.graph
-            .reverse_refs
-            .entry(to.to_string())
-            .or_insert_with(HashSet::new)
-            .insert(from.to_string());
+        self.graph.add_reverse_ref(from, to);
     }
 
     /// Set entry point.

@@ -559,6 +559,7 @@ mod tests {
             doc_comment: None,
             invariant: None,
             macro_invocations: vec![],
+            mixins: vec![],
         })
     }
 

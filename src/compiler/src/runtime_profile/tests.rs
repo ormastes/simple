@@ -3,9 +3,9 @@
 #[cfg(test)]
 mod tests {
     use super::super::*;
-    use std::thread;
-    use std::time::Duration;
 
+    #[test]
+    fn test_collect_metrics() {
         let profiler = RuntimeProfiler::new(ProfileConfig {
             sample_rate: 1, // Sample every call
             ..Default::default()
@@ -155,5 +155,4 @@ mod tests {
         assert_eq!(top[0].name, "very_hot");
         assert_eq!(top[1].name, "somewhat_hot");
     }
-}
 }

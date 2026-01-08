@@ -2,6 +2,7 @@
 
 use crate::hir::{LayoutConfig, LayoutPhase};
 
+#[derive(Debug, Default)]
 pub struct LayoutFeedback {
     /// Functions that should be moved to startup phase
     pub promote_to_startup: Vec<String>,
@@ -67,25 +68,5 @@ impl LayoutFeedback {
         }
 
         output
-    }
-}
-
-/// Internal function entry for profiling
-#[derive(Debug)]
-struct ProfileEntry {
-    call_count: AtomicU64,
-    total_time_ns: AtomicU64,
-    first_call_ns: AtomicU64,
-    last_call_ns: AtomicU64,
-}
-
-impl ProfileEntry {
-    fn new() -> Self {
-        Self {
-            call_count: AtomicU64::new(0),
-            total_time_ns: AtomicU64::new(0),
-            first_call_ns: AtomicU64::new(0),
-            last_call_ns: AtomicU64::new(0),
-        }
     }
 }
