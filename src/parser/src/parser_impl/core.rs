@@ -228,7 +228,6 @@ impl<'a> Parser<'a> {
             TokenKind::Union => self.parse_union_with_doc(doc_comment),
             TokenKind::Trait => self.parse_trait_with_doc(doc_comment),
             TokenKind::Mixin => self.parse_mixin(),
-            TokenKind::Bind => self.parse_interface_binding(),
             TokenKind::Impl => self.parse_impl(),
             TokenKind::Actor => self.parse_actor(),
             TokenKind::Pub => {
@@ -283,7 +282,24 @@ impl<'a> Parser<'a> {
             TokenKind::Requires => self.parse_requires_capabilities(),
             // AOP & Unified Predicates (#1000-1050)
             TokenKind::On => self.parse_aop_advice().map(Node::AopAdvice),
-            TokenKind::Bind => self.parse_di_binding().map(Node::DiBinding),
+            TokenKind::Bind => {
+                // Disambiguate between:
+                // - DI binding: `bind on pc{...} -> Impl`
+                // - Interface binding: `bind [static|dyn] Interface = ImplType`
+                let next = self.pending_tokens
+                    .front()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let tok = self.lexer.next_token();
+                        self.pending_tokens.push_back(tok.clone());
+                        tok
+                    });
+                if matches!(next.kind, TokenKind::On) {
+                    self.parse_di_binding().map(Node::DiBinding)
+                } else {
+                    self.parse_interface_binding()
+                }
+            }
             TokenKind::Forbid | TokenKind::Allow => {
                 self.parse_arch_rule().map(Node::ArchitectureRule)
             }
