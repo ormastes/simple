@@ -1,6 +1,76 @@
 use super::*;
 use std::collections::HashMap;
 
+//==============================================================================
+// Trait Metadata for Static Polymorphism
+//==============================================================================
+
+/// Method signature for vtable slot resolution
+#[derive(Debug, Clone)]
+pub struct HirMethodSignature {
+    /// Method name
+    pub name: String,
+    /// Vtable slot index (0-based)
+    pub vtable_slot: u32,
+    /// Parameter types (excluding self/receiver)
+    pub param_types: Vec<TypeId>,
+    /// Return type
+    pub return_type: TypeId,
+}
+
+/// Trait information for static polymorphism support
+///
+/// Stores trait metadata including method signatures and vtable slot mappings.
+/// Used during MIR lowering to resolve dynamic dispatch vtable slots.
+#[derive(Debug, Clone)]
+pub struct HirTraitInfo {
+    /// Trait name
+    pub name: String,
+    /// Generic type parameters
+    pub generic_params: Vec<String>,
+    /// Method signatures indexed by name
+    pub methods: HashMap<String, HirMethodSignature>,
+    /// Total number of vtable slots (equals methods.len())
+    pub vtable_size: u32,
+}
+
+impl HirTraitInfo {
+    /// Create a new trait info
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            generic_params: Vec::new(),
+            methods: HashMap::new(),
+            vtable_size: 0,
+        }
+    }
+
+    /// Add a method and assign its vtable slot
+    pub fn add_method(&mut self, name: String, param_types: Vec<TypeId>, return_type: TypeId) {
+        let slot = self.vtable_size;
+        self.methods.insert(
+            name.clone(),
+            HirMethodSignature {
+                name,
+                vtable_slot: slot,
+                param_types,
+                return_type,
+            },
+        );
+        self.vtable_size += 1;
+    }
+
+    /// Get vtable slot for a method by name
+    pub fn get_vtable_slot(&self, method_name: &str) -> Option<u32> {
+        self.methods.get(method_name).map(|m| m.vtable_slot)
+    }
+
+    /// Get method signature by name
+    pub fn get_method(&self, method_name: &str) -> Option<&HirMethodSignature> {
+        self.methods.get(method_name)
+    }
+}
+
 /// HIR representation of an import statement.
 #[derive(Debug, Clone)]
 pub struct HirImport {
@@ -37,6 +107,8 @@ pub struct HirModule {
     pub mock_decls: Vec<HirMockDecl>,
     /// Import statements for dependency tracking
     pub imports: Vec<HirImport>,
+    /// Trait information for static polymorphism (vtable slot resolution)
+    pub trait_infos: HashMap<String, HirTraitInfo>,
 }
 
 impl HirModule {
@@ -53,7 +125,27 @@ impl HirModule {
             arch_rules: Vec::new(),
             mock_decls: Vec::new(),
             imports: Vec::new(),
+            trait_infos: HashMap::new(),
         }
+    }
+
+    /// Get trait info by name
+    pub fn get_trait_info(&self, trait_name: &str) -> Option<&HirTraitInfo> {
+        self.trait_infos.get(trait_name)
+    }
+
+    /// Get vtable slot for a method on a trait
+    pub fn get_vtable_slot(&self, trait_name: &str, method_name: &str) -> Option<u32> {
+        self.trait_infos
+            .get(trait_name)
+            .and_then(|info| info.get_vtable_slot(method_name))
+    }
+
+    /// Get method signature from a trait
+    pub fn get_trait_method(&self, trait_name: &str, method_name: &str) -> Option<&HirMethodSignature> {
+        self.trait_infos
+            .get(trait_name)
+            .and_then(|info| info.get_method(method_name))
     }
 
     /// Get the type invariant for a type by name

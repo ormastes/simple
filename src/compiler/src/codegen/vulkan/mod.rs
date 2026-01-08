@@ -38,6 +38,8 @@ mod backend;
 #[cfg(feature = "vulkan")]
 mod spirv_builder;
 #[cfg(feature = "vulkan")]
+mod spirv_instructions;
+#[cfg(feature = "vulkan")]
 mod types;
 #[cfg(feature = "vulkan")]
 mod instr_compute;

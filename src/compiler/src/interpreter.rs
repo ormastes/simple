@@ -32,9 +32,9 @@ pub(crate) use interpreter_state::{
     ACTOR_INBOX, ACTOR_OUTBOX, ACTOR_SPAWNER, AOP_CONFIG, BASE_UNIT_DIMENSIONS,
     COMPOUND_UNIT_DIMENSIONS, CONST_NAMES, CONTEXT_OBJECT, CONTEXT_VAR_NAME, CURRENT_FILE,
     DI_CONFIG, DI_SINGLETONS, EXECUTION_MODE, EXTERN_FUNCTIONS, GENERATOR_YIELDS,
-    INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER, MODULE_GLOBALS, MOVED_VARS,
-    SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS, UNIT_SUFFIX_TO_FAMILY,
-    USER_MACROS,
+    INTERFACE_BINDINGS, INTERPRETER_ARGS, INTERRUPT_REQUESTED, MACRO_DEFINITION_ORDER,
+    MODULE_GLOBALS, MOVED_VARS, SI_BASE_UNITS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
+    UNIT_SUFFIX_TO_FAMILY, USER_MACROS,
 };
 pub(crate) use interpreter_state::{
     clear_moved_vars, get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config,
@@ -700,6 +700,11 @@ use interpreter_call::{evaluate_call, BDD_INDENT, BDD_COUNTS, BDD_SHARED_EXAMPLE
                        exec_block_value};
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 
+// Module caching and loading state
+#[path = "module_cache.rs"]
+mod module_cache;
+pub use module_cache::clear_module_cache;
+
 // Module loading and resolution
 #[path = "interpreter_module.rs"]
 mod interpreter_module;
@@ -707,7 +712,6 @@ use interpreter_module::{
     evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions,
     resolve_module_path,
 };
-pub use interpreter_module::clear_module_cache;
 
 // Type-related utilities
 #[path = "interpreter_types.rs"]
@@ -727,6 +731,9 @@ pub(crate) use macros::{
     take_macro_introduced_symbols,
 };
 pub use macros::set_macro_trace;
+// Native I/O helper utilities
+#[path = "native_io_helpers.rs"]
+mod native_io_helpers;
 #[path = "interpreter_native_io.rs"]
 mod interpreter_native_io;
 // Re-export all native I/O functions

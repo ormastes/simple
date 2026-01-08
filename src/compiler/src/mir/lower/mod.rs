@@ -30,6 +30,8 @@ use crate::mir::function::MirModule;
 pub fn lower_to_mir(hir: &HirModule) -> MirLowerResult<MirModule> {
     MirLowerer::new()
         .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
         .lower_module(hir)
 }
 
@@ -40,6 +42,8 @@ pub fn lower_to_mir_with_mode(
 ) -> MirLowerResult<MirModule> {
     MirLowerer::with_contract_mode(contract_mode)
         .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
         .lower_module(hir)
 }
 
@@ -52,6 +56,8 @@ pub fn lower_to_mir_with_mode_and_di(
     MirLowerer::with_contract_mode(contract_mode)
         .with_di_config(di_config)
         .with_refined_types(&hir.refined_types)
+        .with_type_registry(&hir.types)
+        .with_trait_infos(&hir.trait_infos)
         .lower_module(hir)
 }
 

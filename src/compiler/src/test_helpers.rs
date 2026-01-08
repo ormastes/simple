@@ -40,7 +40,10 @@ pub fn lower_to_mir(
     hir_module: &hir::HirModule,
     di_config: Option<di::DiConfig>,
 ) -> Result<mir::MirModule, mir::MirLowerError> {
-    let lowerer = mir::MirLowerer::new().with_di_config(di_config);
+    let lowerer = mir::MirLowerer::new()
+        .with_di_config(di_config)
+        .with_type_registry(&hir_module.types)
+        .with_trait_infos(&hir_module.trait_infos);
     lowerer.lower_module(hir_module)
 }
 

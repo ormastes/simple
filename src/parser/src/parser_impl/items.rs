@@ -288,6 +288,7 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Struct => self.parse_struct_with_attrs(attributes),
             TokenKind::Class => self.parse_class_with_attrs(attributes),
+            TokenKind::Mixin => self.parse_mixin_with_attrs(attributes),
             TokenKind::Enum => self.parse_enum_with_attrs(attributes),
             TokenKind::Union => self.parse_union_with_attrs(attributes),
             TokenKind::Impl => self.parse_impl_with_attrs(attributes),
@@ -330,9 +331,16 @@ impl<'a> Parser<'a> {
                 }
                 Ok(node)
             }
+            TokenKind::Mixin => {
+                let mut node = self.parse_mixin_with_attrs(attributes)?;
+                if let Node::Mixin(ref mut m) = node {
+                    m.visibility = Visibility::Public;
+                }
+                Ok(node)
+            }
             TokenKind::Mod => self.parse_mod(Visibility::Public, attributes),
             _ => Err(ParseError::unexpected_token(
-                "fn, struct, class, or mod after pub with attributes",
+                "fn, struct, class, mixin, or mod after pub with attributes",
                 format!("{:?}", self.current.kind),
                 self.current.span,
             )),

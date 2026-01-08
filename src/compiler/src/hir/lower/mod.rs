@@ -5,6 +5,7 @@ mod lowerer;
 mod module_lowering;
 pub mod parallel;
 mod stmt_lowering;
+mod type_registration;
 mod type_resolver;
 
 pub use error::{LowerError, LowerResult};

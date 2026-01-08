@@ -221,6 +221,8 @@ pub struct MirLowerer<'a> {
     pub(super) refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
+    /// Reference to trait infos for vtable slot resolution (static polymorphism)
+    pub(super) trait_infos: Option<&'a std::collections::HashMap<String, crate::hir::HirTraitInfo>>,
     /// DI configuration for constructor injection
     pub(super) di_config: Option<DiConfig>,
     /// Map of injectable function names to parameter types and inject flags (#1013)
@@ -246,6 +248,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode: ContractMode::All,
             refined_types: None,
             type_registry: None,
+            trait_infos: None,
             di_config: None,
             inject_functions: HashMap::new(),
             singleton_cache: HashMap::new(),
@@ -264,6 +267,7 @@ impl<'a> MirLowerer<'a> {
             contract_mode,
             refined_types: None,
             type_registry: None,
+            trait_infos: None,
             di_config: None,
             inject_functions: HashMap::new(),
             singleton_cache: HashMap::new(),
@@ -302,6 +306,29 @@ impl<'a> MirLowerer<'a> {
     pub fn with_type_registry(mut self, registry: &'a crate::hir::TypeRegistry) -> Self {
         self.type_registry = Some(registry);
         self
+    }
+
+    /// Set trait infos reference for vtable slot resolution (static polymorphism)
+    pub fn with_trait_infos(mut self, trait_infos: &'a std::collections::HashMap<String, crate::hir::HirTraitInfo>) -> Self {
+        self.trait_infos = Some(trait_infos);
+        self
+    }
+
+    /// Get vtable slot for a method on a trait
+    /// Returns None if trait or method not found
+    pub(super) fn get_vtable_slot(&self, trait_name: &str, method_name: &str) -> Option<u32> {
+        self.trait_infos
+            .and_then(|infos| infos.get(trait_name))
+            .and_then(|info| info.get_vtable_slot(method_name))
+    }
+
+    /// Get method signature from a trait
+    /// Returns param_types (excluding self) and return_type
+    pub(super) fn get_trait_method_signature(&self, trait_name: &str, method_name: &str) -> Option<(Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
+        self.trait_infos
+            .and_then(|infos| infos.get(trait_name))
+            .and_then(|info| info.get_method(method_name))
+            .map(|sig| (sig.param_types.clone(), sig.return_type))
     }
 
     /// Get the current contract mode

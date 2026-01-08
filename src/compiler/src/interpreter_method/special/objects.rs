@@ -23,9 +23,29 @@ pub fn handle_trait_object_methods(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
+    use crate::interpreter::INTERFACE_BINDINGS;
+
+    // Check if there's an interface binding for static polymorphism
+    let bound_impl = INTERFACE_BINDINGS.with(|bindings| {
+        bindings.borrow().get(trait_name).cloned()
+    });
+
     // Extract the inner value's class/type
     if let Value::Object { class, fields } = inner.as_ref() {
-        // Try to find and execute the method on the inner object
+        // If there's a binding, verify the inner object matches the bound type
+        // and use static dispatch to the bound implementation
+        if let Some(ref bound_type) = bound_impl {
+            if class != bound_type {
+                // Inner type doesn't match binding - this shouldn't happen in well-typed code
+                // Fall back to normal dynamic dispatch
+            }
+            // Static dispatch: method lookup on the bound implementation type
+            if let Some(result) = find_and_exec_method(method, args, bound_type, fields, env, functions, classes, enums, impl_methods)? {
+                return Ok(Some(result));
+            }
+        }
+
+        // Dynamic dispatch: method lookup on the actual inner object type
         if let Some(result) = find_and_exec_method(method, args, class, fields, env, functions, classes, enums, impl_methods)? {
             return Ok(Some(result));
         }

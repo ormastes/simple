@@ -61,4 +61,22 @@ impl<'a> Parser<'a> {
         }
         Ok(node)
     }
+
+    pub(super) fn parse_mixin_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
+        let mut node = self.parse_mixin()?;
+        if let Node::Mixin(ref mut m) = node {
+            m.doc_comment = doc_comment.or(m.doc_comment.take());
+        }
+        Ok(node)
+    }
+
+    pub(super) fn parse_mixin_with_attrs(
+        &mut self,
+        _attributes: Vec<Attribute>,
+    ) -> Result<Node, ParseError> {
+        self.parse_mixin()
+    }
 }
