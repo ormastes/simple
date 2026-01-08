@@ -56,6 +56,7 @@ pub mod smf_builder;
 pub mod trait_coherence;
 pub mod value;
 pub mod value_bridge;
+pub mod runtime_bridge;
 pub mod verification_checker;
 pub mod web_compiler;
 pub mod runtime_profile;

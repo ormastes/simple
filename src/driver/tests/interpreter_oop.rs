@@ -504,3 +504,105 @@ main = get_value(a) + get_value(b)
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 157); // (5*10) + (7+100) = 50 + 107 = 157
 }
+
+// =============================================================================
+// Static Polymorphism Tests (Interface Bindings)
+// =============================================================================
+
+#[test]
+fn interpreter_static_polymorphism_basic() {
+    let code = r#"
+trait Logger:
+    fn log(self, msg: str) -> str
+
+class ConsoleLogger:
+    fn log(self, msg: str) -> str:
+        return "Console: " + msg
+
+bind Logger = ConsoleLogger
+
+fn create_logger() -> Logger:
+    return ConsoleLogger()
+
+let logger: Logger = create_logger()
+let result = logger.log("Hello")
+# With binding, should dispatch statically to ConsoleLogger
+if result == "Console: Hello":
+    main = 0
+else:
+    main = 1
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 0, "Static dispatch should work");
+}
+
+#[test]
+fn interpreter_static_polymorphism_multiple_methods() {
+    let code = r#"
+trait Calculator:
+    fn add(self, a: i64, b: i64) -> i64
+    fn multiply(self, a: i64, b: i64) -> i64
+
+class SimpleCalc:
+    fn add(self, a: i64, b: i64) -> i64:
+        return a + b
+    fn multiply(self, a: i64, b: i64) -> i64:
+        return a * b
+
+bind Calculator = SimpleCalc
+
+let calc: Calculator = SimpleCalc()
+main = calc.add(3, 4) + calc.multiply(2, 5)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 17); // 7 + 10 = 17
+}
+
+#[test]
+fn interpreter_static_polymorphism_with_fields() {
+    let code = r#"
+trait Counter:
+    fn get_value(self) -> i64
+    fn increment(self) -> i64
+
+class SimpleCounter:
+    value: i64
+
+    fn get_value(self) -> i64:
+        return self.value
+
+    fn increment(self) -> i64:
+        return self.value + 1
+
+bind Counter = SimpleCounter
+
+let counter: Counter = SimpleCounter { value: 42 }
+main = counter.get_value()
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 42);
+}
+
+#[test]
+fn interpreter_static_polymorphism_function_parameter() {
+    let code = r#"
+trait Greeter:
+    fn greet(self, name: str) -> i64
+
+class FormalGreeter:
+    multiplier: i64
+
+    fn greet(self, name: str) -> i64:
+        return self.multiplier * 10
+
+bind Greeter = FormalGreeter
+
+fn do_greeting(g: Greeter) -> i64:
+    return g.greet("Alice")
+
+let greeter: Greeter = FormalGreeter { multiplier: 5 }
+main = do_greeting(greeter)
+"#;
+    let result = run_code(code, &[], "").unwrap();
+    assert_eq!(result.exit_code, 50); // 5 * 10 = 50
+}

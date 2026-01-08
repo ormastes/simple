@@ -34,6 +34,10 @@ pub mod contracts;
 pub mod units;
 pub mod pointers;
 pub mod parallel;
+pub mod enum_union;
+pub mod memory;
+pub mod actors;
+pub mod simd_stubs;
 
 // Re-export key functions for backward compatibility
 pub use body::compile_function_body;
@@ -62,6 +66,23 @@ use contracts::compile_contract_check;
 use units::{compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate, compile_unit_widen};
 use pointers::{compile_pointer_deref, compile_pointer_new, compile_pointer_ref};
 use parallel::{compile_par_filter, compile_par_for_each, compile_par_map, compile_par_reduce};
+use enum_union::{
+    compile_enum_discriminant, compile_enum_payload, compile_union_discriminant,
+    compile_union_payload, compile_union_wrap,
+};
+use memory::{
+    compile_gc_alloc, compile_get_element_ptr, compile_load, compile_local_addr, compile_store,
+    compile_wait,
+};
+use actors::{
+    compile_actor_join, compile_actor_recv, compile_actor_reply, compile_actor_send,
+    compile_await, compile_generator_next,
+};
+use simd_stubs::{
+    compile_neighbor_load, compile_vec_clamp, compile_vec_fma, compile_vec_gather,
+    compile_vec_load, compile_vec_masked_load, compile_vec_masked_store, compile_vec_max_vec,
+    compile_vec_min_vec, compile_vec_recip, compile_vec_scatter, compile_vec_store,
+};
 
 /// Context for instruction compilation, holding all state needed to compile MIR instructions.
 pub struct InstrContext<'a, M: Module> {
@@ -151,30 +172,15 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::LocalAddr { dest, local_index } => {
-            let addr_val = builder.ins().iconst(types::I64, *local_index as i64);
-            ctx.vreg_values.insert(*dest, addr_val);
-            ctx.local_addr_map.insert(*dest, *local_index);
+            compile_local_addr(ctx, builder, *dest, *local_index)?;
         }
 
         MirInst::Load { dest, addr, .. } => {
-            if let Some(&local_index) = ctx.local_addr_map.get(addr) {
-                if let Some(&var) = ctx.variables.get(&local_index) {
-                    let val = builder.use_var(var);
-                    ctx.vreg_values.insert(*dest, val);
-                }
-            } else {
-                let val = ctx.vreg_values[addr];
-                ctx.vreg_values.insert(*dest, val);
-            }
+            compile_load(ctx, builder, *dest, *addr)?;
         }
 
         MirInst::Store { addr, value, .. } => {
-            if let Some(&local_index) = ctx.local_addr_map.get(addr) {
-                if let Some(&var) = ctx.variables.get(&local_index) {
-                    let val = ctx.vreg_values[value];
-                    builder.def_var(var, val);
-                }
-            }
+            compile_store(ctx, builder, *addr, *value)?;
         }
 
         MirInst::UnaryOp { dest, op, operand } => {
@@ -225,33 +231,15 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::GetElementPtr { dest, base, index } => {
-            let base_val = ctx.vreg_values[base];
-            let index_val = ctx.vreg_values[index];
-            let element_size = builder.ins().iconst(types::I64, 8);
-            let offset = builder.ins().imul(index_val, element_size);
-            let addr = builder.ins().iadd(base_val, offset);
-            ctx.vreg_values.insert(*dest, addr);
+            compile_get_element_ptr(ctx, builder, *dest, *base, *index)?;
         }
 
         MirInst::GcAlloc { dest, ty } => {
-            let alloc_id = ctx.runtime_funcs["rt_alloc"];
-            let alloc_ref = ctx.module.declare_func_in_func(alloc_id, builder.func);
-            let size = type_id_size(*ty) as i64;
-            let size_val = builder.ins().iconst(types::I64, size.max(8));
-            let call = builder.ins().call(alloc_ref, &[size_val]);
-            let ptr = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, ptr);
+            compile_gc_alloc(ctx, builder, *dest, *ty)?;
         }
 
         MirInst::Wait { dest, target } => {
-            let wait_id = ctx.runtime_funcs["rt_wait"];
-            let wait_ref = ctx.module.declare_func_in_func(wait_id, builder.func);
-            let target_val = ctx.vreg_values[target];
-            let call = builder.ins().call(wait_ref, &[target_val]);
-            let result = builder.inst_results(call)[0];
-            if let Some(d) = dest {
-                ctx.vreg_values.insert(*d, result);
-            }
+            compile_wait(ctx, builder, *dest, *target)?;
         }
 
         MirInst::InterpCall {
@@ -574,21 +562,11 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::EnumDiscriminant { dest, value } => {
-            let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];
-            let disc_ref = ctx.module.declare_func_in_func(disc_id, builder.func);
-            let val = ctx.vreg_values[value];
-            let call = builder.ins().call(disc_ref, &[val]);
-            let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, result);
+            compile_enum_discriminant(ctx, builder, *dest, *value)?;
         }
 
         MirInst::EnumPayload { dest, value } => {
-            let payload_id = ctx.runtime_funcs["rt_enum_payload"];
-            let payload_ref = ctx.module.declare_func_in_func(payload_id, builder.func);
-            let val = ctx.vreg_values[value];
-            let call = builder.ins().call(payload_ref, &[val]);
-            let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, result);
+            compile_enum_payload(ctx, builder, *dest, *value)?;
         }
 
         MirInst::EnumUnit {
@@ -610,36 +588,15 @@ pub fn compile_instruction<M: Module>(
 
         // Union type instructions - reuse enum runtime functions with type index
         MirInst::UnionDiscriminant { dest, value } => {
-            // Unions use the same representation as enums
-            let disc_id = ctx.runtime_funcs["rt_enum_discriminant"];
-            let disc_ref = ctx.module.declare_func_in_func(disc_id, builder.func);
-            let val = ctx.vreg_values[value];
-            let call = builder.ins().call(disc_ref, &[val]);
-            let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, result);
+            compile_union_discriminant(ctx, builder, *dest, *value)?;
         }
 
         MirInst::UnionPayload { dest, value, type_index: _ } => {
-            // Extract the payload value (type_index is for compile-time type safety)
-            let payload_id = ctx.runtime_funcs["rt_enum_payload"];
-            let payload_ref = ctx.module.declare_func_in_func(payload_id, builder.func);
-            let val = ctx.vreg_values[value];
-            let call = builder.ins().call(payload_ref, &[val]);
-            let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, result);
+            compile_union_payload(ctx, builder, *dest, *value)?;
         }
 
         MirInst::UnionWrap { dest, value, type_index } => {
-            // Wrap a value into a union - use enum new with type index as discriminant
-            let wrap_id = ctx.runtime_funcs["rt_enum_new"];
-            let wrap_ref = ctx.module.declare_func_in_func(wrap_id, builder.func);
-            let disc = builder.ins().iconst(cranelift_codegen::ir::types::I32, *type_index as i64);
-            // variant_count is not strictly needed for runtime, use 0
-            let variant_count = builder.ins().iconst(cranelift_codegen::ir::types::I32, 0);
-            let val = ctx.vreg_values[value];
-            let call = builder.ins().call(wrap_ref, &[disc, variant_count, val]);
-            let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, result);
+            compile_union_wrap(ctx, builder, *dest, *value, *type_index as u32)?;
         }
 
         MirInst::FutureCreate { dest, body_block } => {
@@ -647,12 +604,7 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::Await { dest, future } => {
-            let await_id = ctx.runtime_funcs["rt_future_await"];
-            let await_ref = ctx.module.declare_func_in_func(await_id, builder.func);
-            let future_val = ctx.vreg_values[future];
-            let call = builder.ins().call(await_ref, &[future_val]);
-            let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, result);
+            compile_await(ctx, builder, *dest, *future)?;
         }
 
         MirInst::ActorSpawn { dest, body_block } => {
@@ -660,39 +612,19 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::ActorSend { actor, message } => {
-            let send_id = ctx.runtime_funcs["rt_actor_send"];
-            let send_ref = ctx.module.declare_func_in_func(send_id, builder.func);
-            let actor_val = ctx.vreg_values[actor];
-            let msg_val = ctx.vreg_values[message];
-            builder.ins().call(send_ref, &[actor_val, msg_val]);
+            compile_actor_send(ctx, builder, *actor, *message)?;
         }
 
         MirInst::ActorRecv { dest } => {
-            let recv_id = ctx.runtime_funcs["rt_actor_recv"];
-            let recv_ref = ctx.module.declare_func_in_func(recv_id, builder.func);
-            let call = builder.ins().call(recv_ref, &[]);
-            let result = builder.inst_results(call)[0];
-            ctx.vreg_values.insert(*dest, result);
+            compile_actor_recv(ctx, builder, *dest)?;
         }
 
         MirInst::ActorJoin { dest, actor } => {
-            let join_id = ctx.runtime_funcs["rt_actor_join"];
-            let join_ref = ctx.module.declare_func_in_func(join_id, builder.func);
-            let actor_val = ctx.vreg_values[actor];
-            let call = builder.ins().call(join_ref, &[actor_val]);
-            let raw_result = builder.inst_results(call)[0];
-            // Convert i64 to RuntimeValue by tagging (shift left 3 bits)
-            let tagged_result = builder.ins().ishl_imm(raw_result, 3);
-            ctx.vreg_values.insert(*dest, tagged_result);
+            compile_actor_join(ctx, builder, *dest, *actor)?;
         }
 
         MirInst::ActorReply { message } => {
-            let reply_id = ctx.runtime_funcs["rt_actor_reply"];
-            let reply_ref = ctx.module.declare_func_in_func(reply_id, builder.func);
-            let message_val = ctx.vreg_values[message];
-            builder.ins().call(reply_ref, &[message_val]);
-            // Reply returns RuntimeValue (NIL), but we don't need to store it
-            // The result is handled by the ConstNil instruction that follows
+            compile_actor_reply(ctx, builder, *message)?;
         }
 
         MirInst::GeneratorCreate { dest, body_block } => {
@@ -704,19 +636,7 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::GeneratorNext { dest, generator } => {
-            let next_id = ctx.runtime_funcs["rt_generator_next"];
-            let next_ref = ctx.module.declare_func_in_func(next_id, builder.func);
-            let gen_val = ctx.vreg_values[generator];
-            let call = builder.ins().call(next_ref, &[gen_val]);
-            let result = builder.inst_results(call)[0];
-
-            // The runtime returns a tagged RuntimeValue; unwrap to a raw i64 for
-            // downstream arithmetic in codegen paths.
-            let unwrap_id = ctx.runtime_funcs["rt_value_as_int"];
-            let unwrap_ref = ctx.module.declare_func_in_func(unwrap_id, builder.func);
-            let unwrap_call = builder.ins().call(unwrap_ref, &[result]);
-            let unwrapped = builder.inst_results(unwrap_call)[0];
-            ctx.vreg_values.insert(*dest, unwrapped);
+            compile_generator_next(ctx, builder, *dest, *generator)?;
         }
 
         MirInst::TryUnwrap {
@@ -874,87 +794,52 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::NeighborLoad { dest, array, direction } => {
-            // Stub for SIMD neighbor load - in real GPU codegen this would
-            // compute (this.index() +/- 1) and load from array at that index
-            let _ = (array, direction);
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_neighbor_load(ctx, builder, *dest, *array, *direction)?;
         }
 
-        // SIMD load/store operations (stub implementations)
+        // SIMD load/store operations
         MirInst::VecLoad { dest, array, offset } => {
-            // Stub: load 4 f32s from array[offset..offset+4]
-            // In real implementation this would emit SIMD load instruction
-            let _ = (array, offset);
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_vec_load(ctx, builder, *dest, *array, *offset)?;
         }
 
         MirInst::VecStore { source, array, offset } => {
-            // Stub: store 4 f32s to array[offset..offset+4]
-            // In real implementation this would emit SIMD store instruction
-            let _ = (source, array, offset);
+            compile_vec_store(ctx, builder, *source, *array, *offset)?;
         }
 
         MirInst::VecGather { dest, array, indices } => {
-            // Stub: gather 4 f32s from array at 4 different indices
-            let _ = (array, indices);
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_vec_gather(ctx, builder, *dest, *array, *indices)?;
         }
 
         MirInst::VecScatter { source, array, indices } => {
-            // Stub: scatter 4 f32s to array at 4 different indices
-            let _ = (source, array, indices);
+            compile_vec_scatter(ctx, builder, *source, *array, *indices)?;
         }
 
         MirInst::VecFma { dest, a, b, c } => {
-            // Stub: fused multiply-add: a * b + c
-            // In real implementation this would emit FMA SIMD instruction
-            let _ = (a, b, c);
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_vec_fma(ctx, builder, *dest, *a, *b, *c)?;
         }
 
         MirInst::VecRecip { dest, source } => {
-            // Stub: reciprocal: 1.0 / source
-            // In real implementation this would emit reciprocal SIMD instruction
-            let _ = source;
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_vec_recip(ctx, builder, *dest, *source)?;
         }
 
         MirInst::VecMaskedLoad { dest, array, offset, mask, default } => {
-            // Stub: masked load - load where mask is true, use default for false
-            let _ = (array, offset, mask, default);
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_vec_masked_load(ctx, builder, *dest, *array, *offset, *mask, *default)?;
         }
 
         MirInst::VecMaskedStore { source, array, offset, mask } => {
-            // Stub: masked store - store only where mask is true
-            let _ = (source, array, offset, mask);
+            compile_vec_masked_store(ctx, builder, *source, *array, *offset, *mask)?;
         }
 
         MirInst::VecMinVec { dest, a, b } => {
-            // Stub: element-wise minimum of two vectors
-            let _ = (a, b);
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_vec_min_vec(ctx, builder, *dest, *a, *b)?;
         }
 
         MirInst::VecMaxVec { dest, a, b } => {
-            // Stub: element-wise maximum of two vectors
-            let _ = (a, b);
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_vec_max_vec(ctx, builder, *dest, *a, *b)?;
         }
 
         MirInst::VecClamp { dest, source, lo, hi } => {
-            // Stub: element-wise clamp to range
-            let _ = (source, lo, hi);
-            let zero = builder.ins().iconst(types::I64, 0);
-            ctx.vreg_values.insert(*dest, zero);
+            compile_vec_clamp(ctx, builder, *dest, *source, *lo, *hi)?;
         }
 
         // Parallel iterator operations
