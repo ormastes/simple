@@ -622,6 +622,10 @@ pub struct TypeChecker {
     mixins: HashMap<String, MixinInfo>,
     /// Mixin compositions: type -> mixins it includes (Feature #2201)
     compositions: HashMap<String, Vec<simple_parser::MixinRef>>,
+    /// Interface binding registry: trait name -> implementation type (for static dispatch)
+    /// When a binding exists, trait references resolve to the bound implementation type
+    /// and dispatch is static (monomorphized). Without binding, dispatch is dynamic (vtable).
+    interface_bindings: HashMap<String, Type>,
 }
 
 // TypeChecker implementation (split for maintainability)

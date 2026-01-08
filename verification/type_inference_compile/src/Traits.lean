@@ -241,6 +241,28 @@ def isValidBinding (implRegistry : ImplRegistry) (binding : InterfaceBinding) : 
 def checkBindingsValid (implRegistry : ImplRegistry) (bindings : BindingRegistry) : Bool :=
   bindings.all (fun b => isValidBinding implRegistry b)
 
+-- Dispatch mode: derived from binding existence
+-- Static when binding exists, Dynamic when no binding
+inductive DispatchMode where
+  | static   -- Monomorphized, direct call (binding exists)
+  | dynamic  -- Vtable lookup (no binding, default)
+  deriving Repr, BEq, DecidableEq
+
+-- Get dispatch mode for a trait
+-- KEY SEMANTIC: Default is Dynamic, Static only when binding exists
+def getDispatchMode (bindings : BindingRegistry) (traitName : String) : DispatchMode :=
+  match lookupBinding bindings traitName with
+  | some _ => DispatchMode.static
+  | none => DispatchMode.dynamic
+
+-- Resolve trait type based on dispatch mode
+-- Static: returns bound implementation type
+-- Dynamic: returns DynTrait representation
+def resolveTraitTypeWithMode (bindings : BindingRegistry) (traitName : String) : Ty × DispatchMode :=
+  match lookupBinding bindings traitName with
+  | some binding => (binding.impl_type, DispatchMode.static)
+  | none => (Ty.named ("dyn " ++ traitName), DispatchMode.dynamic)
+
 -- Resolve method dispatch for static polymorphism
 -- Returns: implementation type if binding exists, otherwise none
 def resolveDispatch (bindings : BindingRegistry) (implRegistry : ImplRegistry)
@@ -259,6 +281,30 @@ def resolveDispatch (bindings : BindingRegistry) (implRegistry : ImplRegistry)
 --==============================================================================
 -- Static Polymorphism Theorems
 --==============================================================================
+
+-- CORE THEOREM: Default dispatch is Dynamic
+-- If no binding exists for a trait, dispatch mode is Dynamic
+theorem default_dispatch_is_dynamic (bindings : BindingRegistry) (traitName : String) :
+    lookupBinding bindings traitName = none →
+    getDispatchMode bindings traitName = DispatchMode.dynamic := by
+  intro h
+  unfold getDispatchMode
+  rw [h]
+
+-- CORE THEOREM: Binding implies Static dispatch
+-- If binding exists for a trait, dispatch mode is Static
+theorem binding_implies_static (bindings : BindingRegistry) (traitName : String)
+    (binding : InterfaceBinding) :
+    lookupBinding bindings traitName = some binding →
+    getDispatchMode bindings traitName = DispatchMode.static := by
+  intro h
+  unfold getDispatchMode
+  rw [h]
+
+-- Dispatch mode is deterministic (function of bindings)
+theorem dispatch_mode_deterministic (bindings : BindingRegistry) (traitName : String) :
+    getDispatchMode bindings traitName = getDispatchMode bindings traitName := by
+  rfl
 
 -- Theorem: Binding resolution is deterministic
 theorem binding_deterministic (bindings : BindingRegistry) (traitName : String)

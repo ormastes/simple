@@ -1,7 +1,15 @@
 // Helper functions for expression parsing - lambdas, colon blocks, if expressions, and arguments
 
+use crate::ast::{Argument, Expr, LambdaParam, MacroArg, MoveMode, Pattern};
+use crate::error::ParseError;
+use crate::parser_impl::core::Parser;
+use crate::token::TokenKind;
+
 impl<'a> Parser<'a> {
-    fn parse_remaining_lambda_params(&mut self, params: &mut Vec<LambdaParam>) -> Result<(), ParseError> {
+    pub(super) fn parse_remaining_lambda_params(
+        &mut self,
+        params: &mut Vec<LambdaParam>,
+    ) -> Result<(), ParseError> {
         while self.check(&TokenKind::Comma) {
             self.advance();
             let name = self.expect_identifier()?;
@@ -23,7 +31,7 @@ impl<'a> Parser<'a> {
     ///
     /// Returns `Some(lambda)` if we see `:` followed by newline and indent,
     /// `None` if this doesn't look like a colon-block.
-    fn try_parse_colon_block(&mut self) -> Result<Option<Expr>, ParseError> {
+    pub(super) fn try_parse_colon_block(&mut self) -> Result<Option<Expr>, ParseError> {
         // Must be at a colon
         if !self.check(&TokenKind::Colon) {
             return Ok(None);
@@ -225,7 +233,7 @@ impl<'a> Parser<'a> {
 
     /// Parse comprehension clause: `for pattern in iterable [if condition]`
     /// Returns (pattern, iterable, condition)
-    fn parse_comprehension_clause(
+    pub(super) fn parse_comprehension_clause(
         &mut self,
     ) -> Result<(Pattern, Expr, Option<Box<Expr>>), ParseError> {
         let pattern = self.parse_pattern()?;
@@ -241,7 +249,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse lambda body (params, colon, expression or block) with given move mode
-    fn parse_lambda_body(&mut self, move_mode: MoveMode) -> Result<Expr, ParseError> {
+    pub(super) fn parse_lambda_body(&mut self, move_mode: MoveMode) -> Result<Expr, ParseError> {
         let params = self.parse_lambda_params()?;
         self.expect(&TokenKind::Colon)?;
 
