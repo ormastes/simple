@@ -302,6 +302,31 @@ impl<'a> Parser<'a> {
         }))
     }
 
+    // === Mixin (Feature #2200) ===
+
+    pub(crate) fn parse_mixin(&mut self) -> Result<Node, ParseError> {
+        let start_span = self.current.span;
+        self.expect(&TokenKind::Mixin)?;
+        let name = self.expect_identifier()?;
+        let generic_params = self.parse_generic_params_as_strings()?;
+        
+        // Parse body using existing field/method parsers
+        let (fields, methods, _invariant, doc_comment) = self.parse_indented_fields_and_methods()?;
+
+        Ok(Node::Mixin(MixinDef {
+            span: self.make_span(start_span),
+            name,
+            generic_params,
+            required_traits: vec![],  // TODO: Phase 2 - parse requires clause
+            required_mixins: vec![],  // TODO: Phase 2 - parse requires clause
+            fields,
+            methods,
+            required_methods: vec![],  // TODO: Phase 2 - parse requires fn
+            visibility: Visibility::Private,
+            doc_comment,
+        }))
+    }
+
     // === Impl ===
 
     pub(crate) fn parse_impl(&mut self) -> Result<Node, ParseError> {

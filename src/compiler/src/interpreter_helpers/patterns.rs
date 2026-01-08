@@ -1,0 +1,255 @@
+//! Pattern matching and binding
+
+use crate::error::CompileError;
+use crate::value::{Env, Value};
+use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Pattern};
+use std::collections::HashMap;
+
+use super::super::{
+    evaluate_expr, evaluate_method_call_with_self_update,
+    Enums, ImplMethods, CONST_NAMES,
+};
+
+use crate::value::{OptionVariant, ResultVariant};
+
+pub(crate) fn bind_pattern(pattern: &Pattern, value: &Value, env: &mut Env) -> bool {
+    match pattern {
+        Pattern::Wildcard => true,
+        Pattern::Identifier(name) => {
+            env.insert(name.clone(), value.clone());
+            true
+        }
+        Pattern::MutIdentifier(name) => {
+            env.insert(name.clone(), value.clone());
+            true
+        }
+        Pattern::Tuple(patterns) => bind_sequence_pattern(value, patterns, env, true),
+        Pattern::Array(patterns) => bind_sequence_pattern(value, patterns, env, false),
+        _ => {
+            // For other patterns, just try identifier binding
+            false
+        }
+    }
+}
+
+// === Helper functions to reduce duplication in interpreter.rs ===
+
+/// Handle functional update expression: target.&method(args)
+/// Returns Ok(Some(new_value)) if successfully processed, Ok(None) if not applicable
+pub(crate) fn handle_functional_update(
+    target: &Expr,
+    method: &str,
+    args: &[simple_parser::ast::Argument],
+    env: &Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<(String, Value)>, CompileError> {
+    if let Expr::Identifier(name) = target {
+        let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(name));
+        if is_const {
+            return Err(CompileError::Semantic(format!(
+                "cannot use functional update on const '{name}'"
+            )));
+        }
+        let recv_val = env.get(name).cloned().ok_or_else(|| {
+            let known_names: Vec<&str> = env
+                .keys()
+                .map(|s| s.as_str())
+                .chain(functions.keys().map(|s| s.as_str()))
+                .chain(classes.keys().map(|s| s.as_str()))
+                .collect();
+            let mut msg = format!("undefined variable: {name}");
+            if let Some(suggestion) = crate::error::typo::format_suggestion(name, known_names) {
+                msg.push_str(&format!("; {}", suggestion));
+            }
+            CompileError::Semantic(msg)
+        })?;
+        let method_call = Expr::MethodCall {
+            receiver: Box::new(Expr::Identifier(name.clone())),
+            method: method.to_string(),
+            args: args.to_vec(),
+        };
+        let result = evaluate_expr(&method_call, env, functions, classes, enums, impl_methods)?;
+        let new_value = match (&recv_val, &result) {
+            (Value::Array(_), Value::Array(_)) => result,
+            (Value::Dict(_), Value::Dict(_)) => result,
+            (Value::Str(_), Value::Str(_)) => result,
+            (Value::Tuple(_), Value::Tuple(_)) => result,
+            (Value::Object { .. }, Value::Object { .. }) => result,
+            _ => env.get(name).cloned().unwrap_or(recv_val),
+        };
+        Ok(Some((name.clone(), new_value)))
+    } else {
+        Err(CompileError::Semantic(
+            "functional update target must be an identifier".into(),
+        ))
+    }
+}
+
+/// Array methods that mutate and should update the binding
+const ARRAY_MUTATING_METHODS: &[&str] = &[
+    "append", "push", "pop", "insert", "remove", "reverse", "concat", "extend",
+    "sort", "sort_desc", "clear",
+];
+
+/// Handle method call on object with self-update tracking
+/// Returns (result, optional_updated_self) where updated_self is the object with mutations
+pub(crate) fn handle_method_call_with_self_update(
+    value_expr: &Expr,
+    env: &Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<(Value, Option<(String, Value)>), CompileError> {
+    if let Expr::MethodCall { receiver, method, args } = value_expr {
+        // Handle nested method calls like self.advance().unwrap()
+        // The receiver itself might be a method call that mutates an object
+        if let Expr::MethodCall { .. } = receiver.as_ref() {
+            // Recursively handle the inner method call first
+            let (inner_result, inner_update) = handle_method_call_with_self_update(
+                receiver, env, functions, classes, enums, impl_methods
+            )?;
+
+            // If there was an update from the inner method call, we need to use
+            // the updated environment for the outer method call
+            let working_env = if let Some((ref obj_name, ref new_self)) = inner_update {
+                let mut temp_env = env.clone();
+                temp_env.insert(obj_name.clone(), new_self.clone());
+                temp_env
+            } else {
+                env.clone()
+            };
+
+            // Now call the outer method on the inner result
+            // Evaluate the arguments first
+            let mut eval_args = Vec::new();
+            for arg in args {
+                let val = evaluate_expr(&arg.value, &working_env, functions, classes, enums, impl_methods)?;
+                eval_args.push(val);
+            }
+
+            // Call the method on the inner_result value
+            let outer_result = call_method_on_value(
+                inner_result, method, &eval_args, &working_env, functions, classes, enums, impl_methods
+            )?;
+
+            // Return the outer result but propagate the inner update
+            return Ok((outer_result, inner_update));
+        }
+
+        if let Expr::Identifier(obj_name) = receiver.as_ref() {
+            // Handle Object mutations
+            if let Some(Value::Object { .. }) = env.get(obj_name) {
+                let (result, updated_self) = evaluate_method_call_with_self_update(
+                    receiver, method, args, env, functions, classes, enums, impl_methods
+                )?;
+                if let Some(new_self) = updated_self {
+                    return Ok((result, Some((obj_name.clone(), new_self))));
+                }
+                return Ok((result, None));
+            }
+            // Handle Array mutations for mutating methods
+            if let Some(Value::Array(_)) = env.get(obj_name) {
+                if ARRAY_MUTATING_METHODS.contains(&method.as_str()) {
+                    // Check if variable is mutable
+                    let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
+                    if is_const {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot call mutating method '{}' on immutable array '{}'",
+                            method, obj_name
+                        )));
+                    }
+                    // Evaluate the method call - it returns the new array
+                    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                    if let Value::Array(new_arr) = &result {
+                        // Return both the new array as result AND the update for self-mutation
+                        let new_array_val = Value::Array(new_arr.clone());
+                        return Ok((new_array_val.clone(), Some((obj_name.clone(), new_array_val))));
+                    }
+                }
+            }
+            // Handle Dict mutations for mutating methods
+            if let Some(Value::Dict(_)) = env.get(obj_name) {
+                let dict_mutating = ["set", "insert", "remove", "delete", "merge", "extend", "clear"];
+                if dict_mutating.contains(&method.as_str()) {
+                    let is_const = CONST_NAMES.with(|cell| cell.borrow().contains(obj_name));
+                    if is_const {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot call mutating method '{}' on immutable dict '{}'",
+                            method, obj_name
+                        )));
+                    }
+                    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+                    if let Value::Dict(new_dict) = &result {
+                        // Return both the new dict as result AND the update for self-mutation
+                        let new_dict_val = Value::Dict(new_dict.clone());
+                        return Ok((new_dict_val.clone(), Some((obj_name.clone(), new_dict_val))));
+                    }
+                }
+            }
+        }
+    }
+    let result = evaluate_expr(value_expr, env, functions, classes, enums, impl_methods)?;
+    Ok((result, None))
+}
+
+/// Bind a single pattern element from a let statement
+/// Updates const names set if the binding is immutable
+fn bind_let_pattern_element(
+    pat: &Pattern,
+    val: Value,
+    is_mutable: bool,
+    env: &mut Env,
+) {
+    match pat {
+        Pattern::Identifier(name) => {
+            env.insert(name.clone(), val);
+            if !is_mutable {
+                CONST_NAMES.with(|cell| cell.borrow_mut().insert(name.clone()));
+            }
+        }
+        Pattern::MutIdentifier(name) => {
+            env.insert(name.clone(), val);
+        }
+        Pattern::Typed { pattern, .. } => {
+            bind_let_pattern_element(pattern, val, is_mutable, env);
+        }
+        _ => {}
+    }
+}
+
+/// Bind any pattern from a let statement.
+pub(crate) fn bind_pattern_value(pat: &Pattern, val: Value, is_mutable: bool, env: &mut Env) {
+    match pat {
+        Pattern::Tuple(patterns) => {
+            // Allow tuple pattern to match both Tuple and Array
+            let values: Vec<Value> = match val {
+                Value::Tuple(v) => v,
+                Value::Array(v) => v,
+                _ => Vec::new(),
+            };
+            bind_collection_pattern(patterns, values, is_mutable, env);
+        }
+        Pattern::Array(patterns) => {
+            if let Value::Array(values) = val {
+                bind_collection_pattern(patterns, values, is_mutable, env);
+            }
+        }
+        _ => bind_let_pattern_element(pat, val, is_mutable, env),
+    }
+}
+
+/// Bind a collection pattern (tuple or array) from a let statement.
+fn bind_collection_pattern(
+    patterns: &[Pattern],
+    values: Vec<Value>,
+    is_mutable: bool,
+    env: &mut Env,
+) {
+    for (pat, val) in patterns.iter().zip(values.into_iter()) {
+        bind_pattern_value(pat, val, is_mutable, env);
+    }
+}

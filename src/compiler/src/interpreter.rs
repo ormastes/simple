@@ -921,10 +921,11 @@ fn exec_method_function(
     }
 }
 
-include!("interpreter_expr.rs");
+mod expr;
+pub(crate) use expr::evaluate_expr;
 
 // Helper functions (method dispatch, array/dict ops, pattern binding, slicing)
-#[path = "interpreter_helpers.rs"]
+#[path = "interpreter_helpers/mod.rs"]
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
     bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
@@ -968,7 +969,11 @@ mod interpreter_eval;
 #[path = "interpreter_method/mod.rs"]
 mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
-include!("interpreter_macro.rs");
+mod macros;
+pub use macros::{
+    enter_block_scope, evaluate_macro_invocation, exit_block_scope, queue_tail_injection,
+    set_macro_trace, take_macro_introduced_symbols,
+};
 #[path = "interpreter_native_io.rs"]
 mod interpreter_native_io;
 // Re-export all native I/O functions

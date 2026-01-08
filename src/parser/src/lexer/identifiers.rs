@@ -86,6 +86,7 @@ impl<'a> super::Lexer<'a> {
             "union" => TokenKind::Union,
             "trait" => TokenKind::Trait,
             "impl" => TokenKind::Impl,
+            "mixin" => TokenKind::Mixin,
             "actor" => TokenKind::Actor,
             "extends" => TokenKind::Extends,
             "pub" => TokenKind::Pub,

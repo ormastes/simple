@@ -87,6 +87,7 @@ pub enum TokenKind {
     Union, // union (tagged union, alias for enum with data)
     Trait,
     Impl,
+    Mixin,  // mixin (for mixin declarations, Feature #2200)
     Actor,
     Extends, // extends (class inheritance)
     Pub,

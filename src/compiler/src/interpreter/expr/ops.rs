@@ -1,0 +1,353 @@
+use std::collections::HashMap;
+
+use simple_parser::ast::{BinOp, Expr, PointerKind, UnaryOp};
+
+use super::casting::cast_value;
+use super::units::{evaluate_unit_binary_inner, evaluate_unit_unary_inner};
+use super::evaluate_expr;
+use crate::error::CompileError;
+use crate::value::{
+    BorrowMutValue, BorrowValue, ManualHandleValue, ManualSharedValue, ManualUniqueValue,
+    ManualWeakValue, Value,
+};
+
+use super::super::{check_unit_binary_op, check_unit_unary_op, ClassDef, Env, Enums, FunctionDef, ImplMethods};
+
+pub(super) fn eval_op_expr(
+    expr: &Expr,
+    env: &Env,
+    functions: &mut HashMap<String, FunctionDef>,
+    classes: &mut HashMap<String, ClassDef>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    match expr {
+        Expr::New { kind, expr } => {
+            let inner = evaluate_expr(expr, env, functions, classes, enums, impl_methods)?;
+            let result = match kind {
+                PointerKind::Unique => Ok(Value::Unique(ManualUniqueValue::new(inner))),
+                PointerKind::Shared => Ok(Value::Shared(ManualSharedValue::new(inner))),
+                PointerKind::Weak => {
+                    if let Value::Shared(shared) = inner {
+                        Ok(Value::Weak(ManualWeakValue::new_from_shared(&shared)))
+                    } else {
+                        Err(CompileError::Semantic(
+                            "new - expects a shared pointer to create a weak reference".into(),
+                        ))
+                    }
+                }
+                PointerKind::Handle => Ok(Value::Handle(ManualHandleValue::new(inner))),
+                PointerKind::Borrow => Ok(Value::Borrow(BorrowValue::new(inner))),
+                PointerKind::BorrowMut => Ok(Value::BorrowMut(BorrowMutValue::new(inner))),
+            };
+            Ok(Some(result?))
+        }
+        Expr::Binary { op, left, right } => {
+            let left_val = evaluate_expr(left, env, functions, classes, enums, impl_methods)?;
+            let right_val = evaluate_expr(right, env, functions, classes, enums, impl_methods)?;
+
+            // Check for unit arithmetic type safety
+            match (&left_val, &right_val) {
+                (
+                    Value::Unit { value: lv, suffix: ls, family: lf },
+                    Value::Unit { value: rv, suffix: rs, family: rf },
+                ) => {
+                    // Both operands are units - check if operation is allowed
+                    let left_family = lf.as_ref().map(|s| s.as_str()).unwrap_or(ls.as_str());
+                    let right_family = rf.as_ref().map(|s| s.as_str()).unwrap_or(rs.as_str());
+
+                    match check_unit_binary_op(left_family, right_family, *op) {
+                        Ok(result_family) => {
+                            // Operation allowed - perform it on inner values
+                            let result_val = evaluate_unit_binary_inner(lv, rv, *op)?;
+                            // Return unit with result family (or left family if same-family operation)
+                            let result_suffix = if let Some(ref fam) = result_family {
+                                fam.clone()
+                            } else {
+                                ls.clone()
+                            };
+                            return Ok(Some(Value::Unit {
+                                value: Box::new(result_val),
+                                suffix: result_suffix,
+                                family: result_family.or_else(|| lf.clone()),
+                            }));
+                        }
+                        Err(err) => {
+                            return Err(CompileError::Semantic(err));
+                        }
+                    }
+                }
+                // Mixed unit/non-unit operations: allow scaling (mul/div)
+                (Value::Unit { value, suffix, family }, other)
+                | (other, Value::Unit { value, suffix, family })
+                    if matches!(op, BinOp::Mul | BinOp::Div) =>
+                {
+                    // Scaling: unit * scalar or scalar * unit (or division)
+                    let inner_result = evaluate_unit_binary_inner(value, other, *op)?;
+                    return Ok(Some(Value::Unit {
+                        value: Box::new(inner_result),
+                        suffix: suffix.clone(),
+                        family: family.clone(),
+                    }));
+                }
+                // Mixed unit/non-unit for non-scaling ops is an error
+                (Value::Unit { suffix: ls, .. }, _) => {
+                    if !matches!(op, BinOp::Eq | BinOp::NotEq) {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot apply {:?} between unit '{}' and non-unit value",
+                            op, ls
+                        )));
+                    }
+                    // Fall through for equality comparison
+                }
+                (_, Value::Unit { suffix: rs, .. }) => {
+                    if !matches!(op, BinOp::Eq | BinOp::NotEq) {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot apply {:?} between non-unit value and unit '{}'",
+                            op, rs
+                        )));
+                    }
+                    // Fall through for equality comparison
+                }
+                _ => {} // Neither is a unit - fall through to normal handling
+            }
+
+            // Standard binary operation handling (for non-unit operations)
+            // Helper to determine if we should use float arithmetic
+            let use_float =
+                matches!(&left_val, Value::Float(_)) || matches!(&right_val, Value::Float(_));
+
+            let result = match op {
+                BinOp::Add => match (&left_val, &right_val) {
+                    (Value::Str(a), Value::Str(b)) => Ok(Value::Str(format!("{a}{b}"))),
+                    (Value::Str(a), b) => Ok(Value::Str(format!("{a}{}", b.to_display_string()))),
+                    (a, Value::Str(b)) => Ok(Value::Str(format!(
+                        "{}{}",
+                        a.to_display_string(),
+                        b
+                    ))),
+                    // Array concatenation: [a, b] + [c, d] => [a, b, c, d]
+                    (Value::Array(a), Value::Array(b)) => {
+                        let mut result = a.clone();
+                        result.extend(b.iter().cloned());
+                        Ok(Value::Array(result))
+                    }
+                    _ if use_float => Ok(Value::Float(left_val.as_float()? + right_val.as_float()?)),
+                    _ => Ok(Value::Int(left_val.as_int()? + right_val.as_int()?)),
+                },
+                BinOp::Sub => {
+                    if use_float {
+                        Ok(Value::Float(left_val.as_float()? - right_val.as_float()?))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? - right_val.as_int()?))
+                    }
+                }
+                BinOp::Mul => {
+                    // String repetition: "a" * 3 -> "aaa" or 3 * "a" -> "aaa"
+                    match (&left_val, &right_val) {
+                        (Value::Str(s), Value::Int(n)) => {
+                            if *n <= 0 {
+                                Ok(Value::Str(String::new()))
+                            } else {
+                                Ok(Value::Str(s.repeat(*n as usize)))
+                            }
+                        }
+                        (Value::Int(n), Value::Str(s)) => {
+                            if *n <= 0 {
+                                Ok(Value::Str(String::new()))
+                            } else {
+                                Ok(Value::Str(s.repeat(*n as usize)))
+                            }
+                        }
+                        _ if use_float => Ok(Value::Float(left_val.as_float()? * right_val.as_float()?)),
+                        _ => Ok(Value::Int(left_val.as_int()? * right_val.as_int()?)),
+                    }
+                }
+                BinOp::Div => {
+                    if use_float {
+                        let r = right_val.as_float()?;
+                        if r == 0.0 {
+                            Err(CompileError::Semantic("division by zero".into()))
+                        } else {
+                            Ok(Value::Float(left_val.as_float()? / r))
+                        }
+                    } else {
+                        let r = right_val.as_int()?;
+                        if r == 0 {
+                            Err(CompileError::Semantic("division by zero".into()))
+                        } else {
+                            Ok(Value::Int(left_val.as_int()? / r))
+                        }
+                    }
+                }
+                BinOp::Mod => {
+                    if use_float {
+                        let r = right_val.as_float()?;
+                        if r == 0.0 {
+                            Err(CompileError::Semantic("modulo by zero".into()))
+                        } else {
+                            Ok(Value::Float(left_val.as_float()? % r))
+                        }
+                    } else {
+                        let r = right_val.as_int()?;
+                        if r == 0 {
+                            Err(CompileError::Semantic("modulo by zero".into()))
+                        } else {
+                            Ok(Value::Int(left_val.as_int()? % r))
+                        }
+                    }
+                }
+                BinOp::Eq => Ok(Value::Bool(left_val == right_val)),
+                BinOp::NotEq => Ok(Value::Bool(left_val != right_val)),
+                BinOp::Lt => {
+                    if use_float {
+                        Ok(Value::Bool(left_val.as_float()? < right_val.as_float()?))
+                    } else {
+                        Ok(Value::Bool(left_val.as_int()? < right_val.as_int()?))
+                    }
+                }
+                BinOp::Gt => {
+                    if use_float {
+                        Ok(Value::Bool(left_val.as_float()? > right_val.as_float()?))
+                    } else {
+                        Ok(Value::Bool(left_val.as_int()? > right_val.as_int()?))
+                    }
+                }
+                BinOp::LtEq => {
+                    if use_float {
+                        Ok(Value::Bool(left_val.as_float()? <= right_val.as_float()?))
+                    } else {
+                        Ok(Value::Bool(left_val.as_int()? <= right_val.as_int()?))
+                    }
+                }
+                BinOp::GtEq => {
+                    if use_float {
+                        Ok(Value::Bool(left_val.as_float()? >= right_val.as_float()?))
+                    } else {
+                        Ok(Value::Bool(left_val.as_int()? >= right_val.as_int()?))
+                    }
+                }
+                BinOp::Is => Ok(Value::Bool(left_val == right_val)),
+                BinOp::And => Ok(Value::Bool(left_val.truthy() && right_val.truthy())),
+                BinOp::Or => Ok(Value::Bool(left_val.truthy() || right_val.truthy())),
+                BinOp::Pow => {
+                    if use_float {
+                        Ok(Value::Float(left_val.as_float()?.powf(right_val.as_float()?)))
+                    } else {
+                        let base = left_val.as_int()?;
+                        let exp = right_val.as_int()?;
+                        if exp < 0 {
+                            Err(CompileError::Semantic(
+                                "negative exponent not supported for integers".into(),
+                            ))
+                        } else {
+                            Ok(Value::Int(base.pow(exp as u32)))
+                        }
+                    }
+                }
+                BinOp::FloorDiv => {
+                    let r = right_val.as_int()?;
+                    if r == 0 {
+                        Err(CompileError::Semantic("floor division by zero".into()))
+                    } else {
+                        let l = left_val.as_int()?;
+                        // Floor division: always round towards negative infinity
+                        Ok(Value::Int(l.div_euclid(r)))
+                    }
+                }
+                BinOp::BitAnd => Ok(Value::Int(left_val.as_int()? & right_val.as_int()?)),
+                BinOp::BitOr => Ok(Value::Int(left_val.as_int()? | right_val.as_int()?)),
+                BinOp::BitXor => Ok(Value::Int(left_val.as_int()? ^ right_val.as_int()?)),
+                BinOp::ShiftLeft => Ok(Value::Int(left_val.as_int()? << right_val.as_int()?)),
+                BinOp::ShiftRight => Ok(Value::Int(left_val.as_int()? >> right_val.as_int()?)),
+                BinOp::In => {
+                    // Membership test: check if left is in right (array, tuple, dict, or string)
+                    match right_val {
+                        Value::Array(arr) => Ok(Value::Bool(arr.contains(&left_val))),
+                        Value::Tuple(tup) => Ok(Value::Bool(tup.contains(&left_val))),
+                        Value::Dict(dict) => {
+                            let key = left_val.to_key_string();
+                            Ok(Value::Bool(dict.contains_key(&key)))
+                        }
+                        Value::Str(s) => {
+                            let needle = left_val.to_key_string();
+                            Ok(Value::Bool(s.contains(&needle)))
+                        }
+                        _ => Err(CompileError::Semantic(
+                            "'in' operator requires array, tuple, dict, or string".into(),
+                        )),
+                    }
+                }
+                BinOp::MatMul => {
+                    // Matrix multiplication (@) - for now, treat as element-wise multiply for numbers
+                    // or defer to a matrix library for actual matrix operations
+                    if use_float {
+                        Ok(Value::Float(left_val.as_float()? * right_val.as_float()?))
+                    } else {
+                        Ok(Value::Int(left_val.as_int()? * right_val.as_int()?))
+                    }
+                }
+            };
+
+            Ok(Some(result?))
+        }
+        Expr::Unary { op, operand } => {
+            let val = evaluate_expr(operand, env, functions, classes, enums, impl_methods)?;
+
+            // Check for unit type safety
+            if let Value::Unit { value, suffix, family } = &val {
+                match op {
+                    UnaryOp::Neg => {
+                        // Check if negation is allowed for this unit family
+                        let unit_family =
+                            family.as_ref().map(|s| s.as_str()).unwrap_or(suffix.as_str());
+                        match check_unit_unary_op(unit_family, *op) {
+                            Ok(_result_family) => {
+                                // Negation allowed - perform it on inner value
+                                let inner_result = evaluate_unit_unary_inner(value, *op)?;
+                                return Ok(Some(Value::Unit {
+                                    value: Box::new(inner_result),
+                                    suffix: suffix.clone(),
+                                    family: family.clone(),
+                                }));
+                            }
+                            Err(err) => {
+                                return Err(CompileError::Semantic(err));
+                            }
+                        }
+                    }
+                    UnaryOp::Not | UnaryOp::BitNot => {
+                        return Err(CompileError::Semantic(format!(
+                            "cannot apply {:?} to unit value '{}'",
+                            op, suffix
+                        )));
+                    }
+                    UnaryOp::Ref => {
+                        return Ok(Some(Value::Borrow(BorrowValue::new(val))));
+                    }
+                    UnaryOp::RefMut => {
+                        return Ok(Some(Value::BorrowMut(BorrowMutValue::new(val))));
+                    }
+                    UnaryOp::Deref => {
+                        return Ok(Some(val.deref_pointer()));
+                    }
+                }
+            }
+
+            let result = match op {
+                UnaryOp::Neg => Ok(Value::Int(-val.as_int()?)),
+                UnaryOp::Not => Ok(Value::Bool(!val.truthy())),
+                UnaryOp::BitNot => Ok(Value::Int(!val.as_int()?)),
+                UnaryOp::Ref => Ok(Value::Borrow(BorrowValue::new(val))),
+                UnaryOp::RefMut => Ok(Value::BorrowMut(BorrowMutValue::new(val))),
+                UnaryOp::Deref => Ok(val.deref_pointer()),
+            };
+            Ok(Some(result?))
+        }
+        Expr::Cast { expr: inner, target_type } => {
+            let val = evaluate_expr(inner, env, functions, classes, enums, impl_methods)?;
+            Ok(Some(cast_value(val, target_type)?))
+        }
+        _ => Ok(None),
+    }
+}

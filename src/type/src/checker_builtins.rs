@@ -9,6 +9,8 @@ impl TypeChecker {
             available_macros: HashSet::new(),
             next_ref_id: 0,
             trait_impls: HashMap::new(),
+            mixins: HashMap::new(),
+            compositions: HashMap::new(),
         };
         // Add built-in functions to environment
         tc.add_builtins();

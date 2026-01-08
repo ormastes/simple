@@ -360,6 +360,50 @@ impl Type {
         }
     }
 
+    /// Substitute type parameters with concrete types (Feature #2201)
+    /// Used for instantiating generic mixins like Container[T] -> Container[i64]
+    pub fn substitute_type_params(&self, subst: &HashMap<String, Type>) -> Type {
+        match self {
+            Type::TypeParam(name) => {
+                subst.get(name).cloned().unwrap_or_else(|| self.clone())
+            }
+            Type::Function { params, ret } => Type::Function {
+                params: params.iter().map(|p| p.substitute_type_params(subst)).collect(),
+                ret: Box::new(ret.substitute_type_params(subst)),
+            },
+            Type::Array(elem) => Type::Array(Box::new(elem.substitute_type_params(subst))),
+            Type::Union(types) => {
+                Type::Union(types.iter().map(|t| t.substitute_type_params(subst)).collect())
+            }
+            Type::Generic { name, args } => Type::Generic {
+                name: name.clone(),
+                args: args.iter().map(|a| a.substitute_type_params(subst)).collect(),
+            },
+            Type::Tuple(types) => {
+                Type::Tuple(types.iter().map(|t| t.substitute_type_params(subst)).collect())
+            }
+            Type::Dict { key, value } => Type::Dict {
+                key: Box::new(key.substitute_type_params(subst)),
+                value: Box::new(value.substitute_type_params(subst)),
+            },
+            Type::Optional(inner) => Type::Optional(Box::new(inner.substitute_type_params(subst))),
+            Type::Borrow(inner) => Type::Borrow(Box::new(inner.substitute_type_params(subst))),
+            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(inner.substitute_type_params(subst))),
+            Type::Constructor { target, args } => Type::Constructor {
+                target: Box::new(target.substitute_type_params(subst)),
+                args: args.as_ref().map(|a| {
+                    a.iter().map(|t| t.substitute_type_params(subst)).collect()
+                }),
+            },
+            Type::Simd { lanes, element } => Type::Simd {
+                lanes: *lanes,
+                element: Box::new(element.substitute_type_params(subst)),
+            },
+            // These types don't contain type parameters
+            _ => self.clone(),
+        }
+    }
+
     /// Check if this type contains the given type variable
     pub fn contains_var(&self, var_id: usize) -> bool {
         match self {
@@ -463,6 +507,102 @@ struct TraitImplRegistry {
     specific_impls: HashSet<String>,
 }
 
+/// Mixin metadata for type checking (Feature #2200)
+#[derive(Debug, Clone)]
+pub struct MixinInfo {
+    pub name: String,
+    pub type_params: Vec<String>,
+    pub fields: Vec<(String, Type)>,
+    pub methods: Vec<(String, FunctionType)>,
+    pub required_traits: Vec<String>,
+    pub required_methods: Vec<RequiredMethodSig>,
+}
+
+impl MixinInfo {
+    /// Instantiate this mixin with concrete type arguments (Feature #2201)
+    /// Example: Container[T] with [i64] -> Container with T replaced by i64
+    pub fn instantiate(&self, type_args: &[Type]) -> Result<Self, String> {
+        if type_args.len() != self.type_params.len() {
+            return Err(format!(
+                "Mixin {} expects {} type arguments, got {}",
+                self.name,
+                self.type_params.len(),
+                type_args.len()
+            ));
+        }
+
+        // Build substitution map: T -> i64, U -> str, etc.
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        for (param, arg) in self.type_params.iter().zip(type_args.iter()) {
+            subst.insert(param.clone(), arg.clone());
+        }
+
+        // Apply substitution to fields and methods
+        let fields = self
+            .fields
+            .iter()
+            .map(|(name, ty)| (name.clone(), ty.substitute_type_params(&subst)))
+            .collect();
+
+        let methods = self
+            .methods
+            .iter()
+            .map(|(name, func_ty)| (name.clone(), func_ty.substitute_type_params(&subst)))
+            .collect();
+
+        let required_methods = self
+            .required_methods
+            .iter()
+            .map(|sig| sig.substitute_type_params(&subst))
+            .collect();
+
+        Ok(MixinInfo {
+            name: self.name.clone(),
+            type_params: vec![], // Instantiated mixins have no more params
+            fields,
+            methods,
+            required_traits: self.required_traits.clone(),
+            required_methods,
+        })
+    }
+}
+
+/// Required method signature in a mixin
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequiredMethodSig {
+    pub name: String,
+    pub params: Vec<Type>,
+    pub ret: Type,
+}
+
+impl RequiredMethodSig {
+    /// Substitute type parameters in this signature (Feature #2201)
+    pub fn substitute_type_params(&self, subst: &HashMap<String, Type>) -> Self {
+        RequiredMethodSig {
+            name: self.name.clone(),
+            params: self.params.iter().map(|p| p.substitute_type_params(subst)).collect(),
+            ret: self.ret.substitute_type_params(subst),
+        }
+    }
+}
+
+/// Function type for method signatures
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionType {
+    pub params: Vec<Type>,
+    pub ret: Type,
+}
+
+impl FunctionType {
+    /// Substitute type parameters in this function type (Feature #2201)
+    pub fn substitute_type_params(&self, subst: &HashMap<String, Type>) -> Self {
+        FunctionType {
+            params: self.params.iter().map(|p| p.substitute_type_params(subst)).collect(),
+            ret: self.ret.substitute_type_params(subst),
+        }
+    }
+}
+
 pub struct TypeChecker {
     env: HashMap<String, Type>,
     next_var: usize,
@@ -478,6 +618,10 @@ pub struct TypeChecker {
     next_ref_id: usize,
     /// Trait implementation registry for coherence checks
     trait_impls: HashMap<String, TraitImplRegistry>,
+    /// Mixin definitions for composition (Feature #2200)
+    mixins: HashMap<String, MixinInfo>,
+    /// Mixin compositions: type -> mixins it includes (Feature #2201)
+    compositions: HashMap<String, Vec<simple_parser::MixinRef>>,
 }
 
 // TypeChecker implementation (split for maintainability)
@@ -514,4 +658,123 @@ mod impl_block_spec {
 #[cfg(test)]
 mod trait_bounds_spec {
     include!("../tests/trait_bounds_spec.rs");
+}
+
+#[cfg(test)]
+mod mixin_type_tests {
+    use super::*;
+
+    //==============================================================================
+    // Step 2: Type Substitution Tests (Feature #2201)
+    //==============================================================================
+
+    #[test]
+    fn test_substitute_simple_type_param() {
+        // Test: Substitute simple type param T -> i64
+        let mixin = MixinInfo {
+            name: "Container".to_string(),
+            type_params: vec!["T".to_string()],
+            fields: vec![("value".to_string(), Type::TypeParam("T".to_string()))],
+            methods: vec![],
+            required_traits: vec![],
+            required_methods: vec![],
+        };
+        
+        let instantiated = mixin.instantiate(&[Type::Int])
+            .expect("Instantiation should succeed");
+        
+        assert_eq!(instantiated.type_params.len(), 0);
+        assert_eq!(instantiated.fields.len(), 1);
+        assert_eq!(instantiated.fields[0].0, "value");
+        assert_eq!(instantiated.fields[0].1, Type::Int);
+    }
+
+    #[test]
+    fn test_substitute_nested_generic() {
+        // Test: Substitute nested generic [T] -> [i64]
+        let mixin = MixinInfo {
+            name: "Container".to_string(),
+            type_params: vec!["T".to_string()],
+            fields: vec![
+                ("items".to_string(), Type::Array(Box::new(Type::TypeParam("T".to_string()))))
+            ],
+            methods: vec![],
+            required_traits: vec![],
+            required_methods: vec![],
+        };
+        
+        let instantiated = mixin.instantiate(&[Type::Int])
+            .expect("Instantiation should succeed");
+        
+        assert_eq!(instantiated.fields[0].1, Type::Array(Box::new(Type::Int)));
+    }
+
+    #[test]
+    fn test_substitute_in_function_type() {
+        // Test: Substitute type param in function signature
+        let mixin = MixinInfo {
+            name: "Processor".to_string(),
+            type_params: vec!["T".to_string()],
+            fields: vec![],
+            methods: vec![
+                ("process".to_string(), FunctionType {
+                    params: vec![Type::TypeParam("T".to_string())],
+                    ret: Type::TypeParam("T".to_string()),
+                })
+            ],
+            required_traits: vec![],
+            required_methods: vec![],
+        };
+        
+        let instantiated = mixin.instantiate(&[Type::Str])
+            .expect("Instantiation should succeed");
+        
+        assert_eq!(instantiated.methods[0].1.params[0], Type::Str);
+        assert_eq!(instantiated.methods[0].1.ret, Type::Str);
+    }
+
+    #[test]
+    fn test_instantiate_multi_param_generic() {
+        // Test: Instantiate mixin with multiple type parameters
+        let mixin = MixinInfo {
+            name: "KeyValue".to_string(),
+            type_params: vec!["K".to_string(), "V".to_string()],
+            fields: vec![
+                ("key".to_string(), Type::TypeParam("K".to_string())),
+                ("value".to_string(), Type::TypeParam("V".to_string())),
+            ],
+            methods: vec![],
+            required_traits: vec![],
+            required_methods: vec![],
+        };
+        
+        let instantiated = mixin.instantiate(&[Type::Str, Type::Int])
+            .expect("Instantiation should succeed");
+        
+        assert_eq!(instantiated.fields[0].1, Type::Str);
+        assert_eq!(instantiated.fields[1].1, Type::Int);
+    }
+
+    #[test]
+    fn test_wrong_type_arg_count() {
+        // Test: Wrong number of type arguments should error
+        let mixin = MixinInfo {
+            name: "Container".to_string(),
+            type_params: vec!["T".to_string()],
+            fields: vec![],
+            methods: vec![],
+            required_traits: vec![],
+            required_methods: vec![],
+        };
+        
+        // Try with 0 args (should fail)
+        let result = mixin.instantiate(&[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expects 1 type arguments, got 0"));
+        
+        // Try with 2 args (should fail)
+        let result = mixin.instantiate(&[Type::Int, Type::Str]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("expects 1 type arguments, got 2"));
+    }
 }

@@ -374,6 +374,47 @@ pub struct ImplBlock {
     pub methods: Vec<FunctionDef>,
 }
 
+/// Mixin definition: mixin Name[T] requires Trait: fields and methods
+/// Mixins provide reusable field and method compositions for classes and structs.
+/// Feature #2200: Mixin Declaration Syntax
+#[derive(Debug, Clone, PartialEq)]
+pub struct MixinDef {
+    pub span: Span,
+    pub name: String,
+    pub generic_params: Vec<String>,
+    pub required_traits: Vec<String>,
+    pub required_mixins: Vec<String>,
+    pub fields: Vec<Field>,
+    pub methods: Vec<FunctionDef>,
+    pub required_methods: Vec<RequiredMethodSig>,
+    pub visibility: Visibility,
+    pub doc_comment: Option<DocComment>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequiredMethodSig {
+    pub span: Span,
+    pub name: String,
+    pub params: Vec<Parameter>,
+    pub return_type: Option<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MixinRef {
+    pub span: Span,
+    pub name: String,
+    pub type_args: Vec<Type>,
+    pub overrides: Vec<OverrideSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverrideSpec {
+    Override(String),
+    Hide(String),
+    Rename { old_name: String, new_name: String },
+}
+
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActorDef {
     pub span: Span,
