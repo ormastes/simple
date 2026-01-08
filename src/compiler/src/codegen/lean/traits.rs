@@ -196,21 +196,8 @@ pub struct LeanBinding {
     pub interface_name: String,
     /// Bound implementation type
     pub impl_type: LeanType,
-    /// Dispatch mode
-    pub mode: BindingMode,
     /// Documentation
     pub doc: Option<String>,
-}
-
-/// Dispatch mode for interface bindings
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BindingMode {
-    /// Always static dispatch
-    Static,
-    /// Always dynamic dispatch
-    Dynamic,
-    /// Compiler chooses
-    Auto,
 }
 
 impl LeanBinding {
@@ -223,13 +210,8 @@ impl LeanBinding {
             out.push_str(&format!("/-- {} -/\n", doc));
         }
 
-        // Mode comment
-        let mode_str = match self.mode {
-            BindingMode::Static => "static",
-            BindingMode::Dynamic => "dynamic",
-            BindingMode::Auto => "auto",
-        };
-        out.push_str(&format!("-- Binding mode: {}\n", mode_str));
+        // Static binding comment
+        out.push_str("-- Static dispatch binding\n");
 
         // Abbreviation: abbrev TraitName.Bound := ImplType
         out.push_str(&format!(
@@ -553,16 +535,15 @@ mod tests {
         let binding = LeanBinding {
             interface_name: "Logger".to_string(),
             impl_type: LeanType::Named("ConsoleLogger".to_string()),
-            mode: BindingMode::Static,
             doc: Some("Bind Logger to ConsoleLogger".to_string()),
         };
 
         let output = binding.to_lean();
         assert!(output.contains("abbrev Logger.Bound := ConsoleLogger"));
         assert!(output.contains("instance Logger.BoundInstance"));
-        assert!(output.contains("static"));
+        assert!(output.contains("Static dispatch"));
 
         let theorem = binding.to_validity_theorem();
-        assert!(output.contains("logger_binding_valid") || theorem.contains("logger_binding_valid"));
+        assert!(theorem.contains("logger_binding_valid"));
     }
 }

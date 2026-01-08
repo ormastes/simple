@@ -54,3 +54,8 @@ impl ProfileConfig {
 
 /// Per-function runtime statistics
 #[derive(Debug, Clone, Default)]
+pub struct FunctionRuntimeStats {
+    pub function_name: String,
+    pub call_count: u64,
+    pub total_time_ns: u64,
+}

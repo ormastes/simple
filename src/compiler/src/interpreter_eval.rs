@@ -710,11 +710,15 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
             | Node::AopAdvice(_)
             | Node::DiBinding(_)
             | Node::ArchitectureRule(_)
-            | Node::MockDecl(_) => {
+            | Node::MockDecl(_)
+            | Node::InterfaceBinding(_)
+            | Node::Mixin(_) => {
                 // Module system is handled by the module resolver
                 // HandlePool is processed at compile time for allocation
                 // Bitfield is processed at compile time for bit-level field access
                 // AOP nodes are declarative configuration handled at compile time
+                // InterfaceBinding affects dispatch mode at compile time
+                // Mixin composition is handled at compile time
                 // These are no-ops in the interpreter
             }
         }

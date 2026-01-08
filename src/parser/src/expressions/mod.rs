@@ -998,4 +998,4 @@ impl<'a> Parser<'a> {
 include!("helpers.rs");
 
 // Primary expression parsing (extracted for maintainability)
-include!("primary.rs");
+mod primary;

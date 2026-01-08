@@ -42,7 +42,7 @@ pub use verification_checker::{VerificationChecker, check_module};
 pub use runner::{LeanRunner, LeanCheckResult, VerificationSummary};
 pub use traits::{
     TraitTranslator, LeanClass, LeanInstance, LeanBinding, LeanMethodSig,
-    BindingMode, StaticPolyTheorems
+    StaticPolyTheorems
 };
 
 use crate::hir::{HirModule, HirFunction};
@@ -167,14 +167,12 @@ impl LeanCodegen {
         &self,
         interface_name: &str,
         impl_type: LeanType,
-        mode: BindingMode,
     ) -> Result<String, CompileError> {
         let mut emitter = LeanEmitter::new();
 
         let binding = LeanBinding {
             interface_name: interface_name.to_string(),
             impl_type,
-            mode,
             doc: None,
         };
 
@@ -190,7 +188,7 @@ impl LeanCodegen {
         module: &HirModule,
         traits: &[TraitDef],
         impls: &[ImplBlock],
-        bindings: &[(String, LeanType, BindingMode)],
+        bindings: &[(String, LeanType)],
     ) -> Result<String, CompileError> {
         let mut emitter = LeanEmitter::new();
 
@@ -228,11 +226,10 @@ impl LeanCodegen {
         // Emit interface bindings for static dispatch
         if !bindings.is_empty() {
             emitter.emit_comment("Interface bindings (static dispatch)");
-            for (interface_name, impl_type, mode) in bindings {
+            for (interface_name, impl_type) in bindings {
                 let binding = LeanBinding {
                     interface_name: interface_name.clone(),
                     impl_type: impl_type.clone(),
-                    mode: *mode,
                     doc: None,
                 };
                 emitter.emit_binding(&binding);

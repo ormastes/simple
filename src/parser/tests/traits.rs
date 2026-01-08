@@ -161,3 +161,26 @@ fn parse_trait_multiple_associated_types() {
         panic!("Expected trait");
     }
 }
+
+// Interface binding tests (static polymorphism)
+#[test]
+fn parse_interface_binding() {
+    // Basic interface binding for static dispatch
+    let items = parse("bind Logger = ConsoleLogger");
+    if let Node::InterfaceBinding(binding) = &items[0] {
+        assert_eq!(binding.interface_name, "Logger");
+    } else {
+        panic!("Expected interface binding");
+    }
+}
+
+#[test]
+fn parse_interface_binding_generic_type() {
+    // Binding with generic implementation type
+    let items = parse("bind Serializer = JsonSerializer[String]");
+    if let Node::InterfaceBinding(binding) = &items[0] {
+        assert_eq!(binding.interface_name, "Serializer");
+    } else {
+        panic!("Expected interface binding");
+    }
+}

@@ -22,3 +22,9 @@ lean_lib Classes
 lean_lib Traits
 
 lean_lib ClassTraitIntegration
+
+lean_lib Mixins
+
+lean_lib MixinsTest
+
+lean_lib MixinVerificationGenerated

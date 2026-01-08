@@ -58,7 +58,9 @@ impl Lowerer {
                 | Node::Macro(_)
                 | Node::Unit(_)
                 | Node::UnitFamily(_)
-                | Node::Bitfield(_) => {}
+                | Node::Bitfield(_)
+                | Node::InterfaceBinding(_)
+                | Node::Mixin(_) => {}
                 Node::Let(_)
                 | Node::Const(_)
                 | Node::Static(_)
