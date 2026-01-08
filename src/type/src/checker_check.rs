@@ -175,6 +175,11 @@ impl TypeChecker {
                     let ty = self.fresh_var();
                     self.env.insert(a.name.clone(), ty);
                 }
+                Node::Mixin(mixin) => {
+                    // Register mixin as a type (Feature #2200)
+                    let ty = self.fresh_var();
+                    self.env.insert(mixin.name.clone(), ty);
+                }
                 Node::TypeAlias(t) => {
                     // Register type alias
                     let ty = self.fresh_var();
@@ -380,6 +385,62 @@ impl TypeChecker {
                 self.register_trait_impl(impl_block)?;
                 // Check all impl methods
                 for method in &impl_block.methods {
+                    let old_env = self.env.clone();
+                    // Add self to environment
+                    let self_ty = self.fresh_var();
+                    self.env.insert("self".to_string(), self_ty);
+                    for param in &method.params {
+                        if param.name != "self" {
+                            let ty = self.fresh_var();
+                            self.env.insert(param.name.clone(), ty);
+                        }
+                    }
+                    self.check_block_with_macro_rules(&method.body)?;
+                    self.env = old_env;
+                }
+                Ok(())
+            }
+            Node::Mixin(mixin) => {
+                // Store mixin metadata for composition (Feature #2200)
+                // Convert fields from AST to Type
+                let fields: Vec<(String, Type)> = mixin
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), self.ast_type_to_type(&f.ty)))
+                    .collect();
+
+                // Convert methods to FunctionType
+                let methods: Vec<(String, FunctionType)> = mixin
+                    .methods
+                    .iter()
+                    .map(|m| {
+                        let params: Vec<Type> = m
+                            .params
+                            .iter()
+                            .filter_map(|p| p.ty.as_ref().map(|t| self.ast_type_to_type(t)))
+                            .collect();
+                        let ret = m
+                            .return_type
+                            .as_ref()
+                            .map(|t| self.ast_type_to_type(t))
+                            .unwrap_or(Type::Nil);
+                        (m.name.clone(), FunctionType { params, ret })
+                    })
+                    .collect();
+
+                // Store MixinInfo
+                let info = MixinInfo {
+                    name: mixin.name.clone(),
+                    type_params: mixin.generic_params.clone(),
+                    fields,
+                    methods,
+                    required_traits: mixin.required_traits.clone(),
+                    required_methods: vec![], // TODO: Phase 2 Step 6
+                };
+                self.mixins.insert(mixin.name.clone(), info);
+
+                // Type check method bodies
+                for method in &mixin.methods {
                     let old_env = self.env.clone();
                     // Add self to environment
                     let self_ty = self.fresh_var();
@@ -897,7 +958,113 @@ impl TypeChecker {
             }
         }
     }
+
+    /// Check for field name conflicts between mixin and class/struct (Feature #2201)
+    pub fn check_mixin_field_conflicts(
+        &self,
+        mixin_fields: &[(String, Type)],
+        target_fields: &[(String, Type)],
+    ) -> Vec<String> {
+        let mut conflicts = Vec::new();
+        for (mixin_name, _mixin_ty) in mixin_fields {
+            if target_fields.iter().any(|(target_name, _)| target_name == mixin_name) {
+                conflicts.push(mixin_name.clone());
+            }
+        }
+        conflicts
+    }
+
+    /// Combine fields from multiple mixins, checking for conflicts (Feature #2201)
+    pub fn combine_mixin_fields(
+        &self,
+        mixins: &[MixinInfo],
+    ) -> Result<Vec<(String, Type)>, TypeError> {
+        let mut combined = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
+
+        for mixin in mixins {
+            for (name, ty) in &mixin.fields {
+                if !seen_names.insert(name.clone()) {
+                    return Err(TypeError::Other(format!(
+                        "Field '{}' defined in multiple mixins",
+                        name
+                    )));
+                }
+                combined.push((name.clone(), ty.clone()));
+            }
+        }
+        Ok(combined)
+    }
+
+    /// Apply mixin to a class/struct, merging fields and methods (Feature #2201)
+    pub fn apply_mixin_to_type(
+        &self,
+        mixin: &MixinInfo,
+        target_name: &str,
+        target_fields: &[(String, Type)],
+    ) -> Result<Vec<(String, Type)>, TypeError> {
+        // Check for conflicts
+        let conflicts = self.check_mixin_field_conflicts(&mixin.fields, target_fields);
+        if !conflicts.is_empty() {
+            return Err(TypeError::Other(format!(
+                "Mixin '{}' conflicts with {} on fields: {}",
+                mixin.name,
+                target_name,
+                conflicts.join(", ")
+            )));
+        }
+
+        // Merge fields
+        let mut merged = target_fields.to_vec();
+        merged.extend(mixin.fields.clone());
+        Ok(merged)
+    }
+
+    /// Get all fields for a type including mixin fields (Feature #2201)
+    pub fn get_all_fields(&mut self, type_name: &str) -> Vec<(String, Type)> {
+        // Check if type has mixin compositions
+        if let Some(mixin_refs) = self.compositions.get(type_name).cloned() {
+            let mut all_fields = Vec::new();
+
+            // Add mixin fields
+            for mixin_ref in &mixin_refs {
+                if let Some(mixin_info) = self.mixins.get(&mixin_ref.name).cloned() {
+                    // Instantiate if generic
+                    if !mixin_ref.type_args.is_empty() {
+                        // Convert AST types to Type
+                        let type_args: Vec<Type> = mixin_ref
+                            .type_args
+                            .iter()
+                            .map(|ast_ty| self.ast_type_to_type(ast_ty))
+                            .collect();
+                        
+                        if let Ok(instantiated) = mixin_info.instantiate(&type_args) {
+                            all_fields.extend(instantiated.fields);
+                        }
+                    } else {
+                        all_fields.extend(mixin_info.fields.clone());
+                    }
+                }
+            }
+            
+            // TODO: Add class/struct own fields when they're registered
+            all_fields
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Resolve field access on a type, including mixin fields (Feature #2201)
+    pub fn resolve_field(&mut self, type_name: &str, field_name: &str) -> Option<Type> {
+        let all_fields = self.get_all_fields(type_name);
+        all_fields
+            .iter()
+            .find(|(name, _)| name == field_name)
+            .map(|(_, ty)| ty.clone())
+    }
 }
+
+
 
 fn substitute_macro_template(
     input: &str,

@@ -4,7 +4,6 @@
 import execution_mode.{ExecutionMode, ModeSet, string_to_mode}
 
 ## Failure Strategy
-# Controls test behavior when execution fails in specific modes
 enum FailureStrategy:
     # Continue with next mode on failure (default)
     SkipRemaining
@@ -16,24 +15,15 @@ enum FailureStrategy:
     CollectAll
 
 ## Mode Configuration
-# Configuration for test execution modes at any level
 struct ModeConfig:
-    # Modes to run (None = inherit from parent)
     modes: Option[ModeSet]
-
-    # Modes to skip (additive with parent skips)
     skip_modes: Option[ModeSet]
-
-    # Exclusive mode list (overrides modes and skip_modes)
     only_modes: Option[ModeSet]
-
-    # Failure handling strategy
     failure_strategy: Option[FailureStrategy]
-
-    # Parent configuration (for inheritance)
     parent: Option[ModeConfig]
 
-    # Create a new empty configuration
+## ModeConfig Implementation
+impl ModeConfig:
     fn new() -> ModeConfig:
         ModeConfig {
             modes: None,
@@ -43,81 +33,62 @@ struct ModeConfig:
             parent: None
         }
 
-    # Create configuration with parent for inheritance
     fn with_parent(parent: ModeConfig) -> ModeConfig:
         let mut config = ModeConfig.new()
         config.parent = Some(parent)
-        config
+        return config
 
-    # Set modes to run
     fn set_modes(mut self, modes: ModeSet) -> ModeConfig:
         self.modes = Some(modes)
-        self
+        return self
 
-    # Set modes to skip
     fn set_skip_modes(mut self, modes: ModeSet) -> ModeConfig:
         self.skip_modes = Some(modes)
-        self
+        return self
 
-    # Set exclusive mode list
     fn set_only_modes(mut self, modes: ModeSet) -> ModeConfig:
         self.only_modes = Some(modes)
-        self
+        return self
 
-    # Set failure strategy
     fn set_failure_strategy(mut self, strategy: FailureStrategy) -> ModeConfig:
         self.failure_strategy = Some(strategy)
-        self
+        return self
 
-    # Resolve the effective modes for this configuration
-    # Applies inheritance and precedence rules
     fn resolve_modes(self) -> ModeSet:
-        # 1. If only_modes is set, use it exclusively (highest precedence)
-        match self.only_modes:
-            case Some(only) => only
-            case None =>
-                # 2. Start with modes from this level or parent
-                let mut effective_modes = match self.modes:
-                    case Some(modes) => modes
-                    case None =>
-                        # Inherit from parent
-                        match self.parent:
-                            case Some(parent) => parent.resolve_modes()
-                            case None => ModeSet.all()  # Default: all modes
+        if self.only_modes.is_some():
+            return self.only_modes.unwrap()
 
-                # 3. Apply skip_modes (from this level and all parents)
-                let skip = self.resolve_skip_modes()
-                effective_modes = effective_modes.difference(skip)
+        let mut effective_modes = ModeSet.all()
+        if self.modes.is_some():
+            effective_modes = self.modes.unwrap()
+        elif self.parent.is_some():
+            effective_modes = self.parent.unwrap().resolve_modes()
 
-                effective_modes
+        let skip = self.resolve_skip_modes()
+        effective_modes = effective_modes.difference(skip)
+        return effective_modes
 
-    # Resolve the effective skip modes (accumulated from all parents)
     fn resolve_skip_modes(self) -> ModeSet:
-        let mut skip = match self.skip_modes:
-            case Some(modes) => modes
-            case None => ModeSet.new([])
+        let mut skip = ModeSet.new([])
+        if self.skip_modes.is_some():
+            skip = self.skip_modes.unwrap()
 
-        # Add parent's skip modes (additive)
-        match self.parent:
-            case Some(parent) =>
-                let parent_skip = parent.resolve_skip_modes()
-                skip = skip.union(parent_skip)
-            case None => pass
+        if self.parent.is_some():
+            let parent_skip = self.parent.unwrap().resolve_skip_modes()
+            skip = skip.union_with(parent_skip)
 
-        skip
+        return skip
 
-    # Resolve the effective failure strategy
     fn resolve_failure_strategy(self) -> FailureStrategy:
-        match self.failure_strategy:
-            case Some(strategy) => strategy
-            case None =>
-                # Inherit from parent
-                match self.parent:
-                    case Some(parent) => parent.resolve_failure_strategy()
-                    case None => FailureStrategy.SkipRemaining  # Default
+        if self.failure_strategy.is_some():
+            return self.failure_strategy.unwrap()
+
+        if self.parent.is_some():
+            return self.parent.unwrap().resolve_failure_strategy()
+
+        return FailureStrategy.SkipRemaining
 
 ## Configuration Levels
-# Hierarchy of configuration sources
 enum ConfigLevel:
     Project
     Directory
@@ -125,38 +96,36 @@ enum ConfigLevel:
     Block
     Test
 
-# Configuration source with level information
 struct ConfigSource:
     level: ConfigLevel
-    path: Option[String]  # File/directory path, if applicable
-    name: Option[String]  # Block/test name, if applicable
+    path: Option[String]
+    name: Option[String]
 
 ## Project-Level Configuration
-# Default configuration from simple.toml [test] section
 struct ProjectConfig:
     default_modes: ModeSet
     mode_failure_strategy: FailureStrategy
 
+impl ProjectConfig:
     fn default() -> ProjectConfig:
         ProjectConfig {
             default_modes: ModeSet.all(),
             mode_failure_strategy: FailureStrategy.SkipRemaining
         }
 
-    # Create ModeConfig from project settings
     fn to_mode_config(self) -> ModeConfig:
         let mut config = ModeConfig.new()
         config = config.set_modes(self.default_modes)
         config = config.set_failure_strategy(self.mode_failure_strategy)
-        config
+        return config
 
 ## Directory-Level Configuration
-# Configuration from .spec_config.sdn file
 struct DirectoryConfig:
     modes: Option[ModeSet]
     skip_modes: Option[ModeSet]
     mode_failure_strategy: Option[FailureStrategy]
 
+impl DirectoryConfig:
     fn new() -> DirectoryConfig:
         DirectoryConfig {
             modes: None,
@@ -164,32 +133,28 @@ struct DirectoryConfig:
             mode_failure_strategy: None
         }
 
-    # Create ModeConfig from directory settings
     fn to_mode_config(self, parent: ModeConfig) -> ModeConfig:
         let mut config = ModeConfig.with_parent(parent)
 
-        match self.modes:
-            case Some(modes) => config = config.set_modes(modes)
-            case None => pass
+        if self.modes.is_some():
+            config = config.set_modes(self.modes.unwrap())
 
-        match self.skip_modes:
-            case Some(skip) => config = config.set_skip_modes(skip)
-            case None => pass
+        if self.skip_modes.is_some():
+            config = config.set_skip_modes(self.skip_modes.unwrap())
 
-        match self.mode_failure_strategy:
-            case Some(strategy) => config = config.set_failure_strategy(strategy)
-            case None => pass
+        if self.mode_failure_strategy.is_some():
+            config = config.set_failure_strategy(self.mode_failure_strategy.unwrap())
 
-        config
+        return config
 
 ## File-Level Configuration
-# Configuration from file attributes #[modes(...)]
 struct FileConfig:
     modes: Option[ModeSet]
     skip_modes: Option[ModeSet]
     only_modes: Option[ModeSet]
     mode_failure_strategy: Option[FailureStrategy]
 
+impl FileConfig:
     fn new() -> FileConfig:
         FileConfig {
             modes: None,
@@ -198,31 +163,25 @@ struct FileConfig:
             mode_failure_strategy: None
         }
 
-    # Create ModeConfig from file settings
     fn to_mode_config(self, parent: ModeConfig) -> ModeConfig:
         let mut config = ModeConfig.with_parent(parent)
 
-        match self.modes:
-            case Some(modes) => config = config.set_modes(modes)
-            case None => pass
+        if self.modes.is_some():
+            config = config.set_modes(self.modes.unwrap())
 
-        match self.skip_modes:
-            case Some(skip) => config = config.set_skip_modes(skip)
-            case None => pass
+        if self.skip_modes.is_some():
+            config = config.set_skip_modes(self.skip_modes.unwrap())
 
-        match self.only_modes:
-            case Some(only) => config = config.set_only_modes(only)
-            case None => pass
+        if self.only_modes.is_some():
+            config = config.set_only_modes(self.only_modes.unwrap())
 
-        match self.mode_failure_strategy:
-            case Some(strategy) => config = config.set_failure_strategy(strategy)
-            case None => pass
+        if self.mode_failure_strategy.is_some():
+            config = config.set_failure_strategy(self.mode_failure_strategy.unwrap())
 
-        config
+        return config
 
 ## Helper Functions
 
-# Parse failure strategy from string
 export fn string_to_failure_strategy(s: String) -> Option[FailureStrategy]:
     match s:
         case "skip_remaining" => Some(FailureStrategy.SkipRemaining)
@@ -230,14 +189,12 @@ export fn string_to_failure_strategy(s: String) -> Option[FailureStrategy]:
         case "collect_all" => Some(FailureStrategy.CollectAll)
         case _ => None
 
-# Convert failure strategy to string
 export fn failure_strategy_to_string(strategy: FailureStrategy) -> String:
     match strategy:
         case FailureStrategy.SkipRemaining => "skip_remaining"
         case FailureStrategy.FailAll => "fail_all"
         case FailureStrategy.CollectAll => "collect_all"
 
-# Parse mode list from strings
 export fn parse_mode_list(mode_names: List[String]) -> Option[ModeSet]:
     let mut modes = []
     let mut valid = true
@@ -245,9 +202,9 @@ export fn parse_mode_list(mode_names: List[String]) -> Option[ModeSet]:
     for name in mode_names:
         match string_to_mode(name):
             case Some(mode) => modes.push(mode)
-            case None => valid = false  # Invalid mode name
+            case None => valid = false
 
     if valid:
-        Some(ModeSet.new(modes))
+        return Some(ModeSet.new(modes))
     else:
-        None
+        return None
