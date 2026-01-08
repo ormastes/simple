@@ -93,6 +93,7 @@ impl<'a> Parser<'a> {
             doc_comment,
             invariant,
             macro_invocations,
+            mixins: Vec::new(),
         }))
     }
 

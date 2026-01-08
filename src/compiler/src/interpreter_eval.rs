@@ -259,6 +259,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         doc_comment: None,
                         invariant: None,
                         macro_invocations: Vec::new(),
+                        mixins: vec![],
                     },
                 );
             }
@@ -404,6 +405,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         doc_comment: None,
                         invariant: None,
                         macro_invocations: Vec::new(),
+                        mixins: vec![],
                     },
                 );
                 env.insert(

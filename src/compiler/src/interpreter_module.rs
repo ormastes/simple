@@ -478,6 +478,7 @@ pub(super) fn evaluate_module_exports(
                     doc_comment: None,
                     invariant: None,
                     macro_invocations: vec![],
+                    mixins: vec![],
                 });
                 global_classes.insert(s.name.clone(), ClassDef {
                     span: s.span.clone(),
@@ -492,6 +493,7 @@ pub(super) fn evaluate_module_exports(
                     doc_comment: None,
                     invariant: None,
                     macro_invocations: vec![],
+                    mixins: vec![],
                 });
                 exports.insert(s.name.clone(), Value::Constructor {
                     class_name: s.name.clone(),

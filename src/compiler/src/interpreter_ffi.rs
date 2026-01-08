@@ -130,6 +130,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         doc_comment: None,
                         invariant: None,
                         macro_invocations: Vec::new(),
+                        mixins: vec![],
                     },
                 );
             }
