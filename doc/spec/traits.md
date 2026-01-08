@@ -102,14 +102,14 @@ Static dispatch uses monomorphization at compile time.
 
 ### Dynamic Dispatch
 
-For cases where the concrete type isn't known at compile time, use trait objects:
+For cases where the concrete type isn't known at compile time, traits use dynamic dispatch by default (when no `bind` declaration exists):
 
 ```simple
 let x: Printable = somePrintableObject  # Uses vtable
 x.print_self()  # Dynamic dispatch
 ```
 
-This is similar to `dyn Trait` in Rust.
+To use static dispatch instead, add a `bind` declaration in the module (see [Interface Bindings](#interface-bindings-static-polymorphism)).
 
 ---
 
@@ -272,6 +272,8 @@ See [Unit Types](units.md) for the complete type safety policy.
 
 Interface bindings allow you to declare that a specific implementation type should be used for all instances of a trait type within a module. This enables **static dispatch** for trait method calls, eliminating vtable lookup overhead.
 
+**Important:** The `bind` statement **only supports static dispatch**. There is no `static` or `dyn` keyword in the bind syntax. Dynamic dispatch is the **default behavior** when no binding exists.
+
 ### Syntax
 
 ```simple
@@ -334,12 +336,13 @@ fn main():
 
 ### Comparison with Dynamic Dispatch
 
-| Aspect | `bind Interface = Impl` | `dyn Interface` |
+| Aspect | `bind Interface = Impl` | Default (no binding) |
 |--------|------------------------|-----------------|
 | Dispatch | Static (compile-time) | Dynamic (runtime) |
 | Performance | No vtable overhead | Vtable lookup |
 | Flexibility | Fixed at compile time | Can vary at runtime |
 | Inlining | Possible | Not possible |
+| Syntax | `bind Interface = Impl` | No binding declaration |
 
 ### Limitations
 

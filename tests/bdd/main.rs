@@ -24,8 +24,8 @@ pub struct MixinWorld {
 
 #[given(regex = r#"^a file "([^"]+)" with content:$"#)]
 async fn given_file_with_content(world: &mut MixinWorld, filename: String, content: String) {
-    world.source_code = content;
-    
+    world.source_code = content.clone();
+
     // Create temp file
     let temp_dir = std::env::temp_dir();
     let file_path = temp_dir.join(filename);
@@ -54,9 +54,9 @@ async fn given_type_inference_enabled(_world: &mut MixinWorld) {
 
 #[when("I parse the file")]
 async fn when_parse_file(world: &mut MixinWorld) {
-    let parser = Parser::new();
+    let mut parser = Parser::new(&world.source_code);
     world.parse_result = Some(
-        parser.parse(&world.source_code)
+        parser.parse()
             .map_err(|e| format!("{:?}", e))
     );
 }
