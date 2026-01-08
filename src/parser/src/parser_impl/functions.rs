@@ -63,43 +63,59 @@ impl<'a> Parser<'a> {
         // Parse optional where clause: where T: Clone + Default
         let where_clause = self.parse_where_clause()?;
 
-        // Skip newlines before the function body colon
+        // Skip newlines before the function body colon or abstract semicolon
         self.skip_newlines();
 
-        self.expect(&TokenKind::Colon)?;
-
-        // After the colon, expect NEWLINE + INDENT to start the function body
-        self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
-
-        // Parse optional contract block at the start of the function body
-        // (new: in/out/out_err/invariant, legacy: requires/ensures)
-        let contract = if self.check(&TokenKind::In)
-            || self.check(&TokenKind::Invariant)
-            || self.check(&TokenKind::Out)
-            || self.check(&TokenKind::OutErr)
-            || self.check(&TokenKind::Requires)
-            || self.check(&TokenKind::Ensures)
-        {
-            self.parse_contract_block()?
+        // Check for abstract method (semicolon instead of body)
+        let is_abstract = if self.check(&TokenKind::Semicolon) {
+            self.advance();
+            true
         } else {
-            None
+            false
         };
 
-        // Parse the rest of the function body statements
-        let body = self.parse_block_body()?;
-
-        // Check for trailing bounds: block (only valid for @simd decorated functions)
-        let has_simd = decorators.iter().any(|d| {
-            matches!(&d.name, Expr::Identifier(name) if name == "simd")
-        });
-
-        let bounds_block = if has_simd {
-            // Skip newlines after body to check for bounds:
-            self.skip_newlines();
-            self.parse_bounds_block()?
+        let (body, contract, bounds_block) = if is_abstract {
+            // Abstract method has no body
+            let empty_span = Span::new(start_span.start, start_span.end, start_span.line, start_span.column);
+            (Block { span: empty_span, statements: vec![] }, None, None)
         } else {
-            None
+            self.expect(&TokenKind::Colon)?;
+
+            // After the colon, expect NEWLINE + INDENT to start the function body
+            self.expect(&TokenKind::Newline)?;
+            self.expect(&TokenKind::Indent)?;
+
+            // Parse optional contract block at the start of the function body
+            // (new: in/out/out_err/invariant, legacy: requires/ensures)
+            let contract = if self.check(&TokenKind::In)
+                || self.check(&TokenKind::Invariant)
+                || self.check(&TokenKind::Out)
+                || self.check(&TokenKind::OutErr)
+                || self.check(&TokenKind::Requires)
+                || self.check(&TokenKind::Ensures)
+            {
+                self.parse_contract_block()?
+            } else {
+                None
+            };
+
+            // Parse the rest of the function body statements
+            let body = self.parse_block_body()?;
+
+            // Check for trailing bounds: block (only valid for @simd decorated functions)
+            let has_simd = decorators.iter().any(|d| {
+                matches!(&d.name, Expr::Identifier(name) if name == "simd")
+            });
+
+            let bounds_block = if has_simd {
+                // Skip newlines after body to check for bounds:
+                self.skip_newlines();
+                self.parse_bounds_block()?
+            } else {
+                None
+            };
+
+            (body, contract, bounds_block)
         };
 
         Ok(Node::Function(FunctionDef {
@@ -121,7 +137,7 @@ impl<'a> Parser<'a> {
             attributes,
             doc_comment: None,
             contract,
-            is_abstract: false,
+            is_abstract,
             is_sync: false,
             bounds_block,
         }))
