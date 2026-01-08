@@ -1,5 +1,6 @@
 //! Analysis statistics
 
+#[derive(Default)]
 pub struct AnalysisStats {
     /// Total number of symbols.
     pub total_symbols: usize,
@@ -40,4 +41,3 @@ impl AnalysisStats {
         }
     }
 }
-

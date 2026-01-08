@@ -9,11 +9,151 @@
 
 | Feature | Priority | Difficulty | Status | Spec File |
 |---------|----------|------------|--------|-----------|
+| Mixins | High | 4 | 🔄 75% Complete | `research/mixins_strongly_typed.md` |
 | Implements Traits | High | 3 | 🔄 In Progress | `spec/traits.md` |
 | Impl Blocks | High | 2 | ✅ Complete (parser) | `spec/traits.md` |
 | Union Types | High | 3 | 📋 Design Required | `spec/types.md` |
 | Result/Option | High | 2 | 📋 Design Required | `spec/types.md` |
 | Bitfields | Medium | 3 | 📋 Design Required | (new) |
+
+---
+
+## 0. Mixins (Strongly-Typed Composition)
+
+**Current Status:** 75% Complete (Parser, Type System, HIR complete; Testing in progress)
+
+### Implementation Tasks
+
+**Phase 1: Grammar and Parser** ✅ Complete
+- [x] Mixin keyword and `MixinDef` AST node
+- [x] Generic parameters (`mixin Name<T>`)
+- [x] Trait bounds (`where T: Trait`)
+- [x] Field definitions (`field name: Type`)
+- [x] Method definitions
+- [x] Required method declarations
+- [x] Mixin application syntax (`use MixinName`)
+- [x] `MixinRef` AST node with type arguments
+- [x] Parser tests
+
+**Phase 2: Type System** ✅ Complete
+- [x] Mixin type representation in `simple-type`
+- [x] Type parameter substitution
+- [x] Trait bound checking
+- [x] Required method verification
+- [x] Field conflict detection
+- [x] Type inference integration (Algorithm W)
+- [x] Unit tests
+
+**Phase 3: HIR Lowering** ✅ Complete
+- [x] `HirType::Mixin` variant
+- [x] `HirMixinMethod` structure
+- [x] `register_mixin()` implementation
+- [x] Field expansion in `register_class()`
+- [x] Method lowering in second pass
+- [x] Type registry updates
+- [x] Pattern match updates in codegen
+- [x] Lean code generation
+
+**Phase 4: Testing** 🚧 In Progress
+- [ ] Parser unit tests
+- [ ] Type system integration tests
+- [ ] HIR lowering tests
+- [ ] End-to-end tests (.simple files)
+- [ ] BDD/Gherkin feature tests
+- [ ] Error handling tests
+- [ ] Performance benchmarks
+
+**Phase 5: Optimization** 📋 Planned
+- [ ] Method inlining
+- [ ] Dead code elimination
+- [ ] Memory layout optimization
+- [ ] Better error messages
+- [ ] IDE integration (LSP)
+
+### Syntax Examples
+
+```simple
+# Basic mixin
+mixin Timestamped {
+    field created_at: i64
+    field updated_at: i64
+    
+    fn get_age() -> i64 {
+        self.updated_at - self.created_at
+    }
+}
+
+# Generic mixin with trait bounds
+mixin Container<T> where T: Clone {
+    field items: [T]
+    
+    fn add(item: T) {
+        self.items.push(item.clone())
+    }
+    
+    fn size() -> i32 {
+        self.items.len()
+    }
+}
+
+# Mixin with required methods
+mixin Serializable {
+    fn to_json() -> str  # Required: class must implement
+    
+    fn serialize() -> str {  # Provided: implemented by mixin
+        "{ \"data\": " + self.to_json() + " }"
+    }
+}
+
+# Mixin application
+class Document {
+    field title: str
+    field content: str
+    
+    use Timestamped
+    use Serializable
+    
+    # Implement required method
+    fn to_json() -> str {
+        "{\"title\": \"" + self.title + "\", \"content\": \"" + self.content + "\"}"
+    }
+}
+
+# Multiple mixins
+class User {
+    field name: str
+    use Identifiable
+    use Timestamped
+    use Auditable
+}
+```
+
+### Design Decisions
+
+1. **Flattening at HIR Level:** Mixins are expanded into classes during HIR lowering, so MIR sees only regular fields and methods
+2. **Static Dispatch:** All mixin methods resolved at compile time (no vtable overhead)
+3. **Nominal Typing:** Classes using the same mixin are NOT subtypes of each other
+4. **LL(1) Grammar:** Each production starts with unique keyword (`mixin`, `use`, `field`, `fn`)
+5. **Type Inference:** Seamless integration with Hindley-Milner type inference
+
+### Key Properties
+
+- **Type Safety:** All errors caught at compile time
+- **Zero-Cost:** Flattening eliminates runtime overhead
+- **Composable:** Multiple mixins per class
+- **Generic:** Full parametric polymorphism support
+- **Verified:** Formal proofs via Lean
+
+### Related Files
+
+- `src/parser/src/statements/mixins.rs` - Parsing
+- `src/parser/src/ast/nodes/definitions.rs` - AST nodes
+- `src/type/src/mixin.rs` - Type representation
+- `src/compiler/src/hir/types/type_system.rs` - HIR types
+- `src/compiler/src/hir/lower/module_lowering.rs` - Lowering
+- `verification/lean/simple/TypeSystem/Mixins.lean` - Formal verification
+- `doc/research/mixins_strongly_typed.md` - Complete design document
+- `doc/implementation_summary_phase{1,2,3,4}_mixin_{parser,types,hir,testing}.md`
 
 ---
 
