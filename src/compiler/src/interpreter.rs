@@ -634,14 +634,19 @@ macro_rules! bail_unknown_method {
     }};
 }
 
-// Control flow functions (if, while, loop, for, match, pattern_matches)
+// Pattern matching functions for match expressions
+#[path = "interpreter_patterns.rs"]
+mod interpreter_patterns;
+pub(crate) use interpreter_patterns::{
+    check_enum_exhaustiveness, collect_covered_variants, is_catch_all_pattern, pattern_matches,
+};
+
+// Control flow functions (if, while, loop, for, match)
 #[path = "interpreter_control.rs"]
 mod interpreter_control;
 use interpreter_control::{
-    check_enum_exhaustiveness, collect_covered_variants, exec_context, exec_for, exec_if,
-    exec_loop, exec_match, exec_while, exec_with, is_catch_all_pattern,
+    exec_context, exec_for, exec_if, exec_loop, exec_match, exec_while, exec_with,
 };
-pub(crate) use interpreter_control::pattern_matches;
 
 /// Helper to execute a method function with self context (for auto-forwarding properties)
 fn exec_method_function(

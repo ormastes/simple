@@ -116,14 +116,16 @@ main = r1 + r2 + r3
 
 #[test]
 fn interpreter_await_non_future() {
-    // Await on a non-future value should just return it
+    // Await on a non-future value now produces a semantic error
     let code = r#"
 let x = 42
 let value = await x
 main = value
 "#;
-    let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 42);
+    let result = run_code(code, &[], "");
+    // With stricter type checking, await requires a Future or Actor handle
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("await requires a Future or Actor handle"));
 }
 
 #[test]
@@ -187,12 +189,12 @@ main = compute()
 
 #[test]
 fn interpreter_async_fn_basic() {
-    // async fn can use blocking operations
+    // async fn can use blocking operations - auto-awaited at top level
     let code = r#"
 async fn fetch():
     return 42
 
-main = await fetch()
+main = fetch()
 "#;
     let result = run_code(code, &[], "").unwrap();
     assert_eq!(result.exit_code, 42);

@@ -28,3 +28,7 @@ lean_lib Mixins
 lean_lib MixinsTest
 
 lean_lib MixinVerificationGenerated
+
+lean_lib StaticPolymorphism
+
+lean_lib StaticPolymorphismTest
