@@ -124,6 +124,17 @@ impl TypeId {
     }
 }
 
+/// Mixin method signature
+#[derive(Debug, Clone, PartialEq)]
+pub struct HirMixinMethod {
+    /// Method name
+    pub name: String,
+    /// Parameter types
+    pub params: Vec<TypeId>,
+    /// Return type
+    pub ret: TypeId,
+}
+
 /// Resolved type information
 #[derive(Debug, Clone, PartialEq)]
 pub enum HirType {
@@ -188,6 +199,22 @@ pub enum HirType {
     Union {
         /// Types that can be held in this union
         variants: Vec<TypeId>,
+    },
+    /// Mixin type: reusable composition unit
+    /// Mixins provide fields and methods that can be composed into classes
+    Mixin {
+        /// Mixin name
+        name: String,
+        /// Type parameters (e.g., <T>)
+        type_params: Vec<String>,
+        /// Fields provided by the mixin
+        fields: Vec<(String, TypeId)>,
+        /// Method signatures provided by the mixin
+        methods: Vec<HirMixinMethod>,
+        /// Required trait bounds (e.g., Self: Trait)
+        trait_bounds: Vec<String>,
+        /// Required methods that the target must implement
+        required_methods: Vec<String>,
     },
     Unknown,
 }

@@ -196,6 +196,11 @@ impl TypeRegistry {
                 variants.iter().all(|v| self.is_snapshot_safe(*v))
             }
 
+            // Mixins are snapshot-safe if all fields are snapshot-safe
+            Some(HirType::Mixin { fields, .. }) => {
+                fields.iter().all(|(_, ty)| self.is_snapshot_safe(*ty))
+            }
+
             // CTR-061: Structs are snapshot-safe if all fields are snapshot-safe
             // CTR-062: Structs with #[snapshot] attribute have custom snapshot semantics
             Some(HirType::Struct { fields, has_snapshot, .. }) => {

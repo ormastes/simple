@@ -48,6 +48,9 @@ impl Lowerer {
                         },
                     );
                 }
+                Node::Mixin(m) => {
+                    self.register_mixin(m)?;
+                }
                 Node::TypeAlias(ta) => {
                     self.register_type_alias(ta)?;
                 }
@@ -59,8 +62,7 @@ impl Lowerer {
                 | Node::Unit(_)
                 | Node::UnitFamily(_)
                 | Node::Bitfield(_)
-                | Node::InterfaceBinding(_)
-                | Node::Mixin(_) => {}
+                | Node::InterfaceBinding(_) => {}
                 Node::Let(_)
                 | Node::Const(_)
                 | Node::Static(_)
@@ -103,6 +105,27 @@ impl Lowerer {
                     for method in &c.methods {
                         let hir_func = self.lower_function(method, Some(&c.name))?;
                         self.module.functions.push(hir_func);
+                    }
+                    
+                    // Lower mixin methods applied to this class
+                    for mixin_ref in &c.mixins {
+                        if let Some(mixin_decl) = ast_module.items.iter().find_map(|item| {
+                            if let Node::Mixin(m) = item {
+                                if m.name == mixin_ref.name {
+                                    Some(m)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }) {
+                            // Lower mixin methods for this class
+                            for method in &mixin_decl.methods {
+                                let hir_func = self.lower_function(method, Some(&c.name))?;
+                                self.module.functions.push(hir_func);
+                            }
+                        }
                     }
                 }
                 Node::Struct(s) => {
@@ -275,7 +298,8 @@ impl Lowerer {
     /// inherits all invariants from the parent. This ensures Liskov Substitution
     /// Principle - a child class must maintain all parent invariants.
     fn register_class(&mut self, c: &ast::ClassDef) -> LowerResult<TypeId> {
-        let fields: Vec<_> = c
+        // Collect class's own fields
+        let mut fields: Vec<_> = c
             .fields
             .iter()
             .map(|f| {
@@ -285,6 +309,19 @@ impl Lowerer {
                 )
             })
             .collect();
+
+        // Apply mixins: add mixin fields to the class
+        for mixin_ref in &c.mixins {
+            if let Some(mixin_type_id) = self.module.types.lookup(&mixin_ref.name) {
+                if let Some(HirType::Mixin { fields: mixin_fields, .. }) = self.module.types.get(mixin_type_id) {
+                    // Add mixin fields to class fields
+                    for (field_name, field_type) in mixin_fields.clone() {
+                        // TODO: Check for field name conflicts
+                        fields.push((field_name, field_type));
+                    }
+                }
+            }
+        }
 
         let type_id = self.module.types.register_named(
             c.name.clone(),
@@ -362,6 +399,56 @@ impl Lowerer {
                 .type_invariants
                 .insert(s.name.clone(), hir_invariant);
         }
+
+        Ok(type_id)
+    }
+
+    fn register_mixin(&mut self, m: &ast::MixinDef) -> LowerResult<TypeId> {
+        // Lower fields
+        let mut fields = Vec::new();
+        for field in &m.fields {
+            let ty = self.resolve_type(&field.ty)?;
+            fields.push((field.name.clone(), ty));
+        }
+
+        // Lower method signatures
+        let mut methods = Vec::new();
+        for method in &m.methods {
+            let params: Vec<TypeId> = method
+                .params
+                .iter()
+                .map(|p| self.resolve_type(&p.ty).unwrap_or(TypeId::VOID))
+                .collect();
+            let ret = self.resolve_type_opt(&method.return_type)?;
+            
+            methods.push(HirMixinMethod {
+                name: method.name.clone(),
+                params,
+                ret,
+            });
+        }
+
+        // Extract type parameters (use generic_params from MixinDef)
+        let type_params = m.generic_params.clone();
+
+        // Extract trait bounds (use required_traits from MixinDef)
+        let trait_bounds = m.required_traits.clone();
+
+        // Extract required method names
+        let required_methods: Vec<String> = m.required_methods.iter()
+            .map(|rm| rm.name.clone())
+            .collect();
+
+        let hir_type = HirType::Mixin {
+            name: m.name.clone(),
+            type_params,
+            fields,
+            methods,
+            trait_bounds,
+            required_methods,
+        };
+
+        let type_id = self.module.types.register_named(m.name.clone(), hir_type);
 
         Ok(type_id)
     }

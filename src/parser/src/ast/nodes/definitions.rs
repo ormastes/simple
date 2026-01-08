@@ -307,6 +307,8 @@ pub struct ClassDef {
     pub invariant: Option<InvariantBlock>,
     /// Macro invocations in class body (expanded at runtime to add fields/methods)
     pub macro_invocations: Vec<MacroInvocation>,
+    /// Mixin applications: use MixinName
+    pub mixins: Vec<MixinRef>,
 }
 
 impl ClassDef {
