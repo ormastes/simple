@@ -242,7 +242,8 @@ impl TypeChecker {
                 Node::AopAdvice(_)
                 | Node::DiBinding(_)
                 | Node::ArchitectureRule(_)
-                | Node::MockDecl(_) => {
+                | Node::MockDecl(_)
+                | Node::InterfaceBinding(_) => {
                     // AOP nodes are declarative and don't introduce type bindings
                 }
             }

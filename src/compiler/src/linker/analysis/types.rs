@@ -27,3 +27,8 @@ pub enum SymbolVisibility {
 }
 
 /// Information about a symbol for analysis.
+#[derive(Debug, Clone)]
+pub struct SymbolInfo {
+    pub name: String,
+    pub visibility: SymbolVisibility,
+}

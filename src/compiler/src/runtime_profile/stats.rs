@@ -94,3 +94,7 @@ impl RuntimeMetrics {
 
 /// Layout feedback from runtime profiling
 #[derive(Debug, Clone, Default)]
+pub struct LayoutFeedback {
+    pub hot_fields: Vec<String>,
+    pub cold_fields: Vec<String>,
+}

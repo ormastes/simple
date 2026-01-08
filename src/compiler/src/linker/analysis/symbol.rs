@@ -62,3 +62,9 @@ impl AnalyzedSymbol {
 
 /// Statistics from symbol analysis.
 #[derive(Debug, Clone, Default)]
+pub struct SymbolAnalysisStats {
+    pub total_symbols: usize,
+    pub exported_symbols: usize,
+    pub imported_symbols: usize,
+    pub local_symbols: usize,
+}
