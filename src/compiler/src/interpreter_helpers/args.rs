@@ -56,7 +56,7 @@ pub(crate) fn eval_arg_usize(
 }
 
 /// Apply a lambda to each item in an array, returning Vec of results.
-fn apply_lambda_to_vec(
+pub(crate) fn apply_lambda_to_vec(
     arr: &[Value],
     lambda_val: &Value,
     functions: &mut HashMap<String, FunctionDef>,

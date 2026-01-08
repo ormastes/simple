@@ -74,7 +74,7 @@ fn call_len_method<M: Module>(
     }
 }
 
-fn compile_builtin_method<M: Module>(
+pub(super) fn compile_builtin_method<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,

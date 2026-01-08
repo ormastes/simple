@@ -9,7 +9,7 @@ use crate::mir::{BlockId, VReg};
 use super::{InstrContext, InstrResult};
 
 /// Allocate a 16-byte tagged object with discriminant and payload.
-fn alloc_tagged_object<M: Module>(
+pub(super) fn alloc_tagged_object<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -34,7 +34,7 @@ fn alloc_tagged_object<M: Module>(
     ctx.vreg_values.insert(dest, ptr);
 }
 
-fn compile_try_unwrap<M: Module>(
+pub(super) fn compile_try_unwrap<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -58,7 +58,7 @@ fn compile_try_unwrap<M: Module>(
     ctx.vreg_values.insert(error_dest, val);
 }
 
-fn compile_option_some<M: Module>(
+pub(super) fn compile_option_some<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -67,7 +67,7 @@ fn compile_option_some<M: Module>(
     alloc_tagged_object(ctx, builder, dest, 1, Some(value));
 }
 
-fn compile_option_none<M: Module>(
+pub(super) fn compile_option_none<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -75,7 +75,7 @@ fn compile_option_none<M: Module>(
     alloc_tagged_object(ctx, builder, dest, 0, None);
 }
 
-fn compile_result_ok<M: Module>(
+pub(super) fn compile_result_ok<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -84,7 +84,7 @@ fn compile_result_ok<M: Module>(
     alloc_tagged_object(ctx, builder, dest, 1, Some(value));
 }
 
-fn compile_result_err<M: Module>(
+pub(super) fn compile_result_err<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

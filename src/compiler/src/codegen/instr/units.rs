@@ -8,11 +8,12 @@ use crate::hir::TypeId;
 use crate::mir::{UnitOverflowBehavior, VReg};
 
 use super::{InstrContext, InstrResult};
+use super::helpers::create_string_constant;
 use super::super::types_util::type_id_to_cranelift;
 
 /// Compile a unit bound check instruction.
 /// This checks if a value is within the unit type's allowed range.
-fn compile_unit_bound_check<M: Module>(
+pub(super) fn compile_unit_bound_check<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     value: VReg,
@@ -87,7 +88,7 @@ fn compile_unit_bound_check<M: Module>(
 
 /// Compile a UnitWiden instruction - widen a unit value to a larger representation.
 /// This is a lossless conversion (e.g., u8 → u16, i8 → i32).
-fn compile_unit_widen<M: Module>(
+pub(super) fn compile_unit_widen<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -123,7 +124,7 @@ fn compile_unit_widen<M: Module>(
 
 /// Compile a UnitNarrow instruction - narrow a unit value to a smaller representation.
 /// This may overflow and requires bounds checking.
-fn compile_unit_narrow<M: Module>(
+pub(super) fn compile_unit_narrow<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -190,7 +191,7 @@ fn compile_unit_narrow<M: Module>(
 }
 
 /// Compile a UnitSaturate instruction - clamp a value to unit bounds.
-fn compile_unit_saturate<M: Module>(
+pub(super) fn compile_unit_saturate<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,

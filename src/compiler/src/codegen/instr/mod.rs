@@ -38,6 +38,31 @@ pub mod parallel;
 // Re-export key functions for backward compatibility
 pub use body::compile_function_body;
 
+// Import compile_* functions from submodules for use in compile_instruction
+use core::{compile_binop, compile_builtin_io_call, compile_interp_call};
+use collections::{
+    compile_array_lit, compile_const_string, compile_dict_lit, compile_fstring_format,
+    compile_index_get, compile_index_set, compile_slice_op, compile_tuple_lit,
+    compile_vec_blend, compile_vec_extract, compile_vec_lit, compile_vec_math,
+    compile_vec_reduction, compile_vec_select, compile_vec_shuffle, compile_vec_with,
+    compile_gpu_atomic, compile_gpu_atomic_cmpxchg,
+};
+use closures_structs::{
+    compile_closure_create, compile_indirect_call, compile_method_call_static,
+    compile_method_call_virtual, compile_struct_init,
+};
+use pattern::{compile_enum_unit, compile_enum_with, compile_pattern_bind, compile_pattern_test};
+use async_ops::{compile_actor_spawn, compile_future_create, compile_generator_create, compile_yield};
+use result::{
+    compile_option_none, compile_option_some, compile_result_err, compile_result_ok,
+    compile_try_unwrap,
+};
+use methods::compile_builtin_method;
+use contracts::compile_contract_check;
+use units::{compile_unit_bound_check, compile_unit_narrow, compile_unit_saturate, compile_unit_widen};
+use pointers::{compile_pointer_deref, compile_pointer_new, compile_pointer_ref};
+use parallel::{compile_par_filter, compile_par_for_each, compile_par_map, compile_par_reduce};
+
 /// Context for instruction compilation, holding all state needed to compile MIR instructions.
 pub struct InstrContext<'a, M: Module> {
     pub module: &'a mut M,

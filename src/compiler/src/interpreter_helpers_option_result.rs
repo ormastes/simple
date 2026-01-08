@@ -11,8 +11,8 @@ use simple_common::actor::Message;
 use simple_parser::ast::{ClassDef, EnumDef, FunctionDef};
 use std::collections::HashMap;
 
-// Import parent module items
-use super::{eval_arg, evaluate_expr, exec_block, Control, Enums, ImplMethods};
+// Import from interpreter module (this file is included via #[path] from collections.rs)
+use super::super::super::{eval_arg, evaluate_expr, exec_block, Control, Enums, ImplMethods};
 
 /// Convert a Message to a Value
 pub(crate) fn message_to_value(msg: Message) -> Value {

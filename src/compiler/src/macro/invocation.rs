@@ -1,8 +1,8 @@
 use super::expansion::expand_user_macro;
 use crate::error::CompileError;
-use crate::interpreter::{evaluate_expr, ClassDef, Enums, FunctionDef, ImplMethods};
+use crate::interpreter::{evaluate_expr, Enums, ImplMethods};
 use crate::value::{Env, Value};
-use simple_parser::ast::{BinOp, Expr, MacroArg};
+use simple_parser::ast::{BinOp, ClassDef, Expr, FunctionDef, MacroArg};
 use std::collections::HashMap;
 
 /// Convert an expression to its source code string representation

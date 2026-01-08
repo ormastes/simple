@@ -1,13 +1,15 @@
 // Complete MIR function body compilation.
 
 use std::collections::HashMap;
-use cranelift_codegen::ir::{types, InstBuilder};
+use cranelift_codegen::ir::{types, condcodes::IntCC, InstBuilder};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::Module;
 
-use crate::mir::{MirFunction, MirInst};
+use crate::hir::TypeId;
+use crate::mir::{BlockId, MirFunction, MirInst, Terminator, VReg};
 
 use super::{InstrContext, InstrResult, compile_instruction};
+use super::async_ops::compile_yield;
 use super::super::types_util::type_to_cranelift;
 
 /// Compile a complete MIR function body.

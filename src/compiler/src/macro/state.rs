@@ -29,7 +29,7 @@ thread_local! {
 }
 
 /// Enable or disable macro expansion tracing
-pub(crate) fn set_macro_trace(enabled: bool) {
+pub fn set_macro_trace(enabled: bool) {
     MACRO_TRACE_ENABLED.with(|cell| {
         *cell.borrow_mut() = enabled;
     });

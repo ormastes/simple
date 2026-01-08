@@ -3,13 +3,14 @@
 use core.*
 use mcp.core.protocol.*
 use mcp.multi_lang.*
+use mcp.multi_lang.base_provider.*
 
 pub struct PythonProvider:
     parser: TreeSitterParser
 
 impl PythonProvider:
     pub fn new() -> PythonProvider:
-        return PythonProvider { parser: TreeSitterParser::new("python") }
+        return PythonProvider { parser: create_parser("python") }
 
 impl LanguageProvider for PythonProvider:
     fn name(self) -> String:
@@ -25,70 +26,30 @@ impl LanguageProvider for PythonProvider:
         for node in tree.root_node().children():
             match node.kind():
                 case "function_definition":
-                    output.add_item(self.format_function(&node, source, opts))
+                    let name = self.get_name(&node, source)
+                    let params = self.get_params(&node, source)
+                    let marker = get_marker(opts, ItemKind::Function)
+                    output.add_item(make_function_item(&name, &params, &marker, "public"))
                 case "class_definition":
-                    output.add_item(self.format_class(&node, source, opts))
+                    let name = self.get_name(&node, source)
+                    let marker = get_marker(opts, ItemKind::Struct)
+                    output.add_item(make_class_item(&name, &marker, "public"))
                 case "import_statement" | "import_from_statement":
                     if opts.show_imports:
-                        output.add_item(self.format_import(&node, source))
+                        let path = self.get_import_path(&node, source)
+                        output.add_item(make_import_item(&path))
                 case _:
                     pass
 
         return Ok(output)
 
     fn get_symbols(self, source: &str) -> Result[Array[Symbol], McpError]:
-        # TODO: Extract Python symbols
-        return Ok([])
+        return default_get_symbols(source)
 
     fn get_diagnostics(self, source: &str) -> Result[Array[Diagnostic], McpError]:
-        return Ok([])
+        return default_get_diagnostics(source)
 
 impl PythonProvider:
-    fn format_function(self, node: &TreeNode, source: &str, opts: &FoldOptions) -> McpItem:
-        let name = self.get_name(node, source)
-        let params = self.get_params(node, source)
-        let marker = if opts.use_markers { "F> " } else { "" }
-
-        return McpItem {
-            kind: ItemKind::Function,
-            line: format!("{}def {}({})", marker, name, params),
-            children: [],
-            metadata: McpMetadata {
-                visibility: "public".to_string(),
-                name: name,
-                location: SourceLocation { line: 0, column: 0, offset: 0 }
-            }
-        }
-
-    fn format_class(self, node: &TreeNode, source: &str, opts: &FoldOptions) -> McpItem:
-        let name = self.get_name(node, source)
-        let marker = if opts.use_markers { "C> " } else { "" }
-
-        return McpItem {
-            kind: ItemKind::Struct,
-            line: format!("{}class {}", marker, name),
-            children: [],
-            metadata: McpMetadata {
-                visibility: "public".to_string(),
-                name: name,
-                location: SourceLocation { line: 0, column: 0, offset: 0 }
-            }
-        }
-
-    fn format_import(self, node: &TreeNode, source: &str) -> McpItem:
-        let path = self.get_import_path(node, source)
-
-        return McpItem {
-            kind: ItemKind::Import,
-            line: format!("import {}", path),
-            children: [],
-            metadata: McpMetadata {
-                visibility: "public".to_string(),
-                name: path.clone(),
-                location: SourceLocation { line: 0, column: 0, offset: 0 }
-            }
-        }
-
     fn get_name(self, node: &TreeNode, source: &str) -> String:
         return "name".to_string()
 

@@ -8,10 +8,12 @@ use std::collections::HashMap;
 use std::sync::{mpsc, Arc, Mutex};
 
 use super::super::{
-    evaluate_expr, exec_function,
+    evaluate_expr, exec_function, exec_block,
     Control, Enums, ImplMethods,
     ACTOR_SPAWNER, ACTOR_INBOX, ACTOR_OUTBOX,
+    EXTERN_FUNCTIONS,
 };
+use super::super::interpreter_eval::PRELUDE_EXTERN_FUNCTIONS;
 
 pub(crate) fn create_range_object(start: i64, end: i64, bound: RangeBound) -> Value {
     let mut fields = HashMap::new();
@@ -43,10 +45,10 @@ pub(crate) fn spawn_actor_with_expr(
 
     let handle = ACTOR_SPAWNER.with(|s| s.spawn(move |inbox, outbox| {
         // Initialize thread-local EXTERN_FUNCTIONS with prelude functions
-        super::super::EXTERN_FUNCTIONS.with(|cell| {
-            let mut externs: std::cell::RefMut<std::collections::HashSet<String>> = cell.borrow_mut();
+        EXTERN_FUNCTIONS.with(|cell| {
+            let mut externs = cell.borrow_mut();
             externs.clear();
-            for &name in super::interpreter_eval::PRELUDE_EXTERN_FUNCTIONS {
+            for &name in PRELUDE_EXTERN_FUNCTIONS {
                 externs.insert(name.to_string());
             }
         });
@@ -62,10 +64,10 @@ pub(crate) fn spawn_actor_with_expr(
                 match value {
                     Value::Function { def, captured_env, .. } => {
                         let mut local_env = captured_env.clone();
-                        let _ = super::exec_block(&def.body, &mut local_env, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
+                        let _ = exec_block(&def.body, &mut local_env, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
                     }
                     Value::Lambda { body, env: lambda_env, .. } => {
-                        let _ = super::evaluate_expr(&body, &lambda_env, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
+                        let _ = evaluate_expr(&body, &lambda_env, &mut funcs, &mut classes_clone, &enums_clone, &impls_clone);
                     }
                     _ => {
                         // Not a callable - just ignore

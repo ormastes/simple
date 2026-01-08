@@ -12,7 +12,7 @@ use super::{InstrContext, InstrResult};
 use super::helpers::{create_string_constant, indirect_call_with_result};
 use super::super::types_util::type_id_to_cranelift;
 
-fn compile_closure_create<M: Module>(
+pub(super) fn compile_closure_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -49,7 +49,7 @@ fn compile_closure_create<M: Module>(
     ctx.vreg_values.insert(dest, closure_ptr);
 }
 
-fn compile_indirect_call<M: Module>(
+pub(super) fn compile_indirect_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
@@ -85,7 +85,7 @@ fn compile_indirect_call<M: Module>(
     indirect_call_with_result(ctx, builder, sig_ref, fn_ptr, &call_args, dest);
 }
 
-fn compile_struct_init<M: Module>(
+pub(super) fn compile_struct_init<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: VReg,
@@ -112,7 +112,7 @@ fn compile_struct_init<M: Module>(
     ctx.vreg_values.insert(dest, ptr);
 }
 
-fn compile_method_call_static<M: Module>(
+pub(super) fn compile_method_call_static<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,
@@ -151,7 +151,7 @@ fn compile_method_call_static<M: Module>(
     Ok(())
 }
 
-fn compile_method_call_virtual<M: Module>(
+pub(super) fn compile_method_call_virtual<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,

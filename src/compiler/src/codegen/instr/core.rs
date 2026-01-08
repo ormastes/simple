@@ -10,7 +10,7 @@ use crate::mir::VReg;
 use super::helpers::create_string_constant;
 use super::{InstrContext, InstrResult};
 
-fn compile_binop<M: Module>(
+pub(super) fn compile_binop<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     op: BinOp,
@@ -131,7 +131,7 @@ fn compile_binop<M: Module>(
 
 /// Compile built-in I/O function calls (print, println, eprint, eprintln, etc.)
 /// Returns Some(result_value) if the function was handled, None if not a built-in I/O function.
-fn compile_builtin_io_call<M: Module>(
+pub(super) fn compile_builtin_io_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     func_name: &str,
@@ -239,7 +239,7 @@ fn compile_builtin_io_call<M: Module>(
     }
 }
 
-fn compile_interp_call<M: Module>(
+pub(super) fn compile_interp_call<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     dest: &Option<VReg>,

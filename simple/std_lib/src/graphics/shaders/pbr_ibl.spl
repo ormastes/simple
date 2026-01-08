@@ -9,6 +9,14 @@ use core.*
 use graphics.math.*
 use graphics.scene.*
 
+# Import shared shader utilities
+use graphics.shaders.shader_constants.{PI}
+use graphics.shaders.shader_math.*
+use graphics.shaders.pbr_common.*
+
+# Import base PBR types
+use graphics.shaders.pbr.{PBRVaryings}
+
 # =============================================================================
 # Enhanced PBR Uniforms with IBL
 # =============================================================================
@@ -85,11 +93,10 @@ pub fn pbr_ibl_fragment_shader(
     let V = varyings.view_dir.normalize()
 
     # Calculate reflectance at normal incidence
-    let F0 = Vec3::new(0.04, 0.04, 0.04)
-    let F0 = lerp_vec3(F0, albedo, metallic)
+    let F0 = calculate_f0(albedo, metallic)
 
     # =============================================================================
-    # Direct Lighting (same as basic PBR)
+    # Direct Lighting (uses shared functions from pbr_common)
     # =============================================================================
 
     let mut Lo = Vec3::zero()
@@ -141,10 +148,10 @@ pub fn pbr_ibl_fragment_shader(
     let mut color = ambient + Lo + emissive
 
     # HDR tone mapping (Reinhard)
-    color = color / (color + Vec3::one())
+    color = tone_map_reinhard(color)
 
     # Gamma correction
-    color = pow_vec3(color, Vec3::new(1.0 / 2.2, 1.0 / 2.2, 1.0 / 2.2))
+    color = linear_to_srgb(color)
 
     return Vec4::from_vec3(color, 1.0)
 
@@ -167,7 +174,7 @@ fn calculate_ibl_contribution(
     let R = reflect(-V, N)
 
     # Fresnel for IBL (with roughness)
-    let F = fresnel_schlick_roughness(max(N.dot(V), 0.0), F0, roughness)
+    let F = fresnel_schlick_roughness(max(dot(N, V), 0.0), F0, roughness)
 
     # Energy conservation
     let kS = F
@@ -194,7 +201,7 @@ fn calculate_ibl_contribution(
     ).rgb()
 
     # Sample BRDF integration LUT
-    let NdotV = max(N.dot(V), 0.0)
+    let NdotV = max(dot(N, V), 0.0)
     let brdf = sample_texture_2d(
         brdf_lut,
         Vec2::new(NdotV, roughness)
@@ -210,159 +217,6 @@ fn calculate_ibl_contribution(
     let ibl = (kD * diffuse * diffuse_intensity + specular * specular_intensity) * ao
 
     return ibl
-
-# =============================================================================
-# Direct Lighting Functions (from pbr.spl)
-# =============================================================================
-
-fn calculate_directional_light(
-    N: Vec3,
-    V: Vec3,
-    albedo: Vec3,
-    metallic: f32,
-    roughness: f32,
-    F0: Vec3,
-    light: PBRLightingUniforms
-) -> Vec3:
-    if light.dir_light_intensity <= 0.0:
-        return Vec3::zero()
-
-    let L = -light.dir_light_direction.normalize()
-    let H = (V + L).normalize()
-
-    let radiance = light.dir_light_color * light.dir_light_intensity
-
-    let NDF = distribution_ggx(N, H, roughness)
-    let G = geometry_smith(N, V, L, roughness)
-    let F = fresnel_schlick(max(H.dot(V), 0.0), F0)
-
-    let numerator = NDF * G * F
-    let denominator = 4.0 * max(N.dot(V), 0.0) * max(N.dot(L), 0.0) + 0.0001
-    let specular = numerator / denominator
-
-    let kS = F
-    let mut kD = Vec3::one() - kS
-    kD = kD * (1.0 - metallic)
-
-    let NdotL = max(N.dot(L), 0.0)
-    return (kD * albedo / PI + specular) * radiance * NdotL
-
-fn calculate_point_light(
-    position_world: Vec3,
-    N: Vec3,
-    V: Vec3,
-    albedo: Vec3,
-    metallic: f32,
-    roughness: f32,
-    F0: Vec3,
-    light_pos: Vec3,
-    light_color: Vec3,
-    light_intensity: f32,
-    light_range: f32
-) -> Vec3:
-    let L = (light_pos - position_world).normalize()
-    let H = (V + L).normalize()
-
-    let distance = (light_pos - position_world).length()
-    let attenuation = 1.0 / (distance * distance)
-    let attenuation = attenuation * clamp((light_range - distance) / light_range, 0.0, 1.0)
-
-    let radiance = light_color * light_intensity * attenuation
-
-    let NDF = distribution_ggx(N, H, roughness)
-    let G = geometry_smith(N, V, L, roughness)
-    let F = fresnel_schlick(max(H.dot(V), 0.0), F0)
-
-    let numerator = NDF * G * F
-    let denominator = 4.0 * max(N.dot(V), 0.0) * max(N.dot(L), 0.0) + 0.0001
-    let specular = numerator / denominator
-
-    let kS = F
-    let mut kD = Vec3::one() - kS
-    kD = kD * (1.0 - metallic)
-
-    let NdotL = max(N.dot(L), 0.0)
-    return (kD * albedo / PI + specular) * radiance * NdotL
-
-# =============================================================================
-# BRDF Functions
-# =============================================================================
-
-const PI: f32 = 3.14159265359
-
-fn distribution_ggx(N: Vec3, H: Vec3, roughness: f32) -> f32:
-    let a = roughness * roughness
-    let a2 = a * a
-    let NdotH = max(N.dot(H), 0.0)
-    let NdotH2 = NdotH * NdotH
-
-    let nom = a2
-    let denom = (NdotH2 * (a2 - 1.0) + 1.0)
-    let denom = PI * denom * denom
-
-    return nom / denom
-
-fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32:
-    let r = roughness + 1.0
-    let k = (r * r) / 8.0
-
-    let nom = NdotV
-    let denom = NdotV * (1.0 - k) + k
-
-    return nom / denom
-
-fn geometry_smith(N: Vec3, V: Vec3, L: Vec3, roughness: f32) -> f32:
-    let NdotV = max(N.dot(V), 0.0)
-    let NdotL = max(N.dot(L), 0.0)
-    let ggx2 = geometry_schlick_ggx(NdotV, roughness)
-    let ggx1 = geometry_schlick_ggx(NdotL, roughness)
-
-    return ggx1 * ggx2
-
-fn fresnel_schlick(cos_theta: f32, F0: Vec3) -> Vec3:
-    return F0 + (Vec3::one() - F0) * pow(1.0 - cos_theta, 5.0)
-
-fn fresnel_schlick_roughness(cos_theta: f32, F0: Vec3, roughness: f32) -> Vec3:
-    let one_minus_roughness = Vec3::new(1.0 - roughness, 1.0 - roughness, 1.0 - roughness)
-    return F0 + (max_vec3(one_minus_roughness, F0) - F0) * pow(1.0 - cos_theta, 5.0)
-
-# =============================================================================
-# Helper Functions
-# =============================================================================
-
-fn max(a: f32, b: f32) -> f32:
-    return if a > b: a else: b
-
-fn clamp(value: f32, min: f32, max: f32) -> f32:
-    if value < min:
-        return min
-    if value > max:
-        return max
-    return value
-
-fn pow(base: f32, exp: f32) -> f32:
-    # Would use math library
-    return 0.0  # Placeholder
-
-fn pow_vec3(v: Vec3, exp: Vec3) -> Vec3:
-    return Vec3::new(
-        pow(v.x, exp.x),
-        pow(v.y, exp.y),
-        pow(v.z, exp.z)
-    )
-
-fn lerp_vec3(a: Vec3, b: Vec3, t: f32) -> Vec3:
-    return a * (1.0 - t) + b * t
-
-fn max_vec3(a: Vec3, b: Vec3) -> Vec3:
-    return Vec3::new(
-        max(a.x, b.x),
-        max(a.y, b.y),
-        max(a.z, b.z)
-    )
-
-fn reflect(I: Vec3, N: Vec3) -> Vec3:
-    return I - N * 2.0 * I.dot(N)
 
 # =============================================================================
 # Texture Sampling
