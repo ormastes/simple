@@ -201,28 +201,21 @@ axiom overlap_violates_coherence (registry : ImplRegistry) (impl1 impl2 : TraitI
   Interface bindings enable static dispatch by binding a trait to a specific
   implementation type at package scope. This is the `bind` statement:
 
-    bind Logger = ConsoleLogger        -- Auto (compiler chooses dispatch)
-    bind static Logger = ConsoleLogger -- Force static dispatch
-    bind dyn Logger = ConsoleLogger    -- Force dynamic dispatch
+    bind Logger = ConsoleLogger
 
   When a binding exists:
   - Type inference resolves the trait to the bound implementation type
   - Static dispatch: calls are monomorphized (like C++ templates)
-  - Dynamic dispatch: calls go through vtable (like traditional OOP)
+  - The compiler performs inlining and dead-code elimination
+
+  Note: `bind` is ONLY for static polymorphism. Dynamic dispatch is handled
+  separately through trait objects (dyn Trait).
 -/
 
--- Dispatch mode for interface bindings
-inductive DispatchMode where
-  | auto    -- Compiler chooses optimal dispatch
-  | static  -- Force monomorphization (static dispatch)
-  | dynamic -- Force vtable (dynamic dispatch)
-  deriving Repr, BEq
-
--- Interface binding: binds a trait to an implementation type
+-- Interface binding: binds a trait to an implementation type for static dispatch
 structure InterfaceBinding where
   trait_name : String        -- The trait being bound
   impl_type : Ty             -- The implementation type
-  mode : DispatchMode        -- Dispatch mode
   deriving Repr
 
 -- Binding registry at package scope
@@ -248,27 +241,20 @@ def isValidBinding (implRegistry : ImplRegistry) (binding : InterfaceBinding) : 
 def checkBindingsValid (implRegistry : ImplRegistry) (bindings : BindingRegistry) : Bool :=
   bindings.all (fun b => isValidBinding implRegistry b)
 
--- Resolve method dispatch based on binding mode
--- Returns: (should_monomorphize, impl_type)
+-- Resolve method dispatch for static polymorphism
+-- Returns: implementation type if binding exists, otherwise none
 def resolveDispatch (bindings : BindingRegistry) (implRegistry : ImplRegistry)
-    (traitName : String) (callSiteTy : Ty) : Option (Bool × Ty) :=
+    (traitName : String) (_callSiteTy : Ty) : Option Ty :=
   match lookupBinding bindings traitName with
   | some binding =>
-      match binding.mode with
-      | DispatchMode.static => some (true, binding.impl_type)  -- Monomorphize
-      | DispatchMode.dynamic => some (false, binding.impl_type) -- Vtable
-      | DispatchMode.auto =>
-          -- Compiler heuristic: use static if type is known at compile time
-          if callSiteTy == binding.impl_type then
-            some (true, binding.impl_type)
-          else
-            some (false, binding.impl_type)
-  | none =>
-      -- No binding: use dynamic dispatch with the call site type
-      if implementsTrait implRegistry callSiteTy traitName then
-        some (false, callSiteTy)
+      -- bind is always static: monomorphize to the implementation type
+      if implementsTrait implRegistry binding.impl_type traitName then
+        some binding.impl_type
       else
         none
+  | none =>
+      -- No binding: cannot use static dispatch
+      none
 
 --==============================================================================
 -- Static Polymorphism Theorems
@@ -298,20 +284,23 @@ axiom static_dispatch_safe (env : TraitEnv) (implRegistry : ImplRegistry)
     inferTraitMethodCall env implRegistry binding.trait_name methodName binding.impl_type [] ≠ none
 
 -- Theorem: Dispatch resolution is consistent
--- Once resolved, the same binding always produces the same dispatch decision
-axiom dispatch_consistent (bindings : BindingRegistry) (implRegistry : ImplRegistry)
-    (traitName : String) (ty : Ty) (mono1 mono2 : Bool) (implTy1 implTy2 : Ty) :
-  resolveDispatch bindings implRegistry traitName ty = some (mono1, implTy1) →
-  resolveDispatch bindings implRegistry traitName ty = some (mono2, implTy2) →
-  mono1 = mono2 ∧ implTy1 = implTy2
+-- Once resolved, the same binding always produces the same implementation type
+theorem dispatch_consistent (bindings : BindingRegistry) (implRegistry : ImplRegistry)
+    (traitName : String) (ty : Ty) (implTy1 implTy2 : Ty) :
+  resolveDispatch bindings implRegistry traitName ty = some implTy1 →
+  resolveDispatch bindings implRegistry traitName ty = some implTy2 →
+  implTy1 = implTy2 := by
+  intro h1 h2
+  rw [h1] at h2
+  injection h2
 
 -- Theorem: Static dispatch is equivalent to direct call
--- Calling through static binding produces same result as calling impl directly
+-- Calling through binding produces same result as calling impl directly
+-- (This is trivially true since bind is always static dispatch)
 axiom static_equiv_direct (env : TraitEnv) (implRegistry : ImplRegistry)
     (bindings : BindingRegistry) (binding : InterfaceBinding)
     (methodName : String) (args : List Ty) (ret : Ty) :
   lookupBinding bindings binding.trait_name = some binding →
-  binding.mode = DispatchMode.static →
   isValidBinding implRegistry binding = true →
   inferTraitMethodCall env implRegistry binding.trait_name methodName binding.impl_type args = some ret →
   -- Direct call to impl_type.methodName produces same result
