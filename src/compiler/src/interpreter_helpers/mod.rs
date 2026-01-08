@@ -44,6 +44,15 @@ pub(crate) use collections::{
     eval_dict_map_values,
     eval_dict_filter,
     iter_to_vec,
+    eval_option_map,
+    eval_option_and_then,
+    eval_option_or_else,
+    eval_option_filter,
+    eval_result_map,
+    eval_result_map_err,
+    eval_result_and_then,
+    eval_result_or_else,
+    message_to_value,
 };
 
 pub(crate) use patterns::{

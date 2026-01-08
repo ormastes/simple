@@ -21,6 +21,7 @@ mod compiler_tests;
 mod lexer_tests;
 mod lexer_tests2;
 mod loader_tests;
+mod mixin_tests;
 mod parser_tests;
 mod parser_tests2;
 mod type_tests;
