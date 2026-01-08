@@ -80,8 +80,37 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Parse mixin application: class Name with Mixin1, Mixin2<T>:
+        let mut explicit_mixins = Vec::new();
+        if self.check(&TokenKind::With) {
+            self.advance();
+            loop {
+                let mixin_name = self.expect_identifier()?;
+                let type_args = if self.check(&TokenKind::Lt) {
+                    self.parse_generic_args()?
+                } else {
+                    Vec::new()
+                };
+                
+                explicit_mixins.push(MixinRef {
+                    span: self.current.span,
+                    name: mixin_name,
+                    type_args,
+                    overrides: Vec::new(),
+                });
+                
+                if !self.check(&TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+
         let where_clause = self.parse_where_clause()?;
-        let (fields, methods, invariant, macro_invocations, mixins, doc_comment) = self.parse_class_body()?;
+        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) = self.parse_class_body()?;
+        
+        // Prepend explicit mixins from `with` clause
+        mixins.splice(0..0, explicit_mixins);
 
         Ok(Node::Class(ClassDef {
             span: self.make_span(start_span),

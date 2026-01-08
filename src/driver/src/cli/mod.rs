@@ -13,6 +13,7 @@ pub mod llm_tools;
 pub mod repl;
 pub mod sandbox;
 pub mod test_discovery;
+pub mod sspec_docgen;
 pub mod test_output;
 pub mod test_runner;
 #[cfg(feature = "tui")]
