@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/capability_effects_spec.spl`
-> **Generated:** 2026-01-09 06:15:42
+> **Generated:** 2026-01-09 06:34:16
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -10,7 +10,16 @@
 > ```
 
 **Status:** 📋 Planned
-**Feature IDs:** **Keywords:**
+**Feature IDs:** #880-884
+**Keywords:** effects, capabilities, purity, safety, LLM-safety
+**Last Updated:** 2026-01-09
+**Topics:** effects, type-system, safety
+**Symbols:** Effect, Capability, Pure, IO, Net, FS, EffectChecker
+**Module:** simple_compiler::effects
+**LLM Safety:** Prevent accidental side effects in AI-generated code
+**Explicit Effects:** All effects visible in signatures and modules
+**Compile-Time Checking:** Effect violations caught at compile time
+**Fine-Grained Control:** Granular capability requirements
 
 ## Quick Navigation
 
@@ -22,6 +31,12 @@
 ## Overview
 
 Capability-based effect system that prevents LLMs from silently adding I/O or stateful behavior to pure code. Explicit effect markers (`@pure`, `@io`, `@net`, `@fs`) make side effects visible and checked at compile time.
+
+## Related Specifications
+
+- **Type System** - Effect type annotations
+- **Module System** - Capability requirements
+- **Functions** - Effect propagation and checking
 
 ---
 
@@ -37,7 +52,8 @@ Capability-based effect system that prevents LLMs from silently adding I/O or st
 | `CalculateTax` | [3](#calculate_tax) |
 | `Can` | [1](#features_1), [7](#unnamed_test) |
 | `Cannot` | [7](#unnamed_test) |
-| `Compiler` | [4](#auto_inferred) |
+| `Capability` | [1](#features_1) |
+| `Compiler` | [1](#features_1), [4](#auto_inferred) |
 | `Deterministic` | [12](#println) |
 | `Discount` | [13](#calculate_discount) |
 | `Done` | [7](#unnamed_test) |
@@ -46,7 +62,7 @@ Capability-based effect system that prevents LLMs from silently adding I/O or st
 | `E0421` | [10](#pure_func) |
 | `E0422` | [11](#features_11) |
 | `ERROR` | [1](#features_1), [3](#calculate_tax), [5](#add), [6](#double), [7](#unnamed_test), ... (9 total) |
-| `Effect` | [8](#unnamed_test) |
+| `Effect` | [1](#features_1), [8](#unnamed_test) |
 | `Error` | [9](#calculate), [10](#pure_func), [11](#features_11) |
 | `Features` | [1](#features_1), [11](#features_11) |
 | `Func` | [10](#pure_func) |
@@ -56,6 +72,7 @@ Capability-based effect system that prevents LLMs from silently adding I/O or st
 | `Impure` | [6](#double) |
 | `Inferred` | [4](#auto_inferred), [8](#unnamed_test) |
 | `LLM` | [13](#calculate_discount) |
+| `Links` | [1](#features_1) |
 | `Module` | [1](#features_1), [2](#calculate) |
 | `Multiple` | [3](#calculate_tax) |
 | `Network` | [3](#calculate_tax) |
@@ -63,6 +80,7 @@ Capability-based effect system that prevents LLMs from silently adding I/O or st
 | `Processing` | [7](#unnamed_test) |
 | `Pure` | [1](#features_1), [6](#double), [10](#pure_func), [14](#handle_request) |
 | `PureFunc` | [10](#pure_func) |
+| `Related` | [1](#features_1) |
 | `Request` | [2](#calculate), [14](#handle_request) |
 | `Response` | [2](#calculate), [14](#handle_request) |
 | `Result` | [3](#calculate_tax), [12](#println) |
@@ -137,20 +155,20 @@ Capability-based effect system that prevents LLMs from silently adding I/O or st
 
 | # | Test | Section | Symbols |
 |---|------|---------|---------|
-| 1 | [features_1](#features_1) | Features | `Features`, `features`, `assert_compiles` +4 |
-| 2 | [calculate](#calculate) | Features | `Calculate`, `calculate`, `Request` +5 |
-| 3 | [calculate_tax](#calculate_tax) | Features | `Calculate`, `calculate_tax`, `Tax` +15 |
-| 4 | [auto_inferred](#auto_inferred) | Features | `auto_inferred`, `Auto`, `inferred` +9 |
-| 5 | [add](#add) | Features | `add`, `Add`, `println` +2 |
-| 6 | [double](#double) | Features | `Double`, `double`, `println` +6 |
-| 7 | [unnamed_test](#unnamed_test) | Features | `Unnamed`, `unnamed`, `println` +13 |
-| 8 | [unnamed_test](#unnamed_test) | Features | `Unnamed`, `unnamed`, `println` +9 |
-| 9 | [calculate](#calculate) | Features | `Calculate`, `calculate`, `println` +3 |
-| 10 | [pure_func](#pure_func) | Features | `PureFunc`, `Func`, `pure_func` +7 |
-| 11 | [features_11](#features_11) | Features | `Features`, `features`, `assert_compiles` +3 |
-| 12 | [println](#println) | Features | `Println`, `println`, `String` +13 |
-| 13 | [calculate_discount](#calculate_discount) | Examples | `CalculateDiscount`, `Calculate`, `discount` +8 |
-| 14 | [handle_request](#handle_request) | Examples | `Handle`, `Request`, `request` +7 |
+| 1 | [features_1](#features_1) | Features | `features`, `Features`, `Effect` +9 |
+| 2 | [calculate](#calculate) | Features | `calculate`, `Calculate`, `Response` +5 |
+| 3 | [calculate_tax](#calculate_tax) | Features | `Tax`, `calculate_tax`, `CalculateTax` +15 |
+| 4 | [auto_inferred](#auto_inferred) | Features | `AutoInferred`, `auto_inferred`, `auto` +9 |
+| 5 | [add](#add) | Features | `add`, `Add`, `impure_mistake` +2 |
+| 6 | [double](#double) | Features | `double`, `Double`, `mistake` +6 |
+| 7 | [unnamed_test](#unnamed_test) | Features | `unnamed`, `Unnamed`, `mistake` +13 |
+| 8 | [unnamed_test](#unnamed_test) | Features | `unnamed`, `Unnamed`, `Effect` +9 |
+| 9 | [calculate](#calculate) | Features | `calculate`, `Calculate`, `Error` +3 |
+| 10 | [pure_func](#pure_func) | Features | `func`, `pure_func`, `pure` +7 |
+| 11 | [features_11](#features_11) | Features | `features`, `Features`, `Error` +3 |
+| 12 | [println](#println) | Features | `Println`, `println`, `read_line` +13 |
+| 13 | [calculate_discount](#calculate_discount) | Examples | `CalculateDiscount`, `Calculate`, `calculate` +8 |
+| 14 | [handle_request](#handle_request) | Examples | `Handle`, `HandleRequest`, `handle_request` +7 |
 
 ---
 
@@ -159,20 +177,27 @@ Capability-based effect system that prevents LLMs from silently adding I/O or st
 **Test name:** `features_1`
 
 **Linked Symbols:**
-- `Features`
 - `features`
+- `Features`
+- `Effect`
+- `Compiler`
+- `Capability`
 - `assert_compiles`
 - `ERROR`
 - `Can`
+- `Related`
 - `Module`
-- `Pure`
+- ... and 2 more
 
 **Code:**
 
 ```simple
 test "features_1":
     """
-    Features
+    Module-level capability requirements with compile-time checking.
+    
+    **Links:** Capability::requires, Effect::Module, Compiler::check
+    **Related:** features_11
     """
     # Pure module - no side effects allowed
     module app.domain requires[pure]:
@@ -205,14 +230,14 @@ test "features_1":
 Capability Inheritance:
 
 **Linked Symbols:**
-- `Calculate`
 - `calculate`
-- `Request`
+- `Calculate`
+- `Response`
 - `handle_request`
+- `Module`
+- `Request`
 - `process`
 - `module`
-- `Module`
-- `Response`
 
 **Code:**
 
@@ -241,16 +266,16 @@ module app.api requires[io, net]:
 **Test name:** `calculate_tax`
 
 **Linked Symbols:**
-- `Calculate`
-- `calculate_tax`
 - `Tax`
-- `tax`
-- `calculate`
+- `calculate_tax`
 - `CalculateTax`
-- `String`
-- `println`
-- `write`
+- `Calculate`
+- `calculate`
+- `tax`
 - `fetch_data`
+- `Multiple`
+- `Network`
+- `String`
 - ... and 8 more
 
 **Code:**
@@ -292,15 +317,15 @@ fn download_and_save_correct(url: String, path: String):
 Effect Inference:
 
 **Linked Symbols:**
-- `auto_inferred`
-- `Auto`
-- `inferred`
 - `AutoInferred`
-- `Inferred`
+- `auto_inferred`
 - `auto`
+- `Auto`
+- `Inferred`
+- `inferred`
+- `Compiler`
 - `println`
 - `Warning`
-- `Compiler`
 - `Function`
 - ... and 2 more
 
@@ -331,9 +356,9 @@ Pure by Default:
 **Linked Symbols:**
 - `add`
 - `Add`
-- `println`
 - `impure_mistake`
 - `ERROR`
+- `println`
 
 **Code:**
 
@@ -350,13 +375,13 @@ fn impure_mistake():
 **Test name:** `double`
 
 **Linked Symbols:**
-- `Double`
 - `double`
-- `println`
-- `log_and_double`
-- `Impure`
-- `ERROR`
+- `Double`
 - `mistake`
+- `Impure`
+- `println`
+- `ERROR`
+- `log_and_double`
 - `multiply`
 - `Pure`
 
@@ -389,15 +414,15 @@ fn log_and_double(x: i64) -> i64:
 Capability Requirements:
 
 **Linked Symbols:**
-- `Unnamed`
 - `unnamed`
+- `Unnamed`
+- `mistake`
+- `Done`
 - `println`
-- `ERROR`
-- `Can`
-- `pure_processor`
-- `Processing`
 - `impure_processor`
+- `Processing`
 - `use_it`
+- `Cannot`
 - `process_with_logging`
 - ... and 6 more
 
@@ -440,16 +465,16 @@ fn mistake():
 Generic Effect Constraints:
 
 **Linked Symbols:**
-- `Unnamed`
 - `unnamed`
-- `println`
-- `Inferred`
-- `use_impure`
-- `print_and_double`
-- `double`
-- `push`
-- `map`
+- `Unnamed`
 - `Effect`
+- `println`
+- `print_and_double`
+- `push`
+- `use_impure`
+- `map`
+- `Usage`
+- `double`
 - ... and 2 more
 
 **Code:**
@@ -487,12 +512,12 @@ fn use_impure():
 **Test name:** `calculate`
 
 **Linked Symbols:**
-- `Calculate`
 - `calculate`
-- `println`
-- `ERROR`
-- `E0420`
+- `Calculate`
 - `Error`
+- `println`
+- `E0420`
+- `ERROR`
 
 **Code:**
 
@@ -524,16 +549,16 @@ error[E0420]: forbidden effect in pure context
 Effect Mismatch Errors:
 
 **Linked Symbols:**
-- `PureFunc`
-- `Func`
+- `func`
 - `pure_func`
 - `pure`
+- `Func`
+- `PureFunc`
 - `Pure`
-- `func`
-- `ERROR`
+- `Error`
 - `E0421`
 - `impure_func`
-- `Error`
+- `ERROR`
 
 **Code:**
 
@@ -570,12 +595,12 @@ error[E0421]: effect mismatch
 Capability Not Available:
 
 **Linked Symbols:**
-- `Features`
 - `features`
-- `assert_compiles`
-- `E0422`
-- `ERROR`
+- `Features`
 - `Error`
+- `assert_compiles`
+- `ERROR`
+- `E0422`
 
 **Code:**
 
@@ -608,14 +633,14 @@ test "features_11":
 **Linked Symbols:**
 - `Println`
 - `println`
-- `String`
-- `post`
+- `read_line`
+- `Result`
 - `randint_seeded`
-- `sqrt`
-- `get`
-- `read_file`
-- `sin`
+- `String`
 - `write_file`
+- `Deterministic`
+- `post`
+- `read_file`
 - ... and 6 more
 
 **Code:**
@@ -687,14 +712,14 @@ module std.random:
 **Linked Symbols:**
 - `CalculateDiscount`
 - `Calculate`
+- `calculate`
 - `discount`
 - `Discount`
-- `calculate`
 - `calculate_discount`
 - `println`
 - `validate_age`
 - `ERROR`
-- `LLM`
+- `return`
 - ... and 1 more
 
 **Code:**
@@ -722,15 +747,15 @@ fn calculate_discount(price: i64, rate: f64) -> i64:
 
 **Linked Symbols:**
 - `Handle`
-- `Request`
-- `request`
-- `handle_request`
 - `HandleRequest`
+- `handle_request`
 - `handle`
+- `request`
+- `Request`
 - `format_response`
+- `Response`
 - `Pure`
 - `calculate_discount`
-- `Response`
 
 **Code:**
 

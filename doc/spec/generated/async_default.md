@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/async_default_spec.spl`
-> **Generated:** 2026-01-09 06:15:42
+> **Generated:** 2026-01-09 06:33:45
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -14,6 +14,12 @@
 **Keywords:** async, sync, effects, promises, futures
 **Last Updated:** 2026-01-05
 **Topics:** concurrency, syntax, effects
+**Symbols:** Promise, Suspension, ExecutionMode, AsyncContext, Future
+**Module:** simple_runtime::async
+**Async by default:** No `async` keyword required
+**Explicit suspension:** `~=` shows suspension points
+**Sync when needed:** `sync fn` for synchronous code
+**Type safety:** Promise types automatically inferred
 
 ## Quick Navigation
 
@@ -26,11 +32,14 @@
 
 This document specifies Simple's async-default execution model where functions are async by default and sync is explicit.
 
+Functions without `sync` keyword return `Promise<T>` automatically. The suspension operator `~=` explicitly marks await points for readability and control.
+
 ## Related Specifications
 
 - **Suspension Operator** - Explicit `~` suspension syntax
 - **Concurrency** - Futures, actors, channels
 - **Functions** - Function definitions
+- **Type System** - Promise type inference
 
 ---
 
@@ -67,6 +76,7 @@ This document specifies Simple's async-default execution model where functions a
 | `ErrorHandling` | [30](#error_handling_36) |
 | `Example` | [10](#example), [15](#example) |
 | `Examples` | [26](#examples_32) |
+| `ExecutionMode` | [2](#design_overview_3) |
 | `Explicitly` | [3](#load_data) |
 | `Fail` | [29](#might_fail) |
 | `Fetch` | [1](#fetch_user), [6](#get_cached_or_fetch), [8](#parallel_fetch), [28](#fetch_or_error) |
@@ -90,6 +100,7 @@ This document specifies Simple's async-default execution model where functions a
 | `Increment` | [3](#load_data) |
 | `Inspection` | [27](#unnamed_test) |
 | `Item` | [13](#double) |
+| `Links` | [2](#design_overview_3) |
 | `Load` | [3](#load_data) |
 | `LoadData` | [3](#load_data) |
 | `Main` | [24](#main) |
@@ -126,7 +137,7 @@ This document specifies Simple's async-default execution model where functions a
 | `Static` | [27](#unnamed_test) |
 | `Stream` | [25](#hash_stream) |
 | `Suspending` | [4](#caller) |
-| `Suspension` | [18](#async_ping) |
+| `Suspension` | [2](#design_overview_3), [18](#async_ping) |
 | `Sync` | [4](#caller), [10](#example) |
 | `Task` | [9](#try_all) |
 | `Technically` | [31](#technically_async) |
@@ -256,37 +267,37 @@ This document specifies Simple's async-default execution model where functions a
 
 | # | Test | Section | Symbols |
 |---|------|---------|---------|
-| 1 | [fetch_user](#fetch_user) | Motivation | `fetch`, `user`, `User` +7 |
-| 2 | [design_overview_3](#design_overview_3) | Design Overview | `design_overview`, `Overview`, `design` +7 |
-| 3 | [load_data](#load_data) | Syntax | `LoadData`, `data`, `load_data` +12 |
-| 4 | [caller](#caller) | Syntax | `caller`, `Caller`, `i64` +8 |
-| 5 | [promise_type_6](#promise_type_6) | Promise Type | `Type`, `promise`, `PromiseType` +10 |
-| 6 | [get_cached_or_fetch](#get_cached_or_fetch) | Promise Type | `fetch`, `Cached`, `get` +12 |
-| 7 | [process_pipeline](#process_pipeline) | Combinators (Promise Chaining) | `process`, `pipeline`, `Process` +14 |
-| 8 | [parallel_fetch](#parallel_fetch) | Combinators (Promise Chaining) | `fetch`, `ParallelFetch`, `Parallel` +17 |
-| 9 | [try_all](#try_all) | Combinators (Promise Chaining) | `Try`, `all`, `TryAll` +12 |
-| 10 | [example](#example) | Sync Functions | `example`, `Example`, `Type` +8 |
-| 11 | [unnamed_test](#unnamed_test) | Type Inference | `Unnamed`, `unnamed`, `Err` +1 |
+| 1 | [fetch_user](#fetch_user) | Motivation | `user`, `fetch`, `User` +7 |
+| 2 | [design_overview_3](#design_overview_3) | Design Overview | `overview`, `Design`, `design` +10 |
+| 3 | [load_data](#load_data) | Syntax | `load_data`, `load`, `Load` +12 |
+| 4 | [caller](#caller) | Syntax | `caller`, `Caller`, `Non` +8 |
+| 5 | [promise_type_6](#promise_type_6) | Promise Type | `promise_type`, `Type`, `promise` +10 |
+| 6 | [get_cached_or_fetch](#get_cached_or_fetch) | Promise Type | `cached`, `get_cached_or_fetch`, `fetch` +12 |
+| 7 | [process_pipeline](#process_pipeline) | Combinators (Promise Chaining) | `Process`, `ProcessPipeline`, `Pipeline` +14 |
+| 8 | [parallel_fetch](#parallel_fetch) | Combinators (Promise Chaining) | `parallel_fetch`, `fetch`, `parallel` +17 |
+| 9 | [try_all](#try_all) | Combinators (Promise Chaining) | `try_all`, `TryAll`, `All` +12 |
+| 10 | [example](#example) | Sync Functions | `example`, `Example`, `Without` +8 |
+| 11 | [unnamed_test](#unnamed_test) | Type Inference | `Unnamed`, `unnamed`, `sleep` +1 |
 | 12 | [unnamed_test](#unnamed_test) | Type Inference | `Unnamed`, `unnamed`, `Parallel` |
-| 13 | [double](#double) | Effect Inference (Automatic async/sync Detection) | `Double`, `double`, `SYNC` +15 |
-| 14 | [caller](#caller) | Effect Inference (Automatic async/sync Detection) | `caller`, `Caller`, `fetch_data` +5 |
-| 15 | [example](#example) | Effect Inference (Automatic async/sync Detection) | `example`, `Example`, `fetch_user` +2 |
+| 13 | [double](#double) | Effect Inference (Automatic async/sync Detection) | `Double`, `double`, `Compiler` +15 |
+| 14 | [caller](#caller) | Effect Inference (Automatic async/sync Detection) | `caller`, `Caller`, `Implicit` +5 |
+| 15 | [example](#example) | Effect Inference (Automatic async/sync Detection) | `example`, `Example`, `User` +2 |
 | 16 | [process](#process) | Effect Inference (Automatic async/sync Detection) | `Process`, `process`, `Compiler` +2 |
-| 17 | [ping](#ping) | Effect Inference (Automatic async/sync Detection) | `ping`, `Ping`, `Calls` +3 |
-| 18 | [async_ping](#async_ping) | Effect Inference (Automatic async/sync Detection) | `Async`, `Ping`, `async_ping` +9 |
-| 19 | [process](#process) | Interaction with ~= Operator | `Process`, `process`, `fetch_data` +3 |
+| 17 | [ping](#ping) | Effect Inference (Automatic async/sync Detection) | `Ping`, `ping`, `SYNC` +3 |
+| 18 | [async_ping](#async_ping) | Effect Inference (Automatic async/sync Detection) | `async_ping`, `ping`, `Async` +9 |
+| 19 | [process](#process) | Interaction with ~= Operator | `Process`, `process`, `transform` +3 |
 | 20 | [foo](#foo) | Interaction with ~= Operator | `Foo`, `foo`, `bar` +1 |
 | 21 | [foo](#foo) | Migration Strategy | `Foo`, `foo` |
-| 22 | [foo](#foo) | Migration Strategy | `Foo`, `foo`, `Promise` +2 |
-| 23 | [handle_request](#handle_request) | Examples | `Handle`, `Request`, `request` +7 |
-| 24 | [main](#main) | Examples | `Main`, `main`, `process` +4 |
-| 25 | [hash_stream](#hash_stream) | Examples | `stream`, `hash_stream`, `Hash` +7 |
-| 26 | [examples_32](#examples_32) | Examples | `Examples`, `examples`, `assert_compiles` +14 |
-| 27 | [unnamed_test](#unnamed_test) | Promise Type Details | `Unnamed`, `unnamed`, `all_settled` +13 |
-| 28 | [fetch_or_error](#fetch_or_error) | Promise Type Details | `fetch`, `fetch_or_error`, `error` +16 |
-| 29 | [might_fail](#might_fail) | Error Handling | `fail`, `MightFail`, `might_fail` +13 |
-| 30 | [error_handling_36](#error_handling_36) | Error Handling | `error`, `ErrorHandling`, `Handling` +13 |
-| 31 | [technically_async](#technically_async) | Performance Considerations | `Async`, `technically_async`, `TechnicallyAsync` +7 |
+| 22 | [foo](#foo) | Migration Strategy | `Foo`, `foo`, `Returns` +2 |
+| 23 | [handle_request](#handle_request) | Examples | `handle`, `request`, `HandleRequest` +7 |
+| 24 | [main](#main) | Examples | `Main`, `main`, `load_config` +4 |
+| 25 | [hash_stream](#hash_stream) | Examples | `hash_stream`, `HashStream`, `Hash` +7 |
+| 26 | [examples_32](#examples_32) | Examples | `Examples`, `examples`, `completion` +14 |
+| 27 | [unnamed_test](#unnamed_test) | Promise Type Details | `Unnamed`, `unnamed`, `catch` +13 |
+| 28 | [fetch_or_error](#fetch_or_error) | Promise Type Details | `fetch`, `Error`, `Fetch` +16 |
+| 29 | [might_fail](#might_fail) | Error Handling | `Might`, `might_fail`, `might` +13 |
+| 30 | [error_handling_36](#error_handling_36) | Error Handling | `error_handling`, `ErrorHandling`, `Error` +13 |
+| 31 | [technically_async](#technically_async) | Performance Considerations | `async`, `Async`, `technically` +7 |
 
 ---
 
@@ -295,15 +306,15 @@ This document specifies Simple's async-default execution model where functions a
 **Test name:** `fetch_user`
 
 **Linked Symbols:**
-- `fetch`
 - `user`
+- `fetch`
 - `User`
 - `Fetch`
-- `fetch_user`
 - `FetchUser`
+- `fetch_user`
 - `signature`
-- `Actual`
 - `UserId`
+- `Actual`
 - `Promise`
 
 **Code:**
@@ -320,23 +331,26 @@ fn fetch_user(id: UserId) -> Promise[User]
 **Test name:** `design_overview_3`
 
 **Linked Symbols:**
-- `design_overview`
-- `Overview`
-- `design`
 - `overview`
 - `Design`
+- `design`
 - `DesignOverview`
-- `assert_compiles`
+- `design_overview`
+- `Overview`
+- `Links`
 - `User`
-- `fetch_user`
-- `Promise`
+- `ExecutionMode`
+- `Suspension`
+- ... and 3 more
 
 **Code:**
 
 ```simple
 test "design_overview_3":
     """
-    Design Overview
+    Suspension operator unwraps Promise to underlying type.
+    
+    **Links:** Promise, Suspension::operator, ExecutionMode
     """
     let user ~= fetch_user(1_uid)   # user: User (not Promise[User])
     assert_compiles()
@@ -347,16 +361,16 @@ test "design_overview_3":
 **Test name:** `load_data`
 
 **Linked Symbols:**
-- `LoadData`
-- `data`
 - `load_data`
 - `load`
-- `Data`
 - `Load`
-- `Explicitly`
-- `compute`
+- `data`
+- `LoadData`
+- `Data`
+- `parse`
 - `Increment`
-- `Counter`
+- `compute`
+- `Actor`
 - ... and 5 more
 
 **Code:**
@@ -383,13 +397,13 @@ actor Counter:
 **Linked Symbols:**
 - `caller`
 - `Caller`
+- `Non`
+- `Result`
 - `i64`
-- `Suspending`
+- `compute`
 - `load_data`
 - `Sync`
-- `Data`
-- `Non`
-- `compute`
+- `Suspending`
 - `Promise`
 - ... and 1 more
 
@@ -412,16 +426,16 @@ fn caller() -> Result:
 **Test name:** `promise_type_6`
 
 **Linked Symbols:**
+- `promise_type`
 - `Type`
 - `promise`
 - `PromiseType`
-- `type`
-- `promise_type`
 - `Promise`
-- `assert_compiles`
-- `Pending`
+- `type`
 - `Rejected`
-- `Fulfilled`
+- `PromiseState`
+- `Error`
+- `assert_compiles`
 - ... and 3 more
 
 **Code:**
@@ -448,16 +462,16 @@ test "promise_type_6":
 **Test name:** `get_cached_or_fetch`
 
 **Linked Symbols:**
+- `cached`
+- `get_cached_or_fetch`
 - `fetch`
-- `Cached`
 - `get`
+- `Fetch`
+- `Cached`
 - `GetCachedOrFetch`
 - `Get`
-- `cached`
-- `Fetch`
-- `get_cached_or_fetch`
 - `Returns`
-- `User`
+- `resolve`
 - ... and 5 more
 
 **Code:**
@@ -474,16 +488,16 @@ fn get_cached_or_fetch(id: UserId) -> Promise[User]:
 **Test name:** `process_pipeline`
 
 **Linked Symbols:**
-- `process`
-- `pipeline`
 - `Process`
-- `process_pipeline`
 - `ProcessPipeline`
 - `Pipeline`
-- `then`
-- `fetch_data`
+- `process_pipeline`
+- `pipeline`
+- `process`
 - `catch`
-- `save`
+- `transform`
+- `cleanup`
+- `Result`
 - ... and 7 more
 
 **Code:**
@@ -502,16 +516,16 @@ fn process_pipeline() -> Promise[Result]:
 **Test name:** `parallel_fetch`
 
 **Linked Symbols:**
-- `fetch`
-- `ParallelFetch`
-- `Parallel`
-- `Fetch`
-- `parallel`
 - `parallel_fetch`
+- `fetch`
+- `parallel`
+- `Fetch`
+- `Parallel`
+- `ParallelFetch`
+- `first_response`
+- `map`
+- `Response`
 - `User`
-- `all`
-- `get`
-- `first_success`
 - ... and 10 more
 
 **Code:**
@@ -535,16 +549,16 @@ fn first_success(urls: [Url]) -> Promise[Response]:
 **Test name:** `try_all`
 
 **Linked Symbols:**
-- `Try`
-- `all`
-- `TryAll`
-- `try`
 - `try_all`
+- `TryAll`
 - `All`
-- `all_settled`
+- `Try`
+- `try`
+- `all`
+- `Task`
 - `Rejected`
-- `Fulfilled`
 - `SettledResult`
+- `map`
 - ... and 5 more
 
 **Code:**
@@ -567,14 +581,14 @@ enum SettledResult[T]:
 **Linked Symbols:**
 - `example`
 - `Example`
-- `Type`
-- `User`
-- `fetch_user`
-- `Sync`
-- `Config`
-- `compute`
-- `Promise`
 - `Without`
+- `Config`
+- `User`
+- `Type`
+- `compute`
+- `load_config`
+- `Sync`
+- `Promise`
 - ... and 1 more
 
 **Code:**
@@ -599,8 +613,8 @@ fn example():
 **Linked Symbols:**
 - `Unnamed`
 - `unnamed`
-- `Err`
 - `sleep`
+- `Err`
 
 **Code:**
 
@@ -638,14 +652,14 @@ fn map_async[T, U](items: [T], f: fn(T) -> U) -> [U]:
 **Linked Symbols:**
 - `Double`
 - `double`
-- `SYNC`
+- `Compiler`
 - `Returns`
+- `get_promise`
+- `map`
 - `User`
-- `get_user_name`
-- `INFERRED`
 - `fetch_user`
-- `Item`
-- `compute_total`
+- `UserId`
+- `SYNC`
 - ... and 8 more
 
 **Code:**
@@ -679,12 +693,12 @@ fn compute_total(items: [Item]) -> i64:
 **Linked Symbols:**
 - `caller`
 - `Caller`
-- `fetch_data`
 - `Implicit`
-- `Assigning`
 - `Equivalent`
-- `Data`
 - `Promise`
+- `fetch_data`
+- `Assigning`
+- `Data`
 
 **Code:**
 
@@ -708,9 +722,9 @@ fn caller() -> Data:
 **Linked Symbols:**
 - `example`
 - `Example`
-- `fetch_user`
-- `Promise`
 - `User`
+- `Promise`
+- `fetch_user`
 
 **Code:**
 
@@ -729,8 +743,8 @@ fn example():
 - `Process`
 - `process`
 - `Compiler`
-- `Result`
 - `Data`
+- `Result`
 
 **Code:**
 
@@ -744,12 +758,12 @@ fn process(data: Data) -> Result:
 **Test name:** `ping`
 
 **Linked Symbols:**
-- `ping`
 - `Ping`
-- `Calls`
-- `pong`
+- `ping`
 - `SYNC`
 - `Both`
+- `Calls`
+- `pong`
 
 **Code:**
 
@@ -770,16 +784,16 @@ fn pong(n: i64) -> i64:
 **Test name:** `async_ping`
 
 **Linked Symbols:**
-- `Async`
-- `Ping`
 - `async_ping`
-- `AsyncPing`
-- `async`
 - `ping`
-- `Calls`
+- `Async`
+- `async`
+- `Ping`
+- `AsyncPing`
+- `Suspension`
+- `ASYNC`
 - `Both`
 - `async_pong`
-- `delay`
 - ... and 2 more
 
 **Code:**
@@ -804,10 +818,10 @@ fn async_pong(n: i64) -> i64:
 **Linked Symbols:**
 - `Process`
 - `process`
-- `fetch_data`
-- `Data`
-- `parse_async`
 - `transform`
+- `fetch_data`
+- `parse_async`
+- `Data`
 
 **Code:**
 
@@ -866,9 +880,9 @@ sync fn foo() -> i64:
 **Linked Symbols:**
 - `Foo`
 - `foo`
-- `Promise`
-- `bar`
 - `Returns`
+- `bar`
+- `Promise`
 
 **Code:**
 
@@ -885,16 +899,16 @@ sync fn bar() -> i64:    # Returns i64 directly
 **Test name:** `handle_request`
 
 **Linked Symbols:**
-- `Handle`
-- `Request`
-- `request`
-- `handle_request`
-- `HandleRequest`
 - `handle`
-- `fetch_user_data`
+- `request`
+- `HandleRequest`
+- `Request`
+- `handle_request`
+- `Handle`
 - `authenticate`
 - `Response`
 - `render_template`
+- `fetch_user_data`
 
 **Code:**
 
@@ -913,11 +927,11 @@ fn handle_request(req: Request) -> Response:
 **Linked Symbols:**
 - `Main`
 - `main`
-- `process`
-- `parse_args`
-- `write_file`
-- `read_file`
 - `load_config`
+- `read_file`
+- `write_file`
+- `parse_args`
+- `process`
 
 **Code:**
 
@@ -939,16 +953,16 @@ fn main() -> i64:
 **Test name:** `hash_stream`
 
 **Linked Symbols:**
-- `stream`
 - `hash_stream`
+- `HashStream`
 - `Hash`
 - `hash`
+- `stream`
 - `Stream`
-- `HashStream`
-- `new`
-- `update`
 - `Sha256`
+- `update`
 - `finalize`
+- `new`
 
 **Code:**
 
@@ -967,14 +981,14 @@ fn hash_stream(stream: Stream) -> Hash:
 **Linked Symbols:**
 - `Examples`
 - `examples`
-- `assert_compiles`
-- `User`
-- `get`
-- `Can`
-- `Refresh`
+- `completion`
 - `UserCache`
-- `Get`
-- `Option`
+- `Refresh`
+- `User`
+- `Update`
+- `fetch_user_from_db`
+- `UserId`
+- `Handler`
 - ... and 7 more
 
 **Code:**
@@ -1010,14 +1024,14 @@ test "examples_32":
 **Linked Symbols:**
 - `Unnamed`
 - `unnamed`
-- `all_settled`
-- `race`
-- `all`
 - `catch`
-- `any`
-- `is_rejected`
+- `SettledResult`
 - `Static`
+- `is_pending`
 - `Inspection`
+- `race`
+- `any`
+- `Error`
 - ... and 6 more
 
 **Code:**
@@ -1045,15 +1059,15 @@ fn then[U](on_fulfilled: fn(T) -> U) -> Promise[U]
 
 **Linked Symbols:**
 - `fetch`
-- `fetch_or_error`
-- `error`
-- `Fetch`
-- `FetchOrError`
 - `Error`
-- `then`
-- `parse_response`
-- `from`
-- `get`
+- `Fetch`
+- `error`
+- `FetchOrError`
+- `fetch_or_error`
+- `catch`
+- `Result`
+- `HttpError`
+- `Url`
 - ... and 9 more
 
 **Code:**
@@ -1075,16 +1089,16 @@ fn use_it() -> Result[Data, Error]:
 **Test name:** `might_fail`
 
 **Linked Symbols:**
-- `fail`
-- `MightFail`
-- `might_fail`
 - `Might`
+- `might_fail`
 - `might`
+- `fail`
 - `Fail`
-- `random`
-- `default_data`
-- `catch`
+- `MightFail`
 - `caller`
+- `catch`
+- `default_data`
+- `May`
 - ... and 6 more
 
 **Code:**
@@ -1109,15 +1123,15 @@ fn caller():
 **Test name:** `error_handling_36`
 
 **Linked Symbols:**
-- `error`
-- `ErrorHandling`
-- `Handling`
-- `handling`
-- `Error`
 - `error_handling`
-- `assert_compiles`
-- `on_unhandled_rejection`
+- `ErrorHandling`
+- `Error`
+- `handling`
+- `error`
+- `Handling`
+- `Global`
 - `catch`
+- `Operation`
 - `risky_operation`
 - ... and 6 more
 
@@ -1147,16 +1161,16 @@ test "error_handling_36":
 **Test name:** `technically_async`
 
 **Linked Symbols:**
-- `Async`
-- `technically_async`
-- `TechnicallyAsync`
-- `Technically`
-- `technically`
 - `async`
-- `call`
-- `Never`
-- `Promise`
+- `Async`
+- `technically`
+- `TechnicallyAsync`
+- `technically_async`
+- `Technically`
 - `Compiler`
+- `Never`
+- `call`
+- `Promise`
 
 **Code:**
 
