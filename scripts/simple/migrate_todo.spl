@@ -1,0 +1,284 @@
+# TODO Migration Script
+# Converts old TODO/FIXME comments to new format:
+#   TODO: [area][priority] description [#issue] [blocked:#n,#m]
+#
+# Usage:
+#   ./target/debug/simple scripts/simple/migrate_todo.spl <file_or_dir> [--dry-run] [--verbose]
+#
+# Examples:
+#   ./target/debug/simple scripts/simple/migrate_todo.spl src/compiler/src/mock.rs --dry-run
+#   ./target/debug/simple scripts/simple/migrate_todo.spl simple/std_lib/src/ --verbose
+
+# Native I/O functions
+extern fn native_fs_read_string(path: String) -> Any
+extern fn native_fs_write_string(path: String, content: String) -> Bool
+extern fn native_fs_exists(path: String) -> Bool
+extern fn native_fs_is_dir(path: String) -> Bool
+extern fn native_fs_list_dir(path: String) -> List[String]
+extern fn sys_get_args() -> List[String]
+extern fn println(msg: String) -> ()
+
+# Priority levels and aliases
+let PRIORITIES = ["P0", "P1", "P2", "P3", "critical", "high", "medium", "low"]
+let PRIORITY_ALIASES = {
+    "critical": "P0",
+    "high": "P1",
+    "medium": "P2",
+    "low": "P3"
+}
+
+# Valid areas
+let AREAS = [
+    "runtime", "codegen", "compiler", "parser", "type",
+    "stdlib", "gpu", "ui", "test", "driver", "loader", "pkg", "sdn"
+]
+
+# Patterns to detect area from file path
+let PATH_TO_AREA = {
+    "src/runtime": "runtime",
+    "src/compiler/src/codegen": "codegen",
+    "src/compiler/src/mir": "codegen",
+    "src/compiler/src/hir": "compiler",
+    "src/compiler": "compiler",
+    "src/parser": "parser",
+    "src/type": "type",
+    "src/driver": "driver",
+    "src/loader": "loader",
+    "src/pkg": "pkg",
+    "src/sdn": "sdn",
+    "src/ui": "ui",
+    "simple/std_lib": "stdlib",
+    "simple/app": "stdlib"
+}
+
+# Detect area from file path
+fn detect_area(file_path: String) -> String:
+    for pattern, area in PATH_TO_AREA.items():
+        if file_path.contains(pattern):
+            return area
+    return "compiler"  # Default
+
+# Detect priority from description keywords
+fn detect_priority(description: String) -> String:
+    let desc_lower = description.lower()
+
+    # Critical indicators
+    if desc_lower.contains("crash") or desc_lower.contains("memory leak") or desc_lower.contains("security"):
+        return "P0"
+    if desc_lower.contains("broken") or desc_lower.contains("corrupt") or desc_lower.contains("race condition"):
+        return "P0"
+
+    # High priority indicators
+    if desc_lower.contains("implement") or desc_lower.contains("add support"):
+        return "P1"
+    if desc_lower.contains("fix") or desc_lower.contains("handle"):
+        return "P1"
+
+    # Medium priority indicators
+    if desc_lower.contains("optimize") or desc_lower.contains("improve") or desc_lower.contains("refactor"):
+        return "P2"
+    if desc_lower.contains("track") or desc_lower.contains("parse"):
+        return "P2"
+
+    # Low priority default
+    return "P3"
+
+# Parse existing TODO comment
+class TodoComment:
+    keyword: String        # TODO or FIXME
+    area: String          # [area] or empty
+    priority: String      # [priority] or empty
+    description: String   # main text
+    issue: String         # #123 or empty
+    blocked: String       # #123,#456 or empty
+    original: String      # original line
+    line_num: Int
+
+    fn new(keyword: String, description: String, original: String, line_num: Int) -> TodoComment:
+        return TodoComment(
+            keyword: keyword,
+            area: "",
+            priority: "",
+            description: description,
+            issue: "",
+            blocked: "",
+            original: original,
+            line_num: line_num
+        )
+
+    fn is_already_formatted(self) -> Bool:
+        # Check if already has [area][priority] format
+        return self.original.contains("][") and self.original.contains("[")
+
+    fn format_new(self, detected_area: String, detected_priority: String) -> String:
+        let area = if self.area != "" then self.area else detected_area
+        let priority = if self.priority != "" then self.priority else detected_priority
+
+        let mut result = self.keyword + ": [" + area + "][" + priority + "] " + self.description
+
+        if self.issue != "":
+            result = result + " [#" + self.issue + "]"
+
+        if self.blocked != "":
+            result = result + " [blocked:" + self.blocked + "]"
+
+        return result
+
+# Parse a TODO/FIXME line
+fn parse_todo_line(line: String, line_num: Int, is_rust: Bool) -> Option[TodoComment]:
+    let comment_prefix = if is_rust then "//" else "#"
+
+    # Find TODO or FIXME
+    let mut keyword = ""
+    let mut start_idx = -1
+
+    if line.contains("TODO"):
+        keyword = "TODO"
+        start_idx = line.find("TODO")
+    elif line.contains("FIXME"):
+        keyword = "FIXME"
+        start_idx = line.find("FIXME")
+    else:
+        return None
+
+    # Extract the rest after TODO:/FIXME:
+    let after_keyword = line.slice(start_idx + keyword.len())
+
+    # Remove leading : and whitespace
+    let mut description = after_keyword.strip()
+    if description.starts_with(":"):
+        description = description.slice(1).strip()
+
+    # Check if already formatted [area][priority]
+    if description.starts_with("["):
+        # Already in new format, skip
+        return None
+
+    let todo = TodoComment.new(keyword, description, line, line_num)
+    return Some(todo)
+
+# Process a single file
+fn process_file(file_path: String, dry_run: Bool, verbose: Bool) -> Int:
+    let is_rust = file_path.ends_with(".rs")
+    let is_simple = file_path.ends_with(".spl")
+
+    if not is_rust and not is_simple:
+        return 0
+
+    let content_result = native_fs_read_string(file_path)
+    match content_result:
+        case Err(e):
+            println("Error reading " + file_path + ": " + e.to_string())
+            return 0
+        case Ok(content):
+            let lines = content.split("\n")
+            let mut modified = false
+            let mut new_lines = []
+            let mut count = 0
+            let detected_area = detect_area(file_path)
+
+            for i, line in lines.enumerate():
+                let line_num = i + 1
+                let parsed = parse_todo_line(line, line_num, is_rust)
+
+                match parsed:
+                    case Some(todo):
+                        if todo.is_already_formatted():
+                            new_lines.push(line)
+                        else:
+                            let detected_priority = detect_priority(todo.description)
+                            let new_comment = todo.format_new(detected_area, detected_priority)
+
+                            # Preserve indentation
+                            let indent = line.slice(0, line.find(todo.keyword))
+                            let comment_char = if is_rust then "// " else "# "
+                            let new_line = indent + comment_char + new_comment
+
+                            if verbose:
+                                println("")
+                                println(file_path + ":" + line_num.to_string())
+                                println("  OLD: " + line.strip())
+                                println("  NEW: " + new_line.strip())
+
+                            new_lines.push(new_line)
+                            modified = true
+                            count = count + 1
+                    case None:
+                        new_lines.push(line)
+
+            if modified and not dry_run:
+                let new_content = new_lines.join("\n")
+                native_fs_write_string(file_path, new_content)
+                println("Updated " + file_path + " (" + count.to_string() + " TODOs)")
+            elif modified and dry_run:
+                println("Would update " + file_path + " (" + count.to_string() + " TODOs)")
+
+            return count
+
+# Process directory recursively
+fn process_dir(dir_path: String, dry_run: Bool, verbose: Bool) -> Int:
+    let mut total = 0
+
+    let entries_result = native_fs_list_dir(dir_path)
+    match entries_result:
+        case Err(e):
+            println("Error listing " + dir_path + ": " + e.to_string())
+            return 0
+        case Ok(entries):
+            for entry in entries:
+                let full_path = dir_path + "/" + entry
+
+                if native_fs_is_dir(full_path):
+                    # Skip hidden dirs and target/
+                    if not entry.starts_with(".") and entry != "target":
+                        total = total + process_dir(full_path, dry_run, verbose)
+                else:
+                    total = total + process_file(full_path, dry_run, verbose)
+
+    return total
+
+# Main entry point
+fn main() -> Int:
+    let args = sys_get_args()
+
+    if args.len() < 2:
+        println("TODO Migration Script")
+        println("")
+        println("Usage: simple scripts/simple/migrate_todo.spl <file_or_dir> [options]")
+        println("")
+        println("Options:")
+        println("  --dry-run   Show changes without modifying files")
+        println("  --verbose   Show detailed changes")
+        println("")
+        println("Format: TODO: [area][priority] description [#issue] [blocked:#n,#m]")
+        println("")
+        println("Priorities: P0/critical, P1/high, P2/medium, P3/low")
+        println("Areas: runtime, codegen, compiler, parser, type, stdlib, gpu, ui, test, driver, loader, pkg")
+        println("")
+        println("Examples:")
+        println("  simple scripts/simple/migrate_todo.spl src/compiler/ --dry-run")
+        println("  simple scripts/simple/migrate_todo.spl simple/std_lib/src/io/fs.spl --verbose")
+        return 1
+
+    let target = args[1]
+    let dry_run = args.contains("--dry-run")
+    let verbose = args.contains("--verbose")
+
+    if dry_run:
+        println("DRY RUN - no files will be modified")
+        println("")
+
+    let mut total = 0
+
+    if native_fs_is_dir(target):
+        total = process_dir(target, dry_run, verbose)
+    elif native_fs_exists(target):
+        total = process_file(target, dry_run, verbose)
+    else:
+        println("Error: Path not found: " + target)
+        return 1
+
+    println("")
+    println("Total TODOs processed: " + total.to_string())
+
+    return 0

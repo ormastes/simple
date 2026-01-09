@@ -118,14 +118,36 @@ TODO: [area][P0|P1|P2|P3] description [#issue] [blocked:#n,#m]
 
 ## Lint Rules
 
-1. **todo-format**: TODO/FIXME must follow format
-2. **todo-area**: Area must be from allowed list
-3. **todo-priority**: Priority must be P0-P3 or alias
-4. **todo-p0-issue**: P0/critical must have issue number
+Enforced by `simple/app/lint/main.spl`:
+
+| Code | Level | Description |
+|------|-------|-------------|
+| T001 | Warn | TODO/FIXME missing [area][priority] format |
+| T002 | Warn | TODO/FIXME has invalid area |
+| T003 | Warn | TODO/FIXME has invalid priority |
+| T004 | Deny | P0/critical TODO must have issue number |
+
+Run linter:
+```bash
+./target/debug/simple simple/app/lint/main.spl <file.spl>
+```
 
 ## Migration
 
-Convert old TODOs:
+**Script:** `scripts/simple/migrate_todo.spl`
+
+```bash
+# Dry run (preview changes)
+./target/debug/simple scripts/simple/migrate_todo.spl src/compiler/ --dry-run
+
+# Migrate with verbose output
+./target/debug/simple scripts/simple/migrate_todo.spl src/runtime/ --verbose
+
+# Migrate single file
+./target/debug/simple scripts/simple/migrate_todo.spl src/compiler/src/mock.rs
+```
+
+**Manual conversion:**
 ```
 # Old
 // TODO: Implement socket write
