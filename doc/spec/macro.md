@@ -1,5 +1,13 @@
 Simple Language — Contract-First Macros (LL(1), One-Pass) Specification
 
+> **📤 EXTRACTED:** Test cases have been extracted to an executable test file:  
+> **→** `tests/specs/macro_spec.spl`  
+> **Date:** 2026-01-09  
+> **Type:** Category B (Extract + Keep)
+> 
+> This file remains as **architectural reference documentation**.  
+> Test cases and examples are in the _spec.spl file for execution and validation.
+
 **Status:** SPECIFICATION (Partially Implemented)
 **Last Updated:** 2025-12-27
 **Implementation Status:** See `doc/status/macros.md`

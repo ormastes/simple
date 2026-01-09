@@ -1,5 +1,13 @@
 # Simple Language Data Structures
 
+> **📤 EXTRACTED:** Test cases have been extracted to an executable test file:  
+> **→** `tests/specs/data_structures_spec.spl`  
+> **Date:** 2026-01-09  
+> **Type:** Category B (Extract + Keep)
+> 
+> This file remains as **architectural reference documentation**.  
+> Test cases and examples are in the _spec.spl file for execution and validation.
+
 This document covers structs, classes, enums, unions, and their associated features.
 
 ## Structs and Classes Overview

@@ -1,5 +1,13 @@
 # Module System Specification
 
+> **📤 EXTRACTED:** Test cases have been extracted to an executable test file:  
+> **→** `tests/specs/modules_spec.spl`  
+> **Date:** 2026-01-09  
+> **Type:** Category B (Extract + Keep)
+> 
+> This file remains as **architectural reference documentation**.  
+> Test cases and examples are in the _spec.spl file for execution and validation.
+
 This document specifies the Simple language module system, including imports, exports, visibility, and the `__init__.spl` file behavior.
 
 ---

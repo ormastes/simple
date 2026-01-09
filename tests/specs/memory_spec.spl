@@ -1,0 +1,266 @@
+"""
+# Simple Language Memory and Ownership - Test Specification
+
+**Status:** Reference
+**Feature IDs:** 
+**Source:** memory.md
+**Type:** Extracted Examples (Category B)
+
+## Overview
+
+This file contains executable test cases extracted from memory.md.
+The original specification file remains as architectural reference documentation.
+
+**Note:** This is a test extraction file. For complete specification text,
+design rationale, and architecture, see doc/spec/memory.md
+
+## Extracted Test Cases
+
+17 test cases extracted covering:
+- Core functionality examples
+- Edge cases and validation
+- Integration patterns
+"""
+
+## Test: Reference and Pointer Kinds (Line ~7)
+
+"""
+A bare type `T` is a GC-managed reference to a heap object:
+"""
+test "reference_and_pointer_kinds_1":
+    let p: Player = Player(name: "Hero", hp: 100)
+    assert_compiles()
+
+## Test: Reference and Pointer Kinds (Line ~21)
+
+"""
+- Exactly one owner at a time
+- Move-only (cannot be copied)
+- When the `&T` goes out of scope, the ...
+"""
+test "reference_and_pointer_kinds_2":
+    let u: &Player = new(&) Player(name: "Solo", hp: 50)
+    # u is the sole owner
+
+    let v = move u    # ownership transferred to v
+    # u is now unusable (compile error if accessed)
+    assert_compiles()
+
+## Test: Reference and Pointer Kinds (Line ~37)
+
+"""
+- Multiple owners allowed
+- Copying/cloning increments the reference count
+- Object freed when refer...
+"""
+test "reference_and_pointer_kinds_3":
+    let s1: *Player = new* Player(name: "Shared", hp: 75)
+    let s2 = s1       # refcount incremented, both own the object
+    # Object freed when both s1 and s2 go out of scope
+    assert_compiles()
+
+## Test: Reference and Pointer Kinds (Line ~51)
+
+"""
+- Non-owning reference to an object managed by `*T` (or GC)
+- Does not keep the object alive
+- Must ...
+"""
+test "reference_and_pointer_kinds_4":
+    let s: *Player = new* Player(name: "Target", hp: 100)
+    let w: -Player = weak_of(s)
+
+    # Later...
+    match w.upgrade():
+        case Some(strong):
+            print "Player still alive: {strong.name}"
+        case None:
+            print "Player was freed"
+    assert_compiles()
+
+## Test: Reference and Pointer Kinds (Line ~72)
+
+"""
+- A small ID (typically `(slot_index, generation)`) into a global handle pool for type `T`
+- Non-own...
+"""
+test "reference_and_pointer_kinds_5":
+    let h: +Enemy = new+ Enemy(hp: 100, pos: (0, 0))
+    # h is a lightweight handle into the global Enemy pool
+    assert_compiles()
+
+## Test: Allocation Forms (`new` Variants) (Line ~14)
+
+"""
+| Form | Returns | Ownership |
+|------|---------|-----------|
+| `new(&) T(...)` | `&T` | Unique (mov...
+"""
+test "allocation_forms_new_variants_6":
+    let u: &Player = new(&) Player(name: "Unique", hp: 100)
+    assert_compiles()
+
+## Test: Allocation Forms (`new` Variants) (Line ~29)
+
+"""
+- Allocate `T` on the manual heap
+- Return unique pointer `&T`
+- `&T` is move-only:
+  - `let b = u` ...
+"""
+test "allocation_forms_new_variants_7":
+    let s: *Player = new* Player(name: "Shared", hp: 100)
+    assert_compiles()
+
+## Test: Allocation Forms (`new` Variants) (Line ~42)
+
+"""
+- Allocate `T` with an embedded reference count
+- Return shared pointer `*T`
+- Copying `*T` incremen...
+"""
+test "allocation_forms_new_variants_8":
+    let w: -Player = new- Player(name: "Ephemeral", hp: 50)
+    assert_compiles()
+
+## Test: Allocation Forms (`new` Variants) (Line ~50)
+
+"""
+- Convenience for creating a weak pointer to a freshly allocated shared object
+- Equivalent to:
+"""
+test "allocation_forms_new_variants_9":
+    let s: *Player = new* Player(name: "Ephemeral", hp: 50)
+      let w: -Player = weak_of(s)
+    assert_compiles()
+
+## Test: Allocation Forms (`new` Variants) (Line ~59)
+
+"""
+- Convenience for creating a weak pointer to a freshly allocated shared object
+- Equivalent to:
+  ``...
+"""
+test "allocation_forms_new_variants_10":
+    let h: +Enemy = new+ Enemy(hp: 100, pos: (0, 0))
+    assert_compiles()
+
+## Test: Global Handle Pools (Line ~10)
+
+"""
+- There can be at most one handle pool
+- It must be declared at global scope
+"""
+test "global_handle_pools_11":
+    handle_pool Enemy:
+        capacity: 1024
+    assert_compiles()
+
+## Test: Global Handle Pools (Line ~33)
+
+"""
+3. Global scope only: Declaring `handle_pool` inside a function, actor, or block produces a compile-...
+"""
+test "global_handle_pools_12":
+    handle_pool Enemy:
+        capacity: 1024
+
+    let h: +Enemy = new+ Enemy(hp: 100, pos: (0, 0))
+    assert_compiles()
+
+## Test: Global Handle Pools (Line ~42)
+
+"""
+Accessing handle data:
+"""
+test "global_handle_pools_13":
+    # Mutable access
+    match Enemy.handle_get_mut(h):
+        case Some(e):
+            e.hp -= 10
+        case None:
+            log "Enemy not found"
+
+    # Read-only access
+    match Enemy.handle_get(h):
+        case Some(e):
+            print "Enemy HP: {e.hp}"
+        case None:
+            log "Enemy not found"
+    assert_compiles()
+
+## Test: Global Handle Pools (Line ~60)
+
+test "global_handle_pools_14":
+    Enemy.handle_free(h)   # Invalidate handle, recycle slot
+    assert_compiles()
+
+## Test: Borrowing (Line ~18)
+
+"""
+The compiler enforces that borrows never outlive their source:
+"""
+fn damage_enemy(h: +Enemy, amount: i32):
+    match Enemy.handle_get_mut(h):
+        case Some(e):      # e is a short-lived mutable borrow
+            e.hp -= amount
+            # e cannot escape this scope
+        case None:
+            log "Enemy not found"
+
+## Test: Example: Game Entity System with Handles (Line ~3)
+
+"""
+Example: Game Entity System with Handles
+"""
+test "example_game_entity_system_with_handles_16":
+    handle_pool Enemy:
+        capacity: 10000
+
+    handle_pool Projectile:
+        capacity: 50000
+
+    actor GameWorld:
+        state:
+            enemies: List[+Enemy] = []
+            projectiles: List[+Projectile] = []
+
+        on SpawnEnemy(pos: Vec2, hp: i32) async:
+            let h: +Enemy = new+ Enemy(pos: pos, hp: hp)
+            self.enemies->push(h)
+
+        on Tick(dt: f64) async:
+            # Update projectiles
+            for proj_handle in self.projectiles:
+                match Projectile.handle_get_mut(proj_handle):
+                    case Some(proj):
+                        proj.pos = proj.pos + proj.vel * dt
+                        match Enemy.handle_get_mut(proj.target):
+                            case Some(enemy):
+                                if distance(proj.pos, enemy.pos) < HIT_RADIUS:
+                                    enemy.hp -= DAMAGE
+                                    Projectile.handle_free(proj_handle)
+                            case None:
+                                Projectile.handle_free(proj_handle)
+                    case None:
+                        pass
+
+            # Compact lists (remove freed handles)
+            self.enemies->retain(\h: Enemy.handle_valid(h))
+            self.projectiles->retain(\h: Projectile.handle_valid(h))
+    assert_compiles()
+
+## Test: Note on Option Types (Line ~5)
+
+"""
+Handle operations like `handle_get`, `handle_get_mut`, and `weak.upgrade()` return `Option[T]` to en...
+"""
+test "note_on_option_types_17":
+    # Option enforces safe access patterns
+    match Enemy.handle_get_mut(h):
+        case Some(enemy):
+            enemy.hp -= 10
+        case None:
+            log "Enemy not found"
+    assert_compiles()
+

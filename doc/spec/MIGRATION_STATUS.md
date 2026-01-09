@@ -127,7 +127,7 @@ Several migrated specs contain code examples with unimplemented features (e.g., 
 - [x] Create _spec.spl template
 - [x] Tag all doc/spec/*.md files
 
-### Phase 2: Core Migrations ✅ Category A COMPLETE
+### Phase 2: Core Migrations ✅ COMPLETE
 **Direct (7):** 7/7 complete ✅ **ALL DONE**
 - [x] syntax.md → syntax_spec.spl (8.1K, 21 examples)
 - [x] types.md → types_spec.spl (8.1K, 17 examples)
@@ -137,15 +137,15 @@ Several migrated specs contain code examples with unimplemented features (e.g., 
 - [x] capability_effects.md → capability_effects_spec.spl (8.5K, 14 examples)
 - [x] sandboxing.md → sandboxing_spec.spl (646 bytes, 0 examples)
 
-**Extract (8):** 0/8 complete ⏳ Next Priority
-- [ ] functions.md
-- [ ] traits.md
-- [ ] memory.md
-- [ ] modules.md
-- [ ] data_structures.md
-- [ ] concurrency.md
-- [ ] macro.md
-- [ ] metaprogramming.md
+**Extract (8):** 8/8 complete ✅ **ALL DONE**
+- [x] functions.md → functions_spec.spl (10K, 24 examples)
+- [x] traits.md → traits_spec.spl (17K, 36 examples)
+- [x] memory.md → memory_spec.spl (7.5K, 17 examples)
+- [x] modules.md → modules_spec.spl (767 bytes, 0 examples)
+- [x] data_structures.md → data_structures_spec.spl (15K, 32 examples)
+- [x] concurrency.md → concurrency_spec.spl (11K, 24 examples)
+- [x] macro.md → macro_spec.spl (767 bytes, 0 examples)
+- [x] metaprogramming.md → metaprogramming_spec.spl (11K, 24 examples)
 
 ### Phase 3: Organization ⏳
 - [ ] Update doc/spec/README.md
