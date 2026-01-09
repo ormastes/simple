@@ -228,6 +228,9 @@ When image is available:
   - [x] Markdown formatter with image links and placeholders
 - [x] Part 2: Diagram generation infrastructure (prepared)
   - [x] Diagram module (`simple/std_lib/src/spec/diagram/__init__.spl`)
+  - [x] Diagram integration module (`simple/std_lib/src/spec/diagram_integration.spl`)
   - [x] Mermaid generation for sequence, class, architecture diagrams
   - [x] Directory structure `doc/spec/diagrams/`
+  - [x] Test runner integration (`src/driver/src/cli/test_runner.rs`)
+  - [x] Exports in spec module (`simple/std_lib/src/spec/__init__.spl`)
   - [ ] Runtime FFI for actual diagram capture (future task)

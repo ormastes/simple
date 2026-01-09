@@ -198,6 +198,12 @@ pub struct StaticBuffer<const N: usize> {
     len: usize,
 }
 
+impl<const N: usize> Default for StaticBuffer<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const N: usize> StaticBuffer<N> {
     /// Create a new empty static buffer.
     pub const fn new() -> Self {
@@ -281,6 +287,12 @@ pub type StaticString<const N: usize> = StaticBuffer<N>;
 pub struct StaticVec<T, const N: usize> {
     data: [core::mem::MaybeUninit<T>; N],
     len: usize,
+}
+
+impl<T, const N: usize> Default for StaticVec<T, N> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<T, const N: usize> StaticVec<T, N> {
@@ -426,6 +438,12 @@ pub struct CoopScheduler {
     task_count: usize,
 }
 
+impl Default for CoopScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CoopScheduler {
     /// Create a new scheduler.
     pub const fn new() -> Self {
@@ -528,6 +546,12 @@ pub struct MemoryPool<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> {
     free_mask: u64, // Bitmap of free blocks (max 64 blocks)
 }
 
+impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> Default for MemoryPool<BLOCK_SIZE, BLOCK_COUNT> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> MemoryPool<BLOCK_SIZE, BLOCK_COUNT> {
     /// Create a new memory pool.
     /// All blocks are initially free.
@@ -569,7 +593,7 @@ impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> MemoryPool<BLOCK_SIZE, B
         let offset = ptr_addr - base;
         let idx = offset / BLOCK_SIZE;
 
-        if idx >= BLOCK_COUNT || offset % BLOCK_SIZE != 0 {
+        if idx >= BLOCK_COUNT || !offset.is_multiple_of(BLOCK_SIZE) {
             return false;
         }
 
@@ -609,6 +633,12 @@ impl<const BLOCK_SIZE: usize, const BLOCK_COUNT: usize> MemoryPool<BLOCK_SIZE, B
 pub struct Arena<const SIZE: usize> {
     memory: [u8; SIZE],
     offset: usize,
+}
+
+impl<const SIZE: usize> Default for Arena<SIZE> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<const SIZE: usize> Arena<SIZE> {
