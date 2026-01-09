@@ -13,6 +13,8 @@ driver (CLI) ──────────────────────�
     │       │                                 │
     │       ├── type (Type checker) ──────────┤
     │       │                                 │
+    │       ├── codegen/lean (Lean gen) ──────┤  ← Lean 4 verification
+    │       │                                 │
     │       └── runtime (GC, Values) ─────────┤
     │               │                         │
     │               └── log ──────────────────┤
@@ -20,6 +22,8 @@ driver (CLI) ──────────────────────�
     ├── loader (SMF binary loader) ───────────┤
     │                                         │
     ├── native_loader (OS dylib) ─────────────┤
+    │                                         │
+    ├── arch_test (Dependency analysis) ──────┤
     │                                         │
     └── pkg (Package manager) ────────────────┘
 ```
@@ -153,9 +157,206 @@ host/
 - `driver` is the only CLI entry point
 - No circular dependencies between crates
 
+---
+
+## Lean 4 Verification
+
+### Verification Projects
+
+```
+verification/
+├── type_inference_compile/    # Type inference soundness
+│   ├── TypeInferenceCompile.lean   # Core inference (determinism theorem)
+│   ├── Generics.lean               # Generic type verification
+│   ├── Contracts.lean              # Contract verification
+│   ├── Traits.lean                 # Trait system
+│   ├── Mixins.lean                 # Mixin composition
+│   ├── StaticPolymorphism.lean     # Static dispatch
+│   └── AsyncEffectInference.lean   # Effect inference
+├── memory_capabilities/       # Reference capabilities (mut T, iso T)
+├── memory_model_drf/          # SC-DRF memory model
+├── manual_pointer_borrow/     # Borrow checker model
+├── gc_manual_borrow/          # GC safety proofs
+├── async_compile/             # Effect tracking
+├── nogc_compile/              # NoGC instruction safety
+├── module_resolution/         # Module path resolution
+├── visibility_export/         # Export visibility rules
+└── macro_auto_import/         # Macro import safety
+```
+
+### Lean Generation Commands
+
+```bash
+# Generate Lean files
+simple gen-lean generate                    # All projects
+simple gen-lean generate --project memory   # Specific project
+
+# Compare generated vs existing
+simple gen-lean compare                     # Show status
+simple gen-lean compare --diff              # Show differences
+
+# Write to verification/
+simple gen-lean write --force               # Regenerate all
+
+# Exit codes:
+# 0 = identical, 1 = differences (safe to replace), 2 = missing definitions
+```
+
+### Lean Codegen Architecture
+
+```
+src/compiler/src/codegen/lean/
+├── mod.rs              # LeanCodegen entry point
+├── types.rs            # TypeTranslator (Simple→Lean types)
+├── functions.rs        # FunctionTranslator
+├── contracts.rs        # ContractTranslator (in:/out: → theorems)
+├── expressions.rs      # ExprTranslator
+├── traits.rs           # TraitTranslator (→ Lean type classes)
+├── emitter.rs          # LeanEmitter (code generation)
+├── runner.rs           # LeanRunner (proof checking)
+├── verification_checker.rs
+└── verification_diagnostics.rs
+```
+
+### Type Inference Verification Impact
+
+The `type_inference_compile` project proves:
+
+1. **Determinism**: `theorem infer_deterministic` - inference yields at most one type
+2. **Soundness**: Well-typed expressions don't get stuck
+3. **Generics**: Type parameter substitution preserves typing
+4. **Contracts**: Pre/postcondition contract verification
+
+**When modifying type inference:**
+1. Update `src/type/src/lib.rs` (Rust implementation)
+2. Update corresponding Lean theorems in `verification/type_inference_compile/`
+3. Run `lake build` in verification project to check proofs
+4. Run `simple gen-lean compare` to verify alignment
+
+### Adding Verified Features
+
+```simple
+# Mark function for verification
+@verify(memory)
+fn safe_swap(a: mut ref Int, b: mut ref Int):
+    """Swap with verified memory safety."""
+    let temp = *a
+    *a = *b
+    *b = temp
+
+@verify(types)
+fn generic_map[T, U](items: List[T], f: fn(T) -> U) -> List[U]:
+    """Generic function with verified type inference."""
+    return [f(item) for item in items]
+```
+
+Generated Lean (in `verification/`):
+```lean
+def safe_swap (a b : MutRef Int) : Unit := do
+  let temp ← a.read
+  a.write (← b.read)
+  b.write temp
+
+theorem safe_swap_preserves_memory : ∀ a b,
+  disjoint a b → valid_after (safe_swap a b) := by
+  sorry  -- Proof stub
+```
+
+---
+
+## Dependency Analysis
+
+### arch_test Crate
+
+Static analysis for enforcing architectural rules.
+
+```rust
+use arch_test::{Architecture, Layer};
+
+let arch = Architecture::new()
+    .layer("presentation", &["src/ui/**"])
+    .layer("business", &["src/services/**"])
+    .layer("data", &["src/repos/**"])
+    .rule(Layer("presentation").may_only_access(&["business"]))
+    .rule(Layer("business").may_not_access(&["presentation"]))
+    .rule(Layer("data").may_not_be_accessed_by(&["presentation"]));
+
+let result = arch.check("src/");
+assert!(result.is_ok());
+```
+
+### Running Architecture Tests
+
+```bash
+make arch-test              # Run architecture tests
+make arch-test-visualize    # Generate DOT/Mermaid graphs
+```
+
+### Circular Dependency Prevention
+
+**Before Design:**
+1. Draw dependency graph of affected modules
+2. Identify potential cycles
+3. Use `make arch-test` to validate current state
+
+**After Implementation:**
+1. Run `make arch-test` to verify no new cycles
+2. Run `simple gen-lean compare` if verification-related
+3. Check `cargo tree -p <crate>` for unexpected dependencies
+
+### Dependency Rules by Layer
+
+| Layer | May Access | May Not Access |
+|-------|------------|----------------|
+| `driver` | all | - |
+| `compiler` | parser, type, runtime, common | driver |
+| `parser` | common | compiler, runtime |
+| `runtime` | log, common | compiler, parser |
+| `common` | - | all |
+
+### Detecting Cycles
+
+```bash
+# Rust crate cycles
+cargo tree --edges features
+
+# Simple module cycles (via arch_test)
+make arch-test
+
+# Lean project dependencies
+cd verification/type_inference_compile && lake build
+```
+
+### Breaking Dependency Cycles
+
+1. **Extract shared interface** → move to `common`
+2. **Invert dependency** → use trait/callback
+3. **Split module** → separate concerns
+4. **Use dependency injection** → runtime configuration
+
+---
+
+## Design Checklist
+
+### Before Implementing
+
+- [ ] Read relevant feature spec (`doc/features/`)
+- [ ] Check existing architecture (`make arch-test`)
+- [ ] Identify affected verification projects
+- [ ] Draw dependency impact diagram
+
+### After Implementing
+
+- [ ] Run `make arch-test` - no new violations
+- [ ] Run `simple gen-lean compare` - if verification affected
+- [ ] Run `cargo test --workspace` - all tests pass
+- [ ] Update Lean proofs if needed (`lake build`)
+
 ## See Also
 
 - `doc/architecture/README.md` - Full architecture docs
 - `doc/codegen_technical.md` - Codegen details
 - `doc/codegen/status.md` - MIR coverage
+- `doc/formal_verification.md` - Lean verification docs
+- `verification/*/lakefile.lean` - Lean project configs
 - `CLAUDE.md` - Current file structure

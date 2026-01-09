@@ -421,9 +421,37 @@ npm install -g jscpd       # Duplication detection
 - One assertion concept per test
 - Clear test names: `it "adds two positive numbers":` not `it "works":`
 
+## Lean Verification Integration
+
+SSpec tests can reference formal verification in docstrings:
+
+```simple
+"""
+### Lean Verification
+
+This feature is verified in:
+- `verification/TypeInference.lean` - Soundness proof
+- `verification/MixinSubstitution.lean` - Type safety
+
+**Properties Verified:**
+1. Type substitution preserves well-typedness
+2. Mixin application is associative
+
+See [architecture skill](/architecture) for verification workflow.
+"""
+```
+
+Generate Lean from verified code:
+```bash
+simple gen-lean compare           # Check alignment
+simple gen-lean write --force     # Regenerate Lean files
+```
+
 ## See Also
 
 - `doc/spec/testing/testing_bdd_framework.md` - Full BDD spec
 - `doc/sspec_format.md` - SSpec format details
 - `doc/test.md` - Test policy
 - `doc/spec/testing/sdoctest.md` - Documentation testing
+- `doc/formal_verification.md` - Lean verification docs
+- `/architecture` skill - Lean codegen, dependency analysis

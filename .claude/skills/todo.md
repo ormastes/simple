@@ -43,8 +43,32 @@ FIXME: [area][priority] description [#issue] [blocked:#issue,#issue]
 | `driver` | CLI, tools |
 | `loader` | SMF loader |
 | `pkg` | Package manager |
+| `doc` | Documentation, specs, guides |
 
 ## Examples
+
+### Markdown
+
+```markdown
+<!-- TODO: [doc][P1] Add examples section [#234] -->
+<!-- FIXME: [doc][P0] Fix broken links [#567] [blocked:#123] -->
+
+> **TODO** [stdlib][P2]: Document variant selection API
+
+- [ ] **TODO** [test][P1]: Add integration test cases [#789]
+- [ ] **FIXME** [doc][critical]: Update outdated diagram [#890]
+
+| Status | Task |
+|--------|------|
+| TODO [compiler][P2] | Document MIR instructions |
+| FIXME [runtime][P1] | Fix GC section [#456] |
+```
+
+**Formats:**
+1. HTML comment: `<!-- TODO: [area][priority] description -->`
+2. Blockquote: `> **TODO** [area][priority]: description`
+3. Checkbox: `- [ ] **TODO** [area][priority]: description [#issue]`
+4. Table cell: `TODO [area][priority]` in content
 
 ### Rust
 
@@ -103,9 +127,24 @@ TODO: [area][P0|P1|P2|P3] description [#issue] [blocked:#n,#m]
 
 ## Regex Patterns
 
-### Match TODO/FIXME
+### Code Comments (Rust/Simple)
 ```regex
 (TODO|FIXME):\s*\[(\w+)\]\[(\w+)\]\s*(.+?)(?:\s*\[#(\d+)\])?(?:\s*\[blocked:(#\d+(?:,#\d+)*)\])?$
+```
+
+### Markdown HTML Comment
+```regex
+<!--\s*(TODO|FIXME):\s*\[(\w+)\]\[(\w+)\]\s*(.+?)(?:\s*\[#(\d+)\])?(?:\s*\[blocked:[^\]]+\])?\s*-->
+```
+
+### Markdown Blockquote
+```regex
+>\s*\*\*(TODO|FIXME)\*\*\s*\[(\w+)\]\[(\w+)\]:\s*(.+?)(?:\s*\[#(\d+)\])?$
+```
+
+### Markdown Checkbox
+```regex
+-\s*\[\s*\]\s*\*\*(TODO|FIXME)\*\*\s*\[(\w+)\]\[(\w+)\]:\s*(.+?)(?:\s*\[#(\d+)\])?$
 ```
 
 ### Capture Groups
