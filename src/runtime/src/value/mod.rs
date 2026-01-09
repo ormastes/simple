@@ -26,6 +26,7 @@ mod contracts;
 mod core;
 pub mod diagram_ffi;
 mod dict;
+pub mod screenshot_ffi;
 mod doctest_io;
 mod ffi;
 mod file_io;
@@ -570,6 +571,25 @@ pub use file_io::{
     sys_munmap,
     sys_open,
 };
+
+// Re-export diagram FFI functions (for spec framework)
+pub use diagram_ffi::{
+    rt_diagram_clear, rt_diagram_disable, rt_diagram_enable, rt_diagram_free_string,
+    rt_diagram_generate_arch, rt_diagram_generate_class, rt_diagram_generate_sequence,
+    rt_diagram_is_enabled, rt_diagram_mark_architectural, rt_diagram_trace_method,
+    rt_diagram_trace_method_with_args, rt_diagram_trace_return,
+};
+
+// Re-export screenshot FFI functions (for spec framework)
+pub use screenshot_ffi::{
+    rt_screenshot_capture_after_terminal, rt_screenshot_capture_before_terminal,
+    rt_screenshot_capture_count, rt_screenshot_clear_captures, rt_screenshot_clear_context,
+    rt_screenshot_disable, rt_screenshot_enable, rt_screenshot_exists, rt_screenshot_free_string,
+    rt_screenshot_get_output_dir, rt_screenshot_get_path, rt_screenshot_is_enabled,
+    rt_screenshot_is_refresh, rt_screenshot_set_context, rt_screenshot_set_output_dir,
+    rt_screenshot_set_refresh,
+};
+pub use screenshot_ffi::{CaptureType, ImageFormat};
 
 // ============================================================================
 // Tests

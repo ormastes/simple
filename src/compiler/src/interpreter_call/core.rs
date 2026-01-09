@@ -62,6 +62,9 @@ use crate::interpreter::{
 };
 use crate::interpreter_unit::{is_unit_type, validate_unit_type};
 use crate::value::*;
+
+// Diagram tracing for call flow profiling
+use simple_runtime::value::diagram_ffi;
 use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef, Parameter, SelfMode, Type};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -391,6 +394,17 @@ fn exec_function_inner(
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);
 
+    // Diagram tracing for call flow profiling
+    if diagram_ffi::is_diagram_enabled() {
+        if let Some((class_name, _)) = self_ctx {
+            // Method call on a class
+            diagram_ffi::trace_method(class_name, &func.name);
+        } else {
+            // Free function call
+            diagram_ffi::trace_call(&func.name);
+        }
+    }
+
     // TODO: [compiler][P2] Re-enable coverage tracking when module is complete
     // if let Some(cov) = crate::coverage::get_global_coverage() {
     //     cov.lock().unwrap().record_function_call(&func.name);
@@ -457,6 +471,11 @@ fn exec_function_with_values_inner(
     // Layout recording for 4KB page locality optimization
     crate::layout_recorder::record_function_call(&func.name);
 
+    // Diagram tracing for call flow profiling
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_call(&func.name);
+    }
+
     // TODO: [compiler][P2] Re-enable coverage tracking when module is complete
     // if let Some(cov) = crate::coverage::get_global_coverage() {
     //     cov.lock().unwrap().record_function_call(&func.name);
@@ -506,6 +525,11 @@ pub(crate) fn instantiate_class(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Diagram tracing for class instantiation
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_method(class_name, "new");
+    }
+
     let class_def = classes
         .get(class_name)
         .cloned()

@@ -15,6 +15,87 @@
 import std.io.fs
 import std.core.json
 
+# ============================================================================
+# FFI Declarations - Runtime Screenshot Functions
+# ============================================================================
+
+# Control functions
+extern fn rt_screenshot_enable() -> Void
+extern fn rt_screenshot_disable() -> Void
+extern fn rt_screenshot_is_enabled() -> Bool
+extern fn rt_screenshot_set_refresh(refresh: Bool) -> Void
+extern fn rt_screenshot_is_refresh() -> Bool
+
+# Output directory
+extern fn rt_screenshot_set_output_dir(dir: String) -> Void
+extern fn rt_screenshot_get_output_dir() -> String
+
+# Test context
+extern fn rt_screenshot_set_context(test_file: String, test_name: String) -> Void
+extern fn rt_screenshot_clear_context() -> Void
+
+# Capture functions
+extern fn rt_screenshot_capture_before_terminal(buffer: String) -> Bool
+extern fn rt_screenshot_capture_after_terminal(buffer: String) -> Bool
+
+# Query functions
+extern fn rt_screenshot_exists(capture_type: Int) -> Bool
+extern fn rt_screenshot_get_path(capture_type: Int) -> String
+extern fn rt_screenshot_capture_count() -> Int
+
+# Clear functions
+extern fn rt_screenshot_clear_captures() -> Void
+
+# Memory management
+extern fn rt_screenshot_free_string(s: String) -> Void
+
+# ============================================================================
+# FFI Wrapper Functions
+# ============================================================================
+
+fn enable_ffi_screenshots() -> Void:
+    rt_screenshot_enable()
+
+fn disable_ffi_screenshots() -> Void:
+    rt_screenshot_disable()
+
+fn is_ffi_screenshots_enabled() -> Bool:
+    return rt_screenshot_is_enabled()
+
+fn set_ffi_refresh(refresh: Bool) -> Void:
+    rt_screenshot_set_refresh(refresh)
+
+fn set_ffi_output_dir(dir: String) -> Void:
+    rt_screenshot_set_output_dir(dir)
+
+fn set_ffi_test_context(test_file: String, test_name: String) -> Void:
+    rt_screenshot_set_context(test_file, test_name)
+
+fn clear_ffi_test_context() -> Void:
+    rt_screenshot_clear_context()
+
+fn capture_before_ffi(buffer: String) -> Bool:
+    return rt_screenshot_capture_before_terminal(buffer)
+
+fn capture_after_ffi(buffer: String) -> Bool:
+    return rt_screenshot_capture_after_terminal(buffer)
+
+# CaptureType enum values matching Rust FFI
+let CAPTURE_TYPE_BEFORE = 0
+let CAPTURE_TYPE_AFTER = 1
+let CAPTURE_TYPE_ON_CHANGE = 2
+
+fn screenshot_exists_ffi(capture_type: Int) -> Bool:
+    return rt_screenshot_exists(capture_type)
+
+fn get_screenshot_path_ffi(capture_type: Int) -> String:
+    return rt_screenshot_get_path(capture_type)
+
+fn clear_ffi_captures() -> Void:
+    rt_screenshot_clear_captures()
+
+# ============================================================================
+
 # Screenshot capture mode
 enum CaptureMode:
     Before       # Capture before test execution
@@ -116,6 +197,9 @@ fn capture_before() -> Void:
         case Some(ctx):
             let buffer = _capture_current_state()
             ctx.before_buffer = Some(buffer)
+            # Also capture via FFI if enabled
+            if is_ffi_screenshots_enabled():
+                capture_before_ffi(buffer)
         case None:
             pass
 
@@ -125,6 +209,9 @@ fn capture_after() -> Void:
         case Some(ctx):
             let buffer = _capture_current_state()
             ctx.after_buffer = Some(buffer)
+            # Also capture via FFI if enabled
+            if is_ffi_screenshots_enabled():
+                capture_after_ffi(buffer)
         case None:
             pass
 
@@ -134,6 +221,9 @@ fn save_screenshots() -> ScreenshotResult:
         case Some(ctx):
             let result = _save_context_screenshots(ctx)
             _screenshot_context = None
+            # Clear FFI context
+            if is_ffi_screenshots_enabled():
+                clear_ffi_test_context()
             return result
         case None:
             return ScreenshotResult(
@@ -155,6 +245,11 @@ fn with_screenshot_config(name: String, config: ScreenshotConfig, block: fn() ->
     let test_file = runtime.get_current_test_file().unwrap_or("unknown")
 
     init_screenshot_context(name, test_file, config)
+
+    # Set FFI context if FFI screenshots are enabled
+    if is_ffi_screenshots_enabled():
+        set_ffi_output_dir(config.output_dir)
+        set_ffi_test_context(test_file, name)
 
     # Capture before state if needed
     match config.capture_mode:
@@ -389,3 +484,14 @@ export CaptureMode, ImageFormat
 export with_screenshot, with_screenshot_config
 export capture_before, capture_after, save_screenshots
 export screenshot_exists, get_screenshot_path, screenshot_markdown
+
+# Export FFI control functions
+export enable_ffi_screenshots, disable_ffi_screenshots, is_ffi_screenshots_enabled
+export set_ffi_refresh, set_ffi_output_dir
+export set_ffi_test_context, clear_ffi_test_context
+export capture_before_ffi, capture_after_ffi
+export screenshot_exists_ffi, get_screenshot_path_ffi
+export clear_ffi_captures
+
+# Export FFI capture type constants
+export CAPTURE_TYPE_BEFORE, CAPTURE_TYPE_AFTER, CAPTURE_TYPE_ON_CHANGE
