@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/concurrency_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -12,6 +12,13 @@
 **Status:** Reference
 **Feature IDs:** **Source:** concurrency.md
 **Note:** This is a test extraction file. For complete specification text,
+
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (24 tests)
+- [Source Code](#source-code)
 
 ## Overview
 
@@ -23,38 +30,214 @@ design rationale, and architecture, see doc/spec/concurrency.md
 
 ---
 
-## Test Cases (24 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [actors_processes_1](#test-1) | Actors (Processes) | spawn: Creates a new process: |
-| [actors_processes_2](#test-2) | Actors (Processes) | send: Sends an asynchronous message to a process: |
-| [actors_processes_3](#test-3) | Actors (Processes) | receive: Waits for messages using pattern matching: |
-| [ping](#test-4) | Actors (Processes) | ```simple... |
-| [handle](#test-5) | Async Effects and Stackless Coroutine Actors | A `async` function is guaranteed by the compiler not to bloc... |
-| [async_effects_and_stackless_coroutine_actors_6](#test-6) | Async Effects and Stackless Coroutine Actors | Allowed loops (must be statically finite): |
-| [async_effects_and_stackless_coroutine_actors_7](#test-7) | Async Effects and Stackless Coroutine Actors | Call rule: A `async` function may only call other `async` fu... |
-| [async_effects_and_stackless_coroutine_actors_8](#test-8) | Async Effects and Stackless Coroutine Actors | Multi-step behavior is modeled by storing state in `self` fi... |
-| [isolated_threads_9](#test-9) | Isolated Threads | 1. No shared mutable state - Cannot access mutable globals... |
-| [isolated_threads_10](#test-10) | Isolated Threads | \| Data Type \| Reason \|... |
-| [futures_and_promises_11](#test-11) | Futures and Promises | In threaded mode, futures execute in a background thread poo... |
-| [futures_and_promises_12](#test-12) | Futures and Promises | Configure the thread pool size: |
-| [futures_and_promises_13](#test-13) | Futures and Promises | For embedded systems or game loops where you need precise co... |
-| [futures_and_promises_14](#test-14) | Futures and Promises | \| Function \| Description \|... |
-| [futures_and_promises_15](#test-15) | Futures and Promises | ```simple... |
-| [fetch_data](#test-16) | Futures and Promises | ```simple... |
-| [futures_and_promises_17](#test-17) | Futures and Promises | \| Combinator \| Description \|... |
-| [futures_and_promises_18](#test-18) | Futures and Promises | ```simple... |
-| [unnamed_test](#test-19) | Futures and Promises | on FetchData(key: String, reply_to: Pid) async:... |
-| [runtime_guards_20](#test-20) | Runtime Guards | When entering a `async` function, the runtime sets a thread-... |
-| [sleep](#test-21) | Runtime Guards | All blocking APIs check this flag: |
-| [failure_handling_22](#test-22) | Failure Handling | In Erlang style, processes can monitor or link to each other... |
-| [failure_handling_23](#test-23) | Failure Handling | Supervisors can restart crashed processes: |
-| [note_on_semantic_types_24](#test-24) | Note on Semantic Types | Actor message types and handler signatures should use semant... |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `Actors` | [1](#actors_processes_1), [2](#actors_processes_2), [3](#actors_processes_3), [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), ... (6 total) |
+| `ActorsProcesses` | [1](#actors_processes_1), [2](#actors_processes_2), [3](#actors_processes_3) |
+| `And` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8), [11](#futures_and_promises_11), [12](#futures_and_promises_12), ... (10 total) |
+| `Async` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8), [20](#runtime_guards_20), [21](#sleep) |
+| `AsyncEffectsAndStacklessCoroutineActors` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `Bytes` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `Channel` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `Check` | [13](#futures_and_promises_13), [15](#futures_and_promises_15) |
+| `Completed` | [14](#futures_and_promises_14) |
+| `Consumer` | [10](#isolated_threads_10) |
+| `Context` | [20](#runtime_guards_20), [21](#sleep) |
+| `Coroutine` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `Counter` | [7](#async_effects_and_stackless_coroutine_actors_7) |
+| `Create` | [13](#futures_and_promises_13), [15](#futures_and_promises_15) |
+| `Currently` | [14](#futures_and_promises_14) |
+| `Damage` | [24](#note_on_semantic_types_24) |
+| `DamageEnemy` | [24](#note_on_semantic_types_24) |
+| `Data` | [8](#async_effects_and_stackless_coroutine_actors_8), [16](#fetch_data), [18](#futures_and_promises_18) |
+| `DataService` | [18](#futures_and_promises_18) |
+| `Dict` | [18](#futures_and_promises_18) |
+| `Done` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `Down` | [22](#failure_handling_22) |
+| `Effects` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `EnemyId` | [24](#note_on_semantic_types_24) |
+| `Error` | [23](#failure_handling_23) |
+| `Failure` | [22](#failure_handling_22), [23](#failure_handling_23) |
+| `FailureHandling` | [22](#failure_handling_22), [23](#failure_handling_23) |
+| `Fetch` | [16](#fetch_data) |
+| `FetchData` | [16](#fetch_data), [18](#futures_and_promises_18) |
+| `Fulfilled` | [14](#futures_and_promises_14) |
+| `Future` | [17](#futures_and_promises_17) |
+| `FutureState` | [14](#futures_and_promises_14) |
+| `Futures` | [11](#futures_and_promises_11), [12](#futures_and_promises_12), [13](#futures_and_promises_13), [14](#futures_and_promises_14), [15](#futures_and_promises_15), ... (7 total) |
+| `FuturesAndPromises` | [11](#futures_and_promises_11), [12](#futures_and_promises_12), [13](#futures_and_promises_13), [14](#futures_and_promises_14), [15](#futures_and_promises_15), ... (7 total) |
+| `GameWorld` | [24](#note_on_semantic_types_24) |
+| `Get` | [7](#async_effects_and_stackless_coroutine_actors_7) |
+| `GetData` | [19](#unnamed_test) |
+| `Got` | [3](#actors_processes_3) |
+| `Guards` | [20](#runtime_guards_20) |
+| `Handle` | [5](#handle) |
+| `Handling` | [22](#failure_handling_22), [23](#failure_handling_23) |
+| `HitPoints` | [24](#note_on_semantic_types_24) |
+| `Inc` | [7](#async_effects_and_stackless_coroutine_actors_7) |
+| `Isolated` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `IsolatedThreads` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `Link` | [22](#failure_handling_22) |
+| `List` | [23](#failure_handling_23) |
+| `Message` | [24](#note_on_semantic_types_24) |
+| `Monitor` | [22](#failure_handling_22) |
+| `Msg` | [2](#actors_processes_2), [3](#actors_processes_3), [5](#handle), [19](#unnamed_test) |
+| `Not` | [14](#futures_and_promises_14), [24](#note_on_semantic_types_24) |
+| `Note` | [24](#note_on_semantic_types_24) |
+| `NoteOnSemanticTypes` | [24](#note_on_semantic_types_24) |
+| `ParserMode` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `Pending` | [14](#futures_and_promises_14) |
+| `Pid` | [7](#async_effects_and_stackless_coroutine_actors_7), [18](#futures_and_promises_18), [19](#unnamed_test), [23](#failure_handling_23) |
+| `Ping` | [4](#ping) |
+| `Poll` | [13](#futures_and_promises_13) |
+| `Pong` | [4](#ping) |
+| `Position` | [24](#note_on_semantic_types_24) |
+| `Process` | [22](#failure_handling_22) |
+| `Processes` | [1](#actors_processes_1), [2](#actors_processes_2), [3](#actors_processes_3) |
+| `Producer` | [10](#isolated_threads_10) |
+| `Promises` | [11](#futures_and_promises_11), [12](#futures_and_promises_12), [13](#futures_and_promises_13), [14](#futures_and_promises_14), [15](#futures_and_promises_15), ... (7 total) |
+| `ReadingBody` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `ReadingHeader` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `Rejected` | [14](#futures_and_promises_14) |
+| `Request` | [19](#unnamed_test) |
+| `Reset` | [7](#async_effects_and_stackless_coroutine_actors_7) |
+| `Restart` | [23](#failure_handling_23) |
+| `Running` | [14](#futures_and_promises_14) |
+| `Runtime` | [20](#runtime_guards_20) |
+| `RuntimeGuards` | [20](#runtime_guards_20) |
+| `Semantic` | [24](#note_on_semantic_types_24) |
+| `Set` | [13](#futures_and_promises_13) |
+| `Sleep` | [21](#sleep) |
+| `SpawnEnemy` | [24](#note_on_semantic_types_24) |
+| `Stackless` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `StreamParser` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `String` | [18](#futures_and_promises_18) |
+| `Supervisor` | [23](#failure_handling_23) |
+| `TLS` | [20](#runtime_guards_20), [21](#sleep) |
+| `Threads` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `Types` | [24](#note_on_semantic_types_24) |
+| `Unnamed` | [19](#unnamed_test) |
+| `Use` | [12](#futures_and_promises_12) |
+| `WorkerCrashed` | [23](#failure_handling_23) |
+| `actors` | [1](#actors_processes_1), [2](#actors_processes_2), [3](#actors_processes_3), [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), ... (6 total) |
+| `actors_processes` | [1](#actors_processes_1), [2](#actors_processes_2), [3](#actors_processes_3) |
+| `all` | [17](#futures_and_promises_17) |
+| `and` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8), [11](#futures_and_promises_11), [12](#futures_and_promises_12), ... (10 total) |
+| `any` | [17](#futures_and_promises_17) |
+| `append` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `assert_compiles` | [1](#actors_processes_1), [2](#actors_processes_2), [3](#actors_processes_3), [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), ... (19 total) |
+| `async` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `async_effects_and_stackless_coroutine_actors` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `async_mode` | [13](#futures_and_promises_13) |
+| `async_workers` | [12](#futures_and_promises_12) |
+| `body_complete` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `case` | [3](#actors_processes_3) |
+| `close` | [10](#isolated_threads_10) |
+| `compute_physics` | [13](#futures_and_promises_13) |
+| `compute_value` | [15](#futures_and_promises_15) |
+| `coroutine` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `data` | [16](#fetch_data) |
+| `do_work` | [1](#actors_processes_1) |
+| `effects` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `empty` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `expensive_computation` | [11](#futures_and_promises_11) |
+| `failure` | [22](#failure_handling_22), [23](#failure_handling_23) |
+| `failure_handling` | [22](#failure_handling_22), [23](#failure_handling_23) |
+| `fetch` | [16](#fetch_data) |
+| `fetch_data` | [11](#futures_and_promises_11), [16](#fetch_data) |
+| `fetch_from_remote` | [18](#futures_and_promises_18) |
+| `future` | [11](#futures_and_promises_11), [13](#futures_and_promises_13), [15](#futures_and_promises_15) |
+| `futures` | [11](#futures_and_promises_11), [12](#futures_and_promises_12), [13](#futures_and_promises_13), [14](#futures_and_promises_14), [15](#futures_and_promises_15), ... (7 total) |
+| `futures_and_promises` | [11](#futures_and_promises_11), [12](#futures_and_promises_12), [13](#futures_and_promises_13), [14](#futures_and_promises_14), [15](#futures_and_promises_15), ... (7 total) |
+| `game_loop` | [13](#futures_and_promises_13) |
+| `get_a` | [17](#futures_and_promises_17) |
+| `get_b` | [17](#futures_and_promises_17) |
+| `get_c` | [17](#futures_and_promises_17) |
+| `guards` | [20](#runtime_guards_20) |
+| `handle` | [5](#handle), [6](#async_effects_and_stackless_coroutine_actors_6) |
+| `handle_data` | [3](#actors_processes_3) |
+| `handling` | [22](#failure_handling_22), [23](#failure_handling_23) |
+| `header_complete` | [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `http_get` | [16](#fetch_data) |
+| `is_ready` | [13](#futures_and_promises_13), [15](#futures_and_promises_15) |
+| `isolated` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `isolated_threads` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `let` | [19](#unnamed_test) |
+| `link` | [22](#failure_handling_22) |
+| `monitor` | [22](#failure_handling_22) |
+| `new` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `note` | [24](#note_on_semantic_types_24) |
+| `note_on_semantic_types` | [24](#note_on_semantic_types_24) |
+| `panic` | [21](#sleep) |
+| `parse` | [16](#fetch_data) |
+| `ping` | [4](#ping) |
+| `poll_all_futures` | [13](#futures_and_promises_13) |
+| `poll_future` | [13](#futures_and_promises_13) |
+| `pong` | [4](#ping) |
+| `process` | [6](#async_effects_and_stackless_coroutine_actors_6), [22](#failure_handling_22) |
+| `processes` | [1](#actors_processes_1), [2](#actors_processes_2), [3](#actors_processes_3), [22](#failure_handling_22) |
+| `promises` | [11](#futures_and_promises_11), [12](#futures_and_promises_12), [13](#futures_and_promises_13), [14](#futures_and_promises_14), [15](#futures_and_promises_15), ... (7 total) |
+| `race` | [17](#futures_and_promises_17) |
+| `range` | [4](#ping) |
+| `recv` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `rejected` | [15](#futures_and_promises_15) |
+| `render` | [13](#futures_and_promises_13) |
+| `replace` | [23](#failure_handling_23) |
+| `request` | [19](#unnamed_test) |
+| `resolved` | [15](#futures_and_promises_15) |
+| `runtime` | [20](#runtime_guards_20) |
+| `runtime_guards` | [20](#runtime_guards_20) |
+| `self` | [1](#actors_processes_1) |
+| `semantic` | [24](#note_on_semantic_types_24) |
+| `send` | [1](#actors_processes_1), [2](#actors_processes_2), [4](#ping), [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `sender` | [4](#ping) |
+| `sleep` | [21](#sleep) |
+| `spawn` | [1](#actors_processes_1), [4](#ping) |
+| `spawn_isolated` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `spawn_worker` | [23](#failure_handling_23) |
+| `stackless` | [6](#async_effects_and_stackless_coroutine_actors_6), [7](#async_effects_and_stackless_coroutine_actors_7), [8](#async_effects_and_stackless_coroutine_actors_8) |
+| `sum` | [9](#isolated_threads_9) |
+| `threads` | [9](#isolated_threads_9), [10](#isolated_threads_10) |
+| `types` | [24](#note_on_semantic_types_24) |
+| `unnamed` | [19](#unnamed_test) |
+| `update_ai` | [13](#futures_and_promises_13) |
 
 ---
 
-### Test 1: Actors (Processes)
+## Test Cases (24 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [actors_processes_1](#actors_processes_1) | Actors (Processes) | `Processes`, `Actors`, `actors_processes` +8 |
+| 2 | [actors_processes_2](#actors_processes_2) | Actors (Processes) | `Processes`, `Actors`, `actors_processes` +6 |
+| 3 | [actors_processes_3](#actors_processes_3) | Actors (Processes) | `Processes`, `Actors`, `actors_processes` +8 |
+| 4 | [ping](#ping) | Actors (Processes) | `ping`, `Ping`, `range` +5 |
+| 5 | [handle](#handle) | Async Effects and Stackless Coroutine Actors | `Handle`, `handle`, `Msg` |
+| 6 | [async_effects_and_stackless_coroutine_actors_6](#async_effects_and_stackless_coroutine_actors_6) | Async Effects and Stackless Coroutine Actors | `Async`, `stackless`, `AsyncEffectsAndStacklessCoroutineActors` +14 |
+| 7 | [async_effects_and_stackless_coroutine_actors_7](#async_effects_and_stackless_coroutine_actors_7) | Async Effects and Stackless Coroutine Actors | `Async`, `stackless`, `AsyncEffectsAndStacklessCoroutineActors` +17 |
+| 8 | [async_effects_and_stackless_coroutine_actors_8](#async_effects_and_stackless_coroutine_actors_8) | Async Effects and Stackless Coroutine Actors | `Async`, `stackless`, `AsyncEffectsAndStacklessCoroutineActors` +23 |
+| 9 | [isolated_threads_9](#isolated_threads_9) | Isolated Threads | `Isolated`, `isolated`, `IsolatedThreads` +10 |
+| 10 | [isolated_threads_10](#isolated_threads_10) | Isolated Threads | `Isolated`, `isolated`, `IsolatedThreads` +12 |
+| 11 | [futures_and_promises_11](#futures_and_promises_11) | Futures and Promises | `futures`, `FuturesAndPromises`, `promises` +9 |
+| 12 | [futures_and_promises_12](#futures_and_promises_12) | Futures and Promises | `futures`, `FuturesAndPromises`, `promises` +8 |
+| 13 | [futures_and_promises_13](#futures_and_promises_13) | Futures and Promises | `futures`, `FuturesAndPromises`, `promises` +19 |
+| 14 | [futures_and_promises_14](#futures_and_promises_14) | Futures and Promises | `futures`, `FuturesAndPromises`, `promises` +14 |
+| 15 | [futures_and_promises_15](#futures_and_promises_15) | Futures and Promises | `futures`, `FuturesAndPromises`, `promises` +13 |
+| 16 | [fetch_data](#fetch_data) | Futures and Promises | `fetch`, `fetch_data`, `data` +5 |
+| 17 | [futures_and_promises_17](#futures_and_promises_17) | Futures and Promises | `futures`, `FuturesAndPromises`, `promises` +13 |
+| 18 | [futures_and_promises_18](#futures_and_promises_18) | Futures and Promises | `futures`, `FuturesAndPromises`, `promises` +13 |
+| 19 | [unnamed_test](#unnamed_test) | Futures and Promises | `Unnamed`, `unnamed`, `let` +5 |
+| 20 | [runtime_guards_20](#runtime_guards_20) | Runtime Guards | `Guards`, `guards`, `Runtime` +7 |
+| 21 | [sleep](#sleep) | Runtime Guards | `Sleep`, `sleep`, `Async` +3 |
+| 22 | [failure_handling_22](#failure_handling_22) | Failure Handling | `failure_handling`, `FailureHandling`, `Failure` +12 |
+| 23 | [failure_handling_23](#failure_handling_23) | Failure Handling | `failure_handling`, `FailureHandling`, `Failure` +12 |
+| 24 | [note_on_semantic_types_24](#note_on_semantic_types_24) | Note on Semantic Types | `NoteOnSemanticTypes`, `note`, `Note` +15 |
+
+---
+
+### Test 1: Actors (Processes) {#actors_processes_1}
 
 *Source line: ~9*
 
@@ -63,6 +246,19 @@ design rationale, and architecture, see doc/spec/concurrency.md
 **Description:**
 
 spawn: Creates a new process:
+
+**Linked Symbols:**
+- `Processes`
+- `Actors`
+- `actors_processes`
+- `actors`
+- `processes`
+- `ActorsProcesses`
+- `assert_compiles`
+- `self`
+- `spawn`
+- `send`
+- ... and 1 more
 
 **Code:**
 
@@ -75,7 +271,7 @@ test "actors_processes_1":
     assert_compiles()
 ```
 
-### Test 2: Actors (Processes)
+### Test 2: Actors (Processes) {#actors_processes_2}
 
 *Source line: ~18*
 
@@ -84,6 +280,17 @@ test "actors_processes_1":
 **Description:**
 
 send: Sends an asynchronous message to a process:
+
+**Linked Symbols:**
+- `Processes`
+- `Actors`
+- `actors_processes`
+- `actors`
+- `processes`
+- `ActorsProcesses`
+- `assert_compiles`
+- `send`
+- `Msg`
 
 **Code:**
 
@@ -94,7 +301,7 @@ test "actors_processes_2":
     assert_compiles()
 ```
 
-### Test 3: Actors (Processes)
+### Test 3: Actors (Processes) {#actors_processes_3}
 
 *Source line: ~27*
 
@@ -103,6 +310,19 @@ test "actors_processes_2":
 **Description:**
 
 receive: Waits for messages using pattern matching:
+
+**Linked Symbols:**
+- `Processes`
+- `Actors`
+- `actors_processes`
+- `actors`
+- `processes`
+- `ActorsProcesses`
+- `assert_compiles`
+- `handle_data`
+- `Msg`
+- `Got`
+- ... and 1 more
 
 **Code:**
 
@@ -120,7 +340,7 @@ test "actors_processes_3":
     assert_compiles()
 ```
 
-### Test 4: Actors (Processes)
+### Test 4: Actors (Processes) {#ping}
 
 *Source line: ~41*
 
@@ -134,6 +354,16 @@ receive:
         print "pong"
     case ("add", x, y):
         print "{x} ...
+
+**Linked Symbols:**
+- `ping`
+- `Ping`
+- `range`
+- `pong`
+- `sender`
+- `spawn`
+- `send`
+- `Pong`
 
 **Code:**
 
@@ -161,7 +391,7 @@ spawn(fn(): ping(pong_pid, count: 3))
 send(pong_pid, :done)
 ```
 
-### Test 5: Async Effects and Stackless Coroutine Actors
+### Test 5: Async Effects and Stackless Coroutine Actors {#handle}
 
 *Source line: ~9*
 
@@ -171,6 +401,11 @@ send(pong_pid, :done)
 
 A `async` function is guaranteed by the compiler not to block or spin forever:
 
+**Linked Symbols:**
+- `Handle`
+- `handle`
+- `Msg`
+
 **Code:**
 
 ```simple
@@ -179,7 +414,7 @@ fn handle(msg: Msg) async:
     ...
 ```
 
-### Test 6: Async Effects and Stackless Coroutine Actors
+### Test 6: Async Effects and Stackless Coroutine Actors {#async_effects_and_stackless_coroutine_actors_6}
 
 *Source line: ~27*
 
@@ -188,6 +423,19 @@ fn handle(msg: Msg) async:
 **Description:**
 
 Allowed loops (must be statically finite):
+
+**Linked Symbols:**
+- `Async`
+- `stackless`
+- `AsyncEffectsAndStacklessCoroutineActors`
+- `async_effects_and_stackless_coroutine_actors`
+- `Effects`
+- `coroutine`
+- `and`
+- `Actors`
+- `actors`
+- `effects`
+- ... and 7 more
 
 **Code:**
 
@@ -204,7 +452,7 @@ test "async_effects_and_stackless_coroutine_actors_6":
     assert_compiles()
 ```
 
-### Test 7: Async Effects and Stackless Coroutine Actors
+### Test 7: Async Effects and Stackless Coroutine Actors {#async_effects_and_stackless_coroutine_actors_7}
 
 *Source line: ~49*
 
@@ -213,6 +461,19 @@ test "async_effects_and_stackless_coroutine_actors_6":
 **Description:**
 
 Call rule: A `async` function may only call other `async` functions or whitelisted intrinsics.
+
+**Linked Symbols:**
+- `Async`
+- `stackless`
+- `AsyncEffectsAndStacklessCoroutineActors`
+- `async_effects_and_stackless_coroutine_actors`
+- `Effects`
+- `coroutine`
+- `and`
+- `Actors`
+- `actors`
+- `effects`
+- ... and 10 more
 
 **Code:**
 
@@ -233,7 +494,7 @@ test "async_effects_and_stackless_coroutine_actors_7":
     assert_compiles()
 ```
 
-### Test 8: Async Effects and Stackless Coroutine Actors
+### Test 8: Async Effects and Stackless Coroutine Actors {#async_effects_and_stackless_coroutine_actors_8}
 
 *Source line: ~81*
 
@@ -242,6 +503,19 @@ test "async_effects_and_stackless_coroutine_actors_7":
 **Description:**
 
 Multi-step behavior is modeled by storing state in `self` fields (state machines):
+
+**Linked Symbols:**
+- `Async`
+- `stackless`
+- `AsyncEffectsAndStacklessCoroutineActors`
+- `async_effects_and_stackless_coroutine_actors`
+- `Effects`
+- `coroutine`
+- `and`
+- `Actors`
+- `actors`
+- `effects`
+- ... and 16 more
 
 **Code:**
 
@@ -272,7 +546,7 @@ test "async_effects_and_stackless_coroutine_actors_8":
     assert_compiles()
 ```
 
-### Test 9: Isolated Threads
+### Test 9: Isolated Threads {#isolated_threads_9}
 
 *Source line: ~14*
 
@@ -282,6 +556,19 @@ test "async_effects_and_stackless_coroutine_actors_8":
 
 1. No shared mutable state - Cannot access mutable globals
 2. Copy or const only - Data must be copi...
+
+**Linked Symbols:**
+- `Isolated`
+- `isolated`
+- `IsolatedThreads`
+- `threads`
+- `isolated_threads`
+- `Threads`
+- `assert_compiles`
+- `Channel`
+- `spawn_isolated`
+- `new`
+- ... and 3 more
 
 **Code:**
 
@@ -298,7 +585,7 @@ test "isolated_threads_9":
     assert_compiles()
 ```
 
-### Test 10: Isolated Threads
+### Test 10: Isolated Threads {#isolated_threads_10}
 
 *Source line: ~46*
 
@@ -310,6 +597,19 @@ test "isolated_threads_9":
 |-----------|--------|
 | Mutable globals | Would create data races |
 | `stati...
+
+**Linked Symbols:**
+- `Isolated`
+- `isolated`
+- `IsolatedThreads`
+- `threads`
+- `isolated_threads`
+- `Threads`
+- `assert_compiles`
+- `close`
+- `Channel`
+- `spawn_isolated`
+- ... and 5 more
 
 **Code:**
 
@@ -335,7 +635,7 @@ test "isolated_threads_10":
     assert_compiles()
 ```
 
-### Test 11: Futures and Promises
+### Test 11: Futures and Promises {#futures_and_promises_11}
 
 *Source line: ~18*
 
@@ -344,6 +644,19 @@ test "isolated_threads_10":
 **Description:**
 
 In threaded mode, futures execute in a background thread pool similar to JavaScript's event loop. Wh...
+
+**Linked Symbols:**
+- `futures`
+- `FuturesAndPromises`
+- `promises`
+- `and`
+- `futures_and_promises`
+- `Promises`
+- `Futures`
+- `And`
+- `assert_compiles`
+- `fetch_data`
+- ... and 2 more
 
 **Code:**
 
@@ -359,7 +672,7 @@ test "futures_and_promises_11":
     assert_compiles()
 ```
 
-### Test 12: Futures and Promises
+### Test 12: Futures and Promises {#futures_and_promises_12}
 
 *Source line: ~30*
 
@@ -369,6 +682,19 @@ test "futures_and_promises_11":
 
 Configure the thread pool size:
 
+**Linked Symbols:**
+- `futures`
+- `FuturesAndPromises`
+- `promises`
+- `and`
+- `futures_and_promises`
+- `Promises`
+- `Futures`
+- `And`
+- `async_workers`
+- `assert_compiles`
+- ... and 1 more
+
 **Code:**
 
 ```simple
@@ -377,7 +703,7 @@ test "futures_and_promises_12":
     assert_compiles()
 ```
 
-### Test 13: Futures and Promises
+### Test 13: Futures and Promises {#futures_and_promises_13}
 
 *Source line: ~38*
 
@@ -386,6 +712,19 @@ test "futures_and_promises_12":
 **Description:**
 
 For embedded systems or game loops where you need precise control over when async work executes, use...
+
+**Linked Symbols:**
+- `futures`
+- `FuturesAndPromises`
+- `promises`
+- `and`
+- `futures_and_promises`
+- `Promises`
+- `Futures`
+- `And`
+- `assert_compiles`
+- `poll_all_futures`
+- ... and 12 more
 
 **Code:**
 
@@ -416,7 +755,7 @@ test "futures_and_promises_13":
     assert_compiles()
 ```
 
-### Test 14: Futures and Promises
+### Test 14: Futures and Promises {#futures_and_promises_14}
 
 *Source line: ~77*
 
@@ -427,6 +766,19 @@ test "futures_and_promises_13":
 | Function | Description |
 |----------|-------------|
 | `async_mode()` | Get current mode ("threaded...
+
+**Linked Symbols:**
+- `futures`
+- `FuturesAndPromises`
+- `promises`
+- `and`
+- `futures_and_promises`
+- `Promises`
+- `Futures`
+- `And`
+- `assert_compiles`
+- `Completed`
+- ... and 7 more
 
 **Code:**
 
@@ -440,7 +792,7 @@ test "futures_and_promises_14":
     assert_compiles()
 ```
 
-### Test 15: Futures and Promises
+### Test 15: Futures and Promises {#futures_and_promises_15}
 
 *Source line: ~87*
 
@@ -453,6 +805,19 @@ enum FutureState:
     Pending     # Not started
     Running     # Currently executing
     ...
+
+**Linked Symbols:**
+- `futures`
+- `FuturesAndPromises`
+- `promises`
+- `and`
+- `futures_and_promises`
+- `Promises`
+- `Futures`
+- `And`
+- `assert_compiles`
+- `compute_value`
+- ... and 6 more
 
 **Code:**
 
@@ -473,7 +838,7 @@ test "futures_and_promises_15":
     assert_compiles()
 ```
 
-### Test 16: Futures and Promises
+### Test 16: Futures and Promises {#fetch_data}
 
 *Source line: ~104*
 
@@ -485,6 +850,16 @@ test "futures_and_promises_15":
 # Create a future that computes a value
 let f = future(compute_value())
 
+**Linked Symbols:**
+- `fetch`
+- `fetch_data`
+- `data`
+- `Data`
+- `Fetch`
+- `FetchData`
+- `parse`
+- `http_get`
+
 **Code:**
 
 ```simple
@@ -493,7 +868,7 @@ fn fetch_data() async -> Data:
     return parse(response)
 ```
 
-### Test 17: Futures and Promises
+### Test 17: Futures and Promises {#futures_and_promises_17}
 
 *Source line: ~124*
 
@@ -506,6 +881,19 @@ fn fetch_data() async -> Data:
 | `then` | Transform result |
 | `catch` | ...
 
+**Linked Symbols:**
+- `futures`
+- `FuturesAndPromises`
+- `promises`
+- `and`
+- `futures_and_promises`
+- `Promises`
+- `Futures`
+- `And`
+- `assert_compiles`
+- `all`
+- ... and 6 more
+
 **Code:**
 
 ```simple
@@ -517,7 +905,7 @@ test "futures_and_promises_17":
     assert_compiles()
 ```
 
-### Test 18: Futures and Promises
+### Test 18: Futures and Promises {#futures_and_promises_18}
 
 *Source line: ~133*
 
@@ -529,6 +917,19 @@ test "futures_and_promises_17":
 let futures = [get_a(), get_b(), get_c()]
 let all_results = Future.all(futures)
 let first ...
+
+**Linked Symbols:**
+- `futures`
+- `FuturesAndPromises`
+- `promises`
+- `and`
+- `futures_and_promises`
+- `Promises`
+- `Futures`
+- `And`
+- `fetch_from_remote`
+- `assert_compiles`
+- ... and 6 more
 
 **Code:**
 
@@ -548,7 +949,7 @@ test "futures_and_promises_18":
     assert_compiles()
 ```
 
-### Test 19: Futures and Promises
+### Test 19: Futures and Promises {#unnamed_test}
 
 *Source line: ~149*
 
@@ -559,6 +960,16 @@ test "futures_and_promises_18":
 on FetchData(key: String, reply_to: Pid) async:
         if key in self.cache:
             send reply...
+
+**Linked Symbols:**
+- `Unnamed`
+- `unnamed`
+- `let`
+- `Request`
+- `request`
+- `Pid`
+- `Msg`
+- `GetData`
 
 **Code:**
 
@@ -571,7 +982,7 @@ fn request<T>(pid: Pid, msg: Msg) async -> T:
 let result = await request(service_pid, GetData("key"))
 ```
 
-### Test 20: Runtime Guards
+### Test 20: Runtime Guards {#runtime_guards_20}
 
 *Source line: ~7*
 
@@ -581,6 +992,18 @@ let result = await request(service_pid, GetData("key"))
 
 When entering a `async` function, the runtime sets a thread-local flag:
 
+**Linked Symbols:**
+- `Guards`
+- `guards`
+- `Runtime`
+- `RuntimeGuards`
+- `runtime`
+- `runtime_guards`
+- `assert_compiles`
+- `TLS`
+- `Async`
+- `Context`
+
 **Code:**
 
 ```simple
@@ -589,7 +1012,7 @@ test "runtime_guards_20":
     assert_compiles()
 ```
 
-### Test 21: Runtime Guards
+### Test 21: Runtime Guards {#sleep}
 
 *Source line: ~13*
 
@@ -599,6 +1022,14 @@ test "runtime_guards_20":
 
 All blocking APIs check this flag:
 
+**Linked Symbols:**
+- `Sleep`
+- `sleep`
+- `Async`
+- `panic`
+- `TLS`
+- `Context`
+
 **Code:**
 
 ```simple
@@ -607,7 +1038,7 @@ fn sleep(ms: i64):
         panic("sleep() called from async context")
 ```
 
-### Test 22: Failure Handling
+### Test 22: Failure Handling {#failure_handling_22}
 
 *Source line: ~5*
 
@@ -616,6 +1047,19 @@ fn sleep(ms: i64):
 **Description:**
 
 In Erlang style, processes can monitor or link to each other:
+
+**Linked Symbols:**
+- `failure_handling`
+- `FailureHandling`
+- `Failure`
+- `failure`
+- `Handling`
+- `handling`
+- `assert_compiles`
+- `process`
+- `Down`
+- `link`
+- ... and 5 more
 
 **Code:**
 
@@ -633,7 +1077,7 @@ test "failure_handling_22":
     assert_compiles()
 ```
 
-### Test 23: Failure Handling
+### Test 23: Failure Handling {#failure_handling_23}
 
 *Source line: ~19*
 
@@ -642,6 +1086,19 @@ test "failure_handling_22":
 **Description:**
 
 Supervisors can restart crashed processes:
+
+**Linked Symbols:**
+- `failure_handling`
+- `FailureHandling`
+- `Failure`
+- `failure`
+- `Handling`
+- `handling`
+- `assert_compiles`
+- `spawn_worker`
+- `replace`
+- `List`
+- ... and 5 more
 
 **Code:**
 
@@ -658,7 +1115,7 @@ test "failure_handling_23":
     assert_compiles()
 ```
 
-### Test 24: Note on Semantic Types
+### Test 24: Note on Semantic Types {#note_on_semantic_types_24}
 
 *Source line: ~5*
 
@@ -667,6 +1124,19 @@ test "failure_handling_23":
 **Description:**
 
 Actor message types and handler signatures should use semantic types:
+
+**Linked Symbols:**
+- `NoteOnSemanticTypes`
+- `note`
+- `Note`
+- `Types`
+- `Semantic`
+- `note_on_semantic_types`
+- `types`
+- `semantic`
+- `assert_compiles`
+- `GameWorld`
+- ... and 8 more
 
 **Code:**
 
@@ -689,6 +1159,12 @@ test "note_on_semantic_types_24":
             ...
     assert_compiles()
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [concurrency_spec.spl](../../tests/specs/concurrency_spec.spl)
 
 ---
 

@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/memory_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -12,6 +12,13 @@
 **Status:** Reference
 **Feature IDs:** **Source:** memory.md
 **Note:** This is a test extraction file. For complete specification text,
+
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (17 tests)
+- [Source Code](#source-code)
 
 ## Overview
 
@@ -23,31 +30,127 @@ design rationale, and architecture, see doc/spec/memory.md
 
 ---
 
-## Test Cases (17 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [reference_and_pointer_kinds_1](#test-1) | Reference and Pointer Kinds | A bare type `T` is a GC-managed reference to a heap object: |
-| [reference_and_pointer_kinds_2](#test-2) | Reference and Pointer Kinds | - Exactly one owner at a time... |
-| [reference_and_pointer_kinds_3](#test-3) | Reference and Pointer Kinds | - Multiple owners allowed... |
-| [reference_and_pointer_kinds_4](#test-4) | Reference and Pointer Kinds | - Non-owning reference to an object managed by `*T` (or GC)... |
-| [reference_and_pointer_kinds_5](#test-5) | Reference and Pointer Kinds | - A small ID (typically `(slot_index, generation)`) into a g... |
-| [allocation_forms_new_variants_6](#test-6) | Allocation Forms (`new` Variants) | \| Form \| Returns \| Ownership \|... |
-| [allocation_forms_new_variants_7](#test-7) | Allocation Forms (`new` Variants) | - Allocate `T` on the manual heap... |
-| [allocation_forms_new_variants_8](#test-8) | Allocation Forms (`new` Variants) | - Allocate `T` with an embedded reference count... |
-| [allocation_forms_new_variants_9](#test-9) | Allocation Forms (`new` Variants) | - Convenience for creating a weak pointer to a freshly alloc... |
-| [allocation_forms_new_variants_10](#test-10) | Allocation Forms (`new` Variants) | - Convenience for creating a weak pointer to a freshly alloc... |
-| [global_handle_pools_11](#test-11) | Global Handle Pools | - There can be at most one handle pool... |
-| [global_handle_pools_12](#test-12) | Global Handle Pools | 3. Global scope only: Declaring `handle_pool` inside a funct... |
-| [global_handle_pools_13](#test-13) | Global Handle Pools | Accessing handle data: |
-| [global_handle_pools_14](#test-14) | Global Handle Pools |  |
-| [damage_enemy](#test-15) | Borrowing | The compiler enforces that borrows never outlive their sourc... |
-| [example_game_entity_system_with_handles_16](#test-16) | Example: Game Entity System with Handles | Example: Game Entity System with Handles |
-| [note_on_option_types_17](#test-17) | Note on Option Types | Handle operations like `handle_get`, `handle_get_mut`, and `... |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `Allocation` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `AllocationFormsNewVariants` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `And` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `Compact` | [16](#example_game_entity_system_with_handles_16) |
+| `DAMAGE` | [16](#example_game_entity_system_with_handles_16) |
+| `Damage` | [15](#damage_enemy) |
+| `DamageEnemy` | [15](#damage_enemy) |
+| `Enemy` | [5](#reference_and_pointer_kinds_5), [10](#allocation_forms_new_variants_10), [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), ... (9 total) |
+| `Entity` | [16](#example_game_entity_system_with_handles_16) |
+| `Ephemeral` | [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9) |
+| `Example` | [16](#example_game_entity_system_with_handles_16) |
+| `ExampleGameEntitySystemWithHandles` | [16](#example_game_entity_system_with_handles_16) |
+| `Forms` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `Game` | [16](#example_game_entity_system_with_handles_16) |
+| `GameWorld` | [16](#example_game_entity_system_with_handles_16) |
+| `Global` | [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), [14](#global_handle_pools_14) |
+| `GlobalHandlePools` | [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), [14](#global_handle_pools_14) |
+| `Handle` | [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), [14](#global_handle_pools_14) |
+| `Handles` | [16](#example_game_entity_system_with_handles_16) |
+| `Hero` | [1](#reference_and_pointer_kinds_1) |
+| `Invalidate` | [14](#global_handle_pools_14) |
+| `Kinds` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `Later` | [4](#reference_and_pointer_kinds_4) |
+| `List` | [16](#example_game_entity_system_with_handles_16) |
+| `Mutable` | [13](#global_handle_pools_13) |
+| `New` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `Note` | [17](#note_on_option_types_17) |
+| `NoteOnOptionTypes` | [17](#note_on_option_types_17) |
+| `Object` | [3](#reference_and_pointer_kinds_3) |
+| `Option` | [17](#note_on_option_types_17) |
+| `Player` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [6](#allocation_forms_new_variants_6), ... (8 total) |
+| `Pointer` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `Pools` | [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), [14](#global_handle_pools_14) |
+| `Projectile` | [16](#example_game_entity_system_with_handles_16) |
+| `Read` | [13](#global_handle_pools_13) |
+| `Reference` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `ReferenceAndPointerKinds` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `Shared` | [3](#reference_and_pointer_kinds_3), [7](#allocation_forms_new_variants_7) |
+| `Solo` | [2](#reference_and_pointer_kinds_2) |
+| `SpawnEnemy` | [16](#example_game_entity_system_with_handles_16) |
+| `System` | [16](#example_game_entity_system_with_handles_16) |
+| `Target` | [4](#reference_and_pointer_kinds_4) |
+| `Tick` | [16](#example_game_entity_system_with_handles_16) |
+| `Types` | [17](#note_on_option_types_17) |
+| `Unique` | [6](#allocation_forms_new_variants_6) |
+| `Update` | [16](#example_game_entity_system_with_handles_16) |
+| `Variants` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `Vec2` | [16](#example_game_entity_system_with_handles_16) |
+| `With` | [16](#example_game_entity_system_with_handles_16) |
+| `allocation` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `allocation_forms_new_variants` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `and` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `assert_compiles` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5), ... (16 total) |
+| `damage` | [15](#damage_enemy) |
+| `damage_enemy` | [15](#damage_enemy) |
+| `distance` | [16](#example_game_entity_system_with_handles_16) |
+| `enemy` | [15](#damage_enemy) |
+| `entity` | [16](#example_game_entity_system_with_handles_16) |
+| `example` | [16](#example_game_entity_system_with_handles_16) |
+| `example_game_entity_system_with_handles` | [16](#example_game_entity_system_with_handles_16) |
+| `forms` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `game` | [16](#example_game_entity_system_with_handles_16) |
+| `global` | [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), [14](#global_handle_pools_14) |
+| `global_handle_pools` | [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), [14](#global_handle_pools_14) |
+| `handle` | [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), [14](#global_handle_pools_14) |
+| `handle_free` | [14](#global_handle_pools_14), [16](#example_game_entity_system_with_handles_16) |
+| `handle_get` | [13](#global_handle_pools_13) |
+| `handle_get_mut` | [13](#global_handle_pools_13), [15](#damage_enemy), [16](#example_game_entity_system_with_handles_16), [17](#note_on_option_types_17) |
+| `handle_valid` | [16](#example_game_entity_system_with_handles_16) |
+| `handles` | [16](#example_game_entity_system_with_handles_16) |
+| `kinds` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `lists` | [16](#example_game_entity_system_with_handles_16) |
+| `new` | [2](#reference_and_pointer_kinds_2), [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), ... (6 total) |
+| `note` | [17](#note_on_option_types_17) |
+| `note_on_option_types` | [17](#note_on_option_types_17) |
+| `option` | [17](#note_on_option_types_17) |
+| `pointer` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `pools` | [11](#global_handle_pools_11), [12](#global_handle_pools_12), [13](#global_handle_pools_13), [14](#global_handle_pools_14) |
+| `push` | [16](#example_game_entity_system_with_handles_16) |
+| `reference` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `reference_and_pointer_kinds` | [1](#reference_and_pointer_kinds_1), [2](#reference_and_pointer_kinds_2), [3](#reference_and_pointer_kinds_3), [4](#reference_and_pointer_kinds_4), [5](#reference_and_pointer_kinds_5) |
+| `retain` | [16](#example_game_entity_system_with_handles_16) |
+| `system` | [16](#example_game_entity_system_with_handles_16) |
+| `types` | [17](#note_on_option_types_17) |
+| `unusable` | [2](#reference_and_pointer_kinds_2) |
+| `upgrade` | [4](#reference_and_pointer_kinds_4) |
+| `variants` | [6](#allocation_forms_new_variants_6), [7](#allocation_forms_new_variants_7), [8](#allocation_forms_new_variants_8), [9](#allocation_forms_new_variants_9), [10](#allocation_forms_new_variants_10) |
+| `weak_of` | [4](#reference_and_pointer_kinds_4), [9](#allocation_forms_new_variants_9) |
+| `with` | [16](#example_game_entity_system_with_handles_16) |
 
 ---
 
-### Test 1: Reference and Pointer Kinds
+## Test Cases (17 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [reference_and_pointer_kinds_1](#reference_and_pointer_kinds_1) | Reference and Pointer Kinds | `Kinds`, `Reference`, `pointer` +10 |
+| 2 | [reference_and_pointer_kinds_2](#reference_and_pointer_kinds_2) | Reference and Pointer Kinds | `Kinds`, `Reference`, `pointer` +12 |
+| 3 | [reference_and_pointer_kinds_3](#reference_and_pointer_kinds_3) | Reference and Pointer Kinds | `Kinds`, `Reference`, `pointer` +11 |
+| 4 | [reference_and_pointer_kinds_4](#reference_and_pointer_kinds_4) | Reference and Pointer Kinds | `Kinds`, `Reference`, `pointer` +13 |
+| 5 | [reference_and_pointer_kinds_5](#reference_and_pointer_kinds_5) | Reference and Pointer Kinds | `Kinds`, `Reference`, `pointer` +9 |
+| 6 | [allocation_forms_new_variants_6](#allocation_forms_new_variants_6) | Allocation Forms (`new` Variants) | `allocation_forms_new_variants`, `AllocationFormsNewVariants`, `forms` +10 |
+| 7 | [allocation_forms_new_variants_7](#allocation_forms_new_variants_7) | Allocation Forms (`new` Variants) | `allocation_forms_new_variants`, `AllocationFormsNewVariants`, `forms` +10 |
+| 8 | [allocation_forms_new_variants_8](#allocation_forms_new_variants_8) | Allocation Forms (`new` Variants) | `allocation_forms_new_variants`, `AllocationFormsNewVariants`, `forms` +10 |
+| 9 | [allocation_forms_new_variants_9](#allocation_forms_new_variants_9) | Allocation Forms (`new` Variants) | `allocation_forms_new_variants`, `AllocationFormsNewVariants`, `forms` +11 |
+| 10 | [allocation_forms_new_variants_10](#allocation_forms_new_variants_10) | Allocation Forms (`new` Variants) | `allocation_forms_new_variants`, `AllocationFormsNewVariants`, `forms` +9 |
+| 11 | [global_handle_pools_11](#global_handle_pools_11) | Global Handle Pools | `Handle`, `handle`, `global_handle_pools` +7 |
+| 12 | [global_handle_pools_12](#global_handle_pools_12) | Global Handle Pools | `Handle`, `handle`, `global_handle_pools` +7 |
+| 13 | [global_handle_pools_13](#global_handle_pools_13) | Global Handle Pools | `Handle`, `handle`, `global_handle_pools` +11 |
+| 14 | [global_handle_pools_14](#global_handle_pools_14) | Global Handle Pools | `Handle`, `handle`, `global_handle_pools` +9 |
+| 15 | [damage_enemy](#damage_enemy) | Borrowing | `damage_enemy`, `enemy`, `damage` +4 |
+| 16 | [example_game_entity_system_with_handles_16](#example_game_entity_system_with_handles_16) | Example: Game Entity System with Handles | `handles`, `System`, `ExampleGameEntitySystemWithHandles` +29 |
+| 17 | [note_on_option_types_17](#note_on_option_types_17) | Note on Option Types | `option`, `note`, `Note` +8 |
+
+---
+
+### Test 1: Reference and Pointer Kinds {#reference_and_pointer_kinds_1}
 
 *Source line: ~7*
 
@@ -57,6 +160,19 @@ design rationale, and architecture, see doc/spec/memory.md
 
 A bare type `T` is a GC-managed reference to a heap object:
 
+**Linked Symbols:**
+- `Kinds`
+- `Reference`
+- `pointer`
+- `kinds`
+- `reference_and_pointer_kinds`
+- `and`
+- `reference`
+- `Pointer`
+- `ReferenceAndPointerKinds`
+- `And`
+- ... and 3 more
+
 **Code:**
 
 ```simple
@@ -65,7 +181,7 @@ test "reference_and_pointer_kinds_1":
     assert_compiles()
 ```
 
-### Test 2: Reference and Pointer Kinds
+### Test 2: Reference and Pointer Kinds {#reference_and_pointer_kinds_2}
 
 *Source line: ~21*
 
@@ -76,6 +192,19 @@ test "reference_and_pointer_kinds_1":
 - Exactly one owner at a time
 - Move-only (cannot be copied)
 - When the `&T` goes out of scope, the ...
+
+**Linked Symbols:**
+- `Kinds`
+- `Reference`
+- `pointer`
+- `kinds`
+- `reference_and_pointer_kinds`
+- `and`
+- `reference`
+- `Pointer`
+- `ReferenceAndPointerKinds`
+- `And`
+- ... and 5 more
 
 **Code:**
 
@@ -89,7 +218,7 @@ test "reference_and_pointer_kinds_2":
     assert_compiles()
 ```
 
-### Test 3: Reference and Pointer Kinds
+### Test 3: Reference and Pointer Kinds {#reference_and_pointer_kinds_3}
 
 *Source line: ~37*
 
@@ -101,6 +230,19 @@ test "reference_and_pointer_kinds_2":
 - Copying/cloning increments the reference count
 - Object freed when refer...
 
+**Linked Symbols:**
+- `Kinds`
+- `Reference`
+- `pointer`
+- `kinds`
+- `reference_and_pointer_kinds`
+- `and`
+- `reference`
+- `Pointer`
+- `ReferenceAndPointerKinds`
+- `And`
+- ... and 4 more
+
 **Code:**
 
 ```simple
@@ -111,7 +253,7 @@ test "reference_and_pointer_kinds_3":
     assert_compiles()
 ```
 
-### Test 4: Reference and Pointer Kinds
+### Test 4: Reference and Pointer Kinds {#reference_and_pointer_kinds_4}
 
 *Source line: ~51*
 
@@ -122,6 +264,19 @@ test "reference_and_pointer_kinds_3":
 - Non-owning reference to an object managed by `*T` (or GC)
 - Does not keep the object alive
 - Must ...
+
+**Linked Symbols:**
+- `Kinds`
+- `Reference`
+- `pointer`
+- `kinds`
+- `reference_and_pointer_kinds`
+- `and`
+- `reference`
+- `Pointer`
+- `ReferenceAndPointerKinds`
+- `And`
+- ... and 6 more
 
 **Code:**
 
@@ -139,7 +294,7 @@ test "reference_and_pointer_kinds_4":
     assert_compiles()
 ```
 
-### Test 5: Reference and Pointer Kinds
+### Test 5: Reference and Pointer Kinds {#reference_and_pointer_kinds_5}
 
 *Source line: ~72*
 
@@ -150,6 +305,19 @@ test "reference_and_pointer_kinds_4":
 - A small ID (typically `(slot_index, generation)`) into a global handle pool for type `T`
 - Non-own...
 
+**Linked Symbols:**
+- `Kinds`
+- `Reference`
+- `pointer`
+- `kinds`
+- `reference_and_pointer_kinds`
+- `and`
+- `reference`
+- `Pointer`
+- `ReferenceAndPointerKinds`
+- `And`
+- ... and 2 more
+
 **Code:**
 
 ```simple
@@ -159,7 +327,7 @@ test "reference_and_pointer_kinds_5":
     assert_compiles()
 ```
 
-### Test 6: Allocation Forms (`new` Variants)
+### Test 6: Allocation Forms (`new` Variants) {#allocation_forms_new_variants_6}
 
 *Source line: ~14*
 
@@ -171,6 +339,19 @@ test "reference_and_pointer_kinds_5":
 |------|---------|-----------|
 | `new(&) T(...)` | `&T` | Unique (mov...
 
+**Linked Symbols:**
+- `allocation_forms_new_variants`
+- `AllocationFormsNewVariants`
+- `forms`
+- `New`
+- `new`
+- `Forms`
+- `allocation`
+- `variants`
+- `Variants`
+- `Allocation`
+- ... and 3 more
+
 **Code:**
 
 ```simple
@@ -179,7 +360,7 @@ test "allocation_forms_new_variants_6":
     assert_compiles()
 ```
 
-### Test 7: Allocation Forms (`new` Variants)
+### Test 7: Allocation Forms (`new` Variants) {#allocation_forms_new_variants_7}
 
 *Source line: ~29*
 
@@ -192,6 +373,19 @@ test "allocation_forms_new_variants_6":
 - `&T` is move-only:
   - `let b = u` ...
 
+**Linked Symbols:**
+- `allocation_forms_new_variants`
+- `AllocationFormsNewVariants`
+- `forms`
+- `New`
+- `new`
+- `Forms`
+- `allocation`
+- `variants`
+- `Variants`
+- `Allocation`
+- ... and 3 more
+
 **Code:**
 
 ```simple
@@ -200,7 +394,7 @@ test "allocation_forms_new_variants_7":
     assert_compiles()
 ```
 
-### Test 8: Allocation Forms (`new` Variants)
+### Test 8: Allocation Forms (`new` Variants) {#allocation_forms_new_variants_8}
 
 *Source line: ~42*
 
@@ -212,6 +406,19 @@ test "allocation_forms_new_variants_7":
 - Return shared pointer `*T`
 - Copying `*T` incremen...
 
+**Linked Symbols:**
+- `allocation_forms_new_variants`
+- `AllocationFormsNewVariants`
+- `forms`
+- `New`
+- `new`
+- `Forms`
+- `allocation`
+- `variants`
+- `Variants`
+- `Allocation`
+- ... and 3 more
+
 **Code:**
 
 ```simple
@@ -220,7 +427,7 @@ test "allocation_forms_new_variants_8":
     assert_compiles()
 ```
 
-### Test 9: Allocation Forms (`new` Variants)
+### Test 9: Allocation Forms (`new` Variants) {#allocation_forms_new_variants_9}
 
 *Source line: ~50*
 
@@ -231,6 +438,19 @@ test "allocation_forms_new_variants_8":
 - Convenience for creating a weak pointer to a freshly allocated shared object
 - Equivalent to:
 
+**Linked Symbols:**
+- `allocation_forms_new_variants`
+- `AllocationFormsNewVariants`
+- `forms`
+- `New`
+- `new`
+- `Forms`
+- `allocation`
+- `variants`
+- `Variants`
+- `Allocation`
+- ... and 4 more
+
 **Code:**
 
 ```simple
@@ -240,7 +460,7 @@ test "allocation_forms_new_variants_9":
     assert_compiles()
 ```
 
-### Test 10: Allocation Forms (`new` Variants)
+### Test 10: Allocation Forms (`new` Variants) {#allocation_forms_new_variants_10}
 
 *Source line: ~59*
 
@@ -252,6 +472,19 @@ test "allocation_forms_new_variants_9":
 - Equivalent to:
   ``...
 
+**Linked Symbols:**
+- `allocation_forms_new_variants`
+- `AllocationFormsNewVariants`
+- `forms`
+- `New`
+- `new`
+- `Forms`
+- `allocation`
+- `variants`
+- `Variants`
+- `Allocation`
+- ... and 2 more
+
 **Code:**
 
 ```simple
@@ -260,7 +493,7 @@ test "allocation_forms_new_variants_10":
     assert_compiles()
 ```
 
-### Test 11: Global Handle Pools
+### Test 11: Global Handle Pools {#global_handle_pools_11}
 
 *Source line: ~10*
 
@@ -271,6 +504,18 @@ test "allocation_forms_new_variants_10":
 - There can be at most one handle pool
 - It must be declared at global scope
 
+**Linked Symbols:**
+- `Handle`
+- `handle`
+- `global_handle_pools`
+- `GlobalHandlePools`
+- `Pools`
+- `pools`
+- `Global`
+- `global`
+- `assert_compiles`
+- `Enemy`
+
 **Code:**
 
 ```simple
@@ -280,7 +525,7 @@ test "global_handle_pools_11":
     assert_compiles()
 ```
 
-### Test 12: Global Handle Pools
+### Test 12: Global Handle Pools {#global_handle_pools_12}
 
 *Source line: ~33*
 
@@ -289,6 +534,18 @@ test "global_handle_pools_11":
 **Description:**
 
 3. Global scope only: Declaring `handle_pool` inside a function, actor, or block produces a compile-...
+
+**Linked Symbols:**
+- `Handle`
+- `handle`
+- `global_handle_pools`
+- `GlobalHandlePools`
+- `Pools`
+- `pools`
+- `Global`
+- `global`
+- `assert_compiles`
+- `Enemy`
 
 **Code:**
 
@@ -301,7 +558,7 @@ test "global_handle_pools_12":
     assert_compiles()
 ```
 
-### Test 13: Global Handle Pools
+### Test 13: Global Handle Pools {#global_handle_pools_13}
 
 *Source line: ~42*
 
@@ -310,6 +567,19 @@ test "global_handle_pools_12":
 **Description:**
 
 Accessing handle data:
+
+**Linked Symbols:**
+- `Handle`
+- `handle`
+- `global_handle_pools`
+- `GlobalHandlePools`
+- `Pools`
+- `pools`
+- `Global`
+- `global`
+- `assert_compiles`
+- `Mutable`
+- ... and 4 more
 
 **Code:**
 
@@ -331,11 +601,24 @@ test "global_handle_pools_13":
     assert_compiles()
 ```
 
-### Test 14: Global Handle Pools
+### Test 14: Global Handle Pools {#global_handle_pools_14}
 
 *Source line: ~60*
 
 **Test name:** `global_handle_pools_14`
+
+**Linked Symbols:**
+- `Handle`
+- `handle`
+- `global_handle_pools`
+- `GlobalHandlePools`
+- `Pools`
+- `pools`
+- `Global`
+- `global`
+- `assert_compiles`
+- `handle_free`
+- ... and 2 more
 
 **Code:**
 
@@ -345,7 +628,7 @@ test "global_handle_pools_14":
     assert_compiles()
 ```
 
-### Test 15: Borrowing
+### Test 15: Borrowing {#damage_enemy}
 
 *Source line: ~18*
 
@@ -354,6 +637,15 @@ test "global_handle_pools_14":
 **Description:**
 
 The compiler enforces that borrows never outlive their source:
+
+**Linked Symbols:**
+- `damage_enemy`
+- `enemy`
+- `damage`
+- `DamageEnemy`
+- `Enemy`
+- `Damage`
+- `handle_get_mut`
 
 **Code:**
 
@@ -367,7 +659,7 @@ fn damage_enemy(h: +Enemy, amount: i32):
             log "Enemy not found"
 ```
 
-### Test 16: Example: Game Entity System with Handles
+### Test 16: Example: Game Entity System with Handles {#example_game_entity_system_with_handles_16}
 
 *Source line: ~3*
 
@@ -376,6 +668,19 @@ fn damage_enemy(h: +Enemy, amount: i32):
 **Description:**
 
 Example: Game Entity System with Handles
+
+**Linked Symbols:**
+- `handles`
+- `System`
+- `ExampleGameEntitySystemWithHandles`
+- `with`
+- `example`
+- `game`
+- `example_game_entity_system_with_handles`
+- `Entity`
+- `entity`
+- `system`
+- ... and 22 more
 
 **Code:**
 
@@ -418,7 +723,7 @@ test "example_game_entity_system_with_handles_16":
     assert_compiles()
 ```
 
-### Test 17: Note on Option Types
+### Test 17: Note on Option Types {#note_on_option_types_17}
 
 *Source line: ~5*
 
@@ -427,6 +732,19 @@ test "example_game_entity_system_with_handles_16":
 **Description:**
 
 Handle operations like `handle_get`, `handle_get_mut`, and `weak.upgrade()` return `Option[T]` to en...
+
+**Linked Symbols:**
+- `option`
+- `note`
+- `Note`
+- `Types`
+- `note_on_option_types`
+- `Option`
+- `NoteOnOptionTypes`
+- `types`
+- `assert_compiles`
+- `handle_get_mut`
+- ... and 1 more
 
 **Code:**
 
@@ -440,6 +758,12 @@ test "note_on_option_types_17":
             log "Enemy not found"
     assert_compiles()
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [memory_spec.spl](../../tests/specs/memory_spec.spl)
 
 ---
 

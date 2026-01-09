@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/data_structures_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -12,6 +12,13 @@
 **Status:** Reference
 **Feature IDs:** **Source:** data_structures.md
 **Note:** This is a test extraction file. For complete specification text,
+
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (32 tests)
+- [Source Code](#source-code)
 
 ## Overview
 
@@ -23,46 +30,257 @@ design rationale, and architecture, see doc/spec/data_structures.md
 
 ---
 
-## Test Cases (32 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [structs_value_types_1](#test-1) | Structs (Value Types) | Structs are value types (similar to structs in C or Rust). T... |
-| [structs_value_types_2](#test-2) | Structs (Value Types) | Unless marked `mut`, a struct's fields cannot be changed aft... |
-| [classes_reference_types_3](#test-3) | Classes (Reference Types) | Classes are reference types, allocated on the heap and manag... |
-| [classes_reference_types_4](#test-4) | Classes (Reference Types) | By default, class instances are mutable. Use `immut` for imm... |
-| [classes_reference_types_5](#test-5) | Classes (Reference Types) | - Mutable by default - Use `immut class` for immutable class... |
-| [auto_forwarding_properties_getsetis_6](#test-6) | Auto-Forwarding Properties (get/set/is) | Simple provides automatic property forwarding for methods pr... |
-| [auto_forwarding_properties_getsetis_7](#test-7) | Auto-Forwarding Properties (get/set/is) | If only `get_` is defined, the property is read-only from ou... |
-| [auto_forwarding_properties_getsetis_8](#test-8) | Auto-Forwarding Properties (get/set/is) | If only `set_` is defined, the property is write-only from o... |
-| [enums_algebraic_data_types_9](#test-9) | Enums (Algebraic Data Types) | Enums define a type that can be one of several variants, eac... |
-| [handle](#test-10) | Enums (Algebraic Data Types) | Enums are typically used with pattern matching: |
-| [enums_algebraic_data_types_11](#test-11) | Enums (Algebraic Data Types) | Enums can have methods added via impl blocks: |
-| [enums_algebraic_data_types_12](#test-12) | Enums (Algebraic Data Types) | fn scale(self, factor: f64) -> Shape:... |
-| [strong_enums_13](#test-13) | Strong Enums | The `#[strong]` attribute enforces exhaustive explicit match... |
-| [strong_enums_14](#test-14) | Strong Enums | Strong enums prevent bugs when new variants are added: |
-| [strong_enums_15](#test-15) | Strong Enums | Use `#[allow(wildcard_match)]` to allow wildcards in specifi... |
-| [example](#test-16) | Union Types | Simple supports union types for cases where a variable might... |
-| [option_type_17](#test-17) | Option Type | A common enum representing "something or nothing": |
-| [option_type_18](#test-18) | Option Type | Important: Simple requires explicit `Option[T]` for nullable... |
-| [visibility_and_access_19](#test-19) | Visibility and Access | By default, all struct and class fields are publicly readabl... |
-| [result_type_20](#test-20) | Result Type | A common enum representing "success or error": |
-| [read_config](#test-21) | Result Type | The `?` operator propagates errors automatically: |
-| [result_type_22](#test-22) | Result Type | ```simple... |
-| [result_type_23](#test-23) | Result Type | ```simple... |
-| [bitfields_24](#test-24) | Bitfields | Bitfields allow compact representation of data at the bit le... |
-| [bitfields_25](#test-25) | Bitfields | The backing type (`u8`, `u16`, `u32`, `u64`) determines the ... |
-| [bitfields_26](#test-26) | Bitfields | Fields can span multiple bits: |
-| [bitfields_27](#test-27) | Bitfields | \| Property \| Description \|... |
-| [bitfields_28](#test-28) | Bitfields | Use `suffix:repr` for simple bit-width specification. In typ... |
-| [bitfields_29](#test-29) | Bitfields | Use `where` for range inference, overflow behavior, and debu... |
-| [bitfields_30](#test-30) | Bitfields | Unit-typed bitfield fields maintain full type safety: |
-| [bitfields_31](#test-31) | Bitfields | let pos = Position(x: 100_cm, y: 200_cm)... |
-| [bitfields_32](#test-32) | Bitfields | In debug builds, assignments to bit-limited fields are check... |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `APIs` | [19](#visibility_and_access_19) |
+| `Access` | [19](#visibility_and_access_19) |
+| `Active` | [14](#strong_enums_14) |
+| `Added` | [14](#strong_enums_14) |
+| `Algebraic` | [9](#enums_algebraic_data_types_9), [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `Alice` | [3](#classes_reference_types_3), [5](#classes_reference_types_5), [6](#auto_forwarding_properties_getsetis_6) |
+| `Always` | [32](#bitfields_32) |
+| `And` | [19](#visibility_and_access_19) |
+| `Arithmetic` | [30](#bitfields_30) |
+| `Associated` | [11](#enums_algebraic_data_types_11) |
+| `Auto` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `AutoForwardingPropertiesGetsetis` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `BUG` | [14](#strong_enums_14) |
+| `Bad` | [13](#strong_enums_13) |
+| `BadRequest` | [13](#strong_enums_13) |
+| `Bitfields` | [24](#bitfields_24), [25](#bitfields_25), [26](#bitfields_26), [27](#bitfields_27), [28](#bitfields_28), ... (9 total) |
+| `Blue` | [12](#enums_algebraic_data_types_12) |
+| `CORRECT` | [18](#option_type_18) |
+| `Circle` | [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `Clamp` | [31](#bitfields_31) |
+| `ClampTest` | [32](#bitfields_32) |
+| `Classes` | [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5) |
+| `ClassesReferenceTypes` | [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5) |
+| `Clear` | [25](#bitfields_25) |
+| `Click` | [15](#strong_enums_15) |
+| `Clone` | [12](#enums_algebraic_data_types_12) |
+| `Color` | [4](#classes_reference_types_4), [12](#enums_algebraic_data_types_12), [26](#bitfields_26) |
+| `Combined` | [29](#bitfields_29) |
+| `Common` | [12](#enums_algebraic_data_types_12) |
+| `Compact` | [31](#bitfields_31) |
+| `Compile` | [18](#option_type_18) |
+| `Config` | [21](#read_config) |
+| `Counter` | [7](#auto_forwarding_properties_getsetis_7) |
+| `Cursor` | [2](#structs_value_types_2) |
+| `Data` | [9](#enums_algebraic_data_types_9), [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `Debug` | [12](#enums_algebraic_data_types_12), [32](#bitfields_32) |
+| `Drawable` | [12](#enums_algebraic_data_types_12) |
+| `ERROR` | [14](#strong_enums_14), [18](#option_type_18), [30](#bitfields_30) |
+| `Enums` | [9](#enums_algebraic_data_types_9), [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12), [13](#strong_enums_13), [14](#strong_enums_14), ... (6 total) |
+| `EnumsAlgebraicDataTypes` | [9](#enums_algebraic_data_types_9), [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `Equivalent` | [21](#read_config) |
+| `Err` | [9](#enums_algebraic_data_types_9), [10](#handle), [20](#result_type_20), [21](#read_config), [22](#result_type_22) |
+| `Error` | [1](#structs_value_types_1), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8), [10](#handle), [23](#result_type_23) |
+| `Event` | [15](#strong_enums_15) |
+| `Example` | [16](#example) |
+| `Explicit` | [18](#option_type_18), [29](#bitfields_29), [31](#bitfields_31) |
+| `FULL` | [27](#bitfields_27) |
+| `Fields` | [4](#classes_reference_types_4) |
+| `Flags` | [24](#bitfields_24), [25](#bitfields_25) |
+| `Forwarding` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `Get` | [25](#bitfields_25) |
+| `Gets` | [6](#auto_forwarding_properties_getsetis_6) |
+| `Getsetis` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `Green` | [12](#enums_algebraic_data_types_12) |
+| `Handle` | [10](#handle) |
+| `HttpStatus` | [13](#strong_enums_13) |
+| `Implicit` | [18](#option_type_18) |
+| `Inactive` | [14](#strong_enums_14) |
+| `Integer` | [16](#example) |
+| `Internal` | [7](#auto_forwarding_properties_getsetis_7) |
+| `Invalid` | [20](#result_type_20) |
+| `IoError` | [21](#read_config) |
+| `Literals` | [28](#bitfields_28) |
+| `MotorControl` | [29](#bitfields_29) |
+| `Not` | [13](#strong_enums_13) |
+| `NotFound` | [13](#strong_enums_13) |
+| `Option` | [17](#option_type_17), [18](#option_type_18) |
+| `OptionType` | [17](#option_type_17), [18](#option_type_18) |
+| `Panics` | [22](#result_type_22) |
+| `ParseError` | [20](#result_type_20) |
+| `Pending` | [14](#strong_enums_14) |
+| `Permission` | [27](#bitfields_27) |
+| `Person` | [3](#classes_reference_types_3), [5](#classes_reference_types_5), [6](#auto_forwarding_properties_getsetis_6) |
+| `Point` | [1](#structs_value_types_1) |
+| `Position` | [30](#bitfields_30) |
+| `Private` | [19](#visibility_and_access_19) |
+| `Properties` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `Public` | [19](#visibility_and_access_19) |
+| `Range` | [29](#bitfields_29) |
+| `Read` | [21](#read_config) |
+| `ReadConfig` | [21](#read_config) |
+| `Rectangle` | [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `Red` | [12](#enums_algebraic_data_types_12) |
+| `Reference` | [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5) |
+| `Release` | [32](#bitfields_32) |
+| `Result` | [9](#enums_algebraic_data_types_9), [10](#handle), [20](#result_type_20), [21](#read_config), [22](#result_type_22), ... (7 total) |
+| `ResultType` | [20](#result_type_20), [22](#result_type_22), [23](#result_type_23) |
+| `Returns` | [21](#read_config) |
+| `RobotArm` | [28](#bitfields_28) |
+| `SafeTest` | [32](#bitfields_32) |
+| `SecureData` | [8](#auto_forwarding_properties_getsetis_8) |
+| `SensorData` | [29](#bitfields_29) |
+| `Server` | [13](#strong_enums_13) |
+| `ServerError` | [13](#strong_enums_13) |
+| `Sets` | [6](#auto_forwarding_properties_getsetis_6) |
+| `Shape` | [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `Silently` | [14](#strong_enums_14) |
+| `Status` | [14](#strong_enums_14) |
+| `String` | [3](#classes_reference_types_3), [9](#enums_algebraic_data_types_9), [16](#example) |
+| `Strong` | [13](#strong_enums_13), [14](#strong_enums_14), [15](#strong_enums_15) |
+| `StrongEnums` | [13](#strong_enums_13), [14](#strong_enums_14), [15](#strong_enums_15) |
+| `Structs` | [1](#structs_value_types_1), [2](#structs_value_types_2) |
+| `StructsValueTypes` | [1](#structs_value_types_1), [2](#structs_value_types_2) |
+| `Success` | [10](#handle), [13](#strong_enums_13) |
+| `Test` | [32](#bitfields_32) |
+| `These` | [6](#auto_forwarding_properties_getsetis_6), [23](#result_type_23) |
+| `Type` | [17](#option_type_17), [18](#option_type_18), [20](#result_type_20), [22](#result_type_22), [23](#result_type_23) |
+| `Types` | [1](#structs_value_types_1), [2](#structs_value_types_2), [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5), ... (8 total) |
+| `Unauthorized` | [13](#strong_enums_13) |
+| `Usage` | [11](#enums_algebraic_data_types_11) |
+| `User` | [17](#option_type_17), [18](#option_type_18), [19](#visibility_and_access_19) |
+| `UserId` | [17](#option_type_17), [18](#option_type_18), [19](#visibility_and_access_19) |
+| `UserStatus` | [19](#visibility_and_access_19) |
+| `Uses` | [19](#visibility_and_access_19) |
+| `Value` | [1](#structs_value_types_1), [2](#structs_value_types_2) |
+| `Visibility` | [19](#visibility_and_access_19) |
+| `VisibilityAndAccess` | [19](#visibility_and_access_19) |
+| `Wide` | [31](#bitfields_31) |
+| `With` | [14](#strong_enums_14) |
+| `Without` | [14](#strong_enums_14) |
+| `access` | [19](#visibility_and_access_19) |
+| `activate` | [14](#strong_enums_14) |
+| `algebraic` | [9](#enums_algebraic_data_types_9), [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `allow` | [15](#strong_enums_15) |
+| `and` | [19](#visibility_and_access_19) |
+| `area` | [11](#enums_algebraic_data_types_11) |
+| `arithmetic` | [29](#bitfields_29) |
+| `assert_compiles` | [1](#structs_value_types_1), [2](#structs_value_types_2), [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5), ... (29 total) |
+| `auto` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `auto_forwarding_properties_getsetis` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `birthday` | [3](#classes_reference_types_3) |
+| `bitfields` | [24](#bitfields_24), [25](#bitfields_25), [26](#bitfields_26), [27](#bitfields_27), [28](#bitfields_28), ... (9 total) |
+| `classes` | [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5) |
+| `classes_reference_types` | [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5) |
+| `config` | [21](#read_config) |
+| `data` | [9](#enums_algebraic_data_types_9), [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `deactivate` | [14](#strong_enums_14) |
+| `degrees` | [28](#bitfields_28) |
+| `derive` | [12](#enums_algebraic_data_types_12) |
+| `draw` | [12](#enums_algebraic_data_types_12) |
+| `draw_circle` | [12](#enums_algebraic_data_types_12) |
+| `draw_rect` | [12](#enums_algebraic_data_types_12) |
+| `enums` | [9](#enums_algebraic_data_types_9), [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12), [13](#strong_enums_13), [14](#strong_enums_14), ... (6 total) |
+| `enums_algebraic_data_types` | [9](#enums_algebraic_data_types_9), [11](#enums_algebraic_data_types_11), [12](#enums_algebraic_data_types_12) |
+| `example` | [16](#example) |
+| `find` | [17](#option_type_17) |
+| `find_user` | [18](#option_type_18) |
+| `foo` | [23](#result_type_23) |
+| `forwarding` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `function` | [11](#enums_algebraic_data_types_11) |
+| `get_count` | [7](#auto_forwarding_properties_getsetis_7) |
+| `get_name` | [6](#auto_forwarding_properties_getsetis_6) |
+| `get_password` | [8](#auto_forwarding_properties_getsetis_8) |
+| `getsetis` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `handle` | [10](#handle) |
+| `handle_some` | [15](#strong_enums_15) |
+| `handle_status` | [13](#strong_enums_13) |
+| `hash` | [8](#auto_forwarding_properties_getsetis_8), [19](#visibility_and_access_19) |
+| `increment` | [7](#auto_forwarding_properties_getsetis_7) |
+| `is_active` | [6](#auto_forwarding_properties_getsetis_6) |
+| `is_err` | [22](#result_type_22) |
+| `is_numeric` | [20](#result_type_20) |
+| `is_ok` | [22](#result_type_22) |
+| `lookup` | [17](#option_type_17) |
+| `narrow` | [31](#bitfields_31) |
+| `narrowing` | [31](#bitfields_31) |
+| `on_click` | [15](#strong_enums_15) |
+| `option` | [17](#option_type_17), [18](#option_type_18) |
+| `option_type` | [17](#option_type_17), [18](#option_type_18) |
+| `panic` | [32](#bitfields_32) |
+| `parse_int` | [20](#result_type_20) |
+| `parse_toml` | [21](#read_config) |
+| `percentage` | [28](#bitfields_28) |
+| `process` | [14](#strong_enums_14) |
+| `properties` | [6](#auto_forwarding_properties_getsetis_6), [7](#auto_forwarding_properties_getsetis_7), [8](#auto_forwarding_properties_getsetis_8) |
+| `raw` | [25](#bitfields_25) |
+| `read` | [21](#read_config) |
+| `read_config` | [21](#read_config) |
+| `read_config_verbose` | [21](#read_config) |
+| `read_file` | [21](#read_config) |
+| `reference` | [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5) |
+| `result` | [20](#result_type_20), [22](#result_type_22), [23](#result_type_23) |
+| `result_type` | [20](#result_type_20), [22](#result_type_22), [23](#result_type_23) |
+| `saturate` | [31](#bitfields_31) |
+| `scale` | [11](#enums_algebraic_data_types_11) |
+| `set_count` | [7](#auto_forwarding_properties_getsetis_7) |
+| `set_name` | [6](#auto_forwarding_properties_getsetis_6) |
+| `set_password` | [8](#auto_forwarding_properties_getsetis_8) |
+| `strong` | [13](#strong_enums_13), [14](#strong_enums_14), [15](#strong_enums_15) |
+| `strong_enums` | [13](#strong_enums_13), [14](#strong_enums_14), [15](#strong_enums_15) |
+| `structs` | [1](#structs_value_types_1), [2](#structs_value_types_2) |
+| `structs_value_types` | [1](#structs_value_types_1), [2](#structs_value_types_2) |
+| `to_int` | [20](#result_type_20) |
+| `type` | [17](#option_type_17), [18](#option_type_18), [20](#result_type_20), [22](#result_type_22), [23](#result_type_23) |
+| `types` | [1](#structs_value_types_1), [2](#structs_value_types_2), [3](#classes_reference_types_3), [4](#classes_reference_types_4), [5](#classes_reference_types_5), ... (8 total) |
+| `unit_circle` | [11](#enums_algebraic_data_types_11) |
+| `unwrap` | [22](#result_type_22) |
+| `unwrap_err` | [22](#result_type_22) |
+| `unwrap_or` | [22](#result_type_22) |
+| `value` | [1](#structs_value_types_1), [2](#structs_value_types_2) |
+| `verify` | [8](#auto_forwarding_properties_getsetis_8), [19](#visibility_and_access_19) |
+| `visibility` | [19](#visibility_and_access_19) |
+| `visibility_and_access` | [19](#visibility_and_access_19) |
+| `widen` | [31](#bitfields_31) |
 
 ---
 
-### Test 1: Structs (Value Types)
+## Test Cases (32 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [structs_value_types_1](#structs_value_types_1) | Structs (Value Types) | `Types`, `Value`, `structs_value_types` +8 |
+| 2 | [structs_value_types_2](#structs_value_types_2) | Structs (Value Types) | `Types`, `Value`, `structs_value_types` +7 |
+| 3 | [classes_reference_types_3](#classes_reference_types_3) | Classes (Reference Types) | `Types`, `ClassesReferenceTypes`, `classes` +10 |
+| 4 | [classes_reference_types_4](#classes_reference_types_4) | Classes (Reference Types) | `Types`, `ClassesReferenceTypes`, `classes` +8 |
+| 5 | [classes_reference_types_5](#classes_reference_types_5) | Classes (Reference Types) | `Types`, `ClassesReferenceTypes`, `classes` +8 |
+| 6 | [auto_forwarding_properties_getsetis_6](#auto_forwarding_properties_getsetis_6) | Auto-Forwarding Properties (get/set/is) | `AutoForwardingPropertiesGetsetis`, `Forwarding`, `auto_forwarding_properties_getsetis` +16 |
+| 7 | [auto_forwarding_properties_getsetis_7](#auto_forwarding_properties_getsetis_7) | Auto-Forwarding Properties (get/set/is) | `AutoForwardingPropertiesGetsetis`, `Forwarding`, `auto_forwarding_properties_getsetis` +14 |
+| 8 | [auto_forwarding_properties_getsetis_8](#auto_forwarding_properties_getsetis_8) | Auto-Forwarding Properties (get/set/is) | `AutoForwardingPropertiesGetsetis`, `Forwarding`, `auto_forwarding_properties_getsetis` +14 |
+| 9 | [enums_algebraic_data_types_9](#enums_algebraic_data_types_9) | Enums (Algebraic Data Types) | `Enums`, `enums_algebraic_data_types`, `Algebraic` +11 |
+| 10 | [handle](#handle) | Enums (Algebraic Data Types) | `Handle`, `handle`, `Success` +3 |
+| 11 | [enums_algebraic_data_types_11](#enums_algebraic_data_types_11) | Enums (Algebraic Data Types) | `Enums`, `enums_algebraic_data_types`, `Algebraic` +17 |
+| 12 | [enums_algebraic_data_types_12](#enums_algebraic_data_types_12) | Enums (Algebraic Data Types) | `Enums`, `enums_algebraic_data_types`, `Algebraic` +23 |
+| 13 | [strong_enums_13](#strong_enums_13) | Strong Enums | `Enums`, `StrongEnums`, `enums` +14 |
+| 14 | [strong_enums_14](#strong_enums_14) | Strong Enums | `Enums`, `StrongEnums`, `enums` +17 |
+| 15 | [strong_enums_15](#strong_enums_15) | Strong Enums | `Enums`, `StrongEnums`, `enums` +9 |
+| 16 | [example](#example) | Union Types | `example`, `Example`, `String` +1 |
+| 17 | [option_type_17](#option_type_17) | Option Type | `option`, `OptionType`, `Type` +8 |
+| 18 | [option_type_18](#option_type_18) | Option Type | `option`, `OptionType`, `Type` +12 |
+| 19 | [visibility_and_access_19](#visibility_and_access_19) | Visibility and Access | `VisibilityAndAccess`, `visibility`, `and` +15 |
+| 20 | [result_type_20](#result_type_20) | Result Type | `Type`, `type`, `result` +10 |
+| 21 | [read_config](#read_config) | Result Type | `read_config`, `read`, `ReadConfig` +11 |
+| 22 | [result_type_22](#result_type_22) | Result Type | `Type`, `type`, `result` +11 |
+| 23 | [result_type_23](#result_type_23) | Result Type | `Type`, `type`, `result` +7 |
+| 24 | [bitfields_24](#bitfields_24) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +1 |
+| 25 | [bitfields_25](#bitfields_25) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +4 |
+| 26 | [bitfields_26](#bitfields_26) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +1 |
+| 27 | [bitfields_27](#bitfields_27) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +2 |
+| 28 | [bitfields_28](#bitfields_28) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +4 |
+| 29 | [bitfields_29](#bitfields_29) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +6 |
+| 30 | [bitfields_30](#bitfields_30) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +4 |
+| 31 | [bitfields_31](#bitfields_31) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +8 |
+| 32 | [bitfields_32](#bitfields_32) | Bitfields | `Bitfields`, `bitfields`, `assert_compiles` +7 |
+
+---
+
+### Test 1: Structs (Value Types) {#structs_value_types_1}
 
 *Source line: ~7*
 
@@ -71,6 +289,19 @@ design rationale, and architecture, see doc/spec/data_structures.md
 **Description:**
 
 Structs are value types (similar to structs in C or Rust). They are copied on assignment and passed ...
+
+**Linked Symbols:**
+- `Types`
+- `Value`
+- `structs_value_types`
+- `value`
+- `types`
+- `Structs`
+- `StructsValueTypes`
+- `structs`
+- `assert_compiles`
+- `Point`
+- ... and 1 more
 
 **Code:**
 
@@ -86,7 +317,7 @@ test "structs_value_types_1":
     assert_compiles()
 ```
 
-### Test 2: Structs (Value Types)
+### Test 2: Structs (Value Types) {#structs_value_types_2}
 
 *Source line: ~21*
 
@@ -95,6 +326,18 @@ test "structs_value_types_1":
 **Description:**
 
 Unless marked `mut`, a struct's fields cannot be changed after construction:
+
+**Linked Symbols:**
+- `Types`
+- `Value`
+- `structs_value_types`
+- `value`
+- `types`
+- `Structs`
+- `StructsValueTypes`
+- `structs`
+- `assert_compiles`
+- `Cursor`
 
 **Code:**
 
@@ -109,7 +352,7 @@ test "structs_value_types_2":
     assert_compiles()
 ```
 
-### Test 3: Classes (Reference Types)
+### Test 3: Classes (Reference Types) {#classes_reference_types_3}
 
 *Source line: ~7*
 
@@ -118,6 +361,19 @@ test "structs_value_types_2":
 **Description:**
 
 Classes are reference types, allocated on the heap and managed by the runtime (with garbage collecti...
+
+**Linked Symbols:**
+- `Types`
+- `ClassesReferenceTypes`
+- `classes`
+- `Reference`
+- `reference`
+- `Classes`
+- `types`
+- `classes_reference_types`
+- `assert_compiles`
+- `String`
+- ... and 3 more
 
 **Code:**
 
@@ -135,7 +391,7 @@ test "classes_reference_types_3":
     assert_compiles()
 ```
 
-### Test 4: Classes (Reference Types)
+### Test 4: Classes (Reference Types) {#classes_reference_types_4}
 
 *Source line: ~23*
 
@@ -144,6 +400,19 @@ test "classes_reference_types_3":
 **Description:**
 
 By default, class instances are mutable. Use `immut` for immutable classes:
+
+**Linked Symbols:**
+- `Types`
+- `ClassesReferenceTypes`
+- `classes`
+- `Reference`
+- `reference`
+- `Classes`
+- `types`
+- `classes_reference_types`
+- `assert_compiles`
+- `Color`
+- ... and 1 more
 
 **Code:**
 
@@ -158,7 +427,7 @@ test "classes_reference_types_4":
     assert_compiles()
 ```
 
-### Test 5: Classes (Reference Types)
+### Test 5: Classes (Reference Types) {#classes_reference_types_5}
 
 *Source line: ~42*
 
@@ -168,6 +437,19 @@ test "classes_reference_types_4":
 
 - Mutable by default - Use `immut class` for immutable classes
 - Reference equality by default - Ove...
+
+**Linked Symbols:**
+- `Types`
+- `ClassesReferenceTypes`
+- `classes`
+- `Reference`
+- `reference`
+- `Classes`
+- `types`
+- `classes_reference_types`
+- `assert_compiles`
+- `Person`
+- ... and 1 more
 
 **Code:**
 
@@ -179,7 +461,7 @@ test "classes_reference_types_5":
     assert_compiles()
 ```
 
-### Test 6: Auto-Forwarding Properties (get/set/is)
+### Test 6: Auto-Forwarding Properties (get/set/is) {#auto_forwarding_properties_getsetis_6}
 
 *Source line: ~7*
 
@@ -188,6 +470,19 @@ test "classes_reference_types_5":
 **Description:**
 
 Simple provides automatic property forwarding for methods prefixed with `get_`, `set_`, or `is_`. Th...
+
+**Linked Symbols:**
+- `AutoForwardingPropertiesGetsetis`
+- `Forwarding`
+- `auto_forwarding_properties_getsetis`
+- `Auto`
+- `Getsetis`
+- `properties`
+- `Properties`
+- `auto`
+- `forwarding`
+- `getsetis`
+- ... and 9 more
 
 **Code:**
 
@@ -211,7 +506,7 @@ test "auto_forwarding_properties_getsetis_6":
     assert_compiles()
 ```
 
-### Test 7: Auto-Forwarding Properties (get/set/is)
+### Test 7: Auto-Forwarding Properties (get/set/is) {#auto_forwarding_properties_getsetis_7}
 
 *Source line: ~37*
 
@@ -220,6 +515,19 @@ test "auto_forwarding_properties_getsetis_6":
 **Description:**
 
 If only `get_` is defined, the property is read-only from outside:
+
+**Linked Symbols:**
+- `AutoForwardingPropertiesGetsetis`
+- `Forwarding`
+- `auto_forwarding_properties_getsetis`
+- `Auto`
+- `Getsetis`
+- `properties`
+- `Properties`
+- `auto`
+- `forwarding`
+- `getsetis`
+- ... and 7 more
 
 **Code:**
 
@@ -239,7 +547,7 @@ test "auto_forwarding_properties_getsetis_7":
     assert_compiles()
 ```
 
-### Test 8: Auto-Forwarding Properties (get/set/is)
+### Test 8: Auto-Forwarding Properties (get/set/is) {#auto_forwarding_properties_getsetis_8}
 
 *Source line: ~55*
 
@@ -248,6 +556,19 @@ test "auto_forwarding_properties_getsetis_7":
 **Description:**
 
 If only `set_` is defined, the property is write-only from outside:
+
+**Linked Symbols:**
+- `AutoForwardingPropertiesGetsetis`
+- `Forwarding`
+- `auto_forwarding_properties_getsetis`
+- `Auto`
+- `Getsetis`
+- `properties`
+- `Properties`
+- `auto`
+- `forwarding`
+- `getsetis`
+- ... and 7 more
 
 **Code:**
 
@@ -266,7 +587,7 @@ test "auto_forwarding_properties_getsetis_8":
     assert_compiles()
 ```
 
-### Test 9: Enums (Algebraic Data Types)
+### Test 9: Enums (Algebraic Data Types) {#enums_algebraic_data_types_9}
 
 *Source line: ~7*
 
@@ -275,6 +596,19 @@ test "auto_forwarding_properties_getsetis_8":
 **Description:**
 
 Enums define a type that can be one of several variants, each possibly carrying data. They are algeb...
+
+**Linked Symbols:**
+- `Enums`
+- `enums_algebraic_data_types`
+- `Algebraic`
+- `data`
+- `Types`
+- `enums`
+- `Data`
+- `EnumsAlgebraicDataTypes`
+- `algebraic`
+- `types`
+- ... and 4 more
 
 **Code:**
 
@@ -286,7 +620,7 @@ test "enums_algebraic_data_types_9":
     assert_compiles()
 ```
 
-### Test 10: Enums (Algebraic Data Types)
+### Test 10: Enums (Algebraic Data Types) {#handle}
 
 *Source line: ~19*
 
@@ -295,6 +629,14 @@ test "enums_algebraic_data_types_9":
 **Description:**
 
 Enums are typically used with pattern matching:
+
+**Linked Symbols:**
+- `Handle`
+- `handle`
+- `Success`
+- `Err`
+- `Result`
+- `Error`
 
 **Code:**
 
@@ -307,7 +649,7 @@ fn handle(result: Result[i64]):
             print "Error: {msg}"
 ```
 
-### Test 11: Enums (Algebraic Data Types)
+### Test 11: Enums (Algebraic Data Types) {#enums_algebraic_data_types_11}
 
 *Source line: ~39*
 
@@ -316,6 +658,19 @@ fn handle(result: Result[i64]):
 **Description:**
 
 Enums can have methods added via impl blocks:
+
+**Linked Symbols:**
+- `Enums`
+- `enums_algebraic_data_types`
+- `Algebraic`
+- `data`
+- `Types`
+- `enums`
+- `Data`
+- `EnumsAlgebraicDataTypes`
+- `algebraic`
+- `types`
+- ... and 10 more
 
 **Code:**
 
@@ -347,7 +702,7 @@ test "enums_algebraic_data_types_11":
     assert_compiles()
 ```
 
-### Test 12: Enums (Algebraic Data Types)
+### Test 12: Enums (Algebraic Data Types) {#enums_algebraic_data_types_12}
 
 *Source line: ~67*
 
@@ -358,6 +713,19 @@ test "enums_algebraic_data_types_11":
 fn scale(self, factor: f64) -> Shape:
         match self:
             case Circle(r): return Shape.C...
+
+**Linked Symbols:**
+- `Enums`
+- `enums_algebraic_data_types`
+- `Algebraic`
+- `data`
+- `Types`
+- `enums`
+- `Data`
+- `EnumsAlgebraicDataTypes`
+- `algebraic`
+- `types`
+- ... and 16 more
 
 **Code:**
 
@@ -381,7 +749,7 @@ test "enums_algebraic_data_types_12":
     assert_compiles()
 ```
 
-### Test 13: Strong Enums
+### Test 13: Strong Enums {#strong_enums_13}
 
 *Source line: ~7*
 
@@ -390,6 +758,19 @@ test "enums_algebraic_data_types_12":
 **Description:**
 
 The `#[strong]` attribute enforces exhaustive explicit matching, disallowing wildcard `_` patterns.
+
+**Linked Symbols:**
+- `Enums`
+- `StrongEnums`
+- `enums`
+- `strong`
+- `Strong`
+- `strong_enums`
+- `assert_compiles`
+- `HttpStatus`
+- `NotFound`
+- `Success`
+- ... and 7 more
 
 **Code:**
 
@@ -414,7 +795,7 @@ test "strong_enums_13":
     assert_compiles()
 ```
 
-### Test 14: Strong Enums
+### Test 14: Strong Enums {#strong_enums_14}
 
 *Source line: ~30*
 
@@ -423,6 +804,19 @@ test "strong_enums_13":
 **Description:**
 
 Strong enums prevent bugs when new variants are added:
+
+**Linked Symbols:**
+- `Enums`
+- `StrongEnums`
+- `enums`
+- `strong`
+- `Strong`
+- `strong_enums`
+- `activate`
+- `assert_compiles`
+- `Active`
+- `Pending`
+- ... and 10 more
 
 **Code:**
 
@@ -455,7 +849,7 @@ test "strong_enums_14":
     assert_compiles()
 ```
 
-### Test 15: Strong Enums
+### Test 15: Strong Enums {#strong_enums_15}
 
 *Source line: ~70*
 
@@ -464,6 +858,19 @@ test "strong_enums_14":
 **Description:**
 
 Use `#[allow(wildcard_match)]` to allow wildcards in specific functions:
+
+**Linked Symbols:**
+- `Enums`
+- `StrongEnums`
+- `enums`
+- `strong`
+- `Strong`
+- `strong_enums`
+- `assert_compiles`
+- `Click`
+- `handle_some`
+- `Event`
+- ... and 2 more
 
 **Code:**
 
@@ -477,7 +884,7 @@ test "strong_enums_15":
     assert_compiles()
 ```
 
-### Test 16: Union Types
+### Test 16: Union Types {#example}
 
 *Source line: ~7*
 
@@ -486,6 +893,12 @@ test "strong_enums_15":
 **Description:**
 
 Simple supports union types for cases where a variable might hold one of multiple types.
+
+**Linked Symbols:**
+- `example`
+- `Example`
+- `String`
+- `Integer`
 
 **Code:**
 
@@ -498,7 +911,7 @@ fn example(x: i64 | str):
             print "String: {s}"
 ```
 
-### Test 17: Option Type
+### Test 17: Option Type {#option_type_17}
 
 *Source line: ~5*
 
@@ -507,6 +920,19 @@ fn example(x: i64 | str):
 **Description:**
 
 A common enum representing "something or nothing":
+
+**Linked Symbols:**
+- `option`
+- `OptionType`
+- `Type`
+- `option_type`
+- `type`
+- `Option`
+- `assert_compiles`
+- `User`
+- `find`
+- `lookup`
+- ... and 1 more
 
 **Code:**
 
@@ -525,7 +951,7 @@ test "option_type_17":
     assert_compiles()
 ```
 
-### Test 18: Option Type
+### Test 18: Option Type {#option_type_18}
 
 *Source line: ~20*
 
@@ -534,6 +960,19 @@ test "option_type_17":
 **Description:**
 
 Important: Simple requires explicit `Option[T]` for nullable values. Implicit `nil` is a compile err...
+
+**Linked Symbols:**
+- `option`
+- `OptionType`
+- `Type`
+- `option_type`
+- `type`
+- `Option`
+- `assert_compiles`
+- `Explicit`
+- `CORRECT`
+- `Compile`
+- ... and 5 more
 
 **Code:**
 
@@ -549,7 +988,7 @@ test "option_type_18":
     assert_compiles()
 ```
 
-### Test 19: Visibility and Access
+### Test 19: Visibility and Access {#visibility_and_access_19}
 
 *Source line: ~5*
 
@@ -558,6 +997,19 @@ test "option_type_18":
 **Description:**
 
 By default, all struct and class fields are publicly readable but only modifiable according to mutab...
+
+**Linked Symbols:**
+- `VisibilityAndAccess`
+- `visibility`
+- `and`
+- `access`
+- `Access`
+- `Visibility`
+- `visibility_and_access`
+- `And`
+- `assert_compiles`
+- `Private`
+- ... and 8 more
 
 **Code:**
 
@@ -574,7 +1026,7 @@ test "visibility_and_access_19":
     assert_compiles()
 ```
 
-### Test 20: Result Type
+### Test 20: Result Type {#result_type_20}
 
 *Source line: ~5*
 
@@ -583,6 +1035,19 @@ test "visibility_and_access_19":
 **Description:**
 
 A common enum representing "success or error":
+
+**Linked Symbols:**
+- `Type`
+- `type`
+- `result`
+- `ResultType`
+- `result_type`
+- `Result`
+- `assert_compiles`
+- `to_int`
+- `Err`
+- `parse_int`
+- ... and 3 more
 
 **Code:**
 
@@ -599,7 +1064,7 @@ test "result_type_20":
     assert_compiles()
 ```
 
-### Test 21: Result Type
+### Test 21: Result Type {#read_config}
 
 *Source line: ~20*
 
@@ -608,6 +1073,19 @@ test "result_type_20":
 **Description:**
 
 The `?` operator propagates errors automatically:
+
+**Linked Symbols:**
+- `read_config`
+- `read`
+- `ReadConfig`
+- `Read`
+- `Config`
+- `config`
+- `parse_toml`
+- `IoError`
+- `Returns`
+- `Err`
+- ... and 4 more
 
 **Code:**
 
@@ -627,7 +1105,7 @@ fn read_config_verbose() -> Result[Config, IoError]:
         case Err(e): return Err(e)
 ```
 
-### Test 22: Result Type
+### Test 22: Result Type {#result_type_22}
 
 *Source line: ~38*
 
@@ -638,6 +1116,19 @@ fn read_config_verbose() -> Result[Config, IoError]:
 ```simple
 fn read_config() -> Result[Config, IoError]:
     let content = read_file("config.toml")?  ...
+
+**Linked Symbols:**
+- `Type`
+- `type`
+- `result`
+- `ResultType`
+- `result_type`
+- `Result`
+- `unwrap_err`
+- `assert_compiles`
+- `Panics`
+- `unwrap_or`
+- ... and 4 more
 
 **Code:**
 
@@ -655,7 +1146,7 @@ test "result_type_22":
     assert_compiles()
 ```
 
-### Test 23: Result Type
+### Test 23: Result Type {#result_type_23}
 
 *Source line: ~52*
 
@@ -669,6 +1160,18 @@ impl Result[T, E]:
     fn is_err() -> bool
     fn unwrap() -> T    ...
 
+**Linked Symbols:**
+- `Type`
+- `type`
+- `result`
+- `ResultType`
+- `result_type`
+- `Result`
+- `assert_compiles`
+- `foo`
+- `These`
+- `Error`
+
 **Code:**
 
 ```simple
@@ -679,7 +1182,7 @@ test "result_type_23":
     assert_compiles()
 ```
 
-### Test 24: Bitfields
+### Test 24: Bitfields {#bitfields_24}
 
 *Source line: ~7*
 
@@ -688,6 +1191,12 @@ test "result_type_23":
 **Description:**
 
 Bitfields allow compact representation of data at the bit level, useful for hardware registers, prot...
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `Flags`
 
 **Code:**
 
@@ -701,7 +1210,7 @@ test "bitfields_24":
     assert_compiles()
 ```
 
-### Test 25: Bitfields
+### Test 25: Bitfields {#bitfields_25}
 
 *Source line: ~19*
 
@@ -710,6 +1219,15 @@ test "bitfields_24":
 **Description:**
 
 The backing type (`u8`, `u16`, `u32`, `u64`) determines the total size.
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `raw`
+- `Get`
+- `Clear`
+- `Flags`
 
 **Code:**
 
@@ -722,7 +1240,7 @@ test "bitfields_25":
     assert_compiles()
 ```
 
-### Test 26: Bitfields
+### Test 26: Bitfields {#bitfields_26}
 
 *Source line: ~30*
 
@@ -731,6 +1249,12 @@ test "bitfields_25":
 **Description:**
 
 Fields can span multiple bits:
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `Color`
 
 **Code:**
 
@@ -746,7 +1270,7 @@ test "bitfields_26":
     assert_compiles()
 ```
 
-### Test 27: Bitfields
+### Test 27: Bitfields {#bitfields_27}
 
 *Source line: ~51*
 
@@ -757,6 +1281,13 @@ test "bitfields_26":
 | Property | Description |
 |----------|-------------|
 | Packed | Fields are tightly packed with no p...
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `Permission`
+- `FULL`
 
 **Code:**
 
@@ -773,7 +1304,7 @@ test "bitfields_27":
     assert_compiles()
 ```
 
-### Test 28: Bitfields
+### Test 28: Bitfields {#bitfields_28}
 
 *Source line: ~70*
 
@@ -782,6 +1313,15 @@ test "bitfields_27":
 **Description:**
 
 Use `suffix:repr` for simple bit-width specification. In type positions, use bare unit suffix (no un...
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `RobotArm`
+- `Literals`
+- `percentage`
+- `degrees`
 
 **Code:**
 
@@ -801,7 +1341,7 @@ test "bitfields_28":
     assert_compiles()
 ```
 
-### Test 29: Bitfields
+### Test 29: Bitfields {#bitfields_29}
 
 *Source line: ~88*
 
@@ -810,6 +1350,17 @@ test "bitfields_28":
 **Description:**
 
 Use `where` for range inference, overflow behavior, and debug checking:
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `arithmetic`
+- `Explicit`
+- `MotorControl`
+- `Range`
+- `SensorData`
+- `Combined`
 
 **Code:**
 
@@ -833,7 +1384,7 @@ test "bitfields_29":
     assert_compiles()
 ```
 
-### Test 30: Bitfields
+### Test 30: Bitfields {#bitfields_30}
 
 *Source line: ~146*
 
@@ -842,6 +1393,15 @@ test "bitfields_29":
 **Description:**
 
 Unit-typed bitfield fields maintain full type safety:
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `Position`
+- `ERROR`
+- `Arithmetic`
+- `Result`
 
 **Code:**
 
@@ -861,7 +1421,7 @@ test "bitfields_30":
     assert_compiles()
 ```
 
-### Test 31: Bitfields
+### Test 31: Bitfields {#bitfields_31}
 
 *Source line: ~162*
 
@@ -872,6 +1432,19 @@ test "bitfields_30":
 let pos = Position(x: 100_cm, y: 200_cm)
 # pos.x = 50_m      # ERROR: cannot assign m to cm field
 # ...
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `Compact`
+- `Explicit`
+- `Wide`
+- `widen`
+- `Clamp`
+- `narrow`
+- `saturate`
+- ... and 1 more
 
 **Code:**
 
@@ -892,7 +1465,7 @@ test "bitfields_31":
     assert_compiles()
 ```
 
-### Test 32: Bitfields
+### Test 32: Bitfields {#bitfields_32}
 
 *Source line: ~181*
 
@@ -901,6 +1474,18 @@ test "bitfields_31":
 **Description:**
 
 In debug builds, assignments to bit-limited fields are checked:
+
+**Linked Symbols:**
+- `Bitfields`
+- `bitfields`
+- `assert_compiles`
+- `Test`
+- `SafeTest`
+- `panic`
+- `Debug`
+- `Release`
+- `Always`
+- `ClampTest`
 
 **Code:**
 
@@ -925,6 +1510,12 @@ test "bitfields_32":
     print cl.value                # 255_cm (clamped)
     assert_compiles()
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [data_structures_spec.spl](../../tests/specs/data_structures_spec.spl)
 
 ---
 

@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/type_inference_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -13,46 +13,156 @@
 **Feature IDs:** #13
 **Keywords:** **Last Updated:** 2026-01-05
 
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (24 tests)
+- [Source Code](#source-code)
+
 ## Overview
 
 Simple uses a Hindley-Milner-style type inference system that automatically deduces types for expressions, variables, and functions without requiring explicit type annotations in most cases.
 
 ---
 
-## Test Cases (24 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [inference_rules_1](#test-1) | Inference Rules |  |
-| [inference_rules_2](#test-2) | Inference Rules |  |
-| [inference_rules_3](#test-3) | Inference Rules |  |
-| [inference_rules_4](#test-4) | Inference Rules |  |
-| [inference_rules_5](#test-5) | Inference Rules |  |
-| [inference_rules_6](#test-6) | Inference Rules | ### Scenario: Arrays:...  Arrays: |
-| [inference_rules_7](#test-7) | Inference Rules | ### Scenario: Tuples:...  Tuples: |
-| [inference_rules_8](#test-8) | Inference Rules | ### Scenario: Dictionaries:...  Dictionaries: |
-| [add](#test-9) | Inference Rules | ### Scenario: Function Definition:...  Function Definition: |
-| [inference_rules_10](#test-10) | Inference Rules | ### Scenario: Function Calls:...  Function Calls: |
-| [apply](#test-11) | Inference Rules | ### Scenario: Higher-Order Functions:...... |
-| [inference_rules_12](#test-12) | Inference Rules | ### Scenario: Match Expressions:...  Match Expressions: |
-| [inference_rules_13](#test-13) | Inference Rules | ### Scenario: Destructuring:...  Destructuring: |
-| [inference_rules_14](#test-14) | Inference Rules | ### Scenario: If Expressions:...  If Expressions: |
-| [inference_rules_15](#test-15) | Inference Rules | ### Scenario: Loops:...  Loops: |
-| [type_unification_16](#test-16) | Type Unification | ### Scenario: Prevents infinite types:...... |
-| [type_unification_17](#test-17) | Type Unification | ### Scenario: Type variables are resolved through substituti... |
-| [examples_18](#test-18) | Examples |  |
-| [map](#test-19) | Examples |  |
-| [unwrap_or](#test-20) | Examples |  |
-| [fetch_data](#test-21) | Examples |  |
-| [error_messages_22](#test-22) | Error Messages |  |
-| [error_messages_23](#test-23) | Error Messages |  |
-| [error_messages_24](#test-24) | Error Messages |  |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `Add` | [9](#add) |
+| `All` | [18](#examples_18) |
+| `Apply` | [11](#apply) |
+| `Array` | [6](#inference_rules_6), [13](#inference_rules_13), [16](#type_unification_16), [17](#type_unification_17), [18](#examples_18), ... (7 total) |
+| `Async` | [21](#fetch_data) |
+| `Blue` | [12](#inference_rules_12) |
+| `Boolean` | [1](#inference_rules_1) |
+| `Branch` | [12](#inference_rules_12), [14](#inference_rules_14) |
+| `Branches` | [14](#inference_rules_14) |
+| `Cannot` | [24](#error_messages_24) |
+| `Color` | [12](#inference_rules_12) |
+| `Data` | [21](#fetch_data) |
+| `Error` | [16](#type_unification_16), [22](#error_messages_22), [23](#error_messages_23), [24](#error_messages_24) |
+| `ErrorMessages` | [22](#error_messages_22), [23](#error_messages_23), [24](#error_messages_24) |
+| `Examples` | [18](#examples_18) |
+| `Expected` | [22](#error_messages_22) |
+| `Explicit` | [6](#inference_rules_6), [9](#add), [21](#fetch_data) |
+| `Explicitly` | [21](#fetch_data) |
+| `Fetch` | [21](#fetch_data) |
+| `FetchData` | [21](#fetch_data) |
+| `Float` | [1](#inference_rules_1), [2](#inference_rules_2) |
+| `For` | [15](#inference_rules_15) |
+| `Found` | [22](#error_messages_22) |
+| `Green` | [12](#inference_rules_12) |
+| `Hello` | [9](#add) |
+| `Inference` | [1](#inference_rules_1), [2](#inference_rules_2), [3](#inference_rules_3), [4](#inference_rules_4), [5](#inference_rules_5), ... (13 total) |
+| `InferenceRules` | [1](#inference_rules_1), [2](#inference_rules_2), [3](#inference_rules_3), [4](#inference_rules_4), [5](#inference_rules_5), ... (13 total) |
+| `Inferred` | [21](#fetch_data) |
+| `Infers` | [9](#add) |
+| `Integer` | [1](#inference_rules_1) |
+| `Map` | [19](#map) |
+| `Messages` | [22](#error_messages_22), [23](#error_messages_23), [24](#error_messages_24) |
+| `Must` | [20](#unwrap_or) |
+| `Nil` | [1](#inference_rules_1) |
+| `Occurs` | [24](#error_messages_24) |
+| `Option` | [20](#unwrap_or) |
+| `Point` | [13](#inference_rules_13) |
+| `Red` | [12](#inference_rules_12) |
+| `Result` | [12](#inference_rules_12), [14](#inference_rules_14) |
+| `Return` | [20](#unwrap_or) |
+| `Rules` | [1](#inference_rules_1), [2](#inference_rules_2), [3](#inference_rules_3), [4](#inference_rules_4), [5](#inference_rules_5), ... (13 total) |
+| `String` | [1](#inference_rules_1) |
+| `Struct` | [13](#inference_rules_13) |
+| `This` | [16](#type_unification_16), [24](#error_messages_24) |
+| `Tuple` | [13](#inference_rules_13) |
+| `Type` | [16](#type_unification_16), [17](#type_unification_17), [20](#unwrap_or), [22](#error_messages_22) |
+| `TypeUnification` | [16](#type_unification_16), [17](#type_unification_17) |
+| `Undefined` | [23](#error_messages_23) |
+| `Unification` | [16](#type_unification_16), [17](#type_unification_17) |
+| `Unify` | [17](#type_unification_17) |
+| `Unwrap` | [20](#unwrap_or) |
+| `UnwrapOr` | [20](#unwrap_or) |
+| `Var` | [24](#error_messages_24) |
+| `While` | [15](#inference_rules_15) |
+| `add` | [9](#add), [10](#inference_rules_10) |
+| `append` | [19](#map) |
+| `apply` | [11](#apply) |
+| `assert_compiles` | [1](#inference_rules_1), [2](#inference_rules_2), [3](#inference_rules_3), [4](#inference_rules_4), [5](#inference_rules_5), ... (19 total) |
+| `compute` | [21](#fetch_data) |
+| `data` | [21](#fetch_data) |
+| `double` | [19](#map) |
+| `error` | [22](#error_messages_22), [23](#error_messages_23), [24](#error_messages_24) |
+| `error_messages` | [22](#error_messages_22), [23](#error_messages_23), [24](#error_messages_24) |
+| `examples` | [18](#examples_18) |
+| `fetch` | [21](#fetch_data) |
+| `fetch_data` | [21](#fetch_data) |
+| `get` | [21](#fetch_data) |
+| `greet` | [9](#add) |
+| `inc` | [11](#apply) |
+| `inference` | [1](#inference_rules_1), [2](#inference_rules_2), [3](#inference_rules_3), [4](#inference_rules_4), [5](#inference_rules_5), ... (13 total) |
+| `inference_rules` | [1](#inference_rules_1), [2](#inference_rules_2), [3](#inference_rules_3), [4](#inference_rules_4), [5](#inference_rules_5), ... (13 total) |
+| `json` | [21](#fetch_data) |
+| `let` | [13](#inference_rules_13) |
+| `map` | [19](#map) |
+| `messages` | [22](#error_messages_22), [23](#error_messages_23), [24](#error_messages_24) |
+| `print` | [15](#inference_rules_15) |
+| `range` | [15](#inference_rules_15) |
+| `rules` | [1](#inference_rules_1), [2](#inference_rules_2), [3](#inference_rules_3), [4](#inference_rules_4), [5](#inference_rules_5), ... (13 total) |
+| `type` | [16](#type_unification_16), [17](#type_unification_17) |
+| `type_unification` | [16](#type_unification_16), [17](#type_unification_17) |
+| `unification` | [16](#type_unification_16), [17](#type_unification_17) |
+| `unwrap` | [20](#unwrap_or) |
+| `unwrap_or` | [20](#unwrap_or) |
 
 ---
 
-### Test 1: Inference Rules
+## Test Cases (24 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [inference_rules_1](#inference_rules_1) | Inference Rules | `rules`, `InferenceRules`, `Inference` +9 |
+| 2 | [inference_rules_2](#inference_rules_2) | Inference Rules | `rules`, `InferenceRules`, `Inference` +5 |
+| 3 | [inference_rules_3](#inference_rules_3) | Inference Rules | `rules`, `InferenceRules`, `Inference` +4 |
+| 4 | [inference_rules_4](#inference_rules_4) | Inference Rules | `rules`, `InferenceRules`, `Inference` +4 |
+| 5 | [inference_rules_5](#inference_rules_5) | Inference Rules | `rules`, `InferenceRules`, `Inference` +4 |
+| 6 | [inference_rules_6](#inference_rules_6) | Inference Rules | `rules`, `InferenceRules`, `Inference` +6 |
+| 7 | [inference_rules_7](#inference_rules_7) | Inference Rules | `rules`, `InferenceRules`, `Inference` +4 |
+| 8 | [inference_rules_8](#inference_rules_8) | Inference Rules | `rules`, `InferenceRules`, `Inference` +4 |
+| 9 | [add](#add) | Inference Rules | `add`, `Add`, `Explicit` +3 |
+| 10 | [inference_rules_10](#inference_rules_10) | Inference Rules | `rules`, `InferenceRules`, `Inference` +5 |
+| 11 | [apply](#apply) | Inference Rules | `apply`, `Apply`, `inc` |
+| 12 | [inference_rules_12](#inference_rules_12) | Inference Rules | `rules`, `InferenceRules`, `Inference` +10 |
+| 13 | [inference_rules_13](#inference_rules_13) | Inference Rules | `rules`, `InferenceRules`, `Inference` +9 |
+| 14 | [inference_rules_14](#inference_rules_14) | Inference Rules | `rules`, `InferenceRules`, `Inference` +7 |
+| 15 | [inference_rules_15](#inference_rules_15) | Inference Rules | `rules`, `InferenceRules`, `Inference` +8 |
+| 16 | [type_unification_16](#type_unification_16) | Type Unification | `Type`, `type`, `Unification` +7 |
+| 17 | [type_unification_17](#type_unification_17) | Type Unification | `Type`, `type`, `Unification` +6 |
+| 18 | [examples_18](#examples_18) | Examples | `Examples`, `examples`, `assert_compiles` +2 |
+| 19 | [map](#map) | Examples | `map`, `Map`, `double` +2 |
+| 20 | [unwrap_or](#unwrap_or) | Examples | `Unwrap`, `unwrap_or`, `unwrap` +5 |
+| 21 | [fetch_data](#fetch_data) | Examples | `fetch`, `fetch_data`, `data` +10 |
+| 22 | [error_messages_22](#error_messages_22) | Error Messages | `Messages`, `ErrorMessages`, `error` +7 |
+| 23 | [error_messages_23](#error_messages_23) | Error Messages | `Messages`, `ErrorMessages`, `error` +5 |
+| 24 | [error_messages_24](#error_messages_24) | Error Messages | `Messages`, `ErrorMessages`, `error` +9 |
+
+---
+
+### Test 1: Inference Rules {#inference_rules_1}
 
 **Test name:** `inference_rules_1`
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
+- `String`
+- `Nil`
+- `Float`
+- ... and 2 more
 
 **Code:**
 
@@ -78,9 +188,19 @@ test "inference_rules_1":
     assert_compiles()
 ```
 
-### Test 2: Inference Rules
+### Test 2: Inference Rules {#inference_rules_2}
 
 **Test name:** `inference_rules_2`
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
+- `Float`
 
 **Code:**
 
@@ -94,9 +214,18 @@ test "inference_rules_2":
     assert_compiles()
 ```
 
-### Test 3: Inference Rules
+### Test 3: Inference Rules {#inference_rules_3}
 
 **Test name:** `inference_rules_3`
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
 
 **Code:**
 
@@ -109,9 +238,18 @@ test "inference_rules_3":
     assert_compiles()
 ```
 
-### Test 4: Inference Rules
+### Test 4: Inference Rules {#inference_rules_4}
 
 **Test name:** `inference_rules_4`
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
 
 **Code:**
 
@@ -124,9 +262,18 @@ test "inference_rules_4":
     assert_compiles()
 ```
 
-### Test 5: Inference Rules
+### Test 5: Inference Rules {#inference_rules_5}
 
 **Test name:** `inference_rules_5`
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
 
 **Code:**
 
@@ -139,7 +286,7 @@ test "inference_rules_5":
     assert_compiles()
 ```
 
-### Test 6: Inference Rules
+### Test 6: Inference Rules {#inference_rules_6}
 
 **Test name:** `inference_rules_6`
 
@@ -148,6 +295,17 @@ test "inference_rules_5":
 ### Scenario: Arrays:...
 
 Arrays:
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
+- `Explicit`
+- `Array`
 
 **Code:**
 
@@ -162,7 +320,7 @@ test "inference_rules_6":
     assert_compiles()
 ```
 
-### Test 7: Inference Rules
+### Test 7: Inference Rules {#inference_rules_7}
 
 **Test name:** `inference_rules_7`
 
@@ -171,6 +329,15 @@ test "inference_rules_6":
 ### Scenario: Tuples:...
 
 Tuples:
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
 
 **Code:**
 
@@ -184,7 +351,7 @@ test "inference_rules_7":
     assert_compiles()
 ```
 
-### Test 8: Inference Rules
+### Test 8: Inference Rules {#inference_rules_8}
 
 **Test name:** `inference_rules_8`
 
@@ -193,6 +360,15 @@ test "inference_rules_7":
 ### Scenario: Dictionaries:...
 
 Dictionaries:
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
 
 **Code:**
 
@@ -206,7 +382,7 @@ test "inference_rules_8":
     assert_compiles()
 ```
 
-### Test 9: Inference Rules
+### Test 9: Inference Rules {#add}
 
 **Test name:** `add`
 
@@ -215,6 +391,14 @@ test "inference_rules_8":
 ### Scenario: Function Definition:...
 
 Function Definition:
+
+**Linked Symbols:**
+- `add`
+- `Add`
+- `Explicit`
+- `Hello`
+- `greet`
+- `Infers`
 
 **Code:**
 
@@ -227,7 +411,7 @@ fn greet(name: str) -> str:
     return "Hello, " + name
 ```
 
-### Test 10: Inference Rules
+### Test 10: Inference Rules {#inference_rules_10}
 
 **Test name:** `inference_rules_10`
 
@@ -236,6 +420,16 @@ fn greet(name: str) -> str:
 ### Scenario: Function Calls:...
 
 Function Calls:
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
+- `add`
 
 **Code:**
 
@@ -248,7 +442,7 @@ test "inference_rules_10":
     assert_compiles()
 ```
 
-### Test 11: Inference Rules
+### Test 11: Inference Rules {#apply}
 
 **Test name:** `apply`
 
@@ -257,6 +451,11 @@ test "inference_rules_10":
 ### Scenario: Higher-Order Functions:...
 
 Higher-Order Functions:
+
+**Linked Symbols:**
+- `apply`
+- `Apply`
+- `inc`
 
 **Code:**
 
@@ -270,7 +469,7 @@ fn inc(n):
 let r = apply(inc, 5)         # r: Int
 ```
 
-### Test 12: Inference Rules
+### Test 12: Inference Rules {#inference_rules_12}
 
 **Test name:** `inference_rules_12`
 
@@ -279,6 +478,19 @@ let r = apply(inc, 5)         # r: Int
 ### Scenario: Match Expressions:...
 
 Match Expressions:
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
+- `Red`
+- `Green`
+- `Color`
+- ... and 3 more
 
 **Code:**
 
@@ -304,7 +516,7 @@ test "inference_rules_12":
     assert_compiles()
 ```
 
-### Test 13: Inference Rules
+### Test 13: Inference Rules {#inference_rules_13}
 
 **Test name:** `inference_rules_13`
 
@@ -313,6 +525,19 @@ test "inference_rules_12":
 ### Scenario: Destructuring:...
 
 Destructuring:
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
+- `let`
+- `Point`
+- `Tuple`
+- ... and 2 more
 
 **Code:**
 
@@ -336,7 +561,7 @@ test "inference_rules_13":
     assert_compiles()
 ```
 
-### Test 14: Inference Rules
+### Test 14: Inference Rules {#inference_rules_14}
 
 **Test name:** `inference_rules_14`
 
@@ -345,6 +570,18 @@ test "inference_rules_13":
 ### Scenario: If Expressions:...
 
 If Expressions:
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
+- `Branches`
+- `Branch`
+- `Result`
 
 **Code:**
 
@@ -362,7 +599,7 @@ test "inference_rules_14":
     assert_compiles()
 ```
 
-### Test 15: Inference Rules
+### Test 15: Inference Rules {#inference_rules_15}
 
 **Test name:** `inference_rules_15`
 
@@ -371,6 +608,19 @@ test "inference_rules_14":
 ### Scenario: Loops:...
 
 Loops:
+
+**Linked Symbols:**
+- `rules`
+- `InferenceRules`
+- `Inference`
+- `inference_rules`
+- `inference`
+- `Rules`
+- `assert_compiles`
+- `range`
+- `print`
+- `While`
+- ... and 1 more
 
 **Code:**
 
@@ -390,7 +640,7 @@ test "inference_rules_15":
     assert_compiles()
 ```
 
-### Test 16: Type Unification
+### Test 16: Type Unification {#type_unification_16}
 
 **Test name:** `type_unification_16`
 
@@ -399,6 +649,18 @@ test "inference_rules_15":
 ### Scenario: Prevents infinite types:...
 
 Prevents infinite types:
+
+**Linked Symbols:**
+- `Type`
+- `type`
+- `Unification`
+- `unification`
+- `type_unification`
+- `TypeUnification`
+- `assert_compiles`
+- `This`
+- `Array`
+- `Error`
 
 **Code:**
 
@@ -412,7 +674,7 @@ test "type_unification_16":
     assert_compiles()
 ```
 
-### Test 17: Type Unification
+### Test 17: Type Unification {#type_unification_17}
 
 **Test name:** `type_unification_17`
 
@@ -421,6 +683,17 @@ test "type_unification_16":
 ### Scenario: Type variables are resolved through substitution:...
 
 Type variables are resolved through substitution:
+
+**Linked Symbols:**
+- `Type`
+- `type`
+- `Unification`
+- `unification`
+- `type_unification`
+- `TypeUnification`
+- `assert_compiles`
+- `Unify`
+- `Array`
 
 **Code:**
 
@@ -435,9 +708,16 @@ test "type_unification_17":
     assert_compiles()
 ```
 
-### Test 18: Examples
+### Test 18: Examples {#examples_18}
 
 **Test name:** `examples_18`
+
+**Linked Symbols:**
+- `Examples`
+- `examples`
+- `assert_compiles`
+- `Array`
+- `All`
 
 **Code:**
 
@@ -455,9 +735,16 @@ test "examples_18":
     assert_compiles()
 ```
 
-### Test 19: Examples
+### Test 19: Examples {#map}
 
 **Test name:** `map`
+
+**Linked Symbols:**
+- `map`
+- `Map`
+- `double`
+- `Array`
+- `append`
 
 **Code:**
 
@@ -475,9 +762,19 @@ let nums = [1, 2, 3]               # Array[Int]
 let doubled = map(double, nums)    # Array[Int]
 ```
 
-### Test 20: Examples
+### Test 20: Examples {#unwrap_or}
 
 **Test name:** `unwrap_or`
+
+**Linked Symbols:**
+- `Unwrap`
+- `unwrap_or`
+- `unwrap`
+- `UnwrapOr`
+- `Type`
+- `Return`
+- `Option`
+- `Must`
 
 **Code:**
 
@@ -491,9 +788,22 @@ fn unwrap_or(opt, default):
 # Return type: T
 ```
 
-### Test 21: Examples
+### Test 21: Examples {#fetch_data}
 
 **Test name:** `fetch_data`
+
+**Linked Symbols:**
+- `fetch`
+- `fetch_data`
+- `data`
+- `Data`
+- `Fetch`
+- `FetchData`
+- `Async`
+- `Explicit`
+- `Explicitly`
+- `get`
+- ... and 3 more
 
 **Code:**
 
@@ -509,9 +819,21 @@ sync fn compute():
 # Explicitly sync
 ```
 
-### Test 22: Error Messages
+### Test 22: Error Messages {#error_messages_22}
 
 **Test name:** `error_messages_22`
+
+**Linked Symbols:**
+- `Messages`
+- `ErrorMessages`
+- `error`
+- `error_messages`
+- `messages`
+- `Error`
+- `assert_compiles`
+- `Type`
+- `Expected`
+- `Found`
 
 **Code:**
 
@@ -527,9 +849,19 @@ test "error_messages_22":
     assert_compiles()
 ```
 
-### Test 23: Error Messages
+### Test 23: Error Messages {#error_messages_23}
 
 **Test name:** `error_messages_23`
+
+**Linked Symbols:**
+- `Messages`
+- `ErrorMessages`
+- `error`
+- `error_messages`
+- `messages`
+- `Error`
+- `assert_compiles`
+- `Undefined`
 
 **Code:**
 
@@ -543,9 +875,22 @@ test "error_messages_23":
     assert_compiles()
 ```
 
-### Test 24: Error Messages
+### Test 24: Error Messages {#error_messages_24}
 
 **Test name:** `error_messages_24`
+
+**Linked Symbols:**
+- `Messages`
+- `ErrorMessages`
+- `error`
+- `error_messages`
+- `messages`
+- `Error`
+- `assert_compiles`
+- `Var`
+- `Occurs`
+- `Cannot`
+- ... and 2 more
 
 **Code:**
 
@@ -560,6 +905,12 @@ test "error_messages_24":
     #   This would create an infinite type
     assert_compiles()
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [type_inference_spec.spl](../../tests/specs/type_inference_spec.spl)
 
 ---
 

@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/types_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -14,6 +14,13 @@
 **Keywords:** types, mutability, generics, type-inference
 **Last Updated:** 2025-12-28
 **Topics:** type-system
+
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (13 tests)
+- [Source Code](#source-code)
 
 ## Overview
 
@@ -28,29 +35,144 @@ Complete specification of Simple's type system, including primitives, composites
 
 ---
 
-## Test Cases (13 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [fetch_user](#test-1) | Built-in Types |  |
-| [mutability_rules_2](#test-2) | Mutability Rules |  |
-| [mutability_rules_3](#test-3) | Mutability Rules |  |
-| [mutability_rules_4](#test-4) | Mutability Rules |  |
-| [unit_types_and_literal_suffixes_5](#test-5) | Unit Types and Literal Suffixes |  |
-| [unit_types_and_literal_suffixes_6](#test-6) | Unit Types and Literal Suffixes |  |
-| [unit_types_and_literal_suffixes_7](#test-7) | Unit Types and Literal Suffixes |  |
-| [unit_types_and_literal_suffixes_8](#test-8) | Unit Types and Literal Suffixes |  |
-| [unit_types_and_literal_suffixes_9](#test-9) | Unit Types and Literal Suffixes |  |
-| [unit_types_and_literal_suffixes_10](#test-10) | Unit Types and Literal Suffixes |  |
-| [internal_calc](#test-11) | Primitive Type Warnings (Public APIs) |  |
-| [primitive_type_warnings_public_apis_16](#test-12) | Primitive Type Warnings (Public APIs) |  |
-| [type_inference_17](#test-13) | Type Inference |  |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `APIs` | [12](#primitive_type_warnings_public_apis_16) |
+| `Access` | [6](#unit_types_and_literal_suffixes_6) |
+| `And` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `Apis` | [12](#primitive_type_warnings_public_apis_16) |
+| `BaseType` | [5](#unit_types_and_literal_suffixes_5), [9](#unit_types_and_literal_suffixes_9) |
+| `Calc` | [11](#internal_calc) |
+| `Celsius` | [9](#unit_types_and_literal_suffixes_9) |
+| `Color` | [3](#mutability_rules_3) |
+| `Comparisons` | [6](#unit_types_and_literal_suffixes_6) |
+| `Compile` | [10](#unit_types_and_literal_suffixes_10) |
+| `Compiler` | [8](#unit_types_and_literal_suffixes_8) |
+| `Cursor` | [2](#mutability_rules_2), [13](#type_inference_17) |
+| `ERROR` | [10](#unit_types_and_literal_suffixes_10) |
+| `Error` | [13](#type_inference_17) |
+| `Fahrenheit` | [9](#unit_types_and_literal_suffixes_9) |
+| `Fetch` | [1](#fetch_user) |
+| `FetchUser` | [1](#fetch_user) |
+| `Inference` | [13](#type_inference_17) |
+| `Internal` | [11](#internal_calc) |
+| `InternalCalc` | [11](#internal_calc) |
+| `Literal` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `MAX` | [4](#mutability_rules_4) |
+| `Mutability` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4) |
+| `MutabilityRules` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4) |
+| `Name` | [9](#unit_types_and_literal_suffixes_9) |
+| `Newton` | [7](#unit_types_and_literal_suffixes_7) |
+| `Operations` | [6](#unit_types_and_literal_suffixes_6) |
+| `Percentage` | [9](#unit_types_and_literal_suffixes_9) |
+| `Person` | [3](#mutability_rules_3) |
+| `Point` | [2](#mutability_rules_2), [13](#type_inference_17) |
+| `Price` | [11](#internal_calc) |
+| `Primitive` | [12](#primitive_type_warnings_public_apis_16) |
+| `PrimitiveTypeWarningsPublicApis` | [12](#primitive_type_warnings_public_apis_16) |
+| `Promise` | [1](#fetch_user) |
+| `Public` | [11](#internal_calc), [12](#primitive_type_warnings_public_apis_16) |
+| `Quantity` | [11](#internal_calc) |
+| `Rules` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4) |
+| `String` | [3](#mutability_rules_3) |
+| `Suffixes` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `Syntax` | [5](#unit_types_and_literal_suffixes_5), [9](#unit_types_and_literal_suffixes_9) |
+| `Total` | [11](#internal_calc) |
+| `Type` | [12](#primitive_type_warnings_public_apis_16), [13](#type_inference_17) |
+| `TypeInference` | [13](#type_inference_17) |
+| `Types` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `Unit` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `UnitTypesAndLiteralSuffixes` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `Usage` | [9](#unit_types_and_literal_suffixes_9) |
+| `User` | [1](#fetch_user) |
+| `UserId` | [1](#fetch_user), [9](#unit_types_and_literal_suffixes_9) |
+| `Using` | [1](#fetch_user) |
+| `Warnings` | [12](#primitive_type_warnings_public_apis_16) |
+| `and` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `apis` | [12](#primitive_type_warnings_public_apis_16) |
+| `area` | [7](#unit_types_and_literal_suffixes_7) |
+| `as_km` | [6](#unit_types_and_literal_suffixes_6) |
+| `as_m` | [6](#unit_types_and_literal_suffixes_6) |
+| `as_mile` | [6](#unit_types_and_literal_suffixes_6) |
+| `assert_compiles` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4), [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), ... (11 total) |
+| `calc` | [11](#internal_calc) |
+| `calculate_total` | [11](#internal_calc) |
+| `deny` | [12](#primitive_type_warnings_public_apis_16) |
+| `family` | [6](#unit_types_and_literal_suffixes_6) |
+| `fetch` | [1](#fetch_user) |
+| `fetch_user` | [1](#fetch_user) |
+| `force` | [7](#unit_types_and_literal_suffixes_7) |
+| `from_raw` | [11](#internal_calc) |
+| `get` | [1](#fetch_user) |
+| `inference` | [13](#type_inference_17) |
+| `internal` | [11](#internal_calc) |
+| `internal_calc` | [11](#internal_calc) |
+| `length` | [5](#unit_types_and_literal_suffixes_5) |
+| `literal` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `mass` | [5](#unit_types_and_literal_suffixes_5) |
+| `mutability` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4) |
+| `mutability_rules` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4) |
+| `mutable` | [4](#mutability_rules_4) |
+| `name` | [5](#unit_types_and_literal_suffixes_5) |
+| `parse` | [1](#fetch_user) |
+| `primitive` | [12](#primitive_type_warnings_public_apis_16) |
+| `primitive_type_warnings_public_apis` | [12](#primitive_type_warnings_public_apis_16) |
+| `public` | [12](#primitive_type_warnings_public_apis_16) |
+| `raw` | [11](#internal_calc) |
+| `rules` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4) |
+| `second` | [7](#unit_types_and_literal_suffixes_7) |
+| `suffixes` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `time` | [5](#unit_types_and_literal_suffixes_5) |
+| `type` | [12](#primitive_type_warnings_public_apis_16), [13](#type_inference_17) |
+| `type_inference` | [13](#type_inference_17) |
+| `types` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `unit` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `unit_types_and_literal_suffixes` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
+| `user` | [1](#fetch_user) |
+| `variable` | [4](#mutability_rules_4) |
+| `velocity` | [7](#unit_types_and_literal_suffixes_7) |
+| `warnings` | [12](#primitive_type_warnings_public_apis_16) |
 
 ---
 
-### Test 1: Built-in Types
+## Test Cases (13 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [fetch_user](#fetch_user) | Built-in Types | `fetch`, `user`, `User` +8 |
+| 2 | [mutability_rules_2](#mutability_rules_2) | Mutability Rules | `Mutability`, `rules`, `mutability_rules` +6 |
+| 3 | [mutability_rules_3](#mutability_rules_3) | Mutability Rules | `Mutability`, `rules`, `mutability_rules` +7 |
+| 4 | [mutability_rules_4](#mutability_rules_4) | Mutability Rules | `Mutability`, `rules`, `mutability_rules` +7 |
+| 5 | [unit_types_and_literal_suffixes_5](#unit_types_and_literal_suffixes_5) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +16 |
+| 6 | [unit_types_and_literal_suffixes_6](#unit_types_and_literal_suffixes_6) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +17 |
+| 7 | [unit_types_and_literal_suffixes_7](#unit_types_and_literal_suffixes_7) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +15 |
+| 8 | [unit_types_and_literal_suffixes_8](#unit_types_and_literal_suffixes_8) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +11 |
+| 9 | [unit_types_and_literal_suffixes_9](#unit_types_and_literal_suffixes_9) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +18 |
+| 10 | [unit_types_and_literal_suffixes_10](#unit_types_and_literal_suffixes_10) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +12 |
+| 11 | [internal_calc](#internal_calc) | Primitive Type Warnings (Public APIs) | `internal_calc`, `internal`, `calc` +10 |
+| 12 | [primitive_type_warnings_public_apis_16](#primitive_type_warnings_public_apis_16) | Primitive Type Warnings (Public APIs) | `primitive_type_warnings_public_apis`, `Type`, `apis` +12 |
+| 13 | [type_inference_17](#type_inference_17) | Type Inference | `inference`, `Type`, `TypeInference` +7 |
+
+---
+
+### Test 1: Built-in Types {#fetch_user}
 
 **Test name:** `fetch_user`
+
+**Linked Symbols:**
+- `fetch`
+- `user`
+- `User`
+- `Fetch`
+- `fetch_user`
+- `FetchUser`
+- `get`
+- `Using`
+- `UserId`
+- `Promise`
+- ... and 1 more
 
 **Code:**
 
@@ -64,9 +186,20 @@ let user ~= fetch_user(1_uid)      # user: User (awaited)
 let promise = fetch_user(1_uid)     # promise: Promise[User]
 ```
 
-### Test 2: Mutability Rules
+### Test 2: Mutability Rules {#mutability_rules_2}
 
 **Test name:** `mutability_rules_2`
+
+**Linked Symbols:**
+- `Mutability`
+- `rules`
+- `mutability_rules`
+- `MutabilityRules`
+- `mutability`
+- `Rules`
+- `assert_compiles`
+- `Point`
+- `Cursor`
 
 **Code:**
 
@@ -85,9 +218,21 @@ test "mutability_rules_2":
     assert_compiles()
 ```
 
-### Test 3: Mutability Rules
+### Test 3: Mutability Rules {#mutability_rules_3}
 
 **Test name:** `mutability_rules_3`
+
+**Linked Symbols:**
+- `Mutability`
+- `rules`
+- `mutability_rules`
+- `MutabilityRules`
+- `mutability`
+- `Rules`
+- `assert_compiles`
+- `String`
+- `Color`
+- `Person`
 
 **Code:**
 
@@ -107,9 +252,21 @@ test "mutability_rules_3":
     assert_compiles()
 ```
 
-### Test 4: Mutability Rules
+### Test 4: Mutability Rules {#mutability_rules_4}
 
 **Test name:** `mutability_rules_4`
+
+**Linked Symbols:**
+- `Mutability`
+- `rules`
+- `mutability_rules`
+- `MutabilityRules`
+- `mutability`
+- `Rules`
+- `assert_compiles`
+- `mutable`
+- `variable`
+- `MAX`
 
 **Code:**
 
@@ -128,9 +285,22 @@ test "mutability_rules_4":
     assert_compiles()
 ```
 
-### Test 5: Unit Types and Literal Suffixes
+### Test 5: Unit Types and Literal Suffixes {#unit_types_and_literal_suffixes_5}
 
 **Test name:** `unit_types_and_literal_suffixes_5`
+
+**Linked Symbols:**
+- `Literal`
+- `UnitTypesAndLiteralSuffixes`
+- `suffixes`
+- `Types`
+- `Unit`
+- `and`
+- `literal`
+- `Suffixes`
+- `unit_types_and_literal_suffixes`
+- `types`
+- ... and 9 more
 
 **Code:**
 
@@ -165,9 +335,22 @@ test "unit_types_and_literal_suffixes_5":
     assert_compiles()
 ```
 
-### Test 6: Unit Types and Literal Suffixes
+### Test 6: Unit Types and Literal Suffixes {#unit_types_and_literal_suffixes_6}
 
 **Test name:** `unit_types_and_literal_suffixes_6`
+
+**Linked Symbols:**
+- `Literal`
+- `UnitTypesAndLiteralSuffixes`
+- `suffixes`
+- `Types`
+- `Unit`
+- `and`
+- `literal`
+- `Suffixes`
+- `unit_types_and_literal_suffixes`
+- `types`
+- ... and 10 more
 
 **Code:**
 
@@ -193,9 +376,22 @@ test "unit_types_and_literal_suffixes_6":
     assert_compiles()
 ```
 
-### Test 7: Unit Types and Literal Suffixes
+### Test 7: Unit Types and Literal Suffixes {#unit_types_and_literal_suffixes_7}
 
 **Test name:** `unit_types_and_literal_suffixes_7`
+
+**Linked Symbols:**
+- `Literal`
+- `UnitTypesAndLiteralSuffixes`
+- `suffixes`
+- `Types`
+- `Unit`
+- `and`
+- `literal`
+- `Suffixes`
+- `unit_types_and_literal_suffixes`
+- `types`
+- ... and 8 more
 
 **Code:**
 
@@ -221,9 +417,22 @@ test "unit_types_and_literal_suffixes_7":
     assert_compiles()
 ```
 
-### Test 8: Unit Types and Literal Suffixes
+### Test 8: Unit Types and Literal Suffixes {#unit_types_and_literal_suffixes_8}
 
 **Test name:** `unit_types_and_literal_suffixes_8`
+
+**Linked Symbols:**
+- `Literal`
+- `UnitTypesAndLiteralSuffixes`
+- `suffixes`
+- `Types`
+- `Unit`
+- `and`
+- `literal`
+- `Suffixes`
+- `unit_types_and_literal_suffixes`
+- `types`
+- ... and 4 more
 
 **Code:**
 
@@ -243,9 +452,22 @@ test "unit_types_and_literal_suffixes_8":
     assert_compiles()
 ```
 
-### Test 9: Unit Types and Literal Suffixes
+### Test 9: Unit Types and Literal Suffixes {#unit_types_and_literal_suffixes_9}
 
 **Test name:** `unit_types_and_literal_suffixes_9`
+
+**Linked Symbols:**
+- `Literal`
+- `UnitTypesAndLiteralSuffixes`
+- `suffixes`
+- `Types`
+- `Unit`
+- `and`
+- `literal`
+- `Suffixes`
+- `unit_types_and_literal_suffixes`
+- `types`
+- ... and 11 more
 
 **Code:**
 
@@ -267,9 +489,22 @@ test "unit_types_and_literal_suffixes_9":
     assert_compiles()
 ```
 
-### Test 10: Unit Types and Literal Suffixes
+### Test 10: Unit Types and Literal Suffixes {#unit_types_and_literal_suffixes_10}
 
 **Test name:** `unit_types_and_literal_suffixes_10`
+
+**Linked Symbols:**
+- `Literal`
+- `UnitTypesAndLiteralSuffixes`
+- `suffixes`
+- `Types`
+- `Unit`
+- `and`
+- `literal`
+- `Suffixes`
+- `unit_types_and_literal_suffixes`
+- `types`
+- ... and 5 more
 
 **Code:**
 
@@ -289,9 +524,22 @@ test "unit_types_and_literal_suffixes_10":
     assert_compiles()
 ```
 
-### Test 11: Primitive Type Warnings (Public APIs)
+### Test 11: Primitive Type Warnings (Public APIs) {#internal_calc}
 
 **Test name:** `internal_calc`
+
+**Linked Symbols:**
+- `internal_calc`
+- `internal`
+- `calc`
+- `Internal`
+- `InternalCalc`
+- `Calc`
+- `Total`
+- `Public`
+- `raw`
+- `calculate_total`
+- ... and 3 more
 
 **Code:**
 
@@ -305,9 +553,22 @@ pub fn calculate_total(price: Price, quantity: Quantity) -> Total:
     return Total.from_raw(raw)
 ```
 
-### Test 12: Primitive Type Warnings (Public APIs)
+### Test 12: Primitive Type Warnings (Public APIs) {#primitive_type_warnings_public_apis_16}
 
 **Test name:** `primitive_type_warnings_public_apis_16`
+
+**Linked Symbols:**
+- `primitive_type_warnings_public_apis`
+- `Type`
+- `apis`
+- `Public`
+- `type`
+- `public`
+- `PrimitiveTypeWarningsPublicApis`
+- `Warnings`
+- `Apis`
+- `warnings`
+- ... and 5 more
 
 **Code:**
 
@@ -326,9 +587,21 @@ test "primitive_type_warnings_public_apis_16":
     assert_compiles()
 ```
 
-### Test 13: Type Inference
+### Test 13: Type Inference {#type_inference_17}
 
 **Test name:** `type_inference_17`
+
+**Linked Symbols:**
+- `inference`
+- `Type`
+- `TypeInference`
+- `type`
+- `Inference`
+- `type_inference`
+- `assert_compiles`
+- `Point`
+- `Cursor`
+- `Error`
 
 **Code:**
 
@@ -346,6 +619,12 @@ test "type_inference_17":
     cur.x = 5           # OK: Cursor is mutable
     assert_compiles()
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [types_spec.spl](../../tests/specs/types_spec.spl)
 
 ---
 

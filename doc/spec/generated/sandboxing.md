@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/sandboxing_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -15,6 +15,12 @@
 **Last Updated:** 2025-12-28
 **Topics:** security, tooling
 
+## Quick Navigation
+
+- [Overview](#overview)
+- [Test Cases](#test-cases) (0 tests)
+- [Source Code](#source-code)
+
 ## Overview
 
 ### Two Isolation Models
@@ -25,6 +31,12 @@
 - **Build Audit** - Security auditing
 
 ---
+
+---
+
+## Source Code
+
+**View full specification:** [sandboxing_spec.spl](../../tests/specs/sandboxing_spec.spl)
 
 ---
 

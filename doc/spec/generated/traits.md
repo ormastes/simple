@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/traits_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -12,6 +12,13 @@
 **Status:** ✅ Implemented (uses existing coherence rules)
 **Feature IDs:** **Source:** traits.md
 **Note:** This is a test extraction file. For complete specification text,
+
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (36 tests)
+- [Source Code](#source-code)
 
 ## Overview
 
@@ -23,54 +30,300 @@ design rationale, and architecture, see doc/spec/traits.md
 
 ---
 
-## Test Cases (36 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [defining_a_trait_1](#test-1) | Defining a Trait |  |
-| [defining_a_trait_2](#test-2) | Defining a Trait | The special `self` keyword in trait definitions refers to th... |
-| [implementing_a_trait_3](#test-3) | Implementing a Trait | To implement a trait for a type, use an `impl Trait for Type... |
-| [implementing_a_trait_4](#test-4) | Implementing a Trait | A type can implement any number of traits: |
-| [unnamed_test](#test-5) | Dispatch | Traits support static dispatch by default - the compiler kno... |
-| [dispatch_6](#test-6) | Dispatch | For cases where the concrete type isn't known at compile tim... |
-| [unnamed_test](#test-7) | Trait Bounds and Generics | Traits are often used as bounds on type parameters: |
-| [unnamed_test](#test-8) | Trait Bounds and Generics | This generic function `print_all` can accept a list of any t... |
-| [unnamed_test](#test-9) | Trait Bounds and Generics | For complex bounds, use where clauses: |
-| [trait_inheritance_10](#test-10) | Trait Inheritance | One trait can require another: |
-| [associated_types_11](#test-11) | Associated Types | Traits can include associated type placeholders: |
-| [trait_objects_and_collections_12](#test-12) | Trait Objects and Collections | Trait objects allow storing different types that implement t... |
-| [common_standard_traits_13](#test-13) | Common Standard Traits | Common traits can be automatically derived: |
-| [note_on_semantic_types_14](#test-14) | Note on Semantic Types | Trait methods in public APIs should follow the same semantic... |
-| [interface_bindings_static_polymorphism_15](#test-15) | Interface Bindings (Static Polymorphism) | Important: The `bind` statement only supports static dispatc... |
-| [interface_bindings_static_polymorphism_16](#test-16) | Interface Bindings (Static Polymorphism) | ```simple bind TraitName = ImplTypeName ``` |
-| [collection_traits_17](#test-17) | Collection Traits | \| Type \| Iterable \| Collection \| Sequence \| MutSequence \| Im... |
-| [inherent_impl_blocks_18](#test-18) | Inherent Impl Blocks | Methods can be added directly to types without using traits: |
-| [inherent_impl_blocks_19](#test-19) | Inherent Impl Blocks | Extension methods allow adding methods to types defined else... |
-| [inherent_impl_blocks_20](#test-20) | Inherent Impl Blocks |  |
-| [inherent_impl_blocks_21](#test-21) | Inherent Impl Blocks | Example - Extending Standard Types: |
-| [inherent_impl_blocks_22](#test-22) | Inherent Impl Blocks | Example - Multiple Extension Traits: |
-| [trait_coherence_rules_23](#test-23) | Trait Coherence Rules | The orphan rule prevents defining trait implementations in "... |
-| [trait_coherence_rules_24](#test-24) | Trait Coherence Rules | Two trait implementations overlap if there exists a type tha... |
-| [trait_coherence_rules_25](#test-25) | Trait Coherence Rules | Specialization allows a more specific implementation to over... |
-| [trait_coherence_rules_26](#test-26) | Trait Coherence Rules | Blanket implementations apply to all types matching a bound: |
-| [trait_coherence_rules_27](#test-27) | Trait Coherence Rules | Associated types in trait implementations must be consistent... |
-| [trait_coherence_rules_28](#test-28) | Trait Coherence Rules | Negative bounds exclude types from a blanket impl: |
-| [trait_coherence_rules_29](#test-29) | Trait Coherence Rules |  |
-| [trait_coherence_rules_30](#test-30) | Trait Coherence Rules |  |
-| [trait_coherence_rules_31](#test-31) | Trait Coherence Rules |  |
-| [related_specifications_32](#test-32) | Related Specifications |  |
-| [related_specifications_33](#test-33) | Related Specifications | 1. Conditional Blanket Impls: |
-| [related_specifications_34](#test-34) | Related Specifications | 2. Avoiding Conflicts: |
-| [related_specifications_35](#test-35) | Related Specifications | 3. Marker Trait Exclusion: |
-| [related_specifications_36](#test-36) | Related Specifications | Example - Complete Pattern: |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `ALLOWED` | [20](#inherent_impl_blocks_20), [23](#trait_coherence_rules_23) |
+| `Add` | [17](#collection_traits_17), [21](#inherent_impl_blocks_21) |
+| `Alice` | [5](#unnamed_test), [12](#trait_objects_and_collections_12), [22](#inherent_impl_blocks_22) |
+| `And` | [12](#trait_objects_and_collections_12) |
+| `Any` | [10](#trait_inheritance_10) |
+| `Array` | [17](#collection_traits_17) |
+| `Associated` | [11](#associated_types_11), [18](#inherent_impl_blocks_18) |
+| `AssociatedTypes` | [11](#associated_types_11) |
+| `Bind` | [16](#interface_bindings_static_polymorphism_16) |
+| `Bindings` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `Blanket` | [26](#trait_coherence_rules_26) |
+| `Blocks` | [18](#inherent_impl_blocks_18), [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22) |
+| `Cannot` | [27](#trait_coherence_rules_27) |
+| `Clone` | [13](#common_standard_traits_13), [17](#collection_traits_17), [24](#trait_coherence_rules_24), [28](#trait_coherence_rules_28), [32](#related_specifications_32), ... (7 total) |
+| `Coherence` | [23](#trait_coherence_rules_23), [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), [26](#trait_coherence_rules_26), [27](#trait_coherence_rules_27), ... (9 total) |
+| `Collection` | [17](#collection_traits_17) |
+| `CollectionTraits` | [17](#collection_traits_17) |
+| `Collections` | [12](#trait_objects_and_collections_12) |
+| `Common` | [13](#common_standard_traits_13) |
+| `CommonStandardTraits` | [13](#common_standard_traits_13) |
+| `Comparable` | [2](#defining_a_trait_2), [4](#implementing_a_trait_4), [8](#unnamed_test), [9](#unnamed_test) |
+| `Compiler` | [5](#unnamed_test) |
+| `Console` | [16](#interface_bindings_static_polymorphism_16) |
+| `ConsoleLogger` | [16](#interface_bindings_static_polymorphism_16) |
+| `Container` | [11](#associated_types_11), [27](#trait_coherence_rules_27) |
+| `Copy` | [28](#trait_coherence_rules_28), [32](#related_specifications_32), [33](#related_specifications_33) |
+| `Debug` | [13](#common_standard_traits_13), [26](#trait_coherence_rules_26) |
+| `Default` | [17](#collection_traits_17), [33](#related_specifications_33), [36](#related_specifications_36) |
+| `Define` | [20](#inherent_impl_blocks_20), [30](#trait_coherence_rules_30) |
+| `Defining` | [1](#defining_a_trait_1), [2](#defining_a_trait_2) |
+| `DefiningATrait` | [1](#defining_a_trait_1), [2](#defining_a_trait_2) |
+| `Different` | [22](#inherent_impl_blocks_22) |
+| `Dispatch` | [6](#dispatch_6) |
+| `Display` | [23](#trait_coherence_rules_23), [34](#related_specifications_34) |
+| `Drawable` | [10](#trait_inheritance_10) |
+| `Dynamic` | [6](#dispatch_6), [12](#trait_objects_and_collections_12) |
+| `ERROR` | [23](#trait_coherence_rules_23), [24](#trait_coherence_rules_24), [27](#trait_coherence_rules_27) |
+| `Each` | [27](#trait_coherence_rules_27) |
+| `FORBIDDEN` | [23](#trait_coherence_rules_23) |
+| `File` | [16](#interface_bindings_static_polymorphism_16) |
+| `FileLogger` | [16](#interface_bindings_static_polymorphism_16) |
+| `For` | [34](#related_specifications_34) |
+| `ForeignTrait` | [29](#trait_coherence_rules_29) |
+| `ForeignType` | [31](#trait_coherence_rules_31) |
+| `GOOD` | [14](#note_on_semantic_types_14) |
+| `Growable` | [17](#collection_traits_17) |
+| `Hash` | [13](#common_standard_traits_13) |
+| `Hello` | [16](#interface_bindings_static_polymorphism_16), [19](#inherent_impl_blocks_19) |
+| `Impl` | [18](#inherent_impl_blocks_18), [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22) |
+| `ImplTypeName` | [15](#interface_bindings_static_polymorphism_15) |
+| `Implement` | [20](#inherent_impl_blocks_20) |
+| `Implementing` | [3](#implementing_a_trait_3), [4](#implementing_a_trait_4), [23](#trait_coherence_rules_23) |
+| `ImplementingATrait` | [3](#implementing_a_trait_3), [4](#implementing_a_trait_4) |
+| `Inherent` | [18](#inherent_impl_blocks_18), [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22) |
+| `InherentImplBlocks` | [18](#inherent_impl_blocks_18), [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22) |
+| `Inheritance` | [10](#trait_inheritance_10) |
+| `IntList` | [11](#associated_types_11), [27](#trait_coherence_rules_27) |
+| `Interface` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `InterfaceBindingsStaticPolymorphism` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `Item` | [11](#associated_types_11), [14](#note_on_semantic_types_14), [27](#trait_coherence_rules_27) |
+| `Iterator` | [14](#note_on_semantic_types_14) |
+| `JSON` | [22](#inherent_impl_blocks_22) |
+| `JsonExt` | [22](#inherent_impl_blocks_22) |
+| `List` | [7](#unnamed_test), [8](#unnamed_test), [17](#collection_traits_17) |
+| `Logger` | [16](#interface_bindings_static_polymorphism_16) |
+| `Multiple` | [32](#related_specifications_32) |
+| `MutSequence` | [17](#collection_traits_17) |
+| `MyString` | [29](#trait_coherence_rules_29) |
+| `MyTrait` | [23](#trait_coherence_rules_23) |
+| `MyType` | [23](#trait_coherence_rules_23) |
+| `MyWrapper` | [31](#trait_coherence_rules_31) |
+| `NOT` | [32](#related_specifications_32), [35](#related_specifications_35) |
+| `Negative` | [32](#related_specifications_32) |
+| `Not` | [28](#trait_coherence_rules_28) |
+| `Note` | [14](#note_on_semantic_types_14) |
+| `NoteOnSemanticTypes` | [14](#note_on_semantic_types_14) |
+| `Now` | [19](#inherent_impl_blocks_19), [29](#trait_coherence_rules_29) |
+| `Objects` | [12](#trait_objects_and_collections_12) |
+| `Only` | [17](#collection_traits_17), [35](#related_specifications_35) |
+| `Option` | [14](#note_on_semantic_types_14), [17](#collection_traits_17) |
+| `Ord` | [17](#collection_traits_17) |
+| `Output` | [17](#collection_traits_17) |
+| `Overlapping` | [24](#trait_coherence_rules_24) |
+| `Person` | [3](#implementing_a_trait_3), [5](#unnamed_test), [12](#trait_objects_and_collections_12) |
+| `Point` | [4](#implementing_a_trait_4), [12](#trait_objects_and_collections_12), [13](#common_standard_traits_13), [18](#inherent_impl_blocks_18) |
+| `Polymorphism` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `Printable` | [1](#defining_a_trait_1), [3](#implementing_a_trait_3), [4](#implementing_a_trait_4), [5](#unnamed_test), [6](#dispatch_6), ... (11 total) |
+| `Process` | [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), [36](#related_specifications_36) |
+| `Related` | [32](#related_specifications_32), [33](#related_specifications_33), [34](#related_specifications_34), [35](#related_specifications_35), [36](#related_specifications_36) |
+| `RelatedSpecifications` | [32](#related_specifications_32), [33](#related_specifications_33), [34](#related_specifications_34), [35](#related_specifications_35), [36](#related_specifications_36) |
+| `Result` | [14](#note_on_semantic_types_14) |
+| `Rules` | [23](#trait_coherence_rules_23), [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), [26](#trait_coherence_rules_26), [27](#trait_coherence_rules_27), ... (9 total) |
+| `Safe` | [35](#related_specifications_35) |
+| `SafeWrapper` | [32](#related_specifications_32) |
+| `Self` | [2](#defining_a_trait_2), [11](#associated_types_11), [14](#note_on_semantic_types_14) |
+| `Semantic` | [14](#note_on_semantic_types_14) |
+| `Send` | [32](#related_specifications_32) |
+| `Sequence` | [17](#collection_traits_17) |
+| `Serialize` | [34](#related_specifications_34) |
+| `Simple` | [33](#related_specifications_33) |
+| `Slice` | [17](#collection_traits_17) |
+| `SliceExt` | [21](#inherent_impl_blocks_21) |
+| `Specialized` | [33](#related_specifications_33) |
+| `Specific` | [36](#related_specifications_36) |
+| `Specifications` | [32](#related_specifications_32), [33](#related_specifications_33), [34](#related_specifications_34), [35](#related_specifications_35), [36](#related_specifications_36) |
+| `Standard` | [13](#common_standard_traits_13), [14](#note_on_semantic_types_14) |
+| `Static` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `String` | [1](#defining_a_trait_1), [3](#implementing_a_trait_3), [4](#implementing_a_trait_4), [9](#unnamed_test), [10](#trait_inheritance_10), ... (14 total) |
+| `StringExt` | [20](#inherent_impl_blocks_20), [30](#trait_coherence_rules_30) |
+| `StringList` | [27](#trait_coherence_rules_27) |
+| `Strings` | [19](#inherent_impl_blocks_19) |
+| `Sync` | [32](#related_specifications_32) |
+| `Trait` | [1](#defining_a_trait_1), [2](#defining_a_trait_2), [3](#implementing_a_trait_3), [4](#implementing_a_trait_4), [10](#trait_inheritance_10), ... (15 total) |
+| `TraitCoherenceRules` | [23](#trait_coherence_rules_23), [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), [26](#trait_coherence_rules_26), [27](#trait_coherence_rules_27), ... (9 total) |
+| `TraitInheritance` | [10](#trait_inheritance_10) |
+| `TraitName` | [15](#interface_bindings_static_polymorphism_15) |
+| `TraitObjectsAndCollections` | [12](#trait_objects_and_collections_12) |
+| `Traits` | [13](#common_standard_traits_13), [17](#collection_traits_17) |
+| `Types` | [11](#associated_types_11), [14](#note_on_semantic_types_14) |
+| `Unnamed` | [5](#unnamed_test), [7](#unnamed_test), [8](#unnamed_test), [9](#unnamed_test) |
+| `UnsafePointer` | [35](#related_specifications_35) |
+| `Usage` | [18](#inherent_impl_blocks_18), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21) |
+| `Use` | [14](#note_on_semantic_types_14) |
+| `User` | [14](#note_on_semantic_types_14), [22](#inherent_impl_blocks_22) |
+| `UserId` | [14](#note_on_semantic_types_14) |
+| `UserService` | [14](#note_on_semantic_types_14) |
+| `UserStatus` | [14](#note_on_semantic_types_14) |
+| `Uses` | [6](#dispatch_6) |
+| `Widget` | [10](#trait_inheritance_10), [12](#trait_objects_and_collections_12) |
+| `With` | [16](#interface_bindings_static_polymorphism_16), [25](#trait_coherence_rules_25) |
+| `Works` | [17](#collection_traits_17), [20](#inherent_impl_blocks_20) |
+| `World` | [19](#inherent_impl_blocks_19) |
+| `Wrap` | [29](#trait_coherence_rules_29) |
+| `XML` | [22](#inherent_impl_blocks_22) |
+| `XmlExt` | [22](#inherent_impl_blocks_22) |
+| `add` | [11](#associated_types_11) |
+| `and` | [12](#trait_objects_and_collections_12) |
+| `as_bytes` | [34](#related_specifications_34) |
+| `assert_compiles` | [1](#defining_a_trait_1), [2](#defining_a_trait_2), [3](#implementing_a_trait_3), [4](#implementing_a_trait_4), [6](#dispatch_6), ... (32 total) |
+| `associated` | [11](#associated_types_11) |
+| `associated_types` | [11](#associated_types_11) |
+| `binary_serialize` | [34](#related_specifications_34) |
+| `bindings` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `blocks` | [18](#inherent_impl_blocks_18), [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22) |
+| `clone` | [17](#collection_traits_17), [28](#trait_coherence_rules_28), [33](#related_specifications_33) |
+| `coherence` | [23](#trait_coherence_rules_23), [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), [26](#trait_coherence_rules_26), [27](#trait_coherence_rules_27), ... (9 total) |
+| `collection` | [17](#collection_traits_17) |
+| `collection_traits` | [17](#collection_traits_17) |
+| `collections` | [12](#trait_objects_and_collections_12) |
+| `common` | [13](#common_standard_traits_13) |
+| `common_standard_traits` | [13](#common_standard_traits_13) |
+| `compare` | [2](#defining_a_trait_2), [4](#implementing_a_trait_4), [8](#unnamed_test) |
+| `copy` | [32](#related_specifications_32) |
+| `create_logger` | [16](#interface_bindings_static_polymorphism_16) |
+| `debug_fmt` | [26](#trait_coherence_rules_26) |
+| `deep_clone` | [33](#related_specifications_33) |
+| `default` | [17](#collection_traits_17), [21](#inherent_impl_blocks_21) |
+| `defining` | [1](#defining_a_trait_1), [2](#defining_a_trait_2) |
+| `defining_a_trait` | [1](#defining_a_trait_1), [2](#defining_a_trait_2) |
+| `delegate_method` | [31](#trait_coherence_rules_31) |
+| `derive` | [13](#common_standard_traits_13) |
+| `dispatch` | [6](#dispatch_6) |
+| `distance` | [18](#inherent_impl_blocks_18) |
+| `draw` | [10](#trait_inheritance_10) |
+| `equals` | [2](#defining_a_trait_2) |
+| `fmt` | [23](#trait_coherence_rules_23) |
+| `fold` | [17](#collection_traits_17) |
+| `function` | [18](#inherent_impl_blocks_18) |
+| `get` | [11](#associated_types_11) |
+| `get_user` | [14](#note_on_semantic_types_14) |
+| `greater_than` | [2](#defining_a_trait_2) |
+| `impl` | [18](#inherent_impl_blocks_18), [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22) |
+| `implementing` | [3](#implementing_a_trait_3), [4](#implementing_a_trait_4) |
+| `implementing_a_trait` | [3](#implementing_a_trait_3), [4](#implementing_a_trait_4) |
+| `inherent` | [18](#inherent_impl_blocks_18), [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22) |
+| `inherent_impl_blocks` | [18](#inherent_impl_blocks_18), [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22) |
+| `inheritance` | [10](#trait_inheritance_10) |
+| `interface` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `interface_bindings_static_polymorphism` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `len` | [11](#associated_types_11), [20](#inherent_impl_blocks_20) |
+| `less_than` | [2](#defining_a_trait_2) |
+| `log` | [5](#unnamed_test), [16](#interface_bindings_static_polymorphism_16) |
+| `main` | [16](#interface_bindings_static_polymorphism_16), [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21) |
+| `max` | [17](#collection_traits_17) |
+| `my_extension` | [30](#trait_coherence_rules_30) |
+| `my_method` | [23](#trait_coherence_rules_23) |
+| `new` | [18](#inherent_impl_blocks_18) |
+| `next` | [14](#note_on_semantic_types_14) |
+| `note` | [14](#note_on_semantic_types_14) |
+| `note_on_semantic_types` | [14](#note_on_semantic_types_14) |
+| `objects` | [12](#trait_objects_and_collections_12) |
+| `origin` | [18](#inherent_impl_blocks_18) |
+| `original_method` | [31](#trait_coherence_rules_31) |
+| `polymorphism` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `print` | [20](#inherent_impl_blocks_20), [21](#inherent_impl_blocks_21), [22](#inherent_impl_blocks_22), [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), ... (6 total) |
+| `print_self` | [1](#defining_a_trait_1), [5](#unnamed_test), [6](#dispatch_6), [7](#unnamed_test), [8](#unnamed_test), ... (6 total) |
+| `process` | [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), [36](#related_specifications_36) |
+| `push` | [11](#associated_types_11), [17](#collection_traits_17) |
+| `related` | [32](#related_specifications_32), [33](#related_specifications_33), [34](#related_specifications_34), [35](#related_specifications_35), [36](#related_specifications_36) |
+| `related_specifications` | [32](#related_specifications_32), [33](#related_specifications_33), [34](#related_specifications_34), [35](#related_specifications_35), [36](#related_specifications_36) |
+| `return` | [18](#inherent_impl_blocks_18) |
+| `reverse` | [17](#collection_traits_17) |
+| `rules` | [23](#trait_coherence_rules_23), [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), [26](#trait_coherence_rules_26), [27](#trait_coherence_rules_27), ... (9 total) |
+| `semantic` | [14](#note_on_semantic_types_14) |
+| `set_status` | [14](#note_on_semantic_types_14) |
+| `sort` | [8](#unnamed_test) |
+| `specifications` | [32](#related_specifications_32), [33](#related_specifications_33), [34](#related_specifications_34), [35](#related_specifications_35), [36](#related_specifications_36) |
+| `split` | [20](#inherent_impl_blocks_20) |
+| `sqrt` | [18](#inherent_impl_blocks_18) |
+| `standard` | [13](#common_standard_traits_13) |
+| `static` | [15](#interface_bindings_static_polymorphism_15), [16](#interface_bindings_static_polymorphism_16) |
+| `stringify` | [1](#defining_a_trait_1), [3](#implementing_a_trait_3), [4](#implementing_a_trait_4), [9](#unnamed_test), [10](#trait_inheritance_10), ... (6 total) |
+| `sum` | [21](#inherent_impl_blocks_21) |
+| `to_bytes` | [34](#related_specifications_34) |
+| `to_json` | [22](#inherent_impl_blocks_22) |
+| `to_string` | [34](#related_specifications_34) |
+| `to_title_case` | [19](#inherent_impl_blocks_19), [20](#inherent_impl_blocks_20) |
+| `to_xml` | [22](#inherent_impl_blocks_22) |
+| `trait` | [1](#defining_a_trait_1), [2](#defining_a_trait_2), [3](#implementing_a_trait_3), [4](#implementing_a_trait_4), [10](#trait_inheritance_10), ... (15 total) |
+| `trait_coherence_rules` | [23](#trait_coherence_rules_23), [24](#trait_coherence_rules_24), [25](#trait_coherence_rules_25), [26](#trait_coherence_rules_26), [27](#trait_coherence_rules_27), ... (9 total) |
+| `trait_inheritance` | [10](#trait_inheritance_10) |
+| `trait_objects_and_collections` | [12](#trait_objects_and_collections_12) |
+| `traits` | [13](#common_standard_traits_13), [17](#collection_traits_17) |
+| `types` | [11](#associated_types_11), [14](#note_on_semantic_types_14), [33](#related_specifications_33) |
+| `unnamed` | [5](#unnamed_test), [7](#unnamed_test), [8](#unnamed_test), [9](#unnamed_test) |
+| `word_count` | [20](#inherent_impl_blocks_20) |
 
 ---
 
-### Test 1: Defining a Trait
+## Test Cases (36 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [defining_a_trait_1](#defining_a_trait_1) | Defining a Trait | `DefiningATrait`, `trait`, `defining_a_trait` +8 |
+| 2 | [defining_a_trait_2](#defining_a_trait_2) | Defining a Trait | `DefiningATrait`, `trait`, `defining_a_trait` +10 |
+| 3 | [implementing_a_trait_3](#implementing_a_trait_3) | Implementing a Trait | `implementing`, `implementing_a_trait`, `trait` +8 |
+| 4 | [implementing_a_trait_4](#implementing_a_trait_4) | Implementing a Trait | `implementing`, `implementing_a_trait`, `trait` +10 |
+| 5 | [unnamed_test](#unnamed_test) | Dispatch | `Unnamed`, `unnamed`, `Alice` +5 |
+| 6 | [dispatch_6](#dispatch_6) | Dispatch | `dispatch`, `Dispatch`, `assert_compiles` +4 |
+| 7 | [unnamed_test](#unnamed_test) | Trait Bounds and Generics | `Unnamed`, `unnamed`, `print_self` +2 |
+| 8 | [unnamed_test](#unnamed_test) | Trait Bounds and Generics | `Unnamed`, `unnamed`, `List` +5 |
+| 9 | [unnamed_test](#unnamed_test) | Trait Bounds and Generics | `Unnamed`, `unnamed`, `Printable` +3 |
+| 10 | [trait_inheritance_10](#trait_inheritance_10) | Trait Inheritance | `Inheritance`, `TraitInheritance`, `trait` +11 |
+| 11 | [associated_types_11](#associated_types_11) | Associated Types | `Associated`, `associated_types`, `associated` +12 |
+| 12 | [trait_objects_and_collections_12](#trait_objects_and_collections_12) | Trait Objects and Collections | `trait_objects_and_collections`, `Collections`, `objects` +15 |
+| 13 | [common_standard_traits_13](#common_standard_traits_13) | Common Standard Traits | `standard`, `common`, `Standard` +11 |
+| 14 | [note_on_semantic_types_14](#note_on_semantic_types_14) | Note on Semantic Types | `NoteOnSemanticTypes`, `note`, `Note` +21 |
+| 15 | [interface_bindings_static_polymorphism_15](#interface_bindings_static_polymorphism_15) | Interface Bindings (Static Polymorphism) | `interface`, `interface_bindings_static_polymorphism`, `Polymorphism` +10 |
+| 16 | [interface_bindings_static_polymorphism_16](#interface_bindings_static_polymorphism_16) | Interface Bindings (Static Polymorphism) | `interface`, `interface_bindings_static_polymorphism`, `Polymorphism` +19 |
+| 17 | [collection_traits_17](#collection_traits_17) | Collection Traits | `collection`, `collection_traits`, `Traits` +25 |
+| 18 | [inherent_impl_blocks_18](#inherent_impl_blocks_18) | Inherent Impl Blocks | `inherent`, `Blocks`, `InherentImplBlocks` +15 |
+| 19 | [inherent_impl_blocks_19](#inherent_impl_blocks_19) | Inherent Impl Blocks | `inherent`, `Blocks`, `InherentImplBlocks` +12 |
+| 20 | [inherent_impl_blocks_20](#inherent_impl_blocks_20) | Inherent Impl Blocks | `inherent`, `Blocks`, `InherentImplBlocks` +19 |
+| 21 | [inherent_impl_blocks_21](#inherent_impl_blocks_21) | Inherent Impl Blocks | `inherent`, `Blocks`, `InherentImplBlocks` +13 |
+| 22 | [inherent_impl_blocks_22](#inherent_impl_blocks_22) | Inherent Impl Blocks | `inherent`, `Blocks`, `InherentImplBlocks` +17 |
+| 23 | [trait_coherence_rules_23](#trait_coherence_rules_23) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +16 |
+| 24 | [trait_coherence_rules_24](#trait_coherence_rules_24) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +12 |
+| 25 | [trait_coherence_rules_25](#trait_coherence_rules_25) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +10 |
+| 26 | [trait_coherence_rules_26](#trait_coherence_rules_26) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +12 |
+| 27 | [trait_coherence_rules_27](#trait_coherence_rules_27) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +14 |
+| 28 | [trait_coherence_rules_28](#trait_coherence_rules_28) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +10 |
+| 29 | [trait_coherence_rules_29](#trait_coherence_rules_29) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +11 |
+| 30 | [trait_coherence_rules_30](#trait_coherence_rules_30) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +10 |
+| 31 | [trait_coherence_rules_31](#trait_coherence_rules_31) | Trait Coherence Rules | `TraitCoherenceRules`, `coherence`, `trait` +10 |
+| 32 | [related_specifications_32](#related_specifications_32) | Related Specifications | `RelatedSpecifications`, `Related`, `related` +13 |
+| 33 | [related_specifications_33](#related_specifications_33) | Related Specifications | `RelatedSpecifications`, `Related`, `related` +12 |
+| 34 | [related_specifications_34](#related_specifications_34) | Related Specifications | `RelatedSpecifications`, `Related`, `related` +11 |
+| 35 | [related_specifications_35](#related_specifications_35) | Related Specifications | `RelatedSpecifications`, `Related`, `related` +8 |
+| 36 | [related_specifications_36](#related_specifications_36) | Related Specifications | `RelatedSpecifications`, `Related`, `related` +10 |
+
+---
+
+### Test 1: Defining a Trait {#defining_a_trait_1}
 
 *Source line: ~3*
 
 **Test name:** `defining_a_trait_1`
+
+**Linked Symbols:**
+- `DefiningATrait`
+- `trait`
+- `defining_a_trait`
+- `Defining`
+- `defining`
+- `Trait`
+- `assert_compiles`
+- `String`
+- `print_self`
+- `Printable`
+- ... and 1 more
 
 **Code:**
 
@@ -84,7 +337,7 @@ test "defining_a_trait_1":
     assert_compiles()
 ```
 
-### Test 2: Defining a Trait
+### Test 2: Defining a Trait {#defining_a_trait_2}
 
 *Source line: ~19*
 
@@ -93,6 +346,19 @@ test "defining_a_trait_1":
 **Description:**
 
 The special `self` keyword in trait definitions refers to the implementing instance type (like `Self...
+
+**Linked Symbols:**
+- `DefiningATrait`
+- `trait`
+- `defining_a_trait`
+- `Defining`
+- `defining`
+- `Trait`
+- `assert_compiles`
+- `Comparable`
+- `less_than`
+- `greater_than`
+- ... and 3 more
 
 **Code:**
 
@@ -109,7 +375,7 @@ test "defining_a_trait_2":
     assert_compiles()
 ```
 
-### Test 3: Implementing a Trait
+### Test 3: Implementing a Trait {#implementing_a_trait_3}
 
 *Source line: ~5*
 
@@ -118,6 +384,19 @@ test "defining_a_trait_2":
 **Description:**
 
 To implement a trait for a type, use an `impl Trait for Type` block:
+
+**Linked Symbols:**
+- `implementing`
+- `implementing_a_trait`
+- `trait`
+- `Implementing`
+- `ImplementingATrait`
+- `Trait`
+- `assert_compiles`
+- `String`
+- `Printable`
+- `stringify`
+- ... and 1 more
 
 **Code:**
 
@@ -134,7 +413,7 @@ test "implementing_a_trait_3":
     assert_compiles()
 ```
 
-### Test 4: Implementing a Trait
+### Test 4: Implementing a Trait {#implementing_a_trait_4}
 
 *Source line: ~22*
 
@@ -143,6 +422,19 @@ test "implementing_a_trait_3":
 **Description:**
 
 A type can implement any number of traits:
+
+**Linked Symbols:**
+- `implementing`
+- `implementing_a_trait`
+- `trait`
+- `Implementing`
+- `ImplementingATrait`
+- `Trait`
+- `assert_compiles`
+- `String`
+- `Comparable`
+- `Point`
+- ... and 3 more
 
 **Code:**
 
@@ -166,7 +458,7 @@ test "implementing_a_trait_4":
     assert_compiles()
 ```
 
-### Test 5: Dispatch
+### Test 5: Dispatch {#unnamed_test}
 
 *Source line: ~7*
 
@@ -175,6 +467,16 @@ test "implementing_a_trait_4":
 **Description:**
 
 Traits support static dispatch by default - the compiler knows at compile time the exact type and ca...
+
+**Linked Symbols:**
+- `Unnamed`
+- `unnamed`
+- `Alice`
+- `print_self`
+- `log`
+- `Printable`
+- `Person`
+- `Compiler`
 
 **Code:**
 
@@ -186,7 +488,7 @@ let p = Person(name: "Alice", age: 30)
 log(p)  # Compiler knows T = Person
 ```
 
-### Test 6: Dispatch
+### Test 6: Dispatch {#dispatch_6}
 
 *Source line: ~21*
 
@@ -195,6 +497,15 @@ log(p)  # Compiler knows T = Person
 **Description:**
 
 For cases where the concrete type isn't known at compile time, traits use dynamic dispatch by defaul...
+
+**Linked Symbols:**
+- `dispatch`
+- `Dispatch`
+- `assert_compiles`
+- `print_self`
+- `Dynamic`
+- `Printable`
+- `Uses`
 
 **Code:**
 
@@ -205,7 +516,7 @@ test "dispatch_6":
     assert_compiles()
 ```
 
-### Test 7: Trait Bounds and Generics
+### Test 7: Trait Bounds and Generics {#unnamed_test}
 
 *Source line: ~5*
 
@@ -215,6 +526,13 @@ test "dispatch_6":
 
 Traits are often used as bounds on type parameters:
 
+**Linked Symbols:**
+- `Unnamed`
+- `unnamed`
+- `print_self`
+- `Printable`
+- `List`
+
 **Code:**
 
 ```simple
@@ -223,7 +541,7 @@ fn print_all[T: Printable](items: List[T]):
         item.print_self()
 ```
 
-### Test 8: Trait Bounds and Generics
+### Test 8: Trait Bounds and Generics {#unnamed_test}
 
 *Source line: ~15*
 
@@ -232,6 +550,16 @@ fn print_all[T: Printable](items: List[T]):
 **Description:**
 
 This generic function `print_all` can accept a list of any type `T` that implements `Printable`. The...
+
+**Linked Symbols:**
+- `Unnamed`
+- `unnamed`
+- `List`
+- `Comparable`
+- `print_self`
+- `sort`
+- `Printable`
+- `compare`
 
 **Code:**
 
@@ -242,7 +570,7 @@ fn process[T: Printable + Comparable](items: List[T]):
     items.sort(\a, b: a.compare(b))
 ```
 
-### Test 9: Trait Bounds and Generics
+### Test 9: Trait Bounds and Generics {#unnamed_test}
 
 *Source line: ~28*
 
@@ -251,6 +579,14 @@ fn process[T: Printable + Comparable](items: List[T]):
 **Description:**
 
 For complex bounds, use where clauses:
+
+**Linked Symbols:**
+- `Unnamed`
+- `unnamed`
+- `Printable`
+- `String`
+- `Comparable`
+- `stringify`
 
 **Code:**
 
@@ -261,7 +597,7 @@ fn complex[T, U](a: T, b: U) -> String
     return "{a.stringify()} vs {b.stringify()}"
 ```
 
-### Test 10: Trait Inheritance
+### Test 10: Trait Inheritance {#trait_inheritance_10}
 
 *Source line: ~5*
 
@@ -270,6 +606,19 @@ fn complex[T, U](a: T, b: U) -> String
 **Description:**
 
 One trait can require another:
+
+**Linked Symbols:**
+- `Inheritance`
+- `TraitInheritance`
+- `trait`
+- `trait_inheritance`
+- `inheritance`
+- `Trait`
+- `assert_compiles`
+- `String`
+- `Drawable`
+- `draw`
+- ... and 4 more
 
 **Code:**
 
@@ -287,7 +636,7 @@ test "trait_inheritance_10":
     assert_compiles()
 ```
 
-### Test 11: Associated Types
+### Test 11: Associated Types {#associated_types_11}
 
 *Source line: ~5*
 
@@ -296,6 +645,19 @@ test "trait_inheritance_10":
 **Description:**
 
 Traits can include associated type placeholders:
+
+**Linked Symbols:**
+- `Associated`
+- `associated_types`
+- `associated`
+- `Types`
+- `types`
+- `AssociatedTypes`
+- `assert_compiles`
+- `get`
+- `Item`
+- `add`
+- ... and 5 more
 
 **Code:**
 
@@ -320,7 +682,7 @@ test "associated_types_11":
     assert_compiles()
 ```
 
-### Test 12: Trait Objects and Collections
+### Test 12: Trait Objects and Collections {#trait_objects_and_collections_12}
 
 *Source line: ~5*
 
@@ -329,6 +691,19 @@ test "associated_types_11":
 **Description:**
 
 Trait objects allow storing different types that implement the same trait:
+
+**Linked Symbols:**
+- `trait_objects_and_collections`
+- `Collections`
+- `objects`
+- `trait`
+- `And`
+- `and`
+- `collections`
+- `TraitObjectsAndCollections`
+- `Objects`
+- `Trait`
+- ... and 8 more
 
 **Code:**
 
@@ -345,7 +720,7 @@ test "trait_objects_and_collections_12":
     assert_compiles()
 ```
 
-### Test 13: Common Standard Traits
+### Test 13: Common Standard Traits {#common_standard_traits_13}
 
 *Source line: ~18*
 
@@ -354,6 +729,19 @@ test "trait_objects_and_collections_12":
 **Description:**
 
 Common traits can be automatically derived:
+
+**Linked Symbols:**
+- `standard`
+- `common`
+- `Standard`
+- `Traits`
+- `common_standard_traits`
+- `Common`
+- `traits`
+- `CommonStandardTraits`
+- `assert_compiles`
+- `Debug`
+- ... and 4 more
 
 **Code:**
 
@@ -366,7 +754,7 @@ test "common_standard_traits_13":
     assert_compiles()
 ```
 
-### Test 14: Note on Semantic Types
+### Test 14: Note on Semantic Types {#note_on_semantic_types_14}
 
 *Source line: ~5*
 
@@ -375,6 +763,19 @@ test "common_standard_traits_13":
 **Description:**
 
 Trait methods in public APIs should follow the same semantic type guidelines as regular functions:
+
+**Linked Symbols:**
+- `NoteOnSemanticTypes`
+- `note`
+- `Note`
+- `Types`
+- `Semantic`
+- `note_on_semantic_types`
+- `types`
+- `semantic`
+- `next`
+- `set_status`
+- ... and 14 more
 
 **Code:**
 
@@ -392,7 +793,7 @@ test "note_on_semantic_types_14":
     assert_compiles()
 ```
 
-### Test 15: Interface Bindings (Static Polymorphism)
+### Test 15: Interface Bindings (Static Polymorphism) {#interface_bindings_static_polymorphism_15}
 
 *Source line: ~9*
 
@@ -402,6 +803,19 @@ test "note_on_semantic_types_14":
 
 Important: The `bind` statement only supports static dispatch. There is no `static` or `dyn` keyword...
 
+**Linked Symbols:**
+- `interface`
+- `interface_bindings_static_polymorphism`
+- `Polymorphism`
+- `bindings`
+- `polymorphism`
+- `Bindings`
+- `Static`
+- `static`
+- `Interface`
+- `InterfaceBindingsStaticPolymorphism`
+- ... and 3 more
+
 **Code:**
 
 ```simple
@@ -410,7 +824,7 @@ test "interface_bindings_static_polymorphism_15":
     assert_compiles()
 ```
 
-### Test 16: Interface Bindings (Static Polymorphism)
+### Test 16: Interface Bindings (Static Polymorphism) {#interface_bindings_static_polymorphism_16}
 
 *Source line: ~15*
 
@@ -421,6 +835,19 @@ test "interface_bindings_static_polymorphism_15":
 ```simple
 bind TraitName = ImplTypeName
 ```
+
+**Linked Symbols:**
+- `interface`
+- `interface_bindings_static_polymorphism`
+- `Polymorphism`
+- `bindings`
+- `polymorphism`
+- `Bindings`
+- `Static`
+- `static`
+- `Interface`
+- `InterfaceBindingsStaticPolymorphism`
+- ... and 12 more
 
 **Code:**
 
@@ -452,7 +879,7 @@ test "interface_bindings_static_polymorphism_16":
     assert_compiles()
 ```
 
-### Test 17: Collection Traits
+### Test 17: Collection Traits {#collection_traits_17}
 
 *Source line: ~46*
 
@@ -462,6 +889,19 @@ test "interface_bindings_static_polymorphism_16":
 
 | Type | Iterable | Collection | Sequence | MutSequence | ImmutSequence | Growable | Sliceable |
 |--...
+
+**Linked Symbols:**
+- `collection`
+- `collection_traits`
+- `Traits`
+- `CollectionTraits`
+- `Collection`
+- `traits`
+- `assert_compiles`
+- `clone`
+- `reverse`
+- `Slice`
+- ... and 18 more
 
 **Code:**
 
@@ -486,7 +926,7 @@ test "collection_traits_17":
     assert_compiles()
 ```
 
-### Test 18: Inherent Impl Blocks
+### Test 18: Inherent Impl Blocks {#inherent_impl_blocks_18}
 
 *Source line: ~5*
 
@@ -495,6 +935,19 @@ test "collection_traits_17":
 **Description:**
 
 Methods can be added directly to types without using traits:
+
+**Linked Symbols:**
+- `inherent`
+- `Blocks`
+- `InherentImplBlocks`
+- `blocks`
+- `Inherent`
+- `impl`
+- `Impl`
+- `inherent_impl_blocks`
+- `assert_compiles`
+- `sqrt`
+- ... and 8 more
 
 **Code:**
 
@@ -523,7 +976,7 @@ test "inherent_impl_blocks_18":
     assert_compiles()
 ```
 
-### Test 19: Inherent Impl Blocks
+### Test 19: Inherent Impl Blocks {#inherent_impl_blocks_19}
 
 *Source line: ~41*
 
@@ -532,6 +985,19 @@ test "inherent_impl_blocks_18":
 **Description:**
 
 Extension methods allow adding methods to types defined elsewhere:
+
+**Linked Symbols:**
+- `inherent`
+- `Blocks`
+- `InherentImplBlocks`
+- `blocks`
+- `Inherent`
+- `impl`
+- `Impl`
+- `inherent_impl_blocks`
+- `assert_compiles`
+- `String`
+- ... and 5 more
 
 **Code:**
 
@@ -548,11 +1014,24 @@ test "inherent_impl_blocks_19":
     assert_compiles()
 ```
 
-### Test 20: Inherent Impl Blocks
+### Test 20: Inherent Impl Blocks {#inherent_impl_blocks_20}
 
 *Source line: ~62*
 
 **Test name:** `inherent_impl_blocks_20`
+
+**Linked Symbols:**
+- `inherent`
+- `Blocks`
+- `InherentImplBlocks`
+- `blocks`
+- `Inherent`
+- `impl`
+- `Impl`
+- `inherent_impl_blocks`
+- `assert_compiles`
+- `String`
+- ... and 12 more
 
 **Code:**
 
@@ -580,7 +1059,7 @@ test "inherent_impl_blocks_20":
     assert_compiles()
 ```
 
-### Test 21: Inherent Impl Blocks
+### Test 21: Inherent Impl Blocks {#inherent_impl_blocks_21}
 
 *Source line: ~100*
 
@@ -589,6 +1068,19 @@ test "inherent_impl_blocks_20":
 **Description:**
 
 Example - Extending Standard Types:
+
+**Linked Symbols:**
+- `inherent`
+- `Blocks`
+- `InherentImplBlocks`
+- `blocks`
+- `Inherent`
+- `impl`
+- `Impl`
+- `inherent_impl_blocks`
+- `assert_compiles`
+- `default`
+- ... and 6 more
 
 **Code:**
 
@@ -614,7 +1106,7 @@ test "inherent_impl_blocks_21":
     assert_compiles()
 ```
 
-### Test 22: Inherent Impl Blocks
+### Test 22: Inherent Impl Blocks {#inherent_impl_blocks_22}
 
 *Source line: ~122*
 
@@ -623,6 +1115,19 @@ test "inherent_impl_blocks_21":
 **Description:**
 
 Example - Multiple Extension Traits:
+
+**Linked Symbols:**
+- `inherent`
+- `Blocks`
+- `InherentImplBlocks`
+- `blocks`
+- `Inherent`
+- `impl`
+- `Impl`
+- `inherent_impl_blocks`
+- `assert_compiles`
+- `String`
+- ... and 10 more
 
 **Code:**
 
@@ -656,7 +1161,7 @@ test "inherent_impl_blocks_22":
     assert_compiles()
 ```
 
-### Test 23: Trait Coherence Rules
+### Test 23: Trait Coherence Rules {#trait_coherence_rules_23}
 
 *Source line: ~9*
 
@@ -665,6 +1170,19 @@ test "inherent_impl_blocks_22":
 **Description:**
 
 The orphan rule prevents defining trait implementations in "orphan" modules:
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `assert_compiles`
+- `String`
+- ... and 9 more
 
 **Code:**
 
@@ -695,7 +1213,7 @@ test "trait_coherence_rules_23":
     assert_compiles()
 ```
 
-### Test 24: Trait Coherence Rules
+### Test 24: Trait Coherence Rules {#trait_coherence_rules_24}
 
 *Source line: ~44*
 
@@ -704,6 +1222,19 @@ test "trait_coherence_rules_23":
 **Description:**
 
 Two trait implementations overlap if there exists a type that could match both:
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `assert_compiles`
+- `Overlapping`
+- ... and 5 more
 
 **Code:**
 
@@ -723,7 +1254,7 @@ test "trait_coherence_rules_24":
     assert_compiles()
 ```
 
-### Test 25: Trait Coherence Rules
+### Test 25: Trait Coherence Rules {#trait_coherence_rules_25}
 
 *Source line: ~64*
 
@@ -732,6 +1263,19 @@ test "trait_coherence_rules_24":
 **Description:**
 
 Specialization allows a more specific implementation to override a general one:
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `assert_compiles`
+- `process`
+- ... and 3 more
 
 **Code:**
 
@@ -752,7 +1296,7 @@ test "trait_coherence_rules_25":
     assert_compiles()
 ```
 
-### Test 26: Trait Coherence Rules
+### Test 26: Trait Coherence Rules {#trait_coherence_rules_26}
 
 *Source line: ~85*
 
@@ -761,6 +1305,19 @@ test "trait_coherence_rules_25":
 **Description:**
 
 Blanket implementations apply to all types matching a bound:
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `debug_fmt`
+- `assert_compiles`
+- ... and 5 more
 
 **Code:**
 
@@ -773,7 +1330,7 @@ test "trait_coherence_rules_26":
     assert_compiles()
 ```
 
-### Test 27: Trait Coherence Rules
+### Test 27: Trait Coherence Rules {#trait_coherence_rules_27}
 
 *Source line: ~98*
 
@@ -782,6 +1339,19 @@ test "trait_coherence_rules_26":
 **Description:**
 
 Associated types in trait implementations must be consistent:
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `assert_compiles`
+- `String`
+- ... and 7 more
 
 **Code:**
 
@@ -803,7 +1373,7 @@ test "trait_coherence_rules_27":
     assert_compiles()
 ```
 
-### Test 28: Trait Coherence Rules
+### Test 28: Trait Coherence Rules {#trait_coherence_rules_28}
 
 *Source line: ~118*
 
@@ -812,6 +1382,19 @@ test "trait_coherence_rules_27":
 **Description:**
 
 Negative bounds exclude types from a blanket impl:
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `assert_compiles`
+- `clone`
+- ... and 3 more
 
 **Code:**
 
@@ -824,11 +1407,24 @@ test "trait_coherence_rules_28":
     assert_compiles()
 ```
 
-### Test 29: Trait Coherence Rules
+### Test 29: Trait Coherence Rules {#trait_coherence_rules_29}
 
 *Source line: ~161*
 
 **Test name:** `trait_coherence_rules_29`
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `assert_compiles`
+- `Wrap`
+- ... and 4 more
 
 **Code:**
 
@@ -842,11 +1438,24 @@ test "trait_coherence_rules_29":
     assert_compiles()
 ```
 
-### Test 30: Trait Coherence Rules
+### Test 30: Trait Coherence Rules {#trait_coherence_rules_30}
 
 *Source line: ~170*
 
 **Test name:** `trait_coherence_rules_30`
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `assert_compiles`
+- `String`
+- ... and 3 more
 
 **Code:**
 
@@ -862,11 +1471,24 @@ test "trait_coherence_rules_30":
     assert_compiles()
 ```
 
-### Test 31: Trait Coherence Rules
+### Test 31: Trait Coherence Rules {#trait_coherence_rules_31}
 
 *Source line: ~181*
 
 **Test name:** `trait_coherence_rules_31`
+
+**Linked Symbols:**
+- `TraitCoherenceRules`
+- `coherence`
+- `trait`
+- `trait_coherence_rules`
+- `rules`
+- `Coherence`
+- `Rules`
+- `Trait`
+- `assert_compiles`
+- `original_method`
+- ... and 3 more
 
 **Code:**
 
@@ -881,11 +1503,24 @@ test "trait_coherence_rules_31":
     assert_compiles()
 ```
 
-### Test 32: Related Specifications
+### Test 32: Related Specifications {#related_specifications_32}
 
 *Source line: ~16*
 
 **Test name:** `related_specifications_32`
+
+**Linked Symbols:**
+- `RelatedSpecifications`
+- `Related`
+- `related`
+- `Specifications`
+- `specifications`
+- `related_specifications`
+- `assert_compiles`
+- `Negative`
+- `Multiple`
+- `Sync`
+- ... and 6 more
 
 **Code:**
 
@@ -904,7 +1539,7 @@ test "related_specifications_32":
     assert_compiles()
 ```
 
-### Test 33: Related Specifications
+### Test 33: Related Specifications {#related_specifications_33}
 
 *Source line: ~32*
 
@@ -913,6 +1548,19 @@ test "related_specifications_32":
 **Description:**
 
 1. Conditional Blanket Impls:
+
+**Linked Symbols:**
+- `RelatedSpecifications`
+- `Related`
+- `related`
+- `Specifications`
+- `specifications`
+- `related_specifications`
+- `assert_compiles`
+- `Specialized`
+- `clone`
+- `deep_clone`
+- ... and 5 more
 
 **Code:**
 
@@ -931,7 +1579,7 @@ test "related_specifications_33":
     assert_compiles()
 ```
 
-### Test 34: Related Specifications
+### Test 34: Related Specifications {#related_specifications_34}
 
 *Source line: ~46*
 
@@ -940,6 +1588,19 @@ test "related_specifications_33":
 **Description:**
 
 2. Avoiding Conflicts:
+
+**Linked Symbols:**
+- `RelatedSpecifications`
+- `Related`
+- `related`
+- `Specifications`
+- `specifications`
+- `related_specifications`
+- `as_bytes`
+- `assert_compiles`
+- `binary_serialize`
+- `to_bytes`
+- ... and 4 more
 
 **Code:**
 
@@ -960,7 +1621,7 @@ test "related_specifications_34":
     assert_compiles()
 ```
 
-### Test 35: Related Specifications
+### Test 35: Related Specifications {#related_specifications_35}
 
 *Source line: ~62*
 
@@ -969,6 +1630,19 @@ test "related_specifications_34":
 **Description:**
 
 3. Marker Trait Exclusion:
+
+**Linked Symbols:**
+- `RelatedSpecifications`
+- `Related`
+- `related`
+- `Specifications`
+- `specifications`
+- `related_specifications`
+- `assert_compiles`
+- `UnsafePointer`
+- `NOT`
+- `Safe`
+- ... and 1 more
 
 **Code:**
 
@@ -983,7 +1657,7 @@ test "related_specifications_35":
     assert_compiles()
 ```
 
-### Test 36: Related Specifications
+### Test 36: Related Specifications {#related_specifications_36}
 
 *Source line: ~81*
 
@@ -992,6 +1666,19 @@ test "related_specifications_35":
 **Description:**
 
 Example - Complete Pattern:
+
+**Linked Symbols:**
+- `RelatedSpecifications`
+- `Related`
+- `related`
+- `Specifications`
+- `specifications`
+- `related_specifications`
+- `assert_compiles`
+- `process`
+- `Clone`
+- `Process`
+- ... and 3 more
 
 **Code:**
 
@@ -1012,6 +1699,12 @@ test "related_specifications_36":
             print("processing cloneable")
     assert_compiles()
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [traits_spec.spl](../../tests/specs/traits_spec.spl)
 
 ---
 
