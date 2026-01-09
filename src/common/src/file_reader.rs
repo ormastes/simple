@@ -15,20 +15,15 @@ use std::path::Path;
 const MMAP_THRESHOLD: u64 = 32 * 1024; // 32 KB
 
 /// File reading strategy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReadStrategy {
     /// Always use regular file reading.
     Regular,
     /// Always use memory-mapped reading.
     Mmap,
     /// Automatically choose based on file size.
+    #[default]
     Auto,
-}
-
-impl Default for ReadStrategy {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Read a file to a string using the specified strategy.

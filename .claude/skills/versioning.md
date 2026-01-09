@@ -2,6 +2,12 @@
 
 **CRITICAL: This project uses Jujutsu (jj), NOT Git!**
 
+## Important Rules
+
+1. **NO BRANCHES** - Work directly on `main`, do not create feature branches
+2. **NO GIT** - Never use git commands, only jj
+3. **LINEAR HISTORY** - Keep history linear, squash if needed before push
+
 ## Quick Reference
 
 | Task | Command |
@@ -10,9 +16,9 @@
 | View changes | `jj diff` |
 | Describe change | `jj describe -m "message"` |
 | View history | `jj log` |
-| Push to remote | `jj git push` |
+| Push to remote | `jj git push --bookmark main` |
+| Set main to current | `jj bookmark set main -r @` |
 | Create new change | `jj new` |
-| Create bookmark | `jj bookmark create <name>` |
 | Abandon change | `jj abandon` |
 | Squash changes | `jj squash` |
 | Edit past change | `jj edit <change-id>` |
@@ -28,7 +34,7 @@ The `.git` directory exists only for remote sync - all local operations use `jj`
 
 ## Standard Workflow
 
-### Making Changes
+### Making Changes (Work on Main)
 ```bash
 # 1. Make your code changes (files are auto-tracked)
 # 2. Check what changed
@@ -36,13 +42,16 @@ jj status
 jj diff
 
 # 3. Describe the current change
-jj describe -m "feat: Add new feature"
+jj describe -m "feat: Add new feature
 
-# 4. Verify
+Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
+
+# 4. Verify linear history
 jj log
 
-# 5. Push when ready
-jj git push
+# 5. Set main bookmark and push
+jj bookmark set main -r @
+jj git push --bookmark main
 ```
 
 ### Creating a New Change
@@ -52,15 +61,6 @@ jj new
 
 # Create new change with message
 jj new -m "Start working on X"
-```
-
-### Bookmarks (Branches)
-```bash
-# Create bookmark at current change
-jj bookmark create feature-name
-
-# Push bookmark to remote
-jj git push --bookmark feature-name
 ```
 
 ### Fixing Past Changes
@@ -73,6 +73,15 @@ jj new
 
 # Or squash fix into parent
 jj squash
+```
+
+### Handling Diverged History
+```bash
+# If branches diverge, abandon the diverged one
+jj abandon <diverged-change-id>
+
+# Ensure linear history before pushing
+jj log
 ```
 
 ## Key Concepts

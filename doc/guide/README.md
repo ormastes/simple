@@ -26,9 +26,10 @@ This directory contains practical guides for:
 
 | Guide | Description |
 |-------|-------------|
-| [coding_style.md](coding_style.md) | **Main coding guide** - Domain types, defaults, config patterns, type inference, keyword omission, Lean verification, AOP logging |
+| [coding_style.md](coding_style.md) | **Main coding guide** - Domain types, defaults, config patterns, type inference, keyword omission, Lean verification, AOP logging, doctest examples |
+| [sspec_writing.md](sspec_writing.md) | **SSpec test guide** - BDD tests, document format, doctest integration, matchers, fixtures |
 
-**Key rules:** No primitives in public APIs, defaults everywhere, type inference for app code, explicit types for lib code, max 800 lines per file.
+**Key rules:** No primitives in public APIs, defaults everywhere, type inference for app code, explicit types for lib code, doctest for all public APIs, max 800 lines per file.
 
 ---
 
@@ -111,9 +112,10 @@ Covers:
 ### By Purpose
 
 **Getting Started:**
-1. [module_system.md](module_system.md) - Project organization
-2. [test.md](test.md) - Writing tests
-3. [basic_sample_check.md](basic_sample_check.md) - Verifying your setup
+1. [coding_style.md](coding_style.md) - Coding conventions
+2. [sspec_writing.md](sspec_writing.md) - Writing tests with SSpec
+3. [module_system.md](module_system.md) - Project organization
+4. [basic_sample_check.md](basic_sample_check.md) - Verifying your setup
 
 **Building Applications:**
 1. [db.md](db.md) - Database integration
@@ -163,4 +165,4 @@ When adding new guides:
 
 ---
 
-**Total:** 15 guide documents
+**Total:** 17 guide documents
