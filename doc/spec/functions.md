@@ -1,5 +1,13 @@
 # Simple Language Functions and Pattern Matching
 
+> **📤 EXTRACTED:** Test cases have been extracted to an executable test file:  
+> **→** `tests/specs/functions_spec.spl`  
+> **Date:** 2026-01-09  
+> **Type:** Category B (Extract + Keep)
+> 
+> This file remains as **architectural reference documentation**.  
+> Test cases and examples are in the _spec.spl file for execution and validation.
+
 This document covers functions, lambdas, closures, pattern matching, and constructor polymorphism.
 
 ## Related Specifications

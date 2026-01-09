@@ -1,5 +1,13 @@
 # Simple Language Memory and Ownership
 
+> **📤 EXTRACTED:** Test cases have been extracted to an executable test file:  
+> **→** `tests/specs/memory_spec.spl`  
+> **Date:** 2026-01-09  
+> **Type:** Category B (Extract + Keep)
+> 
+> This file remains as **architectural reference documentation**.  
+> Test cases and examples are in the _spec.spl file for execution and validation.
+
 This document covers memory management, ownership semantics, pointer types, and borrowing.
 
 ## Overview
