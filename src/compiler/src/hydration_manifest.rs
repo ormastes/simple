@@ -34,7 +34,7 @@
 //! }
 //! ```
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Version 2 Hydration Manifest with WASM support
@@ -197,7 +197,8 @@ impl HydrationManifest {
         if !self.state.is_empty() {
             script.push_str("  // Restore initial state\n");
             script.push_str("  const state = ");
-            script.push_str(&serde_json::to_string(&self.state).unwrap_or_else(|_| "{}".to_string()));
+            script
+                .push_str(&serde_json::to_string(&self.state).unwrap_or_else(|_| "{}".to_string()));
             script.push_str(";\n");
             script.push_str("  if (wasm.restore_state) {\n");
             script.push_str("    wasm.restore_state(state);\n");
@@ -245,9 +246,7 @@ impl HydrationManifest {
             ));
             script.push_str(&format!(
                 "    console.log('Hydrated: {} -> {} on {}');\n",
-                binding.selector,
-                binding.event,
-                binding.handler
+                binding.selector, binding.event, binding.handler
             ));
             script.push_str("  } else {\n");
             script.push_str(&format!(
@@ -311,7 +310,8 @@ impl ManifestBuilder {
         event: impl Into<String>,
         handler: impl Into<String>,
     ) -> Self {
-        self.manifest.add_binding(selector.into(), event.into(), handler.into());
+        self.manifest
+            .add_binding(selector.into(), event.into(), handler.into());
         self
     }
 
@@ -396,7 +396,11 @@ mod tests {
     fn test_to_json() {
         let mut manifest = HydrationManifest::new();
         manifest.add_export("increment".to_string());
-        manifest.add_binding("#btn".to_string(), "click".to_string(), "increment".to_string());
+        manifest.add_binding(
+            "#btn".to_string(),
+            "click".to_string(),
+            "increment".to_string(),
+        );
         manifest.set_state("count".to_string(), "0".to_string());
 
         let json = manifest.to_json().unwrap();
@@ -411,7 +415,11 @@ mod tests {
     #[test]
     fn test_generate_hydration_script() {
         let mut manifest = HydrationManifest::new();
-        manifest.add_binding("#btn".to_string(), "click".to_string(), "on_click".to_string());
+        manifest.add_binding(
+            "#btn".to_string(),
+            "click".to_string(),
+            "on_click".to_string(),
+        );
 
         let script = manifest.generate_hydration_script();
 
@@ -455,7 +463,10 @@ mod tests {
     #[test]
     fn test_sanitize_var_name() {
         assert_eq!(sanitize_var_name("#btn-submit"), "_btn_submit");
-        assert_eq!(sanitize_var_name("input[type='text']"), "input_type__text__");
+        assert_eq!(
+            sanitize_var_name("input[type='text']"),
+            "input_type__text__"
+        );
     }
 
     #[test]

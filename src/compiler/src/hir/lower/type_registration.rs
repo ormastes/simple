@@ -11,10 +11,10 @@
 
 use simple_parser::{self as ast};
 
+use super::super::types::*;
 use super::context::FunctionContext;
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
-use super::super::types::*;
 
 impl Lowerer {
     /// Register a class type and its invariant
@@ -38,10 +38,14 @@ impl Lowerer {
         // Apply mixins: add mixin fields to the class
         for mixin_ref in &c.mixins {
             if let Some(mixin_type_id) = self.module.types.lookup(&mixin_ref.name) {
-                if let Some(HirType::Mixin { fields: mixin_fields, .. }) = self.module.types.get(mixin_type_id) {
+                if let Some(HirType::Mixin {
+                    fields: mixin_fields,
+                    ..
+                }) = self.module.types.get(mixin_type_id)
+                {
                     // Add mixin fields to class fields
                     for (field_name, field_type) in mixin_fields.clone() {
-                        // TODO: Check for field name conflicts
+                        // TODO: [compiler][P3] Check for field name conflicts
                         fields.push((field_name, field_type));
                     }
                 }
@@ -160,7 +164,9 @@ impl Lowerer {
         let trait_bounds = m.required_traits.clone();
 
         // Extract required method names
-        let required_methods: Vec<String> = m.required_methods.iter()
+        let required_methods: Vec<String> = m
+            .required_methods
+            .iter()
             .map(|rm| rm.name.clone())
             .collect();
 
@@ -191,7 +197,11 @@ impl Lowerer {
             // Lower the predicate with a synthetic 'self' binding
             let mut ctx = FunctionContext::new(base_type);
             // Add 'self' as a local variable for the predicate
-            ctx.add_local("self".to_string(), base_type, simple_parser::Mutability::Immutable);
+            ctx.add_local(
+                "self".to_string(),
+                base_type,
+                simple_parser::Mutability::Immutable,
+            );
 
             let predicate = self.lower_expr(where_clause, &mut ctx)?;
 
@@ -201,7 +211,9 @@ impl Lowerer {
                 predicate,
             };
 
-            self.module.refined_types.insert(ta.name.clone(), refined_type);
+            self.module
+                .refined_types
+                .insert(ta.name.clone(), refined_type);
         }
 
         // Register the type alias name to map to the base type

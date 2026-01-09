@@ -5,11 +5,11 @@
 
 use simple_parser::{self as ast, Expr};
 
-use crate::value::{BUILTIN_SPAWN, BUILTIN_JOIN, BUILTIN_REPLY};
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
+use crate::value::{BUILTIN_JOIN, BUILTIN_REPLY, BUILTIN_SPAWN};
 
 impl Lowerer {
     /// Lower a function call expression to HIR
@@ -163,7 +163,12 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
         if matches!(name, "print" | "println" | "eprint" | "eprintln") {
-            Ok(Some(self.lower_builtin_call(name, args, TypeId::NIL, ctx)?))
+            Ok(Some(self.lower_builtin_call(
+                name,
+                args,
+                TypeId::NIL,
+                ctx,
+            )?))
         } else {
             Ok(None)
         }
@@ -180,15 +185,21 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<Option<HirExpr>> {
         match name {
-            "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => {
-                Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?))
-            }
-            "to_string" => {
-                Ok(Some(self.lower_builtin_call(name, args, TypeId::STRING, ctx)?))
-            }
-            "to_int" => {
-                Ok(Some(self.lower_builtin_call(name, args, TypeId::I64, ctx)?))
-            }
+            "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" => Ok(Some(
+                self.lower_builtin_call(name, args, TypeId::I64, ctx)?,
+            )),
+            "to_string" => Ok(Some(self.lower_builtin_call(
+                name,
+                args,
+                TypeId::STRING,
+                ctx,
+            )?)),
+            "to_int" => Ok(Some(self.lower_builtin_call(
+                name,
+                args,
+                TypeId::I64,
+                ctx,
+            )?)),
             _ => Ok(None),
         }
     }
@@ -199,9 +210,20 @@ impl Lowerer {
     /// Some functions are implicitly pure (math builtins, accessors, converters).
     /// Other functions must be explicitly marked as pure.
     fn check_contract_purity(&self, name: &str) -> LowerResult<()> {
-        let is_implicitly_pure = matches!(name,
-            "abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow" |
-            "len" | "is_empty" | "contains" | "to_string" | "to_int"
+        let is_implicitly_pure = matches!(
+            name,
+            "abs"
+                | "min"
+                | "max"
+                | "sqrt"
+                | "floor"
+                | "ceil"
+                | "pow"
+                | "len"
+                | "is_empty"
+                | "contains"
+                | "to_string"
+                | "to_int"
         );
         if !is_implicitly_pure && !self.is_pure_function(name) {
             return Err(LowerError::ImpureFunctionInContract {

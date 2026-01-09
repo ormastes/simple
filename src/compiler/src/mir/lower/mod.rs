@@ -4,22 +4,22 @@
 //! including contract checking, dependency injection, GPU intrinsics, and coverage instrumentation.
 
 // Module declarations
-mod lowering_core;
-mod lowering_types;
 mod lowering_contracts;
-mod lowering_stmt;
-mod lowering_expr;
-mod lowering_di;
-mod lowering_gpu;
+mod lowering_core;
 mod lowering_coverage;
+mod lowering_di;
+mod lowering_expr;
+mod lowering_gpu;
+mod lowering_stmt;
+mod lowering_types;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export the main types and functions
 pub use lowering_core::{
-    ContractContext, ContractMode, LoopContext, LowererState, MirLowerer, MirLowerError,
-    MirLowerResult,
+    ContractContext, ContractMode, LoopContext, LowererState, MirLowerError, MirLowerResult,
+    MirLowerer,
 };
 
 // Re-export public API functions

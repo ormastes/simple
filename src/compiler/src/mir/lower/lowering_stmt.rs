@@ -3,13 +3,17 @@
 //! This module contains methods for lowering HIR statements to MIR instructions,
 //! including control flow (if, while, loop, break, continue) and assignments.
 
-use super::lowering_core::{LoopContext, MirLowerer, MirLowerResult};
+use super::lowering_core::{LoopContext, MirLowerResult, MirLowerer};
 use crate::hir::{HirContract, HirStmt};
 use crate::mir::blocks::Terminator;
 use crate::mir::instructions::MirInst;
 
 impl<'a> MirLowerer<'a> {
-    pub(super) fn lower_stmt(&mut self, stmt: &HirStmt, contract: Option<&HirContract>) -> MirLowerResult<()> {
+    pub(super) fn lower_stmt(
+        &mut self,
+        stmt: &HirStmt,
+        contract: Option<&HirContract>,
+    ) -> MirLowerResult<()> {
         match stmt {
             HirStmt::Let {
                 local_index,
@@ -73,7 +77,7 @@ impl<'a> MirLowerer<'a> {
                 // Emit contract checks before the actual return based on contract mode
                 if let Some(contract) = contract {
                     if self.should_emit_contracts() {
-                        // TODO(contracts): Detect Result::Err variant to call emit_error_contracts
+                        // TODO: [compiler][P3] Detect Result::Err variant to call emit_error_contracts
                         // For now, we always emit success postconditions. Future improvement:
                         // 1. Check if return expression is enum variant construction
                         // 2. If variant name is "Err" and enum is "Result", call emit_error_contracts
@@ -108,7 +112,7 @@ impl<'a> MirLowerer<'a> {
                 let cond_reg = self.lower_expr(condition)?;
 
                 // Emit decision probe for coverage (before branch)
-                // TODO: Get actual line/column from condition span
+                // TODO: [codegen][P3] Get actual line/column from condition span
                 self.emit_decision_probe(cond_reg, 0, 0)?;
 
                 // Create blocks
@@ -171,7 +175,7 @@ impl<'a> MirLowerer<'a> {
                 let cond_reg = self.lower_expr(condition)?;
 
                 // Emit decision probe for while condition coverage
-                // TODO: Get actual line/column from condition span
+                // TODO: [codegen][P3] Get actual line/column from condition span
                 self.emit_decision_probe(cond_reg, 0, 0)?;
 
                 self.with_func(|func, current_block| {

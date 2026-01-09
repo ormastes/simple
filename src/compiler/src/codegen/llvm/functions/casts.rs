@@ -125,7 +125,8 @@ impl LlvmBackend {
             _ if from_type == to_type => Ok(source_val),
             // Unsupported cast
             _ => Err(CompileError::Semantic(format!(
-                "Unsupported cast from {:?} to {:?}", from_type, to_type
+                "Unsupported cast from {:?} to {:?}",
+                from_type, to_type
             ))),
         }
     }

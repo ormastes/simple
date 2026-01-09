@@ -1,38 +1,85 @@
 # Simple Language Documentation
 
-This directory houses all documentation for the Simple language compiler, grouped by subject to keep design notes, references, plans, and status updates organized.
+Documentation for the Simple language compiler.
 
 ## Directory Structure
 
 ```
 doc/
-├── README.md                  # This file
-├── architecture/              # Architecture overview and supporting narratives
-├── codegen/                   # Backend code generation discussions
-├── design/                    # Design documents maintained over time
-├── examples/                  # Language or syntax examples
-├── features/                  # Feature roadmap, work-in-progress notes, and status
-├── formal_verification/       # Lean 4 formal verification proofs and models
-├── guides/                    # Operational and process guidance (testing, UI, tooling)
-├── plans/                     # Future implementation plans
-├── research/                  # Exploratory research and experiments
-├── spec/                      # Language and compiler specifications
-├── status/                    # Feature implementation tracking
-├── archive/                   # Retired documents and deep dives
+├── README.md
+│
+├── feature/           # GENERATED - from feature_db.sdn
+│   ├── feature_db.sdn # Feature database
+│   ├── feature.md     # Generated summary
+│   └── category/      # Generated category files
+│
+├── task/              # GENERATED - from task_db.sdn
+│   ├── task_db.sdn    # Task database (non-feature work)
+│   └── task.md        # Generated summary
+│
+├── spec/              # GENERATED - from tests/spec/*_spec.spl
+│   ├── generated/     # Auto-generated specs
+│   ├── parser/        # Parser reference
+│   ├── tooling/       # Tool specs
+│   ├── testing/       # Test framework specs
+│   ├── gpu_simd/      # GPU specs
+│   └── graphics_3d/   # 3D rendering specs
+│
+├── architecture/      # Architecture overview
+├── design/            # Design documents
+├── research/          # Exploratory research
+├── plan/              # Implementation roadmaps
+├── guide/             # How-to guides
+├── example/           # Code examples
+├── report/            # Session logs
+└── archive/           # Retired documents
 ```
 
-## Highlights
+## Generated vs Manual
 
-| Document | Description |
-|----------|-------------|
-| `architecture/overview.md` | Module dependencies, class responsibilities, and architectural rules |
-| `codegen/overview.md` | Compiler backend goals, constraints, and technology trade-offs |
-| `formal_verification/overview.md` | Lean 4 proofs covering memory safety, effects, and type inference |
-| `guides/test.md` | Test policies, coverage targets, and mock strategies |
-| `spec/language.md` | Complete language specification |
+| Directory | Source | Generated? |
+|-----------|--------|------------|
+| `feature/` | `feature_db.sdn` | Yes |
+| `task/` | `task_db.sdn` | Yes |
+| `spec/generated/` | `tests/spec/*_spec.spl` | Yes |
+| `architecture/` | Manual | No |
+| `design/` | Manual | No |
+| `research/` | Manual | No |
+| `plan/` | Manual | No |
+| `guide/` | Manual | No |
+| `example/` | Manual | No |
+| `report/` | Manual | No |
+| `archive/` | Manual | No |
 
-## Related Directories
+## Workflow
 
-- `../verification/` – Lean 4 formal verification projects
-- `../src/` – Compiler source code
-- `../tests/` – Integration and system tests
+### Feature Development
+1. Add feature to `feature/feature_db.sdn`
+2. Write spec in `tests/spec/*_spec.spl`
+3. Run `simple feature-gen` → generates `feature/feature.md`
+4. Run `simple spec-gen` → generates `spec/generated/`
+
+### Task Management
+1. Add task to `task/task_db.sdn`
+2. Run `simple task-gen` → generates `task/task.md`
+3. Update status as work progresses
+
+## Database Formats
+
+### feature_db.sdn
+```
+features |id, category, name, description, spec, status, valid|
+    1, Category, "Name", "Description", doc/spec/file.md, complete, true
+```
+
+### task_db.sdn
+```
+tasks |id, category, name, description, priority, status, valid|
+    1, Category, "Name", "Description", high, planned, true
+```
+
+## Related
+
+- `../verification/` - Lean 4 formal verification
+- `../tests/spec/` - Executable specifications (`*_spec.spl`)
+- `../src/` - Compiler source code

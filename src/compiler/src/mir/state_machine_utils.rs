@@ -165,7 +165,7 @@ mod tests {
         live_out.insert(VReg(2));
 
         let live_states = live_after_each_inst(&block, Some(&live_out));
-        
+
         // Should have 3 states: after inst 0, after inst 1, live-out
         assert_eq!(live_states.len(), 3);
     }

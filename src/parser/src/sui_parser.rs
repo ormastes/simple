@@ -153,7 +153,7 @@ impl SuiParser {
         let trimmed = content.trim();
 
         // For now, just store the raw declaration
-        // TODO: Parse into proper AST
+        // TODO: [parser][P2] Parse into proper AST
         Ok(SharedStateDecl {
             name: trimmed.to_string(),
             type_annotation: None,
@@ -182,11 +182,7 @@ impl SuiParser {
         // Parse the code as Simple code
         let ast = self.parse_simple_code(&code)?;
 
-        Ok(ServerBlock {
-            label,
-            code,
-            ast,
-        })
+        Ok(ServerBlock { label, code, ast })
     }
 
     /// Parse client block: `{+ client +} ... code ...`
@@ -305,7 +301,11 @@ impl SuiParser {
     }
 
     /// Helper: extract content until pattern from iterator
-    fn extract_until_in_iter(&self, chars: &mut std::iter::Peekable<std::str::Chars>, pattern: &str) -> String {
+    fn extract_until_in_iter(
+        &self,
+        chars: &mut std::iter::Peekable<std::str::Chars>,
+        pattern: &str,
+    ) -> String {
         let mut result = String::new();
         let pattern_chars: Vec<char> = pattern.chars().collect();
         let mut match_pos = 0;
@@ -344,11 +344,7 @@ impl SuiParser {
     }
 
     fn peek_str(&self, len: usize) -> String {
-        self.source
-            .chars()
-            .skip(self.position)
-            .take(len)
-            .collect()
+        self.source.chars().skip(self.position).take(len).collect()
     }
 
     fn advance(&mut self) -> char {
@@ -531,7 +527,9 @@ fn on_click():
         let result = parser.parse().unwrap();
 
         assert_eq!(result.template_blocks.len(), 1);
-        assert!(result.template_blocks[0].variables.contains(&"user".to_string()));
+        assert!(result.template_blocks[0]
+            .variables
+            .contains(&"user".to_string()));
     }
 
     #[test]

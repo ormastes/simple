@@ -7,7 +7,7 @@
 //!
 //! See doc/spec/language.md for pattern matching specification.
 
-use simple_parser::ast::{MatchArm, Pattern, EnumDef};
+use simple_parser::ast::{EnumDef, MatchArm, Pattern};
 use simple_type::{TaggedUnion, UnionVariant};
 use std::collections::HashSet;
 
@@ -127,59 +127,55 @@ fn pattern_to_string(pattern: &Pattern) -> Option<String> {
         Pattern::MutIdentifier(name) => Some(format!("mut {}", name)),
         Pattern::Literal(expr) => Some(format!("{:?}", expr)),
         Pattern::Tuple(patterns) => {
-            let parts: Vec<String> = patterns
-                .iter()
-                .filter_map(pattern_to_string)
-                .collect();
+            let parts: Vec<String> = patterns.iter().filter_map(pattern_to_string).collect();
             Some(format!("({})", parts.join(", ")))
         }
         Pattern::Array(patterns) => {
-            let parts: Vec<String> = patterns
-                .iter()
-                .filter_map(pattern_to_string)
-                .collect();
+            let parts: Vec<String> = patterns.iter().filter_map(pattern_to_string).collect();
             Some(format!("[{}]", parts.join(", ")))
         }
         Pattern::Struct { name, fields } => {
             let field_strs: Vec<String> = fields
                 .iter()
                 .map(|(k, v)| {
-                    format!("{}: {}", k, pattern_to_string(v).unwrap_or_else(|| "_".to_string()))
+                    format!(
+                        "{}: {}",
+                        k,
+                        pattern_to_string(v).unwrap_or_else(|| "_".to_string())
+                    )
                 })
                 .collect();
             Some(format!("{} {{ {} }}", name, field_strs.join(", ")))
         }
-        Pattern::Enum { name, variant, payload } => {
+        Pattern::Enum {
+            name,
+            variant,
+            payload,
+        } => {
             if let Some(payload) = payload {
-                let parts: Vec<String> = payload
-                    .iter()
-                    .filter_map(pattern_to_string)
-                    .collect();
+                let parts: Vec<String> = payload.iter().filter_map(pattern_to_string).collect();
                 Some(format!("{}.{}({})", name, variant, parts.join(", ")))
             } else {
                 Some(format!("{}.{}", name, variant))
             }
         }
-        Pattern::Typed { pattern, ty } => {
-            Some(format!(
-                "{}: {:?}",
-                pattern_to_string(pattern).unwrap_or_else(|| "_".to_string()),
-                ty
-            ))
-        }
-        Pattern::Range { start, end, inclusive } => {
-            Some(format!(
-                "{:?}{}  {:?}",
-                start,
-                if *inclusive { "..=" } else { ".." },
-                end
-            ))
-        }
+        Pattern::Typed { pattern, ty } => Some(format!(
+            "{}: {:?}",
+            pattern_to_string(pattern).unwrap_or_else(|| "_".to_string()),
+            ty
+        )),
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => Some(format!(
+            "{:?}{}  {:?}",
+            start,
+            if *inclusive { "..=" } else { ".." },
+            end
+        )),
         Pattern::Or(patterns) => {
-            let parts: Vec<String> = patterns
-                .iter()
-                .filter_map(pattern_to_string)
-                .collect();
+            let parts: Vec<String> = patterns.iter().filter_map(pattern_to_string).collect();
             Some(parts.join(" | "))
         }
         Pattern::Rest => Some("..".to_string()),
@@ -225,10 +221,7 @@ pub fn check_enum_exhaustiveness(
 /// Check exhaustiveness for tagged union patterns.
 ///
 /// Verifies that all variants of a tagged union type are handled.
-pub fn check_union_exhaustiveness(
-    union: &TaggedUnion,
-    arms: &[MatchArm],
-) -> (bool, Vec<String>) {
+pub fn check_union_exhaustiveness(union: &TaggedUnion, arms: &[MatchArm]) -> (bool, Vec<String>) {
     // Check if there's a wildcard pattern
     for arm in arms {
         if is_wildcard_pattern(&arm.pattern) {
@@ -327,34 +320,45 @@ pub fn pattern_subsumes(general: &Pattern, specific: &Pattern) -> bool {
 
         // Tuple patterns
         (Pattern::Tuple(g_pats), Pattern::Tuple(s_pats)) => {
-            g_pats.len() == s_pats.len() &&
-                g_pats.iter().zip(s_pats.iter()).all(|(g, s)| pattern_subsumes(g, s))
+            g_pats.len() == s_pats.len()
+                && g_pats
+                    .iter()
+                    .zip(s_pats.iter())
+                    .all(|(g, s)| pattern_subsumes(g, s))
         }
 
         // Enum patterns
-        (Pattern::Enum { name: g_name, variant: g_var, payload: g_payload },
-         Pattern::Enum { name: s_name, variant: s_var, payload: s_payload }) => {
+        (
+            Pattern::Enum {
+                name: g_name,
+                variant: g_var,
+                payload: g_payload,
+            },
+            Pattern::Enum {
+                name: s_name,
+                variant: s_var,
+                payload: s_payload,
+            },
+        ) => {
             if g_name != s_name || g_var != s_var {
                 return false;
             }
             match (g_payload, s_payload) {
                 (None, None) => true,
                 (Some(g), Some(s)) => {
-                    g.len() == s.len() &&
-                        g.iter().zip(s.iter()).all(|(g_p, s_p)| pattern_subsumes(g_p, s_p))
+                    g.len() == s.len()
+                        && g.iter()
+                            .zip(s.iter())
+                            .all(|(g_p, s_p)| pattern_subsumes(g_p, s_p))
                 }
                 _ => false,
             }
         }
 
         // Or patterns - general subsumes specific if it subsumes any alternative
-        (Pattern::Or(g_pats), _) => {
-            g_pats.iter().any(|g| pattern_subsumes(g, specific))
-        }
+        (Pattern::Or(g_pats), _) => g_pats.iter().any(|g| pattern_subsumes(g, specific)),
 
-        (_, Pattern::Or(s_pats)) => {
-            s_pats.iter().all(|s| pattern_subsumes(general, s))
-        }
+        (_, Pattern::Or(s_pats)) => s_pats.iter().all(|s| pattern_subsumes(general, s)),
 
         // Conservative: assume no subsumption for other cases
         _ => false,
@@ -510,7 +514,11 @@ mod tests {
 
     #[test]
     fn test_enum_exhaustiveness_complete() {
-        let variants = vec!["Circle".to_string(), "Rectangle".to_string(), "Triangle".to_string()];
+        let variants = vec![
+            "Circle".to_string(),
+            "Rectangle".to_string(),
+            "Triangle".to_string(),
+        ];
         let arms = vec![
             make_arm(Pattern::Enum {
                 name: "Shape".to_string(),
@@ -536,7 +544,11 @@ mod tests {
 
     #[test]
     fn test_enum_exhaustiveness_missing_variant() {
-        let variants = vec!["Circle".to_string(), "Rectangle".to_string(), "Triangle".to_string()];
+        let variants = vec![
+            "Circle".to_string(),
+            "Rectangle".to_string(),
+            "Triangle".to_string(),
+        ];
         let arms = vec![
             make_arm(Pattern::Enum {
                 name: "Shape".to_string(),
@@ -574,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_union_exhaustiveness_complete() {
-        use simple_type::{TaggedUnion, UnionVariant, Type};
+        use simple_type::{TaggedUnion, Type, UnionVariant};
 
         let mut shape_union = TaggedUnion::new("Shape".to_string());
         shape_union.add_variant(UnionVariant::new("Circle".to_string(), 0));
@@ -606,19 +618,17 @@ mod tests {
 
     #[test]
     fn test_union_exhaustiveness_missing() {
-        use simple_type::{TaggedUnion, UnionVariant, Type};
+        use simple_type::{TaggedUnion, Type, UnionVariant};
 
         let mut result_union = TaggedUnion::new("Result".to_string());
         result_union.add_variant(UnionVariant::new("Ok".to_string(), 0));
         result_union.add_variant(UnionVariant::new("Err".to_string(), 1));
 
-        let arms = vec![
-            make_arm(Pattern::Enum {
-                name: "Result".to_string(),
-                variant: "Ok".to_string(),
-                payload: Some(vec![Pattern::Wildcard]),
-            }),
-        ];
+        let arms = vec![make_arm(Pattern::Enum {
+            name: "Result".to_string(),
+            variant: "Ok".to_string(),
+            payload: Some(vec![Pattern::Wildcard]),
+        })];
 
         let (is_exhaustive, missing) = check_union_exhaustiveness(&result_union, &arms);
         assert!(!is_exhaustive);

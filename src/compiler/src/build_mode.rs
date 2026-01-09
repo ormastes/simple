@@ -96,7 +96,10 @@ impl BuildMode {
         match s.to_lowercase().as_str() {
             "debug" => Ok(BuildMode::Debug),
             "release" => Ok(BuildMode::Release),
-            _ => Err(format!("unknown build mode '{}', expected 'debug' or 'release'", s)),
+            _ => Err(format!(
+                "unknown build mode '{}', expected 'debug' or 'release'",
+                s
+            )),
         }
     }
 
@@ -199,8 +202,7 @@ mod tests {
 
     #[test]
     fn test_deterministic_config_with_timestamp() {
-        let config = DeterministicConfig::new()
-            .with_timestamp("2025-01-15T10:00:00Z".to_string());
+        let config = DeterministicConfig::new().with_timestamp("2025-01-15T10:00:00Z".to_string());
         assert_eq!(config.timestamp, Some("2025-01-15T10:00:00Z".to_string()));
     }
 
@@ -218,8 +220,7 @@ mod tests {
 
     #[test]
     fn test_get_timestamp_with_override() {
-        let config = DeterministicConfig::new()
-            .with_timestamp("2025-01-15T10:00:00Z".to_string());
+        let config = DeterministicConfig::new().with_timestamp("2025-01-15T10:00:00Z".to_string());
         let timestamp = config.get_timestamp();
         assert_eq!(timestamp.to_rfc3339(), "2025-01-15T10:00:00+00:00");
     }

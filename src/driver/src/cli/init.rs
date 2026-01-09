@@ -6,8 +6,8 @@
 //! - Panic hook installation
 //! - Signal handler setup
 
-use std::path::PathBuf;
 use simple_driver::StartupMetrics;
+use std::path::PathBuf;
 
 /// Initialize logging system based on build mode
 ///
@@ -19,40 +19,38 @@ pub fn init_logging(metrics: &mut StartupMetrics) {
     // Enable dual logging (stdout + file) in debug mode only for diagnostics
     #[cfg(debug_assertions)]
     {
-        let log_dir = std::env::var("SIMPLE_LOG_DIR")
-            .ok()
-            .map(PathBuf::from);
+        let log_dir = std::env::var("SIMPLE_LOG_DIR").ok().map(PathBuf::from);
         let log_filter = std::env::var("SIMPLE_LOG")
             .ok()
             .or_else(|| std::env::var("RUST_LOG").ok());
 
-        if let Err(e) = simple_log::init_dual(
-            log_dir.as_deref(),
-            log_filter.as_deref(),
-        ) {
+        if let Err(e) = simple_log::init_dual(log_dir.as_deref(), log_filter.as_deref()) {
             eprintln!("warning: failed to initialize file logging: {}", e);
             simple_log::init(); // Fallback to stdout only
         }
 
         // Cleanup old logs (keep 7 days) - non-fatal if it fails
-        let _ = simple_log::cleanup_old_logs(
-            std::path::Path::new(".simple/logs"),
-            7,
-        );
+        let _ = simple_log::cleanup_old_logs(std::path::Path::new(".simple/logs"), 7);
     }
 
     // In release mode, use simple stdout-only logging
     #[cfg(not(debug_assertions))]
     simple_log::init();
 
-    metrics.record(simple_driver::StartupPhase::LoggingInit, log_start.elapsed());
+    metrics.record(
+        simple_driver::StartupPhase::LoggingInit,
+        log_start.elapsed(),
+    );
 }
 
 /// Initialize interpreter handlers for hybrid execution
 pub fn init_interpreter_handlers(metrics: &mut StartupMetrics) {
     let handler_start = std::time::Instant::now();
     simple_compiler::interpreter_ffi::init_interpreter_handlers();
-    metrics.record(simple_driver::StartupPhase::HandlerInit, handler_start.elapsed());
+    metrics.record(
+        simple_driver::StartupPhase::HandlerInit,
+        handler_start.elapsed(),
+    );
 }
 
 /// Install panic hook for detailed crash diagnostics (debug mode only)
@@ -97,7 +95,10 @@ pub fn init_panic_hook(metrics: &mut StartupMetrics) {
         let _ = stderr.flush();
     }));
 
-    metrics.record(simple_driver::StartupPhase::PanicHookInit, panic_start.elapsed());
+    metrics.record(
+        simple_driver::StartupPhase::PanicHookInit,
+        panic_start.elapsed(),
+    );
 }
 
 /// Install signal handlers for graceful interrupt (Ctrl-C) - debug mode only
@@ -107,7 +108,10 @@ pub fn init_signal_handlers(metrics: &mut StartupMetrics) {
     #[cfg(debug_assertions)]
     simple_compiler::interpreter::init_signal_handlers();
 
-    metrics.record(simple_driver::StartupPhase::SignalHandlerInit, signal_start.elapsed());
+    metrics.record(
+        simple_driver::StartupPhase::SignalHandlerInit,
+        signal_start.elapsed(),
+    );
 }
 
 /// Run all initialization phases in sequence

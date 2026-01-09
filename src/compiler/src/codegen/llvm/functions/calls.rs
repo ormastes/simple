@@ -98,7 +98,9 @@ impl LlvmBackend {
                     i8_ptr_type.ptr_type(inkwell::AddressSpace::default()),
                     "fn_ptr_slot_cast",
                 )
-                .map_err(|e| CompileError::Semantic(format!("Failed to cast fn slot ptr: {}", e)))?;
+                .map_err(|e| {
+                    CompileError::Semantic(format!("Failed to cast fn slot ptr: {}", e))
+                })?;
 
             let func_ptr = builder
                 .build_load(i8_ptr_type, fn_ptr_slot, "loaded_func")
@@ -111,8 +113,13 @@ impl LlvmBackend {
                     arg_vals.push(val.into());
                 }
 
-                let llvm_param_types: Result<Vec<inkwell::types::BasicMetadataTypeEnum>, CompileError> =
-                    param_types.iter().map(|ty| self.llvm_type(ty).map(|t| t.into())).collect();
+                let llvm_param_types: Result<
+                    Vec<inkwell::types::BasicMetadataTypeEnum>,
+                    CompileError,
+                > = param_types
+                    .iter()
+                    .map(|ty| self.llvm_type(ty).map(|t| t.into()))
+                    .collect();
                 let llvm_param_types = llvm_param_types?;
 
                 let fn_type = if *return_type == TypeId::VOID {

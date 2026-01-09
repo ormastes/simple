@@ -48,7 +48,7 @@ enum SchedulerState {
     },
     ReduceLROnPlateau {
         optimizer: u64,
-        mode: i32,  // 0=min, 1=max
+        mode: i32, // 0=min, 1=max
         factor: f64,
         patience: usize,
         threshold: f64,
@@ -455,7 +455,10 @@ pub extern "C" fn rt_torch_scheduler_free(scheduler_handle: u64) -> i32 {
     {
         let mut sched_registry = SCHEDULER_REGISTRY.lock();
         if sched_registry.remove(&scheduler_handle).is_some() {
-            tracing::debug!("rt_torch_scheduler_free: freed scheduler={}", scheduler_handle);
+            tracing::debug!(
+                "rt_torch_scheduler_free: freed scheduler={}",
+                scheduler_handle
+            );
             TorchFfiError::Success as i32
         } else {
             TorchFfiError::InvalidHandle as i32

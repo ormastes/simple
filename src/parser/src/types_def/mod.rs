@@ -91,14 +91,14 @@ impl<'a> Parser<'a> {
                 } else {
                     Vec::new()
                 };
-                
+
                 explicit_mixins.push(MixinRef {
                     span: self.current.span,
                     name: mixin_name,
                     type_args,
                     overrides: Vec::new(),
                 });
-                
+
                 if !self.check(&TokenKind::Comma) {
                     break;
                 }
@@ -107,8 +107,9 @@ impl<'a> Parser<'a> {
         }
 
         let where_clause = self.parse_where_clause()?;
-        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) = self.parse_class_body()?;
-        
+        let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) =
+            self.parse_class_body()?;
+
         // Prepend explicit mixins from `with` clause
         mixins.splice(0..0, explicit_mixins);
 
@@ -147,10 +148,12 @@ impl<'a> Parser<'a> {
         };
 
         let where_clause = self.parse_where_clause()?;
-        let (fields, methods, invariant, _macro_invocations, _mixins, doc_comment) = self.parse_class_body()?;
+        let (fields, methods, invariant, _macro_invocations, _mixins, doc_comment) =
+            self.parse_class_body()?;
 
         // Parse required methods (methods without bodies)
-        let required_methods = methods.iter()
+        let required_methods = methods
+            .iter()
             .filter(|m| m.is_abstract)
             .map(|m| RequiredMethodSig {
                 span: m.span,
@@ -220,7 +223,8 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Actor)?;
         let name = self.expect_identifier()?;
 
-        let (fields, methods, _invariant, _doc_comment) = self.parse_indented_fields_and_methods()?;
+        let (fields, methods, _invariant, _doc_comment) =
+            self.parse_indented_fields_and_methods()?;
 
         Ok(Node::Actor(ActorDef {
             span: self.make_span(start_span),
@@ -340,7 +344,15 @@ impl<'a> Parser<'a> {
     /// Parse fields and methods in an indented block (class, actor, struct)
     fn parse_indented_fields_and_methods(
         &mut self,
-    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Option<DocComment>), ParseError> {
+    ) -> Result<
+        (
+            Vec<Field>,
+            Vec<FunctionDef>,
+            Option<InvariantBlock>,
+            Option<DocComment>,
+        ),
+        ParseError,
+    > {
         self.debug_enter("parse_indented_fields_and_methods");
         self.expect_block_start()?;
         let mut fields = Vec::new();
@@ -353,17 +365,22 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         match &self.current.kind {
             TokenKind::String(content) => {
-                doc_comment = Some(DocComment { content: content.clone() });
+                doc_comment = Some(DocComment {
+                    content: content.clone(),
+                });
                 self.advance();
                 self.skip_newlines();
             }
             TokenKind::FString(parts) => {
                 // Extract text from FStringToken parts for doc comment
                 use crate::token::FStringToken;
-                let content: String = parts.iter().filter_map(|p| match p {
-                    FStringToken::Literal(s) => Some(s.clone()),
-                    FStringToken::Expr(_) => None, // Skip interpolated expressions
-                }).collect();
+                let content: String = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        FStringToken::Literal(s) => Some(s.clone()),
+                        FStringToken::Expr(_) => None, // Skip interpolated expressions
+                    })
+                    .collect();
                 doc_comment = Some(DocComment { content });
                 self.advance();
                 self.skip_newlines();
@@ -421,7 +438,17 @@ impl<'a> Parser<'a> {
     /// Parse fields, methods, and macro invocations in a class body
     fn parse_class_body(
         &mut self,
-    ) -> Result<(Vec<Field>, Vec<FunctionDef>, Option<InvariantBlock>, Vec<MacroInvocation>, Vec<MixinRef>, Option<DocComment>), ParseError> {
+    ) -> Result<
+        (
+            Vec<Field>,
+            Vec<FunctionDef>,
+            Option<InvariantBlock>,
+            Vec<MacroInvocation>,
+            Vec<MixinRef>,
+            Option<DocComment>,
+        ),
+        ParseError,
+    > {
         self.debug_enter("parse_class_body");
         self.expect_block_start()?;
         let mut fields = Vec::new();
@@ -436,17 +463,22 @@ impl<'a> Parser<'a> {
         self.skip_newlines();
         match &self.current.kind {
             TokenKind::String(content) => {
-                doc_comment = Some(DocComment { content: content.clone() });
+                doc_comment = Some(DocComment {
+                    content: content.clone(),
+                });
                 self.advance();
                 self.skip_newlines();
             }
             TokenKind::FString(parts) => {
                 // Extract text from FStringToken parts for doc comment
                 use crate::token::FStringToken;
-                let content: String = parts.iter().filter_map(|p| match p {
-                    FStringToken::Literal(s) => Some(s.clone()),
-                    FStringToken::Expr(_) => None, // Skip interpolated expressions
-                }).collect();
+                let content: String = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        FStringToken::Literal(s) => Some(s.clone()),
+                        FStringToken::Expr(_) => None, // Skip interpolated expressions
+                    })
+                    .collect();
                 doc_comment = Some(DocComment { content });
                 self.advance();
                 self.skip_newlines();
@@ -521,7 +553,14 @@ impl<'a> Parser<'a> {
         }
         self.consume_dedent();
         self.debug_exit("parse_class_body");
-        Ok((fields, methods, invariant, macro_invocations, mixins, doc_comment))
+        Ok((
+            fields,
+            methods,
+            invariant,
+            macro_invocations,
+            mixins,
+            doc_comment,
+        ))
     }
 
     /// Check if current position is at a macro invocation (identifier followed by !)

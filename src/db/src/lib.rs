@@ -33,30 +33,30 @@
 //! ```
 
 pub mod connection;
+pub mod drivers;
 pub mod error;
+pub mod ffi;
 pub mod pool;
 pub mod row;
 pub mod schema;
-pub mod transaction;
-pub mod types;
-pub mod drivers;
-pub mod ffi;
 #[cfg(feature = "sdn-table")]
 pub mod sdn_table;
+pub mod transaction;
+pub mod types;
 
 // Re-export main types
 pub use connection::{Connection, Database};
 pub use error::{DbError, DbResult};
 pub use pool::{Pool, PoolConfig, PoolStats};
 pub use row::{Row, Rows};
-pub use transaction::{Transaction, Savepoint};
-pub use types::{SqlValue, FromSql, ToSql};
 pub use schema::{
-    ColumnInfo, ColumnType, ForeignKeyInfo, IndexInfo, SchemaIntrospector, TableInfo,
-    SqliteIntrospector, PostgresIntrospector,
+    ColumnInfo, ColumnType, ForeignKeyInfo, IndexInfo, PostgresIntrospector, SchemaIntrospector,
+    SqliteIntrospector, TableInfo,
 };
 #[cfg(feature = "sdn-table")]
 pub use sdn_table::{export_table_sdn, import_table_sdn};
+pub use transaction::{Savepoint, Transaction};
+pub use types::{FromSql, SqlValue, ToSql};
 
 // Re-export FFI functions
 pub use ffi::*;

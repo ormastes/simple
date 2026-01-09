@@ -248,7 +248,7 @@ pub extern "C" fn monoio_tcp_read(
     tracing::error!("monoio_tcp_read: Not implemented - requires runtime thread architecture");
     tracing::info!("monoio_tcp_read: For async TCP I/O, write applications in Simple language directly");
 
-    // TODO: Implement with dedicated runtime thread + message passing
+    // TODO: [runtime][P1] Implement with dedicated runtime thread + message passing
     // Current FFI approach cannot keep streams alive between calls
 
     RuntimeValue::from_int(-1) // Error: not implemented
@@ -268,7 +268,7 @@ pub extern "C" fn monoio_tcp_write(
     stream_handle: RuntimeValue,
     buffer: RuntimeValue,
 ) -> RuntimeValue {
-    // TODO: Get stream from handle and write data
+    // TODO: [runtime][P1] Get stream from handle and write data
     // For now, return stub value
 
     tracing::warn!("monoio_tcp_write: stub implementation");
@@ -295,7 +295,7 @@ pub extern "C" fn monoio_tcp_write(
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
 pub extern "C" fn monoio_tcp_flush(stream_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: Get stream from handle and flush
+    // TODO: [runtime][P1] Get stream from handle and flush
     // For now, return stub value
 
     tracing::warn!("monoio_tcp_flush: stub implementation");
@@ -317,7 +317,7 @@ pub extern "C" fn monoio_tcp_shutdown(
     stream_handle: RuntimeValue,
     how: i64,
 ) -> RuntimeValue {
-    // TODO: Get stream from handle and shutdown
+    // TODO: [runtime][P1] Get stream from handle and shutdown
     // For now, return stub value
 
     tracing::warn!("monoio_tcp_shutdown: stub implementation");
@@ -345,7 +345,7 @@ pub extern "C" fn monoio_tcp_shutdown(
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
 pub extern "C" fn monoio_tcp_close(stream_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: Get stream from handle and close
+    // TODO: [runtime][P1] Get stream from handle and close
     // For now, return stub value
 
     tracing::warn!("monoio_tcp_close: stub implementation");
@@ -369,7 +369,7 @@ pub extern "C" fn monoio_tcp_close(stream_handle: RuntimeValue) -> RuntimeValue 
 /// RuntimeValue containing 1 on success, or negative value on error
 #[no_mangle]
 pub extern "C" fn monoio_tcp_listener_close(listener_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: Get listener from handle and close
+    // TODO: [runtime][P1] Get listener from handle and close
     // For now, return stub value
 
     tracing::warn!("monoio_tcp_listener_close: stub implementation");
@@ -393,7 +393,7 @@ pub extern "C" fn monoio_tcp_listener_close(listener_handle: RuntimeValue) -> Ru
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
 pub extern "C" fn monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: Get stream from handle and return local address
+    // TODO: [runtime][P1] Get stream from handle and return local address
     // For now, return nil
 
     tracing::warn!("monoio_tcp_local_addr: stub implementation");
@@ -418,7 +418,7 @@ pub extern "C" fn monoio_tcp_local_addr(stream_handle: RuntimeValue) -> RuntimeV
 /// RuntimeValue containing address string, or nil on error
 #[no_mangle]
 pub extern "C" fn monoio_tcp_peer_addr(stream_handle: RuntimeValue) -> RuntimeValue {
-    // TODO: Get stream from handle and return peer address
+    // TODO: [runtime][P1] Get stream from handle and return peer address
     // For now, return nil
 
     tracing::warn!("monoio_tcp_peer_addr: stub implementation");
@@ -447,7 +447,7 @@ pub extern "C" fn monoio_tcp_set_nodelay(
     stream_handle: RuntimeValue,
     nodelay: i64,
 ) -> RuntimeValue {
-    // TODO: Get stream from handle and set option
+    // TODO: [runtime][P1] Get stream from handle and set option
     // For now, return stub value
 
     tracing::warn!("monoio_tcp_set_nodelay: stub implementation");
@@ -475,7 +475,7 @@ pub extern "C" fn monoio_tcp_set_keepalive(
     stream_handle: RuntimeValue,
     keepalive_secs: i64,
 ) -> RuntimeValue {
-    // TODO: Get stream from handle and set option
+    // TODO: [runtime][P1] Get stream from handle and set option
     // For now, return stub value
 
     tracing::warn!("monoio_tcp_set_keepalive: stub implementation");

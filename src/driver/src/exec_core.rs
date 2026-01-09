@@ -132,7 +132,7 @@ impl ExecCore {
     ) -> Result<Vec<u8>, String> {
         let mut compiler =
             CompilerPipeline::with_gc(self.gc_alloc.clone()).map_err(|e| format!("{e:?}"))?;
-        
+
         // Set emit options
         if let Some(path) = &options.emit_ast {
             compiler.set_emit_ast(path.clone());
@@ -143,7 +143,7 @@ impl ExecCore {
         if let Some(path) = &options.emit_mir {
             compiler.set_emit_mir(path.clone());
         }
-        
+
         compiler
             .compile_source_to_memory(source)
             .map_err(|e| format!("compile failed: {e}"))
@@ -292,7 +292,11 @@ impl ExecCore {
     }
 
     /// Run SMF from memory buffer with arguments
-    pub fn run_smf_from_memory_with_args(&self, bytes: &[u8], args: Vec<String>) -> Result<i32, String> {
+    pub fn run_smf_from_memory_with_args(
+        &self,
+        bytes: &[u8],
+        args: Vec<String>,
+    ) -> Result<i32, String> {
         // Set arguments in runtime before loading module
         simple_runtime::value::rt_set_args_vec(&args);
 
@@ -318,7 +322,7 @@ impl ExecCore {
     #[cfg(feature = "wasm")]
     pub fn run_source_wasm(&self, source: &str) -> Result<i32, String> {
         use simple_common::target::{Target, TargetArch, WasmRuntime};
-        use simple_wasm_runtime::{WasmRunner, WasiConfig};
+        use simple_wasm_runtime::{WasiConfig, WasmRunner};
 
         // Compile to wasm32-wasi
         let target = Target::new_wasm(TargetArch::Wasm32, WasmRuntime::Wasi);
@@ -331,8 +335,8 @@ impl ExecCore {
 
         // Create WasmRunner with WASI configuration
         let config = WasiConfig::new();
-        let mut runner = WasmRunner::with_config(config)
-            .map_err(|e| format!("create wasm runner: {e}"))?;
+        let mut runner =
+            WasmRunner::with_config(config).map_err(|e| format!("create wasm runner: {e}"))?;
 
         // Run the main function
         let result = runner
@@ -345,14 +349,18 @@ impl ExecCore {
             if !stdout.is_empty() {
                 use simple_runtime::value::rt_print_str;
                 // Write to capture buffer (rt_print_str checks if capture is active)
-                unsafe { rt_print_str(stdout.as_ptr(), stdout.len() as u64); }
+                unsafe {
+                    rt_print_str(stdout.as_ptr(), stdout.len() as u64);
+                }
             }
         }
         if let Ok(stderr) = runner.config().get_stderr_string() {
             if !stderr.is_empty() {
                 use simple_runtime::value::rt_eprint_str;
                 // Write to capture buffer (rt_eprint_str checks if capture is active)
-                unsafe { rt_eprint_str(stderr.as_ptr(), stderr.len() as u64); }
+                unsafe {
+                    rt_eprint_str(stderr.as_ptr(), stderr.len() as u64);
+                }
             }
         }
 
@@ -373,14 +381,14 @@ impl ExecCore {
 
         match extension {
             "smf" => self.run_smf(path),
-            "spl" | "" => {
+            "spl" | "simple" | "sscript" | "" => {
                 let out_path = path.with_extension("smf");
                 self.compile_file(path, &out_path)?;
                 let module = self.load_module(&out_path)?;
                 self.execute_and_gc(&module)
             }
             other => Err(format!(
-                "unsupported file extension '.{}': expected '.spl' or '.smf'",
+                "unsupported file extension '.{}': expected '.spl', '.simple', '.sscript', or '.smf'",
                 other
             )),
         }
@@ -398,9 +406,13 @@ impl ExecCore {
     /// Run a .spl file using the interpreter with command-line arguments.
     ///
     /// The args are made available to the Simple program via `sys_get_args()`.
-    pub fn run_file_interpreted_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
-        use simple_compiler::pipeline::module_loader::load_module_with_imports;
+    pub fn run_file_interpreted_with_args(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+    ) -> Result<i32, String> {
         use simple_compiler::interpreter::{evaluate_module, set_current_file};
+        use simple_compiler::pipeline::module_loader::load_module_with_imports;
         use simple_compiler::set_interpreter_args;
         use std::collections::HashSet;
 

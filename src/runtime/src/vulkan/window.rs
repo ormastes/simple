@@ -4,14 +4,14 @@ use super::error::{VulkanError, VulkanResult};
 use super::instance::VulkanInstance;
 use ash::vk;
 use parking_lot::Mutex;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::{
     event::{Event, WindowEvent as WinitWindowEvent},
     event_loop::{EventLoop, EventLoopProxy},
-    window::{Window, Fullscreen},
+    window::{Fullscreen, Window},
 };
 
 /// Window handle type
@@ -31,10 +31,7 @@ pub enum WindowEvent {
     CloseRequested { window: WindowHandle },
 
     /// Window gained or lost focus
-    Focused {
-        window: WindowHandle,
-        focused: bool,
-    },
+    Focused { window: WindowHandle, focused: bool },
 
     /// Mouse moved
     MouseMoved {
@@ -148,7 +145,9 @@ impl WindowManager {
     /// Start the event loop on a dedicated thread
     pub fn start_event_loop_thread(&mut self) -> VulkanResult<()> {
         if self.request_sender.is_some() {
-            return Err(VulkanError::WindowError("Event loop already running".to_string()));
+            return Err(VulkanError::WindowError(
+                "Event loop already running".to_string(),
+            ));
         }
 
         let (request_sender, request_receiver) = crossbeam::channel::unbounded();
@@ -163,7 +162,9 @@ impl WindowManager {
             .spawn(move || {
                 Self::event_loop_thread_main(windows, event_sender, instance, request_receiver);
             })
-            .map_err(|e| VulkanError::WindowError(format!("Failed to spawn event loop thread: {:?}", e)))?;
+            .map_err(|e| {
+                VulkanError::WindowError(format!("Failed to spawn event loop thread: {:?}", e))
+            })?;
 
         self.event_loop_thread = Some(thread);
         tracing::info!("Window event loop thread started");
@@ -200,34 +201,36 @@ impl WindowManager {
         });
 
         // Run event loop
-        let _ = event_loop.run(move |event, target| {
-            match event {
-                Event::UserEvent(UserEvent::Request(request)) => {
-                    Self::handle_request(request, &windows, &instance, target);
-                }
-
-                Event::WindowEvent { window_id, event: win_event } => {
-                    let windows_lock = windows.lock();
-                    let window_handle = windows_lock.iter()
-                        .find(|(_, state)| state.window.id() == window_id)
-                        .map(|(handle, _)| *handle);
-                    drop(windows_lock);
-
-                    if let Some(handle) = window_handle {
-                        if let Some(event) = Self::convert_window_event(handle, win_event) {
-                            let _ = event_sender.send(event);
-                        }
-                    }
-                }
-
-                Event::AboutToWait => {
-                    if windows.lock().is_empty() {
-                        target.exit();
-                    }
-                }
-
-                _ => {}
+        let _ = event_loop.run(move |event, target| match event {
+            Event::UserEvent(UserEvent::Request(request)) => {
+                Self::handle_request(request, &windows, &instance, target);
             }
+
+            Event::WindowEvent {
+                window_id,
+                event: win_event,
+            } => {
+                let windows_lock = windows.lock();
+                let window_handle = windows_lock
+                    .iter()
+                    .find(|(_, state)| state.window.id() == window_id)
+                    .map(|(handle, _)| *handle);
+                drop(windows_lock);
+
+                if let Some(handle) = window_handle {
+                    if let Some(event) = Self::convert_window_event(handle, win_event) {
+                        let _ = event_sender.send(event);
+                    }
+                }
+            }
+
+            Event::AboutToWait => {
+                if windows.lock().is_empty() {
+                    target.exit();
+                }
+            }
+
+            _ => {}
         });
 
         tracing::info!("Event loop thread exiting");
@@ -241,15 +244,15 @@ impl WindowManager {
         target: &winit::event_loop::ActiveEventLoop,
     ) {
         match request {
-            WindowRequest::CreateWindow { handle, width, height, title, response } => {
+            WindowRequest::CreateWindow {
+                handle,
+                width,
+                height,
+                title,
+                response,
+            } => {
                 let result = Self::create_window_internal(
-                    handle,
-                    width,
-                    height,
-                    &title,
-                    windows,
-                    instance,
-                    target,
+                    handle, width, height, &title, windows, instance, target,
                 );
                 let _ = response.send(result);
             }
@@ -259,14 +262,19 @@ impl WindowManager {
                 let _ = response.send(Ok(()));
             }
 
-            WindowRequest::SetFullscreen { handle, mode, response } => {
+            WindowRequest::SetFullscreen {
+                handle,
+                mode,
+                response,
+            } => {
                 Self::set_fullscreen_internal(handle, mode, windows);
                 let _ = response.send(Ok(()));
             }
 
             WindowRequest::GetWindowSize { handle, response } => {
                 let windows_lock = windows.lock();
-                let result = windows_lock.get(&handle)
+                let result = windows_lock
+                    .get(&handle)
                     .map(|state| (state.width, state.height))
                     .ok_or(VulkanError::InvalidHandle);
                 let _ = response.send(result);
@@ -293,16 +301,19 @@ impl WindowManager {
             .with_title(title)
             .with_inner_size(winit::dpi::PhysicalSize::new(width, height));
 
-        let window = target.create_window(window_attrs)
+        let window = target
+            .create_window(window_attrs)
             .map_err(|e| VulkanError::WindowError(format!("Window creation failed: {:?}", e)))?;
 
         let window = Arc::new(window);
 
         // Create surface
-        let display_handle = window.display_handle()
-            .map_err(|e| VulkanError::SurfaceError(format!("Failed to get display handle: {:?}", e)))?;
-        let window_handle = window.window_handle()
-            .map_err(|e| VulkanError::SurfaceError(format!("Failed to get window handle: {:?}", e)))?;
+        let display_handle = window.display_handle().map_err(|e| {
+            VulkanError::SurfaceError(format!("Failed to get display handle: {:?}", e))
+        })?;
+        let window_handle = window.window_handle().map_err(|e| {
+            VulkanError::SurfaceError(format!("Failed to get window handle: {:?}", e))
+        })?;
 
         let surface = unsafe {
             ash_window::create_surface(
@@ -341,7 +352,9 @@ impl WindowManager {
         if let Some(state) = windows_lock.remove(&handle) {
             // Destroy surface
             unsafe {
-                instance.surface_loader().destroy_surface(state.surface, None);
+                instance
+                    .surface_loader()
+                    .destroy_surface(state.surface, None);
             }
             tracing::info!("Window {} destroyed", handle);
         }
@@ -362,7 +375,7 @@ impl WindowManager {
                 }
                 FullscreenMode::Exclusive => {
                     // For now, treat as borderless
-                    // TODO: Implement exclusive fullscreen with mode selection
+                    // TODO: [runtime][P1] Implement exclusive fullscreen with mode selection
                     Some(Fullscreen::Borderless(state.window.current_monitor()))
                 }
             };
@@ -382,7 +395,9 @@ impl WindowManager {
                 height: size.height,
             }),
 
-            WinitWindowEvent::CloseRequested => Some(WindowEvent::CloseRequested { window: handle }),
+            WinitWindowEvent::CloseRequested => {
+                Some(WindowEvent::CloseRequested { window: handle })
+            }
 
             WinitWindowEvent::Focused(focused) => Some(WindowEvent::Focused {
                 window: handle,
@@ -445,82 +460,118 @@ impl WindowManager {
     ) -> VulkanResult<WindowHandle> {
         let handle = self.next_handle.fetch_add(1, Ordering::SeqCst);
 
-        let sender = self.request_sender.as_ref()
+        let sender = self
+            .request_sender
+            .as_ref()
             .ok_or_else(|| VulkanError::WindowError("Event loop not running".to_string()))?;
 
         let (response_tx, response_rx) = crossbeam::channel::bounded(1);
 
-        sender.send(WindowRequest::CreateWindow {
-            handle,
-            width,
-            height,
-            title: title.to_string(),
-            response: response_tx,
-        }).map_err(|e| VulkanError::WindowError(format!("Failed to send create window request: {:?}", e)))?;
+        sender
+            .send(WindowRequest::CreateWindow {
+                handle,
+                width,
+                height,
+                title: title.to_string(),
+                response: response_tx,
+            })
+            .map_err(|e| {
+                VulkanError::WindowError(format!("Failed to send create window request: {:?}", e))
+            })?;
 
         // Wait for response
-        response_rx.recv()
-            .map_err(|e| VulkanError::WindowError(format!("Failed to receive create window response: {:?}", e)))??;
+        response_rx.recv().map_err(|e| {
+            VulkanError::WindowError(format!("Failed to receive create window response: {:?}", e))
+        })??;
 
         Ok(handle)
     }
 
     /// Destroy a window
     pub fn destroy_window(&self, handle: WindowHandle) -> VulkanResult<()> {
-        let sender = self.request_sender.as_ref()
+        let sender = self
+            .request_sender
+            .as_ref()
             .ok_or_else(|| VulkanError::WindowError("Event loop not running".to_string()))?;
 
         let (response_tx, response_rx) = crossbeam::channel::bounded(1);
 
-        sender.send(WindowRequest::DestroyWindow {
-            handle,
-            response: response_tx,
-        }).map_err(|e| VulkanError::WindowError(format!("Failed to send destroy window request: {:?}", e)))?;
+        sender
+            .send(WindowRequest::DestroyWindow {
+                handle,
+                response: response_tx,
+            })
+            .map_err(|e| {
+                VulkanError::WindowError(format!("Failed to send destroy window request: {:?}", e))
+            })?;
 
-        response_rx.recv()
-            .map_err(|e| VulkanError::WindowError(format!("Failed to receive destroy window response: {:?}", e)))?
+        response_rx.recv().map_err(|e| {
+            VulkanError::WindowError(format!(
+                "Failed to receive destroy window response: {:?}",
+                e
+            ))
+        })?
     }
 
     /// Get window dimensions
     pub fn get_window_size(&self, handle: WindowHandle) -> VulkanResult<(u32, u32)> {
-        let sender = self.request_sender.as_ref()
+        let sender = self
+            .request_sender
+            .as_ref()
             .ok_or_else(|| VulkanError::WindowError("Event loop not running".to_string()))?;
 
         let (response_tx, response_rx) = crossbeam::channel::bounded(1);
 
-        sender.send(WindowRequest::GetWindowSize {
-            handle,
-            response: response_tx,
-        }).map_err(|e| VulkanError::WindowError(format!("Failed to send get window size request: {:?}", e)))?;
+        sender
+            .send(WindowRequest::GetWindowSize {
+                handle,
+                response: response_tx,
+            })
+            .map_err(|e| {
+                VulkanError::WindowError(format!("Failed to send get window size request: {:?}", e))
+            })?;
 
-        response_rx.recv()
-            .map_err(|e| VulkanError::WindowError(format!("Failed to receive get window size response: {:?}", e)))?
+        response_rx.recv().map_err(|e| {
+            VulkanError::WindowError(format!(
+                "Failed to receive get window size response: {:?}",
+                e
+            ))
+        })?
     }
 
     /// Get window surface
     pub fn get_surface(&self, handle: WindowHandle) -> VulkanResult<vk::SurfaceKHR> {
         let windows = self.windows.lock();
-        let state = windows.get(&handle)
-            .ok_or(VulkanError::InvalidHandle)?;
+        let state = windows.get(&handle).ok_or(VulkanError::InvalidHandle)?;
 
         Ok(state.surface)
     }
 
     /// Set fullscreen mode
     pub fn set_fullscreen(&self, handle: WindowHandle, mode: FullscreenMode) -> VulkanResult<()> {
-        let sender = self.request_sender.as_ref()
+        let sender = self
+            .request_sender
+            .as_ref()
             .ok_or_else(|| VulkanError::WindowError("Event loop not running".to_string()))?;
 
         let (response_tx, response_rx) = crossbeam::channel::bounded(1);
 
-        sender.send(WindowRequest::SetFullscreen {
-            handle,
-            mode,
-            response: response_tx,
-        }).map_err(|e| VulkanError::WindowError(format!("Failed to send set fullscreen request: {:?}", e)))?;
+        sender
+            .send(WindowRequest::SetFullscreen {
+                handle,
+                mode,
+                response: response_tx,
+            })
+            .map_err(|e| {
+                VulkanError::WindowError(format!("Failed to send set fullscreen request: {:?}", e))
+            })?;
 
-        response_rx.recv()
-            .map_err(|e| VulkanError::WindowError(format!("Failed to receive set fullscreen response: {:?}", e)))?
+        response_rx.recv().map_err(|e| {
+            VulkanError::WindowError(format!(
+                "Failed to receive set fullscreen response: {:?}",
+                e
+            ))
+        })?
     }
 
     /// Poll for events (non-blocking)
@@ -541,8 +592,9 @@ impl WindowManager {
         }
 
         if let Some(thread) = self.event_loop_thread.take() {
-            thread.join()
-                .map_err(|_| VulkanError::WindowError("Failed to join event loop thread".to_string()))?;
+            thread.join().map_err(|_| {
+                VulkanError::WindowError("Failed to join event loop thread".to_string())
+            })?;
             tracing::info!("Event loop thread shut down");
         }
 
@@ -593,9 +645,16 @@ mod tests {
         // Test that different event types are distinct
         let handle = 1;
 
-        let _resize = WindowEvent::Resized { window: handle, width: 800, height: 600 };
+        let _resize = WindowEvent::Resized {
+            window: handle,
+            width: 800,
+            height: 600,
+        };
         let _close = WindowEvent::CloseRequested { window: handle };
-        let _focus = WindowEvent::Focused { window: handle, focused: true };
+        let _focus = WindowEvent::Focused {
+            window: handle,
+            focused: true,
+        };
 
         // Just verify they compile and are distinct types
         assert!(true);

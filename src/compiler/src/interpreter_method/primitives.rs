@@ -1,14 +1,10 @@
 // Primitive type methods: Int, Float, Bool
 
+use super::super::{eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, Enums, ImplMethods};
 use crate::error::CompileError;
-use crate::value::{Value, Env};
-use simple_parser::ast::{Argument, FunctionDef, ClassDef};
+use crate::value::{Env, Value};
+use simple_parser::ast::{Argument, ClassDef, FunctionDef};
 use std::collections::HashMap;
-use super::super::{
-    evaluate_expr,
-    eval_arg, eval_arg_int, eval_arg_usize,
-    Enums, ImplMethods,
-};
 
 /// Handle Int methods
 pub fn handle_int_methods(
@@ -32,25 +28,75 @@ pub fn handle_int_methods(
         "to_float" => Value::Float(n as f64),
         "to_string" => Value::Str(n.to_string()),
         "clamp" => {
-            let min = eval_arg(args, 0, Value::Int(i64::MIN), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(i64::MIN);
-            let max = eval_arg(args, 1, Value::Int(i64::MAX), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(i64::MAX);
+            let min = eval_arg(
+                args,
+                0,
+                Value::Int(i64::MIN),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(i64::MIN);
+            let max = eval_arg(
+                args,
+                1,
+                Value::Int(i64::MAX),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(i64::MAX);
             Value::Int(n.clamp(min, max))
         }
         "min" => {
-            let other = eval_arg(args, 0, Value::Int(n), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(n);
+            let other = eval_arg(
+                args,
+                0,
+                Value::Int(n),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(n);
             Value::Int(n.min(other))
         }
         "max" => {
-            let other = eval_arg(args, 0, Value::Int(n), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(n);
+            let other = eval_arg(
+                args,
+                0,
+                Value::Int(n),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(n);
             Value::Int(n.max(other))
         }
         "pow" => {
-            let exp = eval_arg(args, 0, Value::Int(1), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(1) as u32;
+            let exp = eval_arg(
+                args,
+                0,
+                Value::Int(1),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(1) as u32;
             Value::Int(n.saturating_pow(exp))
         }
         "bit_count" | "count_ones" => Value::Int(n.count_ones() as i64),
@@ -61,15 +107,30 @@ pub fn handle_int_methods(
         "to_oct" => Value::Str(format!("{:o}", n)),
         "times" => {
             // Call a function n times, returning array of results
-            let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let func = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let mut results = Vec::new();
-            if let Value::Lambda { params, body, env: captured } = func {
+            if let Value::Lambda {
+                params,
+                body,
+                env: captured,
+            } = func
+            {
                 for i in 0..n.max(0) {
                     let mut local_env = captured.clone();
                     if let Some(param) = params.first() {
                         local_env.insert(param.clone(), Value::Int(i));
                     }
-                    let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                    let result =
+                        evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
                     results.push(result);
                 }
             }
@@ -77,15 +138,35 @@ pub fn handle_int_methods(
         }
         "up_to" => {
             // Create range from self to n (exclusive)
-            let end = eval_arg(args, 0, Value::Int(n), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(n);
+            let end = eval_arg(
+                args,
+                0,
+                Value::Int(n),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(n);
             let range: Vec<Value> = (n..end).map(Value::Int).collect();
             Value::Array(range)
         }
         "down_to" => {
             // Create range from self down to n (exclusive)
-            let end = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(0);
+            let end = eval_arg(
+                args,
+                0,
+                Value::Int(0),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(0);
             let range: Vec<Value> = (end..n).rev().map(Value::Int).collect();
             Value::Array(range)
         }
@@ -138,52 +219,152 @@ pub fn handle_float_methods(
         "cosh" => Value::Float(f.cosh()),
         "tanh" => Value::Float(f.tanh()),
         "clamp" => {
-            let min = eval_arg(args, 0, Value::Float(f64::MIN), env, functions, classes, enums, impl_methods)?
-                .as_float().unwrap_or(f64::MIN);
-            let max = eval_arg(args, 1, Value::Float(f64::MAX), env, functions, classes, enums, impl_methods)?
-                .as_float().unwrap_or(f64::MAX);
+            let min = eval_arg(
+                args,
+                0,
+                Value::Float(f64::MIN),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_float()
+            .unwrap_or(f64::MIN);
+            let max = eval_arg(
+                args,
+                1,
+                Value::Float(f64::MAX),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_float()
+            .unwrap_or(f64::MAX);
             Value::Float(f.clamp(min, max))
         }
         "min" => {
-            let other = eval_arg(args, 0, Value::Float(f), env, functions, classes, enums, impl_methods)?
-                .as_float().unwrap_or(f);
+            let other = eval_arg(
+                args,
+                0,
+                Value::Float(f),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_float()
+            .unwrap_or(f);
             Value::Float(f.min(other))
         }
         "max" => {
-            let other = eval_arg(args, 0, Value::Float(f), env, functions, classes, enums, impl_methods)?
-                .as_float().unwrap_or(f);
+            let other = eval_arg(
+                args,
+                0,
+                Value::Float(f),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_float()
+            .unwrap_or(f);
             Value::Float(f.max(other))
         }
         "pow" | "powf" => {
-            let exp = eval_arg(args, 0, Value::Float(1.0), env, functions, classes, enums, impl_methods)?
-                .as_float().unwrap_or(1.0);
+            let exp = eval_arg(
+                args,
+                0,
+                Value::Float(1.0),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_float()
+            .unwrap_or(1.0);
             Value::Float(f.powf(exp))
         }
         "powi" => {
-            let exp = eval_arg(args, 0, Value::Int(1), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(1) as i32;
+            let exp = eval_arg(
+                args,
+                0,
+                Value::Int(1),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(1) as i32;
             Value::Float(f.powi(exp))
         }
         "log" => {
-            let base = eval_arg(args, 0, Value::Float(std::f64::consts::E), env, functions, classes, enums, impl_methods)?
-                .as_float().unwrap_or(std::f64::consts::E);
+            let base = eval_arg(
+                args,
+                0,
+                Value::Float(std::f64::consts::E),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_float()
+            .unwrap_or(std::f64::consts::E);
             Value::Float(f.log(base))
         }
         "atan2" => {
-            let other = eval_arg(args, 0, Value::Float(1.0), env, functions, classes, enums, impl_methods)?
-                .as_float().unwrap_or(1.0);
+            let other = eval_arg(
+                args,
+                0,
+                Value::Float(1.0),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_float()
+            .unwrap_or(1.0);
             Value::Float(f.atan2(other))
         }
         "hypot" => {
-            let other = eval_arg(args, 0, Value::Float(0.0), env, functions, classes, enums, impl_methods)?
-                .as_float().unwrap_or(0.0);
+            let other = eval_arg(
+                args,
+                0,
+                Value::Float(0.0),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_float()
+            .unwrap_or(0.0);
             Value::Float(f.hypot(other))
         }
         "to_degrees" => Value::Float(f.to_degrees()),
         "to_radians" => Value::Float(f.to_radians()),
         "round_to" => {
-            let places = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?
-                .as_int().unwrap_or(0) as i32;
+            let places = eval_arg(
+                args,
+                0,
+                Value::Int(0),
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?
+            .as_int()
+            .unwrap_or(0) as i32;
             let multiplier = 10f64.powi(places);
             Value::Float((f * multiplier).round() / multiplier)
         }
@@ -209,9 +390,24 @@ pub fn handle_bool_methods(
         "then" => {
             // Returns Some(result) if true, None if false
             if b {
-                let func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-                if let Value::Lambda { params: _, body, env: captured } = func {
-                    let result = evaluate_expr(&body, &captured, functions, classes, enums, impl_methods)?;
+                let func = eval_arg(
+                    args,
+                    0,
+                    Value::Nil,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if let Value::Lambda {
+                    params: _,
+                    body,
+                    env: captured,
+                } = func
+                {
+                    let result =
+                        evaluate_expr(&body, &captured, functions, classes, enums, impl_methods)?;
                     return Ok(Some(Value::some(result)));
                 }
                 return Ok(Some(Value::some(Value::Nil)));
@@ -219,11 +415,41 @@ pub fn handle_bool_methods(
             return Ok(Some(Value::none()));
         }
         "then_else" => {
-            let then_func = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let else_func = eval_arg(args, 1, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let then_func = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let else_func = eval_arg(
+                args,
+                1,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             let func = if b { then_func } else { else_func };
-            if let Value::Lambda { params: _, body, env: captured } = func {
-                return Ok(Some(evaluate_expr(&body, &captured, functions, classes, enums, impl_methods)?));
+            if let Value::Lambda {
+                params: _,
+                body,
+                env: captured,
+            } = func
+            {
+                return Ok(Some(evaluate_expr(
+                    &body,
+                    &captured,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?));
             }
             return Ok(Some(Value::Nil));
         }

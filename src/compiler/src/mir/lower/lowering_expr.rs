@@ -4,7 +4,7 @@
 //! including literals, variables, operators, function calls, lambdas, async/await,
 //! actors, pointers, and collections.
 
-use super::lowering_core::{MirLowerer, MirLowerResult, MirLowerError};
+use super::lowering_core::{MirLowerError, MirLowerResult, MirLowerer};
 use crate::hir::{DispatchMode, HirExpr, HirExprKind, HirType, PointerKind, TypeId};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, VReg};
@@ -130,7 +130,8 @@ impl<'a> MirLowerer<'a> {
                         let mut final_args = Vec::new();
                         let mut provided_idx = 0;
 
-                        for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate() {
+                        for (param_idx, (param_ty, is_injectable)) in param_info.iter().enumerate()
+                        {
                             if *is_injectable {
                                 // This parameter should be DI-injected
                                 if self.di_config.is_none() {
@@ -329,7 +330,9 @@ impl<'a> MirLowerer<'a> {
                             message: message_reg,
                         });
                         // Reply returns nil (represented as 0)
-                        block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                        block
+                            .instructions
+                            .push(MirInst::ConstInt { dest, value: 0 });
                         dest
                     });
                 }
@@ -365,7 +368,9 @@ impl<'a> MirLowerer<'a> {
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
-                        block.instructions.push(MirInst::ConstInt { dest, value: 0 });
+                        block
+                            .instructions
+                            .push(MirInst::ConstInt { dest, value: 0 });
                         dest
                     })
                 }
@@ -390,9 +395,10 @@ impl<'a> MirLowerer<'a> {
 
                 // If we reach here, the old() expression wasn't found in captures
                 // This shouldn't happen with proper HIR lowering
-                Err(MirLowerError::Unsupported(
-                    format!("old() expression not found in captures: {:?}", inner)
-                ))
+                Err(MirLowerError::Unsupported(format!(
+                    "old() expression not found in captures: {:?}",
+                    inner
+                )))
             }
 
             // Pointer operations
@@ -519,26 +525,32 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 // Get struct type information from type registry
-                let (field_types, field_offsets, struct_size) = if let Some(registry) = self.type_registry {
-                    if let Some(HirType::Struct { fields: struct_fields, .. }) = registry.get(*ty) {
-                        let field_types: Vec<TypeId> = struct_fields.iter().map(|(_, ty)| *ty).collect();
-                        // For now, use simple sequential layout (simplified, may not match actual layout)
-                        let mut offsets = Vec::new();
-                        let mut offset = 0u32;
-                        for (_, field_ty) in struct_fields {
-                            offsets.push(offset);
-                            // Assume 8-byte fields for simplicity (pointer-sized)
-                            offset += 8;
+                let (field_types, field_offsets, struct_size) =
+                    if let Some(registry) = self.type_registry {
+                        if let Some(HirType::Struct {
+                            fields: struct_fields,
+                            ..
+                        }) = registry.get(*ty)
+                        {
+                            let field_types: Vec<TypeId> =
+                                struct_fields.iter().map(|(_, ty)| *ty).collect();
+                            // For now, use simple sequential layout (simplified, may not match actual layout)
+                            let mut offsets = Vec::new();
+                            let mut offset = 0u32;
+                            for (_, field_ty) in struct_fields {
+                                offsets.push(offset);
+                                // Assume 8-byte fields for simplicity (pointer-sized)
+                                offset += 8;
+                            }
+                            (field_types, offsets, offset)
+                        } else {
+                            // Fallback: use empty struct
+                            (Vec::new(), Vec::new(), 0u32)
                         }
-                        (field_types, offsets, offset)
                     } else {
-                        // Fallback: use empty struct
+                        // No type registry, use empty struct
                         (Vec::new(), Vec::new(), 0u32)
-                    }
-                } else {
-                    // No type registry, use empty struct
-                    (Vec::new(), Vec::new(), 0u32)
-                };
+                    };
 
                 self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
@@ -574,7 +586,12 @@ impl<'a> MirLowerer<'a> {
             }
 
             // Method call with dispatch mode (static vs dynamic)
-            HirExprKind::MethodCall { receiver, method, args, dispatch } => {
+            HirExprKind::MethodCall {
+                receiver,
+                method,
+                args,
+                dispatch,
+            } => {
                 let receiver_reg = self.lower_expr(receiver)?;
                 let mut arg_regs = Vec::new();
                 for arg in args {
@@ -604,14 +621,16 @@ impl<'a> MirLowerer<'a> {
                         let receiver_type = receiver.ty;
 
                         // Try to get trait name from receiver type
-                        let trait_name = self.type_registry
+                        let trait_name = self
+                            .type_registry
                             .and_then(|reg| reg.get_type_name(receiver_type))
                             .map(|s| s.to_string());
 
                         // Resolve vtable slot and param types from trait info
                         let (vtable_slot, param_types) = if let Some(ref tname) = trait_name {
                             let slot = self.get_vtable_slot(tname, method).unwrap_or(0);
-                            let params = self.get_trait_method_signature(tname, method)
+                            let params = self
+                                .get_trait_method_signature(tname, method)
                                 .map(|(p, _)| p)
                                 .unwrap_or_default();
                             (slot, params)

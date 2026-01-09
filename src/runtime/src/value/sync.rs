@@ -100,10 +100,12 @@ pub extern "C" fn rt_atomic_compare_exchange(
     };
 
     unsafe {
-        match (*atomic_ptr)
-            .value
-            .compare_exchange(expected, new_value, Ordering::AcqRel, Ordering::Acquire)
-        {
+        match (*atomic_ptr).value.compare_exchange(
+            expected,
+            new_value,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
             Ok(old) => {
                 if !result_ptr.is_null() {
                     *result_ptr = old;

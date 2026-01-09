@@ -28,18 +28,18 @@
 //! - **ui/tui/**: TUI renderer implementation
 //! - **ui/gui/**: GUI renderer implementation (future)
 
+pub mod ffi;
+pub mod ir;
 pub mod lexer;
 pub mod parser;
-pub mod ir;
-pub mod ffi;
 
 // Keep patchset/render for reference during transition
+pub mod hydration;
 pub mod patchset;
 pub mod render;
 pub mod ssr;
-pub mod hydration;
 
 // Re-export main types for compiler integration
+pub use ir::{InitIR, RenderIR, TemplateIR};
 pub use lexer::{SuiLexer, SuiToken, SuiTokenKind};
 pub use parser::{SuiParser, SuiTemplate, TemplateNode};
-pub use ir::{InitIR, TemplateIR, RenderIR};

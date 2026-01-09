@@ -31,7 +31,7 @@ impl VulkanBackend {
 
     /// Check if Vulkan is available on the system
     fn vulkan_available() -> bool {
-        // TODO: Implement actual Vulkan availability check
+        // TODO: [codegen][P1] Implement actual Vulkan availability check
         // For now, assume available if feature is enabled
         true
     }
@@ -54,7 +54,10 @@ impl NativeBackend for VulkanBackend {
         // Serialize to bytecode
         let bytes = spirv_module.into_bytes()?;
 
-        tracing::info!("Vulkan backend: Generated {} bytes of SPIR-V bytecode", bytes.len());
+        tracing::info!(
+            "Vulkan backend: Generated {} bytes of SPIR-V bytecode",
+            bytes.len()
+        );
 
         Ok(bytes)
     }
@@ -197,10 +200,7 @@ mod tests {
         assert!(version > 0, "SPIR-V version should be non-zero");
 
         // Words 2-4 exist (generator, bound, schema)
-        assert!(
-            spirv.len() >= 20,
-            "SPIR-V header should have all 5 words"
-        );
+        assert!(spirv.len() >= 20, "SPIR-V header should have all 5 words");
     }
 
     #[test]

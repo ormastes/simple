@@ -60,7 +60,8 @@ impl LinkerBuilder {
     /// Returns an error if the linker name is not recognized.
     pub fn linker_name(mut self, name: &str) -> LinkerResult<Self> {
         self.linker = Some(
-            NativeLinker::from_name(name).ok_or_else(|| LinkerError::LinkerNotFound(name.to_string()))?,
+            NativeLinker::from_name(name)
+                .ok_or_else(|| LinkerError::LinkerNotFound(name.to_string()))?,
         );
         Ok(self)
     }
@@ -99,7 +100,9 @@ impl LinkerBuilder {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.options.libraries.extend(names.into_iter().map(|s| s.into()));
+        self.options
+            .libraries
+            .extend(names.into_iter().map(|s| s.into()));
         self
     }
 
@@ -115,7 +118,9 @@ impl LinkerBuilder {
         I: IntoIterator<Item = P>,
         P: Into<PathBuf>,
     {
-        self.options.library_paths.extend(paths.into_iter().map(|p| p.into()));
+        self.options
+            .library_paths
+            .extend(paths.into_iter().map(|p| p.into()));
         self
     }
 
@@ -176,7 +181,9 @@ impl LinkerBuilder {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.options.extra_flags.extend(flags.into_iter().map(|s| s.into()));
+        self.options
+            .extra_flags
+            .extend(flags.into_iter().map(|s| s.into()));
         self
     }
 
@@ -290,7 +297,10 @@ mod tests {
         assert_eq!(builder.objects.len(), 2);
         assert_eq!(builder.output, Some(PathBuf::from("program")));
         assert_eq!(builder.options.libraries, vec!["c"]);
-        assert_eq!(builder.options.library_paths, vec![PathBuf::from("/usr/lib")]);
+        assert_eq!(
+            builder.options.library_paths,
+            vec![PathBuf::from("/usr/lib")]
+        );
         assert!(builder.options.strip);
         assert!(builder.options.pie);
         assert_eq!(builder.options.threads, Some(4));
@@ -300,25 +310,21 @@ mod tests {
 
     #[test]
     fn test_builder_objects_batch() {
-        let builder = LinkerBuilder::new()
-            .objects(["a.o", "b.o", "c.o"]);
+        let builder = LinkerBuilder::new().objects(["a.o", "b.o", "c.o"]);
 
         assert_eq!(builder.objects.len(), 3);
     }
 
     #[test]
     fn test_builder_libraries_batch() {
-        let builder = LinkerBuilder::new()
-            .libraries(["c", "m", "pthread"]);
+        let builder = LinkerBuilder::new().libraries(["c", "m", "pthread"]);
 
         assert_eq!(builder.options.libraries, vec!["c", "m", "pthread"]);
     }
 
     #[test]
     fn test_builder_linker_name() {
-        let builder = LinkerBuilder::new()
-            .linker_name("mold")
-            .unwrap();
+        let builder = LinkerBuilder::new().linker_name("mold").unwrap();
         assert_eq!(builder.linker, Some(NativeLinker::Mold));
 
         let result = LinkerBuilder::new().linker_name("nonexistent");
@@ -330,18 +336,14 @@ mod tests {
         let builder = LinkerBuilder::new();
         assert!(!builder.is_ready());
 
-        let builder = LinkerBuilder::new()
-            .object("a.o")
-            .output("out");
+        let builder = LinkerBuilder::new().object("a.o").output("out");
         // May be ready depending on system linker availability
         let _ = builder.is_ready();
     }
 
     #[test]
     fn test_builder_auto_map() {
-        let builder = LinkerBuilder::new()
-            .output("program")
-            .auto_map();
+        let builder = LinkerBuilder::new().output("program").auto_map();
 
         assert!(builder.options.generate_map);
         assert!(builder.options.map_file.is_none()); // Set during link()
@@ -349,18 +351,14 @@ mod tests {
 
     #[test]
     fn test_link_validation_no_output() {
-        let result = LinkerBuilder::new()
-            .object("a.o")
-            .link();
+        let result = LinkerBuilder::new().object("a.o").link();
 
         assert!(matches!(result, Err(LinkerError::InvalidConfig(_))));
     }
 
     #[test]
     fn test_link_validation_no_objects() {
-        let result = LinkerBuilder::new()
-            .output("program")
-            .link();
+        let result = LinkerBuilder::new().output("program").link();
 
         assert!(matches!(result, Err(LinkerError::InvalidConfig(_))));
     }

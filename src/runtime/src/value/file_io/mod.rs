@@ -8,57 +8,50 @@
 //! - File operations (open, close, read, write)
 //! - Process management (spawn, wait, kill)
 
+pub mod async_file;
 pub mod common;
 pub mod fadvise;
-pub mod mmap;
-pub mod zerocopy;
 pub mod file_ops;
+pub mod mmap;
 pub mod process;
-pub mod async_file;
 pub mod syscalls;
+pub mod zerocopy;
 
 // Re-export fadvise functions
 pub use fadvise::{
-    native_fadvise_sequential, native_fadvise_random,
-    native_fadvise_willneed, native_fadvise_dontneed,
+    native_fadvise_dontneed, native_fadvise_random, native_fadvise_sequential,
+    native_fadvise_willneed,
 };
 
 // Re-export mmap functions
 pub use mmap::{
-    native_mmap_create_shared, native_mmap_create,
-    native_mmap_read, native_mmap_unmap,
+    native_mmap_create, native_mmap_create_shared, native_mmap_read, native_mmap_unmap,
 };
 
 // Re-export zero-copy functions
-pub use zerocopy::{
-    native_sendfile, native_copy_file_range,
-};
+pub use zerocopy::{native_copy_file_range, native_sendfile};
 
 // Re-export file operations
 pub use file_ops::{
-    native_fs_open, native_file_read, native_file_write,
-    native_file_close, native_file_flush, native_file_seek,
-    native_file_sync,
+    native_file_close, native_file_flush, native_file_read, native_file_seek, native_file_sync,
+    native_file_write, native_fs_open,
 };
 
 // Re-export process management functions
 pub use process::{
-    native_spawn_worker, native_process_wait, native_process_is_alive,
-    native_process_kill, native_path_resolve,
+    native_path_resolve, native_process_is_alive, native_process_kill, native_process_wait,
+    native_spawn_worker,
 };
 
 // Re-export async file functions
 pub use async_file::{
-    native_async_file_create, native_async_file_start_loading,
-    native_async_file_is_ready, native_async_file_get_state,
-    native_async_file_wait, async_yield, FileLoadState,
+    async_yield, native_async_file_create, native_async_file_get_state, native_async_file_is_ready,
+    native_async_file_start_loading, native_async_file_wait, FileLoadState,
 };
 
 // Re-export low-level syscall wrappers
 pub use syscalls::{
-    sys_mmap, sys_munmap, sys_madvise,
-    sys_open, sys_close,
-    sys_file_size, sys_file_exists,
+    sys_close, sys_file_exists, sys_file_size, sys_madvise, sys_mmap, sys_munmap, sys_open,
 };
 
 /// Memory-mapped region handle

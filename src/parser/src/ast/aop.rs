@@ -23,10 +23,7 @@ pub struct PredicateExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub enum PredicateKind {
     /// Selector function call, e.g., `execution(* User.new(..))`
-    Selector {
-        name: String,
-        args: Vec<String>,
-    },
+    Selector { name: String, args: Vec<String> },
     /// Logical NOT: `!predicate`
     Not(Box<PredicateExpr>),
     /// Logical AND: `pred1 & pred2`

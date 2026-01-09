@@ -68,7 +68,8 @@ impl<'a> Transaction<'a> {
         if self.finalized.load(Ordering::Acquire) {
             return Err(DbError::transaction_failed("Transaction already finalized"));
         }
-        self.executor.execute_raw(&format!("SAVEPOINT {}", name), &[])?;
+        self.executor
+            .execute_raw(&format!("SAVEPOINT {}", name), &[])?;
         Ok(Savepoint {
             executor: self.executor,
             name: name.to_string(),
@@ -102,7 +103,8 @@ impl Savepoint<'_> {
         if self.released.swap(true, Ordering::AcqRel) {
             return Err(DbError::transaction_failed("Savepoint already released"));
         }
-        self.executor.execute_raw(&format!("RELEASE SAVEPOINT {}", self.name), &[])?;
+        self.executor
+            .execute_raw(&format!("RELEASE SAVEPOINT {}", self.name), &[])?;
         Ok(())
     }
 
@@ -111,7 +113,8 @@ impl Savepoint<'_> {
         if self.released.swap(true, Ordering::AcqRel) {
             return Err(DbError::transaction_failed("Savepoint already released"));
         }
-        self.executor.execute_raw(&format!("ROLLBACK TO SAVEPOINT {}", self.name), &[])?;
+        self.executor
+            .execute_raw(&format!("ROLLBACK TO SAVEPOINT {}", self.name), &[])?;
         Ok(())
     }
 }
@@ -120,7 +123,9 @@ impl Drop for Savepoint<'_> {
     fn drop(&mut self) {
         // Release savepoint if not already done
         if !self.released.swap(true, Ordering::AcqRel) {
-            let _ = self.executor.execute_raw(&format!("RELEASE SAVEPOINT {}", self.name), &[]);
+            let _ = self
+                .executor
+                .execute_raw(&format!("RELEASE SAVEPOINT {}", self.name), &[]);
         }
     }
 }

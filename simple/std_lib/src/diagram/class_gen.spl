@@ -1,0 +1,230 @@
+# Class Diagram Generator
+# Generates Mermaid class diagrams from call events
+#
+# Output format: Mermaid classDiagram syntax
+# Features:
+# - Extract classes from sequence participants
+# - Show methods called on each class
+# - Infer relationships (uses, calls)
+
+import core.{Option, List, Set, Dict, String}
+import recorder.{CallEvent, CallEventRecorder, CallType}
+import filter.{DiagramFilter}
+import config.{DiagramConfig}
+
+# Method info for a class
+struct MethodInfo:
+    name: String
+    call_count: u32
+    is_static: Bool
+
+    fn new(name: String) -> MethodInfo:
+        return MethodInfo {
+            name: name,
+            call_count: 1,
+            is_static: false,
+        }
+
+# Relationship between classes
+enum RelationType:
+    Uses       # One class uses another (method calls)
+    Depends    # Dependency (parameter types)
+    Owns       # Composition (field types)
+
+struct ClassRelation:
+    from_class: String
+    to_class: String
+    relation_type: RelationType
+    label: String
+
+    fn new(from: String, to: String, rel: RelationType) -> ClassRelation:
+        let label = match rel:
+            case RelationType.Uses:
+                "uses"
+            case RelationType.Depends:
+                "depends"
+            case RelationType.Owns:
+                "owns"
+        return ClassRelation {
+            from_class: from,
+            to_class: to,
+            relation_type: rel,
+            label: label,
+        }
+
+# Class info extracted from events
+struct ClassInfo:
+    name: String
+    methods: Dict[String, MethodInfo]
+    is_architectural: Bool
+
+    fn new(name: String) -> ClassInfo:
+        return ClassInfo {
+            name: name,
+            methods: Dict.new(),
+            is_architectural: false,
+        }
+
+    fn add_method(mut self, method_name: String) -> Void:
+        match self.methods.get(method_name):
+            case Some(info):
+                let mut updated = info
+                updated.call_count += 1
+                self.methods.insert(method_name, updated)
+            case None:
+                self.methods.insert(method_name, MethodInfo.new(method_name))
+
+# Class diagram generator
+class ClassDiagramGenerator:
+    events: List[CallEvent]
+    filter: DiagramFilter
+    config: DiagramConfig
+    classes: Dict[String, ClassInfo]
+    relations: List[ClassRelation]
+    output: String
+
+    fn new(config: DiagramConfig) -> ClassDiagramGenerator:
+        return ClassDiagramGenerator {
+            events: [],
+            filter: config.filter,
+            config: config,
+            classes: Dict.new(),
+            relations: [],
+            output: "",
+        }
+
+    # Generate diagram from recorder
+    fn generate(mut self, recorder: CallEventRecorder) -> String:
+        self.events = recorder.get_events()
+
+        # Mark architectural entities
+        for entity in recorder.get_architectural_entities():
+            match self.classes.get(entity):
+                case Some(cls):
+                    let mut updated = cls
+                    updated.is_architectural = true
+                    self.classes.insert(entity, updated)
+                case None:
+                    pass
+
+        return self.generate_from_events(self.events)
+
+    # Generate diagram from event list
+    fn generate_from_events(mut self, events: List[CallEvent]) -> String:
+        # Filter events if filter is configured
+        let filtered = if self.filter.is_empty():
+            events
+        else:
+            self.filter.filter_events(events)
+
+        # Extract classes and relationships
+        self.extract_classes(filtered)
+        self.extract_relations(filtered)
+
+        # Generate output
+        self.output = ""
+        self.emit_header()
+        self.emit_classes()
+        self.emit_relations()
+        self.emit_footer()
+
+        return self.output
+
+    # Extract classes from events
+    fn extract_classes(mut self, events: List[CallEvent]) -> Void:
+        self.classes = Dict.new()
+
+        for event in events:
+            if event.is_return:
+                continue
+
+            # Extract callee class
+            match event.callee_class:
+                case Some(cls):
+                    if not self.classes.contains(cls):
+                        self.classes.insert(cls, ClassInfo.new(cls))
+
+                    match self.classes.get(cls):
+                        case Some(info):
+                            let mut updated = info
+                            updated.add_method(event.callee)
+                            self.classes.insert(cls, updated)
+                        case None:
+                            pass
+                case None:
+                    # Function call, not a method - skip for class diagram
+                    pass
+
+    # Extract relationships from events
+    fn extract_relations(mut self, events: List[CallEvent]) -> Void:
+        self.relations = []
+        let seen: Set[String] = Set.new()
+
+        for event in events:
+            if event.is_return:
+                continue
+
+            match (event.caller_class, event.callee_class):
+                case (Some(from_cls), Some(to_cls)):
+                    if from_cls != to_cls:
+                        let key = "${from_cls}->${to_cls}"
+                        if not seen.contains(key):
+                            seen.insert(key)
+                            self.relations.push(ClassRelation.new(
+                                from_cls,
+                                to_cls,
+                                RelationType.Uses
+                            ))
+                case _:
+                    pass
+
+    # Emit diagram header
+    fn emit_header(mut self) -> Void:
+        self.output = self.output + "```mermaid\n"
+        self.output = self.output + "classDiagram\n"
+
+    # Emit class definitions
+    fn emit_classes(mut self) -> Void:
+        for (name, info) in self.classes:
+            self.output = self.output + "    class ${name} {\n"
+
+            for (method_name, method_info) in info.methods:
+                let visibility = "+"  # public
+                self.output = self.output + "        ${visibility}${method_name}()\n"
+
+            self.output = self.output + "    }\n"
+
+    # Emit relationships
+    fn emit_relations(mut self) -> Void:
+        self.output = self.output + "\n"
+
+        for rel in self.relations:
+            # Mermaid relationship syntax
+            let arrow = match rel.relation_type:
+                case RelationType.Uses:
+                    "-->"
+                case RelationType.Depends:
+                    "..>"
+                case RelationType.Owns:
+                    "*--"
+
+            self.output = self.output + "    ${rel.from_class} ${arrow} ${rel.to_class} : ${rel.label}\n"
+
+    # Emit footer
+    fn emit_footer(mut self) -> Void:
+        self.output = self.output + "```\n"
+
+# Generate class diagram from recorder
+fn generate_class_diagram(recorder: CallEventRecorder, config: DiagramConfig) -> String:
+    let gen = ClassDiagramGenerator.new(config)
+    return gen.generate(recorder)
+
+# Generate class diagram from events
+fn generate_class_from_events(events: List[CallEvent], config: DiagramConfig) -> String:
+    let gen = ClassDiagramGenerator.new(config)
+    return gen.generate_from_events(events)
+
+# Simple generation with defaults
+fn to_mermaid_class(recorder: CallEventRecorder) -> String:
+    let config = DiagramConfig.new().with_class_diagram()
+    return generate_class_diagram(recorder, config)

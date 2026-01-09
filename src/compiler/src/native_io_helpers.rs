@@ -207,9 +207,15 @@ pub fn create_file_metadata(meta: &std::fs::Metadata) -> Value {
     );
 
     // Timestamps (as Option)
-    fields.insert("modified".to_string(), make_timestamp_option(meta.modified()));
+    fields.insert(
+        "modified".to_string(),
+        make_timestamp_option(meta.modified()),
+    );
     fields.insert("created".to_string(), make_timestamp_option(meta.created()));
-    fields.insert("accessed".to_string(), make_timestamp_option(meta.accessed()));
+    fields.insert(
+        "accessed".to_string(),
+        make_timestamp_option(meta.accessed()),
+    );
 
     // Permissions (Unix mode)
     #[cfg(unix)]

@@ -31,7 +31,10 @@ let result = make_ten!()
 main = x + result  # Should be 5 + 10 = 15, not 10 + 10 = 20
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 15, "Macro should not capture outer variable 'x'");
+    assert_eq!(
+        result.exit_code, 15,
+        "Macro should not capture outer variable 'x'"
+    );
 }
 
 #[test]
@@ -48,7 +51,10 @@ let b = increment!()
 main = a + b  # Should be 1 + 1 = 2
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 2, "Each macro invocation should have isolated variables");
+    assert_eq!(
+        result.exit_code, 2,
+        "Each macro invocation should have isolated variables"
+    );
 }
 
 #[test]
@@ -65,7 +71,10 @@ let _ = do_nothing!()
 main = value  # Should still be 42
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 42, "Outer variable should not be affected by macro");
+    assert_eq!(
+        result.exit_code, 42,
+        "Outer variable should not be affected by macro"
+    );
 }
 
 // ============================================================================
@@ -85,7 +94,10 @@ macro nested_scopes() -> (returns result: Int):
 main = nested_scopes!()
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 30, "Nested scopes in macro should be handled correctly");
+    assert_eq!(
+        result.exit_code, 30,
+        "Nested scopes in macro should be handled correctly"
+    );
 }
 
 #[test]
@@ -105,7 +117,10 @@ macro outer() -> (returns result: Int):
 main = outer!()  # Should be 10 + 5 = 15
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 15, "Nested macro calls should maintain hygiene");
+    assert_eq!(
+        result.exit_code, 15,
+        "Nested macro calls should maintain hygiene"
+    );
 }
 
 #[test]
@@ -121,7 +136,10 @@ macro nested_blocks() -> (returns result: Int):
 main = nested_blocks!()
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 6, "Nested blocks should push/pop scopes correctly");
+    assert_eq!(
+        result.exit_code, 6,
+        "Nested blocks should push/pop scopes correctly"
+    );
 }
 
 // ============================================================================
@@ -143,7 +161,10 @@ let third = counter!()
 main = first + second + third  # 1 + 1 + 1 = 3
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 3, "Each macro call should have unique gensym'd variables");
+    assert_eq!(
+        result.exit_code, 3,
+        "Each macro call should have unique gensym'd variables"
+    );
 }
 
 #[test]
@@ -164,7 +185,10 @@ let result = multi_vars!()
 main = x + y + z + result  # 10 + 20 + 30 + 6 = 66
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 66, "All macro variables should be gensym'd independently");
+    assert_eq!(
+        result.exit_code, 66,
+        "All macro variables should be gensym'd independently"
+    );
 }
 
 // ============================================================================
@@ -175,7 +199,7 @@ main = x + y + z + result  # 10 + 20 + 30 + 6 = 66
 
 // #[test]
 // fn hygiene_pattern_matching_variables() {
-//     // TODO: Enable when pattern matching syntax is supported
+// TODO: [driver][P3] Enable when pattern matching syntax is supported
 // }
 
 // ============================================================================
@@ -195,7 +219,10 @@ macro func_test() -> (returns result: Int):
 main = func_test!()
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 10, "Function parameters should be hygienic");
+    assert_eq!(
+        result.exit_code, 10,
+        "Function parameters should be hygienic"
+    );
 }
 
 #[test]
@@ -213,7 +240,10 @@ let result = func_macro!()
 main = x + result
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 110, "Function parameters should not capture outer variables");
+    assert_eq!(
+        result.exit_code, 110,
+        "Function parameters should not capture outer variables"
+    );
 }
 
 #[test]
@@ -231,7 +261,10 @@ macro nested_func() -> (returns result: Int):
 main = nested_func!()
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 15, "Nested functions should maintain hygiene");
+    assert_eq!(
+        result.exit_code, 15,
+        "Nested functions should maintain hygiene"
+    );
 }
 
 // ============================================================================
@@ -257,7 +290,10 @@ let result = complex!()
 main = result
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 10, "Complex macro should maintain hygiene throughout");
+    assert_eq!(
+        result.exit_code, 10,
+        "Complex macro should maintain hygiene throughout"
+    );
 }
 
 #[test]
@@ -274,7 +310,10 @@ let result = use_param!(32)
 main = x + result  # 5 + 42 = 47
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 47, "Macro parameters should work correctly with hygiene");
+    assert_eq!(
+        result.exit_code, 47,
+        "Macro parameters should work correctly with hygiene"
+    );
 }
 
 #[test]
@@ -296,7 +335,10 @@ macro wrapper() -> (returns result: Int):
 main = wrapper!()  # 5 + 10 + 20 = 35
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 35, "Nested macros with same variable names should not interfere");
+    assert_eq!(
+        result.exit_code, 35,
+        "Nested macros with same variable names should not interfere"
+    );
 }
 
 // ============================================================================
@@ -331,7 +373,10 @@ macro early_return(cond: Bool) -> (returns result: Int):
 main = early_return!(false)  # 42
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 42, "Macro with early return should be hygienic");
+    assert_eq!(
+        result.exit_code, 42,
+        "Macro with early return should be hygienic"
+    );
 }
 
 #[test]
@@ -348,5 +393,8 @@ macro shadow_test() -> (returns result: Int):
 main = shadow_test!()  # ((10 + 5) * 2) = 30
 "#;
     let result = run_code(code, &[], "").unwrap();
-    assert_eq!(result.exit_code, 30, "Variable shadowing in macro should work");
+    assert_eq!(
+        result.exit_code, 30,
+        "Variable shadowing in macro should work"
+    );
 }

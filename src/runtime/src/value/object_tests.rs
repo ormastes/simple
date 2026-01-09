@@ -1,16 +1,25 @@
 //! Tests for object functionality (objects, closures, enums, unique)
 
 use super::{
-    // Object functions
-    rt_object_new, rt_object_field_get, rt_object_field_set,
-    rt_object_class_id, rt_object_field_count,
-    // Closure functions
-    rt_closure_new, rt_closure_set_capture, rt_closure_get_capture,
     rt_closure_func_ptr,
+    rt_closure_get_capture,
+    // Closure functions
+    rt_closure_new,
+    rt_closure_set_capture,
+    rt_enum_discriminant,
     // Enum functions
-    rt_enum_new, rt_enum_discriminant, rt_enum_payload,
+    rt_enum_new,
+    rt_enum_payload,
+    rt_object_class_id,
+    rt_object_field_count,
+    rt_object_field_get,
+    rt_object_field_set,
+    // Object functions
+    rt_object_new,
+    rt_unique_get,
     // Unique functions
-    rt_unique_new, rt_unique_get, rt_unique_set,
+    rt_unique_new,
+    rt_unique_set,
 };
 use crate::value::RuntimeValue;
 
@@ -72,7 +81,11 @@ fn test_object_invalid_value() {
     assert_eq!(rt_object_class_id(not_an_object), -1);
     assert_eq!(rt_object_field_count(not_an_object), -1);
     assert!(rt_object_field_get(not_an_object, 0).is_nil());
-    assert!(!rt_object_field_set(not_an_object, 0, RuntimeValue::from_int(99)));
+    assert!(!rt_object_field_set(
+        not_an_object,
+        0,
+        RuntimeValue::from_int(99)
+    ));
 }
 
 #[test]
@@ -129,9 +142,21 @@ fn test_closure_captures() {
     let closure = rt_closure_new(func_ptr, 3);
 
     // Set capture values
-    assert!(rt_closure_set_capture(closure, 0, RuntimeValue::from_int(10)));
-    assert!(rt_closure_set_capture(closure, 1, RuntimeValue::from_int(20)));
-    assert!(rt_closure_set_capture(closure, 2, RuntimeValue::from_int(30)));
+    assert!(rt_closure_set_capture(
+        closure,
+        0,
+        RuntimeValue::from_int(10)
+    ));
+    assert!(rt_closure_set_capture(
+        closure,
+        1,
+        RuntimeValue::from_int(20)
+    ));
+    assert!(rt_closure_set_capture(
+        closure,
+        2,
+        RuntimeValue::from_int(30)
+    ));
 
     // Get capture values
     assert_eq!(rt_closure_get_capture(closure, 0).as_int(), 10);
@@ -158,7 +183,11 @@ fn test_closure_capture_out_of_bounds() {
     assert!(val.is_nil());
 
     // Set out of bounds should return false
-    assert!(!rt_closure_set_capture(closure, 10, RuntimeValue::from_int(99)));
+    assert!(!rt_closure_set_capture(
+        closure,
+        10,
+        RuntimeValue::from_int(99)
+    ));
 }
 
 #[test]
@@ -167,7 +196,11 @@ fn test_closure_invalid_value() {
 
     assert!(rt_closure_func_ptr(not_a_closure).is_null());
     assert!(rt_closure_get_capture(not_a_closure, 0).is_nil());
-    assert!(!rt_closure_set_capture(not_a_closure, 0, RuntimeValue::from_int(99)));
+    assert!(!rt_closure_set_capture(
+        not_a_closure,
+        0,
+        RuntimeValue::from_int(99)
+    ));
 }
 
 #[test]
@@ -184,7 +217,7 @@ fn test_closure_null_func_ptr() {
 
 #[test]
 fn test_enum_new_with_payload() {
-    let enum_id = 1;  // Enum type ID
+    let enum_id = 1; // Enum type ID
     let discriminant = 1;
     let payload = RuntimeValue::from_int(42);
     let enum_val = rt_enum_new(enum_id, discriminant, payload);
@@ -207,7 +240,7 @@ fn test_enum_new_nil_payload() {
 
 #[test]
 fn test_enum_multiple_variants() {
-    let enum_id = 1;  // Same enum type for all variants
+    let enum_id = 1; // Same enum type for all variants
 
     // Variant 0: None
     let none_variant = rt_enum_new(enum_id, 0, RuntimeValue::NIL);

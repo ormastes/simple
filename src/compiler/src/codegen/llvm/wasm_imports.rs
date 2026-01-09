@@ -129,10 +129,7 @@ pub fn declare_wasi_imports(module: &Module) -> Result<(), CompileError> {
 
     // fd_prestat_get: Get file descriptor pre-opened directory info
     // i32 fd_prestat_get(fd: i32, prestat: *mut prestat) -> errno
-    let fd_prestat_get_type = i32_type.fn_type(
-        &[i32_type.into(), ptr_type.into()],
-        false,
-    );
+    let fd_prestat_get_type = i32_type.fn_type(&[i32_type.into(), ptr_type.into()], false);
     module.add_function("fd_prestat_get", fd_prestat_get_type, None);
 
     // fd_prestat_dir_name: Get pre-opened directory name
@@ -151,34 +148,22 @@ pub fn declare_wasi_imports(module: &Module) -> Result<(), CompileError> {
 
     // environ_sizes_get: Get environment variable sizes
     // i32 environ_sizes_get(count: *mut i32, buf_size: *mut i32) -> errno
-    let environ_sizes_get_type = i32_type.fn_type(
-        &[ptr_type.into(), ptr_type.into()],
-        false,
-    );
+    let environ_sizes_get_type = i32_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
     module.add_function("environ_sizes_get", environ_sizes_get_type, None);
 
     // environ_get: Get environment variables
     // i32 environ_get(environ: *mut *mut u8, environ_buf: *mut u8) -> errno
-    let environ_get_type = i32_type.fn_type(
-        &[ptr_type.into(), ptr_type.into()],
-        false,
-    );
+    let environ_get_type = i32_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
     module.add_function("environ_get", environ_get_type, None);
 
     // args_sizes_get: Get command-line argument sizes
     // i32 args_sizes_get(count: *mut i32, buf_size: *mut i32) -> errno
-    let args_sizes_get_type = i32_type.fn_type(
-        &[ptr_type.into(), ptr_type.into()],
-        false,
-    );
+    let args_sizes_get_type = i32_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
     module.add_function("args_sizes_get", args_sizes_get_type, None);
 
     // args_get: Get command-line arguments
     // i32 args_get(argv: *mut *mut u8, argv_buf: *mut u8) -> errno
-    let args_get_type = i32_type.fn_type(
-        &[ptr_type.into(), ptr_type.into()],
-        false,
-    );
+    let args_get_type = i32_type.fn_type(&[ptr_type.into(), ptr_type.into()], false);
     module.add_function("args_get", args_get_type, None);
 
     // ===== Process Control =====
@@ -204,10 +189,7 @@ pub fn declare_wasi_imports(module: &Module) -> Result<(), CompileError> {
 
     // random_get: Get random bytes
     // i32 random_get(buf: *mut u8, buf_len: i32) -> errno
-    let random_get_type = i32_type.fn_type(
-        &[ptr_type.into(), i32_type.into()],
-        false,
-    );
+    let random_get_type = i32_type.fn_type(&[ptr_type.into(), i32_type.into()], false);
     module.add_function("random_get", random_get_type, None);
 
     // ===== Path Operations =====

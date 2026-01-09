@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use simple_parser::ast::{BinaryArithmeticOp, BinOp, Type, UnaryArithmeticOp, UnaryOp};
+use simple_parser::ast::{BinOp, BinaryArithmeticOp, Type, UnaryArithmeticOp, UnaryOp};
 
 use crate::value::Value;
 
@@ -21,27 +21,27 @@ use crate::interpreter::{
 /// SI prefix definitions: (prefix_char, multiplier)
 /// Standard SI prefixes from yotta (10^24) to yocto (10^-24)
 pub(crate) const SI_PREFIXES: &[(&str, f64)] = &[
-    ("Y", 1e24),   // yotta
-    ("Z", 1e21),   // zetta
-    ("E", 1e18),   // exa
-    ("P", 1e15),   // peta
-    ("T", 1e12),   // tera
-    ("G", 1e9),    // giga
-    ("M", 1e6),    // mega
-    ("k", 1e3),    // kilo
-    ("h", 1e2),    // hecto
-    ("da", 1e1),   // deca
-    ("d", 1e-1),   // deci
-    ("c", 1e-2),   // centi
-    ("m", 1e-3),   // milli (note: conflicts with meter, handled specially)
-    ("u", 1e-6),   // micro (ASCII u for µ)
-    ("μ", 1e-6),   // micro (Unicode)
-    ("n", 1e-9),   // nano
-    ("p", 1e-12),  // pico
-    ("f", 1e-15),  // femto
-    ("a", 1e-18),  // atto
-    ("z", 1e-21),  // zepto
-    ("y", 1e-24),  // yocto
+    ("Y", 1e24),  // yotta
+    ("Z", 1e21),  // zetta
+    ("E", 1e18),  // exa
+    ("P", 1e15),  // peta
+    ("T", 1e12),  // tera
+    ("G", 1e9),   // giga
+    ("M", 1e6),   // mega
+    ("k", 1e3),   // kilo
+    ("h", 1e2),   // hecto
+    ("da", 1e1),  // deca
+    ("d", 1e-1),  // deci
+    ("c", 1e-2),  // centi
+    ("m", 1e-3),  // milli (note: conflicts with meter, handled specially)
+    ("u", 1e-6),  // micro (ASCII u for µ)
+    ("μ", 1e-6),  // micro (Unicode)
+    ("n", 1e-9),  // nano
+    ("p", 1e-12), // pico
+    ("f", 1e-15), // femto
+    ("a", 1e-18), // atto
+    ("z", 1e-21), // zepto
+    ("y", 1e-24), // yocto
 ];
 
 /// Try to decompose a unit suffix into SI prefix + base unit
@@ -76,16 +76,12 @@ pub(crate) fn decompose_si_prefix(suffix: &str) -> Option<(f64, String, String)>
 /// Returns true if the type name refers to a unit type that can be used for type checking
 pub(crate) fn is_unit_type(type_name: &str) -> bool {
     // Check if it's a unit family (like "length", "time")
-    let is_family = UNIT_FAMILY_CONVERSIONS.with(|cell| {
-        cell.borrow().contains_key(type_name)
-    });
+    let is_family = UNIT_FAMILY_CONVERSIONS.with(|cell| cell.borrow().contains_key(type_name));
     if is_family {
         return true;
     }
     // Check if it's a compound unit (like "velocity", "acceleration")
-    COMPOUND_UNIT_DIMENSIONS.with(|cell| {
-        cell.borrow().contains_key(type_name)
-    })
+    COMPOUND_UNIT_DIMENSIONS.with(|cell| cell.borrow().contains_key(type_name))
 }
 
 /// Validate that a value matches a unit type annotation
@@ -94,14 +90,16 @@ pub(crate) fn validate_unit_type(value: &Value, expected_type: &str) -> Result<(
     match value {
         Value::Unit { family, suffix, .. } => {
             // Check if the unit's family matches the expected type
-            let actual_family = family.as_ref().map(|s| s.as_str()).unwrap_or(suffix.as_str());
+            let actual_family = family
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or(suffix.as_str());
             if actual_family == expected_type {
                 Ok(())
             } else {
                 // Check if the suffix itself indicates membership in the expected family
-                let suffix_family = UNIT_SUFFIX_TO_FAMILY.with(|cell| {
-                    cell.borrow().get(suffix).cloned()
-                });
+                let suffix_family =
+                    UNIT_SUFFIX_TO_FAMILY.with(|cell| cell.borrow().get(suffix).cloned());
                 if suffix_family.as_deref() == Some(expected_type) {
                     Ok(())
                 } else {
@@ -114,7 +112,8 @@ pub(crate) fn validate_unit_type(value: &Value, expected_type: &str) -> Result<(
         }
         _ => Err(format!(
             "expected unit type '{}', got non-unit value of type '{}'",
-            expected_type, value.type_name()
+            expected_type,
+            value.type_name()
         )),
     }
 }
@@ -129,8 +128,12 @@ pub(crate) fn validate_unit_constraints(
     // Extract the numeric value from the Unit
     let inner_value = match &value {
         Value::Unit { value: inner, .. } => inner.as_ref(),
-        Value::Int(n) => return validate_int_constraints(*n, unit_name, constraints).map(Value::Int),
-        Value::Float(f) => return validate_float_constraints(*f, unit_name, constraints).map(Value::Float),
+        Value::Int(n) => {
+            return validate_int_constraints(*n, unit_name, constraints).map(Value::Int)
+        }
+        Value::Float(f) => {
+            return validate_float_constraints(*f, unit_name, constraints).map(Value::Float)
+        }
         _ => return Ok(value), // Non-numeric types pass through unchanged
     };
 
@@ -148,7 +151,8 @@ pub(crate) fn validate_unit_constraints(
 
         if numeric < min_f || numeric > max_f {
             match constraints.overflow {
-                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
+                simple_parser::ast::OverflowBehavior::Checked
+                | simple_parser::ast::OverflowBehavior::Default => {
                     return Err(format!(
                         "unit '{}' value {} out of range [{}, {}]",
                         unit_name, numeric, min, max
@@ -173,11 +177,16 @@ pub(crate) fn validate_unit_constraints(
 }
 
 /// Apply constraints to an integer value
-fn validate_int_constraints(value: i64, unit_name: &str, constraints: &simple_parser::ast::UnitReprConstraints) -> Result<i64, String> {
+fn validate_int_constraints(
+    value: i64,
+    unit_name: &str,
+    constraints: &simple_parser::ast::UnitReprConstraints,
+) -> Result<i64, String> {
     if let Some((min, max)) = constraints.range {
         if value < min || value > max {
             match constraints.overflow {
-                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
+                simple_parser::ast::OverflowBehavior::Checked
+                | simple_parser::ast::OverflowBehavior::Default => {
                     return Err(format!(
                         "unit '{}' value {} out of range [{}, {}]",
                         unit_name, value, min, max
@@ -197,13 +206,18 @@ fn validate_int_constraints(value: i64, unit_name: &str, constraints: &simple_pa
 }
 
 /// Apply constraints to a float value
-fn validate_float_constraints(value: f64, unit_name: &str, constraints: &simple_parser::ast::UnitReprConstraints) -> Result<f64, String> {
+fn validate_float_constraints(
+    value: f64,
+    unit_name: &str,
+    constraints: &simple_parser::ast::UnitReprConstraints,
+) -> Result<f64, String> {
     if let Some((min, max)) = constraints.range {
         let min_f = min as f64;
         let max_f = max as f64;
         if value < min_f || value > max_f {
             match constraints.overflow {
-                simple_parser::ast::OverflowBehavior::Checked | simple_parser::ast::OverflowBehavior::Default => {
+                simple_parser::ast::OverflowBehavior::Checked
+                | simple_parser::ast::OverflowBehavior::Default => {
                     return Err(format!(
                         "unit '{}' value {} out of range [{}, {}]",
                         unit_name, value, min, max
@@ -225,7 +239,11 @@ fn validate_float_constraints(value: f64, unit_name: &str, constraints: &simple_
 /// Helper to create a new Unit value with clamped inner value
 fn clamp_unit_value(original: Value, new_numeric: f64) -> Value {
     match original {
-        Value::Unit { value: inner, suffix, family } => {
+        Value::Unit {
+            value: inner,
+            suffix,
+            family,
+        } => {
             let new_inner = match inner.as_ref() {
                 Value::Int(_) => Value::Int(new_numeric as i64),
                 Value::Float(_) => Value::Float(new_numeric),
@@ -446,7 +464,9 @@ pub(crate) fn check_unit_binary_op(
                     if result_dim.is_dimensionless() {
                         // Result is dimensionless (e.g., length / length)
                         Ok(None) // Returns a plain number, not a unit
-                    } else if let Some(compound_name) = find_compound_unit_for_dimension(&result_dim) {
+                    } else if let Some(compound_name) =
+                        find_compound_unit_for_dimension(&result_dim)
+                    {
                         // Found a matching compound unit
                         Ok(Some(compound_name))
                     } else {
@@ -473,10 +493,7 @@ pub(crate) fn check_unit_binary_op(
 
 /// Check if a unary operation is allowed for a unit value
 /// Returns Ok(result_family) if allowed, Err with error message if not
-pub(crate) fn check_unit_unary_op(
-    family: &str,
-    op: UnaryOp,
-) -> Result<Option<String>, String> {
+pub(crate) fn check_unit_unary_op(family: &str, op: UnaryOp) -> Result<Option<String>, String> {
     // Convert UnaryOp to UnaryArithmeticOp
     let arith_op = match op {
         UnaryOp::Neg => UnaryArithmeticOp::Neg,

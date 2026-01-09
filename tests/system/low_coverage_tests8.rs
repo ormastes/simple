@@ -145,7 +145,9 @@ mod coverage_collector_tests {
         cov.record_line(Path::new("test.spl"), 1);
         let result = cov.validate_minimum_coverage(1, 5);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Insufficient function coverage"));
+        assert!(result
+            .unwrap_err()
+            .contains("Insufficient function coverage"));
     }
 
     #[test]
@@ -277,7 +279,9 @@ mod package_reader_tests {
 
     #[test]
     fn test_package_trailer_flags() {
-        use simple_loader::package::{PackageTrailer, SPK_FLAG_HAS_MANIFEST, SPK_FLAG_HAS_RESOURCES};
+        use simple_loader::package::{
+            PackageTrailer, SPK_FLAG_HAS_MANIFEST, SPK_FLAG_HAS_RESOURCES,
+        };
 
         let mut trailer = PackageTrailer::new();
 
@@ -297,7 +301,7 @@ mod package_reader_tests {
 // Type Checker Unification Tests (simple_type)
 // ===========================================================================
 mod type_unification_tests {
-    use simple_type::{Type, TypeScheme, Substitution, TypeError, TypeChecker};
+    use simple_type::{Substitution, Type, TypeChecker, TypeError, TypeScheme};
 
     #[test]
     fn test_type_int_apply_subst() {
@@ -494,7 +498,7 @@ mod type_unification_tests {
         subst1.insert(0, Type::Int);
 
         let mut subst2 = Substitution::new();
-        subst2.insert(1, Type::Var(0));  // var 1 maps to var 0
+        subst2.insert(1, Type::Var(0)); // var 1 maps to var 0
 
         subst1.compose(&subst2);
 
@@ -758,7 +762,7 @@ mod type_unification_tests {
 // Package List Command Tests (simple_pkg::commands::list)
 // ===========================================================================
 mod pkg_list_tests {
-    use simple_pkg::commands::list::{InstalledPackage, TreeNode, format_tree};
+    use simple_pkg::commands::list::{format_tree, InstalledPackage, TreeNode};
 
     #[test]
     fn test_installed_package_struct() {
@@ -886,7 +890,7 @@ mod pkg_list_tests {
 // Lean Type Inference Tests (simple_type::lean_*)
 // ===========================================================================
 mod lean_type_tests {
-    use simple_type::{LeanTy, LeanExpr, lean_infer, infer_deterministic, infer_simple};
+    use simple_type::{infer_deterministic, infer_simple, lean_infer, LeanExpr, LeanTy};
 
     #[test]
     fn test_lean_ty_nat() {
@@ -941,10 +945,7 @@ mod lean_type_tests {
 
     #[test]
     fn test_lean_expr_add() {
-        let expr = LeanExpr::Add(
-            Box::new(LeanExpr::LitNat(1)),
-            Box::new(LeanExpr::LitNat(2)),
-        );
+        let expr = LeanExpr::Add(Box::new(LeanExpr::LitNat(1)), Box::new(LeanExpr::LitNat(2)));
         let ty = lean_infer(&expr);
         assert_eq!(ty, Some(LeanTy::Nat));
     }
@@ -1016,7 +1017,10 @@ mod lean_type_tests {
     fn test_lean_expr_lam() {
         let expr = LeanExpr::Lam(Box::new(LeanExpr::LitBool(true)));
         let ty = lean_infer(&expr);
-        assert_eq!(ty, Some(LeanTy::Arrow(Box::new(LeanTy::Nat), Box::new(LeanTy::Bool))));
+        assert_eq!(
+            ty,
+            Some(LeanTy::Arrow(Box::new(LeanTy::Nat), Box::new(LeanTy::Bool)))
+        );
     }
 
     #[test]
@@ -1044,10 +1048,7 @@ mod lean_type_tests {
 
     #[test]
     fn test_infer_deterministic() {
-        let expr = LeanExpr::Add(
-            Box::new(LeanExpr::LitNat(1)),
-            Box::new(LeanExpr::LitNat(2)),
-        );
+        let expr = LeanExpr::Add(Box::new(LeanExpr::LitNat(1)), Box::new(LeanExpr::LitNat(2)));
         assert!(infer_deterministic(&expr));
     }
 
@@ -1062,7 +1063,7 @@ mod lean_type_tests {
 // Type Generic and Dict Tests
 // ===========================================================================
 mod type_generic_dict_tests {
-    use simple_type::{Type, Substitution};
+    use simple_type::{Substitution, Type};
 
     #[test]
     fn test_type_generic_apply_subst() {

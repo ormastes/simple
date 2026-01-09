@@ -18,11 +18,7 @@ pub struct ChildSnapshot {
 }
 
 /// Diff two lists of children and produce patch operations
-pub fn diff_children(
-    parent_id: NodeId,
-    old: &[ChildSnapshot],
-    new: &[ChildSnapshot],
-) -> PatchSet {
+pub fn diff_children(parent_id: NodeId, old: &[ChildSnapshot], new: &[ChildSnapshot]) -> PatchSet {
     let mut patches = PatchSet::new();
 
     // Build key→index map for old children
@@ -79,14 +75,18 @@ pub fn diff_children(
 
     // Insert new children and compute moves
     // Using a simple O(n) algorithm for now
-    // TODO: Implement LIS for optimal moves
+    // TODO: [ui][P1] Implement LIS for optimal moves
     let mut current_pos = 0;
     for (new_idx, new_child) in new.iter().enumerate() {
         match new_order[new_idx] {
             Some(old_idx) => {
                 // Child exists, check if it needs to move
                 // For simplicity, we'll just track position
-                let expected_pos = old.iter().take(old_idx).filter(|c| used_old[old.iter().position(|x| x.id == c.id).unwrap()]).count();
+                let expected_pos = old
+                    .iter()
+                    .take(old_idx)
+                    .filter(|c| used_old[old.iter().position(|x| x.id == c.id).unwrap()])
+                    .count();
                 if expected_pos != current_pos {
                     patches.push(PatchOp::MoveChild {
                         parent_id,
@@ -206,7 +206,10 @@ mod tests {
         let new = vec![make_child(1, Some("a")), make_child(2, Some("b"))];
         let patches = diff_children(NodeId(0), &old, &new);
         assert_eq!(patches.len(), 1);
-        assert!(matches!(&patches.ops[0], PatchOp::InsertChild { index: 1, .. }));
+        assert!(matches!(
+            &patches.ops[0],
+            PatchOp::InsertChild { index: 1, .. }
+        ));
     }
 
     #[test]
@@ -215,7 +218,13 @@ mod tests {
         let new = vec![make_child(1, Some("a"))];
         let patches = diff_children(NodeId(0), &old, &new);
         assert_eq!(patches.len(), 1);
-        assert!(matches!(&patches.ops[0], PatchOp::RemoveChild { child_id: NodeId(2), .. }));
+        assert!(matches!(
+            &patches.ops[0],
+            PatchOp::RemoveChild {
+                child_id: NodeId(2),
+                ..
+            }
+        ));
     }
 
     #[test]

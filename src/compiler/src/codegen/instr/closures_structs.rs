@@ -8,9 +8,9 @@ use cranelift_module::Module;
 use crate::hir::TypeId;
 use crate::mir::VReg;
 
-use super::{InstrContext, InstrResult};
-use super::helpers::{create_string_constant, indirect_call_with_result};
 use super::super::types_util::type_id_to_cranelift;
+use super::helpers::{create_string_constant, indirect_call_with_result};
+use super::{InstrContext, InstrResult};
 
 pub(super) fn compile_closure_create<M: Module>(
     ctx: &mut InstrContext<'_, M>,

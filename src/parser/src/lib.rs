@@ -14,9 +14,9 @@ mod parser_impl;
 
 // Parser submodules (split from parser.rs for maintainability)
 mod expressions;
+mod parser_helpers;
 mod parser_patterns;
 mod parser_types;
-mod parser_helpers;
 mod statements;
 mod types_def;
 
@@ -28,6 +28,6 @@ pub use error::*;
 pub use interner::*;
 pub use lexer::*;
 pub use macro_registry::*;
-pub use parser_impl::{Parser, ParserMode, DebugMode, MAX_LOOP_ITERATIONS};
+pub use parser_impl::{DebugMode, Parser, ParserMode, MAX_LOOP_ITERATIONS};
 pub use sui_parser::*;
 pub use token::*;

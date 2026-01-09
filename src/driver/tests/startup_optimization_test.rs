@@ -72,9 +72,12 @@ fn test_early_args_app_type_repl() {
 #[test]
 fn test_early_args_window_hints() {
     let args = vec![
-        "--window-width", "1920",
-        "--window-height", "1080",
-        "--window-title", "Test Window",
+        "--window-width",
+        "1920",
+        "--window-height",
+        "1080",
+        "--window-title",
+        "Test Window",
     ];
     let config = parse_early_args(args);
 
@@ -121,10 +124,7 @@ fn test_early_args_multiple_files() {
     File::create(&file1).unwrap().write_all(b"file1").unwrap();
     File::create(&file2).unwrap().write_all(b"file2").unwrap();
 
-    let args = vec![
-        file1.to_str().unwrap(),
-        file2.to_str().unwrap(),
-    ];
+    let args = vec![file1.to_str().unwrap(), file2.to_str().unwrap()];
     let config = parse_early_args(args);
 
     assert_eq!(config.input_files.len(), 2);
@@ -151,9 +151,12 @@ fn test_early_args_combined() {
     temp_file.flush().unwrap();
 
     let args = vec![
-        "--app-type", "gui",
-        "--window-width", "1024",
-        "--window-height", "768",
+        "--app-type",
+        "gui",
+        "--window-width",
+        "1024",
+        "--window-height",
+        "768",
         temp_file.path().to_str().unwrap(),
         "--unknown-flag",
         "value",
@@ -416,9 +419,12 @@ fn test_full_startup_flow_cli() {
 fn test_full_startup_flow_gui() {
     // Simulate full startup for GUI app
     let args = vec![
-        "--app-type", "gui",
-        "--window-width", "1024",
-        "--window-height", "768",
+        "--app-type",
+        "gui",
+        "--window-width",
+        "1024",
+        "--window-height",
+        "768",
         "app.spl",
     ];
     let config = parse_early_args(args);

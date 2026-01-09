@@ -33,7 +33,7 @@ impl PtySession {
         let mut cmd = CommandBuilder::new(&binary);
         // Normal mode is the default - no args needed
         cmd.env("TERM", "xterm-256color");
-        cmd.env("REPL_DEBUG", "1");  // Enable debug logging
+        cmd.env("REPL_DEBUG", "1"); // Enable debug logging
 
         let _child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -46,7 +46,7 @@ impl PtySession {
 
     fn wait_for_prompt(&mut self, timeout_ms: u64) -> Result<String, Box<dyn std::error::Error>> {
         thread::sleep(Duration::from_millis(timeout_ms));
-        let mut buf = [0u8; 16384];  // Larger buffer for debug output
+        let mut buf = [0u8; 16384]; // Larger buffer for debug output
         match self.reader.read(&mut buf) {
             Ok(n) if n > 0 => Ok(String::from_utf8_lossy(&buf[..n]).to_string()),
             Ok(_) => Ok(String::new()),
@@ -81,12 +81,12 @@ impl PtySession {
     }
 
     fn send_ctrl_u(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.send_key(b"\x15")  // Ctrl+U
+        self.send_key(b"\x15") // Ctrl+U
     }
 
     fn read_output(&mut self, wait_ms: u64) -> Result<String, Box<dyn std::error::Error>> {
         thread::sleep(Duration::from_millis(wait_ms));
-        let mut buf = [0u8; 16384];  // Larger buffer
+        let mut buf = [0u8; 16384]; // Larger buffer
         match self.reader.read(&mut buf) {
             Ok(n) if n > 0 => Ok(String::from_utf8_lossy(&buf[..n]).to_string()),
             Ok(_) => Ok(String::new()),

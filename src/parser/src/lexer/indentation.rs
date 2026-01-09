@@ -49,7 +49,7 @@ impl<'a> super::Lexer<'a> {
                     if next == Some('#') {
                         // Doc comment ## - emit DocComment token
                         self.advance(); // Consume second '#'
-                        // Skip leading whitespace
+                                        // Skip leading whitespace
                         while let Some(c) = self.peek() {
                             if c == ' ' || c == '\t' {
                                 self.advance();
@@ -95,7 +95,7 @@ impl<'a> super::Lexer<'a> {
                     self.advance(); // Consume the '/'
                     if self.peek() == Some('*') {
                         self.advance(); // Consume the '*'
-                        // Check for doc comment /** (but not /**/)
+                                        // Check for doc comment /** (but not /**/)
                         if self.peek() == Some('*') && self.peek_ahead(1) != Some('/') {
                             // Doc comment /** ... */
                             self.advance(); // Consume second '*'
@@ -155,7 +155,9 @@ impl<'a> super::Lexer<'a> {
                             // Check if this is a multi-line doc block (/// on its own line)
                             if self.peek() == Some('\n') || self.peek().is_none() {
                                 // Multi-line doc block: ///\n...\n///
-                                return Some(self.read_doc_block_triple_slash(start_pos, start_line, start_col));
+                                return Some(self.read_doc_block_triple_slash(
+                                    start_pos, start_line, start_col,
+                                ));
                             }
 
                             // Read to end of line (single-line doc comment)
@@ -166,15 +168,12 @@ impl<'a> super::Lexer<'a> {
                                 }
                                 self.advance();
                             }
-                            let content = self.source[content_start..self.current_pos].trim().to_string();
+                            let content = self.source[content_start..self.current_pos]
+                                .trim()
+                                .to_string();
                             return Some(Token::new(
                                 TokenKind::DocComment(content),
-                                Span::new(
-                                    start_pos,
-                                    self.current_pos,
-                                    start_line,
-                                    start_col,
-                                ),
+                                Span::new(start_pos, self.current_pos, start_line, start_col),
                                 self.source[start_pos..self.current_pos].to_string(),
                             ));
                         } else {

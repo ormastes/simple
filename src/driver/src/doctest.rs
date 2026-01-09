@@ -20,6 +20,9 @@ pub struct DoctestExample {
     pub start_line: usize,
     pub commands: Vec<String>,
     pub expected: Expected,
+    /// Section name extracted from nearest markdown heading + sequential number
+    /// Example: "Stack Operations #1", "Stack Operations #2"
+    pub section_name: Option<String>,
 }
 
 /// Result of running a doctest example.
@@ -116,6 +119,7 @@ pub fn parse_doctest_text(content: &str, source: impl AsRef<Path>) -> Vec<Doctes
             start_line: *start_line,
             commands: commands.clone(),
             expected: expected_kind,
+            section_name: None,
         });
 
         commands.clear();
@@ -160,17 +164,37 @@ pub fn parse_doctest_text(content: &str, source: impl AsRef<Path>) -> Vec<Doctes
 
 /// Parse doctest examples from Markdown content that uses doctest code fences.
 /// Supports both ```sdoctest and ```simple-doctest language hints.
+///
+/// Extracts section names from nearest markdown headings with sequential numbering.
+/// Example: "## Stack Operations" with 2 code blocks yields:
+///   - "Stack Operations #1"
+///   - "Stack Operations #2"
 pub fn parse_markdown_doctests(content: &str, source: impl AsRef<Path>) -> Vec<DoctestExample> {
     let mut examples = Vec::new();
     let mut in_block = false;
     let mut block = String::new();
     let mut block_start_line = 0usize;
 
+    // Section tracking for doctest naming
+    let mut current_heading: Option<String> = None;
+    let mut section_counts: HashMap<String, usize> = HashMap::new();
+
     for (idx, line) in content.lines().enumerate() {
         let trimmed = line.trim_start();
 
+        // Track markdown headings (any level: #, ##, ###, etc.)
+        if trimmed.starts_with('#') && !in_block {
+            let heading_text = trimmed.trim_start_matches('#').trim().to_string();
+            if !heading_text.is_empty() {
+                current_heading = Some(heading_text);
+            }
+        }
+
         // Check for doctest code fence opening with language hint
-        if trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest") || trimmed.starts_with("```simple") {
+        if trimmed.starts_with("```sdoctest")
+            || trimmed.starts_with("```simple-doctest")
+            || trimmed.starts_with("```simple")
+        {
             // Only enter block if the hint is for doctests (not other code blocks)
             if trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest") {
                 in_block = true;
@@ -183,9 +207,17 @@ pub fn parse_markdown_doctests(content: &str, source: impl AsRef<Path>) -> Vec<D
         if trimmed.starts_with("```") && in_block {
             in_block = false;
             let mut block_examples = parse_doctest_text(&block, source.as_ref());
+
+            // Assign section names to examples
             for ex in &mut block_examples {
                 ex.start_line += block_start_line;
+                if let Some(ref heading) = current_heading {
+                    let count = section_counts.entry(heading.clone()).or_insert(0);
+                    *count += 1;
+                    ex.section_name = Some(format!("{} #{}", heading, count));
+                }
             }
+
             examples.extend(block_examples);
             block.clear();
             continue;
@@ -274,7 +306,9 @@ fn parse_docstring_fences(docstring: &str, source: impl AsRef<Path>) -> Vec<Doct
         let trimmed = line.trim_start();
 
         // Check for code fence opening
-        if (trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest")) && !in_fence {
+        if (trimmed.starts_with("```sdoctest") || trimmed.starts_with("```simple-doctest"))
+            && !in_fence
+        {
             in_fence = true;
             fence_content.clear();
             fence_start_line = line_num;
@@ -304,10 +338,482 @@ fn parse_docstring_fences(docstring: &str, source: impl AsRef<Path>) -> Vec<Doct
     examples
 }
 
+// ============================================================================
+// README.md-based Doctest Discovery (doc/spec/doctest_readme.md)
+// ============================================================================
+
+/// Configuration parsed from README.md front matter
+#[derive(Debug, Clone, Default)]
+pub struct ReadmeConfig {
+    /// Patterns to exclude from doctest discovery
+    pub excludes: Vec<String>,
+    /// Default language for untagged code blocks
+    pub lang: String,
+    /// Timeout in milliseconds per doctest
+    pub timeout: u64,
+    /// Whether doctests are disabled in this scope
+    pub disabled: bool,
+}
+
+impl ReadmeConfig {
+    pub fn new() -> Self {
+        Self {
+            excludes: Vec::new(),
+            lang: "simple".to_string(),
+            timeout: 5000,
+            disabled: false,
+        }
+    }
+
+    /// Merge with parent config (child overrides parent)
+    pub fn merge_with(&self, parent: &ReadmeConfig) -> ReadmeConfig {
+        let mut excludes = parent.excludes.clone();
+        excludes.extend(self.excludes.clone());
+
+        ReadmeConfig {
+            excludes,
+            lang: if self.lang != "simple" {
+                self.lang.clone()
+            } else {
+                parent.lang.clone()
+            },
+            timeout: if self.timeout != 5000 {
+                self.timeout
+            } else {
+                parent.timeout
+            },
+            disabled: self.disabled || parent.disabled,
+        }
+    }
+}
+
+/// Link extracted from ## Subdirectory or ## Files section
+#[derive(Debug, Clone)]
+pub struct ReadmeLink {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// Parsed README.md result
+#[derive(Debug, Clone)]
+pub struct ParsedReadme {
+    pub config: ReadmeConfig,
+    pub subdirs: Vec<ReadmeLink>,
+    pub files: Vec<ReadmeLink>,
+    pub content: String,
+}
+
+/// Parse README.md for doctest configuration
+pub fn parse_readme_config(content: &str) -> ParsedReadme {
+    let mut config = ReadmeConfig::new();
+    let mut subdirs = Vec::new();
+    let mut files = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0;
+    let mut content_start = 0;
+
+    // Phase 1: Parse front matter (exclude and config blocks)
+    while i < lines.len() {
+        let line = lines[i].trim();
+
+        // Parse <!--doctest:exclude block
+        if line.starts_with("<!--doctest:exclude") {
+            i += 1;
+            while i < lines.len() && !lines[i].trim().starts_with("-->") {
+                let exclude_line = lines[i].trim();
+                if !exclude_line.is_empty() && !exclude_line.starts_with('#') {
+                    config.excludes.push(exclude_line.to_string());
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Parse <!--doctest:config block
+        if line.starts_with("<!--doctest:config") {
+            i += 1;
+            while i < lines.len() && !lines[i].trim().starts_with("-->") {
+                let config_line = lines[i].trim();
+                if let Some(pos) = config_line.find(':') {
+                    let key = config_line[..pos].trim();
+                    let value = config_line[pos + 1..].trim();
+
+                    match key {
+                        "lang" => config.lang = value.to_string(),
+                        "timeout" => config.timeout = value.parse().unwrap_or(5000),
+                        "disabled" => config.disabled = value == "true",
+                        _ => {}
+                    }
+                }
+                i += 1;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Shorthand: <!--doctest:lang simple-->
+        if line.starts_with("<!--doctest:") && line.ends_with("-->") {
+            let inner = &line[12..line.len() - 3].trim();
+            if inner.starts_with("lang ") {
+                config.lang = inner[5..].trim().to_string();
+            } else if inner.starts_with("timeout ") {
+                config.timeout = inner[8..].trim().parse().unwrap_or(5000);
+            } else if *inner == "disabled" {
+                config.disabled = true;
+            }
+            i += 1;
+            continue;
+        }
+
+        // Not front matter - start of content
+        if !line.is_empty() && !line.starts_with("<!--") {
+            content_start = i;
+            break;
+        }
+
+        i += 1;
+    }
+
+    // Phase 2: Parse ## Subdirectory and ## Files sections
+    let mut current_section = "";
+
+    while i < lines.len() {
+        let line = lines[i];
+        let trimmed = line.trim();
+
+        // Check for section headers
+        if trimmed == "## Subdirectory" || trimmed == "## Subdirectories" {
+            current_section = "subdirs";
+            i += 1;
+            continue;
+        }
+
+        if trimmed == "## Files" || trimmed == "## File" {
+            current_section = "files";
+            i += 1;
+            continue;
+        }
+
+        // Check for section termination
+        if trimmed == "---" {
+            break;
+        }
+
+        if trimmed.starts_with("## ") && !current_section.is_empty() {
+            // New section that's not Subdirectory or Files - stop parsing
+            break;
+        }
+
+        // Parse links in current section
+        if !current_section.is_empty() && trimmed.starts_with("- [") {
+            if let Some(link) = parse_md_link(trimmed) {
+                // Skip external URLs and anchors
+                if !link.path.starts_with("http") && !link.path.starts_with('#') {
+                    if current_section == "subdirs" {
+                        subdirs.push(link);
+                    } else if current_section == "files" {
+                        files.push(link);
+                    }
+                }
+            }
+        }
+
+        i += 1;
+    }
+
+    // Build content after front matter
+    let content_lines: Vec<&str> = lines[content_start..].to_vec();
+
+    ParsedReadme {
+        config,
+        subdirs,
+        files,
+        content: content_lines.join("\n"),
+    }
+}
+
+/// Parse a markdown link: - [Text](path)
+fn parse_md_link(line: &str) -> Option<ReadmeLink> {
+    let trimmed = line.trim();
+
+    // Find [
+    let bracket_start = trimmed.find('[')?;
+    // Find ]
+    let bracket_end = trimmed[bracket_start..].find(']')? + bracket_start;
+    // Find (
+    let paren_start = trimmed[bracket_end..].find('(')? + bracket_end;
+    // Find )
+    let paren_end = trimmed[paren_start..].find(')')? + paren_start;
+
+    let text = &trimmed[bracket_start + 1..bracket_end];
+    let href = &trimmed[paren_start + 1..paren_end];
+
+    Some(ReadmeLink {
+        name: text.to_string(),
+        path: href.trim_end_matches('/').to_string(),
+        is_dir: href.ends_with('/'),
+    })
+}
+
+/// Check if path matches any exclude pattern
+fn is_excluded(path: &Path, excludes: &[String]) -> bool {
+    let path_str = path.to_string_lossy();
+
+    for pattern in excludes {
+        // Handle negation
+        if pattern.starts_with('!') {
+            continue;
+        }
+
+        // Simple pattern matching
+        let clean_pattern = pattern
+            .trim_start_matches("**/")
+            .trim_end_matches("/**")
+            .replace("**", "");
+
+        if clean_pattern.contains('*') {
+            // Wildcard - check parts
+            for part in clean_pattern.split('*') {
+                if !part.is_empty() && !path_str.contains(part) {
+                    continue;
+                }
+            }
+            return true;
+        } else if path_str.contains(&clean_pattern) || path_str.ends_with(&clean_pattern) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Discover doctests from markdown using README.md hierarchy
+///
+/// Starts from root_path, looks for README.md, and follows
+/// ## Subdirectory and ## Files links.
+pub fn discover_md_doctests(root_path: &Path) -> std::io::Result<Vec<DoctestExample>> {
+    let mut examples = Vec::new();
+
+    if root_path.is_file() {
+        if root_path.extension().and_then(|s| s.to_str()) == Some("md") {
+            let content = fs::read_to_string(root_path)?;
+            let parsed = parse_readme_config(&content);
+            examples.extend(extract_md_code_blocks(
+                &parsed.content,
+                root_path,
+                &parsed.config,
+            ));
+        }
+        return Ok(examples);
+    }
+
+    let readme_path = root_path.join("README.md");
+    if readme_path.exists() {
+        examples.extend(discover_from_readme(&readme_path, &ReadmeConfig::new())?);
+    }
+
+    Ok(examples)
+}
+
+/// Discover doctests from a README.md and its linked files
+fn discover_from_readme(
+    readme_path: &Path,
+    parent_config: &ReadmeConfig,
+) -> std::io::Result<Vec<DoctestExample>> {
+    let mut examples = Vec::new();
+
+    if !readme_path.exists() {
+        return Ok(examples);
+    }
+
+    let content = fs::read_to_string(readme_path)?;
+    let parsed = parse_readme_config(&content);
+    let config = parsed.config.merge_with(parent_config);
+
+    if config.disabled {
+        return Ok(examples);
+    }
+
+    let base_dir = readme_path.parent().unwrap_or(Path::new("."));
+
+    // Add the README.md itself if it has code blocks
+    let readme_examples = extract_md_code_blocks(&parsed.content, readme_path, &config);
+    examples.extend(readme_examples);
+
+    // Process subdirectories
+    for subdir_link in &parsed.subdirs {
+        let subdir_path = base_dir.join(&subdir_link.path);
+
+        if is_excluded(&subdir_path, &config.excludes) {
+            continue;
+        }
+
+        let subdir_readme = subdir_path.join("README.md");
+        if subdir_readme.exists() {
+            examples.extend(discover_from_readme(&subdir_readme, &config)?);
+        }
+    }
+
+    // Process linked files
+    for file_link in &parsed.files {
+        let file_path = base_dir.join(&file_link.path);
+
+        if is_excluded(&file_path, &config.excludes) {
+            continue;
+        }
+
+        if !file_path.exists() {
+            continue;
+        }
+
+        let file_content = fs::read_to_string(&file_path)?;
+        let file_parsed = parse_readme_config(&file_content);
+        let file_config = file_parsed.config.merge_with(&config);
+
+        if file_config.disabled {
+            continue;
+        }
+
+        let file_examples = extract_md_code_blocks(&file_parsed.content, &file_path, &file_config);
+        examples.extend(file_examples);
+    }
+
+    Ok(examples)
+}
+
+/// Extract code blocks from markdown content that should be tested
+fn extract_md_code_blocks(
+    content: &str,
+    source: &Path,
+    config: &ReadmeConfig,
+) -> Vec<DoctestExample> {
+    let mut examples = Vec::new();
+    let mut in_block = false;
+    let mut block_lines: Vec<String> = Vec::new();
+    let mut block_start_line = 0;
+    let mut block_lang = String::new();
+    let mut block_skip = false;
+
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("```") && !in_block {
+            in_block = true;
+            block_lines.clear();
+            block_start_line = idx + 2; // Line after fence
+
+            // Parse language and modifiers
+            let lang_part = &trimmed[3..];
+            block_skip = false;
+
+            if lang_part.is_empty() {
+                // No tag - use default language
+                block_lang = config.lang.clone();
+            } else if lang_part.contains(":skip") {
+                block_skip = true;
+                block_lang = lang_part.split(':').next().unwrap_or("").to_string();
+            } else if lang_part.contains(':') {
+                block_lang = lang_part.split(':').next().unwrap_or("").to_string();
+            } else {
+                block_lang = lang_part.to_string();
+            }
+
+            continue;
+        }
+
+        if trimmed.starts_with("```") && in_block {
+            in_block = false;
+
+            // Only process Simple code blocks
+            if !block_skip
+                && (block_lang == "simple" || block_lang == config.lang || block_lang.is_empty())
+            {
+                let code = block_lines.join("\n");
+
+                // Check for doctest marker or assertions
+                if code.contains("# doctest")
+                    || code.contains("assert ")
+                    || code.contains("assert(")
+                {
+                    // Convert to DoctestExample
+                    let commands = extract_commands_from_block(&code);
+                    if !commands.is_empty() {
+                        examples.push(DoctestExample {
+                            source: source.to_path_buf(),
+                            start_line: block_start_line,
+                            commands,
+                            expected: Expected::Empty, // Assertions handle their own checks
+                            section_name: None,
+                        });
+                    }
+                }
+            }
+
+            block_lines.clear();
+            continue;
+        }
+
+        if in_block {
+            block_lines.push(line.to_string());
+        }
+    }
+
+    examples
+}
+
+/// Extract executable commands from a code block
+fn extract_commands_from_block(code: &str) -> Vec<String> {
+    let mut commands = Vec::new();
+    let mut in_doctest = false;
+    let mut current_command = String::new();
+
+    for line in code.lines() {
+        let trimmed = line.trim();
+
+        if trimmed == "# doctest" || trimmed == "#doctest" {
+            in_doctest = true;
+            // Add everything before # doctest as setup
+            if !current_command.is_empty() {
+                commands.push(current_command.trim().to_string());
+                current_command.clear();
+            }
+            continue;
+        }
+
+        if in_doctest {
+            // After # doctest marker - these are the actual test commands
+            if !trimmed.is_empty() && !trimmed.starts_with('#') {
+                current_command.push_str(line);
+                current_command.push('\n');
+            }
+        } else {
+            // Before # doctest marker - this is setup code
+            current_command.push_str(line);
+            current_command.push('\n');
+        }
+    }
+
+    if !current_command.is_empty() {
+        commands.push(current_command.trim().to_string());
+    }
+
+    // If no # doctest marker, treat entire block as one command
+    if commands.len() == 1 && !code.contains("# doctest") {
+        return vec![code.to_string()];
+    }
+
+    commands
+}
+
+// ============================================================================
+// Original Discovery Functions
+// ============================================================================
+
 /// Discover doctest examples from a path:
 /// - `.sdt`: parsed directly
 /// - `.md`: fenced code blocks
-/// - `.spl`: """ docstring blocks with ```sdoctest fences
+/// - `.spl`, `.simple`, `.sscript`: """ docstring blocks with ```sdoctest fences
 /// - directories: walks recursively for all supported formats
 pub fn discover_doctests(path: &Path) -> std::io::Result<Vec<DoctestExample>> {
     let mut examples = Vec::new();
@@ -320,8 +826,12 @@ pub fn discover_doctests(path: &Path) -> std::io::Result<Vec<DoctestExample>> {
                 let ext = p.extension().and_then(|s| s.to_str());
                 match ext {
                     Some("sdt") => examples.extend(parse_doctest_text(&fs::read_to_string(p)?, p)),
-                    Some("md") => examples.extend(parse_markdown_doctests(&fs::read_to_string(p)?, p)),
-                    Some("spl") => examples.extend(parse_spl_doctests(&fs::read_to_string(p)?, p)),
+                    Some("md") => {
+                        examples.extend(parse_markdown_doctests(&fs::read_to_string(p)?, p))
+                    }
+                    Some("spl") | Some("simple") | Some("sscript") => {
+                        examples.extend(parse_spl_doctests(&fs::read_to_string(p)?, p))
+                    }
                     _ => {}
                 }
             }
@@ -333,7 +843,9 @@ pub fn discover_doctests(path: &Path) -> std::io::Result<Vec<DoctestExample>> {
     match ext {
         Some("sdt") => examples.extend(parse_doctest_text(&fs::read_to_string(path)?, path)),
         Some("md") => examples.extend(parse_markdown_doctests(&fs::read_to_string(path)?, path)),
-        Some("spl") => examples.extend(parse_spl_doctests(&fs::read_to_string(path)?, path)),
+        Some("spl") | Some("simple") | Some("sscript") => {
+            examples.extend(parse_spl_doctests(&fs::read_to_string(path)?, path))
+        }
         _ => {}
     }
 
@@ -471,9 +983,7 @@ fn contains_assignment(snippet: &str) -> bool {
             } else {
                 ' '
             };
-            if before != '=' && before != '!' && before != '<' && before != '>'
-                && after != '='
-            {
+            if before != '=' && before != '!' && before != '<' && before != '>' && after != '=' {
                 return true;
             }
         }

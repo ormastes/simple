@@ -135,8 +135,7 @@ mod tests {
 
     #[test]
     fn test_raw_sql_bind_all() {
-        let query = RawSql::new("SELECT * FROM users WHERE id IN (?, ?, ?)")
-            .bind_all([1, 2, 3]);
+        let query = RawSql::new("SELECT * FROM users WHERE id IN (?, ?, ?)").bind_all([1, 2, 3]);
         assert_eq!(query.params().len(), 3);
     }
 

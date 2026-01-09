@@ -187,11 +187,8 @@ impl CoverageAnalyzer {
 
     /// Generate integration test coverage report (function coverage)
     pub fn generate_integration_report(&self) -> ExtendedCoverageReport {
-        let mut report = ExtendedCoverageReport::new(
-            CoverageType::Integration,
-            &self.llvm_file,
-            &self.api_file,
-        );
+        let mut report =
+            ExtendedCoverageReport::new(CoverageType::Integration, &self.llvm_file, &self.api_file);
 
         let fn_counts = self.build_function_counts();
 
@@ -385,7 +382,8 @@ impl CoverageAnalyzer {
         report.summary.external_lib_coverage_percent = if report.summary.total_external_libs == 0 {
             100.0
         } else {
-            (report.summary.covered_external_libs as f64 / report.summary.total_external_libs as f64)
+            (report.summary.covered_external_libs as f64
+                / report.summary.total_external_libs as f64)
                 * 100.0
         };
 

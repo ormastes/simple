@@ -41,16 +41,15 @@ pub fn read_message<R: BufRead, M: for<'de> Deserialize<'de>>(
         }
 
         if let Some(value) = header.strip_prefix("Content-Length: ") {
-            content_length = Some(
-                value
-                    .parse()
-                    .map_err(|_| TransportError::InvalidFormat("Invalid Content-Length".to_string()))?,
-            );
+            content_length = Some(value.parse().map_err(|_| {
+                TransportError::InvalidFormat("Invalid Content-Length".to_string())
+            })?);
         }
     }
 
-    let content_length = content_length
-        .ok_or_else(|| TransportError::InvalidFormat("Missing Content-Length header".to_string()))?;
+    let content_length = content_length.ok_or_else(|| {
+        TransportError::InvalidFormat("Missing Content-Length header".to_string())
+    })?;
 
     // Read content
     let mut content = vec![0u8; content_length];

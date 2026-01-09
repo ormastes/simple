@@ -26,7 +26,11 @@ pub extern "C" fn native_pty_openpty() -> RuntimeValue {
 
                 // Return tuple of [master, slave]
                 let tuple = super::collections::rt_tuple_new(2);
-                super::collections::rt_tuple_set(tuple, 0, RuntimeValue::from_int(master_fd as i64));
+                super::collections::rt_tuple_set(
+                    tuple,
+                    0,
+                    RuntimeValue::from_int(master_fd as i64),
+                );
                 super::collections::rt_tuple_set(tuple, 1, RuntimeValue::from_int(slave_fd as i64));
                 tuple
             }

@@ -3,16 +3,16 @@
 use std::collections::HashMap;
 
 // Module declarations
-pub mod type_system;
-pub mod layout;
-pub mod code_layout;
-pub mod layout_config;
-pub mod expressions;
-pub mod statements;
-pub mod contracts;
-pub mod functions;
 pub mod aop;
+pub mod code_layout;
+pub mod contracts;
+pub mod expressions;
+pub mod functions;
+pub mod layout;
+pub mod layout_config;
 pub mod module;
+pub mod statements;
+pub mod type_system;
 pub mod verification;
 
 // GPU intrinsics
@@ -23,16 +23,16 @@ include!("../gpu_intrinsics.rs");
 include!("../type_registry.rs");
 
 // Re-export all public types
-pub use type_system::*;
-pub use layout::*;
-pub use code_layout::*;
-pub use layout_config::*;
-pub use expressions::*;
-pub use statements::*;
-pub use contracts::*;
-pub use functions::*;
 pub use aop::*;
+pub use code_layout::*;
+pub use contracts::*;
+pub use expressions::*;
+pub use functions::*;
+pub use layout::*;
+pub use layout_config::*;
 pub use module::*;
+pub use statements::*;
+pub use type_system::*;
 pub use verification::*;
 
 #[cfg(test)]

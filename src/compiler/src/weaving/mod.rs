@@ -15,8 +15,8 @@ pub mod weaver;
 pub use diagnostics::{DiagnosticLevel, WeavingDiagnostic};
 pub use matcher::Weaver;
 pub use types::{
-    AdviceForm, JoinPoint, JoinPointContext, JoinPointKind, MatchedAdvice,
-    WeavingConfig, WeavingResult, WeavingRule,
+    AdviceForm, JoinPoint, JoinPointContext, JoinPointKind, MatchedAdvice, WeavingConfig,
+    WeavingResult, WeavingRule,
 };
 
 #[cfg(test)]
@@ -66,8 +66,8 @@ mod tests {
     #[test]
     fn test_match_advice_to_join_point() {
         // Use init() selector which matches on type_name (function_name in our case)
-        let predicate = crate::predicate_parser::parse_predicate("pc{ init(my_function) }")
-            .unwrap();
+        let predicate =
+            crate::predicate_parser::parse_predicate("pc{ init(my_function) }").unwrap();
 
         let aop_config = AopConfig {
             runtime_enabled: true,
@@ -89,14 +89,17 @@ mod tests {
 
         assert_eq!(advices.len(), 1);
         assert_eq!(advices[0].advice_function, "log_advice");
-        assert!(diagnostics.is_empty(), "Should not have diagnostics for valid advice");
+        assert!(
+            diagnostics.is_empty(),
+            "Should not have diagnostics for valid advice"
+        );
     }
 
     #[test]
     fn test_match_execution_selector() {
         // Test execution() selector with proper signature matching
-        let predicate = crate::predicate_parser::parse_predicate("pc{ execution(* my_function(..)) }")
-            .unwrap();
+        let predicate =
+            crate::predicate_parser::parse_predicate("pc{ execution(* my_function(..)) }").unwrap();
 
         let aop_config = AopConfig {
             runtime_enabled: true,
@@ -122,7 +125,12 @@ mod tests {
 
         // For now, since signature format might be complex, just check that matching works
         // We'll fix the signature format issue separately
-        assert_eq!(advices.len(), 1, "Expected 1 advice but got {}", advices.len());
+        assert_eq!(
+            advices.len(),
+            1,
+            "Expected 1 advice but got {}",
+            advices.len()
+        );
         assert_eq!(advices[0].advice_function, "trace_fn");
     }
 
@@ -222,12 +230,10 @@ mod tests {
 
         // The inserted instruction should be a Call
         match &func.blocks[0].instructions[0] {
-            MirInst::Call { target, .. } => {
-                match target {
-                    CallTarget::Io(name) => assert_eq!(name, "before_advice"),
-                    _ => panic!("Expected Io call target"),
-                }
-            }
+            MirInst::Call { target, .. } => match target {
+                CallTarget::Io(name) => assert_eq!(name, "before_advice"),
+                _ => panic!("Expected Io call target"),
+            },
             _ => panic!("Expected Call instruction"),
         }
     }
@@ -268,7 +274,10 @@ mod tests {
 
         // First should be before_advice
         match &func.blocks[0].instructions[0] {
-            MirInst::Call { target: CallTarget::Io(name), .. } => {
+            MirInst::Call {
+                target: CallTarget::Io(name),
+                ..
+            } => {
                 assert_eq!(name, "before_advice");
             }
             _ => panic!("Expected before_advice call"),
@@ -276,7 +285,10 @@ mod tests {
 
         // Second should be after_advice
         match &func.blocks[0].instructions[1] {
-            MirInst::Call { target: CallTarget::Io(name), .. } => {
+            MirInst::Call {
+                target: CallTarget::Io(name),
+                ..
+            } => {
                 assert_eq!(name, "after_advice");
             }
             _ => panic!("Expected after_advice call"),
@@ -315,9 +327,9 @@ mod tests {
         assert_eq!(join_points.len(), 2);
 
         // Check that one is a condition join point
-        let has_condition = join_points.iter().any(|jp| {
-            matches!(jp.kind, JoinPointKind::Condition { .. })
-        });
+        let has_condition = join_points
+            .iter()
+            .any(|jp| matches!(jp.kind, JoinPointKind::Condition { .. }));
         assert!(has_condition, "Should detect condition join point");
     }
 
@@ -389,9 +401,9 @@ mod tests {
         assert_eq!(join_points.len(), 2);
 
         // Check that one is an error join point
-        let has_error = join_points.iter().any(|jp| {
-            matches!(jp.kind, JoinPointKind::Error { .. })
-        });
+        let has_error = join_points
+            .iter()
+            .any(|jp| matches!(jp.kind, JoinPointKind::Error { .. }));
         assert!(has_error, "Should detect error join point");
     }
 
@@ -527,7 +539,9 @@ mod tests {
         // Should have error diagnostic for invalid selector
         assert!(result.has_errors(), "Should have invalid selector error");
         let errors: Vec<_> = result.errors().collect();
-        assert!(errors.iter().any(|e| e.message.contains("Invalid selector")));
+        assert!(errors
+            .iter()
+            .any(|e| e.message.contains("Invalid selector")));
     }
 
     #[test]
@@ -588,9 +602,14 @@ mod tests {
         let result = weaver.weave_function(&mut func);
 
         // Should have warning about ambiguous ordering
-        assert!(result.has_warnings(), "Should have ambiguous ordering warning");
+        assert!(
+            result.has_warnings(),
+            "Should have ambiguous ordering warning"
+        );
         let warnings: Vec<_> = result.warnings().collect();
-        assert!(warnings.iter().any(|w| w.message.contains("Ambiguous advice ordering")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.message.contains("Ambiguous advice ordering")));
     }
 
     #[test]

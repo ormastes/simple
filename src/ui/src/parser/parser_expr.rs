@@ -1,7 +1,7 @@
 //! Expression parsing for SUI templates (precedence climbing parser)
 
-use crate::lexer::{SuiTokenKind};
-use super::{Expr, BinOp, UnaryOp, ParseError, SuiParser};
+use super::{BinOp, Expr, ParseError, SuiParser, UnaryOp};
+use crate::lexer::SuiTokenKind;
 
 impl<'a> SuiParser<'a> {
     pub(super) fn parse_expression(&mut self) -> Result<Expr, ParseError> {
@@ -243,15 +243,22 @@ impl<'a> SuiParser<'a> {
         }
     }
 
-    fn parse_arguments(&mut self) -> Result<Vec<Expr>, ParseError> { // private, only called internally
+    fn parse_arguments(&mut self) -> Result<Vec<Expr>, ParseError> {
+        // private, only called internally
         let mut args = Vec::new();
 
-        if !matches!(self.peek_kind(), SuiTokenKind::RParen | SuiTokenKind::RBracket) {
+        if !matches!(
+            self.peek_kind(),
+            SuiTokenKind::RParen | SuiTokenKind::RBracket
+        ) {
             args.push(self.parse_expression()?);
 
             while self.peek_kind() == SuiTokenKind::Comma {
                 self.advance();
-                if matches!(self.peek_kind(), SuiTokenKind::RParen | SuiTokenKind::RBracket) {
+                if matches!(
+                    self.peek_kind(),
+                    SuiTokenKind::RParen | SuiTokenKind::RBracket
+                ) {
                     break; // Allow trailing comma
                 }
                 args.push(self.parse_expression()?);

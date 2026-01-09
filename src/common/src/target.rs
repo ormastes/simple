@@ -455,12 +455,10 @@ impl Target {
                 "wasi" => Some(WasmRuntime::Wasi),
                 "unknown" => {
                     // Check third part for "emscripten"
-                    parts
-                        .get(2)
-                        .and_then(|p| match p.to_lowercase().as_str() {
-                            "emscripten" => Some(WasmRuntime::Emscripten),
-                            _ => Some(WasmRuntime::Standalone),
-                        })
+                    parts.get(2).and_then(|p| match p.to_lowercase().as_str() {
+                        "emscripten" => Some(WasmRuntime::Emscripten),
+                        _ => Some(WasmRuntime::Standalone),
+                    })
                 }
                 _ => Some(WasmRuntime::Standalone),
             })

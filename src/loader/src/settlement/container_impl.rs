@@ -209,8 +209,8 @@ impl Settlement {
             code_slots,
             data_slots,
             functions: functions.clone(),
-            globals: Vec::new(), // TODO: populate from module
-            types: Vec::new(),   // TODO: populate from module
+            globals: Vec::new(), // TODO: [loader][P3] populate from module
+            types: Vec::new(),   // TODO: [loader][P3] populate from module
             dependencies,        // Now properly populated from linker
             version: module.version,
             code_size,

@@ -7,15 +7,15 @@
 //! 4. Export/import analysis
 //! 5. Symbol size estimation
 
-pub mod types;
-pub mod symbol;
-pub mod stats;
-pub mod graph;
 pub mod analyzer;
+pub mod graph;
+pub mod stats;
+pub mod symbol;
+pub mod types;
 
 // Re-export public API
-pub use types::{RefKind, SymbolVisibility};
-pub use symbol::AnalyzedSymbol;
-pub use stats::AnalysisStats;
-pub use graph::SymbolGraph;
 pub use analyzer::SymbolAnalyzer;
+pub use graph::SymbolGraph;
+pub use stats::AnalysisStats;
+pub use symbol::AnalyzedSymbol;
+pub use types::{RefKind, SymbolVisibility};

@@ -332,7 +332,9 @@ fn infers_static_declaration() {
 
 #[test]
 fn infers_macro_definition() {
-    let items = parse_items("macro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\nmain = 0");
+    let items = parse_items(
+        "macro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x\nmain = 0",
+    );
     check(&items).expect("type check ok");
 }
 

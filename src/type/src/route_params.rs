@@ -11,7 +11,10 @@ pub enum RouteParamError {
     /// Parameter not found in route
     MissingParameter(String),
     /// Failed to parse parameter to requested type
-    ParseError { param: String, expected_type: String },
+    ParseError {
+        param: String,
+        expected_type: String,
+    },
     /// Invalid route pattern
     InvalidPattern(String),
     /// Parameter appears multiple times
@@ -24,8 +27,15 @@ impl std::fmt::Display for RouteParamError {
             RouteParamError::MissingParameter(name) => {
                 write!(f, "Missing required parameter: {}", name)
             }
-            RouteParamError::ParseError { param, expected_type } => {
-                write!(f, "Failed to parse parameter '{}' as {}", param, expected_type)
+            RouteParamError::ParseError {
+                param,
+                expected_type,
+            } => {
+                write!(
+                    f,
+                    "Failed to parse parameter '{}' as {}",
+                    param, expected_type
+                )
             }
             RouteParamError::InvalidPattern(pattern) => {
                 write!(f, "Invalid route pattern: {}", pattern)
@@ -94,16 +104,14 @@ impl ParamValue {
     pub fn as_bool(&self) -> Result<bool, RouteParamError> {
         match self {
             ParamValue::Boolean(b) => Ok(*b),
-            ParamValue::String(s) => {
-                match s.to_lowercase().as_str() {
-                    "true" | "1" | "yes" | "on" => Ok(true),
-                    "false" | "0" | "no" | "off" => Ok(false),
-                    _ => Err(RouteParamError::ParseError {
-                        param: s.clone(),
-                        expected_type: "bool".to_string(),
-                    }),
-                }
-            }
+            ParamValue::String(s) => match s.to_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Ok(true),
+                "false" | "0" | "no" | "off" => Ok(false),
+                _ => Err(RouteParamError::ParseError {
+                    param: s.clone(),
+                    expected_type: "bool".to_string(),
+                }),
+            },
             _ => Err(RouteParamError::ParseError {
                 param: format!("{:?}", self),
                 expected_type: "bool".to_string(),
@@ -137,33 +145,35 @@ impl RouteParams {
     /// Result: {id: "123", post_id: "456"}
     pub fn from_path(pattern: &str, path: &str) -> Result<Self, RouteParamError> {
         let mut params = Self::new();
-        
+
         let pattern_segments: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
         let path_segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
         if pattern_segments.len() != path_segments.len() {
-            return Err(RouteParamError::InvalidPattern(
-                format!("Pattern '{}' doesn't match path '{}'", pattern, path)
-            ));
+            return Err(RouteParamError::InvalidPattern(format!(
+                "Pattern '{}' doesn't match path '{}'",
+                pattern, path
+            )));
         }
 
         for (pattern_seg, path_seg) in pattern_segments.iter().zip(path_segments.iter()) {
             if pattern_seg.starts_with(':') {
                 let param_name = &pattern_seg[1..];
-                
+
                 // Check for duplicate parameters
                 if params.path_params.contains_key(param_name) {
                     return Err(RouteParamError::DuplicateParameter(param_name.to_string()));
                 }
-                
+
                 params.path_params.insert(
                     param_name.to_string(),
                     ParamValue::String(path_seg.to_string()),
                 );
             } else if pattern_seg != path_seg {
-                return Err(RouteParamError::InvalidPattern(
-                    format!("Segment '{}' doesn't match '{}'", pattern_seg, path_seg)
-                ));
+                return Err(RouteParamError::InvalidPattern(format!(
+                    "Segment '{}' doesn't match '{}'",
+                    pattern_seg, path_seg
+                )));
             }
         }
 
@@ -176,7 +186,7 @@ impl RouteParams {
     /// Result: {name: "John", age: "30", active: "true"}
     pub fn from_query(query: &str) -> Result<Self, RouteParamError> {
         let mut params = Self::new();
-        
+
         let query = query.trim_start_matches('?');
         if query.is_empty() {
             return Ok(params);
@@ -186,15 +196,14 @@ impl RouteParams {
             if let Some(pos) = pair.find('=') {
                 let key = &pair[..pos];
                 let value = &pair[pos + 1..];
-                
+
                 if params.query_params.contains_key(key) {
                     return Err(RouteParamError::DuplicateParameter(key.to_string()));
                 }
-                
-                params.query_params.insert(
-                    key.to_string(),
-                    ParamValue::String(value.to_string()),
-                );
+
+                params
+                    .query_params
+                    .insert(key.to_string(), ParamValue::String(value.to_string()));
             }
         }
 
@@ -284,8 +293,8 @@ mod tests {
 
     #[test]
     fn test_path_params_extraction() {
-        let params = RouteParams::from_path("/users/:id/posts/:post_id", "/users/123/posts/456")
-            .unwrap();
+        let params =
+            RouteParams::from_path("/users/:id/posts/:post_id", "/users/123/posts/456").unwrap();
 
         assert_eq!(params.get("id").unwrap(), "123");
         assert_eq!(params.get("post_id").unwrap(), "456");
@@ -294,7 +303,7 @@ mod tests {
     #[test]
     fn test_path_params_with_type_conversion() {
         let params = RouteParams::from_path("/users/:id", "/users/123").unwrap();
-        
+
         assert_eq!(params.get_i64("id").unwrap(), 123);
     }
 
@@ -351,8 +360,8 @@ mod tests {
 
     #[test]
     fn test_parameter_names() {
-        let params = RouteParams::from_path("/users/:user_id/posts/:post_id", "/users/1/posts/2")
-            .unwrap();
+        let params =
+            RouteParams::from_path("/users/:user_id/posts/:post_id", "/users/1/posts/2").unwrap();
 
         let names = params.path_names();
         assert_eq!(names.len(), 2);

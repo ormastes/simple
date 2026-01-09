@@ -70,7 +70,9 @@ impl LlvmBackend {
 
             let gep = builder
                 .build_struct_gep(struct_type, alloc, i as u32, "tuple_elem")
-                .map_err(|e| CompileError::Semantic(format!("Failed to build struct gep: {}", e)))?;
+                .map_err(|e| {
+                    CompileError::Semantic(format!("Failed to build struct gep: {}", e))
+                })?;
 
             builder
                 .build_store(gep, elem_val)
@@ -244,9 +246,7 @@ impl LlvmBackend {
         let end_val = if let Some(e) = end {
             self.get_vreg(&e, vreg_map)?
         } else {
-            inkwell::values::BasicValueEnum::IntValue(
-                i64_type.const_int(i64::MAX as u64, false),
-            )
+            inkwell::values::BasicValueEnum::IntValue(i64_type.const_int(i64::MAX as u64, false))
         };
 
         // Get step (default to 1)

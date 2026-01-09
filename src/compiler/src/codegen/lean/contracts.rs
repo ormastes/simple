@@ -6,9 +6,9 @@
 //! - invariant → class invariant Props
 //! - old() → local bindings for pre-state values
 
-use super::types::{LeanType, TypeTranslator};
 use super::expressions::{ExprTranslator, LeanExpr, LeanLit};
-use crate::hir::{HirFunction, HirContract, HirExpr, HirExprKind, BinOp, UnaryOp};
+use super::types::{LeanType, TypeTranslator};
+use crate::hir::{BinOp, HirContract, HirExpr, HirExprKind, HirFunction, UnaryOp};
 use crate::CompileError;
 
 /// A Lean theorem
@@ -182,14 +182,16 @@ impl LeanProp {
 
     /// Create a conjunction of multiple propositions
     pub fn and_all(props: Vec<LeanProp>) -> LeanProp {
-        props.into_iter()
+        props
+            .into_iter()
             .reduce(|acc, p| LeanProp::And(Box::new(acc), Box::new(p)))
             .unwrap_or(LeanProp::True)
     }
 
     /// Create a disjunction of multiple propositions
     pub fn or_all(props: Vec<LeanProp>) -> LeanProp {
-        props.into_iter()
+        props
+            .into_iter()
             .reduce(|acc, p| LeanProp::Or(Box::new(acc), Box::new(p)))
             .unwrap_or(LeanProp::False)
     }
@@ -216,7 +218,9 @@ impl<'a> ContractTranslator<'a> {
         let expr_translator = ExprTranslator::new(self.type_translator);
 
         // Translate preconditions to hypotheses
-        let preconditions: Result<Vec<_>, _> = contract.preconditions.iter()
+        let preconditions: Result<Vec<_>, _> = contract
+            .preconditions
+            .iter()
             .map(|clause| self.translate_predicate(&expr_translator, &clause.condition))
             .collect();
         let preconditions = preconditions?;
@@ -226,7 +230,8 @@ impl<'a> ContractTranslator<'a> {
             let conclusion = self.translate_predicate(&expr_translator, &clause.condition)?;
 
             // Build hypotheses from preconditions
-            let hypotheses: Vec<_> = preconditions.iter()
+            let hypotheses: Vec<_> = preconditions
+                .iter()
                 .enumerate()
                 .map(|(j, p)| (format!("h{}", j + 1), p.clone()))
                 .collect();
@@ -315,18 +320,16 @@ impl<'a> ContractTranslator<'a> {
                     }
                 }
             }
-            HirExprKind::Unary { op, operand } => {
-                match op {
-                    UnaryOp::Not => {
-                        let inner = self.translate_predicate(expr_translator, operand)?;
-                        Ok(LeanProp::Not(Box::new(inner)))
-                    }
-                    _ => {
-                        let expr = expr_translator.translate(predicate)?;
-                        Ok(LeanProp::Expr(expr))
-                    }
+            HirExprKind::Unary { op, operand } => match op {
+                UnaryOp::Not => {
+                    let inner = self.translate_predicate(expr_translator, operand)?;
+                    Ok(LeanProp::Not(Box::new(inner)))
                 }
-            }
+                _ => {
+                    let expr = expr_translator.translate(predicate)?;
+                    Ok(LeanProp::Expr(expr))
+                }
+            },
             HirExprKind::Bool(true) => Ok(LeanProp::True),
             HirExprKind::Bool(false) => Ok(LeanProp::False),
             _ => {

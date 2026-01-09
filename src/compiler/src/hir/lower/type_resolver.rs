@@ -14,7 +14,7 @@ impl Lowerer {
                         return Ok(class_ty);
                     } else {
                         return Err(LowerError::UnknownType(
-                            "Self used outside of class/struct context".to_string()
+                            "Self used outside of class/struct context".to_string(),
                         ));
                     }
                 }
@@ -140,7 +140,11 @@ impl Lowerer {
                 // Get the inner HIR type to check if it's already a pointer
                 if let Some(inner_hir) = self.module.types.get(inner_id) {
                     match inner_hir {
-                        HirType::Pointer { kind, capability: _, inner: ptr_inner } => {
+                        HirType::Pointer {
+                            kind,
+                            capability: _,
+                            inner: ptr_inner,
+                        } => {
                             // Inner is already a pointer, update its capability
                             let ptr_type = HirType::Pointer {
                                 kind: *kind,
@@ -167,7 +171,10 @@ impl Lowerer {
                     }
                 } else {
                     // Cannot get inner type, error
-                    Err(LowerError::UnknownType(format!("capability inner type {:?}", inner)))
+                    Err(LowerError::UnknownType(format!(
+                        "capability inner type {:?}",
+                        inner
+                    )))
                 }
             }
             _ => Err(LowerError::Unsupported(format!("{:?}", ty))),
@@ -195,7 +202,11 @@ impl Lowerer {
         }
     }
 
-    pub(super) fn get_field_info(&self, struct_ty: TypeId, field: &str) -> LowerResult<(usize, TypeId)> {
+    pub(super) fn get_field_info(
+        &self,
+        struct_ty: TypeId,
+        field: &str,
+    ) -> LowerResult<(usize, TypeId)> {
         if let Some(hir_ty) = self.module.types.get(struct_ty) {
             match hir_ty {
                 HirType::Struct { name, fields, .. } => {
@@ -209,9 +220,7 @@ impl Lowerer {
                         field: field.to_string(),
                     })
                 }
-                HirType::Pointer { inner, .. } => {
-                    self.get_field_info(*inner, field)
-                }
+                HirType::Pointer { inner, .. } => self.get_field_info(*inner, field),
                 _ => Err(LowerError::CannotInferFieldType {
                     struct_name: format!("{:?}", hir_ty),
                     field: field.to_string(),
@@ -230,15 +239,11 @@ impl Lowerer {
             match hir_ty {
                 HirType::Array { element, .. } => Ok(*element),
                 HirType::Simd { element, .. } => Ok(*element),
-                HirType::Tuple(types) => {
-                    types
-                        .first()
-                        .copied()
-                        .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string()))
-                }
-                HirType::Pointer { inner, .. } => {
-                    self.get_index_element_type(*inner)
-                }
+                HirType::Tuple(types) => types
+                    .first()
+                    .copied()
+                    .ok_or_else(|| LowerError::CannotInferIndexType("empty tuple".to_string())),
+                HirType::Pointer { inner, .. } => self.get_index_element_type(*inner),
                 _ => Err(LowerError::CannotInferIndexType(format!("{:?}", hir_ty))),
             }
         } else {

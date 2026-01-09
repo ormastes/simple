@@ -22,19 +22,19 @@ use std::sync::Arc;
 
 // Re-export items that submodules need
 #[cfg(feature = "pytorch")]
-pub(super) use super::registry::{TENSOR_REGISTRY, TensorWrapper, next_handle};
+pub(super) use super::registry::{next_handle, TensorWrapper, TENSOR_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-pub(super) use super::creation::{rt_torch_randn, rt_torch_zeros, rt_torch_ones, rt_torch_free};
+pub(super) use super::creation::{rt_torch_free, rt_torch_ones, rt_torch_randn, rt_torch_zeros};
 
 #[cfg(feature = "pytorch")]
-pub(super) use super::autograd::{rt_torch_set_requires_grad, rt_torch_detach};
+pub(super) use super::autograd::{rt_torch_detach, rt_torch_set_requires_grad};
 
 #[cfg(feature = "pytorch")]
 pub(super) use super::nn_initialization::rt_torch_kaiming_uniform_;
 
 #[cfg(feature = "pytorch")]
-pub(super) use super::ops_matrix::{rt_torch_transpose, rt_torch_matmul};
+pub(super) use super::ops_matrix::{rt_torch_matmul, rt_torch_transpose};
 
 #[cfg(feature = "pytorch")]
 pub(super) use super::ops_elementwise::rt_torch_add;
@@ -42,21 +42,21 @@ pub(super) use super::ops_elementwise::rt_torch_add;
 #[cfg(feature = "pytorch")]
 pub(super) use super::ops_shape::rt_torch_clone;
 
-pub mod linear;
-pub mod conv;
 pub mod batchnorm;
+pub mod conv;
 pub mod dropout;
-pub mod layernorm;
 pub mod embedding;
+pub mod layernorm;
+pub mod linear;
 pub mod rnn;
 
 // Re-export module functions
-pub use linear::*;
-pub use conv::*;
 pub use batchnorm::*;
+pub use conv::*;
 pub use dropout::*;
-pub use layernorm::*;
 pub use embedding::*;
+pub use layernorm::*;
+pub use linear::*;
 pub use rnn::*;
 
 /// Module state enum for different layer types
@@ -64,8 +64,8 @@ pub use rnn::*;
 #[derive(Debug)]
 pub(crate) enum ModuleState {
     Linear {
-        weight: u64,  // Tensor handle
-        bias: Option<u64>,  // Optional bias tensor handle
+        weight: u64,       // Tensor handle
+        bias: Option<u64>, // Optional bias tensor handle
     },
     Conv2d {
         weight: u64,
@@ -74,8 +74,8 @@ pub(crate) enum ModuleState {
         padding: (i64, i64),
     },
     BatchNorm2d {
-        weight: u64,  // Scale (gamma)
-        bias: u64,    // Shift (beta)
+        weight: u64, // Scale (gamma)
+        bias: u64,   // Shift (beta)
         running_mean: u64,
         running_var: u64,
         eps: f64,
@@ -100,20 +100,20 @@ pub(crate) enum ModuleState {
         weights: Vec<(u64, u64, u64, u64)>,
     },
     Dropout {
-        p: f64,       // Dropout probability
+        p: f64,        // Dropout probability
         inplace: bool, // Whether to modify input in-place
     },
     LayerNorm {
-        normalized_shape: Vec<i64>,  // Shape to normalize over
-        weight: u64,   // Scale (gamma) parameter
-        bias: u64,     // Shift (beta) parameter
-        eps: f64,      // Epsilon for numerical stability
+        normalized_shape: Vec<i64>, // Shape to normalize over
+        weight: u64,                // Scale (gamma) parameter
+        bias: u64,                  // Shift (beta) parameter
+        eps: f64,                   // Epsilon for numerical stability
     },
     Embedding {
-        num_embeddings: i64,  // Vocabulary size
-        embedding_dim: i64,   // Embedding dimension
-        weight: u64,          // Embedding weight matrix [num_embeddings, embedding_dim]
-        padding_idx: Option<i64>,  // Optional padding index
+        num_embeddings: i64,      // Vocabulary size
+        embedding_dim: i64,       // Embedding dimension
+        weight: u64,              // Embedding weight matrix [num_embeddings, embedding_dim]
+        padding_idx: Option<i64>, // Optional padding index
     },
 }
 

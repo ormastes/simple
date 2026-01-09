@@ -130,7 +130,7 @@ mod compiler_module_resolver_extended_tests {
 // Compiler Pipeline Extended Types
 // ============================================================================
 mod compiler_pipeline_extended_tests {
-    use simple_compiler::{CompilerPipeline, CompileError};
+    use simple_compiler::{CompileError, CompilerPipeline};
 
     #[test]
     fn test_compiler_pipeline_size() {
@@ -164,7 +164,7 @@ mod compiler_hir_expr_tests {
 // Driver Runner Types
 // ============================================================================
 mod driver_runner_tests {
-    use simple_driver::{Runner, RunResult};
+    use simple_driver::{RunResult, Runner};
 
     #[test]
     fn test_runner_size() {
@@ -181,7 +181,7 @@ mod driver_runner_tests {
 // Loader Module Types
 // ============================================================================
 mod loader_module_tests {
-    use simple_loader::{ModuleLoader, ModuleRegistry, LoadedModule};
+    use simple_loader::{LoadedModule, ModuleLoader, ModuleRegistry};
 
     #[test]
     fn test_module_loader_size() {
@@ -256,7 +256,7 @@ mod common_message_tests {
 // Compiler Value Extended Types
 // ============================================================================
 mod compiler_value_extended_tests {
-    use simple_compiler::value::{Value, ClassType, SpecialEnumType};
+    use simple_compiler::value::{ClassType, SpecialEnumType, Value};
 
     #[test]
     fn test_value_size() {
@@ -307,7 +307,7 @@ mod pkg_version_tests {
 // Pkg Manifest Types
 // ============================================================================
 mod pkg_manifest_tests {
-    use simple_pkg::{Manifest, LockFile};
+    use simple_pkg::{LockFile, Manifest};
 
     #[test]
     fn test_manifest_size() {
@@ -324,7 +324,7 @@ mod pkg_manifest_tests {
 // Type Crate Types
 // ============================================================================
 mod type_crate_tests {
-    use simple_type::{Type, TypeScheme, Substitution};
+    use simple_type::{Substitution, Type, TypeScheme};
 
     #[test]
     fn test_type_size() {

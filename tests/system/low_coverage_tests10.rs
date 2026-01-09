@@ -6,7 +6,7 @@
 // Settlement Builder Tests (simple_loader::settlement)
 // ===========================================================================
 mod settlement_builder_tests {
-    use simple_loader::{BuildError, BuildOptions, SettlementBuilder, find_stub};
+    use simple_loader::{find_stub, BuildError, BuildOptions, SettlementBuilder};
     use std::path::PathBuf;
 
     #[test]
@@ -124,10 +124,8 @@ mod module_resolver_tests {
 
     #[test]
     fn test_module_resolver_new() {
-        let resolver = ModuleResolver::new(
-            PathBuf::from("/project"),
-            PathBuf::from("/project/src"),
-        );
+        let resolver =
+            ModuleResolver::new(PathBuf::from("/project"), PathBuf::from("/project/src"));
         let _ = resolver;
     }
 
@@ -233,8 +231,8 @@ mod codegen_shared_tests {
 // Lexer Tests (simple_parser::Lexer)
 // ===========================================================================
 mod lexer_tests {
-    use simple_parser::Lexer;
     use simple_parser::token::TokenKind;
+    use simple_parser::Lexer;
 
     #[test]
     fn test_lexer_new() {
@@ -254,14 +252,18 @@ mod lexer_tests {
     fn test_lexer_tokenize_integer() {
         let mut lexer = Lexer::new("42");
         let tokens = lexer.tokenize();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Integer(_))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Integer(_))));
     }
 
     #[test]
     fn test_lexer_tokenize_identifier() {
         let mut lexer = Lexer::new("foo");
         let tokens = lexer.tokenize();
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier(_))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Identifier(_))));
     }
 
     #[test]
@@ -269,7 +271,9 @@ mod lexer_tests {
         let mut lexer = Lexer::new("\"hello\"");
         let tokens = lexer.tokenize();
         // FString is now the default for double-quoted strings
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::String(_) | TokenKind::FString(_))));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::String(_) | TokenKind::FString(_))));
     }
 
     #[test]
@@ -337,8 +341,12 @@ mod lexer_tests {
         let mut lexer = Lexer::new("x = 1 # comment\ny = 2");
         let tokens = lexer.tokenize();
         // Comments are skipped, so only x, =, 1, newline, y, =, 2, eof
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "x")));
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "y")));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "x")));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Identifier(ref s) if s == "y")));
     }
 
     #[test]
@@ -353,8 +361,12 @@ mod lexer_tests {
         let mut lexer = Lexer::new("true false");
         let tokens = lexer.tokenize();
         // true/false can be Bool(bool) or True/False keywords
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Bool(true) | TokenKind::True)));
-        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Bool(false) | TokenKind::False)));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Bool(true) | TokenKind::True)));
+        assert!(tokens
+            .iter()
+            .any(|t| matches!(t.kind, TokenKind::Bool(false) | TokenKind::False)));
     }
 
     #[test]

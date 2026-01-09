@@ -102,7 +102,7 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
 ///
 /// ```rust
 /// use simple_runtime::value::rt_set_args_vec;
-/// 
+///
 /// // Driver code (exec_core.rs)
 /// let args = vec!["program".to_string(), "arg1".to_string()];
 /// rt_set_args_vec(&args);
@@ -194,7 +194,10 @@ fn auto_init_args_if_empty() {
     let args: Vec<String> = std::env::args().collect();
 
     if !args.is_empty() {
-        tracing::debug!(arg_count = args.len(), "Auto-initialized arguments from std::env::args()");
+        tracing::debug!(
+            arg_count = args.len(),
+            "Auto-initialized arguments from std::env::args()"
+        );
         *args_lock = args;
     }
 }

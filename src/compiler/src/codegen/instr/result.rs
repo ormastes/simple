@@ -45,12 +45,16 @@ pub(super) fn compile_try_unwrap<M: Module>(
     let val = ctx.vreg_values[&value];
     let disc = builder.ins().load(types::I64, MemFlags::new(), val, 0);
     let zero = builder.ins().iconst(types::I64, 0);
-    let is_error = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, disc, zero);
+    let is_error = builder
+        .ins()
+        .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, disc, zero);
 
     let success_block = builder.create_block();
     let err_block = *ctx.blocks.get(&error_block).unwrap();
 
-    builder.ins().brif(is_error, err_block, &[], success_block, &[]);
+    builder
+        .ins()
+        .brif(is_error, err_block, &[], success_block, &[]);
 
     builder.switch_to_block(success_block);
     let payload = builder.ins().load(types::I64, MemFlags::new(), val, 8);

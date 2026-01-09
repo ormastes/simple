@@ -95,7 +95,8 @@ fn parse_extern_function() {
 // Macro - syntax is: macro name(params) -> (contract): body
 #[test]
 fn parse_macro_definition() {
-    let items = parse("macro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x");
+    let items =
+        parse("macro double(x: Int) -> (returns result: Int):\n    emit result:\n        x + x");
     if let Node::Macro(m) = &items[0] {
         assert_eq!(m.name, "double");
     } else {

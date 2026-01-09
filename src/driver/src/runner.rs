@@ -72,7 +72,11 @@ impl Runner {
     ///
     /// The args are made available to the Simple program via `sys_get_args()`.
     #[instrument(skip(self, args), fields(path = %path.display()))]
-    pub fn run_file_interpreted_with_args(&self, path: &Path, args: Vec<String>) -> Result<i32, String> {
+    pub fn run_file_interpreted_with_args(
+        &self,
+        path: &Path,
+        args: Vec<String>,
+    ) -> Result<i32, String> {
         self.core.run_file_interpreted_with_args(path, args)
     }
 

@@ -55,9 +55,8 @@ impl ColumnType {
     pub fn from_postgres(type_name: &str) -> Self {
         let lower = type_name.to_lowercase();
         match lower.as_str() {
-            "int2" | "int4" | "int8" | "smallint" | "integer" | "bigint" | "serial" | "bigserial" => {
-                ColumnType::Integer
-            }
+            "int2" | "int4" | "int8" | "smallint" | "integer" | "bigint" | "serial"
+            | "bigserial" => ColumnType::Integer,
             "float4" | "float8" | "real" | "double precision" | "numeric" | "decimal" => {
                 ColumnType::Real
             }
@@ -68,9 +67,10 @@ impl ColumnType {
             "bool" | "boolean" => ColumnType::Boolean,
             "date" => ColumnType::Date,
             "time" | "time without time zone" | "time with time zone" => ColumnType::Time,
-            "timestamp" | "timestamp without time zone" | "timestamp with time zone" | "timestamptz" => {
-                ColumnType::Timestamp
-            }
+            "timestamp"
+            | "timestamp without time zone"
+            | "timestamp with time zone"
+            | "timestamptz" => ColumnType::Timestamp,
             "json" | "jsonb" => ColumnType::Json,
             "uuid" => ColumnType::Uuid,
             _ => ColumnType::Unknown(type_name.to_string()),
@@ -212,7 +212,10 @@ impl<C: Connection + ?Sized> SchemaIntrospector for SqliteIntrospector<'_, C> {
         }
 
         if columns.is_empty() {
-            return Err(DbError::NotFound(format!("Table '{}' not found", table_name)));
+            return Err(DbError::NotFound(format!(
+                "Table '{}' not found",
+                table_name
+            )));
         }
 
         Ok(TableInfo {
@@ -261,7 +264,10 @@ impl<C: Connection + ?Sized> SchemaIntrospector for SqliteIntrospector<'_, C> {
 
     fn list_foreign_keys(&self, table_name: &str) -> DbResult<Vec<ForeignKeyInfo>> {
         let rows = self.conn.query(
-            &format!("PRAGMA foreign_key_list('{}')", table_name.replace('\'', "''")),
+            &format!(
+                "PRAGMA foreign_key_list('{}')",
+                table_name.replace('\'', "''")
+            ),
             &[],
         )?;
 
@@ -271,8 +277,12 @@ impl<C: Connection + ?Sized> SchemaIntrospector for SqliteIntrospector<'_, C> {
             let to_table: String = row.get_by_name("table")?;
             let from_col: String = row.get_by_name("from")?;
             let to_col: String = row.get_by_name("to")?;
-            let on_update: String = row.get_opt_by_name("on_update")?.unwrap_or_else(|| "NO ACTION".to_string());
-            let on_delete: String = row.get_opt_by_name("on_delete")?.unwrap_or_else(|| "NO ACTION".to_string());
+            let on_update: String = row
+                .get_opt_by_name("on_update")?
+                .unwrap_or_else(|| "NO ACTION".to_string());
+            let on_delete: String = row
+                .get_opt_by_name("on_delete")?
+                .unwrap_or_else(|| "NO ACTION".to_string());
 
             fks.push(ForeignKeyInfo {
                 name: None,
@@ -333,7 +343,9 @@ impl<C: Connection + ?Sized> SchemaIntrospector for PostgresIntrospector<'_, C> 
             let row = row?;
             let name: String = row.get_by_name("column_name")?;
             let type_name: String = row.get_opt_by_name("data_type")?.unwrap_or_default();
-            let nullable_str: String = row.get_opt_by_name("is_nullable")?.unwrap_or_else(|| "YES".to_string());
+            let nullable_str: String = row
+                .get_opt_by_name("is_nullable")?
+                .unwrap_or_else(|| "YES".to_string());
             let dflt: Option<String> = row.get_opt_by_name("column_default")?;
 
             columns.push(ColumnInfo {
@@ -346,7 +358,10 @@ impl<C: Connection + ?Sized> SchemaIntrospector for PostgresIntrospector<'_, C> 
         }
 
         if columns.is_empty() {
-            return Err(DbError::NotFound(format!("Table '{}' not found", table_name)));
+            return Err(DbError::NotFound(format!(
+                "Table '{}' not found",
+                table_name
+            )));
         }
 
         // Get primary key columns
@@ -443,8 +458,12 @@ impl<C: Connection + ?Sized> SchemaIntrospector for PostgresIntrospector<'_, C> 
             let from_col: String = row.get_by_name("from_column")?;
             let to_table: String = row.get_by_name("to_table")?;
             let to_col: String = row.get_by_name("to_column")?;
-            let on_update: String = row.get_opt_by_name("update_rule")?.unwrap_or_else(|| "NO ACTION".to_string());
-            let on_delete: String = row.get_opt_by_name("delete_rule")?.unwrap_or_else(|| "NO ACTION".to_string());
+            let on_update: String = row
+                .get_opt_by_name("update_rule")?
+                .unwrap_or_else(|| "NO ACTION".to_string());
+            let on_delete: String = row
+                .get_opt_by_name("delete_rule")?
+                .unwrap_or_else(|| "NO ACTION".to_string());
 
             fks.push(ForeignKeyInfo {
                 name: Some(name),

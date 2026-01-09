@@ -89,7 +89,12 @@ impl PreAllocatedResources {
         let (tui, gui, service, repl) = match app_type {
             AppType::Cli => (None, None, None, None),
             AppType::Tui => (Some(TuiResources::allocate()?), None, None, None),
-            AppType::Gui => (None, Some(GuiResources::allocate(window_hints)?), None, None),
+            AppType::Gui => (
+                None,
+                Some(GuiResources::allocate(window_hints)?),
+                None,
+                None,
+            ),
             AppType::Service => (None, None, Some(ServiceResources::allocate()?), None),
             AppType::Repl => (None, None, None, Some(ReplResources::allocate()?)),
         };
@@ -203,10 +208,10 @@ impl GuiResources {
         let gpu_handle = start_gpu_init(config);
 
         Ok(Self {
-            window_created: true,  // Window creation starts immediately
-            window_handle: None,   // Will be filled when init completes
+            window_created: true, // Window creation starts immediately
+            window_handle: None,  // Will be filled when init completes
             gpu_init_started: true,
-            gpu_ready: false,      // Will be set when init completes
+            gpu_ready: false, // Will be set when init completes
             event_loop_ready: false,
             gpu_init_handle: Some(gpu_handle),
         })
@@ -264,9 +269,9 @@ impl ServiceResources {
             // For now, just mark as ready without actually daemonizing
             // (actual daemonization should be opt-in via flag)
             Ok(Self {
-                detached: false,      // Would be true after fork
-                signals_ready: true,  // Signal handlers would be installed
-                ipc_ready: true,      // IPC channels would be created
+                detached: false,     // Would be true after fork
+                signals_ready: true, // Signal handlers would be installed
+                ipc_ready: true,     // IPC channels would be created
             })
         }
 

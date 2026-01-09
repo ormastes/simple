@@ -3,7 +3,7 @@
 use crate::effects::check_effect_violations;
 use crate::error::CompileError;
 use crate::value::{Env, Value};
-use simple_parser::ast::{Argument, FunctionDef, ClassDef, EnumDef};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, FunctionDef};
 use std::collections::HashMap;
 
 // Import parent interpreter types
@@ -18,9 +18,7 @@ use super::interpreter_native_io::*;
 use super::interpreter_native_net::*;
 
 // Import the runtime I/O capture functions
-use simple_runtime::value::{
-    rt_is_stdout_capturing, rt_is_stderr_capturing,
-};
+use simple_runtime::value::{rt_is_stderr_capturing, rt_is_stdout_capturing};
 
 // TuiEvent struct matches the C ABI struct in ratatui_tui.rs
 #[repr(C)]
@@ -43,7 +41,12 @@ extern "C" {
     fn ratatui_textbuffer_newline(buffer: u64);
     fn ratatui_textbuffer_get_text(buffer: u64, buf_ptr: *mut u8, buf_len: usize) -> usize;
     fn ratatui_textbuffer_set_text(buffer: u64, text_ptr: *const u8, text_len: usize);
-    fn ratatui_render_textbuffer(terminal: u64, buffer: u64, prompt_ptr: *const u8, prompt_len: usize);
+    fn ratatui_render_textbuffer(
+        terminal: u64,
+        buffer: u64,
+        prompt_ptr: *const u8,
+        prompt_len: usize,
+    );
     fn ratatui_read_event_timeout(timeout_ms: u64) -> TuiEvent;
     fn ratatui_object_destroy(handle: u64);
 }
@@ -54,7 +57,9 @@ extern "C" {
 #[cfg(not(target_env = "msvc"))]
 #[linkage = "weak"]
 #[no_mangle]
-pub extern "C" fn simple_repl_runner_init() -> bool { false }
+pub extern "C" fn simple_repl_runner_init() -> bool {
+    false
+}
 
 #[cfg(not(target_env = "msvc"))]
 #[linkage = "weak"]
@@ -64,24 +69,40 @@ pub extern "C" fn simple_repl_runner_cleanup() {}
 #[cfg(not(target_env = "msvc"))]
 #[linkage = "weak"]
 #[no_mangle]
-pub extern "C" fn simple_repl_runner_execute(_code_ptr: *const u8, _code_len: usize, _result_buffer: *mut u8, _result_capacity: usize) -> i32 { 1 }
+pub extern "C" fn simple_repl_runner_execute(
+    _code_ptr: *const u8,
+    _code_len: usize,
+    _result_buffer: *mut u8,
+    _result_capacity: usize,
+) -> i32 {
+    1
+}
 
 #[cfg(not(target_env = "msvc"))]
 #[linkage = "weak"]
 #[no_mangle]
-pub extern "C" fn simple_repl_runner_clear_prelude() -> bool { true }
+pub extern "C" fn simple_repl_runner_clear_prelude() -> bool {
+    true
+}
 
 #[cfg(not(target_env = "msvc"))]
 #[linkage = "weak"]
 #[no_mangle]
-pub extern "C" fn simple_repl_runner_get_prelude(_buffer: *mut u8, _capacity: usize) -> usize { 0 }
+pub extern "C" fn simple_repl_runner_get_prelude(_buffer: *mut u8, _capacity: usize) -> usize {
+    0
+}
 
 // MSVC doesn't support weak linkage, so we use extern declarations and handle missing symbols at runtime
 #[cfg(target_env = "msvc")]
 extern "C" {
     fn simple_repl_runner_init() -> bool;
     fn simple_repl_runner_cleanup();
-    fn simple_repl_runner_execute(code_ptr: *const u8, code_len: usize, result_buffer: *mut u8, result_capacity: usize) -> i32;
+    fn simple_repl_runner_execute(
+        code_ptr: *const u8,
+        code_len: usize,
+        result_buffer: *mut u8,
+        result_capacity: usize,
+    ) -> i32;
     fn simple_repl_runner_clear_prelude() -> bool;
     fn simple_repl_runner_get_prelude(buffer: *mut u8, capacity: usize) -> usize;
 }
@@ -157,7 +178,10 @@ pub(crate) fn call_extern_function(
             }
             use std::io::{self, BufRead};
             let stdin = io::stdin();
-            let line = stdin.lock().lines().next()
+            let line = stdin
+                .lock()
+                .lines()
+                .next()
                 .transpose()
                 .map_err(|e| CompileError::Semantic(format!("input error: {e}")))?
                 .unwrap_or_default();
@@ -166,60 +190,97 @@ pub(crate) fn call_extern_function(
 
         // Math functions
         "abs" => {
-            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("abs expects 1 argument".into()))?;
+            let val = evaluated
+                .first()
+                .ok_or_else(|| CompileError::Semantic("abs expects 1 argument".into()))?;
             match val {
                 Value::Int(i) => Ok(Value::Int(i.abs())),
                 _ => Err(CompileError::Semantic("abs expects integer".into())),
             }
         }
         "min" => {
-            let a = evaluated.get(0).ok_or_else(|| CompileError::Semantic("min expects 2 arguments".into()))?.as_int()?;
-            let b = evaluated.get(1).ok_or_else(|| CompileError::Semantic("min expects 2 arguments".into()))?.as_int()?;
+            let a = evaluated
+                .get(0)
+                .ok_or_else(|| CompileError::Semantic("min expects 2 arguments".into()))?
+                .as_int()?;
+            let b = evaluated
+                .get(1)
+                .ok_or_else(|| CompileError::Semantic("min expects 2 arguments".into()))?
+                .as_int()?;
             Ok(Value::Int(a.min(b)))
         }
         "max" => {
-            let a = evaluated.get(0).ok_or_else(|| CompileError::Semantic("max expects 2 arguments".into()))?.as_int()?;
-            let b = evaluated.get(1).ok_or_else(|| CompileError::Semantic("max expects 2 arguments".into()))?.as_int()?;
+            let a = evaluated
+                .get(0)
+                .ok_or_else(|| CompileError::Semantic("max expects 2 arguments".into()))?
+                .as_int()?;
+            let b = evaluated
+                .get(1)
+                .ok_or_else(|| CompileError::Semantic("max expects 2 arguments".into()))?
+                .as_int()?;
             Ok(Value::Int(a.max(b)))
         }
         "sqrt" => {
-            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("sqrt expects 1 argument".into()))?.as_int()?;
+            let val = evaluated
+                .first()
+                .ok_or_else(|| CompileError::Semantic("sqrt expects 1 argument".into()))?
+                .as_int()?;
             Ok(Value::Int((val as f64).sqrt() as i64))
         }
         "floor" => {
-            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("floor expects 1 argument".into()))?.as_int()?;
+            let val = evaluated
+                .first()
+                .ok_or_else(|| CompileError::Semantic("floor expects 1 argument".into()))?
+                .as_int()?;
             Ok(Value::Int(val))
         }
         "ceil" => {
-            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("ceil expects 1 argument".into()))?.as_int()?;
+            let val = evaluated
+                .first()
+                .ok_or_else(|| CompileError::Semantic("ceil expects 1 argument".into()))?
+                .as_int()?;
             Ok(Value::Int(val))
         }
         "pow" => {
-            let base = evaluated.get(0).ok_or_else(|| CompileError::Semantic("pow expects 2 arguments".into()))?.as_int()?;
-            let exp = evaluated.get(1).ok_or_else(|| CompileError::Semantic("pow expects 2 arguments".into()))?.as_int()?;
+            let base = evaluated
+                .get(0)
+                .ok_or_else(|| CompileError::Semantic("pow expects 2 arguments".into()))?
+                .as_int()?;
+            let exp = evaluated
+                .get(1)
+                .ok_or_else(|| CompileError::Semantic("pow expects 2 arguments".into()))?
+                .as_int()?;
             Ok(Value::Int(base.pow(exp as u32)))
         }
 
         // Conversion functions
         "to_string" => {
-            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("to_string expects 1 argument".into()))?;
+            let val = evaluated
+                .first()
+                .ok_or_else(|| CompileError::Semantic("to_string expects 1 argument".into()))?;
             Ok(Value::Str(val.to_display_string()))
         }
         "to_int" => {
-            let val = evaluated.first().ok_or_else(|| CompileError::Semantic("to_int expects 1 argument".into()))?;
+            let val = evaluated
+                .first()
+                .ok_or_else(|| CompileError::Semantic("to_int expects 1 argument".into()))?;
             match val {
                 Value::Int(i) => Ok(Value::Int(*i)),
-                Value::Str(s) => s.parse::<i64>()
+                Value::Str(s) => s
+                    .parse::<i64>()
                     .map(Value::Int)
                     .map_err(|_| CompileError::Semantic(format!("cannot convert '{}' to int", s))),
                 Value::Bool(b) => Ok(Value::Int(if *b { 1 } else { 0 })),
-                _ => Err(CompileError::Semantic("to_int expects string, int, or bool".into())),
+                _ => Err(CompileError::Semantic(
+                    "to_int expects string, int, or bool".into(),
+                )),
             }
         }
 
         // Process control
         "exit" => {
-            let code = evaluated.first()
+            let code = evaluated
+                .first()
                 .map(|v| v.as_int())
                 .transpose()?
                 .unwrap_or(0) as i32;
@@ -229,9 +290,7 @@ pub(crate) fn call_extern_function(
         // =====================================================================
         // Native Filesystem Operations (simple/std_lib/src/host/async_nogc/io/fs.spl)
         // =====================================================================
-        "native_fs_exists" => {
-            native_fs_exists(&evaluated)
-        }
+        "native_fs_exists" => native_fs_exists(&evaluated),
         "native_fs_read" => {
             check_effect_violations("native_fs_read")?;
             native_fs_read(&evaluated)
@@ -466,7 +525,8 @@ pub(crate) fn call_extern_function(
         }
         "stdout_write" => {
             check_effect_violations("stdout_write")?;
-            let s = evaluated.first()
+            let s = evaluated
+                .first()
                 .ok_or_else(|| CompileError::Semantic("stdout_write expects 1 argument".into()))?
                 .to_display_string();
             print_to_stdout(&s);
@@ -479,7 +539,8 @@ pub(crate) fn call_extern_function(
         }
         "stderr_write" => {
             check_effect_violations("stderr_write")?;
-            let s = evaluated.first()
+            let s = evaluated
+                .first()
                 .ok_or_else(|| CompileError::Semantic("stderr_write expects 1 argument".into()))?
                 .to_display_string();
             print_to_stderr(&s);
@@ -496,8 +557,8 @@ pub(crate) fn call_extern_function(
         // =====================================================================
         "sys_get_args" => {
             // Get command line arguments from runtime FFI (unified approach)
-            use simple_runtime::value::rt_get_args;
             use crate::value_bridge::runtime_to_value;
+            use simple_runtime::value::rt_get_args;
 
             let runtime_array = rt_get_args();
             let value = runtime_to_value(runtime_array);
@@ -505,7 +566,8 @@ pub(crate) fn call_extern_function(
             Ok(value)
         }
         "sys_exit" => {
-            let code = evaluated.first()
+            let code = evaluated
+                .first()
                 .map(|v| v.as_int())
                 .transpose()?
                 .unwrap_or(0) as i32;
@@ -520,17 +582,27 @@ pub(crate) fn call_extern_function(
             Ok(Value::Int(handle as i64))
         }
         "ratatui_terminal_cleanup" => {
-            let terminal = evaluated.first()
-                .ok_or_else(|| CompileError::Semantic("ratatui_terminal_cleanup expects 1 argument".into()))?
+            let terminal = evaluated
+                .first()
+                .ok_or_else(|| {
+                    CompileError::Semantic("ratatui_terminal_cleanup expects 1 argument".into())
+                })?
                 .as_int()? as u64;
-            unsafe { ratatui_terminal_cleanup(terminal); }
+            unsafe {
+                ratatui_terminal_cleanup(terminal);
+            }
             Ok(Value::Nil)
         }
         "ratatui_terminal_clear" => {
-            let terminal = evaluated.first()
-                .ok_or_else(|| CompileError::Semantic("ratatui_terminal_clear expects 1 argument".into()))?
+            let terminal = evaluated
+                .first()
+                .ok_or_else(|| {
+                    CompileError::Semantic("ratatui_terminal_clear expects 1 argument".into())
+                })?
                 .as_int()? as u64;
-            unsafe { ratatui_terminal_clear(terminal); }
+            unsafe {
+                ratatui_terminal_clear(terminal);
+            }
             Ok(Value::Nil)
         }
         "ratatui_textbuffer_new" => {
@@ -538,34 +610,61 @@ pub(crate) fn call_extern_function(
             Ok(Value::Int(handle as i64))
         }
         "ratatui_textbuffer_insert_char" => {
-            let buffer = evaluated.get(0)
-                .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_insert_char expects 2 arguments".into()))?
+            let buffer = evaluated
+                .get(0)
+                .ok_or_else(|| {
+                    CompileError::Semantic(
+                        "ratatui_textbuffer_insert_char expects 2 arguments".into(),
+                    )
+                })?
                 .as_int()? as u64;
-            let code = evaluated.get(1)
-                .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_insert_char expects 2 arguments".into()))?
+            let code = evaluated
+                .get(1)
+                .ok_or_else(|| {
+                    CompileError::Semantic(
+                        "ratatui_textbuffer_insert_char expects 2 arguments".into(),
+                    )
+                })?
                 .as_int()? as u32;
-            unsafe { ratatui_textbuffer_insert_char(buffer, code); }
+            unsafe {
+                ratatui_textbuffer_insert_char(buffer, code);
+            }
             Ok(Value::Nil)
         }
         "ratatui_textbuffer_backspace" => {
-            let buffer = evaluated.first()
-                .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_backspace expects 1 argument".into()))?
+            let buffer = evaluated
+                .first()
+                .ok_or_else(|| {
+                    CompileError::Semantic("ratatui_textbuffer_backspace expects 1 argument".into())
+                })?
                 .as_int()? as u64;
-            unsafe { ratatui_textbuffer_backspace(buffer); }
+            unsafe {
+                ratatui_textbuffer_backspace(buffer);
+            }
             Ok(Value::Nil)
         }
         "ratatui_textbuffer_newline" => {
-            let buffer = evaluated.first()
-                .ok_or_else(|| CompileError::Semantic("ratatui_textbuffer_newline expects 1 argument".into()))?
+            let buffer = evaluated
+                .first()
+                .ok_or_else(|| {
+                    CompileError::Semantic("ratatui_textbuffer_newline expects 1 argument".into())
+                })?
                 .as_int()? as u64;
-            unsafe { ratatui_textbuffer_newline(buffer); }
+            unsafe {
+                ratatui_textbuffer_newline(buffer);
+            }
             Ok(Value::Nil)
         }
         "ratatui_object_destroy" => {
-            let handle = evaluated.first()
-                .ok_or_else(|| CompileError::Semantic("ratatui_object_destroy expects 1 argument".into()))?
+            let handle = evaluated
+                .first()
+                .ok_or_else(|| {
+                    CompileError::Semantic("ratatui_object_destroy expects 1 argument".into())
+                })?
                 .as_int()? as u64;
-            unsafe { ratatui_object_destroy(handle); }
+            unsafe {
+                ratatui_object_destroy(handle);
+            }
             Ok(Value::Nil)
         }
 
@@ -577,7 +676,9 @@ pub(crate) fn call_extern_function(
             Ok(Value::Bool(success))
         }
         "simple_repl_runner_cleanup" => {
-            unsafe { simple_repl_runner_cleanup(); }
+            unsafe {
+                simple_repl_runner_cleanup();
+            }
             Ok(Value::Nil)
         }
 
@@ -589,13 +690,18 @@ pub(crate) fn call_extern_function(
             // Record layout marker for 4KB page locality optimization.
             // When running with --layout-record, this tracks phase boundaries
             // (startup, first_frame, event_loop) for optimal code placement.
-            let val = evaluated.first()
-                .ok_or_else(|| CompileError::Semantic("simple_layout_mark expects 1 argument".into()))?;
+            let val = evaluated.first().ok_or_else(|| {
+                CompileError::Semantic("simple_layout_mark expects 1 argument".into())
+            })?;
 
             let marker_name = match val {
                 Value::Str(s) => s.clone(),
                 Value::Symbol(s) => s.clone(),
-                _ => return Err(CompileError::Semantic("simple_layout_mark expects a string argument".into())),
+                _ => {
+                    return Err(CompileError::Semantic(
+                        "simple_layout_mark expects a string argument".into(),
+                    ))
+                }
             };
 
             // Record the marker if layout recording is enabled
@@ -611,7 +717,10 @@ pub(crate) fn call_extern_function(
         }
 
         // Unknown extern function
-        _ => Err(CompileError::Semantic(format!("unknown extern function: {}", name))),
+        _ => Err(CompileError::Semantic(format!(
+            "unknown extern function: {}",
+            name
+        ))),
     }
 }
 

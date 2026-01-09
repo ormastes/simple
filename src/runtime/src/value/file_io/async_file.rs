@@ -7,9 +7,9 @@
 //! - Thread pool for concurrent file operations
 
 use crate::value::RuntimeValue;
-use std::sync::Arc;
 use parking_lot::RwLock;
 use std::sync::mpsc::{channel, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 /// Memory-mapped region handle
@@ -44,7 +44,7 @@ pub struct AsyncFileHandle {
     state: Arc<RwLock<FileLoadState>>,
     region: Arc<RwLock<Option<MmapRegion>>>,
     error: Arc<RwLock<Option<String>>>,
-    mode: i32,    // Open mode flags
+    mode: i32,      // Open mode flags
     prefault: bool, // Enable progressive prefaulting
 }
 
@@ -246,14 +246,7 @@ fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, S
     // Note: These FFI functions are defined in the parent mod.rs module
     extern "C" {
         fn sys_file_size(fd: i32) -> i64;
-        fn sys_mmap(
-            addr: i64,
-            length: u64,
-            prot: i32,
-            flags: i32,
-            fd: i32,
-            offset: u64,
-        ) -> i64;
+        fn sys_mmap(addr: i64, length: u64, prot: i32, flags: i32, fd: i32, offset: u64) -> i64;
         fn sys_close(fd: i32) -> i32;
         fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32;
     }
@@ -268,8 +261,10 @@ fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, S
         }
         #[cfg(target_family = "windows")]
         {
-            use windows_sys::Win32::Storage::FileSystem::{CreateFileA, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL};
             use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+            use windows_sys::Win32::Storage::FileSystem::{
+                CreateFileA, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+            };
 
             let access = if mode & 0x1 != 0 { 0x80000000 } else { 0 }  // GENERIC_READ
                        | if mode & 0x2 != 0 { 0x40000000 } else { 0 }; // GENERIC_WRITE
@@ -298,24 +293,28 @@ fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, S
     // Get file size
     let file_size = unsafe { sys_file_size(fd) };
     if file_size < 0 {
-        unsafe { sys_close(fd); }
+        unsafe {
+            sys_close(fd);
+        }
         return Err("Failed to get file size".to_string());
     }
 
     // Create mmap
     let mmap_ptr = unsafe {
         sys_mmap(
-            0,           // addr: let kernel choose
+            0, // addr: let kernel choose
             file_size as u64,
-            1,           // prot: PROT_READ
-            2,           // flags: MAP_PRIVATE
+            1, // prot: PROT_READ
+            2, // flags: MAP_PRIVATE
             fd,
-            0,           // offset
+            0, // offset
         )
     };
 
     if mmap_ptr < 0 {
-        unsafe { sys_close(fd); }
+        unsafe {
+            sys_close(fd);
+        }
         return Err("mmap failed".to_string());
     }
 
@@ -325,7 +324,9 @@ fn load_file_mmap(path: &str, mode: i32, prefault: bool) -> Result<MmapRegion, S
     }
 
     // Close fd (mmap keeps reference)
-    unsafe { sys_close(fd); }
+    unsafe {
+        sys_close(fd);
+    }
 
     Ok(MmapRegion {
         ptr: mmap_ptr as *mut u8,
@@ -419,7 +420,11 @@ pub extern "C" fn native_async_file_start_loading(handle_id: i64) {
 #[no_mangle]
 pub extern "C" fn native_async_file_is_ready(handle_id: i64) -> i32 {
     if let Some(handle) = ASYNC_FILE_REGISTRY.read().get(&handle_id) {
-        if handle.is_ready() { 1 } else { 0 }
+        if handle.is_ready() {
+            1
+        } else {
+            0
+        }
     } else {
         0 // Invalid handle
     }
@@ -471,7 +476,6 @@ pub extern "C" fn native_async_file_wait(handle_id: i64) -> RuntimeValue {
         }
     }
 }
-
 
 // =============================================================================
 // Async Primitives

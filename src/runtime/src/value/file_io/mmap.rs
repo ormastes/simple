@@ -5,8 +5,8 @@
 //! - Zero-copy read operations
 //! - Memory region unmapping with registry cleanup
 
-use crate::value::RuntimeValue;
 use super::{MmapRegion, MMAP_REGISTRY};
+use crate::value::RuntimeValue;
 
 /// Create memory-mapped region for file (SHARED across processes)
 ///
@@ -31,7 +31,7 @@ pub extern "C" fn native_mmap_create_shared(handle: i64, size: u64) -> RuntimeVa
                 std::ptr::null_mut(),
                 len,
                 PROT_READ,
-                MAP_SHARED,  // SHARED instead of PRIVATE
+                MAP_SHARED, // SHARED instead of PRIVATE
                 fd,
                 0,
             );
@@ -57,7 +57,7 @@ pub extern "C" fn native_mmap_create_shared(handle: i64, size: u64) -> RuntimeVa
 
     #[cfg(not(target_family = "unix"))]
     {
-        RuntimeValue::NIL  // Error - not supported
+        RuntimeValue::NIL // Error - not supported
     }
 }
 
@@ -80,14 +80,7 @@ pub extern "C" fn native_mmap_create(handle: i64, size: u64) -> RuntimeValue {
         let len = size as usize;
 
         unsafe {
-            let ptr = mmap(
-                std::ptr::null_mut(),
-                len,
-                PROT_READ,
-                MAP_PRIVATE,
-                fd,
-                0,
-            );
+            let ptr = mmap(std::ptr::null_mut(), len, PROT_READ, MAP_PRIVATE, fd, 0);
 
             if ptr == libc::MAP_FAILED {
                 // Return error - use NIL for now
@@ -112,7 +105,7 @@ pub extern "C" fn native_mmap_create(handle: i64, size: u64) -> RuntimeValue {
     #[cfg(not(target_family = "unix"))]
     {
         // Windows/other platforms - use memmap2 crate
-        RuntimeValue::NIL  // Error - not supported
+        RuntimeValue::NIL // Error - not supported
     }
 }
 

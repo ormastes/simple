@@ -3,7 +3,7 @@
 //! This module contains methods for type coercion, union wrapping,
 //! and unit type bound checking.
 
-use super::lowering_core::{MirLowerer, MirLowerResult};
+use super::lowering_core::{MirLowerResult, MirLowerer};
 use crate::hir::{HirType, TypeId};
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
 
@@ -44,9 +44,7 @@ impl<'a> MirLowerer<'a> {
         if let Some(registry) = self.type_registry {
             if let Some(hir_type) = registry.get(ty) {
                 if let HirType::UnitType {
-                    name,
-                    constraints,
-                    ..
+                    name, constraints, ..
                 } = hir_type
                 {
                     // Only emit check if there's a range constraint

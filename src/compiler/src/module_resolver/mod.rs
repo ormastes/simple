@@ -449,11 +449,7 @@ auto import router.route
         fs::create_dir_all(&child).unwrap();
 
         // Child module with [pure, io] capabilities
-        fs::write(
-            child.join("__init__.spl"),
-            "mod child\nrequires [pure, io]",
-        )
-        .unwrap();
+        fs::write(child.join("__init__.spl"), "mod child\nrequires [pure, io]").unwrap();
 
         let mut resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
 

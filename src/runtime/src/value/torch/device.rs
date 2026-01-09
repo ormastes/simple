@@ -19,7 +19,9 @@ pub extern "C" fn rt_torch_to_device(tensor_handle: u64, device_code: i32) -> u6
         use tch::Device;
 
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let device = match device_code {
@@ -33,8 +35,15 @@ pub extern "C" fn rt_torch_to_device(tensor_handle: u64, device_code: i32) -> u6
 
         let result = tensor.0.to_device(device);
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!("rt_torch_to_device: {} -> device={:?} -> handle={}", tensor_handle, device, handle);
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!(
+            "rt_torch_to_device: {} -> device={:?} -> handle={}",
+            tensor_handle,
+            device,
+            handle
+        );
         handle
     }
     #[cfg(not(feature = "pytorch"))]

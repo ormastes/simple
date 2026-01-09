@@ -3,8 +3,8 @@
 //! Provides utilities for deferring expensive initialization until actually needed.
 //! This helps improve startup time by only initializing components when they're first used.
 
-use std::sync::{Once, OnceLock};
 use parking_lot::{Mutex, MutexGuard};
+use std::sync::{Once, OnceLock};
 
 /// Lazy initialized value with thread-safe initialization
 ///
@@ -252,7 +252,8 @@ impl LazyScheduler {
         let mut tasks = self.tasks.lock();
 
         // Find the task
-        let task_index = tasks.iter()
+        let task_index = tasks
+            .iter()
             .position(|t: &DeferredTask| t.name() == name)
             .ok_or_else(|| format!("Task '{}' not found", name))?;
 
@@ -296,7 +297,11 @@ impl LazyScheduler {
 
     /// Get count of initialized tasks
     pub fn initialized_count(&self) -> usize {
-        self.tasks.lock().iter().filter(|t: &&DeferredTask| t.is_initialized()).count()
+        self.tasks
+            .lock()
+            .iter()
+            .filter(|t: &&DeferredTask| t.is_initialized())
+            .count()
     }
 }
 
@@ -378,8 +383,7 @@ mod tests {
 
     #[test]
     fn test_deferred_task_with_dependencies() {
-        let task = DeferredTask::new("task_b", || {})
-            .depends_on("task_a");
+        let task = DeferredTask::new("task_b", || {}).depends_on("task_a");
 
         assert_eq!(task.dependencies().len(), 1);
         assert_eq!(task.dependencies()[0], "task_a");

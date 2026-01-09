@@ -1,7 +1,7 @@
+use pretty_assertions::assert_eq;
 use simple_parser::ast::*;
 use simple_parser::error::ParseError;
 use simple_parser::{Parser, ParserMode};
-use pretty_assertions::assert_eq;
 
 fn parse(source: &str) -> Result<Module, ParseError> {
     let mut parser = Parser::new(source);
@@ -123,7 +123,11 @@ fn test_strict_mode_allows_inner_paren_call() {
         assert_eq!(**callee, Expr::Identifier("func1".to_string()));
         assert_eq!(args.len(), 1);
         // The argument should be a call expression: func2(arg)
-        if let Expr::Call { callee: inner_callee, args: inner_args } = &args[0].value {
+        if let Expr::Call {
+            callee: inner_callee,
+            args: inner_args,
+        } = &args[0].value
+        {
             assert_eq!(**inner_callee, Expr::Identifier("func2".to_string()));
             assert_eq!(inner_args.len(), 1);
         } else {
@@ -211,7 +215,10 @@ fn test_normal_mode_allows_nested_no_paren() {
     // Note: they may not parse as intended, but they don't error
     let result = parse("func1 func2 arg");
     // Normal mode should not error (though parsing may be ambiguous)
-    assert!(result.is_ok(), "Normal mode should allow nested no-paren syntax");
+    assert!(
+        result.is_ok(),
+        "Normal mode should allow nested no-paren syntax"
+    );
 }
 
 // === GPU/Shared Memory Tests ===

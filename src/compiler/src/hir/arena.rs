@@ -4,12 +4,12 @@
 //! All HIR nodes within a module are allocated from the same arena, enabling
 //! bulk deallocation when the module is dropped.
 
-use typed_arena::Arena;
 use std::cell::RefCell;
+use typed_arena::Arena;
 
 use super::types::{
-    HirExpr, HirFunction, HirModule, HirType, HirStmt, HirContract, HirContractClause,
-    HirTypeInvariant, HirRefinedType,
+    HirContract, HirContractClause, HirExpr, HirFunction, HirModule, HirRefinedType, HirStmt,
+    HirType, HirTypeInvariant,
 };
 
 /// Arena allocator for HIR nodes.
@@ -72,8 +72,15 @@ pub struct HirArenaStats {
 impl HirArenaStats {
     /// Get total number of allocations.
     pub fn total(&self) -> usize {
-        self.exprs + self.stmts + self.types + self.functions + self.modules
-            + self.contracts + self.contract_clauses + self.type_invariants + self.refined_types
+        self.exprs
+            + self.stmts
+            + self.types
+            + self.functions
+            + self.modules
+            + self.contracts
+            + self.contract_clauses
+            + self.type_invariants
+            + self.refined_types
     }
 }
 
@@ -242,9 +249,7 @@ pub fn clear_hir_thread_arena() {
 
 /// Get thread-local HIR arena stats.
 pub fn hir_thread_arena_stats() -> Option<HirArenaStats> {
-    THREAD_ARENA.with(|arena| {
-        arena.borrow().as_ref().map(|a| a.stats())
-    })
+    THREAD_ARENA.with(|arena| arena.borrow().as_ref().map(|a| a.stats()))
 }
 
 #[cfg(test)]

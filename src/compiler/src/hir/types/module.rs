@@ -142,7 +142,11 @@ impl HirModule {
     }
 
     /// Get method signature from a trait
-    pub fn get_trait_method(&self, trait_name: &str, method_name: &str) -> Option<&HirMethodSignature> {
+    pub fn get_trait_method(
+        &self,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<&HirMethodSignature> {
         self.trait_infos
             .get(trait_name)
             .and_then(|info| info.get_method(method_name))
@@ -213,11 +217,7 @@ impl HirModule {
     /// - `Ok(true)`: Predicate is provably satisfied at compile time
     /// - `Ok(false)`: Predicate is provably violated at compile time
     /// - `Err(predicate)`: Cannot prove at compile time, need runtime check
-    pub fn check_refinement(
-        &self,
-        type_name: &str,
-        value: &HirExpr,
-    ) -> Result<bool, HirExpr> {
+    pub fn check_refinement(&self, type_name: &str, value: &HirExpr) -> Result<bool, HirExpr> {
         if let Some(refined) = self.refined_types.get(type_name) {
             // CTR-022: Try compile-time evaluation
             if let Some(result) = refined.try_const_eval(value) {

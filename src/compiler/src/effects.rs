@@ -16,18 +16,11 @@ const BLOCKING_OPERATIONS: &[&str] = &[
     "recv_blocking", // Blocking receive from channel (sync version)
     "join_blocking", // Blocking wait for actor/future (sync version)
     "sleep_blocking", // Thread sleep (sync version)
-    // Note: await, print, read_file etc are OK in async - they're async-aware
+                     // Note: await, print, read_file etc are OK in async - they're async-aware
 ];
 
 /// Operations that require @io effect (console I/O)
-const IO_OPERATIONS: &[&str] = &[
-    "print",
-    "println",
-    "eprint",
-    "eprintln",
-    "input",
-    "flush",
-];
+const IO_OPERATIONS: &[&str] = &["print", "println", "eprint", "eprintln", "input", "flush"];
 
 /// Operations that require @fs effect (filesystem)
 const FS_OPERATIONS: &[&str] = &[
@@ -142,8 +135,7 @@ pub fn check_pure_violation(operation: &str) -> Result<(), CompileError> {
                 return Err(CompileError::Semantic(format!(
                     "side-effecting operation '{}' not allowed in pure function\n\
                      help: remove @pure decorator or add {} effect to function",
-                    operation,
-                    needed_effect
+                    operation, needed_effect
                 )));
             }
         }
@@ -218,7 +210,10 @@ pub fn check_call_compatibility(
 
             // If callee has any side-effecting decorators, reject
             for effect in callee_effects {
-                if matches!(effect, Effect::Io | Effect::Net | Effect::Fs | Effect::Unsafe) {
+                if matches!(
+                    effect,
+                    Effect::Io | Effect::Net | Effect::Fs | Effect::Unsafe
+                ) {
                     return Err(CompileError::Semantic(format!(
                         "pure function cannot call '{}' with @{} effect\n\
                          help: remove @pure decorator from caller or remove @{} from callee",

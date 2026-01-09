@@ -32,7 +32,12 @@ fn apply_lambda_to_value(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = lambda_arg {
+    if let Value::Lambda {
+        params,
+        body,
+        env: captured,
+    } = lambda_arg
+    {
         let mut local_env = captured.clone();
         if let Some(param) = params.first() {
             local_env.insert(param.clone(), val.clone());
@@ -59,13 +64,36 @@ fn handle_option_operation<F, W>(
     wrap_result: W,
 ) -> Result<Value, CompileError>
 where
-    F: Fn(&Value, Value, &mut HashMap<String, FunctionDef>, &mut HashMap<String, ClassDef>, &Enums, &ImplMethods) -> Result<Value, CompileError>,
+    F: Fn(
+        &Value,
+        Value,
+        &mut HashMap<String, FunctionDef>,
+        &mut HashMap<String, ClassDef>,
+        &Enums,
+        &ImplMethods,
+    ) -> Result<Value, CompileError>,
     W: Fn(Value) -> Value,
 {
     if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
         if let Some(val) = payload {
-            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let result = apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods)?;
+            let lambda = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let result = apply_lambda_to_value(
+                val.as_ref(),
+                lambda,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             return Ok(wrap_result(result));
         }
     }
@@ -96,8 +124,24 @@ where
 
     if is_ok == check_ok {
         if let Some(val) = payload {
-            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let result = apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods)?;
+            let lambda = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let result = apply_lambda_to_value(
+                val.as_ref(),
+                lambda,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             return Ok(wrap_ok(result));
         }
     }
@@ -118,7 +162,14 @@ pub(crate) fn eval_option_map(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     handle_option_operation(
-        variant, payload, args, env, functions, classes, enums, impl_methods,
+        variant,
+        payload,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
         apply_lambda_to_value,
         Value::some,
     )
@@ -136,7 +187,14 @@ pub(crate) fn eval_option_and_then(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     handle_option_operation(
-        variant, payload, args, env, functions, classes, enums, impl_methods,
+        variant,
+        payload,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
         apply_lambda_to_value,
         |v| v, // Identity - don't wrap result
     )
@@ -162,8 +220,22 @@ pub(crate) fn eval_option_or_else(
         });
     }
     // None case: call the function to get alternative
-    let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-    if let Value::Lambda { params: _, body, env: captured } = func_arg {
+    let func_arg = eval_arg(
+        args,
+        0,
+        Value::Nil,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )?;
+    if let Value::Lambda {
+        params: _,
+        body,
+        env: captured,
+    } = func_arg
+    {
         return evaluate_expr(&body, &captured, functions, classes, enums, impl_methods);
     }
     Ok(Value::none())
@@ -182,13 +254,28 @@ pub(crate) fn eval_option_filter(
 ) -> Result<Value, CompileError> {
     if OptionVariant::from_name(variant) == Some(OptionVariant::Some) {
         if let Some(val) = payload {
-            let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            if let Value::Lambda { params, body, env: captured } = func_arg {
+            let func_arg = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            if let Value::Lambda {
+                params,
+                body,
+                env: captured,
+            } = func_arg
+            {
                 let mut local_env = captured.clone();
                 if let Some(param) = params.first() {
                     local_env.insert(param.clone(), val.as_ref().clone());
                 }
-                let result = evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
+                let result =
+                    evaluate_expr(&body, &local_env, functions, classes, enums, impl_methods)?;
                 if result.truthy() {
                     return Ok(Value::some(val.as_ref().clone()));
                 }
@@ -213,8 +300,24 @@ pub(crate) fn eval_result_map(
 
     if is_ok {
         if let Some(val) = payload {
-            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let result = apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods)?;
+            let lambda = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let result = apply_lambda_to_value(
+                val.as_ref(),
+                lambda,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             return Ok(Value::ok(result));
         }
     }
@@ -241,8 +344,24 @@ pub(crate) fn eval_result_map_err(
 
     if is_err {
         if let Some(val) = payload {
-            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let result = apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods)?;
+            let lambda = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
+            let result = apply_lambda_to_value(
+                val.as_ref(),
+                lambda,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             return Ok(Value::err(result));
         }
     }
@@ -267,9 +386,25 @@ pub(crate) fn eval_result_and_then(
 ) -> Result<Value, CompileError> {
     if ResultVariant::from_name(variant) == Some(ResultVariant::Ok) {
         if let Some(val) = payload {
-            let lambda = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            let lambda = eval_arg(
+                args,
+                0,
+                Value::Nil,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )?;
             // Return result as-is (should be Result)
-            return apply_lambda_to_value(val.as_ref(), lambda, functions, classes, enums, impl_methods);
+            return apply_lambda_to_value(
+                val.as_ref(),
+                lambda,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            );
         }
     }
     // Return Err as-is
@@ -301,8 +436,22 @@ pub(crate) fn eval_result_or_else(
     }
     // Err case: call the function with error value
     if let Some(err_val) = payload {
-        let func_arg = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-        if let Value::Lambda { params, body, env: captured } = func_arg {
+        let func_arg = eval_arg(
+            args,
+            0,
+            Value::Nil,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+        )?;
+        if let Value::Lambda {
+            params,
+            body,
+            env: captured,
+        } = func_arg
+        {
             let mut local_env = captured.clone();
             if let Some(param) = params.first() {
                 local_env.insert(param.clone(), err_val.as_ref().clone());

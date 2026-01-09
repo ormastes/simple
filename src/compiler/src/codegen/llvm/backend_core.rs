@@ -1,5 +1,4 @@
 /// LLVM backend core - struct definition, constructors, and basic accessors
-
 use crate::codegen::backend_trait::NativeBackend;
 use crate::error::CompileError;
 use crate::hir::TypeId;

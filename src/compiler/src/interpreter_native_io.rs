@@ -14,9 +14,8 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 // Re-export helpers from native_io_helpers module
 pub(crate) use super::native_io_helpers::{
-    extract_bool, extract_bytes, extract_int, extract_open_mode, extract_path,
-    io_err, io_err_msg, io_ok, create_file_metadata, create_dir_entry,
-    make_timestamp_option,
+    create_dir_entry, create_file_metadata, extract_bool, extract_bytes, extract_int,
+    extract_open_mode, extract_path, io_err, io_err_msg, io_ok, make_timestamp_option,
 };
 
 //==============================================================================
@@ -47,7 +46,10 @@ where
         let mut handles = handles.borrow_mut();
         match handles.get_mut(&id) {
             Some(file) => f(file),
-            None => Err(io::Error::new(ErrorKind::InvalidInput, "invalid file handle")),
+            None => Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "invalid file handle",
+            )),
         }
     })
 }
@@ -90,7 +92,11 @@ pub fn native_fs_write_string(args: &[Value]) -> Result<Value, CompileError> {
     let path = extract_path(args, 0)?;
     let content = match args.get(1) {
         Some(Value::Str(s)) => s.clone(),
-        _ => return Err(CompileError::Semantic("native_fs_write_string: content must be a string".into())),
+        _ => {
+            return Err(CompileError::Semantic(
+                "native_fs_write_string: content must be a string".into(),
+            ))
+        }
     };
 
     match std::fs::write(&path, &content) {
@@ -308,10 +314,7 @@ pub fn native_file_seek(args: &[Value]) -> Result<Value, CompileError> {
         Some(Value::Enum {
             variant, payload, ..
         }) => {
-            let pos = payload
-                .as_ref()
-                .and_then(|p| p.as_int().ok())
-                .unwrap_or(0);
+            let pos = payload.as_ref().and_then(|p| p.as_int().ok()).unwrap_or(0);
             match variant.as_str() {
                 "Start" => SeekFrom::Start(pos as u64),
                 "End" => SeekFrom::End(pos),
@@ -539,14 +542,14 @@ pub fn native_term_read(args: &[Value]) -> Result<Value, CompileError> {
 fn poll_stdin(timeout_ms: i32) -> Result<i32, i32> {
     use std::os::unix::io::AsRawFd;
     let fd = std::io::stdin().as_raw_fd();
-    
+
     unsafe {
         let mut pfd = libc::pollfd {
             fd,
             events: libc::POLLIN,
             revents: 0,
         };
-        
+
         let ret = libc::poll(&mut pfd, 1, timeout_ms);
         if ret < 0 {
             Err(-1)

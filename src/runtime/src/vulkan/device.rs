@@ -122,7 +122,9 @@ impl VulkanDevice {
             .enabled_extension_names(&extension_names);
 
         let device = unsafe {
-            instance.instance().create_device(physical_device.handle, &create_info, None)
+            instance
+                .instance()
+                .create_device(physical_device.handle, &create_info, None)
                 .map_err(|e| VulkanError::DeviceCreationFailed(format!("{:?}", e)))?
         };
 
@@ -131,14 +133,12 @@ impl VulkanDevice {
         let transfer_queue = unsafe { device.get_device_queue(transfer_family, 0) };
 
         #[cfg(feature = "vulkan")]
-        let graphics_queue = graphics_family.map(|family| unsafe {
-            device.get_device_queue(family, 0)
-        });
+        let graphics_queue =
+            graphics_family.map(|family| unsafe { device.get_device_queue(family, 0) });
 
         #[cfg(feature = "vulkan")]
-        let present_queue = present_family.map(|family| unsafe {
-            device.get_device_queue(family, 0)
-        });
+        let present_queue =
+            present_family.map(|family| unsafe { device.get_device_queue(family, 0) });
 
         // Create allocator
         let allocator = Allocator::new(&AllocatorCreateDesc {
@@ -154,8 +154,11 @@ impl VulkanDevice {
         // Create pipeline cache
         let cache_info = vk::PipelineCacheCreateInfo::default();
         let pipeline_cache = unsafe {
-            device.create_pipeline_cache(&cache_info, None)
-                .map_err(|e| VulkanError::DeviceCreationFailed(format!("Pipeline cache: {:?}", e)))?
+            device
+                .create_pipeline_cache(&cache_info, None)
+                .map_err(|e| {
+                    VulkanError::DeviceCreationFailed(format!("Pipeline cache: {:?}", e))
+                })?
         };
 
         // Create command pools
@@ -163,7 +166,8 @@ impl VulkanDevice {
             .queue_family_index(compute_family)
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let compute_pool = unsafe {
-            device.create_command_pool(&compute_pool_info, None)
+            device
+                .create_command_pool(&compute_pool_info, None)
                 .map_err(|e| VulkanError::DeviceCreationFailed(format!("Compute pool: {:?}", e)))?
         };
 
@@ -171,7 +175,8 @@ impl VulkanDevice {
             .queue_family_index(transfer_family)
             .flags(vk::CommandPoolCreateFlags::TRANSIENT);
         let transfer_pool = unsafe {
-            device.create_command_pool(&transfer_pool_info, None)
+            device
+                .create_command_pool(&transfer_pool_info, None)
                 .map_err(|e| VulkanError::DeviceCreationFailed(format!("Transfer pool: {:?}", e)))?
         };
 
@@ -182,8 +187,11 @@ impl VulkanDevice {
                 .queue_family_index(gfx_family)
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
             let pool = unsafe {
-                device.create_command_pool(&graphics_pool_info, None)
-                    .map_err(|e| VulkanError::DeviceCreationFailed(format!("Graphics pool: {:?}", e)))?
+                device
+                    .create_command_pool(&graphics_pool_info, None)
+                    .map_err(|e| {
+                        VulkanError::DeviceCreationFailed(format!("Graphics pool: {:?}", e))
+                    })?
             };
             Some(pool)
         } else {
@@ -192,7 +200,10 @@ impl VulkanDevice {
 
         // Create swapchain loader
         #[cfg(feature = "vulkan")]
-        let swapchain_loader = Some(ash::khr::swapchain::Device::new(instance.instance(), &device));
+        let swapchain_loader = Some(ash::khr::swapchain::Device::new(
+            instance.instance(),
+            &device,
+        ));
 
         tracing::info!("Vulkan device created successfully");
 
@@ -237,7 +248,11 @@ impl VulkanDevice {
             .max_by_key(|d| d.compute_score())
             .ok_or(VulkanError::NoDeviceFound)?;
 
-        tracing::info!("Auto-selected device: {} (score: {})", best.name(), best.compute_score());
+        tracing::info!(
+            "Auto-selected device: {} (score: {})",
+            best.name(),
+            best.compute_score()
+        );
 
         Self::new(best)
     }
@@ -305,7 +320,8 @@ impl VulkanDevice {
     /// Wait for device to be idle
     pub fn wait_idle(&self) -> VulkanResult<()> {
         unsafe {
-            self.device.device_wait_idle()
+            self.device
+                .device_wait_idle()
                 .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
         }
         Ok(())
@@ -321,16 +337,17 @@ impl VulkanDevice {
             .command_buffer_count(1);
 
         let cmd = unsafe {
-            self.device.allocate_command_buffers(&alloc_info)
-                .map_err(|e| VulkanError::CommandBufferError(format!("Allocate: {:?}", e)))?
-                [0]
+            self.device
+                .allocate_command_buffers(&alloc_info)
+                .map_err(|e| VulkanError::CommandBufferError(format!("Allocate: {:?}", e)))?[0]
         };
 
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
         unsafe {
-            self.device.begin_command_buffer(cmd, &begin_info)
+            self.device
+                .begin_command_buffer(cmd, &begin_info)
                 .map_err(|e| VulkanError::CommandBufferError(format!("Begin: {:?}", e)))?;
         }
 
@@ -340,21 +357,23 @@ impl VulkanDevice {
     /// Submit and wait for a transfer command buffer
     pub fn submit_transfer_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
         unsafe {
-            self.device.end_command_buffer(cmd)
+            self.device
+                .end_command_buffer(cmd)
                 .map_err(|e| VulkanError::CommandBufferError(format!("End: {:?}", e)))?;
         }
 
         let cmd_buffers = [cmd];
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(&cmd_buffers);
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
         let queue = self.transfer_queue.lock();
 
         unsafe {
-            self.device.queue_submit(*queue, &[submit_info], vk::Fence::null())
+            self.device
+                .queue_submit(*queue, &[submit_info], vk::Fence::null())
                 .map_err(|e| VulkanError::CommandBufferError(format!("Submit: {:?}", e)))?;
 
-            self.device.queue_wait_idle(*queue)
+            self.device
+                .queue_wait_idle(*queue)
                 .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
         }
 
@@ -377,16 +396,17 @@ impl VulkanDevice {
             .command_buffer_count(1);
 
         let cmd = unsafe {
-            self.device.allocate_command_buffers(&alloc_info)
-                .map_err(|e| VulkanError::CommandBufferError(format!("Allocate: {:?}", e)))?
-                [0]
+            self.device
+                .allocate_command_buffers(&alloc_info)
+                .map_err(|e| VulkanError::CommandBufferError(format!("Allocate: {:?}", e)))?[0]
         };
 
         let begin_info = vk::CommandBufferBeginInfo::default()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
 
         unsafe {
-            self.device.begin_command_buffer(cmd, &begin_info)
+            self.device
+                .begin_command_buffer(cmd, &begin_info)
                 .map_err(|e| VulkanError::CommandBufferError(format!("Begin: {:?}", e)))?;
         }
 
@@ -396,21 +416,23 @@ impl VulkanDevice {
     /// Submit and wait for a compute command buffer
     pub fn submit_compute_command(&self, cmd: vk::CommandBuffer) -> VulkanResult<()> {
         unsafe {
-            self.device.end_command_buffer(cmd)
+            self.device
+                .end_command_buffer(cmd)
                 .map_err(|e| VulkanError::CommandBufferError(format!("End: {:?}", e)))?;
         }
 
         let cmd_buffers = [cmd];
-        let submit_info = vk::SubmitInfo::default()
-            .command_buffers(&cmd_buffers);
+        let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
         let queue = self.compute_queue.lock();
 
         unsafe {
-            self.device.queue_submit(*queue, &[submit_info], vk::Fence::null())
+            self.device
+                .queue_submit(*queue, &[submit_info], vk::Fence::null())
                 .map_err(|e| VulkanError::CommandBufferError(format!("Submit: {:?}", e)))?;
 
-            self.device.queue_wait_idle(*queue)
+            self.device
+                .queue_wait_idle(*queue)
                 .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
         }
 
@@ -429,9 +451,12 @@ impl Drop for VulkanDevice {
         unsafe {
             let _ = self.device.device_wait_idle();
 
-            self.device.destroy_command_pool(*self.transfer_pool.lock(), None);
-            self.device.destroy_command_pool(*self.compute_pool.lock(), None);
-            self.device.destroy_pipeline_cache(self.pipeline_cache, None);
+            self.device
+                .destroy_command_pool(*self.transfer_pool.lock(), None);
+            self.device
+                .destroy_command_pool(*self.compute_pool.lock(), None);
+            self.device
+                .destroy_pipeline_cache(self.pipeline_cache, None);
 
             // Allocator drop happens automatically
 

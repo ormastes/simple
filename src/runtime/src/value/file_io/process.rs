@@ -48,7 +48,7 @@ pub extern "C" fn native_spawn_worker(worker_fn: u64) -> RuntimeValue {
 
     #[cfg(not(target_family = "unix"))]
     {
-        RuntimeValue::NIL  // Not supported on non-Unix platforms
+        RuntimeValue::NIL // Not supported on non-Unix platforms
     }
 }
 
@@ -80,7 +80,7 @@ pub extern "C" fn native_process_wait(pid: i64) -> RuntimeValue {
                 let exit_code = WEXITSTATUS(status);
                 RuntimeValue::from_int(exit_code as i64)
             } else {
-                RuntimeValue::from_int(-1)  // Abnormal termination
+                RuntimeValue::from_int(-1) // Abnormal termination
             }
         }
     }
@@ -140,9 +140,9 @@ pub extern "C" fn native_process_kill(pid: i64) -> RuntimeValue {
             let result = kill(pid as pid_t, SIGTERM);
 
             if result == 0 {
-                RuntimeValue::NIL  // Success
+                RuntimeValue::NIL // Success
             } else {
-                RuntimeValue::NIL  // Error
+                RuntimeValue::NIL // Error
             }
         }
     }

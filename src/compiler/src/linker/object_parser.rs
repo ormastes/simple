@@ -3,14 +3,12 @@
 //! Parses ELF, Mach-O, and COFF object files produced by Cranelift
 //! and extracts sections, symbols, and relocations for SMF generation.
 
-use object::{
-    Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolKind,
-};
+use object::{Object, ObjectSection, ObjectSymbol, RelocationTarget, SectionKind, SymbolKind};
 use std::collections::HashMap;
 use thiserror::Error;
 
 use super::smf_writer::{
-    DataSectionKind, RelocationType, SmfRelocation, SmfSection, SmfSymbol, SectionType,
+    DataSectionKind, RelocationType, SectionType, SmfRelocation, SmfSection, SmfSymbol,
     SymbolBinding, SymbolType, SECTION_FLAG_EXEC, SECTION_FLAG_READ, SECTION_FLAG_WRITE,
 };
 
@@ -133,7 +131,11 @@ impl ParsedObject {
                 // Find SMF section index from object section index
                 let obj_section = obj_file.section_by_index(section_idx)?;
                 let section_name = obj_section.name().unwrap_or("");
-                parsed.section_name_to_index.get(section_name).copied().unwrap_or(0) as u16
+                parsed
+                    .section_name_to_index
+                    .get(section_name)
+                    .copied()
+                    .unwrap_or(0) as u16
             } else {
                 0 // Undefined symbol
             };
@@ -170,7 +172,11 @@ impl ParsedObject {
                         // Find symbol in our parsed symbols
                         let obj_symbol = obj_file.symbol_by_index(sym_idx)?;
                         let sym_name = obj_symbol.name().unwrap_or("");
-                        parsed.symbol_name_to_index.get(sym_name).copied().unwrap_or(0) as u32
+                        parsed
+                            .symbol_name_to_index
+                            .get(sym_name)
+                            .copied()
+                            .unwrap_or(0) as u32
                     }
                     _ => continue, // Skip non-symbol relocations
                 };

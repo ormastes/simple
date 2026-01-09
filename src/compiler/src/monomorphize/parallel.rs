@@ -171,9 +171,7 @@ impl ParallelMonoTable {
 
     /// Get total number of completed specializations.
     pub fn completed_count(&self) -> usize {
-        self.completed_functions.len()
-            + self.completed_structs.len()
-            + self.completed_classes.len()
+        self.completed_functions.len() + self.completed_structs.len() + self.completed_classes.len()
     }
 }
 
@@ -352,10 +350,7 @@ impl Default for ParallelMonomorphizer {
 pub fn monomorphize_modules_parallel(modules: &[Module]) -> Vec<(ParallelMonoTable, MonoStats)> {
     let mono = ParallelMonomorphizer::new();
 
-    modules
-        .par_iter()
-        .map(|m| mono.process_module(m))
-        .collect()
+    modules.par_iter().map(|m| mono.process_module(m)).collect()
 }
 
 #[cfg(test)]
@@ -371,9 +366,7 @@ mod tests {
 
     #[test]
     fn test_parallel_mono_config() {
-        let config = ParallelMonoConfig::new()
-            .with_threshold(10)
-            .with_threads(4);
+        let config = ParallelMonoConfig::new().with_threshold(10).with_threads(4);
 
         assert_eq!(config.parallel_threshold, 10);
         assert_eq!(config.num_threads, Some(4));

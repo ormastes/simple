@@ -359,6 +359,7 @@ fn test_hir_function_integration() {
         effects: vec![],
         layout_hint: None,
         verification_mode: VerificationMode::Unverified,
+        is_ghost: false,
     };
 
     assert_eq!(func.name, "add");

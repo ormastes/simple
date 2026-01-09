@@ -312,11 +312,7 @@ pub extern "C" fn rt_vk_descriptor_set_allocate(
 pub extern "C" fn rt_vk_descriptor_set_free(set_handle: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
-        if DESCRIPTOR_SET_REGISTRY
-            .lock()
-            .remove(&set_handle)
-            .is_some()
-        {
+        if DESCRIPTOR_SET_REGISTRY.lock().remove(&set_handle).is_some() {
             tracing::debug!("Descriptor set {} freed", set_handle);
             VulkanFfiError::Success as i32
         } else {
@@ -370,7 +366,9 @@ pub extern "C" fn rt_vk_descriptor_set_update_buffer(
                 Ok(()) => {
                     tracing::debug!(
                         "Descriptor set {} updated with buffer {} at binding {}",
-                        set_handle, buffer_handle, binding
+                        set_handle,
+                        buffer_handle,
+                        binding
                     );
                     VulkanFfiError::Success as i32
                 }

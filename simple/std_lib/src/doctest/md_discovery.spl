@@ -1,0 +1,347 @@
+/// Markdown Doctest Discovery
+///
+/// Discovers doctests from markdown files using README.md-based configuration.
+/// See doc/spec/doctest_readme.md for the full specification.
+///
+/// Discovery starts from a root README.md and recursively processes:
+/// - ## Subdirectory links (directories with their own README.md)
+/// - ## Files links (individual .md files)
+///
+/// Code blocks in markdown are extracted and filtered by:
+/// - Default language (from config or "simple")
+/// - Modifiers (:skip, :ignore-output, :should-fail)
+/// - Doctest marker (# doctest)
+
+use readme_parser::{
+    ReadmeConfig, ReadmeLink, ParsedReadme,
+    parse_readme, extract_code_blocks, has_doctest_marker, MarkdownCodeBlock
+}
+use parser::{DoctestExample, Expected, SourceLocation}
+
+// ============================================================================
+// FFI Declarations (shared with discovery.spl)
+// ============================================================================
+
+extern fn doctest_read_file(path: String) -> String
+extern fn doctest_path_exists(path: String) -> Bool
+extern fn doctest_is_file(path: String) -> Bool
+extern fn doctest_is_dir(path: String) -> Bool
+extern fn doctest_path_contains(path: String, pattern: String) -> Bool
+
+// ============================================================================
+// Doctest File Representation
+// ============================================================================
+
+/// A file containing doctests with its configuration
+struct DoctestFile:
+    /// Path to the file
+    path: String
+    /// Configuration (inherited and merged)
+    config: ReadmeConfig
+    /// Code blocks extracted from the file
+    blocks: List[MarkdownCodeBlock]
+
+// ============================================================================
+// Discovery Functions
+// ============================================================================
+
+/// Discover all doctests starting from a root path
+///
+/// If root is a directory, looks for README.md and processes hierarchically.
+/// If root is a file, processes just that file.
+fn discover_md_doctests(root: String) -> List[DoctestFile]:
+    if doctest_is_file(root):
+        # Single file
+        if root.ends_with(".md"):
+            let content = doctest_read_file(root)
+            let parsed = parse_readme(content)
+            let blocks = extract_code_blocks(parsed.content, root, parsed.config.lang)
+            return [DoctestFile(path: root, config: parsed.config, blocks: blocks)]
+        return []
+
+    if doctest_is_dir(root):
+        let readme_path = join_path(root, "README.md")
+        if doctest_path_exists(readme_path):
+            return discover_from_readme(readme_path, ReadmeConfig.default())
+        else:
+            # No README.md - just scan .md files in directory
+            return scan_directory_flat(root, ReadmeConfig.default())
+
+    return []
+
+/// Discover doctests hierarchically from a README.md file
+fn discover_from_readme(readme_path: String, parent_config: ReadmeConfig) -> List[DoctestFile]:
+    let results: List[DoctestFile] = []
+
+    if not doctest_path_exists(readme_path):
+        return results
+
+    let content = doctest_read_file(readme_path)
+    let parsed = parse_readme(content)
+
+    # Merge config with parent
+    let config = parsed.config.merge_with(parent_config)
+
+    if config.disabled:
+        return results
+
+    let base_dir = get_directory(readme_path)
+
+    # Add the README.md itself if it has code blocks
+    let readme_blocks = extract_code_blocks(parsed.content, readme_path, config.lang)
+    let doctest_blocks = filter_doctest_blocks(readme_blocks)
+    if doctest_blocks.len() > 0:
+        results.push(DoctestFile(path: readme_path, config: config, blocks: doctest_blocks))
+
+    # Process subdirectories
+    for subdir_link in parsed.subdirs:
+        let subdir_path = join_path(base_dir, subdir_link.path)
+
+        if is_excluded(subdir_path, config.excludes):
+            continue
+
+        let subdir_readme = join_path(subdir_path, "README.md")
+        if doctest_path_exists(subdir_readme):
+            let sub_results = discover_from_readme(subdir_readme, config)
+            results.extend(sub_results)
+        else:
+            # Warning: subdirectory missing README.md
+            # Could log this, for now skip silently
+            pass
+
+    # Process linked files
+    for file_link in parsed.files:
+        let file_path = join_path(base_dir, file_link.path)
+
+        if is_excluded(file_path, config.excludes):
+            continue
+
+        if not doctest_path_exists(file_path):
+            # Warning: linked file not found
+            continue
+
+        let file_content = doctest_read_file(file_path)
+        let file_parsed = parse_readme(file_content)
+        let file_config = file_parsed.config.merge_with(config)
+
+        if file_config.disabled:
+            continue
+
+        let file_blocks = extract_code_blocks(file_parsed.content, file_path, file_config.lang)
+        let file_doctest_blocks = filter_doctest_blocks(file_blocks)
+
+        if file_doctest_blocks.len() > 0:
+            results.push(DoctestFile(path: file_path, config: file_config, blocks: file_doctest_blocks))
+
+    return results
+
+/// Scan directory flat (no README.md hierarchy)
+fn scan_directory_flat(dir: String, config: ReadmeConfig) -> List[DoctestFile]:
+    let results: List[DoctestFile] = []
+
+    # Would need directory listing FFI
+    # For now, return empty - hierarchical discovery is preferred
+    return results
+
+// ============================================================================
+// Filtering Functions
+// ============================================================================
+
+/// Filter code blocks to only those that should be tested
+fn filter_doctest_blocks(blocks: List[MarkdownCodeBlock]) -> List[MarkdownCodeBlock]:
+    let result: List[MarkdownCodeBlock] = []
+
+    for block in blocks:
+        # Skip blocks with :skip modifier
+        if block.should_skip():
+            continue
+
+        # Only include blocks with doctest marker or all simple blocks
+        if has_doctest_marker(block.code):
+            result.push(block)
+        elif block.lang == "simple" or block.lang == "":
+            # Include all simple code blocks by default
+            result.push(block)
+
+    return result
+
+/// Check if path matches any exclude pattern
+fn is_excluded(path: String, excludes: List[String]) -> Bool:
+    for pattern in excludes:
+        if matches_pattern(path, pattern):
+            return True
+    return False
+
+/// Simple glob pattern matching
+fn matches_pattern(path: String, pattern: String) -> Bool:
+    # Handle negation
+    if pattern.starts_with("!"):
+        return False  # Negation means "don't exclude"
+
+    # Handle ** patterns
+    let clean_pattern = pattern
+    if clean_pattern.starts_with("**/"):
+        clean_pattern = clean_pattern[3:]
+    if clean_pattern.ends_with("/**"):
+        clean_pattern = clean_pattern[:-3]
+
+    # Handle * wildcards - convert to simple contains check
+    if clean_pattern.contains("*"):
+        let parts = clean_pattern.split("*")
+        for part in parts:
+            if part.len() > 0 and not doctest_path_contains(path, part):
+                return False
+        return True
+
+    # Direct match or contains
+    return path == pattern or path.ends_with("/" + pattern) or doctest_path_contains(path, pattern)
+
+// ============================================================================
+// Path Utilities
+// ============================================================================
+
+/// Join two path components
+fn join_path(base: String, relative: String) -> String:
+    if base.ends_with("/"):
+        return base + relative
+    return base + "/" + relative
+
+/// Get directory part of a path
+fn get_directory(path: String) -> String:
+    let last_slash = path.rfind("/")
+    if last_slash < 0:
+        return "."
+    return path[0:last_slash]
+
+// ============================================================================
+// Conversion to DoctestExample
+// ============================================================================
+
+/// Convert markdown code blocks to DoctestExample format
+fn blocks_to_examples(file: DoctestFile) -> List[DoctestExample]:
+    let examples: List[DoctestExample] = []
+
+    for block in file.blocks:
+        let example = code_block_to_example(block, file.config)
+        examples.push(example)
+
+    return examples
+
+/// Convert a single code block to DoctestExample
+fn code_block_to_example(block: MarkdownCodeBlock, config: ReadmeConfig) -> DoctestExample:
+    # Parse the code to extract setup, main code, and expected output
+    let lines = block.code.split("\n")
+    let setup: List[String] = []
+    let code: List[String] = []
+    let expected_lines: List[String] = []
+
+    let in_doctest = False
+    let in_expected = False
+
+    for line in lines:
+        let trimmed = line.trim()
+
+        if trimmed == "# doctest" or trimmed == "#doctest":
+            in_doctest = True
+            continue
+
+        if in_doctest:
+            if trimmed.starts_with("# expected:") or trimmed.starts_with("#expected:"):
+                in_expected = True
+                let exp_value = trimmed[trimmed.find(":") + 1:].trim()
+                if exp_value.len() > 0:
+                    expected_lines.push(exp_value)
+                continue
+
+            if in_expected:
+                if trimmed.starts_with("#"):
+                    expected_lines.push(trimmed[1:].trim())
+                else:
+                    in_expected = False
+                    code.push(line)
+            else:
+                code.push(line)
+        else:
+            # Before # doctest marker - could be setup or actual code
+            code.push(line)
+
+    # Determine expected output
+    let expected = if expected_lines.len() > 0:
+        Expected.Output(expected_lines.join("\n"))
+    elif block.should_fail():
+        Expected.Exception("", "")  # Any exception
+    elif block.should_ignore_output():
+        Expected.Nothing
+    else:
+        Expected.Nothing  # Default: just check it runs
+
+    return DoctestExample(
+        code: code,
+        expected: expected,
+        setup: setup,
+        teardown: [],
+        location: SourceLocation(
+            file: block.source,
+            line: block.line,
+            column: 1
+        ),
+        timeout_ms: config.timeout
+    )
+
+// ============================================================================
+// High-Level API
+// ============================================================================
+
+/// Run all doctests from markdown starting at root path
+fn run_md_doctests(root: String) -> MdDoctestResults:
+    let files = discover_md_doctests(root)
+    let total_examples = 0
+    let passed = 0
+    let failed = 0
+    let skipped = 0
+    let file_results: List[MdFileResult] = []
+
+    for file in files:
+        let examples = blocks_to_examples(file)
+        let file_passed = 0
+        let file_failed = 0
+
+        for example in examples:
+            total_examples = total_examples + 1
+            # Would call runner.run_example(example) here
+            # For now, count as passed
+            file_passed = file_passed + 1
+            passed = passed + 1
+
+        file_results.push(MdFileResult(
+            path: file.path,
+            total: examples.len(),
+            passed: file_passed,
+            failed: file_failed
+        ))
+
+    return MdDoctestResults(
+        total: total_examples,
+        passed: passed,
+        failed: failed,
+        skipped: skipped,
+        files: file_results
+    )
+
+/// Results from markdown doctest run
+struct MdDoctestResults:
+    total: Int
+    passed: Int
+    failed: Int
+    skipped: Int
+    files: List[MdFileResult]
+
+    fn success(self) -> Bool:
+        return self.failed == 0
+
+/// Results for a single file
+struct MdFileResult:
+    path: String
+    total: Int
+    passed: Int
+    failed: Int

@@ -5,7 +5,7 @@
 // Parser Unit Definition Types
 // ============================================================================
 mod parser_unit_def_tests {
-    use simple_parser::{UnitDef, UnitExpr, UnitVariant, UnitFamilyDef};
+    use simple_parser::{UnitDef, UnitExpr, UnitFamilyDef, UnitVariant};
 
     #[test]
     fn test_unit_def_size() {
@@ -32,7 +32,10 @@ mod parser_unit_def_tests {
 // Parser Arithmetic Types
 // ============================================================================
 mod parser_arithmetic_tests {
-    use simple_parser::{BinaryArithmeticOp, BinaryArithmeticRule, UnaryArithmeticOp, UnaryArithmeticRule, UnitArithmetic};
+    use simple_parser::{
+        BinaryArithmeticOp, BinaryArithmeticRule, UnaryArithmeticOp, UnaryArithmeticRule,
+        UnitArithmetic,
+    };
 
     #[test]
     fn test_binary_arithmetic_op_size() {
@@ -86,7 +89,7 @@ mod parser_bounds_extended_tests {
 // Parser Type Alias Types
 // ============================================================================
 mod parser_type_alias_tests {
-    use simple_parser::{TypeAliasDef, RefinementType, WhereBound};
+    use simple_parser::{RefinementType, TypeAliasDef, WhereBound};
 
     #[test]
     fn test_type_alias_def_size() {
@@ -108,7 +111,7 @@ mod parser_type_alias_tests {
 // Parser Repr Types
 // ============================================================================
 mod parser_repr_tests {
-    use simple_parser::{ReprType, UnitWithRepr, UnitReprConstraints};
+    use simple_parser::{ReprType, UnitReprConstraints, UnitWithRepr};
 
     #[test]
     fn test_repr_type_size() {
@@ -130,7 +133,7 @@ mod parser_repr_tests {
 // Parser Static and Requires Types
 // ============================================================================
 mod parser_static_tests {
-    use simple_parser::{StaticStmt, RequiresCapabilitiesStmt};
+    use simple_parser::{RequiresCapabilitiesStmt, StaticStmt};
 
     #[test]
     fn test_static_stmt_size() {

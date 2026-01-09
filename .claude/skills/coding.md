@@ -144,6 +144,7 @@ File in `simple/bug_report.md`:
 
 ## See Also
 
+- **`doc/guide/coding_style.md`** - Full coding style guide (domain types, defaults, config, AOP)
 - `doc/spec/syntax.md` - Lexical structure
 - `doc/spec/types.md` - Type system
 - `doc/spec/functions.md` - Functions, pattern matching

@@ -8,7 +8,7 @@
 //! - If expressions → Lean if-then-else
 
 use super::types::{LeanType, TypeTranslator};
-use crate::hir::{HirExpr, HirExprKind, HirStmt, BinOp, UnaryOp, LocalVar};
+use crate::hir::{BinOp, HirExpr, HirExprKind, HirStmt, LocalVar, UnaryOp};
 use crate::CompileError;
 
 /// A Lean expression
@@ -25,10 +25,7 @@ pub enum LeanExpr {
         right: Box<LeanExpr>,
     },
     /// Unary operation
-    UnaryOp {
-        op: String,
-        operand: Box<LeanExpr>,
-    },
+    UnaryOp { op: String, operand: Box<LeanExpr> },
     /// Function application
     App {
         func: Box<LeanExpr>,
@@ -118,7 +115,8 @@ impl LeanExpr {
                 if args.is_empty() {
                     func.to_lean()
                 } else {
-                    let args_str = args.iter()
+                    let args_str = args
+                        .iter()
                         .map(|a| a.to_lean())
                         .collect::<Vec<_>>()
                         .join(" ");
@@ -126,7 +124,8 @@ impl LeanExpr {
                 }
             }
             LeanExpr::Lambda { params, body } => {
-                let params_str = params.iter()
+                let params_str = params
+                    .iter()
                     .map(|(name, ty)| {
                         if let Some(t) = ty {
                             format!("({} : {})", name, t.to_lean())
@@ -141,7 +140,11 @@ impl LeanExpr {
             LeanExpr::Let { name, value, body } => {
                 format!("let {} := {}\n  {}", name, value.to_lean(), body.to_lean())
             }
-            LeanExpr::If { cond, then_branch, else_branch } => {
+            LeanExpr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
                 format!(
                     "if {} then {} else {}",
                     cond.to_lean(),
@@ -168,22 +171,28 @@ impl LeanExpr {
             LeanExpr::Field { object, field } => {
                 format!("{}.{}", object.to_lean(), field)
             }
-            LeanExpr::StructInit { type_name: _, fields } => {
-                let fields_str = fields.iter()
+            LeanExpr::StructInit {
+                type_name: _,
+                fields,
+            } => {
+                let fields_str = fields
+                    .iter()
                     .map(|(name, value)| format!("{} := {}", name, value.to_lean()))
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("{{ {} }}", fields_str)
             }
             LeanExpr::List(elements) => {
-                let elems_str = elements.iter()
+                let elems_str = elements
+                    .iter()
                     .map(|e| e.to_lean())
                     .collect::<Vec<_>>()
                     .join(", ");
                 format!("[{}]", elems_str)
             }
             LeanExpr::Tuple(elements) => {
-                let elems_str = elements.iter()
+                let elems_str = elements
+                    .iter()
                     .map(|e| e.to_lean())
                     .collect::<Vec<_>>()
                     .join(", ");
@@ -262,14 +271,14 @@ impl<'a> ExprTranslator<'a> {
             HirExprKind::Nil => Ok(LeanExpr::Unit),
 
             HirExprKind::Local(idx) => {
-                let name = self.locals.get(*idx)
+                let name = self
+                    .locals
+                    .get(*idx)
                     .map(|n| self.to_lean_name(n))
                     .unwrap_or_else(|| format!("local{}", idx));
                 Ok(LeanExpr::Var(name))
             }
-            HirExprKind::Global(name) => {
-                Ok(LeanExpr::Var(self.to_lean_name(name)))
-            }
+            HirExprKind::Global(name) => Ok(LeanExpr::Var(self.to_lean_name(name))),
 
             HirExprKind::Binary { op, left, right } => {
                 let lean_op = self.translate_binop(op);
@@ -292,16 +301,17 @@ impl<'a> ExprTranslator<'a> {
 
             HirExprKind::Call { func, args } => {
                 let lean_func = self.translate(func)?;
-                let lean_args: Result<Vec<_>, _> = args.iter()
-                    .map(|a| self.translate(a))
-                    .collect();
+                let lean_args: Result<Vec<_>, _> = args.iter().map(|a| self.translate(a)).collect();
                 Ok(LeanExpr::App {
                     func: Box::new(lean_func),
                     args: lean_args?,
                 })
             }
 
-            HirExprKind::FieldAccess { receiver, field_index } => {
+            HirExprKind::FieldAccess {
+                receiver,
+                field_index,
+            } => {
                 let lean_receiver = self.translate(receiver)?;
                 // Field access by index - we don't have field names here
                 Ok(LeanExpr::Field {
@@ -319,7 +329,11 @@ impl<'a> ExprTranslator<'a> {
                 })
             }
 
-            HirExprKind::If { condition, then_branch, else_branch } => {
+            HirExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
                 let lean_cond = self.translate(condition)?;
                 let lean_then = self.translate(then_branch)?;
                 let lean_else = if let Some(ref else_expr) = else_branch {
@@ -335,26 +349,24 @@ impl<'a> ExprTranslator<'a> {
             }
 
             HirExprKind::Array(elements) => {
-                let lean_elements: Result<Vec<_>, _> = elements.iter()
-                    .map(|e| self.translate(e))
-                    .collect();
+                let lean_elements: Result<Vec<_>, _> =
+                    elements.iter().map(|e| self.translate(e)).collect();
                 Ok(LeanExpr::List(lean_elements?))
             }
             HirExprKind::VecLiteral(elements) => {
-                let lean_elements: Result<Vec<_>, _> = elements.iter()
-                    .map(|e| self.translate(e))
-                    .collect();
+                let lean_elements: Result<Vec<_>, _> =
+                    elements.iter().map(|e| self.translate(e)).collect();
                 Ok(LeanExpr::List(lean_elements?))
             }
             HirExprKind::Tuple(elements) => {
-                let lean_elements: Result<Vec<_>, _> = elements.iter()
-                    .map(|e| self.translate(e))
-                    .collect();
+                let lean_elements: Result<Vec<_>, _> =
+                    elements.iter().map(|e| self.translate(e)).collect();
                 Ok(LeanExpr::Tuple(lean_elements?))
             }
 
             HirExprKind::StructInit { fields, .. } => {
-                let lean_fields: Result<Vec<(String, LeanExpr)>, CompileError> = fields.iter()
+                let lean_fields: Result<Vec<(String, LeanExpr)>, CompileError> = fields
+                    .iter()
                     .enumerate()
                     .map(|(i, expr)| {
                         let lean_value = self.translate(expr)?;
@@ -368,7 +380,8 @@ impl<'a> ExprTranslator<'a> {
             }
 
             HirExprKind::Lambda { params, body, .. } => {
-                let lean_params: Vec<_> = params.iter()
+                let lean_params: Vec<_> = params
+                    .iter()
                     .map(|(name, tid)| {
                         let lean_type = self.type_translator.translate(*tid).ok();
                         (self.to_lean_name(name), lean_type)
@@ -381,9 +394,7 @@ impl<'a> ExprTranslator<'a> {
                 })
             }
 
-            HirExprKind::ContractResult => {
-                Ok(LeanExpr::Var("result".to_string()))
-            }
+            HirExprKind::ContractResult => Ok(LeanExpr::Var("result".to_string())),
             HirExprKind::ContractOld(inner) => {
                 let lean_inner = self.translate(inner)?;
                 Ok(LeanExpr::App {
@@ -398,7 +409,11 @@ impl<'a> ExprTranslator<'a> {
     }
 
     /// Translate statements to a Lean expression (nested lets)
-    pub fn translate_stmts(&self, stmts: &[HirStmt], locals: &[LocalVar]) -> Result<LeanExpr, CompileError> {
+    pub fn translate_stmts(
+        &self,
+        stmts: &[HirStmt],
+        locals: &[LocalVar],
+    ) -> Result<LeanExpr, CompileError> {
         if stmts.is_empty() {
             return Ok(LeanExpr::Unit);
         }
@@ -408,9 +423,12 @@ impl<'a> ExprTranslator<'a> {
 
         for stmt in stmts.iter().rev() {
             match stmt {
-                HirStmt::Let { local_index, value, .. } => {
+                HirStmt::Let {
+                    local_index, value, ..
+                } => {
                     // Get the local name
-                    let name = locals.get(*local_index)
+                    let name = locals
+                        .get(*local_index)
                         .map(|l| {
                             if l.is_ghost {
                                 // Skip ghost variables
@@ -447,7 +465,11 @@ impl<'a> ExprTranslator<'a> {
                         result = Some(lean_expr);
                     }
                 }
-                HirStmt::If { condition, then_block, else_block } => {
+                HirStmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                } => {
                     let lean_cond = self.translate(condition)?;
                     let lean_then = self.translate_stmts(then_block, locals)?;
                     let lean_else = if let Some(else_stmts) = else_block {
@@ -486,7 +508,7 @@ impl<'a> ExprTranslator<'a> {
             BinOp::Mod => "%".to_string(),
             BinOp::Pow => "^".to_string(),
             BinOp::FloorDiv => "/".to_string(), // Lean integer division
-            BinOp::MatMul => "*".to_string(), // Matrix multiplication
+            BinOp::MatMul => "*".to_string(),   // Matrix multiplication
             BinOp::Eq => "==".to_string(),
             BinOp::NotEq => "!=".to_string(),
             BinOp::Lt => "<".to_string(),
@@ -501,7 +523,7 @@ impl<'a> ExprTranslator<'a> {
             BinOp::ShiftLeft => "<<<".to_string(),
             BinOp::ShiftRight => ">>>".to_string(),
             BinOp::Is => "==".to_string(), // Identity check becomes equality
-            BinOp::In => "∈".to_string(), // Membership
+            BinOp::In => "∈".to_string(),  // Membership
         }
     }
 

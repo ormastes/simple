@@ -125,7 +125,9 @@ impl GpuInitHandle {
     /// Wait for GPU initialization to complete
     pub fn wait(mut self) -> Result<GpuContext, String> {
         if let Some(thread) = self.thread.take() {
-            thread.join().map_err(|_| "GPU init thread panicked".to_string())?
+            thread
+                .join()
+                .map_err(|_| "GPU init thread panicked".to_string())?
         } else {
             Err("GPU init thread already joined".to_string())
         }
@@ -195,7 +197,7 @@ fn init_gpu_context(config: WindowConfig, state: GpuInitState) -> Result<GpuCont
     state.update(GpuInitPhase::CreatingWindow, 10);
     thread::sleep(Duration::from_millis(50)); // Simulate window creation
 
-    // TODO: Real window creation with winit
+    // TODO: [driver][P3] Real window creation with winit
     // let event_loop = EventLoop::new();
     // let window = WindowBuilder::new()
     //     .with_title(&config.title)
@@ -207,43 +209,43 @@ fn init_gpu_context(config: WindowConfig, state: GpuInitState) -> Result<GpuCont
     state.update(GpuInitPhase::InitializingInstance, 25);
     thread::sleep(Duration::from_millis(50)); // Simulate instance creation
 
-    // TODO: Real Vulkan instance creation
+    // TODO: [driver][P3] Real Vulkan instance creation
     // let instance = create_vulkan_instance()?;
 
     // Phase 3: Select physical device
     state.update(GpuInitPhase::SelectingDevice, 40);
     thread::sleep(Duration::from_millis(30)); // Simulate device selection
 
-    // TODO: Real device selection
+    // TODO: [driver][P3] Real device selection
     // let physical_device = select_physical_device(&instance)?;
 
     // Phase 4: Create logical device
     state.update(GpuInitPhase::CreatingDevice, 60);
     thread::sleep(Duration::from_millis(40)); // Simulate device creation
 
-    // TODO: Real logical device creation
+    // TODO: [driver][P3] Real logical device creation
     // let device = create_logical_device(physical_device)?;
 
     // Phase 5: Create swapchain
     state.update(GpuInitPhase::CreatingSwapchain, 75);
     thread::sleep(Duration::from_millis(30)); // Simulate swapchain creation
 
-    // TODO: Real swapchain creation
+    // TODO: [driver][P3] Real swapchain creation
     // let swapchain = create_swapchain(&device, &window)?;
 
     // Phase 6: Load shaders
     state.update(GpuInitPhase::LoadingShaders, 90);
     thread::sleep(Duration::from_millis(20)); // Simulate shader loading
 
-    // TODO: Real shader loading
+    // TODO: [driver][P3] Real shader loading
     // let shaders = load_default_shaders(&device)?;
 
     // Mark as ready
     state.set_ready();
 
     Ok(GpuContext {
-        window_handle: 0x1234, // Placeholder
-        device_handle: 0x5678, // Placeholder
+        window_handle: 0x1234,    // Placeholder
+        device_handle: 0x5678,    // Placeholder
         swapchain_handle: 0x9ABC, // Placeholder
         width: config.width,
         height: config.height,

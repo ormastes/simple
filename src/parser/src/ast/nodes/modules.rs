@@ -1,8 +1,8 @@
 //! Module system AST nodes (mod, use, export, auto import, etc.)
 
-use crate::token::Span;
 use super::super::enums::*;
 use super::core::*;
+use crate::token::Span;
 
 //==============================================================================
 // Module System (Features #104-111)

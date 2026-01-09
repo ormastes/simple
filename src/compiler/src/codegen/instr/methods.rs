@@ -4,8 +4,8 @@ use cranelift_codegen::ir::{types, InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
-use crate::mir::VReg;
 use super::{InstrContext, InstrResult};
+use crate::mir::VReg;
 
 /// Helper to call a runtime function and get its result
 fn call_runtime_1<M: Module>(
@@ -97,14 +97,27 @@ pub(super) fn compile_builtin_method<M: Module>(
         ("Array", "get") | ("array", "get") => {
             let idx_val = ctx.vreg_values[&args[0]];
             let wrapped_idx = wrap_value(ctx, builder, idx_val);
-            Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_idx))
+            Some(call_runtime_2(
+                ctx,
+                builder,
+                "rt_index_get",
+                receiver_val,
+                wrapped_idx,
+            ))
         }
         ("Array", "set") | ("array", "set") => {
             let idx_val = ctx.vreg_values[&args[0]];
             let arg_val = ctx.vreg_values[&args[1]];
             let wrapped_idx = wrap_value(ctx, builder, idx_val);
             let wrapped_val = wrap_value(ctx, builder, arg_val);
-            let result_i8 = call_runtime_3(ctx, builder, "rt_index_set", receiver_val, wrapped_idx, wrapped_val);
+            let result_i8 = call_runtime_3(
+                ctx,
+                builder,
+                "rt_index_set",
+                receiver_val,
+                wrapped_idx,
+                wrapped_val,
+            );
             Some(builder.ins().uextend(types::I64, result_i8))
         }
         ("Array", "pop") | ("array", "pop") => {
@@ -119,19 +132,38 @@ pub(super) fn compile_builtin_method<M: Module>(
         }
         ("String", "concat") | ("string", "concat") => {
             let arg_val = ctx.vreg_values[&args[0]];
-            Some(call_runtime_2(ctx, builder, "rt_string_concat", receiver_val, arg_val))
+            Some(call_runtime_2(
+                ctx,
+                builder,
+                "rt_string_concat",
+                receiver_val,
+                arg_val,
+            ))
         }
         ("Dict", "get") | ("dict", "get") => {
             let key_val = ctx.vreg_values[&args[0]];
             let wrapped_key = wrap_value(ctx, builder, key_val);
-            Some(call_runtime_2(ctx, builder, "rt_index_get", receiver_val, wrapped_key))
+            Some(call_runtime_2(
+                ctx,
+                builder,
+                "rt_index_get",
+                receiver_val,
+                wrapped_key,
+            ))
         }
         ("Dict", "set") | ("dict", "set") => {
             let key_val = ctx.vreg_values[&args[0]];
             let val_val = ctx.vreg_values[&args[1]];
             let wrapped_key = wrap_value(ctx, builder, key_val);
             let wrapped_val = wrap_value(ctx, builder, val_val);
-            let result_i8 = call_runtime_3(ctx, builder, "rt_dict_set", receiver_val, wrapped_key, wrapped_val);
+            let result_i8 = call_runtime_3(
+                ctx,
+                builder,
+                "rt_dict_set",
+                receiver_val,
+                wrapped_key,
+                wrapped_val,
+            );
             Some(builder.ins().uextend(types::I64, result_i8))
         }
         ("Dict", "len") | ("dict", "len") => {
@@ -149,7 +181,13 @@ pub(super) fn compile_builtin_method<M: Module>(
         }
         ("Tuple", "get") | ("tuple", "get") => {
             let idx_val = ctx.vreg_values[&args[0]];
-            Some(call_runtime_2(ctx, builder, "rt_tuple_get", receiver_val, idx_val))
+            Some(call_runtime_2(
+                ctx,
+                builder,
+                "rt_tuple_get",
+                receiver_val,
+                idx_val,
+            ))
         }
         ("Tuple", "len") | ("tuple", "len") => {
             Some(call_len_method(ctx, builder, "rt_tuple_len", receiver_val))
@@ -158,18 +196,21 @@ pub(super) fn compile_builtin_method<M: Module>(
             let idx_val = ctx.vreg_values[&args[0]];
             let arg_val = ctx.vreg_values[&args[1]];
             let wrapped = wrap_value(ctx, builder, arg_val);
-            let result_i8 = call_runtime_3(ctx, builder, "rt_tuple_set", receiver_val, idx_val, wrapped);
+            let result_i8 =
+                call_runtime_3(ctx, builder, "rt_tuple_set", receiver_val, idx_val, wrapped);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
-        ("Array", "contains") | ("array", "contains") |
-        ("Dict", "contains") | ("dict", "contains") |
-        ("String", "contains") | ("string", "contains") => {
+        ("Array", "contains")
+        | ("array", "contains")
+        | ("Dict", "contains")
+        | ("dict", "contains")
+        | ("String", "contains")
+        | ("string", "contains") => {
             let arg_val = ctx.vreg_values[&args[0]];
             let result_i8 = call_runtime_2(ctx, builder, "rt_contains", receiver_val, arg_val);
             Some(builder.ins().uextend(types::I64, result_i8))
         }
-        ("Array", "slice") | ("array", "slice") |
-        ("String", "slice") | ("string", "slice") => {
+        ("Array", "slice") | ("array", "slice") | ("String", "slice") | ("string", "slice") => {
             let slice_id = ctx.runtime_funcs["rt_slice"];
             let slice_ref = ctx.module.declare_func_in_func(slice_id, builder.func);
             let start = ctx.vreg_values[&args[0]];
@@ -183,38 +224,50 @@ pub(super) fn compile_builtin_method<M: Module>(
             } else {
                 builder.ins().iconst(types::I64, 1)
             };
-            let call = builder.ins().call(slice_ref, &[receiver_val, start, end, step]);
+            let call = builder
+                .ins()
+                .call(slice_ref, &[receiver_val, start, end, step]);
             Some(builder.inst_results(call)[0])
         }
         _ => {
             // Unknown method - call rt_method_not_found
             let type_bytes = receiver_type.as_bytes();
-            let type_data_id = ctx.module
+            let type_data_id = ctx
+                .module
                 .declare_anonymous_data(true, false)
                 .map_err(|e| e.to_string())?;
             let mut type_data_desc = cranelift_module::DataDescription::new();
             type_data_desc.define(type_bytes.to_vec().into_boxed_slice());
-            ctx.module.define_data(type_data_id, &type_data_desc).map_err(|e| e.to_string())?;
+            ctx.module
+                .define_data(type_data_id, &type_data_desc)
+                .map_err(|e| e.to_string())?;
 
             let type_global = ctx.module.declare_data_in_func(type_data_id, builder.func);
             let type_ptr = builder.ins().global_value(types::I64, type_global);
             let type_len = builder.ins().iconst(types::I64, type_bytes.len() as i64);
 
             let method_bytes = method.as_bytes();
-            let method_data_id = ctx.module
+            let method_data_id = ctx
+                .module
                 .declare_anonymous_data(true, false)
                 .map_err(|e| e.to_string())?;
             let mut method_data_desc = cranelift_module::DataDescription::new();
             method_data_desc.define(method_bytes.to_vec().into_boxed_slice());
-            ctx.module.define_data(method_data_id, &method_data_desc).map_err(|e| e.to_string())?;
+            ctx.module
+                .define_data(method_data_id, &method_data_desc)
+                .map_err(|e| e.to_string())?;
 
-            let method_global = ctx.module.declare_data_in_func(method_data_id, builder.func);
+            let method_global = ctx
+                .module
+                .declare_data_in_func(method_data_id, builder.func);
             let method_ptr = builder.ins().global_value(types::I64, method_global);
             let method_len = builder.ins().iconst(types::I64, method_bytes.len() as i64);
 
             let not_found_id = ctx.runtime_funcs["rt_method_not_found"];
             let not_found_ref = ctx.module.declare_func_in_func(not_found_id, builder.func);
-            let call = builder.ins().call(not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
+            let call = builder
+                .ins()
+                .call(not_found_ref, &[type_ptr, type_len, method_ptr, method_len]);
             Some(builder.inst_results(call)[0])
         }
     };

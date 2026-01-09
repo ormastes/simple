@@ -9,11 +9,7 @@ mod compiler_lint_tests {
 
     #[test]
     fn test_lint_level_variants() {
-        let levels = [
-            LintLevel::Allow,
-            LintLevel::Warn,
-            LintLevel::Deny,
-        ];
+        let levels = [LintLevel::Allow, LintLevel::Warn, LintLevel::Deny];
         for l in levels {
             let _ = format!("{:?}", l);
         }
@@ -30,9 +26,7 @@ mod compiler_lint_tests {
 // Compiler Monomorphize Types Tests
 // ============================================================================
 mod compiler_mono_tests {
-    use simple_compiler::{
-        ConcreteType, MonomorphizationTable, TypeBindings, PointerKind,
-    };
+    use simple_compiler::{ConcreteType, MonomorphizationTable, PointerKind, TypeBindings};
 
     #[test]
     fn test_concrete_type_variants() {
@@ -61,11 +55,7 @@ mod compiler_mono_tests {
 
     #[test]
     fn test_pointer_kind_variants() {
-        let kinds = [
-            PointerKind::Unique,
-            PointerKind::Shared,
-            PointerKind::Weak,
-        ];
+        let kinds = [PointerKind::Unique, PointerKind::Shared, PointerKind::Weak];
         for k in kinds {
             let _ = format!("{:?}", k);
         }
@@ -327,9 +317,16 @@ mod parser_binop_tests {
     #[test]
     fn test_binop_variants() {
         let ops = [
-            BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div, BinOp::Mod,
-            BinOp::Eq, BinOp::Lt, BinOp::Gt,
-            BinOp::And, BinOp::Or,
+            BinOp::Add,
+            BinOp::Sub,
+            BinOp::Mul,
+            BinOp::Div,
+            BinOp::Mod,
+            BinOp::Eq,
+            BinOp::Lt,
+            BinOp::Gt,
+            BinOp::And,
+            BinOp::Or,
         ];
         for op in ops {
             let _ = format!("{:?}", op);
@@ -345,10 +342,7 @@ mod parser_unaryop_tests {
 
     #[test]
     fn test_unaryop_variants() {
-        let ops = [
-            UnaryOp::Neg,
-            UnaryOp::Not,
-        ];
+        let ops = [UnaryOp::Neg, UnaryOp::Not];
         for op in ops {
             let _ = format!("{:?}", op);
         }
@@ -384,10 +378,7 @@ mod parser_visibility_tests {
 
     #[test]
     fn test_visibility_variants() {
-        let vis = [
-            Visibility::Private,
-            Visibility::Public,
-        ];
+        let vis = [Visibility::Private, Visibility::Public];
         for v in vis {
             let _ = format!("{:?}", v);
         }
@@ -402,10 +393,7 @@ mod parser_mutability_tests {
 
     #[test]
     fn test_mutability_variants() {
-        let muts = [
-            Mutability::Immutable,
-            Mutability::Mutable,
-        ];
+        let muts = [Mutability::Immutable, Mutability::Mutable];
         for m in muts {
             let _ = format!("{:?}", m);
         }
@@ -420,10 +408,7 @@ mod parser_effect_tests {
 
     #[test]
     fn test_effect_variants() {
-        let effects = [
-            Effect::Pure,
-            Effect::Async,
-        ];
+        let effects = [Effect::Pure, Effect::Async];
         for e in effects {
             let _ = format!("{:?}", e);
         }
@@ -438,11 +423,7 @@ mod parser_pointer_tests {
 
     #[test]
     fn test_pointer_kind_variants() {
-        let kinds = [
-            PointerKind::Unique,
-            PointerKind::Shared,
-            PointerKind::Weak,
-        ];
+        let kinds = [PointerKind::Unique, PointerKind::Shared, PointerKind::Weak];
         for k in kinds {
             let _ = format!("{:?}", k);
         }
@@ -457,10 +438,7 @@ mod parser_rangebound_tests {
 
     #[test]
     fn test_range_bound_variants() {
-        let bounds = [
-            RangeBound::Inclusive,
-            RangeBound::Exclusive,
-        ];
+        let bounds = [RangeBound::Inclusive, RangeBound::Exclusive];
         for b in bounds {
             let _ = format!("{:?}", b);
         }
@@ -475,10 +453,7 @@ mod parser_overflow_tests {
 
     #[test]
     fn test_overflow_behavior_variants() {
-        let behaviors = [
-            OverflowBehavior::Wrap,
-            OverflowBehavior::Saturate,
-        ];
+        let behaviors = [OverflowBehavior::Wrap, OverflowBehavior::Saturate];
         for b in behaviors {
             let _ = format!("{:?}", b);
         }

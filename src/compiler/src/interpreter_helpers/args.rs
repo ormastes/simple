@@ -5,10 +5,7 @@ use crate::value::{Env, Value};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
-use super::super::{
-    evaluate_expr,
-    Enums, ImplMethods,
-};
+use super::super::{evaluate_expr, Enums, ImplMethods};
 
 pub(crate) fn eval_arg(
     args: &[simple_parser::ast::Argument],
@@ -37,8 +34,17 @@ pub(crate) fn eval_arg_int(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<i64, CompileError> {
-    eval_arg(args, idx, Value::Int(default), env, functions, classes, enums, impl_methods)?
-        .as_int()
+    eval_arg(
+        args,
+        idx,
+        Value::Int(default),
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )?
+    .as_int()
 }
 
 /// Evaluate an argument as usize with default
@@ -52,7 +58,16 @@ pub(crate) fn eval_arg_usize(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<usize, CompileError> {
-    Ok(eval_arg_int(args, idx, default as i64, env, functions, classes, enums, impl_methods)? as usize)
+    Ok(eval_arg_int(
+        args,
+        idx,
+        default as i64,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )? as usize)
 }
 
 /// Apply a lambda to each item in an array, returning Vec of results.
@@ -64,7 +79,12 @@ pub(crate) fn apply_lambda_to_vec(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Value>, CompileError> {
-    if let Value::Lambda { params, body, env: captured } = lambda_val {
+    if let Value::Lambda {
+        params,
+        body,
+        env: captured,
+    } = lambda_val
+    {
         let mut results = Vec::new();
         for item in arr {
             let mut local_env = captured.clone();

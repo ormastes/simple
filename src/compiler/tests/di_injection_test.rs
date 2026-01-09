@@ -258,7 +258,10 @@ bindings = [
     match result {
         Ok(mir_module) => {
             // Verify MIR was generated
-            assert!(!mir_module.functions.is_empty(), "Should have MIR functions");
+            assert!(
+                !mir_module.functions.is_empty(),
+                "Should have MIR functions"
+            );
 
             // Find the main function
             let main_func = mir_module
@@ -268,7 +271,9 @@ bindings = [
                 .expect("Should have main function");
 
             // Count Config.new calls - should be exactly 1 for singleton
-            let config_new_calls = main_func.blocks.iter()
+            let config_new_calls = main_func
+                .blocks
+                .iter()
                 .flat_map(|block| &block.instructions)
                 .filter(|inst| {
                     matches!(inst, mir::MirInst::Call { target, .. }
@@ -335,7 +340,10 @@ bindings = [
     match result {
         Ok(mir_module) => {
             // Verify MIR was generated
-            assert!(!mir_module.functions.is_empty(), "Should have MIR functions");
+            assert!(
+                !mir_module.functions.is_empty(),
+                "Should have MIR functions"
+            );
 
             // Find the main function
             let main_func = mir_module
@@ -345,7 +353,9 @@ bindings = [
                 .expect("Should have main function");
 
             // Count Logger.new calls - should be 2 for transient (one per service)
-            let logger_new_calls = main_func.blocks.iter()
+            let logger_new_calls = main_func
+                .blocks
+                .iter()
                 .flat_map(|block| &block.instructions)
                 .filter(|inst| {
                     matches!(inst, mir::MirInst::Call { target, .. }
@@ -460,7 +470,10 @@ bindings = [
     let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should fail with circular dependency error
-    assert!(result.is_err(), "Should detect indirect circular dependency");
+    assert!(
+        result.is_err(),
+        "Should detect indirect circular dependency"
+    );
 
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(
@@ -516,7 +529,10 @@ bindings = [
     // Should succeed - no circular dependency
     match result {
         Ok(mir_module) => {
-            assert!(!mir_module.functions.is_empty(), "Should have MIR functions");
+            assert!(
+                !mir_module.functions.is_empty(),
+                "Should have MIR functions"
+            );
         }
         Err(e) => {
             panic!("Valid dependency chain should work, but got error: {:?}", e);
@@ -562,10 +578,16 @@ bindings = [
     // Should succeed - config is injected, manual_id is provided
     match result {
         Ok(mir_module) => {
-            assert!(!mir_module.functions.is_empty(), "Should have MIR functions");
+            assert!(
+                !mir_module.functions.is_empty(),
+                "Should have MIR functions"
+            );
         }
         Err(e) => {
-            panic!("Per-parameter injection should work, but got error: {:?}", e);
+            panic!(
+                "Per-parameter injection should work, but got error: {:?}",
+                e
+            );
         }
     }
 }
@@ -613,10 +635,16 @@ bindings = [
     // Should succeed - both parameters are injected
     match result {
         Ok(mir_module) => {
-            assert!(!mir_module.functions.is_empty(), "Should have MIR functions");
+            assert!(
+                !mir_module.functions.is_empty(),
+                "Should have MIR functions"
+            );
         }
         Err(e) => {
-            panic!("All-parameter injection should work, but got error: {:?}", e);
+            panic!(
+                "All-parameter injection should work, but got error: {:?}",
+                e
+            );
         }
     }
 }
@@ -659,10 +687,16 @@ bindings = [
     // Should succeed - config injected in middle position
     match result {
         Ok(mir_module) => {
-            assert!(!mir_module.functions.is_empty(), "Should have MIR functions");
+            assert!(
+                !mir_module.functions.is_empty(),
+                "Should have MIR functions"
+            );
         }
         Err(e) => {
-            panic!("Middle-position injection should work, but got error: {:?}", e);
+            panic!(
+                "Middle-position injection should work, but got error: {:?}",
+                e
+            );
         }
     }
 }
@@ -703,7 +737,10 @@ bindings = [
     let result = lower_to_mir(&hir_module, Some(di_config));
 
     // Should fail - manual_id is not provided
-    assert!(result.is_err(), "Should fail when manual argument is missing");
+    assert!(
+        result.is_err(),
+        "Should fail when manual argument is missing"
+    );
 
     let err_msg = format!("{:?}", result.unwrap_err());
     assert!(

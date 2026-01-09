@@ -12,7 +12,7 @@ use tempfile::TempDir;
 #[cfg(test)]
 mod web_e2e_tests {
     use super::*;
-    // TODO: Enable when cli module is public
+    // TODO: [driver][P3] Enable when cli module is public
     // use simple_driver::cli::web::{web_build, web_init, WebBuildOptions};
 
     /// Test helper: create temp directory
@@ -53,15 +53,18 @@ fn render(): String = "Hello, World!"
         assert_eq!(exit_code, 0, "web_build should succeed");
 
         // Verify output files exist
-        assert!(output_dir.join("app.html").exists(), "HTML file should exist");
+        assert!(
+            output_dir.join("app.html").exists(),
+            "HTML file should exist"
+        );
         assert!(
             output_dir.join("app.manifest.json").exists(),
             "Manifest should exist"
         );
 
         // Verify HTML content
-        let html_content = fs::read_to_string(output_dir.join("app.html"))
-            .expect("Failed to read HTML");
+        let html_content =
+            fs::read_to_string(output_dir.join("app.html")).expect("Failed to read HTML");
         assert!(
             html_content.contains("<h1>"),
             "HTML should contain server-rendered content"
@@ -114,8 +117,8 @@ dom.getElementById("btn").addEventListener("click", increment)
         );
 
         // Verify HTML contains WASM loader
-        let html_content = fs::read_to_string(output_dir.join("counter.html"))
-            .expect("Failed to read HTML");
+        let html_content =
+            fs::read_to_string(output_dir.join("counter.html")).expect("Failed to read HTML");
         assert!(
             html_content.contains("loadWasm"),
             "HTML should contain WASM loader"
@@ -156,8 +159,8 @@ fn on_click():
         assert!(output_dir.join("app.wasm").exists());
 
         // Read HTML and verify minification
-        let html_content = fs::read_to_string(output_dir.join("app.html"))
-            .expect("Failed to read HTML");
+        let html_content =
+            fs::read_to_string(output_dir.join("app.html")).expect("Failed to read HTML");
 
         // Minified HTML should have less whitespace
         let line_count = html_content.lines().count();
@@ -248,18 +251,24 @@ dom.getElementById("form").addEventListener("reset", on_reset)
         // Verify project structure
         let project_dir = temp_dir.path().join(project_name);
         assert!(project_dir.exists(), "Project directory should exist");
-        assert!(
-            project_dir.join("app.sui").exists(),
-            "app.sui should exist"
-        );
+        assert!(project_dir.join("app.sui").exists(), "app.sui should exist");
 
         // Verify app.sui contains all required blocks
-        let sui_content = fs::read_to_string(project_dir.join("app.sui"))
-            .expect("Failed to read app.sui");
+        let sui_content =
+            fs::read_to_string(project_dir.join("app.sui")).expect("Failed to read app.sui");
 
-        assert!(sui_content.contains("{$ "), "Should have shared state block");
-        assert!(sui_content.contains("{- server -}"), "Should have server block");
-        assert!(sui_content.contains("{+ client +}"), "Should have client block");
+        assert!(
+            sui_content.contains("{$ "),
+            "Should have shared state block"
+        );
+        assert!(
+            sui_content.contains("{- server -}"),
+            "Should have server block"
+        );
+        assert!(
+            sui_content.contains("{+ client +}"),
+            "Should have client block"
+        );
         assert!(
             sui_content.contains("{@ render @}"),
             "Should have template block"
@@ -337,23 +346,28 @@ dom.getElementById("btn").addEventListener("click", handler)
         let manifest_path = output_dir.join("app.manifest.json");
         assert!(manifest_path.exists(), "Manifest should exist");
 
-        let manifest_content = fs::read_to_string(manifest_path)
-            .expect("Failed to read manifest");
+        let manifest_content = fs::read_to_string(manifest_path).expect("Failed to read manifest");
 
         // Verify manifest structure (basic JSON validation)
-        assert!(manifest_content.contains("\"version\""), "Should have version field");
-        assert!(manifest_content.contains("\"exports\""), "Should have exports field");
-        assert!(manifest_content.contains("\"bindings\""), "Should have bindings field");
+        assert!(
+            manifest_content.contains("\"version\""),
+            "Should have version field"
+        );
+        assert!(
+            manifest_content.contains("\"exports\""),
+            "Should have exports field"
+        );
+        assert!(
+            manifest_content.contains("\"bindings\""),
+            "Should have bindings field"
+        );
 
         // Verify specific binding
         assert!(
             manifest_content.contains("\"selector\""),
             "Should have selector in bindings"
         );
-        assert!(
-            manifest_content.contains("\"#btn\""),
-            "Should bind to #btn"
-        );
+        assert!(manifest_content.contains("\"#btn\""), "Should bind to #btn");
         assert!(
             manifest_content.contains("\"click\""),
             "Should bind click event"
@@ -494,8 +508,7 @@ dom.getElementById("btn").addEventListener("click", update_message)
 
         // Step 4: Verify file contents
         let html_content = fs::read_to_string(html_file).expect("Failed to read HTML");
-        let manifest_content =
-            fs::read_to_string(manifest_file).expect("Failed to read manifest");
+        let manifest_content = fs::read_to_string(manifest_file).expect("Failed to read manifest");
         let hydration_content =
             fs::read_to_string(hydration_file).expect("Failed to read hydration");
 

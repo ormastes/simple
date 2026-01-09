@@ -1,8 +1,8 @@
 //! Statement AST nodes (let, const, static, if, match, for, while, etc.)
 
-use crate::token::Span;
 use super::super::enums::*;
 use super::core::*;
+use crate::token::Span;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetStmt {

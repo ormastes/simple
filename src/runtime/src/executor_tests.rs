@@ -86,10 +86,7 @@ extern "C" fn add_values(v1: RuntimeValue, v2: RuntimeValue) -> RuntimeValue {
 
 #[test]
 fn test_isolated_thread_spawn_and_join() {
-    let handle = rt_thread_spawn_isolated(
-        double_value as u64,
-        RuntimeValue::from_int(21),
-    );
+    let handle = rt_thread_spawn_isolated(double_value as u64, RuntimeValue::from_int(21));
 
     assert!(handle != 0);
     assert!(rt_thread_id(handle) > 0);
@@ -125,10 +122,7 @@ fn test_isolated_thread_is_done() {
         v
     }
 
-    let handle = rt_thread_spawn_isolated(
-        slow_work as u64,
-        RuntimeValue::from_int(1),
-    );
+    let handle = rt_thread_spawn_isolated(slow_work as u64, RuntimeValue::from_int(1));
 
     // Thread should not be done immediately
     assert_eq!(rt_thread_is_done(handle), 0);

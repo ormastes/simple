@@ -218,7 +218,8 @@ pub struct MirLowerer<'a> {
     /// Contract checking mode
     pub(super) contract_mode: ContractMode,
     /// Reference to refined types for emitting refinement checks (CTR-020)
-    pub(super) refined_types: Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
+    pub(super) refined_types:
+        Option<&'a std::collections::HashMap<String, crate::hir::HirRefinedType>>,
     /// Reference to type registry for looking up unit type constraints
     pub(super) type_registry: Option<&'a crate::hir::TypeRegistry>,
     /// Reference to trait infos for vtable slot resolution (static polymorphism)
@@ -297,7 +298,10 @@ impl<'a> MirLowerer<'a> {
     }
 
     /// Set refined types reference for emitting refinement checks (CTR-020)
-    pub fn with_refined_types(mut self, refined_types: &'a std::collections::HashMap<String, crate::hir::HirRefinedType>) -> Self {
+    pub fn with_refined_types(
+        mut self,
+        refined_types: &'a std::collections::HashMap<String, crate::hir::HirRefinedType>,
+    ) -> Self {
         self.refined_types = Some(refined_types);
         self
     }
@@ -309,7 +313,10 @@ impl<'a> MirLowerer<'a> {
     }
 
     /// Set trait infos reference for vtable slot resolution (static polymorphism)
-    pub fn with_trait_infos(mut self, trait_infos: &'a std::collections::HashMap<String, crate::hir::HirTraitInfo>) -> Self {
+    pub fn with_trait_infos(
+        mut self,
+        trait_infos: &'a std::collections::HashMap<String, crate::hir::HirTraitInfo>,
+    ) -> Self {
         self.trait_infos = Some(trait_infos);
         self
     }
@@ -324,7 +331,11 @@ impl<'a> MirLowerer<'a> {
 
     /// Get method signature from a trait
     /// Returns param_types (excluding self) and return_type
-    pub(super) fn get_trait_method_signature(&self, trait_name: &str, method_name: &str) -> Option<(Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
+    pub(super) fn get_trait_method_signature(
+        &self,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Option<(Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
         self.trait_infos
             .and_then(|infos| infos.get(trait_name))
             .and_then(|info| info.get_method(method_name))
@@ -357,7 +368,12 @@ impl<'a> MirLowerer<'a> {
     }
 
     /// Transition from Idle to Lowering - explicit state transition
-    pub(super) fn begin_function(&mut self, func: MirFunction, func_name: &str, is_public: bool) -> MirLowerResult<()> {
+    pub(super) fn begin_function(
+        &mut self,
+        func: MirFunction,
+        func_name: &str,
+        is_public: bool,
+    ) -> MirLowerResult<()> {
         match &self.state {
             LowererState::Idle => {
                 self.state = LowererState::Lowering {
@@ -485,7 +501,9 @@ impl<'a> MirLowerer<'a> {
             if has_any_injectable {
                 // If function-level @inject, all params without explicit @inject are injectable
                 // If no function-level @inject, only params with @inject are injectable
-                let param_info: Vec<(TypeId, bool)> = func.params.iter()
+                let param_info: Vec<(TypeId, bool)> = func
+                    .params
+                    .iter()
                     .map(|p| (p.ty, func.inject || p.inject))
                     .collect();
                 self.inject_functions.insert(func.name.clone(), param_info);
@@ -531,23 +549,43 @@ impl<'a> MirLowerer<'a> {
                     crate::weaving::DiagnosticLevel::Error => {
                         tracing::error!(
                             "AOP weaving error{}: {}{}",
-                            diagnostic.location.as_ref().map(|l| format!(" in {}", l)).unwrap_or_default(),
+                            diagnostic
+                                .location
+                                .as_ref()
+                                .map(|l| format!(" in {}", l))
+                                .unwrap_or_default(),
                             diagnostic.message,
-                            diagnostic.predicate.as_ref().map(|p| format!(" (predicate: {})", p)).unwrap_or_default()
+                            diagnostic
+                                .predicate
+                                .as_ref()
+                                .map(|p| format!(" (predicate: {})", p))
+                                .unwrap_or_default()
                         );
                     }
                     crate::weaving::DiagnosticLevel::Warning => {
                         tracing::warn!(
                             "AOP weaving warning{}: {}{}",
-                            diagnostic.location.as_ref().map(|l| format!(" in {}", l)).unwrap_or_default(),
+                            diagnostic
+                                .location
+                                .as_ref()
+                                .map(|l| format!(" in {}", l))
+                                .unwrap_or_default(),
                             diagnostic.message,
-                            diagnostic.predicate.as_ref().map(|p| format!(" (predicate: {})", p)).unwrap_or_default()
+                            diagnostic
+                                .predicate
+                                .as_ref()
+                                .map(|p| format!(" (predicate: {})", p))
+                                .unwrap_or_default()
                         );
                     }
                     crate::weaving::DiagnosticLevel::Info => {
                         tracing::info!(
                             "AOP weaving{}: {}",
-                            diagnostic.location.as_ref().map(|l| format!(" in {}", l)).unwrap_or_default(),
+                            diagnostic
+                                .location
+                                .as_ref()
+                                .map(|l| format!(" in {}", l))
+                                .unwrap_or_default(),
                             diagnostic.message
                         );
                     }
@@ -555,7 +593,8 @@ impl<'a> MirLowerer<'a> {
             }
 
             // Fail compilation if there are errors
-            let error_count = all_diagnostics.iter()
+            let error_count = all_diagnostics
+                .iter()
                 .filter(|d| d.level == crate::weaving::DiagnosticLevel::Error)
                 .count();
             if error_count > 0 {

@@ -7,7 +7,7 @@ use crate::error::CompileError;
 use crate::value::{Value, ATTR_STRONG};
 
 use super::super::{
-    exec_node, pattern_matches, ClassDef, Control, Env, Enums, FunctionDef, ImplMethods,
+    exec_node, pattern_matches, ClassDef, Control, Enums, Env, FunctionDef, ImplMethods,
 };
 
 pub(super) fn eval_control_expr(
@@ -19,7 +19,11 @@ pub(super) fn eval_control_expr(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     match expr {
-        Expr::Lambda { params, body, move_mode } => {
+        Expr::Lambda {
+            params,
+            body,
+            move_mode,
+        } => {
             let names: Vec<String> = params
                 .iter()
                 .map(|LambdaParam { name, .. }| name.clone())
@@ -38,7 +42,11 @@ pub(super) fn eval_control_expr(
                 env: captured_env,
             }))
         }
-        Expr::If { condition, then_branch, else_branch } => {
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
             let result = if evaluate_expr(condition, env, functions, classes, enums, impl_methods)?
                 .truthy()
             {
@@ -51,14 +59,15 @@ pub(super) fn eval_control_expr(
             Ok(Some(result))
         }
         Expr::Match { subject, arms } => {
-            let subject_val =
-                evaluate_expr(subject, env, functions, classes, enums, impl_methods)?;
+            let subject_val = evaluate_expr(subject, env, functions, classes, enums, impl_methods)?;
 
             // Check pattern exhaustiveness for enums
             if let Value::Enum { enum_name, .. } = &subject_val {
                 if let Some(enum_def) = enums.get(enum_name) {
-                    let is_strong =
-                        enum_def.attributes.iter().any(|attr| attr.name == ATTR_STRONG);
+                    let is_strong = enum_def
+                        .attributes
+                        .iter()
+                        .any(|attr| attr.name == ATTR_STRONG);
 
                     // For strong enums, disallow wildcard/catch-all patterns
                     if is_strong {
@@ -77,9 +86,7 @@ pub(super) fn eval_control_expr(
                         enum_def.variants.iter().map(|v| v.name.clone()).collect();
                     let (is_exhaustive, missing) =
                         crate::pattern_analysis::check_enum_exhaustiveness(
-                            enum_name,
-                            &variants,
-                            arms,
+                            enum_name, &variants, arms,
                         );
 
                     if !is_exhaustive {

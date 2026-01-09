@@ -10,9 +10,9 @@ use super::*;
 #[test]
 fn test_simd_this_index_intrinsic() {
     // Test this.index() intrinsic lowering for SIMD kernels
-    let module = parse_and_lower(
-        "@simd\nfn kernel() -> i64:\n    let i = this.index()\n    return i\n"
-    ).unwrap();
+    let module =
+        parse_and_lower("@simd\nfn kernel() -> i64:\n    let i = this.index()\n    return i\n")
+            .unwrap();
 
     let func = &module.functions[0];
     assert_eq!(func.name, "kernel");
@@ -21,7 +21,10 @@ fn test_simd_this_index_intrinsic() {
     assert_eq!(func.locals[0].ty, TypeId::I64);
 
     // Check the assignment statement
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[0] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[0]
+    {
         // Verify it's a GpuIntrinsic expression
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(intrinsic, &GpuIntrinsicKind::SimdIndex);
@@ -38,11 +41,15 @@ fn test_simd_this_index_intrinsic() {
 fn test_simd_thread_index_intrinsic() {
     // Test this.thread_index() intrinsic lowering
     let module = parse_and_lower(
-        "@simd\nfn kernel() -> i64:\n    let i = this.thread_index()\n    return i\n"
-    ).unwrap();
+        "@simd\nfn kernel() -> i64:\n    let i = this.thread_index()\n    return i\n",
+    )
+    .unwrap();
 
     let func = &module.functions[0];
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[0] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[0]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(intrinsic, &GpuIntrinsicKind::SimdThreadIndex);
             assert!(args.is_empty());
@@ -58,11 +65,15 @@ fn test_simd_thread_index_intrinsic() {
 fn test_simd_group_index_intrinsic() {
     // Test this.group_index() intrinsic lowering
     let module = parse_and_lower(
-        "@simd\nfn kernel() -> i64:\n    let i = this.group_index()\n    return i\n"
-    ).unwrap();
+        "@simd\nfn kernel() -> i64:\n    let i = this.group_index()\n    return i\n",
+    )
+    .unwrap();
 
     let func = &module.functions[0];
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[0] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[0]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(intrinsic, &GpuIntrinsicKind::SimdGroupIndex);
             assert!(args.is_empty());
@@ -84,7 +95,10 @@ fn test_simd_left_neighbor_access() {
 
     let func = &module.functions[0];
     // Check the second statement (after arr declaration)
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[1]
+    {
         if let HirExprKind::NeighborAccess { direction, .. } = &value.kind {
             assert_eq!(*direction, NeighborDirection::Left);
         } else {
@@ -105,7 +119,10 @@ fn test_simd_right_neighbor_access() {
 
     let func = &module.functions[0];
     // Check the second statement (after arr declaration)
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[1]
+    {
         if let HirExprKind::NeighborAccess { direction, .. } = &value.kind {
             assert_eq!(*direction, NeighborDirection::Right);
         } else {
@@ -120,8 +137,9 @@ fn test_simd_right_neighbor_access() {
 fn test_thread_group_id() {
     // Test thread_group.id property
     let module = parse_and_lower(
-        "@simd\nfn kernel() -> i64:\n    let gid = thread_group.id\n    return gid\n"
-    ).unwrap();
+        "@simd\nfn kernel() -> i64:\n    let gid = thread_group.id\n    return gid\n",
+    )
+    .unwrap();
 
     let func = &module.functions[0];
     assert_eq!(func.name, "kernel");
@@ -130,7 +148,10 @@ fn test_thread_group_id() {
     assert_eq!(func.locals[0].ty, TypeId::I64);
 
     // Check the let statement
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[0] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[0]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(intrinsic, &GpuIntrinsicKind::GroupId);
             assert!(args.is_empty());
@@ -146,11 +167,15 @@ fn test_thread_group_id() {
 fn test_thread_group_size() {
     // Test thread_group.size property
     let module = parse_and_lower(
-        "@simd\nfn kernel() -> i64:\n    let sz = thread_group.size\n    return sz\n"
-    ).unwrap();
+        "@simd\nfn kernel() -> i64:\n    let sz = thread_group.size\n    return sz\n",
+    )
+    .unwrap();
 
     let func = &module.functions[0];
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[0] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[0]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(intrinsic, &GpuIntrinsicKind::LocalSize);
             assert!(args.is_empty());
@@ -165,9 +190,9 @@ fn test_thread_group_size() {
 #[test]
 fn test_thread_group_barrier() {
     // Test thread_group.barrier() method
-    let module = parse_and_lower(
-        "@simd\nfn kernel() -> i64:\n    thread_group.barrier()\n    return 0\n"
-    ).unwrap();
+    let module =
+        parse_and_lower("@simd\nfn kernel() -> i64:\n    thread_group.barrier()\n    return 0\n")
+            .unwrap();
 
     let func = &module.functions[0];
     // Check the expression statement for barrier

@@ -10,9 +10,12 @@ use walkdir::WalkDir;
 /// Run the linter on a file or directory
 pub fn run_lint(args: &[String]) -> i32 {
     // Parse arguments
-    let path = args.get(1).map(|s| PathBuf::from(s)).unwrap_or_else(|| PathBuf::from("."));
+    let path = args
+        .get(1)
+        .map(|s| PathBuf::from(s))
+        .unwrap_or_else(|| PathBuf::from("."));
     let json_output = args.iter().any(|a| a == "--json");
-    let _fix = args.iter().any(|a| a == "--fix"); // TODO: Implement auto-fix
+    let _fix = args.iter().any(|a| a == "--fix"); // TODO: [driver][P1] Implement auto-fix
 
     // Check if path is directory
     if path.is_dir() {
@@ -64,17 +67,26 @@ pub fn lint_directory(dir: &PathBuf, json_output: bool) -> i32 {
         }
     } else {
         println!();
-        println!("Total: {} error(s), {} warning(s) across {} file(s)",
-            total_errors, total_warnings,
-            WalkDir::new(dir).into_iter().filter(|e|
-                e.as_ref().ok().and_then(|e|
-                    e.path().extension().and_then(|s| s.to_str())
-                ) == Some("spl")
-            ).count()
+        println!(
+            "Total: {} error(s), {} warning(s) across {} file(s)",
+            total_errors,
+            total_warnings,
+            WalkDir::new(dir)
+                .into_iter()
+                .filter(|e| e
+                    .as_ref()
+                    .ok()
+                    .and_then(|e| e.path().extension().and_then(|s| s.to_str()))
+                    == Some("spl"))
+                .count()
         );
     }
 
-    if all_errors { 1 } else { 0 }
+    if all_errors {
+        1
+    } else {
+        0
+    }
 }
 
 /// Lint a single file
@@ -94,7 +106,11 @@ pub fn lint_file(path: &PathBuf, json_output: bool) -> i32 {
                 }
             }
         }
-        if has_errors { 1 } else { 0 }
+        if has_errors {
+            1
+        } else {
+            0
+        }
     } else {
         1
     }
@@ -104,7 +120,12 @@ pub fn lint_file(path: &PathBuf, json_output: bool) -> i32 {
 pub fn lint_file_internal(
     path: &std::path::Path,
     json_output: bool,
-) -> Option<(bool, usize, usize, Vec<simple_common::diagnostic::Diagnostic>)> {
+) -> Option<(
+    bool,
+    usize,
+    usize,
+    Vec<simple_common::diagnostic::Diagnostic>,
+)> {
     // Read file
     let source = match fs::read_to_string(path) {
         Ok(s) => s,
@@ -136,7 +157,6 @@ pub fn lint_file_internal(
     checker.check_module(&module.items);
     let diagnostics = checker.diagnostics();
 
-
     let error_count = diagnostics.iter().filter(|d| d.is_error()).count();
     let warning_count = diagnostics.len() - error_count;
     let has_errors = error_count > 0;
@@ -157,7 +177,11 @@ pub fn lint_file_internal(
             for diagnostic in diagnostics {
                 // Format: file:line:col: level: message
                 let span = &diagnostic.span;
-                let level_str = if diagnostic.is_error() { "error" } else { "warning" };
+                let level_str = if diagnostic.is_error() {
+                    "error"
+                } else {
+                    "warning"
+                };
                 println!(
                     "{}:{}:{}: {}: {} [{}]",
                     path.display(),
@@ -180,7 +204,10 @@ pub fn lint_file_internal(
 /// Run the formatter on a file or directory
 pub fn run_fmt(args: &[String]) -> i32 {
     // Parse arguments
-    let path = args.get(1).map(|s| PathBuf::from(s)).unwrap_or_else(|| PathBuf::from("."));
+    let path = args
+        .get(1)
+        .map(|s| PathBuf::from(s))
+        .unwrap_or_else(|| PathBuf::from("."));
     let check_only = args.iter().any(|a| a == "--check");
 
     // Read file
@@ -192,7 +219,7 @@ pub fn run_fmt(args: &[String]) -> i32 {
         }
     };
 
-    // TODO: Implement actual formatting logic
+    // TODO: [driver][P1] Implement actual formatting logic
     // For now, this is a placeholder that validates the file can be parsed
     let mut parser = Parser::new(&source);
     match parser.parse() {
@@ -201,7 +228,10 @@ pub fn run_fmt(args: &[String]) -> i32 {
                 println!("{}: formatted correctly", path.display());
                 0
             } else {
-                println!("{}: would format (formatter not yet implemented)", path.display());
+                println!(
+                    "{}: would format (formatter not yet implemented)",
+                    path.display()
+                );
                 0
             }
         }

@@ -3,9 +3,9 @@
 
 #![cfg(feature = "monoio-net")]
 
-use crate::value::RuntimeValue;
-use crate::monoio_runtime::{runtime_value_to_string, copy_to_buffer, extract_buffer_bytes};
+use crate::monoio_runtime::{copy_to_buffer, extract_buffer_bytes, runtime_value_to_string};
 use crate::monoio_thread::{send_request, IoRequest, IoResponse};
+use crate::value::RuntimeValue;
 
 /// Bind a UDP socket to the specified address
 /// Feature #1745: UDP socket creation
@@ -77,12 +77,17 @@ pub extern "C" fn monoio_udp_send_to(
             bytes
         }
         None => {
-            tracing::error!("monoio_udp_send_to: Invalid buffer (not a RuntimeArray or RuntimeString)");
+            tracing::error!(
+                "monoio_udp_send_to: Invalid buffer (not a RuntimeArray or RuntimeString)"
+            );
             return RuntimeValue::from_int(-1);
         }
     };
 
-    tracing::debug!("monoio_udp_send_to: Extracted {} bytes from buffer", data.len());
+    tracing::debug!(
+        "monoio_udp_send_to: Extracted {} bytes from buffer",
+        data.len()
+    );
 
     // Send request to runtime thread
     let response = send_request(IoRequest::UdpSendTo {
@@ -142,7 +147,12 @@ pub extern "C" fn monoio_udp_recv_from(
                 return RuntimeValue::from_int(-1);
             }
 
-            tracing::debug!("monoio_udp_recv_from: Received {} bytes from {}, copied {} to buffer", len, addr, copied);
+            tracing::debug!(
+                "monoio_udp_recv_from: Received {} bytes from {}, copied {} to buffer",
+                len,
+                addr,
+                copied
+            );
             RuntimeValue::from_int(len as i64)
         }
         IoResponse::Error { code, message } => {
@@ -158,24 +168,35 @@ pub extern "C" fn monoio_udp_recv_from(
 
 /// Connect UDP socket to a peer (for send/recv without address)
 #[no_mangle]
-pub extern "C" fn monoio_udp_connect(_socket_handle: RuntimeValue, _addr: RuntimeValue) -> RuntimeValue {
-    // TODO: Implement connected UDP
+pub extern "C" fn monoio_udp_connect(
+    _socket_handle: RuntimeValue,
+    _addr: RuntimeValue,
+) -> RuntimeValue {
+    // TODO: [runtime][P1] Implement connected UDP
     tracing::warn!("monoio_udp_connect: Not yet implemented");
     RuntimeValue::from_int(1)
 }
 
 /// Send data to connected peer
 #[no_mangle]
-pub extern "C" fn monoio_udp_send(_socket_handle: RuntimeValue, _buffer: RuntimeValue, _len: i64) -> RuntimeValue {
-    // TODO: Implement connected send
+pub extern "C" fn monoio_udp_send(
+    _socket_handle: RuntimeValue,
+    _buffer: RuntimeValue,
+    _len: i64,
+) -> RuntimeValue {
+    // TODO: [runtime][P1] Implement connected send
     tracing::warn!("monoio_udp_send: Not yet implemented");
     RuntimeValue::from_int(-1)
 }
 
 /// Receive data from connected peer
 #[no_mangle]
-pub extern "C" fn monoio_udp_recv(_socket_handle: RuntimeValue, _buffer: RuntimeValue, _max_len: i64) -> RuntimeValue {
-    // TODO: Implement connected recv
+pub extern "C" fn monoio_udp_recv(
+    _socket_handle: RuntimeValue,
+    _buffer: RuntimeValue,
+    _max_len: i64,
+) -> RuntimeValue {
+    // TODO: [runtime][P1] Implement connected recv
     tracing::warn!("monoio_udp_recv: Not yet implemented");
     RuntimeValue::from_int(-1)
 }
@@ -236,7 +257,10 @@ pub extern "C" fn monoio_udp_local_addr(socket_handle: RuntimeValue) -> RuntimeV
 
 /// Set broadcast option
 #[no_mangle]
-pub extern "C" fn monoio_udp_set_broadcast(socket_handle: RuntimeValue, broadcast: bool) -> RuntimeValue {
+pub extern "C" fn monoio_udp_set_broadcast(
+    socket_handle: RuntimeValue,
+    broadcast: bool,
+) -> RuntimeValue {
     let socket_id = socket_handle.as_int();
 
     // Send request to runtime thread
@@ -248,7 +272,11 @@ pub extern "C" fn monoio_udp_set_broadcast(socket_handle: RuntimeValue, broadcas
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!("monoio_udp_set_broadcast: Set broadcast={} for socket {}", broadcast, socket_id);
+            tracing::debug!(
+                "monoio_udp_set_broadcast: Set broadcast={} for socket {}",
+                broadcast,
+                socket_id
+            );
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {
@@ -264,11 +292,17 @@ pub extern "C" fn monoio_udp_set_broadcast(socket_handle: RuntimeValue, broadcas
 
 /// Set multicast TTL
 #[no_mangle]
-pub extern "C" fn monoio_udp_set_multicast_ttl(socket_handle: RuntimeValue, ttl: i64) -> RuntimeValue {
+pub extern "C" fn monoio_udp_set_multicast_ttl(
+    socket_handle: RuntimeValue,
+    ttl: i64,
+) -> RuntimeValue {
     let socket_id = socket_handle.as_int();
 
     if ttl < 0 || ttl > 255 {
-        tracing::error!("monoio_udp_set_multicast_ttl: Invalid TTL {}, must be 0-255", ttl);
+        tracing::error!(
+            "monoio_udp_set_multicast_ttl: Invalid TTL {}, must be 0-255",
+            ttl
+        );
         return RuntimeValue::from_int(-1);
     }
 
@@ -281,7 +315,11 @@ pub extern "C" fn monoio_udp_set_multicast_ttl(socket_handle: RuntimeValue, ttl:
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!("monoio_udp_set_multicast_ttl: Set TTL={} for socket {}", ttl, socket_id);
+            tracing::debug!(
+                "monoio_udp_set_multicast_ttl: Set TTL={} for socket {}",
+                ttl,
+                socket_id
+            );
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {
@@ -332,7 +370,10 @@ pub extern "C" fn monoio_udp_join_multicast(
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!("monoio_udp_join_multicast: Joined multicast group for socket {}", socket_id);
+            tracing::debug!(
+                "monoio_udp_join_multicast: Joined multicast group for socket {}",
+                socket_id
+            );
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {
@@ -383,7 +424,10 @@ pub extern "C" fn monoio_udp_leave_multicast(
 
     match response {
         IoResponse::Success { .. } => {
-            tracing::debug!("monoio_udp_leave_multicast: Left multicast group for socket {}", socket_id);
+            tracing::debug!(
+                "monoio_udp_leave_multicast: Left multicast group for socket {}",
+                socket_id
+            );
             RuntimeValue::from_int(1)
         }
         IoResponse::Error { code, message } => {

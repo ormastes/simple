@@ -1,9 +1,11 @@
 //! Tests for async/future functionality
 
-use super::{rt_future_new, rt_future_await, rt_future_is_ready,
-            rt_future_resolve, rt_future_all, rt_future_race};
-use crate::value::{RuntimeValue, rt_array_new, rt_array_push, rt_array_get, rt_array_len};
-use crate::executor::{AsyncMode, configure_async_mode};
+use super::{
+    rt_future_all, rt_future_await, rt_future_is_ready, rt_future_new, rt_future_race,
+    rt_future_resolve,
+};
+use crate::executor::{configure_async_mode, AsyncMode};
+use crate::value::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, RuntimeValue};
 use std::sync::atomic::{AtomicI32, Ordering};
 
 // Test helper: Simple function that returns a value
@@ -34,10 +36,7 @@ fn test_future_new_and_await_simple() {
     configure_async_mode(AsyncMode::Threaded);
 
     // Create a future with lazy execution
-    let future = rt_future_new(
-        return_value as u64,
-        RuntimeValue::from_int(123),
-    );
+    let future = rt_future_new(return_value as u64, RuntimeValue::from_int(123));
 
     // Counter should be 0 (lazy execution)
     assert!(future.is_heap());
@@ -58,10 +57,7 @@ fn test_future_await_executes_body() {
     configure_async_mode(AsyncMode::Threaded);
 
     // Create future with counter increment
-    let future = rt_future_new(
-        increment_counter as u64,
-        RuntimeValue::NIL,
-    );
+    let future = rt_future_new(increment_counter as u64, RuntimeValue::NIL);
 
     // Counter should still be 0 (lazy)
     assert_eq!(TEST_COUNTER.load(Ordering::SeqCst), 0);
@@ -78,10 +74,7 @@ fn test_future_await_executes_body() {
 fn test_future_await_double_await() {
     configure_async_mode(AsyncMode::Threaded);
 
-    let future = rt_future_new(
-        double_int as u64,
-        RuntimeValue::from_int(21),
-    );
+    let future = rt_future_new(double_int as u64, RuntimeValue::from_int(21));
 
     // First await
     let result1 = rt_future_await(future);
@@ -96,10 +89,7 @@ fn test_future_await_double_await() {
 fn test_future_is_ready() {
     configure_async_mode(AsyncMode::Threaded);
 
-    let future = rt_future_new(
-        return_value as u64,
-        RuntimeValue::from_int(100),
-    );
+    let future = rt_future_new(return_value as u64, RuntimeValue::from_int(100));
 
     // Not ready initially (lazy execution)
     assert_eq!(rt_future_is_ready(future), 0);

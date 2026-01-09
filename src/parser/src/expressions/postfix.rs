@@ -189,7 +189,7 @@ impl<'a> Parser<'a> {
                             let full_name = format!("{}.{}", qualified_name, field);
 
                             self.advance(); // consume '{'
-                            // Skip newlines after opening brace
+                                            // Skip newlines after opening brace
                             while self.check(&TokenKind::Newline) {
                                 self.advance();
                             }

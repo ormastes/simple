@@ -48,14 +48,26 @@ impl Weaver {
         for block in &function.blocks {
             for (idx, inst) in block.instructions.iter().enumerate() {
                 match inst {
-                    MirInst::BinOp { dest: _, op, left: _, right: _ } => {
+                    MirInst::BinOp {
+                        dest: _,
+                        op,
+                        left: _,
+                        right: _,
+                    } => {
                         // Condition evaluation (comparison operators)
                         match op {
-                            BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => {
+                            BinOp::Eq
+                            | BinOp::NotEq
+                            | BinOp::Lt
+                            | BinOp::LtEq
+                            | BinOp::Gt
+                            | BinOp::GtEq => {
                                 join_points.push(JoinPoint {
                                     kind: JoinPointKind::Condition {
-                                        location: format!("{}:block{:?}:inst{}",
-                                            function.name, block.id, idx),
+                                        location: format!(
+                                            "{}:block{:?}:inst{}",
+                                            function.name, block.id, idx
+                                        ),
                                     },
                                     block_id: block.id,
                                     instruction_index: idx,
@@ -70,8 +82,10 @@ impl Weaver {
                         if self.is_decision_instruction(inst) {
                             join_points.push(JoinPoint {
                                 kind: JoinPointKind::Decision {
-                                    location: format!("{}:block{:?}:inst{}",
-                                        function.name, block.id, idx),
+                                    location: format!(
+                                        "{}:block{:?}:inst{}",
+                                        function.name, block.id, idx
+                                    ),
                                 },
                                 block_id: block.id,
                                 instruction_index: idx,
@@ -83,8 +97,10 @@ impl Weaver {
                         if self.is_error_instruction(inst) {
                             join_points.push(JoinPoint {
                                 kind: JoinPointKind::Error {
-                                    location: format!("{}:block{:?}:inst{}",
-                                        function.name, block.id, idx),
+                                    location: format!(
+                                        "{}:block{:?}:inst{}",
+                                        function.name, block.id, idx
+                                    ),
                                     error_type: "Result".to_string(),
                                 },
                                 block_id: block.id,
@@ -102,24 +118,29 @@ impl Weaver {
 
     /// Check if an instruction represents a decision point.
     fn is_decision_instruction(&self, inst: &MirInst) -> bool {
-        matches!(inst,
-            MirInst::PatternTest { .. } |
-            MirInst::EnumDiscriminant { .. } |
-            MirInst::TryUnwrap { .. }  // Result/Option unwrapping is a decision point
+        matches!(
+            inst,
+            MirInst::PatternTest { .. }
+                | MirInst::EnumDiscriminant { .. }
+                | MirInst::TryUnwrap { .. } // Result/Option unwrapping is a decision point
         )
     }
 
     /// Check if an instruction represents an error handling point.
     fn is_error_instruction(&self, inst: &MirInst) -> bool {
-        matches!(inst,
+        matches!(
+            inst,
             MirInst::ResultErr { .. } |  // Creating Result::Err
-            MirInst::TryUnwrap { .. }     // ? operator (unwrap or propagate error)
+            MirInst::TryUnwrap { .. } // ? operator (unwrap or propagate error)
         )
     }
 
     /// Match advice to join points.
     /// Returns (matched advices, diagnostics).
-    pub fn match_advice(&self, join_point: &JoinPoint) -> (Vec<MatchedAdvice>, Vec<WeavingDiagnostic>) {
+    pub fn match_advice(
+        &self,
+        join_point: &JoinPoint,
+    ) -> (Vec<MatchedAdvice>, Vec<WeavingDiagnostic>) {
         if !self.config.enabled {
             return (Vec::new(), Vec::new());
         }
@@ -198,10 +219,8 @@ impl Weaver {
 
             for group in same_priority_groups {
                 if group.len() > 1 && group.iter().any(|a| a.specificity == group[0].specificity) {
-                    let advice_names: Vec<String> = group
-                        .iter()
-                        .map(|a| a.advice_function.clone())
-                        .collect();
+                    let advice_names: Vec<String> =
+                        group.iter().map(|a| a.advice_function.clone()).collect();
                     diagnostics.push(
                         WeavingDiagnostic::warning(format!(
                             "Ambiguous advice ordering at priority {}: [{}]. Consider adjusting priorities.",
@@ -227,12 +246,12 @@ impl Weaver {
     /// Build a signature string for a function.
     pub(super) fn build_signature(&self, function: &MirFunction) -> String {
         // Simple signature: return_type name(param_types...)
-        // TODO: Use proper type names instead of TypeId debug format
+        // TODO: [compiler][P3] Use proper type names instead of TypeId debug format
         // For now, just use simple format that matches predicate patterns
         let param_types = function
             .params
             .iter()
-            .map(|_| "Any".to_string())  // Simplified for now
+            .map(|_| "Any".to_string()) // Simplified for now
             .collect::<Vec<_>>()
             .join(", ");
 

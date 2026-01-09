@@ -1,8 +1,8 @@
 //! Vulkan descriptor set management
 
-use super::error::{VulkanError, VulkanResult};
-use super::device::VulkanDevice;
 use super::buffer::VulkanBuffer;
+use super::device::VulkanDevice;
+use super::error::{VulkanError, VulkanResult};
 use ash::vk;
 use std::sync::Arc;
 
@@ -18,15 +18,24 @@ impl DescriptorSetLayout {
         device: Arc<VulkanDevice>,
         bindings: &[vk::DescriptorSetLayoutBinding],
     ) -> VulkanResult<Arc<Self>> {
-        let create_info = vk::DescriptorSetLayoutCreateInfo::default()
-            .bindings(bindings);
+        let create_info = vk::DescriptorSetLayoutCreateInfo::default().bindings(bindings);
 
         let layout = unsafe {
-            device.handle().create_descriptor_set_layout(&create_info, None)
-                .map_err(|e| VulkanError::PipelineCreationFailed(format!("Failed to create descriptor set layout: {:?}", e)))?
+            device
+                .handle()
+                .create_descriptor_set_layout(&create_info, None)
+                .map_err(|e| {
+                    VulkanError::PipelineCreationFailed(format!(
+                        "Failed to create descriptor set layout: {:?}",
+                        e
+                    ))
+                })?
         };
 
-        tracing::info!("Descriptor set layout created with {} bindings", bindings.len());
+        tracing::info!(
+            "Descriptor set layout created with {} bindings",
+            bindings.len()
+        );
 
         Ok(Arc::new(Self { device, layout }))
     }
@@ -62,7 +71,9 @@ impl DescriptorSetLayout {
 impl Drop for DescriptorSetLayout {
     fn drop(&mut self) {
         unsafe {
-            self.device.handle().destroy_descriptor_set_layout(self.layout, None);
+            self.device
+                .handle()
+                .destroy_descriptor_set_layout(self.layout, None);
         }
         tracing::info!("Descriptor set layout destroyed");
     }
@@ -87,8 +98,15 @@ impl DescriptorPool {
             .pool_sizes(pool_sizes);
 
         let pool = unsafe {
-            device.handle().create_descriptor_pool(&create_info, None)
-                .map_err(|e| VulkanError::AllocationFailed(format!("Failed to create descriptor pool: {:?}", e)))?
+            device
+                .handle()
+                .create_descriptor_pool(&create_info, None)
+                .map_err(|e| {
+                    VulkanError::AllocationFailed(format!(
+                        "Failed to create descriptor pool: {:?}",
+                        e
+                    ))
+                })?
         };
 
         tracing::info!("Descriptor pool created (max sets: {})", max_sets);
@@ -113,10 +131,7 @@ impl DescriptorPool {
     }
 
     /// Create a pool for combined image samplers
-    pub fn new_for_samplers(
-        device: Arc<VulkanDevice>,
-        max_sets: u32,
-    ) -> VulkanResult<Arc<Self>> {
+    pub fn new_for_samplers(device: Arc<VulkanDevice>, max_sets: u32) -> VulkanResult<Arc<Self>> {
         let pool_size = vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(max_sets);
@@ -134,8 +149,15 @@ impl DescriptorPool {
             .set_layouts(layouts);
 
         unsafe {
-            self.device.handle().allocate_descriptor_sets(&alloc_info)
-                .map_err(|e| VulkanError::AllocationFailed(format!("Failed to allocate descriptor sets: {:?}", e)))
+            self.device
+                .handle()
+                .allocate_descriptor_sets(&alloc_info)
+                .map_err(|e| {
+                    VulkanError::AllocationFailed(format!(
+                        "Failed to allocate descriptor sets: {:?}",
+                        e
+                    ))
+                })
         }
     }
 
@@ -153,7 +175,9 @@ impl DescriptorPool {
 impl Drop for DescriptorPool {
     fn drop(&mut self) {
         unsafe {
-            self.device.handle().destroy_descriptor_pool(self.pool, None);
+            self.device
+                .handle()
+                .destroy_descriptor_pool(self.pool, None);
         }
         tracing::info!("Descriptor pool destroyed");
     }
@@ -176,7 +200,9 @@ impl DescriptorSet {
         let mut sets = pool.allocate_sets(&layouts)?;
 
         if sets.is_empty() {
-            return Err(VulkanError::AllocationFailed("No descriptor sets allocated".to_string()));
+            return Err(VulkanError::AllocationFailed(
+                "No descriptor sets allocated".to_string(),
+            ));
         }
 
         let set = sets.remove(0);
@@ -245,7 +271,10 @@ impl DescriptorSet {
             self.device.handle().update_descriptor_sets(&writes, &[]);
         }
 
-        tracing::debug!("Descriptor set updated with image sampler at binding {}", binding);
+        tracing::debug!(
+            "Descriptor set updated with image sampler at binding {}",
+            binding
+        );
 
         Ok(())
     }
@@ -308,7 +337,10 @@ mod tests {
             .descriptor_count(1)
             .stage_flags(vk::ShaderStageFlags::FRAGMENT);
 
-        assert_eq!(binding.descriptor_type, vk::DescriptorType::COMBINED_IMAGE_SAMPLER);
+        assert_eq!(
+            binding.descriptor_type,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+        );
         assert!(binding.stage_flags.contains(vk::ShaderStageFlags::FRAGMENT));
     }
 
@@ -384,7 +416,10 @@ mod tests {
             .sampler(vk::Sampler::null())
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
 
-        assert_eq!(image_info.image_layout, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+        assert_eq!(
+            image_info.image_layout,
+            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+        );
     }
 
     #[test]
@@ -411,7 +446,10 @@ mod tests {
             .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER);
 
         assert_eq!(write.dst_binding, 1);
-        assert_eq!(write.descriptor_type, vk::DescriptorType::COMBINED_IMAGE_SAMPLER);
+        assert_eq!(
+            write.descriptor_type,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+        );
     }
 
     #[test]
@@ -435,8 +473,7 @@ mod tests {
     #[test]
     fn test_descriptor_array_single_element() {
         // Most descriptors use a single element (count = 1)
-        let binding = vk::DescriptorSetLayoutBinding::default()
-            .descriptor_count(1);
+        let binding = vk::DescriptorSetLayoutBinding::default().descriptor_count(1);
 
         assert_eq!(binding.descriptor_count, 1);
     }
@@ -444,8 +481,7 @@ mod tests {
     #[test]
     fn test_descriptor_array_multiple_elements() {
         // Test descriptor arrays (e.g., texture arrays)
-        let binding = vk::DescriptorSetLayoutBinding::default()
-            .descriptor_count(16); // Array of 16 textures
+        let binding = vk::DescriptorSetLayoutBinding::default().descriptor_count(16); // Array of 16 textures
 
         assert_eq!(binding.descriptor_count, 16);
     }

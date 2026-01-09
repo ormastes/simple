@@ -24,11 +24,7 @@ use super::registry::TENSOR_REGISTRY;
 /// - Number of dimensions (ndim) on success
 /// - 0 on failure
 #[no_mangle]
-pub extern "C" fn rt_torch_shape(
-    tensor_handle: u64,
-    out_shape: *mut i64,
-    max_dims: i32,
-) -> i32 {
+pub extern "C" fn rt_torch_shape(tensor_handle: u64, out_shape: *mut i64, max_dims: i32) -> i32 {
     #[cfg(feature = "pytorch")]
     {
         if out_shape.is_null() || max_dims <= 0 {

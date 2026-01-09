@@ -26,7 +26,9 @@ pub extern "C" fn rt_torch_copy_data_to_cpu(
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let numel = tensor.0.numel();
@@ -40,7 +42,10 @@ pub extern "C" fn rt_torch_copy_data_to_cpu(
         }
 
         // Convert to CPU and f32 if needed
-        let cpu_tensor = tensor.0.to_device(tch::Device::Cpu).to_kind(tch::Kind::Float);
+        let cpu_tensor = tensor
+            .0
+            .to_device(tch::Device::Cpu)
+            .to_kind(tch::Kind::Float);
 
         // Copy data to buffer
         let data: Vec<f32> = cpu_tensor.view(-1).try_into().unwrap_or_default();
@@ -52,10 +57,7 @@ pub extern "C" fn rt_torch_copy_data_to_cpu(
             std::ptr::copy_nonoverlapping(data.as_ptr(), buffer_ptr, data.len());
         }
 
-        tracing::debug!(
-            "rt_torch_copy_data_to_cpu: copied {} elements",
-            data.len()
-        );
+        tracing::debug!("rt_torch_copy_data_to_cpu: copied {} elements", data.len());
         data.len() as i64
     }
     #[cfg(not(feature = "pytorch"))]
@@ -72,7 +74,9 @@ pub extern "C" fn rt_torch_item(tensor_handle: u64) -> f64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0.0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0.0;
+        };
         drop(registry);
 
         if tensor.0.numel() != 1 {
@@ -99,12 +103,16 @@ pub extern "C" fn rt_torch_sum(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let result = tensor.0.sum(tch::Kind::Float);
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_sum: {} -> handle={}", tensor_handle, handle);
         handle
     }
@@ -122,12 +130,16 @@ pub extern "C" fn rt_torch_mean(tensor_handle: u64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let result = tensor.0.mean(tch::Kind::Float);
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
         tracing::debug!("rt_torch_mean: {} -> handle={}", tensor_handle, handle);
         handle
     }

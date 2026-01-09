@@ -51,10 +51,7 @@ impl CompilerPipeline {
         let errors = checker.check_module(items);
 
         if !errors.is_empty() {
-            let error_messages: Vec<String> = errors
-                .iter()
-                .map(|e| format!("{:?}", e))
-                .collect();
+            let error_messages: Vec<String> = errors.iter().map(|e| format!("{:?}", e)).collect();
             return Err(CompileError::Semantic(format!(
                 "Trait coherence errors:\n{}",
                 error_messages.join("\n")

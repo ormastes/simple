@@ -33,7 +33,7 @@ impl PtySession {
         let mut cmd = CommandBuilder::new(&binary);
         cmd.arg("--tui");
         cmd.env("TERM", "xterm-256color");
-        cmd.env("TUI_DEBUG", "1");  // Enable debug logging
+        cmd.env("TUI_DEBUG", "1"); // Enable debug logging
 
         let _child = pair.slave.spawn_command(cmd)?;
         drop(pair.slave);
@@ -357,7 +357,10 @@ fn test_tui_two_if_statements_backspace() -> Result<(), Box<dyn std::error::Erro
     session.send_backspace()?;
     thread::sleep(Duration::from_millis(200));
     let output6 = session.read_output(200)?;
-    log_event("STEP 7: Press Backspace #2 (4→3 spaces, PREVENT EMPTY)", &output6)?;
+    log_event(
+        "STEP 7: Press Backspace #2 (4→3 spaces, PREVENT EMPTY)",
+        &output6,
+    )?;
     println!("Output after second backspace:\n{}", output6);
 
     // Check for empty buffer prevention
@@ -492,7 +495,8 @@ fn test_tui_visibility_fixes() -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 #[cfg(feature = "tui")]
-fn test_tui_repl_two_if_statements_backspace_normal_baseline() -> Result<(), Box<dyn std::error::Error>> {
+fn test_tui_repl_two_if_statements_backspace_normal_baseline(
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== Testing TUI REPL: Two If Statements + Backspace (Normal Mode Baseline) ===\n");
 
     let mut session = PtySession::new()?;
@@ -578,6 +582,6 @@ fn test_tui_repl_two_if_statements_backspace_normal_baseline() -> Result<(), Box
 
     println!("\n=== Test Complete ===");
     println!("TUI mode passes Normal mode baseline tests!");
-    
+
     Ok(())
 }

@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use tracing::{debug, error, instrument, trace, warn};
 
 use simple_parser::ast::{
-    ClassDef, EnumDef, Expr, ExportUseStmt, FunctionDef, ImportTarget, MacroDef, Node, Pattern, UseStmt,
+    ClassDef, EnumDef, ExportUseStmt, Expr, FunctionDef, ImportTarget, MacroDef, Node, Pattern,
+    UseStmt,
 };
 
 use crate::error::CompileError;
@@ -22,8 +23,8 @@ use crate::value::{Env, Value};
 // Import module cache utilities
 use super::module_cache::{
     cache_module_exports, decrement_load_depth, filter_functions_from_value,
-    get_cached_module_exports, increment_load_depth, is_module_loading,
-    mark_module_loading, unmark_module_loading, MAX_MODULE_DEPTH,
+    get_cached_module_exports, increment_load_depth, is_module_loading, mark_module_loading,
+    unmark_module_loading, MAX_MODULE_DEPTH,
 };
 
 type Enums = HashMap<String, EnumDef>;
@@ -56,7 +57,11 @@ pub(super) fn load_and_merge_module(
     let depth = increment_load_depth();
     if depth > MAX_MODULE_DEPTH {
         decrement_load_depth();
-        error!(depth, max = MAX_MODULE_DEPTH, "Module import depth exceeded");
+        error!(
+            depth,
+            max = MAX_MODULE_DEPTH,
+            "Module import depth exceeded"
+        );
         return Err(CompileError::Runtime(format!(
             "Maximum module import depth ({}) exceeded. Possible circular import or very deep module hierarchy.",
             MAX_MODULE_DEPTH
@@ -185,7 +190,10 @@ pub(super) fn load_and_merge_module(
         Err(e) => {
             unmark_module_loading(&module_path);
             decrement_load_depth();
-            return Err(CompileError::Io(format!("Cannot read module {:?}: {}", module_path, e)));
+            return Err(CompileError::Io(format!(
+                "Cannot read module {:?}: {}",
+                module_path, e
+            )));
         }
     };
 
@@ -197,28 +205,25 @@ pub(super) fn load_and_merge_module(
             unmark_module_loading(&module_path);
             decrement_load_depth();
             error!(path = ?module_path, error = %e, "Failed to parse module");
-            return Err(CompileError::Parse(format!("Cannot parse module {:?}: {}", module_path, e)));
+            return Err(CompileError::Parse(format!(
+                "Cannot parse module {:?}: {}",
+                module_path, e
+            )));
         }
     };
 
     // Evaluate the module to get its environment (including imports)
     debug!(path = ?module_path, "Evaluating module exports");
-    let (module_env, module_exports) = match evaluate_module_exports(
-        &module.items,
-        Some(&module_path),
-        functions,
-        classes,
-        enums,
-    ) {
-        Ok(result) => {
-            result
-        }
-        Err(e) => {
-            unmark_module_loading(&module_path);
-            decrement_load_depth();
-            return Err(e);
-        }
-    };
+    let (module_env, module_exports) =
+        match evaluate_module_exports(&module.items, Some(&module_path), functions, classes, enums)
+        {
+            Ok(result) => result,
+            Err(e) => {
+                unmark_module_loading(&module_path);
+                decrement_load_depth();
+                return Err(e);
+            }
+        };
 
     // Create exports with the module's environment captured
     // IMPORTANT: Filter out Function values from captured_env to avoid exponential cloning.
@@ -234,13 +239,18 @@ pub(super) fn load_and_merge_module(
     let mut exports: HashMap<String, Value> = HashMap::new();
     for (name, value) in module_exports {
         match value {
-            Value::Function { name: fn_name, def, .. } => {
+            Value::Function {
+                name: fn_name, def, ..
+            } => {
                 // Re-create function with filtered env (excludes function values to avoid cycles)
-                exports.insert(name, Value::Function {
-                    name: fn_name,
-                    def,
-                    captured_env: filtered_env.clone(),
-                });
+                exports.insert(
+                    name,
+                    Value::Function {
+                        name: fn_name,
+                        def,
+                        captured_env: filtered_env.clone(),
+                    },
+                );
             }
             other => {
                 exports.insert(name, other);
@@ -290,17 +300,74 @@ pub(super) fn evaluate_module_exports(
     let impl_methods: ImplMethods = HashMap::new();
 
     // Add builtin types to module environment so they're available in module code
-    env.insert("Dict".to_string(), Value::Constructor { class_name: "Dict".to_string() });
-    env.insert("List".to_string(), Value::Constructor { class_name: "List".to_string() });
-    env.insert("Set".to_string(), Value::Constructor { class_name: "Set".to_string() });
-    env.insert("Array".to_string(), Value::Constructor { class_name: "Array".to_string() });
-    env.insert("Tuple".to_string(), Value::Constructor { class_name: "Tuple".to_string() });
-    env.insert("Option".to_string(), Value::Constructor { class_name: "Option".to_string() });
-    env.insert("Result".to_string(), Value::Constructor { class_name: "Result".to_string() });
-    env.insert("Some".to_string(), Value::Constructor { class_name: "Some".to_string() });
-    env.insert("None".to_string(), Value::Enum { enum_name: "Option".to_string(), variant: "None".to_string(), payload: None });
-    env.insert("Ok".to_string(), Value::Constructor { class_name: "Ok".to_string() });
-    env.insert("Err".to_string(), Value::Constructor { class_name: "Err".to_string() });
+    env.insert(
+        "Dict".to_string(),
+        Value::Constructor {
+            class_name: "Dict".to_string(),
+        },
+    );
+    env.insert(
+        "List".to_string(),
+        Value::Constructor {
+            class_name: "List".to_string(),
+        },
+    );
+    env.insert(
+        "Set".to_string(),
+        Value::Constructor {
+            class_name: "Set".to_string(),
+        },
+    );
+    env.insert(
+        "Array".to_string(),
+        Value::Constructor {
+            class_name: "Array".to_string(),
+        },
+    );
+    env.insert(
+        "Tuple".to_string(),
+        Value::Constructor {
+            class_name: "Tuple".to_string(),
+        },
+    );
+    env.insert(
+        "Option".to_string(),
+        Value::Constructor {
+            class_name: "Option".to_string(),
+        },
+    );
+    env.insert(
+        "Result".to_string(),
+        Value::Constructor {
+            class_name: "Result".to_string(),
+        },
+    );
+    env.insert(
+        "Some".to_string(),
+        Value::Constructor {
+            class_name: "Some".to_string(),
+        },
+    );
+    env.insert(
+        "None".to_string(),
+        Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "None".to_string(),
+            payload: None,
+        },
+    );
+    env.insert(
+        "Ok".to_string(),
+        Value::Constructor {
+            class_name: "Ok".to_string(),
+        },
+    );
+    env.insert(
+        "Err".to_string(),
+        Value::Constructor {
+            class_name: "Err".to_string(),
+        },
+    );
 
     // First pass: register functions and types
     for (idx, item) in items.iter().enumerate() {
@@ -316,47 +383,59 @@ pub(super) fn evaluate_module_exports(
             Node::Class(c) => {
                 local_classes.insert(c.name.clone(), c.clone());
                 global_classes.insert(c.name.clone(), c.clone());
-                exports.insert(c.name.clone(), Value::Constructor {
-                    class_name: c.name.clone(),
-                });
+                exports.insert(
+                    c.name.clone(),
+                    Value::Constructor {
+                        class_name: c.name.clone(),
+                    },
+                );
             }
             Node::Struct(s) => {
                 // Treat structs like classes for export purposes
-                local_classes.insert(s.name.clone(), ClassDef {
-                    span: s.span.clone(),
-                    name: s.name.clone(),
-                    generic_params: vec![],
-                    where_clause: vec![],
-                    fields: s.fields.clone(),
-                    methods: vec![],
-                    parent: None,
-                    visibility: simple_parser::ast::Visibility::Public,
-                    effects: vec![],
-                    attributes: vec![],
-                    doc_comment: None,
-                    invariant: None,
-                    macro_invocations: vec![],
-                    mixins: vec![],
-                });
-                global_classes.insert(s.name.clone(), ClassDef {
-                    span: s.span.clone(),
-                    name: s.name.clone(),
-                    generic_params: vec![],
-                    where_clause: vec![],
-                    fields: s.fields.clone(),
-                    methods: vec![],
-                    parent: None,
-                    visibility: simple_parser::ast::Visibility::Public,
-                    effects: vec![],
-                    attributes: vec![],
-                    doc_comment: None,
-                    invariant: None,
-                    macro_invocations: vec![],
-                    mixins: vec![],
-                });
-                exports.insert(s.name.clone(), Value::Constructor {
-                    class_name: s.name.clone(),
-                });
+                local_classes.insert(
+                    s.name.clone(),
+                    ClassDef {
+                        span: s.span.clone(),
+                        name: s.name.clone(),
+                        generic_params: vec![],
+                        where_clause: vec![],
+                        fields: s.fields.clone(),
+                        methods: vec![],
+                        parent: None,
+                        visibility: simple_parser::ast::Visibility::Public,
+                        effects: vec![],
+                        attributes: vec![],
+                        doc_comment: None,
+                        invariant: None,
+                        macro_invocations: vec![],
+                        mixins: vec![],
+                    },
+                );
+                global_classes.insert(
+                    s.name.clone(),
+                    ClassDef {
+                        span: s.span.clone(),
+                        name: s.name.clone(),
+                        generic_params: vec![],
+                        where_clause: vec![],
+                        fields: s.fields.clone(),
+                        methods: vec![],
+                        parent: None,
+                        visibility: simple_parser::ast::Visibility::Public,
+                        effects: vec![],
+                        attributes: vec![],
+                        doc_comment: None,
+                        invariant: None,
+                        macro_invocations: vec![],
+                        mixins: vec![],
+                    },
+                );
+                exports.insert(
+                    s.name.clone(),
+                    Value::Constructor {
+                        class_name: s.name.clone(),
+                    },
+                );
             }
             Node::Impl(impl_block) => {
                 // Add impl block methods to the corresponding class/struct
@@ -383,7 +462,10 @@ pub(super) fn evaluate_module_exports(
             }
             Node::Macro(m) => {
                 // Register macro in exports with special prefix
-                exports.insert(format!("macro:{}", m.name), Value::Str(format!("macro:{}", m.name)));
+                exports.insert(
+                    format!("macro:{}", m.name),
+                    Value::Str(format!("macro:{}", m.name)),
+                );
                 // Also register in the thread-local USER_MACROS
                 super::USER_MACROS.with(|cell| cell.borrow_mut().insert(m.name.clone(), m.clone()));
             }
@@ -412,17 +494,30 @@ pub(super) fn evaluate_module_exports(
                 let binding_name = match &use_stmt.target {
                     ImportTarget::Single(name) => name.clone(),
                     ImportTarget::Aliased { alias, .. } => alias.clone(),
-                    ImportTarget::Glob | ImportTarget::Group(_) => {
-                        use_stmt.path.segments.last().cloned().unwrap_or_else(|| "module".to_string())
-                    }
+                    ImportTarget::Glob | ImportTarget::Group(_) => use_stmt
+                        .path
+                        .segments
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| "module".to_string()),
                 };
 
-                match load_and_merge_module(use_stmt, module_path, global_functions, global_classes, global_enums) {
+                match load_and_merge_module(
+                    use_stmt,
+                    module_path,
+                    global_functions,
+                    global_classes,
+                    global_enums,
+                ) {
                     Ok(value) => {
                         // Unpack module exports into current namespace
                         // This allows direct access like: import std.spec; ExecutionMode.Variant
                         if let Value::Dict(exports) = &value {
-                            eprintln!("DEBUG: Unpacking {} exports from {}", exports.len(), binding_name);
+                            eprintln!(
+                                "DEBUG: Unpacking {} exports from {}",
+                                exports.len(),
+                                binding_name
+                            );
                             for (name, export_value) in exports {
                                 eprintln!("DEBUG:   - {}", name);
                                 env.insert(name.clone(), export_value.clone());
@@ -440,7 +535,14 @@ pub(super) fn evaluate_module_exports(
             Node::Let(stmt) => {
                 // Evaluate module-level let statements (for global variables)
                 if let Some(init) = &stmt.value {
-                    if let Ok(value) = evaluate_expr(init, &env, &mut local_functions, &mut local_classes, &local_enums, &impl_methods) {
+                    if let Ok(value) = evaluate_expr(
+                        init,
+                        &env,
+                        &mut local_functions,
+                        &mut local_classes,
+                        &local_enums,
+                        &impl_methods,
+                    ) {
                         // Only handle simple identifier patterns for now
                         if let Pattern::Identifier(name) = &stmt.pattern {
                             env.insert(name.clone(), value);
@@ -451,7 +553,14 @@ pub(super) fn evaluate_module_exports(
             Node::Assignment(stmt) => {
                 // Evaluate module-level assignments
                 if let Expr::Identifier(name) = &stmt.target {
-                    if let Ok(value) = evaluate_expr(&stmt.value, &env, &mut local_functions, &mut local_classes, &local_enums, &impl_methods) {
+                    if let Ok(value) = evaluate_expr(
+                        &stmt.value,
+                        &env,
+                        &mut local_functions,
+                        &mut local_classes,
+                        &local_enums,
+                        &impl_methods,
+                    ) {
                         env.insert(name.clone(), value);
                     }
                 }
@@ -459,7 +568,13 @@ pub(super) fn evaluate_module_exports(
             Node::ExportUseStmt(export_stmt) => {
                 // Handle re-exports: export X, Y from module
                 // Load the source module and add specified items to our exports
-                if let Ok(source_exports) = load_export_source(export_stmt, module_path, global_functions, global_classes, global_enums) {
+                if let Ok(source_exports) = load_export_source(
+                    export_stmt,
+                    module_path,
+                    global_functions,
+                    global_classes,
+                    global_enums,
+                ) {
                     match &export_stmt.target {
                         ImportTarget::Single(name) => {
                             if let Some(value) = source_exports.get(name) {
@@ -509,13 +624,19 @@ pub(super) fn evaluate_module_exports(
 
     // First pass: Add all module functions to env with empty captured_env
     // This allows functions to reference each other
-    trace!(functions = local_functions.len(), "First pass: adding functions to env");
+    trace!(
+        functions = local_functions.len(),
+        "First pass: adding functions to env"
+    );
     for (name, f) in &local_functions {
-        env.insert(name.clone(), Value::Function {
-            name: name.clone(),
-            def: Box::new(f.clone()),
-            captured_env: Env::new(), // Temporary - will be replaced
-        });
+        env.insert(
+            name.clone(),
+            Value::Function {
+                name: name.clone(),
+                def: Box::new(f.clone()),
+                captured_env: Env::new(), // Temporary - will be replaced
+            },
+        );
     }
 
     // Create a filtered environment that excludes Function values from imported modules.
@@ -533,7 +654,11 @@ pub(super) fn evaluate_module_exports(
 
     // Second pass: Export functions with filtered environment captured
     // The captured_env includes non-function values (classes, enums, imported modules as dicts)
-    trace!(functions = local_functions.len(), env_size = filtered_env.len(), "Second pass: exporting functions");
+    trace!(
+        functions = local_functions.len(),
+        env_size = filtered_env.len(),
+        "Second pass: exporting functions"
+    );
     for (name, f) in &local_functions {
         let func_with_env = Value::Function {
             name: name.clone(),
@@ -574,7 +699,7 @@ fn load_export_source(
         span: export_stmt.span.clone(),
         path: export_stmt.path.clone(),
         target: ImportTarget::Glob, // Load entire module to get all exports
-        is_type_only: false, // Runtime export loading is never type-only
+        is_type_only: false,        // Runtime export loading is never type-only
     };
 
     match load_and_merge_module(&use_stmt, current_file, functions, classes, enums) {
@@ -588,7 +713,10 @@ fn load_export_source(
 }
 
 /// Resolve module path from segments
-pub(super) fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<PathBuf, CompileError> {
+pub(super) fn resolve_module_path(
+    parts: &[String],
+    base_dir: &Path,
+) -> Result<PathBuf, CompileError> {
     // Try resolving from base directory first (sibling files)
     let mut resolved = base_dir.to_path_buf();
     for part in parts {
@@ -652,39 +780,39 @@ pub(super) fn resolve_module_path(parts: &[String], base_dir: &Path) -> Result<P
         for stdlib_subpath in &["simple/std_lib/src", "std_lib/src"] {
             let stdlib_candidate = current.join(stdlib_subpath);
             if stdlib_candidate.exists() {
-            // When importing from stdlib, "std" represents the stdlib root itself, not a subdirectory.
-            // So "import std.spec" should resolve to "std_lib/src/spec/__init__.spl", not "std_lib/src/std/spec/__init__.spl".
-            // Strip the "std" prefix if present.
-            let stdlib_parts: Vec<String> = if parts.len() > 0 && parts[0] == "std" {
-                parts[1..].to_vec()
-            } else {
-                parts.to_vec()
-            };
+                // When importing from stdlib, "std" represents the stdlib root itself, not a subdirectory.
+                // So "import std.spec" should resolve to "std_lib/src/spec/__init__.spl", not "std_lib/src/std/spec/__init__.spl".
+                // Strip the "std" prefix if present.
+                let stdlib_parts: Vec<String> = if parts.len() > 0 && parts[0] == "std" {
+                    parts[1..].to_vec()
+                } else {
+                    parts.to_vec()
+                };
 
-            // Try resolving from stdlib (only if we have parts after stripping "std")
-            if !stdlib_parts.is_empty() {
-                let mut stdlib_path = stdlib_candidate.clone();
-                for part in &stdlib_parts {
-                    stdlib_path = stdlib_path.join(part);
-                }
-                stdlib_path.set_extension("spl");
-                if stdlib_path.exists() {
-                    return Ok(stdlib_path);
-                }
+                // Try resolving from stdlib (only if we have parts after stripping "std")
+                if !stdlib_parts.is_empty() {
+                    let mut stdlib_path = stdlib_candidate.clone();
+                    for part in &stdlib_parts {
+                        stdlib_path = stdlib_path.join(part);
+                    }
+                    stdlib_path.set_extension("spl");
+                    if stdlib_path.exists() {
+                        return Ok(stdlib_path);
+                    }
 
-                // Also try __init__.spl in stdlib
-                let mut stdlib_init_path = stdlib_candidate.clone();
-                for part in &stdlib_parts {
-                    stdlib_init_path = stdlib_init_path.join(part);
+                    // Also try __init__.spl in stdlib
+                    let mut stdlib_init_path = stdlib_candidate.clone();
+                    for part in &stdlib_parts {
+                        stdlib_init_path = stdlib_init_path.join(part);
+                    }
+                    stdlib_init_path = stdlib_init_path.join("__init__");
+                    stdlib_init_path.set_extension("spl");
+                    if stdlib_init_path.exists() {
+                        return Ok(stdlib_init_path);
+                    }
                 }
-                stdlib_init_path = stdlib_init_path.join("__init__");
-                stdlib_init_path.set_extension("spl");
-                if stdlib_init_path.exists() {
-                    return Ok(stdlib_init_path);
-                }
-            }
-            }  // End of if stdlib_candidate.exists()
-        }  // End of for stdlib_subpath
+            } // End of if stdlib_candidate.exists()
+        } // End of for stdlib_subpath
         if let Some(parent) = current.parent() {
             current = parent.to_path_buf();
         } else {
@@ -727,18 +855,24 @@ pub(super) fn merge_module_definitions(
                 classes.insert(c.name.clone(), c.clone());
 
                 // Add to exports dict
-                exports.insert(c.name.clone(), Value::Constructor {
-                    class_name: c.name.clone(),
-                });
+                exports.insert(
+                    c.name.clone(),
+                    Value::Constructor {
+                        class_name: c.name.clone(),
+                    },
+                );
             }
             Node::Enum(e) => {
                 // Add to global enums map - this is critical for enum variant access
                 enums.insert(e.name.clone(), e.clone());
 
                 // Export the enum as EnumType for variant construction (EnumName.Variant)
-                exports.insert(e.name.clone(), Value::EnumType {
-                    enum_name: e.name.clone(),
-                });
+                exports.insert(
+                    e.name.clone(),
+                    Value::EnumType {
+                        enum_name: e.name.clone(),
+                    },
+                );
             }
             _ => {}
         }

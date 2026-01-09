@@ -4,9 +4,9 @@ use crate::value::RuntimeValue;
 use std::os::unix::io::RawFd;
 
 #[cfg(unix)]
-use nix::unistd::{fork, ForkResult, execvp, setsid};
-#[cfg(unix)]
 use nix::sys::signal::{kill, Signal};
+#[cfg(unix)]
+use nix::unistd::{execvp, fork, setsid, ForkResult};
 #[cfg(unix)]
 use std::ffi::CString;
 

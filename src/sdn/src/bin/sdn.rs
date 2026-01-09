@@ -392,7 +392,10 @@ fn split_json_object(s: &str) -> Result<Vec<(String, String)>, String> {
                 in_key = false;
             }
             ',' if depth == 0 => {
-                pairs.push((current_key.trim().to_string(), current_value.trim().to_string()));
+                pairs.push((
+                    current_key.trim().to_string(),
+                    current_value.trim().to_string(),
+                ));
                 current_key = String::new();
                 current_value = String::new();
                 in_key = true;
@@ -407,7 +410,10 @@ fn split_json_object(s: &str) -> Result<Vec<(String, String)>, String> {
         }
     }
     if !current_key.trim().is_empty() {
-        pairs.push((current_key.trim().to_string(), current_value.trim().to_string()));
+        pairs.push((
+            current_key.trim().to_string(),
+            current_value.trim().to_string(),
+        ));
     }
     Ok(pairs)
 }

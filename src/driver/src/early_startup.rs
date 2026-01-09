@@ -133,7 +133,9 @@ where
             match arg_str.as_ref() {
                 "--app-type" => {
                     if let Some(type_arg) = args_iter.next() {
-                        if let Some(app_type) = AppType::from_str(&type_arg.as_ref().to_string_lossy()) {
+                        if let Some(app_type) =
+                            AppType::from_str(&type_arg.as_ref().to_string_lossy())
+                        {
                             config.app_type = app_type;
                         }
                     }
@@ -157,7 +159,8 @@ where
                 }
                 "--window-title" => {
                     if let Some(title_arg) = args_iter.next() {
-                        config.window_hints.title = title_arg.as_ref().to_string_lossy().to_string();
+                        config.window_hints.title =
+                            title_arg.as_ref().to_string_lossy().to_string();
                     }
                 }
                 _ => {
@@ -237,10 +240,14 @@ mod tests {
     #[test]
     fn test_parse_early_args_window_hints() {
         let args = vec![
-            "--app-type", "gui",
-            "--window-width", "1920",
-            "--window-height", "1080",
-            "--window-title", "Test App"
+            "--app-type",
+            "gui",
+            "--window-width",
+            "1920",
+            "--window-height",
+            "1080",
+            "--window-title",
+            "Test App",
         ];
         let config = parse_early_args(args);
         assert_eq!(config.app_type, AppType::Gui);

@@ -4,10 +4,13 @@
 
 use crate::error::CompileError;
 use crate::hir::{BinOp, TypeId};
-use crate::mir::{BlockId, GpuAtomicOp, GpuMemoryScope, MirFunction, MirInst, MirModule, Terminator, VReg};
+use crate::mir::{
+    BlockId, GpuAtomicOp, GpuMemoryScope, MirFunction, MirInst, MirModule, Terminator, VReg,
+};
 use rspirv::dr::{Builder, Module};
 use rspirv::spirv::{
-    AddressingModel, Capability, Decoration, ExecutionMode, ExecutionModel, MemoryModel, StorageClass, Word,
+    AddressingModel, Capability, Decoration, ExecutionMode, ExecutionModel, MemoryModel,
+    StorageClass, Word,
 };
 use std::collections::HashMap;
 
@@ -141,12 +144,17 @@ impl SpirvModule {
         let func_type = self.builder.type_function(void_type, vec![]);
 
         // Create function
-        let func_id = self.builder.begin_function(
-            void_type,
-            None,
-            rspirv::spirv::FunctionControl::NONE,
-            func_type,
-        ).map_err(|e| CompileError::Codegen(format!("Failed to create SPIR-V function: {}", e)))?;
+        let func_id = self
+            .builder
+            .begin_function(
+                void_type,
+                None,
+                rspirv::spirv::FunctionControl::NONE,
+                func_type,
+            )
+            .map_err(|e| {
+                CompileError::Codegen(format!("Failed to create SPIR-V function: {}", e))
+            })?;
 
         self.func_id_map.insert(func.name.clone(), func_id);
 
@@ -167,7 +175,8 @@ impl SpirvModule {
 
         // Set execution mode (local size will be set from kernel launch parameters)
         // For now, use a default 1x1x1 (will be overridden at runtime)
-        self.builder.execution_mode(func_id, ExecutionMode::LocalSize, vec![1, 1, 1]);
+        self.builder
+            .execution_mode(func_id, ExecutionMode::LocalSize, vec![1, 1, 1]);
 
         Ok(())
     }
@@ -176,7 +185,11 @@ impl SpirvModule {
     ///
     /// In SPIR-V compute shaders, kernel parameters are represented as global variables
     /// in the StorageBuffer storage class, bound via descriptor sets.
-    fn create_buffer_parameter(&mut self, index: usize, param: &crate::mir::MirLocal) -> Result<Word, CompileError> {
+    fn create_buffer_parameter(
+        &mut self,
+        index: usize,
+        param: &crate::mir::MirLocal,
+    ) -> Result<Word, CompileError> {
         // Determine element type from parameter TypeId
         // For array/pointer types, we'd need to extract the element type
         // For now, use the parameter type directly (assumes primitive type buffers)
@@ -190,11 +203,8 @@ impl SpirvModule {
         let struct_type = self.builder.type_struct(vec![runtime_array_type]);
 
         // Decorate the struct
-        self.builder.decorate(
-            struct_type,
-            Decoration::Block,
-            vec![],
-        );
+        self.builder
+            .decorate(struct_type, Decoration::Block, vec![]);
 
         // Decorate the member (offset 0)
         self.builder.member_decorate(
@@ -205,10 +215,14 @@ impl SpirvModule {
         );
 
         // Create pointer type to the struct in StorageBuffer storage class
-        let ptr_type = self.builder.type_pointer(None, StorageClass::StorageBuffer, struct_type);
+        let ptr_type = self
+            .builder
+            .type_pointer(None, StorageClass::StorageBuffer, struct_type);
 
         // Create the global variable
-        let var_id = self.builder.variable(ptr_type, None, StorageClass::StorageBuffer, None);
+        let var_id = self
+            .builder
+            .variable(ptr_type, None, StorageClass::StorageBuffer, None);
 
         // Decorate with descriptor set and binding
         self.builder.decorate(
@@ -249,10 +263,12 @@ impl SpirvModule {
             let block_id = BlockId(i.try_into().unwrap());
 
             // Start the block with its pre-allocated label
-            let label = *self.block_id_map.get(&block_id)
-                .ok_or_else(|| CompileError::Codegen(format!("Missing label for block {:?}", block_id)))?;
+            let label = *self.block_id_map.get(&block_id).ok_or_else(|| {
+                CompileError::Codegen(format!("Missing label for block {:?}", block_id))
+            })?;
 
-            self.builder.begin_block(Some(label))
+            self.builder
+                .begin_block(Some(label))
                 .map_err(|e| CompileError::Codegen(format!("Failed to begin block: {}", e)))?;
 
             // Compile instructions
@@ -265,7 +281,8 @@ impl SpirvModule {
         }
 
         // End function
-        self.builder.end_function()
+        self.builder
+            .end_function()
             .map_err(|e| CompileError::Codegen(format!("Failed to end function: {}", e)))?;
 
         Ok(())
@@ -275,43 +292,59 @@ impl SpirvModule {
     fn lower_terminator(&mut self, term: &Terminator) -> Result<(), CompileError> {
         match term {
             Terminator::Return(None) => {
-                self.builder.ret()
+                self.builder
+                    .ret()
                     .map_err(|e| CompileError::Codegen(format!("Failed to emit return: {}", e)))?;
             }
 
             Terminator::Return(Some(vreg)) => {
-                let value_id = *self.vreg_id_map.get(vreg)
-                    .ok_or_else(|| CompileError::Codegen(format!("Undefined return value register: {:?}", vreg)))?;
+                let value_id = *self.vreg_id_map.get(vreg).ok_or_else(|| {
+                    CompileError::Codegen(format!("Undefined return value register: {:?}", vreg))
+                })?;
 
-                self.builder.ret_value(value_id)
-                    .map_err(|e| CompileError::Codegen(format!("Failed to emit return value: {}", e)))?;
+                self.builder.ret_value(value_id).map_err(|e| {
+                    CompileError::Codegen(format!("Failed to emit return value: {}", e))
+                })?;
             }
 
             Terminator::Jump(target) => {
-                let target_label = *self.block_id_map.get(target)
-                    .ok_or_else(|| CompileError::Codegen(format!("Undefined jump target: {:?}", target)))?;
+                let target_label = *self.block_id_map.get(target).ok_or_else(|| {
+                    CompileError::Codegen(format!("Undefined jump target: {:?}", target))
+                })?;
 
-                self.builder.branch(target_label)
+                self.builder
+                    .branch(target_label)
                     .map_err(|e| CompileError::Codegen(format!("Failed to emit branch: {}", e)))?;
             }
 
-            Terminator::Branch { cond, then_block, else_block } => {
-                let cond_id = *self.vreg_id_map.get(cond)
-                    .ok_or_else(|| CompileError::Codegen(format!("Undefined condition register: {:?}", cond)))?;
+            Terminator::Branch {
+                cond,
+                then_block,
+                else_block,
+            } => {
+                let cond_id = *self.vreg_id_map.get(cond).ok_or_else(|| {
+                    CompileError::Codegen(format!("Undefined condition register: {:?}", cond))
+                })?;
 
-                let then_label = *self.block_id_map.get(then_block)
-                    .ok_or_else(|| CompileError::Codegen(format!("Undefined then block: {:?}", then_block)))?;
+                let then_label = *self.block_id_map.get(then_block).ok_or_else(|| {
+                    CompileError::Codegen(format!("Undefined then block: {:?}", then_block))
+                })?;
 
-                let else_label = *self.block_id_map.get(else_block)
-                    .ok_or_else(|| CompileError::Codegen(format!("Undefined else block: {:?}", else_block)))?;
+                let else_label = *self.block_id_map.get(else_block).ok_or_else(|| {
+                    CompileError::Codegen(format!("Undefined else block: {:?}", else_block))
+                })?;
 
-                self.builder.branch_conditional(cond_id, then_label, else_label, vec![])
-                    .map_err(|e| CompileError::Codegen(format!("Failed to emit conditional branch: {}", e)))?;
+                self.builder
+                    .branch_conditional(cond_id, then_label, else_label, vec![])
+                    .map_err(|e| {
+                        CompileError::Codegen(format!("Failed to emit conditional branch: {}", e))
+                    })?;
             }
 
             Terminator::Unreachable => {
-                self.builder.unreachable()
-                    .map_err(|e| CompileError::Codegen(format!("Failed to emit unreachable: {}", e)))?;
+                self.builder.unreachable().map_err(|e| {
+                    CompileError::Codegen(format!("Failed to emit unreachable: {}", e))
+                })?;
             }
         }
 
@@ -323,15 +356,17 @@ impl SpirvModule {
     // Type getters with caching
 
     fn get_void_type(&mut self) -> Word {
-        *self.type_cache.void_type.get_or_insert_with(|| {
-            self.builder.type_void()
-        })
+        *self
+            .type_cache
+            .void_type
+            .get_or_insert_with(|| self.builder.type_void())
     }
 
     fn get_bool_type(&mut self) -> Word {
-        *self.type_cache.bool_type.get_or_insert_with(|| {
-            self.builder.type_bool()
-        })
+        *self
+            .type_cache
+            .bool_type
+            .get_or_insert_with(|| self.builder.type_bool())
     }
 
     fn get_i32_type(&mut self) -> Word {
@@ -341,9 +376,10 @@ impl SpirvModule {
     }
 
     fn get_f32_type(&mut self) -> Word {
-        *self.type_cache.f32_type.get_or_insert_with(|| {
-            self.builder.type_float(32)
-        })
+        *self
+            .type_cache
+            .f32_type
+            .get_or_insert_with(|| self.builder.type_float(32))
     }
 
     fn get_u32_type(&mut self) -> Word {
@@ -365,9 +401,10 @@ impl SpirvModule {
     }
 
     fn get_f64_type(&mut self) -> Word {
-        *self.type_cache.f64_type.get_or_insert_with(|| {
-            self.builder.type_float(64)
-        })
+        *self
+            .type_cache
+            .f64_type
+            .get_or_insert_with(|| self.builder.type_float(64))
     }
 
     /// Map TypeId to SPIR-V type Word
@@ -408,7 +445,9 @@ impl SpirvModule {
             return id;
         }
         let vec3_u32 = self.get_vec3_u32_type();
-        let id = self.builder.type_pointer(None, StorageClass::Input, vec3_u32);
+        let id = self
+            .builder
+            .type_pointer(None, StorageClass::Input, vec3_u32);
         self.type_cache.ptr_input_vec3_u32 = Some(id);
         id
     }
@@ -418,7 +457,7 @@ impl SpirvModule {
     /// Serializes the constructed SPIR-V module to bytecode (32-bit words).
     pub fn into_bytes(self) -> Result<Vec<u8>, CompileError> {
         // Validate the module
-        // TODO: Add SPIR-V validation using spirv-val or rspirv's built-in validation
+        // TODO: [codegen][P3] Add SPIR-V validation using spirv-val or rspirv's built-in validation
 
         // The Builder's module() returns the internal Module
         // We need to use binary::Assemble trait to convert it to words
@@ -428,9 +467,7 @@ impl SpirvModule {
         let words: Vec<u32> = module.assemble();
 
         // Convert to bytes (SPIR-V is little-endian)
-        let bytes: Vec<u8> = words.iter()
-            .flat_map(|word| word.to_le_bytes())
-            .collect();
+        let bytes: Vec<u8> = words.iter().flat_map(|word| word.to_le_bytes()).collect();
 
         Ok(bytes)
     }

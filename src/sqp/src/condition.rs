@@ -55,10 +55,7 @@ pub enum Condition {
         high: SqlValue,
     },
     /// IS NULL or IS NOT NULL
-    Null {
-        column: String,
-        is_null: bool,
-    },
+    Null { column: String, is_null: bool },
     /// AND of multiple conditions
     And(Vec<Condition>),
     /// OR of multiple conditions
@@ -66,10 +63,7 @@ pub enum Condition {
     /// NOT condition
     Not(Box<Condition>),
     /// Raw SQL condition
-    Raw {
-        sql: String,
-        params: Vec<SqlValue>,
-    },
+    Raw { sql: String, params: Vec<SqlValue> },
 }
 
 impl Condition {
@@ -271,9 +265,18 @@ impl Condition {
                     _ => unreachable!(),
                 };
                 params.push(value.clone());
-                format!("{} {} {}", column, op_str, dialect.placeholder(offset + params.len()))
+                format!(
+                    "{} {} {}",
+                    column,
+                    op_str,
+                    dialect.placeholder(offset + params.len())
+                )
             }
-            Condition::InList { column, values, negated } => {
+            Condition::InList {
+                column,
+                values,
+                negated,
+            } => {
                 let placeholders: Vec<String> = values
                     .iter()
                     .map(|v| {
@@ -324,7 +327,10 @@ impl Condition {
                 let inner = condition.build_sql(dialect, params, offset);
                 format!("NOT ({})", inner)
             }
-            Condition::Raw { sql, params: raw_params } => {
+            Condition::Raw {
+                sql,
+                params: raw_params,
+            } => {
                 params.extend(raw_params.iter().cloned());
                 sql.clone()
             }
@@ -413,10 +419,7 @@ mod tests {
 
     #[test]
     fn test_and_condition() {
-        let cond = Condition::and([
-            Condition::eq("status", "active"),
-            Condition::gt("age", 18),
-        ]);
+        let cond = Condition::and([Condition::eq("status", "active"), Condition::gt("age", 18)]);
         let (sql, params) = cond.build(Dialect::Sqlite);
         assert_eq!(sql, "(status = ? AND age > ?)");
         assert_eq!(params.len(), 2);
@@ -442,10 +445,7 @@ mod tests {
 
     #[test]
     fn test_postgres_placeholders() {
-        let cond = Condition::and([
-            Condition::eq("name", "Alice"),
-            Condition::gt("age", 18),
-        ]);
+        let cond = Condition::and([Condition::eq("name", "Alice"), Condition::gt("age", 18)]);
         let (sql, _) = cond.build(Dialect::Postgres);
         assert_eq!(sql, "(name = $1 AND age > $2)");
     }

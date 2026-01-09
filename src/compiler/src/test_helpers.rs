@@ -1,8 +1,8 @@
+use crate::{di, hir, mir};
+use simple_parser::Parser;
 /// Shared test utilities for compiler crate
 use std::fs;
 use tempfile::TempDir;
-use crate::{di, hir, mir};
-use simple_parser::Parser;
 
 /// Create a temporary test project directory with src/ subdirectory
 
@@ -73,13 +73,19 @@ pub fn empty_di_config() -> di::DiConfig {
 
 /// Find a function in HIR module by name
 
-pub fn find_hir_function<'a>(module: &'a hir::HirModule, name: &str) -> Option<&'a hir::HirFunction> {
+pub fn find_hir_function<'a>(
+    module: &'a hir::HirModule,
+    name: &str,
+) -> Option<&'a hir::HirFunction> {
     module.functions.iter().find(|f| f.name == name)
 }
 
 /// Find a function in MIR module by name
 
-pub fn find_mir_function<'a>(module: &'a mir::MirModule, name: &str) -> Option<&'a mir::MirFunction> {
+pub fn find_mir_function<'a>(
+    module: &'a mir::MirModule,
+    name: &str,
+) -> Option<&'a mir::MirFunction> {
     module.functions.iter().find(|f| f.name == name)
 }
 
@@ -101,7 +107,10 @@ pub fn assert_inject(module: &hir::HirModule, function_name: &str) {
 
 /// Assert that MIR lowering fails with a message containing the expected text
 
-pub fn assert_mir_error_contains(result: Result<mir::MirModule, mir::MirLowerError>, expected: &str) {
+pub fn assert_mir_error_contains(
+    result: Result<mir::MirModule, mir::MirLowerError>,
+    expected: &str,
+) {
     match result {
         Ok(_) => panic!("Expected MIR lowering to fail, but it succeeded"),
         Err(e) => {

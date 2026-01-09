@@ -20,34 +20,33 @@
 //! let lean_code = codegen.generate_module(&hir_module)?;
 //! ```
 
-mod types;
-mod functions;
 mod contracts;
-mod expressions;
 mod emitter;
-mod verification_diagnostics;
-mod verification_checker;
+mod expressions;
+mod functions;
 mod runner;
 mod traits;
+mod types;
+mod verification_checker;
+mod verification_diagnostics;
 
-pub use types::{LeanType, TypeTranslator};
-pub use functions::{FunctionTranslator, LeanFunction};
-pub use contracts::{ContractTranslator, LeanTheorem, LeanProp, LeanClassInvariant};
-pub use expressions::{ExprTranslator, LeanExpr, LeanLit, LeanDoStmt};
+pub use contracts::{ContractTranslator, LeanClassInvariant, LeanProp, LeanTheorem};
 pub use emitter::{LeanEmitter, LeanModule};
-pub use verification_diagnostics::{
-    VerificationErrorCode, VerificationDiagnostic, VerificationDiagnostics
-};
-pub use verification_checker::{VerificationChecker, check_module};
-pub use runner::{LeanRunner, LeanCheckResult, VerificationSummary};
+pub use expressions::{ExprTranslator, LeanDoStmt, LeanExpr, LeanLit};
+pub use functions::{FunctionTranslator, LeanFunction};
+pub use runner::{LeanCheckResult, LeanRunner, VerificationSummary};
 pub use traits::{
-    TraitTranslator, LeanClass, LeanInstance, LeanBinding, LeanMethodSig,
-    StaticPolyTheorems
+    LeanBinding, LeanClass, LeanInstance, LeanMethodSig, StaticPolyTheorems, TraitTranslator,
+};
+pub use types::{LeanType, TypeTranslator};
+pub use verification_checker::{check_module, VerificationChecker};
+pub use verification_diagnostics::{
+    VerificationDiagnostic, VerificationDiagnostics, VerificationErrorCode,
 };
 
-use crate::hir::{HirModule, HirFunction};
+use crate::hir::{HirFunction, HirModule};
 use crate::CompileError;
-use simple_parser::ast::{TraitDef, ImplBlock};
+use simple_parser::ast::{ImplBlock, TraitDef};
 
 /// Lean code generator
 pub struct LeanCodegen {
@@ -83,7 +82,9 @@ impl LeanCodegen {
         let mut emitter = LeanEmitter::new();
 
         // Generate module header
-        let module_name = self.module_name.clone()
+        let module_name = self
+            .module_name
+            .clone()
             .or_else(|| module.name.clone())
             .unwrap_or_else(|| "Main".to_string());
 
@@ -120,7 +121,11 @@ impl LeanCodegen {
     }
 
     /// Generate Lean code for a single verified function
-    pub fn generate_function(&self, func: &HirFunction, module: &HirModule) -> Result<String, CompileError> {
+    pub fn generate_function(
+        &self,
+        func: &HirFunction,
+        module: &HirModule,
+    ) -> Result<String, CompileError> {
         if !func.verification_mode.is_verified() {
             return Err(CompileError::Semantic(format!(
                 "Function '{}' is not marked @verify",
@@ -139,7 +144,11 @@ impl LeanCodegen {
     }
 
     /// Generate Lean type class from a Simple trait definition
-    pub fn generate_trait(&self, trait_def: &TraitDef, module: &HirModule) -> Result<String, CompileError> {
+    pub fn generate_trait(
+        &self,
+        trait_def: &TraitDef,
+        module: &HirModule,
+    ) -> Result<String, CompileError> {
         let mut emitter = LeanEmitter::new();
         let type_translator = TypeTranslator::new(&module.types);
         let trait_translator = TraitTranslator::new(&type_translator);
@@ -151,7 +160,11 @@ impl LeanCodegen {
     }
 
     /// Generate Lean instance from a Simple impl block
-    pub fn generate_impl(&self, impl_block: &ImplBlock, module: &HirModule) -> Result<String, CompileError> {
+    pub fn generate_impl(
+        &self,
+        impl_block: &ImplBlock,
+        module: &HirModule,
+    ) -> Result<String, CompileError> {
         let mut emitter = LeanEmitter::new();
         let type_translator = TypeTranslator::new(&module.types);
         let trait_translator = TraitTranslator::new(&type_translator);
@@ -193,7 +206,9 @@ impl LeanCodegen {
         let mut emitter = LeanEmitter::new();
 
         // Generate module header
-        let module_name = self.module_name.clone()
+        let module_name = self
+            .module_name
+            .clone()
             .or_else(|| module.name.clone())
             .unwrap_or_else(|| "Main".to_string());
 
@@ -265,7 +280,8 @@ impl LeanCodegen {
 
             // Generate coherence theorem for each trait
             for trait_def in traits {
-                let impl_types: Vec<&str> = impls.iter()
+                let impl_types: Vec<&str> = impls
+                    .iter()
                     .filter(|i| i.trait_name.as_ref() == Some(&trait_def.name))
                     .filter_map(|i| {
                         if let simple_parser::ast::Type::Simple(name) = &i.target_type {
@@ -277,7 +293,8 @@ impl LeanCodegen {
                     .collect();
 
                 if !impl_types.is_empty() {
-                    let coherence = StaticPolyTheorems::coherence_theorem(&trait_def.name, &impl_types);
+                    let coherence =
+                        StaticPolyTheorems::coherence_theorem(&trait_def.name, &impl_types);
                     emitter.emit_raw(&coherence);
                 }
             }

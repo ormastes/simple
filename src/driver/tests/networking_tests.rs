@@ -8,8 +8,8 @@
 mod test_helpers;
 
 use simple_driver::interpreter::{Interpreter, RunConfig, RunningType};
-use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::thread;
 use std::time::Duration;
 
@@ -158,7 +158,8 @@ fn test_tcp_connect_to_local_server() {
     // Give server time to start
     thread::sleep(Duration::from_millis(50));
 
-    let code = format!(r#"
+    let code = format!(
+        r#"
 extern fn native_tcp_connect(addr: str) -> (i64, str, i64)
 extern fn native_tcp_close(handle: i64) -> i64
 
@@ -172,7 +173,9 @@ fn main() -> i64:
         return -2
     native_tcp_close(handle)
     return 0
-"#, server_addr);
+"#,
+        server_addr
+    );
 
     assert_eq!(run_net_test(&code), 0, "TCP connect test failed");
     let _ = server_thread.join();
@@ -204,7 +207,9 @@ fn test_udp_loopback() {
     // Create a receiver socket in Rust
     let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
     let receiver_addr = receiver.local_addr().unwrap();
-    receiver.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
 
     // Start receiver thread
     let receiver_thread = thread::spawn(move || {
@@ -217,7 +222,8 @@ fn test_udp_loopback() {
 
     thread::sleep(Duration::from_millis(50));
 
-    let code = format!(r#"
+    let code = format!(
+        r#"
 extern fn native_udp_bind(addr: str) -> (i64, i64)
 extern fn native_udp_send_to(handle: i64, data: [i64], len: i64, addr: str) -> (i64, i64)
 extern fn native_udp_close(handle: i64) -> i64
@@ -240,7 +246,9 @@ fn main() -> i64:
 
     native_udp_close(handle)
     return 0
-"#, receiver_addr);
+"#,
+        receiver_addr
+    );
 
     assert_eq!(run_net_test(&code), 0, "UDP loopback test failed");
     let received = receiver_thread.join().unwrap();

@@ -1,6 +1,6 @@
 //! Tensor shape manipulation operations
 
-use super::registry::{TENSOR_REGISTRY, next_handle, TensorWrapper};
+use super::registry::{next_handle, TensorWrapper, TENSOR_REGISTRY};
 use std::sync::Arc;
 
 #[cfg(feature = "pytorch")]
@@ -18,13 +18,23 @@ macro_rules! tensor_unary_i64_op {
             #[cfg(feature = "pytorch")]
             {
                 let registry = TENSOR_REGISTRY.lock();
-                let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+                let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+                    return 0;
+                };
                 drop(registry);
 
                 let result = $operation(&tensor.0, param);
                 let handle = next_handle();
-                TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-                tracing::debug!("{}: {} param={} -> handle={}", $op_name, tensor_handle, param, handle);
+                TENSOR_REGISTRY
+                    .lock()
+                    .insert(handle, Arc::new(TensorWrapper(result)));
+                tracing::debug!(
+                    "{}: {} param={} -> handle={}",
+                    $op_name,
+                    tensor_handle,
+                    param,
+                    handle
+                );
                 handle
             }
             #[cfg(not(feature = "pytorch"))]
@@ -48,10 +58,12 @@ macro_rules! tensor_multi_op {
                     return 0;
                 }
 
-                let handles = unsafe { std::slice::from_raw_parts(handles_ptr, num_tensors as usize) };
+                let handles =
+                    unsafe { std::slice::from_raw_parts(handles_ptr, num_tensors as usize) };
 
                 let registry = TENSOR_REGISTRY.lock();
-                let tensors: Vec<_> = handles.iter()
+                let tensors: Vec<_> = handles
+                    .iter()
                     .filter_map(|&h| registry.get(&h).cloned())
                     .collect();
                 drop(registry);
@@ -65,8 +77,16 @@ macro_rules! tensor_multi_op {
 
                 let result = $operation(&tensor_refs, dim);
                 let handle = next_handle();
-                TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-                tracing::debug!("{}: {} tensors dim={} -> handle={}", $op_name, num_tensors, dim, handle);
+                TENSOR_REGISTRY
+                    .lock()
+                    .insert(handle, Arc::new(TensorWrapper(result)));
+                tracing::debug!(
+                    "{}: {} tensors dim={} -> handle={}",
+                    $op_name,
+                    num_tensors,
+                    dim,
+                    handle
+                );
                 handle
             }
             #[cfg(not(feature = "pytorch"))]
@@ -81,11 +101,17 @@ macro_rules! tensor_multi_op {
 /// Reshape tensor to new shape
 /// Returns new tensor handle, or 0 on failure
 #[no_mangle]
-pub extern "C" fn rt_torch_reshape(tensor_handle: u64, new_shape_ptr: *const i64, ndim: i32) -> u64 {
+pub extern "C" fn rt_torch_reshape(
+    tensor_handle: u64,
+    new_shape_ptr: *const i64,
+    ndim: i32,
+) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let new_shape = unsafe { std::slice::from_raw_parts(new_shape_ptr, ndim as usize) };
@@ -93,8 +119,15 @@ pub extern "C" fn rt_torch_reshape(tensor_handle: u64, new_shape_ptr: *const i64
         match tensor.0.reshape(new_shape) {
             result => {
                 let handle = next_handle();
-                TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-                tracing::debug!("rt_torch_reshape: {} -> shape={:?} -> handle={}", tensor_handle, new_shape, handle);
+                TENSOR_REGISTRY
+                    .lock()
+                    .insert(handle, Arc::new(TensorWrapper(result)));
+                tracing::debug!(
+                    "rt_torch_reshape: {} -> shape={:?} -> handle={}",
+                    tensor_handle,
+                    new_shape,
+                    handle
+                );
                 handle
             }
         }
@@ -114,15 +147,24 @@ pub extern "C" fn rt_torch_permute(tensor_handle: u64, dims_ptr: *const i64, ndi
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let dims = unsafe { std::slice::from_raw_parts(dims_ptr, ndim as usize) };
 
         let result = tensor.0.permute(dims);
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!("rt_torch_permute: {} -> dims={:?} -> handle={}", tensor_handle, dims, handle);
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!(
+            "rt_torch_permute: {} -> dims={:?} -> handle={}",
+            tensor_handle,
+            dims,
+            handle
+        );
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -139,7 +181,9 @@ pub extern "C" fn rt_torch_squeeze(tensor_handle: u64, dim: i64) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let result = if dim == -1 {
@@ -149,8 +193,15 @@ pub extern "C" fn rt_torch_squeeze(tensor_handle: u64, dim: i64) -> u64 {
         };
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!("rt_torch_squeeze: {} dim={} -> handle={}", tensor_handle, dim, handle);
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!(
+            "rt_torch_squeeze: {} dim={} -> handle={}",
+            tensor_handle,
+            dim,
+            handle
+        );
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -162,22 +213,44 @@ pub extern "C" fn rt_torch_squeeze(tensor_handle: u64, dim: i64) -> u64 {
 
 /// Unsqueeze tensor: add a dimension of size 1
 /// dim: position to insert new dimension
-tensor_unary_i64_op!(rt_torch_unsqueeze, "rt_torch_unsqueeze", |t: &Tensor, dim| t.unsqueeze(dim));
+tensor_unary_i64_op!(
+    rt_torch_unsqueeze,
+    "rt_torch_unsqueeze",
+    |t: &Tensor, dim| t.unsqueeze(dim)
+);
 
 /// Slice tensor along a dimension
 /// dim: dimension to slice, start: start index, end: end index, step: step size
 #[no_mangle]
-pub extern "C" fn rt_torch_slice(tensor_handle: u64, dim: i64, start: i64, end: i64, step: i64) -> u64 {
+pub extern "C" fn rt_torch_slice(
+    tensor_handle: u64,
+    dim: i64,
+    start: i64,
+    end: i64,
+    step: i64,
+) -> u64 {
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let result = tensor.0.slice(dim, start, end, step);
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!("rt_torch_slice: {} dim={} [{}:{}:{}] -> handle={}", tensor_handle, dim, start, end, step, handle);
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!(
+            "rt_torch_slice: {} dim={} [{}:{}:{}] -> handle={}",
+            tensor_handle,
+            dim,
+            start,
+            end,
+            step,
+            handle
+        );
         handle
     }
     #[cfg(not(feature = "pytorch"))]
@@ -189,11 +262,19 @@ pub extern "C" fn rt_torch_slice(tensor_handle: u64, dim: i64, start: i64, end: 
 
 /// Concatenate tensors along a dimension
 /// handles_ptr: array of tensor handles, num_tensors: number of tensors, dim: dimension to concatenate
-tensor_multi_op!(rt_torch_cat, "rt_torch_cat", |tensors: &Vec<&Tensor>, dim| Tensor::cat(tensors, dim));
+tensor_multi_op!(
+    rt_torch_cat,
+    "rt_torch_cat",
+    |tensors: &Vec<&Tensor>, dim| Tensor::cat(tensors, dim)
+);
 
 /// Stack tensors along a new dimension
 /// handles_ptr: array of tensor handles, num_tensors: number of tensors, dim: dimension to stack
-tensor_multi_op!(rt_torch_stack, "rt_torch_stack", |tensors: &Vec<&Tensor>, dim| Tensor::stack(tensors, dim));
+tensor_multi_op!(
+    rt_torch_stack,
+    "rt_torch_stack",
+    |tensors: &Vec<&Tensor>, dim| Tensor::stack(tensors, dim)
+);
 
 // ============================================================================
 // Simple Math Extensions (#1940-#1949)
@@ -207,13 +288,22 @@ pub extern "C" fn rt_torch_one_hot(tensor_handle: u64, num_classes: i64) -> u64 
     #[cfg(feature = "pytorch")]
     {
         let registry = TENSOR_REGISTRY.lock();
-        let Some(tensor) = registry.get(&tensor_handle).cloned() else { return 0; };
+        let Some(tensor) = registry.get(&tensor_handle).cloned() else {
+            return 0;
+        };
         drop(registry);
 
         let result = tensor.0.one_hot(num_classes);
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, Arc::new(TensorWrapper(result)));
-        tracing::debug!("rt_torch_one_hot: {} num_classes={} -> handle={}", tensor_handle, num_classes, handle);
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, Arc::new(TensorWrapper(result)));
+        tracing::debug!(
+            "rt_torch_one_hot: {} num_classes={} -> handle={}",
+            tensor_handle,
+            num_classes,
+            handle
+        );
         handle
     }
     #[cfg(not(feature = "pytorch"))]

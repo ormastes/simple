@@ -172,8 +172,7 @@ mod tests {
         // Verify it's one of the expected backends
         #[cfg(feature = "vulkan")]
         assert!(
-            matches!(backend, BackendKind::Software)
-                || matches!(backend, BackendKind::Vulkan),
+            matches!(backend, BackendKind::Software) || matches!(backend, BackendKind::Vulkan),
             "Unexpected backend for X86_64: {:?}",
             backend
         );
@@ -193,8 +192,7 @@ mod tests {
         // Should work on ARM64 too (Vulkan is cross-platform)
         #[cfg(feature = "vulkan")]
         assert!(
-            matches!(backend, BackendKind::Software)
-                || matches!(backend, BackendKind::Vulkan),
+            matches!(backend, BackendKind::Software) || matches!(backend, BackendKind::Vulkan),
             "Unexpected backend for ARM64: {:?}",
             backend
         );
@@ -215,14 +213,8 @@ mod tests {
         let backend2 = BackendKind::for_gpu_kernel(&target);
         let backend3 = BackendKind::for_gpu_kernel(&target);
 
-        assert_eq!(
-            backend1, backend2,
-            "for_gpu_kernel should be deterministic"
-        );
-        assert_eq!(
-            backend2, backend3,
-            "for_gpu_kernel should be deterministic"
-        );
+        assert_eq!(backend1, backend2, "for_gpu_kernel should be deterministic");
+        assert_eq!(backend2, backend3, "for_gpu_kernel should be deterministic");
     }
 
     #[test]

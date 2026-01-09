@@ -6,6 +6,6 @@ use crate::error::CompileError;
 
 /// Compile a compute kernel instruction
 pub fn compile_compute_instruction() -> Result<(), CompileError> {
-    // TODO: Implement instruction lowering
+    // TODO: [codegen][P1] Implement instruction lowering
     Ok(())
 }

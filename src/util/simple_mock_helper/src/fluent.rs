@@ -97,7 +97,7 @@ impl MethodSetup {
     }
 
     /// Chain another method call (for deep call chains)
-    /// 
+    ///
     /// Example: `setup.when("getLibrary").chain("getHead").chain("getName").returns("Jane")`
     pub fn chain(&mut self, method: impl Into<String>) -> &mut Self {
         self.method_chain.push(method.into());
@@ -106,10 +106,8 @@ impl MethodSetup {
 
     /// Match specific arguments
     pub fn with_args(&mut self, args: &[impl ToString]) -> &mut Self {
-        self.args.extend(
-            args.iter()
-                .map(|a| ArgMatcher::Exact(a.to_string()))
-        );
+        self.args
+            .extend(args.iter().map(|a| ArgMatcher::Exact(a.to_string())));
         self
     }
 
@@ -133,7 +131,8 @@ impl MethodSetup {
 
     /// Set multiple return values in sequence
     pub fn returns_seq(&mut self, values: Vec<impl Into<String>>) -> &mut Self {
-        self.return_values.extend(values.into_iter().map(|v| v.into()));
+        self.return_values
+            .extend(values.into_iter().map(|v| v.into()));
         self
     }
 
@@ -215,12 +214,12 @@ impl MethodSetup {
 impl fmt::Display for MethodSetup {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}::{}", self.mock_name, self.method_name)?;
-        
+
         // Show method chain if present
         for method in &self.method_chain {
             write!(f, "().{}", method)?;
         }
-        
+
         if !self.args.is_empty() {
             write!(f, "(")?;
             for (i, arg) in self.args.iter().enumerate() {
@@ -392,10 +391,8 @@ impl MethodVerification {
 
     /// Verify with specific arguments
     pub fn with_args(&mut self, args: &[impl ToString]) -> &mut Self {
-        self.expected_args.extend(
-            args.iter()
-                .map(|a| ArgMatcher::Exact(a.to_string()))
-        );
+        self.expected_args
+            .extend(args.iter().map(|a| ArgMatcher::Exact(a.to_string())));
         self
     }
 
@@ -555,18 +552,13 @@ impl Spy {
 
     /// Record a method call
     pub fn record(&mut self, method: impl Into<String>, args: Vec<impl Into<String>>) {
-        self.calls.push((
-            method.into(),
-            args.into_iter().map(|a| a.into()).collect(),
-        ));
+        self.calls
+            .push((method.into(), args.into_iter().map(|a| a.into()).collect()));
     }
 
     /// Get number of calls to a method
     pub fn call_count(&self, method: &str) -> usize {
-        self.calls
-            .iter()
-            .filter(|(m, _)| m == method)
-            .count()
+        self.calls.iter().filter(|(m, _)| m == method).count()
     }
 
     /// Get all calls to a method
@@ -611,7 +603,10 @@ mod tests {
     #[test]
     fn test_mock_setup_fluent() {
         let mut setup = MockSetup::new("UserDao");
-        setup.when("findById").with_args(&[123]).returns("User(id: 123)");
+        setup
+            .when("findById")
+            .with_args(&[123])
+            .returns("User(id: 123)");
         setup.when("save").with_any_args().returns("true");
 
         assert_eq!(setup.setups().len(), 2);
@@ -711,14 +706,18 @@ mod tests {
     #[test]
     fn test_multiple_chain_calls() {
         let mut setup = MethodSetup::new("Company", "getDepartment");
-        setup.chain("getManager")
+        setup
+            .chain("getManager")
             .chain("getName")
             .with_args(&["Engineering"])
             .returns("Alice");
 
         assert_eq!(setup.method_chain().len(), 2);
-        assert_eq!(setup.full_method_path(), "getDepartment().getManager().getName");
-        
+        assert_eq!(
+            setup.full_method_path(),
+            "getDepartment().getManager().getName"
+        );
+
         let display = format!("{}", setup);
         assert!(display.contains("getDepartment().getManager().getName"));
     }
@@ -726,7 +725,8 @@ mod tests {
     #[test]
     fn test_chain_with_args_and_returns() {
         let mut setup = MethodSetup::new("API", "getEndpoint");
-        setup.chain("getHandler")
+        setup
+            .chain("getHandler")
             .chain("execute")
             .with_args(&["POST", "/api/users"])
             .returns("200 OK");

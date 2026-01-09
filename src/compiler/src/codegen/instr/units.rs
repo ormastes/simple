@@ -1,15 +1,15 @@
 // Unit type operation instruction compilation.
 
-use cranelift_codegen::ir::{types, condcodes::IntCC, InstBuilder};
+use cranelift_codegen::ir::{condcodes::IntCC, types, InstBuilder};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
 
 use crate::hir::TypeId;
 use crate::mir::{UnitOverflowBehavior, VReg};
 
-use super::{InstrContext, InstrResult};
-use super::helpers::create_string_constant;
 use super::super::types_util::type_id_to_cranelift;
+use super::helpers::create_string_constant;
+use super::{InstrContext, InstrResult};
 
 /// Compile a unit bound check instruction.
 /// This checks if a value is within the unit type's allowed range.
@@ -29,8 +29,12 @@ pub(super) fn compile_unit_bound_check<M: Module>(
     let max_val = builder.ins().iconst(types::I64, max);
 
     // Check if value is in range: min <= val && val <= max
-    let ge_min = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, val, min_val);
-    let le_max = builder.ins().icmp(IntCC::SignedLessThanOrEqual, val, max_val);
+    let ge_min = builder
+        .ins()
+        .icmp(IntCC::SignedGreaterThanOrEqual, val, min_val);
+    let le_max = builder
+        .ins()
+        .icmp(IntCC::SignedLessThanOrEqual, val, max_val);
     let in_range = builder.ins().band(ge_min, le_max);
 
     match overflow {
@@ -46,18 +50,25 @@ pub(super) fn compile_unit_bound_check<M: Module>(
                 // Convert bool to i64 for the call
                 let in_range_i64 = builder.ins().uextend(types::I64, in_range);
 
-                builder.ins().call(func_ref, &[in_range_i64, val, min_val, max_val, name_ptr, name_len]);
+                builder.ins().call(
+                    func_ref,
+                    &[in_range_i64, val, min_val, max_val, name_ptr, name_len],
+                );
             } else {
                 // Fallback: generate inline check with trap on failure
                 let trap_block = builder.create_block();
                 let continue_block = builder.create_block();
 
-                builder.ins().brif(in_range, continue_block, &[], trap_block, &[]);
+                builder
+                    .ins()
+                    .brif(in_range, continue_block, &[], trap_block, &[]);
 
                 builder.switch_to_block(trap_block);
                 builder.seal_block(trap_block);
                 // Use a generic trap code for unit bound violations
-                builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(10));
+                builder
+                    .ins()
+                    .trap(cranelift_codegen::ir::TrapCode::unwrap_user(10));
 
                 builder.switch_to_block(continue_block);
                 builder.seal_block(continue_block);
@@ -152,19 +163,27 @@ pub(super) fn compile_unit_narrow<M: Module>(
     match overflow {
         UnitOverflowBehavior::Default | UnitOverflowBehavior::Checked => {
             // Check if value is in range: min <= val && val <= max
-            let ge_min = builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, val, min_val);
-            let le_max = builder.ins().icmp(IntCC::SignedLessThanOrEqual, val, max_val);
+            let ge_min = builder
+                .ins()
+                .icmp(IntCC::SignedGreaterThanOrEqual, val, min_val);
+            let le_max = builder
+                .ins()
+                .icmp(IntCC::SignedLessThanOrEqual, val, max_val);
             let in_range = builder.ins().band(ge_min, le_max);
 
             // Trap if out of range
             let trap_block = builder.create_block();
             let continue_block = builder.create_block();
 
-            builder.ins().brif(in_range, continue_block, &[], trap_block, &[]);
+            builder
+                .ins()
+                .brif(in_range, continue_block, &[], trap_block, &[]);
 
             builder.switch_to_block(trap_block);
             builder.seal_block(trap_block);
-            builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(11));
+            builder
+                .ins()
+                .trap(cranelift_codegen::ir::TrapCode::unwrap_user(11));
 
             builder.switch_to_block(continue_block);
             builder.seal_block(continue_block);

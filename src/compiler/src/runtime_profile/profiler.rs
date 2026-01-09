@@ -1,6 +1,6 @@
 //! Runtime profiler implementation
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -9,9 +9,9 @@ use parking_lot::RwLock;
 
 use crate::hir::LayoutPhase;
 
-use super::config::ProfileConfig;
-use super::stats::{FunctionStats, RuntimeMetrics};
+use super::config::{CallType, ProfileConfig, ProfileMode, SequenceEvent};
 use super::feedback::LayoutFeedback;
+use super::stats::{FunctionStats, RuntimeMetrics};
 
 #[derive(Debug)]
 struct ProfileEntry {
@@ -32,7 +32,15 @@ impl ProfileEntry {
     }
 }
 
-/// Runtime profiler for hot path analysis
+/// Stack frame for tracking call depth
+#[derive(Debug, Clone)]
+struct StackFrame {
+    function_name: String,
+    class_name: Option<String>,
+    entry_time_ns: u64,
+}
+
+/// Runtime profiler for hot path analysis and sequence recording
 pub struct RuntimeProfiler {
     /// Profiling configuration
     config: ProfileConfig,
@@ -48,6 +56,17 @@ pub struct RuntimeProfiler {
     startup_window_ns: u64,
     /// First frame window (nanoseconds from start)
     first_frame_window_ns: u64,
+    // --- Sequence recording fields ---
+    /// Sequence event counter
+    sequence_counter: AtomicU64,
+    /// Recorded sequence events
+    sequence_events: RwLock<Vec<SequenceEvent>>,
+    /// Call stack for depth tracking
+    call_stack: RwLock<Vec<StackFrame>>,
+    /// Architectural entities
+    architectural_entities: RwLock<HashSet<String>>,
+    /// Classes seen in sequence
+    classes_seen: RwLock<HashSet<String>>,
 }
 
 impl RuntimeProfiler {
@@ -59,9 +78,24 @@ impl RuntimeProfiler {
             start_time: RwLock::new(None),
             entries: RwLock::new(HashMap::new()),
             sample_counter: AtomicU64::new(0),
-            startup_window_ns: 100_000_000,      // 100ms
-            first_frame_window_ns: 500_000_000,  // 500ms
+            startup_window_ns: 100_000_000,     // 100ms
+            first_frame_window_ns: 500_000_000, // 500ms
+            sequence_counter: AtomicU64::new(0),
+            sequence_events: RwLock::new(Vec::new()),
+            call_stack: RwLock::new(Vec::new()),
+            architectural_entities: RwLock::new(HashSet::new()),
+            classes_seen: RwLock::new(HashSet::new()),
         }
+    }
+
+    /// Create a sequence profiler for diagram generation
+    pub fn sequence_profiler() -> Self {
+        Self::new(ProfileConfig::sequence())
+    }
+
+    /// Create a combined profiler (statistics + sequence)
+    pub fn combined_profiler() -> Self {
+        Self::new(ProfileConfig::combined())
     }
 
     /// Create with default config
@@ -95,36 +129,98 @@ impl RuntimeProfiler {
         self.active.load(Ordering::Relaxed)
     }
 
+    /// Check if profiling is enabled (not Off mode)
+    pub fn is_enabled(&self) -> bool {
+        self.config.is_enabled()
+    }
+
     /// Record a function call (called from instrumented code)
     #[inline]
     pub fn record_call(&self, function_name: &str) {
-        if !self.is_active() {
+        if !self.is_active() || !self.is_enabled() {
             return;
         }
 
-        // Sample rate limiting
+        // Sample rate limiting (skip if sample_rate is 0)
+        if self.config.sample_rate == 0 {
+            return;
+        }
         let counter = self.sample_counter.fetch_add(1, Ordering::Relaxed);
         if counter % self.config.sample_rate as u64 != 0 {
             return;
         }
 
-        self.record_call_internal(function_name);
+        // Record statistics if enabled
+        if self.config.records_statistics() {
+            self.record_call_internal(function_name);
+        }
     }
 
     /// Record a function call with timing
     #[inline]
     pub fn record_call_with_duration(&self, function_name: &str, duration_ns: u64) {
-        if !self.is_active() {
+        if !self.is_active() || !self.is_enabled() {
             return;
         }
 
-        // Sample rate limiting
+        // Sample rate limiting (skip if sample_rate is 0)
+        if self.config.sample_rate == 0 {
+            return;
+        }
         let counter = self.sample_counter.fetch_add(1, Ordering::Relaxed);
         if counter % self.config.sample_rate as u64 != 0 {
             return;
         }
 
-        self.record_call_internal_with_time(function_name, duration_ns);
+        if self.config.records_statistics() {
+            self.record_call_internal_with_time(function_name, duration_ns);
+        }
+    }
+
+    /// Record a complete call event (statistics + sequence if enabled)
+    /// This is the main entry point for combined profiling
+    #[inline]
+    pub fn record_full_call(
+        &self,
+        function_name: &str,
+        class_name: Option<&str>,
+        arguments: Vec<String>,
+        call_type: CallType,
+    ) {
+        if !self.is_active() || !self.is_enabled() {
+            return;
+        }
+
+        // Sample rate limiting (skip if sample_rate is 0)
+        if self.config.sample_rate == 0 {
+            return;
+        }
+        let counter = self.sample_counter.fetch_add(1, Ordering::Relaxed);
+        if counter % self.config.sample_rate as u64 != 0 {
+            return;
+        }
+
+        // Record statistics
+        if self.config.records_statistics() {
+            self.record_call_internal(function_name);
+        }
+
+        // Record sequence
+        if self.config.records_sequence() {
+            self.record_sequence_call_internal(function_name, class_name, arguments, call_type);
+        }
+    }
+
+    /// Record a return (for sequence diagrams)
+    #[inline]
+    pub fn record_full_return(&self, return_value: Option<String>) {
+        if !self.is_active() || !self.is_enabled() {
+            return;
+        }
+
+        if self.config.records_sequence() {
+            self.record_sequence_return(return_value);
+        }
     }
 
     fn record_call_internal(&self, function_name: &str) {
@@ -136,12 +232,10 @@ impl RuntimeProfiler {
             entry.last_call_ns.store(now_ns, Ordering::Relaxed);
 
             // Set first call if not set
-            entry.first_call_ns.compare_exchange(
-                0,
-                now_ns,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ).ok();
+            entry
+                .first_call_ns
+                .compare_exchange(0, now_ns, Ordering::Relaxed, Ordering::Relaxed)
+                .ok();
             return;
         }
         drop(entries);
@@ -156,7 +250,9 @@ impl RuntimeProfiler {
         entry.first_call_ns.store(now_ns, Ordering::Relaxed);
         entry.last_call_ns.store(now_ns, Ordering::Relaxed);
 
-        self.entries.write().insert(function_name.to_string(), entry);
+        self.entries
+            .write()
+            .insert(function_name.to_string(), entry);
     }
 
     fn record_call_internal_with_time(&self, function_name: &str, duration_ns: u64) {
@@ -165,15 +261,15 @@ impl RuntimeProfiler {
         let entries = self.entries.read();
         if let Some(entry) = entries.get(function_name) {
             entry.call_count.fetch_add(1, Ordering::Relaxed);
-            entry.total_time_ns.fetch_add(duration_ns, Ordering::Relaxed);
+            entry
+                .total_time_ns
+                .fetch_add(duration_ns, Ordering::Relaxed);
             entry.last_call_ns.store(now_ns, Ordering::Relaxed);
 
-            entry.first_call_ns.compare_exchange(
-                0,
-                now_ns,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ).ok();
+            entry
+                .first_call_ns
+                .compare_exchange(0, now_ns, Ordering::Relaxed, Ordering::Relaxed)
+                .ok();
             return;
         }
         drop(entries);
@@ -188,7 +284,9 @@ impl RuntimeProfiler {
         entry.first_call_ns.store(now_ns, Ordering::Relaxed);
         entry.last_call_ns.store(now_ns, Ordering::Relaxed);
 
-        self.entries.write().insert(function_name.to_string(), entry);
+        self.entries
+            .write()
+            .insert(function_name.to_string(), entry);
     }
 
     fn elapsed_ns(&self) -> u64 {
@@ -200,7 +298,8 @@ impl RuntimeProfiler {
 
     /// Collect runtime metrics
     pub fn collect_metrics(&self) -> RuntimeMetrics {
-        let duration = self.start_time
+        let duration = self
+            .start_time
             .read()
             .map(|t| t.elapsed())
             .unwrap_or_default();
@@ -237,9 +336,18 @@ impl RuntimeProfiler {
         stats.sort_by(|a, b| b.call_count.cmp(&a.call_count));
 
         let total_calls = stats.iter().map(|s| s.call_count).sum();
-        let hot_functions = stats.iter().filter(|s| s.inferred_phase == LayoutPhase::Steady).count();
-        let cold_functions = stats.iter().filter(|s| s.inferred_phase == LayoutPhase::Cold).count();
-        let startup_functions = stats.iter().filter(|s| s.inferred_phase == LayoutPhase::Startup).count();
+        let hot_functions = stats
+            .iter()
+            .filter(|s| s.inferred_phase == LayoutPhase::Steady)
+            .count();
+        let cold_functions = stats
+            .iter()
+            .filter(|s| s.inferred_phase == LayoutPhase::Cold)
+            .count();
+        let startup_functions = stats
+            .iter()
+            .filter(|s| s.inferred_phase == LayoutPhase::Startup)
+            .count();
 
         RuntimeMetrics {
             duration,
@@ -295,7 +403,8 @@ impl RuntimeProfiler {
         const AVG_FUNC_SIZE: usize = 200; // Assume average function is 200 bytes
 
         // Count startup functions
-        let startup_count = stats.iter()
+        let startup_count = stats
+            .iter()
             .filter(|s| s.inferred_phase == LayoutPhase::Startup)
             .count();
 
@@ -363,11 +472,192 @@ impl RuntimeProfiler {
     pub fn clear(&self) {
         self.entries.write().clear();
         self.sample_counter.store(0, Ordering::Relaxed);
+        self.sequence_counter.store(0, Ordering::Relaxed);
+        self.sequence_events.write().clear();
+        self.call_stack.write().clear();
+        self.architectural_entities.write().clear();
+        self.classes_seen.write().clear();
     }
 
     /// Get the current sample count
     pub fn sample_count(&self) -> u64 {
         self.sample_counter.load(Ordering::Relaxed)
+    }
+
+    // ========================================================================
+    // Sequence Recording Methods
+    // ========================================================================
+
+    /// Check if sequence recording is enabled
+    pub fn records_sequence(&self) -> bool {
+        self.config.records_sequence()
+    }
+
+    /// Get current call stack depth
+    pub fn current_depth(&self) -> u32 {
+        self.call_stack.read().len() as u32
+    }
+
+    /// Record a sequence call event (public API with full checks)
+    pub fn record_sequence_call(
+        &self,
+        callee: &str,
+        callee_class: Option<&str>,
+        arguments: Vec<String>,
+        call_type: CallType,
+    ) {
+        if !self.is_active() || !self.is_enabled() || !self.records_sequence() {
+            return;
+        }
+        self.record_sequence_call_internal(callee, callee_class, arguments, call_type);
+    }
+
+    /// Internal sequence call recording (no active/enabled checks)
+    fn record_sequence_call_internal(
+        &self,
+        callee: &str,
+        callee_class: Option<&str>,
+        arguments: Vec<String>,
+        call_type: CallType,
+    ) {
+        // Check max events limit
+        let max_events = self.config.max_sequence_events;
+        if max_events > 0 && self.sequence_events.read().len() >= max_events {
+            return;
+        }
+
+        let now_ns = self.elapsed_ns();
+        let seq_num = self.sequence_counter.fetch_add(1, Ordering::Relaxed);
+        let depth = self.current_depth();
+
+        // Get caller info from stack
+        let (caller, caller_class) = {
+            let stack = self.call_stack.read();
+            if let Some(frame) = stack.last() {
+                (frame.function_name.clone(), frame.class_name.clone())
+            } else {
+                ("(test)".to_string(), None)
+            }
+        };
+
+        // Track classes
+        if let Some(cls) = callee_class {
+            self.classes_seen.write().insert(cls.to_string());
+        }
+        if let Some(cls) = &caller_class {
+            self.classes_seen.write().insert(cls.clone());
+        }
+
+        // Create event
+        let event = SequenceEvent::new_call(
+            seq_num,
+            now_ns,
+            caller,
+            callee.to_string(),
+            caller_class,
+            callee_class.map(|s| s.to_string()),
+            if self.config.capture_args {
+                arguments
+            } else {
+                vec![]
+            },
+            call_type,
+            depth,
+        );
+
+        self.sequence_events.write().push(event);
+
+        // Push onto call stack
+        let frame = StackFrame {
+            function_name: callee.to_string(),
+            class_name: callee_class.map(|s| s.to_string()),
+            entry_time_ns: now_ns,
+        };
+        self.call_stack.write().push(frame);
+    }
+
+    /// Record a sequence return event
+    pub fn record_sequence_return(&self, return_value: Option<String>) {
+        if !self.is_active() || !self.is_enabled() || !self.records_sequence() {
+            return;
+        }
+
+        let stack_frame = {
+            let mut stack = self.call_stack.write();
+            stack.pop()
+        };
+
+        let Some(frame) = stack_frame else {
+            return;
+        };
+
+        let now_ns = self.elapsed_ns();
+        let seq_num = self.sequence_counter.fetch_add(1, Ordering::Relaxed);
+        let depth = self.current_depth();
+
+        // Get caller info (now the top of stack after pop)
+        let (caller, caller_class) = {
+            let stack = self.call_stack.read();
+            if let Some(f) = stack.last() {
+                (f.function_name.clone(), f.class_name.clone())
+            } else {
+                ("(test)".to_string(), None)
+            }
+        };
+
+        let event = SequenceEvent::new_return(
+            seq_num,
+            now_ns,
+            caller,
+            frame.function_name,
+            caller_class,
+            frame.class_name,
+            if self.config.capture_returns {
+                return_value
+            } else {
+                None
+            },
+            depth,
+        );
+
+        self.sequence_events.write().push(event);
+    }
+
+    /// Mark an entity as architectural (for architecture diagrams)
+    pub fn mark_architectural(&self, entity: &str) {
+        self.architectural_entities
+            .write()
+            .insert(entity.to_string());
+    }
+
+    /// Check if an entity is marked as architectural
+    pub fn is_architectural(&self, entity: &str) -> bool {
+        self.architectural_entities.read().contains(entity)
+    }
+
+    /// Get all recorded sequence events
+    pub fn get_sequence_events(&self) -> Vec<SequenceEvent> {
+        self.sequence_events.read().clone()
+    }
+
+    /// Get event count
+    pub fn sequence_event_count(&self) -> usize {
+        self.sequence_events.read().len()
+    }
+
+    /// Get classes seen in sequence
+    pub fn get_classes(&self) -> HashSet<String> {
+        self.classes_seen.read().clone()
+    }
+
+    /// Get architectural entities
+    pub fn get_architectural_entities(&self) -> HashSet<String> {
+        self.architectural_entities.read().clone()
+    }
+
+    /// Get the current profile mode
+    pub fn mode(&self) -> ProfileMode {
+        self.config.mode
     }
 }
 

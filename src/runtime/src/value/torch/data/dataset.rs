@@ -27,8 +27,8 @@ use crate::value::torch::TorchFfiError;
 pub enum DatasetState {
     /// TensorDataset: wraps feature and label tensors
     TensorDataset {
-        features: u64,  // Tensor handle [num_samples, ...]
-        labels: u64,    // Tensor handle [num_samples, ...]
+        features: u64, // Tensor handle [num_samples, ...]
+        labels: u64,   // Tensor handle [num_samples, ...]
     },
 }
 

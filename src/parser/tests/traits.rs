@@ -36,9 +36,8 @@ fn parse_trait_impl() {
 
 #[test]
 fn parse_default_trait_impl_attribute() {
-    let items = parse(
-        "#[default]\nimpl[T] Process for T:\n    fn process(self):\n        return 0",
-    );
+    let items =
+        parse("#[default]\nimpl[T] Process for T:\n    fn process(self):\n        return 0");
     if let Node::Impl(impl_block) = &items[0] {
         assert!(impl_block
             .attributes
@@ -79,7 +78,8 @@ fn parse_trait_default_method() {
 #[test]
 fn parse_trait_mixed_methods() {
     // Trait with both abstract and default methods
-    let items = parse("trait Animal:\n    fn speak(self) -> str\n    fn sleep(self):\n        return 0");
+    let items =
+        parse("trait Animal:\n    fn speak(self) -> str\n    fn sleep(self):\n        return 0");
     if let Node::Trait(t) = &items[0] {
         assert_eq!(t.methods.len(), 2);
         // speak is abstract (no body)
@@ -113,7 +113,8 @@ fn parse_trait_associated_type_simple() {
 #[test]
 fn parse_trait_associated_type_with_bounds() {
     // Associated type with trait bounds
-    let items = parse("trait Collection:\n    type Item: Clone + Default\n    fn get(self) -> Item");
+    let items =
+        parse("trait Collection:\n    type Item: Clone + Default\n    fn get(self) -> Item");
     if let Node::Trait(t) = &items[0] {
         assert_eq!(t.associated_types.len(), 1);
         assert_eq!(t.associated_types[0].name, "Item");
@@ -139,7 +140,9 @@ fn parse_trait_associated_type_with_default() {
 #[test]
 fn parse_impl_associated_type() {
     // Impl block with associated type implementation
-    let items = parse("impl Iterator for List:\n    type Item = i64\n    fn next(self) -> i64:\n        return 0");
+    let items = parse(
+        "impl Iterator for List:\n    type Item = i64\n    fn next(self) -> i64:\n        return 0",
+    );
     if let Node::Impl(impl_block) = &items[0] {
         assert_eq!(impl_block.associated_types.len(), 1);
         assert_eq!(impl_block.associated_types[0].name, "Item");
@@ -152,7 +155,8 @@ fn parse_impl_associated_type() {
 #[test]
 fn parse_trait_multiple_associated_types() {
     // Multiple associated types
-    let items = parse("trait Map:\n    type Key\n    type Value\n    fn get(self, k: Key) -> Value");
+    let items =
+        parse("trait Map:\n    type Key\n    type Value\n    fn get(self, k: Key) -> Value");
     if let Node::Trait(t) = &items[0] {
         assert_eq!(t.associated_types.len(), 2);
         assert_eq!(t.associated_types[0].name, "Key");

@@ -10,9 +10,7 @@ use super::*;
 #[test]
 fn test_gpu_global_id() {
     // Test gpu.global_id() intrinsic
-    let module = parse_and_lower(
-        "fn test() -> i64:\n    return gpu.global_id()\n"
-    ).unwrap();
+    let module = parse_and_lower("fn test() -> i64:\n    return gpu.global_id()\n").unwrap();
 
     let func = &module.functions[0];
     assert_eq!(func.return_type, TypeId::I64);
@@ -23,7 +21,10 @@ fn test_gpu_global_id() {
             assert_eq!(*intrinsic, GpuIntrinsicKind::GlobalId);
             assert!(args.is_empty());
         } else {
-            panic!("Expected GpuIntrinsic for gpu.global_id(), got {:?}", expr.kind);
+            panic!(
+                "Expected GpuIntrinsic for gpu.global_id(), got {:?}",
+                expr.kind
+            );
         }
     } else {
         panic!("Expected Return statement");
@@ -33,9 +34,7 @@ fn test_gpu_global_id() {
 #[test]
 fn test_gpu_global_id_with_dim() {
     // Test gpu.global_id(dim) intrinsic with dimension argument
-    let module = parse_and_lower(
-        "fn test() -> i64:\n    return gpu.global_id(1)\n"
-    ).unwrap();
+    let module = parse_and_lower("fn test() -> i64:\n    return gpu.global_id(1)\n").unwrap();
 
     let func = &module.functions[0];
     assert_eq!(func.return_type, TypeId::I64);
@@ -52,7 +51,10 @@ fn test_gpu_global_id_with_dim() {
                 panic!("Expected Integer for dimension, got {:?}", args[0].kind);
             }
         } else {
-            panic!("Expected GpuIntrinsic for gpu.global_id(1), got {:?}", expr.kind);
+            panic!(
+                "Expected GpuIntrinsic for gpu.global_id(1), got {:?}",
+                expr.kind
+            );
         }
     } else {
         panic!("Expected Return statement");
@@ -62,9 +64,7 @@ fn test_gpu_global_id_with_dim() {
 #[test]
 fn test_gpu_barrier() {
     // Test gpu.barrier() intrinsic
-    let module = parse_and_lower(
-        "fn test():\n    gpu.barrier()\n"
-    ).unwrap();
+    let module = parse_and_lower("fn test():\n    gpu.barrier()\n").unwrap();
 
     let func = &module.functions[0];
 
@@ -74,7 +74,10 @@ fn test_gpu_barrier() {
             assert_eq!(*intrinsic, GpuIntrinsicKind::Barrier);
             assert!(args.is_empty());
         } else {
-            panic!("Expected GpuIntrinsic for gpu.barrier(), got {:?}", expr.kind);
+            panic!(
+                "Expected GpuIntrinsic for gpu.barrier(), got {:?}",
+                expr.kind
+            );
         }
     } else {
         panic!("Expected Expr statement");
@@ -84,9 +87,7 @@ fn test_gpu_barrier() {
 #[test]
 fn test_gpu_local_size() {
     // Test gpu.local_size() intrinsic
-    let module = parse_and_lower(
-        "fn test() -> i64:\n    return gpu.local_size()\n"
-    ).unwrap();
+    let module = parse_and_lower("fn test() -> i64:\n    return gpu.local_size()\n").unwrap();
 
     let func = &module.functions[0];
     assert_eq!(func.return_type, TypeId::I64);
@@ -96,7 +97,10 @@ fn test_gpu_local_size() {
         if let HirExprKind::GpuIntrinsic { intrinsic, .. } = &expr.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::LocalSize);
         } else {
-            panic!("Expected GpuIntrinsic for gpu.local_size(), got {:?}", expr.kind);
+            panic!(
+                "Expected GpuIntrinsic for gpu.local_size(), got {:?}",
+                expr.kind
+            );
         }
     } else {
         panic!("Expected Return statement");

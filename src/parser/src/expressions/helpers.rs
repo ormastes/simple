@@ -144,15 +144,11 @@ impl<'a> Parser<'a> {
             if let TokenKind::Identifier(id) = &self.current.kind {
                 let id_clone = id.clone();
                 // Peek ahead for '=' or ':' without consuming the stream
-                let next = self
-                    .pending_tokens
-                    .front()
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let tok = self.lexer.next_token();
-                        self.pending_tokens.push_back(tok.clone());
-                        tok
-                    });
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
                 if next.kind == TokenKind::Assign {
                     name = Some(id_clone);
                     self.advance(); // consume identifier

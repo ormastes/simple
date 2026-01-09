@@ -14,9 +14,9 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 use simple_parser::{Module, Node};
 
+use super::super::types::*;
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
-use super::super::types::*;
 
 /// Configuration for parallel HIR lowering.
 #[derive(Debug, Clone)]

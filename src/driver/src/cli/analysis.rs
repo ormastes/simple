@@ -44,7 +44,7 @@ pub fn run_query(args: &[String]) -> i32 {
                 if path.is_file() && path.extension().map_or(false, |e| e == "spl") {
                     spl_files.push(path);
                 }
-                // TODO: Add recursive directory walking
+                // TODO: [driver][P3] Add recursive directory walking
             }
         }
     }
@@ -216,7 +216,9 @@ pub fn run_info(args: &[String]) -> i32 {
                                         simple_parser::Expr::FString(parts) => {
                                             // Handle FString with single Literal part
                                             if parts.len() == 1 {
-                                                if let simple_parser::FStringPart::Literal(s) = &parts[0] {
+                                                if let simple_parser::FStringPart::Literal(s) =
+                                                    &parts[0]
+                                                {
                                                     s.clone()
                                                 } else {
                                                     format!("{:?}", parts)

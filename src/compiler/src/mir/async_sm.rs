@@ -100,9 +100,11 @@ pub fn lower_async(func: &MirFunction, body_block: BlockId) -> AsyncLowering {
                     for inst_after in orig_block.instructions.iter().skip(idx + 1) {
                         resume_block.instructions.push(inst_after.clone());
                     }
-                    resume_block.terminator =
-                        state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
-                            .unwrap_or_else(|| Terminator::Return(None));
+                    resume_block.terminator = state_machine_utils::remap_terminator(
+                        orig_block.terminator.clone(),
+                        &block_map,
+                    )
+                    .unwrap_or_else(|| Terminator::Return(None));
                     state_machine_utils::write_block(&mut rewritten, resume_block);
                     resume
                 } else {
@@ -149,8 +151,9 @@ pub fn lower_async(func: &MirFunction, body_block: BlockId) -> AsyncLowering {
 
         // If the block ended without an await, copy the original terminator.
         if !current_block.terminator.is_sealed() {
-            current_block.terminator = state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
-                .unwrap_or(Terminator::Return(None));
+            current_block.terminator =
+                state_machine_utils::remap_terminator(orig_block.terminator.clone(), &block_map)
+                    .unwrap_or(Terminator::Return(None));
             state_machine_utils::write_block(&mut rewritten, current_block);
         } else {
             state_machine_utils::write_block(&mut rewritten, current_block);

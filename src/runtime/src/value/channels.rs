@@ -240,7 +240,11 @@ pub extern "C" fn rt_channel_is_closed(channel: RuntimeValue) -> i64 {
     };
 
     unsafe {
-        if (*ch_ptr).closed != 0 { 1 } else { 0 }
+        if (*ch_ptr).closed != 0 {
+            1
+        } else {
+            0
+        }
     }
 }
 

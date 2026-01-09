@@ -381,7 +381,10 @@ strict = true
 "#;
         let manifest = Manifest::parse(content).unwrap();
         assert!(manifest.verify.enabled);
-        assert_eq!(manifest.verify.lean_path, Some("/opt/lean/bin/lean".to_string()));
+        assert_eq!(
+            manifest.verify.lean_path,
+            Some("/opt/lean/bin/lean".to_string())
+        );
         assert_eq!(manifest.verify.output_dir, Some("target/lean".to_string()));
         assert!(!manifest.verify.generate_stubs);
         assert_eq!(manifest.verify.modules, vec!["core", "math"]);

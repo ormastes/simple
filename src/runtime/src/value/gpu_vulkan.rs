@@ -12,29 +12,31 @@
 pub mod vulkan_ffi;
 
 pub use vulkan_ffi::common::VulkanFfiError;
-pub use vulkan_ffi::{DEVICE_REGISTRY, BUFFER_REGISTRY, PIPELINE_REGISTRY};
+pub use vulkan_ffi::{BUFFER_REGISTRY, DEVICE_REGISTRY, PIPELINE_REGISTRY};
 
 // Re-export FFI functions for backward compatibility
-pub use vulkan_ffi::device::{rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync};
 pub use vulkan_ffi::buffer::{
-    rt_vk_buffer_alloc, rt_vk_buffer_free, rt_vk_buffer_upload, rt_vk_buffer_download,
+    rt_vk_buffer_alloc, rt_vk_buffer_download, rt_vk_buffer_free, rt_vk_buffer_upload,
 };
-pub use vulkan_ffi::kernel::{rt_vk_kernel_compile, rt_vk_kernel_free, rt_vk_kernel_launch, rt_vk_kernel_launch_1d};
+pub use vulkan_ffi::common::rt_vk_available;
 pub use vulkan_ffi::descriptor::{
-    rt_vk_descriptor_layout_create_uniform, rt_vk_descriptor_layout_create_sampler,
+    rt_vk_descriptor_layout_create_sampler, rt_vk_descriptor_layout_create_uniform,
     rt_vk_descriptor_layout_free, rt_vk_descriptor_pool_create, rt_vk_descriptor_pool_free,
     rt_vk_descriptor_set_allocate, rt_vk_descriptor_set_free, rt_vk_descriptor_set_update_buffer,
 };
+pub use vulkan_ffi::device::{rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync};
+pub use vulkan_ffi::kernel::{
+    rt_vk_kernel_compile, rt_vk_kernel_free, rt_vk_kernel_launch, rt_vk_kernel_launch_1d,
+};
 pub use vulkan_ffi::swapchain::{
-    rt_vk_swapchain_create, rt_vk_swapchain_recreate, rt_vk_swapchain_destroy,
-    rt_vk_swapchain_acquire_next_image, rt_vk_swapchain_present,
-    rt_vk_swapchain_get_image_count, rt_vk_swapchain_get_extent,
+    rt_vk_swapchain_acquire_next_image, rt_vk_swapchain_create, rt_vk_swapchain_destroy,
+    rt_vk_swapchain_get_extent, rt_vk_swapchain_get_image_count, rt_vk_swapchain_present,
+    rt_vk_swapchain_recreate,
 };
 pub use vulkan_ffi::window::{
-    rt_vk_window_create, rt_vk_window_destroy, rt_vk_window_get_size,
-    rt_vk_window_set_fullscreen, rt_vk_window_poll_event, rt_vk_window_wait_event,
+    rt_vk_window_create, rt_vk_window_destroy, rt_vk_window_get_size, rt_vk_window_poll_event,
+    rt_vk_window_set_fullscreen, rt_vk_window_wait_event,
 };
-pub use vulkan_ffi::common::rt_vk_available;
 
 #[cfg(test)]
 #[cfg(feature = "vulkan")]
@@ -211,7 +213,10 @@ mod tests {
         assert_eq!(rt_vk_device_free(dev2), VulkanFfiError::Success as i32);
 
         // Freeing again should fail
-        assert_eq!(rt_vk_device_free(dev1), VulkanFfiError::InvalidHandle as i32);
+        assert_eq!(
+            rt_vk_device_free(dev1),
+            VulkanFfiError::InvalidHandle as i32
+        );
     }
 
     #[test]
@@ -380,4 +385,3 @@ mod tests {
         );
     }
 }
-

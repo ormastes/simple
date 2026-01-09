@@ -138,10 +138,7 @@ pub fn init_compact() {
 /// simple_log::init_dual(None, None)?; // Uses default .simple/logs directory
 /// simple_log::cleanup_old_logs(std::path::Path::new(".simple/logs"), 7)?;
 /// ```
-pub fn init_dual(
-    log_dir: Option<&std::path::Path>,
-    filter: Option<&str>,
-) -> std::io::Result<()> {
+pub fn init_dual(log_dir: Option<&std::path::Path>, filter: Option<&str>) -> std::io::Result<()> {
     use std::fs;
     use std::path::Path;
     use tracing_subscriber::fmt::writer::MakeWriterExt;

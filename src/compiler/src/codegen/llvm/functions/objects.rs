@@ -39,10 +39,9 @@ impl LlvmBackend {
         {
             let field_val = self.get_vreg(value, vreg_map)?;
             let offset_val = self.context.i32_type().const_int(*offset as u64, false);
-            let field_ptr = unsafe {
-                builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr")
-            }
-            .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
+            let field_ptr =
+                unsafe { builder.build_gep(i8_type, struct_ptr, &[offset_val], "field_ptr") }
+                    .map_err(|e| CompileError::Semantic(format!("Failed to build gep: {}", e)))?;
             let llvm_field_ty = self.llvm_type(field_type)?;
             let typed_ptr = builder
                 .build_pointer_cast(

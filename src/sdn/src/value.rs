@@ -4,9 +4,10 @@ use indexmap::IndexMap;
 use std::fmt;
 
 /// SDN value representing any parsed SDN data.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum SdnValue {
     /// Null value (null or nil)
+    #[default]
     Null,
     /// Boolean value
     Bool(bool),
@@ -336,12 +337,6 @@ impl fmt::Display for SdnValue {
                 Ok(())
             }
         }
-    }
-}
-
-impl Default for SdnValue {
-    fn default() -> Self {
-        SdnValue::Null
     }
 }
 

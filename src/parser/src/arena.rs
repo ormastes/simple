@@ -4,12 +4,12 @@
 //! All AST nodes within a module are allocated from the same arena, enabling
 //! bulk deallocation when the module is dropped.
 
-use typed_arena::Arena;
 use std::cell::{Cell, RefCell};
+use typed_arena::Arena;
 
 use crate::ast::{
-    Block, Expr, FunctionDef, Module, Node, Parameter, StructDef, Type,
-    ClassDef, EnumDef, TraitDef, ImplBlock, Pattern,
+    Block, ClassDef, EnumDef, Expr, FunctionDef, ImplBlock, Module, Node, Parameter, Pattern,
+    StructDef, TraitDef, Type,
 };
 
 /// Arena allocator for AST nodes.
@@ -97,9 +97,19 @@ pub struct ArenaStats {
 impl ArenaStats {
     /// Get total number of allocations.
     pub fn total(&self) -> usize {
-        self.exprs + self.types + self.blocks + self.patterns
-            + self.functions + self.structs + self.classes + self.enums
-            + self.traits + self.impls + self.params + self.nodes + self.modules
+        self.exprs
+            + self.types
+            + self.blocks
+            + self.patterns
+            + self.functions
+            + self.structs
+            + self.classes
+            + self.enums
+            + self.traits
+            + self.impls
+            + self.params
+            + self.nodes
+            + self.modules
     }
 }
 
@@ -305,9 +315,7 @@ pub fn clear_thread_arena() {
 
 /// Get thread-local arena stats.
 pub fn thread_arena_stats() -> Option<ArenaStats> {
-    THREAD_ARENA.with(|arena| {
-        arena.borrow().as_ref().map(|a| a.stats())
-    })
+    THREAD_ARENA.with(|arena| arena.borrow().as_ref().map(|a| a.stats()))
 }
 
 /// Arena pool for reusing arenas across multiple parse operations.
@@ -453,11 +461,7 @@ mod tests {
     fn test_ast_arena_slices() {
         let arena = AstArena::new();
 
-        let exprs = vec![
-            Expr::Integer(1),
-            Expr::Integer(2),
-            Expr::Integer(3),
-        ];
+        let exprs = vec![Expr::Integer(1), Expr::Integer(2), Expr::Integer(3)];
 
         let slice = arena.alloc_expr_slice(exprs);
         assert_eq!(slice.len(), 3);

@@ -6,10 +6,10 @@
 //! - Parsing Lean output for errors
 //! - Tracking proof status
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::fs;
 use std::io;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 use crate::CompileError;
 
@@ -132,21 +132,20 @@ impl LeanRunner {
         let output = Command::new(&self.lean_path)
             .arg(file)
             .output()
-            .map_err(|e| CompileError::Semantic(format!(
-                "Failed to run Lean: {}",
-                e
-            )))?;
+            .map_err(|e| CompileError::Semantic(format!("Failed to run Lean: {}", e)))?;
 
         Ok(self.parse_output(file, output))
     }
 
     /// Run Lean on generated content
-    pub fn check_content(&self, name: &str, content: &str) -> Result<LeanCheckResult, CompileError> {
-        let file_path = self.write_lean_file(name, content)
-            .map_err(|e| CompileError::Semantic(format!(
-                "Failed to write Lean file: {}",
-                e
-            )))?;
+    pub fn check_content(
+        &self,
+        name: &str,
+        content: &str,
+    ) -> Result<LeanCheckResult, CompileError> {
+        let file_path = self
+            .write_lean_file(name, content)
+            .map_err(|e| CompileError::Semantic(format!("Failed to write Lean file: {}", e)))?;
 
         self.check_file(&file_path)
     }
@@ -157,8 +156,7 @@ impl LeanRunner {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         // Count sorry occurrences as remaining goals
-        let goals_remaining = stdout.matches("sorry").count() +
-                              stderr.matches("sorry").count();
+        let goals_remaining = stdout.matches("sorry").count() + stderr.matches("sorry").count();
 
         // Try to extract goal count from Lean output
         let goals_solved = self.count_solved_goals(&stdout, &stderr);
@@ -188,7 +186,8 @@ impl LeanRunner {
 
     /// Check multiple files
     pub fn check_files(&self, files: &[PathBuf]) -> Vec<LeanCheckResult> {
-        files.iter()
+        files
+            .iter()
             .filter_map(|f| self.check_file(f).ok())
             .collect()
     }
@@ -255,9 +254,7 @@ impl VerificationSummary {
     pub fn format(&self) -> String {
         let mut out = String::new();
 
-        out.push_str(&format!(
-            "Verification Summary:\n"
-        ));
+        out.push_str(&format!("Verification Summary:\n"));
         out.push_str(&format!(
             "  Files: {}/{} passed\n",
             self.files_passed, self.files_checked
@@ -271,17 +268,11 @@ impl VerificationSummary {
         }
 
         if self.unproven_theorems > 0 {
-            out.push_str(&format!(
-                "  Unproven (sorry): {}\n",
-                self.unproven_theorems
-            ));
+            out.push_str(&format!("  Unproven (sorry): {}\n", self.unproven_theorems));
         }
 
         if !self.errors.is_empty() {
-            out.push_str(&format!(
-                "  Errors: {}\n",
-                self.errors.len()
-            ));
+            out.push_str(&format!("  Errors: {}\n", self.errors.len()));
         }
 
         out

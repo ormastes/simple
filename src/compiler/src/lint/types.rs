@@ -69,8 +69,7 @@ impl LintName {
     /// - How to suppress it
     pub fn explain(&self) -> String {
         match self {
-            LintName::PrimitiveApi => {
-                r#"Lint: primitive_api
+            LintName::PrimitiveApi => r#"Lint: primitive_api
 Level: warn (default)
 
 === What it checks ===
@@ -131,10 +130,9 @@ If you really need primitives in a public API:
 Or in simple.sdn:
     [lints]
     primitive_api = "allow"
-"#.to_string()
-            }
-            LintName::BareBool => {
-                r#"Lint: bare_bool
+"#
+            .to_string(),
+            LintName::BareBool => r#"Lint: bare_bool
 Level: warn (default)
 
 === What it checks ===
@@ -189,8 +187,8 @@ If you need boolean parameters:
 Or in simple.sdn:
     [lints]
     bare_bool = "allow"
-"#.to_string()
-            }
+"#
+            .to_string(),
         }
     }
 

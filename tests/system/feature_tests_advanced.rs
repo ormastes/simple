@@ -796,7 +796,9 @@ unit length(base: f64): m = 1.0, km = 1000.0
 distance = 100_km
 main = distance.to_m()
 "#;
-    let result = runner.run_source(source).expect("literal suffix conversion");
+    let result = runner
+        .run_source(source)
+        .expect("literal suffix conversion");
     assert_eq!(result, 100000);
 }
 

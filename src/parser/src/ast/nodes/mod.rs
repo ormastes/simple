@@ -9,17 +9,17 @@
 //! - `effects`: Effect and Capability types for effect system
 
 // Module declarations
+pub mod contracts;
 pub mod core;
 pub mod definitions;
 pub mod effects;
-pub mod statements;
 pub mod modules;
-pub mod contracts;
+pub mod statements;
 
 // Re-export all public types from each module for convenience
+pub use contracts::*;
 pub use core::*;
 pub use definitions::*;
 pub use effects::*;
-pub use statements::*;
 pub use modules::*;
-pub use contracts::*;
+pub use statements::*;

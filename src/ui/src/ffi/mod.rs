@@ -20,8 +20,8 @@ pub struct ScreenBuffer {
 #[derive(Clone, Default)]
 pub struct Cell {
     pub ch: char,
-    pub fg: u32,  // RGBA color
-    pub bg: u32,  // RGBA color
+    pub fg: u32,   // RGBA color
+    pub bg: u32,   // RGBA color
     pub flags: u8, // bold=1, dim=2, italic=4, underline=8, blink=16, reverse=32
 }
 
@@ -102,12 +102,24 @@ fn write_cell_style(writer: &mut dyn Write, cell: &Cell) -> io::Result<()> {
     let mut codes = Vec::new();
 
     // Flags
-    if cell.flags & 1 != 0 { codes.push("1".to_string()); } // bold
-    if cell.flags & 2 != 0 { codes.push("2".to_string()); } // dim
-    if cell.flags & 4 != 0 { codes.push("3".to_string()); } // italic
-    if cell.flags & 8 != 0 { codes.push("4".to_string()); } // underline
-    if cell.flags & 16 != 0 { codes.push("5".to_string()); } // blink
-    if cell.flags & 32 != 0 { codes.push("7".to_string()); } // reverse
+    if cell.flags & 1 != 0 {
+        codes.push("1".to_string());
+    } // bold
+    if cell.flags & 2 != 0 {
+        codes.push("2".to_string());
+    } // dim
+    if cell.flags & 4 != 0 {
+        codes.push("3".to_string());
+    } // italic
+    if cell.flags & 8 != 0 {
+        codes.push("4".to_string());
+    } // underline
+    if cell.flags & 16 != 0 {
+        codes.push("5".to_string());
+    } // blink
+    if cell.flags & 32 != 0 {
+        codes.push("7".to_string());
+    } // reverse
 
     // Foreground color (RGB)
     if cell.fg != 0 {
@@ -208,7 +220,7 @@ pub extern "C" fn ui_screen_buffer_mark_dirty(buf: *mut ScreenBuffer) {
 pub struct NativeWindow {
     width: u32,
     height: u32,
-    framebuffer: Vec<u32>,  // RGBA pixels
+    framebuffer: Vec<u32>, // RGBA pixels
     title: String,
     // In a real implementation, this would hold the platform window handle
     // (HWND on Windows, NSWindow on macOS, X11 Window on Linux)
@@ -314,12 +326,7 @@ pub extern "C" fn ui_native_window_height(win: *const NativeWindow) -> u32 {
 
 /// Set a pixel in the framebuffer
 #[no_mangle]
-pub extern "C" fn ui_native_window_set_pixel(
-    win: *mut NativeWindow,
-    x: u32,
-    y: u32,
-    color: u32,
-) {
+pub extern "C" fn ui_native_window_set_pixel(win: *mut NativeWindow, x: u32, y: u32, color: u32) {
     if !win.is_null() {
         unsafe { (*win).set_pixel(x, y, color) };
     }
@@ -392,7 +399,16 @@ mod tests {
     #[test]
     fn test_screen_buffer_set_cell() {
         let mut buf = ScreenBuffer::new(10, 10);
-        buf.set_cell(5, 5, Cell { ch: 'X', fg: 0xFF0000, bg: 0, flags: 1 });
+        buf.set_cell(
+            5,
+            5,
+            Cell {
+                ch: 'X',
+                fg: 0xFF0000,
+                bg: 0,
+                flags: 1,
+            },
+        );
         let cell = buf.get_cell(5, 5).unwrap();
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.fg, 0xFF0000);

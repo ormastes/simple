@@ -66,7 +66,7 @@ impl Lowerer {
             })
         } else {
             Err(LowerError::Unsupported(
-                "FString with interpolation not yet supported in native compilation".to_string()
+                "FString with interpolation not yet supported in native compilation".to_string(),
             ))
         }
     }

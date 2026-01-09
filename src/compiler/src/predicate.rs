@@ -338,7 +338,10 @@ impl Selector {
                     | Selector::Init(_) // Runtime weaving via DI proxies
             ),
             PredicateContext::DependencyInjection => {
-                matches!(self, Selector::Type(_) | Selector::Within(_) | Selector::Attr(_))
+                matches!(
+                    self,
+                    Selector::Type(_) | Selector::Within(_) | Selector::Attr(_)
+                )
             }
             PredicateContext::Mock => {
                 matches!(
@@ -555,10 +558,7 @@ fn match_segment(pattern: &str, value: &str) -> bool {
 }
 
 fn pattern_specificity(pattern: &str) -> i32 {
-    pattern
-        .split('.')
-        .map(segment_specificity)
-        .sum::<i32>()
+    pattern.split('.').map(segment_specificity).sum::<i32>()
 }
 
 fn segment_specificity(segment: &str) -> i32 {
@@ -605,7 +605,9 @@ mod tests {
         assert!(exec.validate(PredicateContext::Weaving).is_ok());
 
         // Invalid in DI context
-        assert!(exec.validate(PredicateContext::DependencyInjection).is_err());
+        assert!(exec
+            .validate(PredicateContext::DependencyInjection)
+            .is_err());
     }
 
     #[test]
@@ -641,8 +643,8 @@ mod tests {
             args: ArgPatterns::Specific(vec!["I64".into(), "I64".into()]),
         };
         assert!(sig2.matches("I64 calc(I64, I64)"));
-        assert!(!sig2.matches("String calc(I64, I64)"));  // Wrong return type
-        assert!(!sig2.matches("I64 calc(I64)"));  // Wrong arg count
+        assert!(!sig2.matches("String calc(I64, I64)")); // Wrong return type
+        assert!(!sig2.matches("I64 calc(I64)")); // Wrong arg count
 
         let sig3 = SignaturePattern {
             return_type: "*".into(),
@@ -651,6 +653,6 @@ mod tests {
         };
         assert!(sig3.matches("Void User.new()"));
         assert!(sig3.matches("String User.getName()"));
-        assert!(!sig3.matches("I64 Service.calc()"));  // Wrong class
+        assert!(!sig3.matches("I64 Service.calc()")); // Wrong class
     }
 }

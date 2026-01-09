@@ -31,12 +31,12 @@ use crate::value::torch::TorchFfiError;
 #[cfg(feature = "pytorch")]
 #[derive(Debug)]
 pub struct DataLoaderState {
-    pub(crate) dataset: u64,         // Dataset handle
+    pub(crate) dataset: u64, // Dataset handle
     pub(crate) batch_size: usize,
     pub(crate) shuffle: bool,
     pub(crate) drop_last: bool,
     pub(crate) current_index: usize,
-    pub(crate) indices: Vec<i64>,    // Shuffled indices for current epoch
+    pub(crate) indices: Vec<i64>, // Shuffled indices for current epoch
     pub(crate) num_samples: i64,
 }
 

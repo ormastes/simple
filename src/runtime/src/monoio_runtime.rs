@@ -78,7 +78,7 @@ pub extern "C" fn monoio_runtime_init_global() -> RuntimeValue {
 /// Feature #1731: Task spawning and management
 #[no_mangle]
 pub extern "C" fn monoio_spawn_local(_task_fn: RuntimeValue) -> RuntimeValue {
-    // TODO: Convert RuntimeValue to Future
+    // TODO: [runtime][P3] Convert RuntimeValue to Future
     // For now, return stub value
     // In full implementation:
     // 1. Extract closure from RuntimeValue
@@ -103,7 +103,9 @@ pub extern "C" fn monoio_block_on(_future: RuntimeValue) -> RuntimeValue {
     // For now, we'll have each TCP/UDP operation create its own runtime instance
 
     tracing::warn!("monoio_block_on: Direct future execution not yet supported");
-    tracing::info!("monoio_block_on: Use TCP/UDP functions which internally handle async execution");
+    tracing::info!(
+        "monoio_block_on: Use TCP/UDP functions which internally handle async execution"
+    );
 
     RuntimeValue::from_int(0)
 }
@@ -118,7 +120,12 @@ where
     let mut rt = RuntimeBuilder::<monoio::FusionDriver>::new()
         .with_entries(entries)
         .build()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("Failed to create runtime: {}", e)))?;
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Failed to create runtime: {}", e),
+            )
+        })?;
 
     // Execute the future
     rt.block_on(future)
@@ -156,7 +163,10 @@ pub extern "C" fn monoio_get_num_cores() -> RuntimeValue {
 #[no_mangle]
 pub extern "C" fn monoio_configure_entries(entries: i64) -> RuntimeValue {
     if entries < 1 || entries > 32768 {
-        tracing::error!("monoio_configure_entries: Invalid entries value {}, must be 1-32768", entries);
+        tracing::error!(
+            "monoio_configure_entries: Invalid entries value {}, must be 1-32768",
+            entries
+        );
         return RuntimeValue::from_int(0);
     }
 
@@ -184,12 +194,7 @@ pub extern "C" fn monoio_configure_entries(entries: i64) -> RuntimeValue {
 
 /// Get configured entries value for current thread
 pub(crate) fn get_entries() -> u32 {
-    MONOIO_RT.with(|rt| {
-        rt.borrow()
-            .as_ref()
-            .map(|h| h.entries)
-            .unwrap_or(256)
-    })
+    MONOIO_RT.with(|rt| rt.borrow().as_ref().map(|h| h.entries).unwrap_or(256))
 }
 
 /// Runtime statistics and monitoring
@@ -214,7 +219,7 @@ thread_local! {
 /// Get current runtime statistics
 #[no_mangle]
 pub extern "C" fn monoio_get_stats() -> RuntimeValue {
-    // TODO: Return stats as RuntimeValue (struct or dict)
+    // TODO: [runtime][P3] Return stats as RuntimeValue (struct or dict)
     // For now, return stub
     RuntimeValue::from_int(0)
 }
@@ -244,7 +249,7 @@ pub(crate) fn has_runtime() -> bool {
 // RuntimeValue conversion helpers
 // ============================================================================
 
-use crate::value::{RuntimeString, HeapObjectType, rt_string_new};
+use crate::value::{rt_string_new, HeapObjectType, RuntimeString};
 
 /// Convert RuntimeValue to String
 /// Returns None if the value is not a string
@@ -273,16 +278,14 @@ pub(crate) fn string_to_runtime_value(s: &str) -> RuntimeValue {
         return unsafe { rt_string_new(std::ptr::null(), 0) };
     }
 
-    unsafe {
-        rt_string_new(s.as_ptr(), s.len() as u64)
-    }
+    unsafe { rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 
 // ============================================================================
 // Buffer Management for Network I/O
 // ============================================================================
 
-use crate::value::{RuntimeArray, HeapHeader};
+use crate::value::{HeapHeader, RuntimeArray};
 
 /// Extract bytes from RuntimeValue buffer (RuntimeArray or RuntimeString)
 /// Returns None if the value is not a valid buffer

@@ -154,11 +154,10 @@ impl LspServer {
         notif: &NotificationMessage,
         writer: &mut W,
     ) -> Result<(), TransportError> {
-        let params: DidOpenTextDocumentParams = serde_json::from_value(
-            notif.params.clone().unwrap_or_default()
-        ).unwrap_or_else(|_| {
-            panic!("Invalid didOpen params");
-        });
+        let params: DidOpenTextDocumentParams =
+            serde_json::from_value(notif.params.clone().unwrap_or_default()).unwrap_or_else(|_| {
+                panic!("Invalid didOpen params");
+            });
 
         let uri = params.text_document.uri.clone();
         let text = params.text_document.text.clone();
@@ -177,11 +176,10 @@ impl LspServer {
         notif: &NotificationMessage,
         writer: &mut W,
     ) -> Result<(), TransportError> {
-        let params: DidChangeTextDocumentParams = serde_json::from_value(
-            notif.params.clone().unwrap_or_default()
-        ).unwrap_or_else(|_| {
-            panic!("Invalid didChange params");
-        });
+        let params: DidChangeTextDocumentParams =
+            serde_json::from_value(notif.params.clone().unwrap_or_default()).unwrap_or_else(|_| {
+                panic!("Invalid didChange params");
+            });
 
         let uri = params.text_document.uri.clone();
 
@@ -215,7 +213,9 @@ impl LspServer {
             Err(err) => {
                 // Convert parse error to diagnostic
                 let error_message = err.to_string();
-                let span = err.span().unwrap_or_else(|| simple_parser::token::Span::new(0, 1, 1, 1));
+                let span = err
+                    .span()
+                    .unwrap_or_else(|| simple_parser::token::Span::new(0, 1, 1, 1));
 
                 let diagnostic = Diagnostic {
                     range: Range {
@@ -225,7 +225,8 @@ impl LspServer {
                         },
                         end: Position {
                             line: (span.line as u32).saturating_sub(1),
-                            character: (span.column as u32).saturating_sub(1) + (span.end - span.start) as u32,
+                            character: (span.column as u32).saturating_sub(1)
+                                + (span.end - span.start) as u32,
                         },
                     },
                     severity: Some(DiagnosticSeverity::Error),

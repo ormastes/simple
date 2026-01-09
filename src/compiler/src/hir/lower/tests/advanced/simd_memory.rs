@@ -19,7 +19,10 @@ fn test_simd_load() {
 
     let func = &module.functions[0];
     // Second statement (after arr declaration) should be the load
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[1]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdLoad);
             assert_eq!(args.len(), 2); // array + offset
@@ -41,7 +44,10 @@ fn test_simd_gather() {
 
     let func = &module.functions[0];
     // Third statement (after arr and idx) should be the gather
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[2] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[2]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdGather);
             assert_eq!(args.len(), 2); // array + indices
@@ -107,7 +113,10 @@ fn test_simd_fma() {
 
     let func = &module.functions[0];
     // Fourth statement should be the fma
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[3] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[3]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdFma);
             assert_eq!(args.len(), 3); // a, b, c
@@ -129,7 +138,10 @@ fn test_simd_recip() {
 
     let func = &module.functions[0];
     // Second statement should be the recip
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[1] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[1]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdRecip);
             assert_eq!(args.len(), 1); // just the vector
@@ -151,7 +163,10 @@ fn test_simd_masked_load() {
 
     let func = &module.functions[0];
     // Third statement (after arr and mask) should be the masked load
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[2] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[2]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdMaskedLoad);
             assert_eq!(args.len(), 4); // array + offset + mask + default
@@ -195,7 +210,10 @@ fn test_simd_min_vec() {
 
     let func = &module.functions[0];
     // Third statement (after a, b) should be the min operation
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[2] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[2]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdMinVec);
             assert_eq!(args.len(), 2); // a + b
@@ -217,7 +235,10 @@ fn test_simd_max_vec() {
 
     let func = &module.functions[0];
     // Third statement (after a, b) should be the max operation
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[2] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[2]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdMaxVec);
             assert_eq!(args.len(), 2); // a + b
@@ -239,7 +260,10 @@ fn test_simd_clamp() {
 
     let func = &module.functions[0];
     // Fourth statement (after v, lo, hi) should be the clamp operation
-    if let HirStmt::Let { value: Some(value), .. } = &func.body[3] {
+    if let HirStmt::Let {
+        value: Some(value), ..
+    } = &func.body[3]
+    {
         if let HirExprKind::GpuIntrinsic { intrinsic, args } = &value.kind {
             assert_eq!(*intrinsic, GpuIntrinsicKind::SimdClamp);
             assert_eq!(args.len(), 3); // v + lo + hi

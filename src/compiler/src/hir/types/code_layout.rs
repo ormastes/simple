@@ -124,9 +124,7 @@ impl LayoutAnchor {
     /// Parse layout anchor from string.
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "event_loop" | "eventloop" | "main_loop" | "mainloop" => {
-                Some(LayoutAnchor::EventLoop)
-            }
+            "event_loop" | "eventloop" | "main_loop" | "mainloop" => Some(LayoutAnchor::EventLoop),
             _ => Some(LayoutAnchor::Custom(s.to_string())),
         }
     }

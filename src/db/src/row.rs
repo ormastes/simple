@@ -25,21 +25,27 @@ impl Row {
 
     /// Get value by column index.
     pub fn get<T: FromSql>(&self, index: usize) -> DbResult<T> {
-        let value = self.values.get(index)
+        let value = self
+            .values
+            .get(index)
             .ok_or_else(|| DbError::column_not_found(format!("index {}", index)))?;
         T::from_sql(value)
     }
 
     /// Get value by column name.
     pub fn get_by_name<T: FromSql>(&self, name: &str) -> DbResult<T> {
-        let index = self.column_map.get(name)
+        let index = self
+            .column_map
+            .get(name)
             .ok_or_else(|| DbError::column_not_found(name))?;
         self.get(*index)
     }
 
     /// Get optional value by index (returns None for NULL).
     pub fn get_opt<T: FromSql>(&self, index: usize) -> DbResult<Option<T>> {
-        let value = self.values.get(index)
+        let value = self
+            .values
+            .get(index)
             .ok_or_else(|| DbError::column_not_found(format!("index {}", index)))?;
         if value.is_null() {
             Ok(None)
@@ -50,7 +56,9 @@ impl Row {
 
     /// Get optional value by name.
     pub fn get_opt_by_name<T: FromSql>(&self, name: &str) -> DbResult<Option<T>> {
-        let index = self.column_map.get(name)
+        let index = self
+            .column_map
+            .get(name)
             .ok_or_else(|| DbError::column_not_found(name))?;
         self.get_opt(*index)
     }

@@ -51,7 +51,7 @@ impl PtySession {
     }
 
     fn send_ctrl_d(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        self.writer.write_all(&[4])?;  // Ctrl+D
+        self.writer.write_all(&[4])?; // Ctrl+D
         self.writer.flush()?;
         thread::sleep(Duration::from_millis(100));
         Ok(())

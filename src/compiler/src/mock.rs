@@ -124,10 +124,7 @@ impl MockRegistry {
         let mut matched = Vec::new();
 
         for rule in &self.config.rules {
-            if rule
-                .predicate
-                .validate(PredicateContext::Mock)
-                .is_ok()
+            if rule.predicate.validate(PredicateContext::Mock).is_ok()
                 && rule.predicate.matches(&ctx)
             {
                 matched.push((rule.priority, rule));
@@ -216,7 +213,7 @@ impl MockRegistry {
 
 /// Parse mock configuration from SDN-like format
 pub fn parse_mock_config(config_str: &str) -> Result<MockConfig, String> {
-    // TODO: Implement proper SDN parsing
+    // TODO: [compiler][P1] Implement proper SDN parsing
     // For now, return an empty configuration
     let _ = config_str;
     Ok(MockConfig::disabled())

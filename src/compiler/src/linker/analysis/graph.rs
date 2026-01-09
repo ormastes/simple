@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 
-use super::symbol::AnalyzedSymbol;
 use super::stats::AnalysisStats;
+use super::symbol::AnalyzedSymbol;
 use super::types::{RefKind, SymbolVisibility};
 
 pub struct SymbolGraph {

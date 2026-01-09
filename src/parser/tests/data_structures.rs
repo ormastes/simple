@@ -123,7 +123,8 @@ fn parse_struct_init_expression() {
 #[test]
 fn parse_struct_with_doc_comment() {
     // Double-quoted strings become FStrings, which the parser handles
-    let items = parse("struct Person:\n    \"A person with a name and age.\"\n    name: str\n    age: i64");
+    let items =
+        parse("struct Person:\n    \"A person with a name and age.\"\n    name: str\n    age: i64");
     if let Node::Struct(s) = &items[0] {
         assert_eq!(s.name, "Person");
         assert!(s.doc_comment.is_some(), "doc_comment should be present");

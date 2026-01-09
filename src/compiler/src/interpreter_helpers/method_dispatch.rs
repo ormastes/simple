@@ -1,13 +1,13 @@
 //! Method dispatch and method_missing hooks
 
 use crate::error::CompileError;
-use crate::value::{Env, Value, METHOD_MISSING, OptionVariant, ResultVariant};
+use crate::value::{Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 
 use super::super::{
-    evaluate_expr, evaluate_method_call_with_self_update, exec_function,
-    Control, Enums, ImplMethods,
+    evaluate_expr, evaluate_method_call_with_self_update, exec_function, Control, Enums,
+    ImplMethods,
 };
 
 pub(crate) fn call_method_on_value(
@@ -25,21 +25,27 @@ pub(crate) fn call_method_on_value(
     // Handle common methods for chained calls
     match &recv_val {
         // String methods
-        Value::Str(s) => {
-            match method {
-                "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
-                "is_empty" => return Ok(Value::Bool(s.is_empty())),
-                "to_string" => return Ok(Value::Str(s.clone())),
-                "chars" => return Ok(Value::Array(s.chars().map(|c| Value::Str(c.to_string())).collect())),
-                "trim" | "strip" => return Ok(Value::Str(s.trim().to_string())),
-                "to_upper" | "upper" | "uppercase" => return Ok(Value::Str(s.to_uppercase())),
-                "to_lower" | "lower" | "lowercase" => return Ok(Value::Str(s.to_lowercase())),
-                _ => {}
+        Value::Str(s) => match method {
+            "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
+            "is_empty" => return Ok(Value::Bool(s.is_empty())),
+            "to_string" => return Ok(Value::Str(s.clone())),
+            "chars" => {
+                return Ok(Value::Array(
+                    s.chars().map(|c| Value::Str(c.to_string())).collect(),
+                ))
             }
-        }
+            "trim" | "strip" => return Ok(Value::Str(s.trim().to_string())),
+            "to_upper" | "upper" | "uppercase" => return Ok(Value::Str(s.to_uppercase())),
+            "to_lower" | "lower" | "lowercase" => return Ok(Value::Str(s.to_lowercase())),
+            _ => {}
+        },
 
         // Option methods (most common in chained calls)
-        Value::Enum { enum_name, variant, payload } if enum_name == "Option" => {
+        Value::Enum {
+            enum_name,
+            variant,
+            payload,
+        } if enum_name == "Option" => {
             let opt_variant = OptionVariant::from_name(variant);
             match method {
                 "is_some" => return Ok(Value::Bool(opt_variant == Some(OptionVariant::Some))),
@@ -69,7 +75,11 @@ pub(crate) fn call_method_on_value(
         }
 
         // Result methods
-        Value::Enum { enum_name, variant, payload } if enum_name == "Result" => {
+        Value::Enum {
+            enum_name,
+            variant,
+            payload,
+        } if enum_name == "Result" => {
             let res_variant = ResultVariant::from_name(variant);
             match method {
                 "is_ok" => return Ok(Value::Bool(res_variant == Some(ResultVariant::Ok))),
@@ -81,7 +91,10 @@ pub(crate) fn call_method_on_value(
                         }
                     }
                     if let Some(err_val) = payload {
-                        return Err(CompileError::Semantic(format!("called unwrap on Err: {}", err_val.to_display_string())));
+                        return Err(CompileError::Semantic(format!(
+                            "called unwrap on Err: {}",
+                            err_val.to_display_string()
+                        )));
                     }
                     return Err(CompileError::Semantic("called unwrap on Err".into()));
                 }
@@ -98,40 +111,40 @@ pub(crate) fn call_method_on_value(
         }
 
         // Array methods
-        Value::Array(arr) => {
-            match method {
-                "len" | "length" => return Ok(Value::Int(arr.len() as i64)),
-                "is_empty" => return Ok(Value::Bool(arr.is_empty())),
-                "first" => {
-                    return Ok(arr.first().map(|v| Value::some(v.clone())).unwrap_or_else(Value::none));
-                }
-                "last" => {
-                    return Ok(arr.last().map(|v| Value::some(v.clone())).unwrap_or_else(Value::none));
-                }
-                _ => {}
+        Value::Array(arr) => match method {
+            "len" | "length" => return Ok(Value::Int(arr.len() as i64)),
+            "is_empty" => return Ok(Value::Bool(arr.is_empty())),
+            "first" => {
+                return Ok(arr
+                    .first()
+                    .map(|v| Value::some(v.clone()))
+                    .unwrap_or_else(Value::none));
             }
-        }
+            "last" => {
+                return Ok(arr
+                    .last()
+                    .map(|v| Value::some(v.clone()))
+                    .unwrap_or_else(Value::none));
+            }
+            _ => {}
+        },
 
         // Int methods
-        Value::Int(n) => {
-            match method {
-                "abs" => return Ok(Value::Int(n.abs())),
-                "to_string" => return Ok(Value::Str(n.to_string())),
-                _ => {}
-            }
-        }
+        Value::Int(n) => match method {
+            "abs" => return Ok(Value::Int(n.abs())),
+            "to_string" => return Ok(Value::Str(n.to_string())),
+            _ => {}
+        },
 
         // Float methods
-        Value::Float(f) => {
-            match method {
-                "abs" => return Ok(Value::Float(f.abs())),
-                "floor" => return Ok(Value::Float(f.floor())),
-                "ceil" => return Ok(Value::Float(f.ceil())),
-                "round" => return Ok(Value::Float(f.round())),
-                "to_string" => return Ok(Value::Str(f.to_string())),
-                _ => {}
-            }
-        }
+        Value::Float(f) => match method {
+            "abs" => return Ok(Value::Float(f.abs())),
+            "floor" => return Ok(Value::Float(f.floor())),
+            "ceil" => return Ok(Value::Float(f.ceil())),
+            "round" => return Ok(Value::Float(f.round())),
+            "to_string" => return Ok(Value::Str(f.to_string())),
+            _ => {}
+        },
 
         _ => {}
     }
@@ -181,13 +194,31 @@ fn find_method_and_exec(
     // Check class methods
     if let Some(class_def) = classes.get(class).cloned() {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method_name) {
-            return Ok(Some(exec_function(func, args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
+            return Ok(Some(exec_function(
+                func,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                Some((class, fields)),
+            )?));
         }
     }
     // Check impl methods
     if let Some(methods) = impl_methods.get(class) {
         if let Some(func) = methods.iter().find(|m| m.name == method_name) {
-            return Ok(Some(exec_function(func, args, env, functions, classes, enums, impl_methods, Some((class, fields)))?));
+            return Ok(Some(exec_function(
+                func,
+                args,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+                Some((class, fields)),
+            )?));
         }
     }
     Ok(None)
@@ -207,7 +238,17 @@ pub(crate) fn find_and_exec_method<'a>(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
-    find_method_and_exec(method, args, class, fields, env, functions, classes, enums, impl_methods)
+    find_method_and_exec(
+        method,
+        args,
+        class,
+        fields,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )
 }
 
 /// Try to call method_missing hook on a class/struct object.
@@ -224,5 +265,15 @@ pub(crate) fn try_method_missing<'a>(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     let mm_args = build_method_missing_args(method, args);
-    find_method_and_exec(METHOD_MISSING, &mm_args, class, fields, env, functions, classes, enums, impl_methods)
+    find_method_and_exec(
+        METHOD_MISSING,
+        &mm_args,
+        class,
+        fields,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+    )
 }

@@ -208,7 +208,12 @@ impl<'a> SuiLexer<'a> {
             self.advance();
             self.mode_stack.push(self.mode);
             self.mode = LexerMode::Tag;
-            return self.make_token(SuiTokenKind::TagEndOpen, start_pos, start_line, start_column);
+            return self.make_token(
+                SuiTokenKind::TagEndOpen,
+                start_pos,
+                start_line,
+                start_column,
+            );
         }
 
         self.mode_stack.push(self.mode);
@@ -238,7 +243,12 @@ impl<'a> SuiLexer<'a> {
                 self.advance();
                 self.advance();
                 self.mode = self.mode_stack.pop().unwrap_or(LexerMode::Html);
-                self.make_token(SuiTokenKind::TagSelfClose, start_pos, start_line, start_column)
+                self.make_token(
+                    SuiTokenKind::TagSelfClose,
+                    start_pos,
+                    start_line,
+                    start_column,
+                )
             }
             '=' => {
                 self.advance();
@@ -668,7 +678,6 @@ impl<'a> SuiLexer<'a> {
         )
     }
 }
-
 
 #[cfg(test)]
 #[path = "tests.rs"]

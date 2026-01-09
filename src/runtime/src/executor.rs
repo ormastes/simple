@@ -466,7 +466,11 @@ pub extern "C" fn rt_executor_set_workers(count: i64) {
 /// Returns 1 if a task was executed, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn rt_executor_poll() -> i64 {
-    if GLOBAL_EXECUTOR.poll_one() { 1 } else { 0 }
+    if GLOBAL_EXECUTOR.poll_one() {
+        1
+    } else {
+        0
+    }
 }
 
 /// Poll and execute all pending tasks (Manual mode only).
@@ -492,7 +496,11 @@ pub extern "C" fn rt_executor_shutdown() {
 /// Returns 1 if manual mode, 0 if threaded mode.
 #[no_mangle]
 pub extern "C" fn rt_executor_is_manual() -> i64 {
-    if is_manual_mode() { 1 } else { 0 }
+    if is_manual_mode() {
+        1
+    } else {
+        0
+    }
 }
 
 // ============================================================================
@@ -527,10 +535,7 @@ static NEXT_THREAD_ID: AtomicU64 = AtomicU64::new(1);
 /// # Returns
 /// A thread handle that can be used to join the thread
 #[no_mangle]
-pub extern "C" fn rt_thread_spawn_isolated(
-    closure_ptr: u64,
-    data: RuntimeValue,
-) -> u64 {
+pub extern "C" fn rt_thread_spawn_isolated(closure_ptr: u64, data: RuntimeValue) -> u64 {
     let thread_id = NEXT_THREAD_ID.fetch_add(1, Ordering::SeqCst);
 
     // Convert closure pointer to a function
@@ -579,9 +584,7 @@ pub extern "C" fn rt_thread_spawn_isolated2(
     // Spawn the OS thread
     let handle = thread::Builder::new()
         .name(format!("simple-isolated-{}", thread_id))
-        .spawn(move || {
-            func(copied_data1, copied_data2)
-        })
+        .spawn(move || func(copied_data1, copied_data2))
         .expect("Failed to spawn isolated thread");
 
     // Create and box the handle
@@ -647,7 +650,11 @@ pub extern "C" fn rt_thread_is_done(handle: u64) -> i64 {
 
         // Check if the thread is finished (thread handle is_finished)
         if let Some(ref join_handle) = (*handle_ptr).join_handle {
-            if join_handle.is_finished() { 1 } else { 0 }
+            if join_handle.is_finished() {
+                1
+            } else {
+                0
+            }
         } else {
             1 // No handle means already joined
         }
@@ -663,9 +670,7 @@ pub extern "C" fn rt_thread_id(handle: u64) -> i64 {
 
     let handle_ptr = handle as *mut IsolatedThreadHandle;
 
-    unsafe {
-        (*handle_ptr).thread_id as i64
-    }
+    unsafe { (*handle_ptr).thread_id as i64 }
 }
 
 /// Free an isolated thread handle.
@@ -706,7 +711,6 @@ pub extern "C" fn rt_thread_sleep(millis: i64) {
 pub extern "C" fn rt_thread_yield() {
     thread::yield_now();
 }
-
 
 #[cfg(test)]
 #[path = "executor_tests.rs"]

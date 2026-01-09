@@ -5,7 +5,7 @@ impl<'a> super::Lexer<'a> {
         // Check for f-string: f"..." or f"""..."""
         if first == 'f' && self.check('"') {
             self.advance(); // consume the opening "
-            // Check for triple-quoted f-string: f"""..."""
+                            // Check for triple-quoted f-string: f"""..."""
             if self.check('"') && self.check_ahead(1, '"') {
                 return self.scan_triple_fstring();
             }
@@ -15,7 +15,7 @@ impl<'a> super::Lexer<'a> {
         // Check for raw string: r"..." or r"""..."""
         if first == 'r' && self.check('"') {
             self.advance(); // consume the first "
-            // Check for triple-quoted raw string: r"""..."""
+                            // Check for triple-quoted raw string: r"""..."""
             if self.check('"') && self.check_ahead(1, '"') {
                 return self.scan_triple_quoted_string();
             }

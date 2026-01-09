@@ -138,9 +138,9 @@ pub extern "C" fn rt_gpu_barrier() {
 #[no_mangle]
 pub extern "C" fn rt_gpu_mem_fence(scope: u32) {
     match scope {
-        0 => std::sync::atomic::fence(Ordering::AcqRel),  // Work group local
-        1 => std::sync::atomic::fence(Ordering::SeqCst),  // Device memory
-        _ => std::sync::atomic::fence(Ordering::SeqCst),  // All memory
+        0 => std::sync::atomic::fence(Ordering::AcqRel), // Work group local
+        1 => std::sync::atomic::fence(Ordering::SeqCst), // Device memory
+        _ => std::sync::atomic::fence(Ordering::SeqCst), // All memory
     }
 }
 
@@ -409,8 +409,12 @@ pub fn execute_kernel_3d(kernel: GpuKernelFn, global_size: [u32; 3], local_size:
 #[no_mangle]
 pub extern "C" fn rt_gpu_launch(
     kernel_ptr: u64,
-    gx: u32, gy: u32, gz: u32,
-    lx: u32, ly: u32, lz: u32,
+    gx: u32,
+    gy: u32,
+    gz: u32,
+    lx: u32,
+    ly: u32,
+    lz: u32,
 ) -> i32 {
     let kernel: GpuKernelFn = unsafe { std::mem::transmute(kernel_ptr) };
     execute_kernel_3d(kernel, [gx, gy, gz], [lx, ly, lz]);

@@ -242,7 +242,7 @@ impl<'a> Parser<'a> {
             if self.peek_is(&TokenKind::Colon) {
                 self.advance(); // consume identifier
                 self.advance(); // consume colon
-                // In strict mode, track depth when parsing named argument value
+                                // In strict mode, track depth when parsing named argument value
                 let prev_depth = self.no_paren_depth;
                 if self.mode == ParserMode::Strict {
                     self.no_paren_depth += 1;

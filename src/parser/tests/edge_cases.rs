@@ -58,7 +58,11 @@ fn test_expect_await_parsing() {
             assert_eq!(args.len(), 1);
             // The argument should be: (await f) == 42
             match &args[0].value {
-                Expr::Binary { op: BinOp::Eq, left, right } => {
+                Expr::Binary {
+                    op: BinOp::Eq,
+                    left,
+                    right,
+                } => {
                     assert!(matches!(**left, Expr::Await(_)));
                     assert!(matches!(**right, Expr::Integer(42)));
                 }

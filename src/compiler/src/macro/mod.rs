@@ -23,18 +23,17 @@
 //! - `const_value_to_string()`: Helper for converting values to strings
 
 // Module declarations
-mod helpers;
-mod invocation;
 mod expansion;
+mod helpers;
 mod hygiene;
+mod invocation;
 mod state;
 mod substitution;
 
 // Re-export public API (accessible from parent interpreter module)
 pub(crate) use helpers::{build_macro_const_bindings, const_value_to_string};
 pub(crate) use invocation::evaluate_macro_invocation;
-pub(crate) use state::{
-    enter_block_scope, exit_block_scope, queue_tail_injection,
-    take_macro_introduced_symbols,
-};
 pub use state::set_macro_trace;
+pub(crate) use state::{
+    enter_block_scope, exit_block_scope, queue_tail_injection, take_macro_introduced_symbols,
+};

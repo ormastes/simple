@@ -27,7 +27,11 @@ pub enum InitInstr {
     /// Assign value to field
     Assign { field: String, value: Expr },
     /// Execute a database query
-    DbQuery { result: String, query: String, params: Vec<Expr> },
+    DbQuery {
+        result: String,
+        query: String,
+        params: Vec<Expr>,
+    },
     /// Get session value
     SessionGet { result: String, key: String },
     /// Get cookie value

@@ -374,8 +374,7 @@ impl LayoutOptimizer {
         let unoptimized_estimate = (optimized_startup_pages + optimized_first_frame_pages) * 2;
 
         // Savings = unoptimized - optimized
-        unoptimized_estimate
-            .saturating_sub(optimized_startup_pages + optimized_first_frame_pages)
+        unoptimized_estimate.saturating_sub(optimized_startup_pages + optimized_first_frame_pages)
     }
 }
 

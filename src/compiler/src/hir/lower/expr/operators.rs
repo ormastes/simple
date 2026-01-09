@@ -35,9 +35,7 @@ impl Lowerer {
             | ast::BinOp::LtEq
             | ast::BinOp::GtEq => {
                 // For SIMD vectors, return a SIMD bool vector
-                if let Some(HirType::Simd { lanes, .. }) =
-                    self.module.types.get(left_hir.ty)
-                {
+                if let Some(HirType::Simd { lanes, .. }) = self.module.types.get(left_hir.ty) {
                     let lanes = *lanes;
                     self.module.types.register(HirType::Simd {
                         lanes,
@@ -47,9 +45,7 @@ impl Lowerer {
                     TypeId::BOOL
                 }
             }
-            ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In => {
-                TypeId::BOOL
-            }
+            ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In => TypeId::BOOL,
             _ => left_hir.ty,
         };
 

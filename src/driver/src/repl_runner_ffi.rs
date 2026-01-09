@@ -5,8 +5,8 @@
 //!
 //! Uses thread-local storage to avoid Send/Sync requirements on Runner.
 
+use crate::doctest::{append_to_prelude, build_source, is_definition_like};
 use crate::runner::Runner;
-use crate::doctest::{is_definition_like, build_source, append_to_prelude};
 use std::cell::RefCell;
 
 thread_local! {
@@ -117,10 +117,7 @@ pub extern "C" fn simple_repl_runner_clear_prelude() -> bool {
 
 /// Get the current prelude
 #[no_mangle]
-pub extern "C" fn simple_repl_runner_get_prelude(
-    buffer: *mut u8,
-    capacity: usize,
-) -> usize {
+pub extern "C" fn simple_repl_runner_get_prelude(buffer: *mut u8, capacity: usize) -> usize {
     REPL_PRELUDE.with(|p| {
         let prelude = p.borrow();
         write_output(buffer, capacity, &prelude)

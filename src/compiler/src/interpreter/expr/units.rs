@@ -5,7 +5,6 @@ use crate::interpreter::UNIT_SUFFIX_TO_FAMILY;
 use crate::interpreter_unit::decompose_si_prefix;
 use crate::value::Value;
 
-
 /// Look up the family name for a unit suffix from the thread-local registry
 pub(super) fn lookup_unit_family(suffix: &str) -> Option<String> {
     // First try direct lookup
@@ -195,10 +194,7 @@ pub(super) fn evaluate_unit_binary_inner(
 }
 
 /// Perform a unary operation on the inner value of a unit
-pub(super) fn evaluate_unit_unary_inner(
-    value: &Value,
-    op: UnaryOp,
-) -> Result<Value, CompileError> {
+pub(super) fn evaluate_unit_unary_inner(value: &Value, op: UnaryOp) -> Result<Value, CompileError> {
     match op {
         UnaryOp::Neg => match value {
             Value::Int(v) => Ok(Value::Int(-v)),

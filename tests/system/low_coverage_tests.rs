@@ -13,9 +13,7 @@ use tempfile::tempdir;
 use simple_compiler::linker::{
     DataSectionKind, SmfRelocation, SmfSymbol as WriterSmfSymbol, SmfWriter,
 };
-use simple_loader::smf::{
-    RelocationType, SectionType, SymbolBinding, SymbolType, SMF_MAGIC,
-};
+use simple_loader::smf::{RelocationType, SectionType, SymbolBinding, SymbolType, SMF_MAGIC};
 
 #[test]
 fn test_smf_writer_new() {
@@ -147,8 +145,14 @@ fn test_data_section_kind_is_readonly() {
 
 #[test]
 fn test_data_section_kind_to_section_type() {
-    assert_eq!(DataSectionKind::Mutable.to_section_type(), SectionType::Data);
-    assert_eq!(DataSectionKind::ReadOnly.to_section_type(), SectionType::RoData);
+    assert_eq!(
+        DataSectionKind::Mutable.to_section_type(),
+        SectionType::Data
+    );
+    assert_eq!(
+        DataSectionKind::ReadOnly.to_section_type(),
+        SectionType::RoData
+    );
 }
 
 #[test]
@@ -174,20 +178,18 @@ use simple_loader::smf::{hash_name, SmfSymbol as LoaderSmfSymbol, SymbolTable};
 
 #[test]
 fn test_symbol_table_new() {
-    let symbols = vec![
-        LoaderSmfSymbol {
-            name_offset: 1,
-            name_hash: hash_name("main"),
-            sym_type: SymbolType::Function,
-            binding: SymbolBinding::Global,
-            visibility: 0,
-            flags: 0,
-            value: 0,
-            size: 10,
-            type_id: 0,
-            version: 0,
-        },
-    ];
+    let symbols = vec![LoaderSmfSymbol {
+        name_offset: 1,
+        name_hash: hash_name("main"),
+        sym_type: SymbolType::Function,
+        binding: SymbolBinding::Global,
+        visibility: 0,
+        flags: 0,
+        value: 0,
+        size: 10,
+        type_id: 0,
+        version: 0,
+    }];
 
     let string_table = b"\0main\0".to_vec();
     let table = SymbolTable::new(symbols, string_table);
@@ -196,20 +198,18 @@ fn test_symbol_table_new() {
 
 #[test]
 fn test_symbol_table_lookup() {
-    let symbols = vec![
-        LoaderSmfSymbol {
-            name_offset: 1,
-            name_hash: hash_name("entry"),
-            sym_type: SymbolType::Function,
-            binding: SymbolBinding::Global,
-            visibility: 0,
-            flags: 0,
-            value: 0x1000,
-            size: 20,
-            type_id: 0,
-            version: 0,
-        },
-    ];
+    let symbols = vec![LoaderSmfSymbol {
+        name_offset: 1,
+        name_hash: hash_name("entry"),
+        sym_type: SymbolType::Function,
+        binding: SymbolBinding::Global,
+        visibility: 0,
+        flags: 0,
+        value: 0x1000,
+        size: 20,
+        type_id: 0,
+        version: 0,
+    }];
 
     let string_table = b"\0entry\0".to_vec();
     let table = SymbolTable::new(symbols, string_table);
@@ -226,20 +226,18 @@ fn test_symbol_table_lookup() {
 
 #[test]
 fn test_symbol_table_symbol_name() {
-    let symbols = vec![
-        LoaderSmfSymbol {
-            name_offset: 1,
-            name_hash: hash_name("test_func"),
-            sym_type: SymbolType::Function,
-            binding: SymbolBinding::Local,
-            visibility: 0,
-            flags: 0,
-            value: 0,
-            size: 0,
-            type_id: 0,
-            version: 0,
-        },
-    ];
+    let symbols = vec![LoaderSmfSymbol {
+        name_offset: 1,
+        name_hash: hash_name("test_func"),
+        sym_type: SymbolType::Function,
+        binding: SymbolBinding::Local,
+        visibility: 0,
+        flags: 0,
+        value: 0,
+        size: 0,
+        type_id: 0,
+        version: 0,
+    }];
 
     let string_table = b"\0test_func\0".to_vec();
     let table = SymbolTable::new(symbols, string_table);
@@ -299,8 +297,10 @@ fn test_hash_name() {
 // SmfHeader Coverage (loader/src/smf/header.rs - 25% coverage)
 // =============================================================================
 
-use simple_loader::smf::{SmfHeader, SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE, SMF_FLAG_DEBUG_INFO};
 use simple_common::target::{TargetArch, TargetOS};
+use simple_loader::smf::{
+    SmfHeader, SMF_FLAG_DEBUG_INFO, SMF_FLAG_EXECUTABLE, SMF_FLAG_RELOADABLE,
+};
 
 #[test]
 fn test_smf_header_new_for_target() {
@@ -586,8 +586,8 @@ fn test_package_linker_new() {
 // Target/Cross-test Coverage (loader/src/cross_test.rs - 0%)
 // =============================================================================
 
-use simple_loader::{TargetFixture, TestMatrix, CrossTestResults};
 use simple_common::target::Target;
+use simple_loader::{CrossTestResults, TargetFixture, TestMatrix};
 
 #[test]
 fn test_target_fixture_new() {

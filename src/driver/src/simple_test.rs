@@ -109,10 +109,7 @@ pub enum SimpleTestResult {
         stdout: String,
     },
     /// Test file failed to compile.
-    CompileError {
-        file: String,
-        error: String,
-    },
+    CompileError { file: String, error: String },
     /// Test file failed at runtime.
     RuntimeError {
         file: String,
@@ -120,25 +117,39 @@ pub enum SimpleTestResult {
         stdout: String,
     },
     /// Test is a fixture and should not be run.
-    Skipped {
-        file: String,
-        reason: String,
-    },
+    Skipped { file: String, reason: String },
 }
 
 impl SimpleTestResult {
     /// Returns true if the test passed or was skipped.
     pub fn is_success(&self) -> bool {
-        matches!(self, SimpleTestResult::Pass { .. } | SimpleTestResult::Skipped { .. })
+        matches!(
+            self,
+            SimpleTestResult::Pass { .. } | SimpleTestResult::Skipped { .. }
+        )
     }
 
     /// Returns a summary string suitable for test output.
     pub fn summary(&self) -> String {
         match self {
-            SimpleTestResult::Pass { file, passed_count, duration_ms, .. } => {
-                format!("{}: {} tests passed ({} ms)", file, passed_count, duration_ms)
+            SimpleTestResult::Pass {
+                file,
+                passed_count,
+                duration_ms,
+                ..
+            } => {
+                format!(
+                    "{}: {} tests passed ({} ms)",
+                    file, passed_count, duration_ms
+                )
             }
-            SimpleTestResult::Fail { file, passed_count, failed_count, duration_ms, .. } => {
+            SimpleTestResult::Fail {
+                file,
+                passed_count,
+                failed_count,
+                duration_ms,
+                ..
+            } => {
                 format!(
                     "{}: {} passed, {} failed ({} ms)",
                     file, passed_count, failed_count, duration_ms
@@ -229,7 +240,10 @@ pub fn discover_tests(test_root: &Path) -> Vec<SimpleTestFile> {
 /// # Returns
 /// Result of running the test file.
 pub fn run_test_file(path: &Path) -> SimpleTestResult {
-    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
 
     // Check if this is a fixture file (should be skipped)
     if TestCategory::from_path(path) == TestCategory::Fixture {
@@ -261,7 +275,13 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
     match run_result {
         Ok(result) => {
             // Parse the output to extract test results
-            parse_test_output(file_name, &result.stdout, &result.stderr, duration_ms, result.exit_code)
+            parse_test_output(
+                file_name,
+                &result.stdout,
+                &result.stderr,
+                duration_ms,
+                result.exit_code,
+            )
         }
         Err(error) => {
             // Try to get any captured output before the error
@@ -273,7 +293,8 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
                 || error.contains("type error")
                 || error.contains("HIR")
                 || error.contains("MIR")
-                || error.contains("semantic:")  // Add semantic errors as compile errors
+                || error.contains("semantic:")
+            // Add semantic errors as compile errors
             {
                 SimpleTestResult::CompileError {
                     file: file_name.to_string(),
@@ -283,7 +304,7 @@ pub fn run_test_file(path: &Path) -> SimpleTestResult {
                 SimpleTestResult::RuntimeError {
                     file: file_name.to_string(),
                     error,
-                    stdout: String::new(),  // Can't capture stdout when run_file returns Err
+                    stdout: String::new(), // Can't capture stdout when run_file returns Err
                 }
             }
         }
@@ -346,7 +367,10 @@ fn parse_test_output(
             current_failure = Some((test_name, Vec::new()));
         }
         // Failure detail lines
-        else if line.starts_with("Expected:") || line.starts_with("Got:") || line.starts_with("at ") {
+        else if line.starts_with("Expected:")
+            || line.starts_with("Got:")
+            || line.starts_with("at ")
+        {
             if let Some((_, ref mut msgs)) = current_failure {
                 msgs.push(line.to_string());
             }
@@ -375,7 +399,10 @@ fn parse_test_output(
         if combined.contains("AssertionError") || combined.contains("ExpectationFailed") {
             return SimpleTestResult::RuntimeError {
                 file: file_name.to_string(),
-                error: format!("Test failed with exit code {} - check output for details", exit_code),
+                error: format!(
+                    "Test failed with exit code {} - check output for details",
+                    exit_code
+                ),
                 stdout: stdout.to_string(),
             };
         }
@@ -418,7 +445,10 @@ fn parse_test_output(
 ///
 /// # Returns
 /// Vector of test results for all discovered tests.
-pub fn run_all_tests(test_root: &Path, filter: Option<&str>) -> Vec<(SimpleTestFile, SimpleTestResult)> {
+pub fn run_all_tests(
+    test_root: &Path,
+    filter: Option<&str>,
+) -> Vec<(SimpleTestFile, SimpleTestResult)> {
     let tests = discover_tests(test_root);
 
     tests

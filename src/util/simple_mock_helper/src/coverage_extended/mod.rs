@@ -18,7 +18,7 @@ pub use display::print_coverage_summary;
 pub use metrics::CoverageMetrics;
 pub use report::{ExtendedCoverageReport, COVERAGE_VERSION};
 pub use types::{
-    CoverageSource, CoverageType, ExternalLibCoverage, ExtendedCoverageSummary, FileCoverage,
+    CoverageSource, CoverageType, ExtendedCoverageSummary, ExternalLibCoverage, FileCoverage,
     FunctionCoverage, InterfaceCoverage, MethodCoverage, NeighborCoverage, TypeCoverage,
     TypeMethodSummary, UncoveredItem, UncoveredSummary,
 };

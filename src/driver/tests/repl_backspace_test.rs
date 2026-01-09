@@ -2,8 +2,8 @@
 
 #[cfg(test)]
 mod tests {
-    use rustyline::{Cmd, ConditionalEventHandler, Event, EventContext, RepeatCount};
     use rustyline::KeyEvent;
+    use rustyline::{Cmd, ConditionalEventHandler, Event, EventContext, RepeatCount};
 
     /// Mock EventContext for testing
     struct MockContext {

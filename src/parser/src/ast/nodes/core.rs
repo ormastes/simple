@@ -1,14 +1,14 @@
 //! Core AST node types including the main Node enum and common utilities
 
-use crate::token::{NumericSuffix, Span};
-use super::super::enums::*;
 use super::super::aop::*;
+use super::super::enums::*;
+use crate::token::{NumericSuffix, Span};
 // Import from sibling modules
 use super::definitions::*;
-use super::statements::*;
 use super::modules::*;
+use super::statements::*;
 // Effects and capabilities are in effects.rs
-pub use super::effects::{Effect, Capability};
+pub use super::effects::{Capability, Effect};
 
 /// All AST node types
 #[derive(Debug, Clone, PartialEq)]
@@ -77,7 +77,7 @@ pub enum Node {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decorator {
     pub span: Span,
-    pub name: Expr,                  // The decorator expression (e.g., Identifier or Call)
+    pub name: Expr, // The decorator expression (e.g., Identifier or Call)
     pub args: Option<Vec<Argument>>, // Arguments if @decorator(args), supports named args
 }
 
@@ -235,10 +235,7 @@ pub enum GenericParam {
     /// Type parameter: T, U, etc.
     Type(String),
     /// Const parameter: const N: usize
-    Const {
-        name: String,
-        ty: Type,
-    },
+    Const { name: String, ty: Type },
 }
 
 impl GenericParam {
@@ -687,7 +684,7 @@ pub struct Field {
 /// Positional: `RGB(Int, Int, Int)` - name is None for all fields
 #[derive(Debug, Clone, PartialEq)]
 pub struct EnumField {
-    pub name: Option<String>,  // None for positional, Some("name") for named
+    pub name: Option<String>, // None for positional, Some("name") for named
     pub ty: Type,
 }
 

@@ -5,9 +5,9 @@
 //! - **RenderIR**: Dynamic rendering instructions
 
 mod init_ir;
-mod template_ir;
 mod render_ir;
+mod template_ir;
 
 pub use init_ir::*;
-pub use template_ir::*;
 pub use render_ir::*;
+pub use template_ir::*;

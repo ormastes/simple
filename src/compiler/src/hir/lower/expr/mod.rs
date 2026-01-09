@@ -13,18 +13,22 @@ mod tensor;
 
 use simple_parser::{self as ast, ast::ReferenceCapability, Expr};
 
-use crate::value::BUILTIN_SPAWN;
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
+use crate::value::BUILTIN_SPAWN;
 
 impl Lowerer {
     /// Main expression lowering dispatcher
     ///
     /// This method delegates to specialized helper methods for each expression type,
     /// keeping the dispatch logic clean and maintainable.
-    pub(in crate::hir::lower) fn lower_expr(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<HirExpr> {
+    pub(in crate::hir::lower) fn lower_expr(
+        &mut self,
+        expr: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
         match expr {
             Expr::Integer(_) | Expr::Float(_) | Expr::String(_) | Expr::Bool(_) | Expr::Nil => {
                 self.lower_literal(expr)
@@ -39,29 +43,35 @@ impl Lowerer {
             Expr::Tuple(exprs) => self.lower_tuple(exprs, ctx),
             Expr::Array(exprs) => self.lower_array(exprs, ctx),
             Expr::VecLiteral(exprs) => self.lower_vec_literal(exprs, ctx),
-            Expr::If { condition, then_branch, else_branch } => {
-                self.lower_if(condition, then_branch, else_branch.as_deref(), ctx)
-            }
+            Expr::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => self.lower_if(condition, then_branch, else_branch.as_deref(), ctx),
             Expr::Lambda { params, body, .. } => self.lower_lambda(params, body, ctx),
             Expr::Yield(value) => self.lower_yield(value.as_deref(), ctx),
             Expr::ContractResult => self.lower_contract_result(ctx),
             Expr::ContractOld(inner) => self.lower_contract_old(inner, ctx),
             Expr::New { kind, expr } => self.lower_new(kind, expr, ctx),
-            Expr::MethodCall { receiver, method, args } => {
-                self.lower_method_call(receiver, method, args, ctx)
-            }
+            Expr::MethodCall {
+                receiver,
+                method,
+                args,
+            } => self.lower_method_call(receiver, method, args, ctx),
             Expr::StructInit { name, fields } => self.lower_struct_init(name, fields, ctx),
             // Simple Math: Grid and Tensor literals (#1920-#1929)
             Expr::GridLiteral { rows, device } => self.lower_grid_literal(rows, device, ctx),
-            Expr::TensorLiteral { dtype, dims, mode, device } => {
-                self.lower_tensor_literal(dtype, dims, mode, device, ctx)
-            }
+            Expr::TensorLiteral {
+                dtype,
+                dims,
+                mode,
+                device,
+            } => self.lower_tensor_literal(dtype, dims, mode, device, ctx),
             // Type cast expression: expr as Type
             Expr::Cast { expr, target_type } => self.lower_cast(expr, target_type, ctx),
             _ => Err(LowerError::Unsupported(format!("{:?}", expr))),
         }
     }
-
 
     // ============================================================================
     // Identifier expressions
@@ -98,11 +108,6 @@ impl Lowerer {
             Err(LowerError::UnknownVariable(name.to_string()))
         }
     }
-
-
-
-
-
 
     // ============================================================================
     // Method calls (largest section - GPU/SIMD intrinsics)
@@ -150,7 +155,9 @@ impl Lowerer {
         // Check for SIMD vector instance methods
         let receiver_hir = self.lower_expr(receiver, ctx)?;
         if let Some(HirType::Simd { .. }) = self.module.types.get(receiver_hir.ty) {
-            if let Some(result) = self.lower_simd_instance_method(&receiver_hir, method, args, ctx)? {
+            if let Some(result) =
+                self.lower_simd_instance_method(&receiver_hir, method, args, ctx)?
+            {
                 return Ok(result);
             }
         }
@@ -163,11 +170,16 @@ impl Lowerer {
     }
 
     /// Handle this.index(), this.thread_index(), this.group_index()
-    fn lower_this_method(&self, method: &str, args: &[ast::Argument]) -> LowerResult<Option<HirExpr>> {
+    fn lower_this_method(
+        &self,
+        method: &str,
+        args: &[ast::Argument],
+    ) -> LowerResult<Option<HirExpr>> {
         if !args.is_empty() {
-            return Err(LowerError::Unsupported(
-                format!("this.{}() takes no arguments", method)
-            ));
+            return Err(LowerError::Unsupported(format!(
+                "this.{}() takes no arguments",
+                method
+            )));
         }
 
         let intrinsic = match method {
@@ -187,7 +199,11 @@ impl Lowerer {
     }
 
     /// Handle thread_group.barrier()
-    fn lower_thread_group_method(&self, method: &str, args: &[ast::Argument]) -> LowerResult<Option<HirExpr>> {
+    fn lower_thread_group_method(
+        &self,
+        method: &str,
+        args: &[ast::Argument],
+    ) -> LowerResult<Option<HirExpr>> {
         if method != "barrier" {
             return Err(LowerError::Unsupported(format!(
                 "unknown thread_group method: {}",
@@ -197,7 +213,7 @@ impl Lowerer {
 
         if !args.is_empty() {
             return Err(LowerError::Unsupported(
-                "thread_group.barrier() takes no arguments".to_string()
+                "thread_group.barrier() takes no arguments".to_string(),
             ));
         }
 

@@ -6,17 +6,12 @@
 // ============================================================================
 mod runtime_extended_tests {
     use simple_runtime::{
-        RuntimeValue, HeapObjectType,
-        AsyncMode, PromiseState,
-        GpuWorkItemState,
-        ContractViolationKind,
-        rt_value_int, rt_value_float, rt_value_bool, rt_value_nil,
-        rt_value_as_int, rt_value_as_float, rt_value_as_bool,
-        rt_value_is_int, rt_value_is_float, rt_value_is_bool, rt_value_is_nil,
-        rt_array_new, rt_array_push, rt_array_len, rt_array_get,
-        rt_string_new, rt_string_len,
-        rt_tuple_new, rt_tuple_len,
-        rt_dict_new, rt_dict_len,
+        rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_dict_len, rt_dict_new,
+        rt_string_len, rt_string_new, rt_tuple_len, rt_tuple_new, rt_value_as_bool,
+        rt_value_as_float, rt_value_as_int, rt_value_bool, rt_value_float, rt_value_int,
+        rt_value_is_bool, rt_value_is_float, rt_value_is_int, rt_value_is_nil, rt_value_nil,
+        AsyncMode, ContractViolationKind, GpuWorkItemState, HeapObjectType, PromiseState,
+        RuntimeValue,
     };
 
     #[test]
@@ -133,7 +128,11 @@ mod runtime_extended_tests {
 
     #[test]
     fn test_promise_state_variants() {
-        let states = [PromiseState::Pending, PromiseState::Fulfilled, PromiseState::Rejected];
+        let states = [
+            PromiseState::Pending,
+            PromiseState::Fulfilled,
+            PromiseState::Rejected,
+        ];
         for state in states {
             let _ = format!("{:?}", state);
         }
@@ -173,11 +172,8 @@ mod runtime_extended_tests {
 // ============================================================================
 mod parser_ast_extended_tests {
     use simple_parser::{
-        AssignOp, BinOp, UnaryOp,
-        OverflowBehavior, PointerKind, Effect,
-        Span, ModulePath,
-        Visibility, Mutability, RangeBound, MoveMode,
-        TokenKind, Lexer, Parser, ParseError,
+        AssignOp, BinOp, Effect, Lexer, ModulePath, MoveMode, Mutability, OverflowBehavior,
+        ParseError, Parser, PointerKind, RangeBound, Span, TokenKind, UnaryOp, Visibility,
     };
 
     #[test]
@@ -197,9 +193,18 @@ mod parser_ast_extended_tests {
     #[test]
     fn test_binop_variants() {
         let ops = [
-            BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div,
-            BinOp::Eq, BinOp::NotEq, BinOp::Lt, BinOp::LtEq, BinOp::Gt, BinOp::GtEq,
-            BinOp::And, BinOp::Or,
+            BinOp::Add,
+            BinOp::Sub,
+            BinOp::Mul,
+            BinOp::Div,
+            BinOp::Eq,
+            BinOp::NotEq,
+            BinOp::Lt,
+            BinOp::LtEq,
+            BinOp::Gt,
+            BinOp::GtEq,
+            BinOp::And,
+            BinOp::Or,
         ];
         for op in ops {
             let _ = format!("{:?}", op);
@@ -216,10 +221,7 @@ mod parser_ast_extended_tests {
 
     #[test]
     fn test_overflow_behavior_variants() {
-        let behaviors = [
-            OverflowBehavior::Wrap,
-            OverflowBehavior::Saturate,
-        ];
+        let behaviors = [OverflowBehavior::Wrap, OverflowBehavior::Saturate];
         for b in behaviors {
             let _ = format!("{:?}", b);
         }
@@ -227,11 +229,7 @@ mod parser_ast_extended_tests {
 
     #[test]
     fn test_pointer_kind_variants() {
-        let kinds = [
-            PointerKind::Unique,
-            PointerKind::Shared,
-            PointerKind::Weak,
-        ];
+        let kinds = [PointerKind::Unique, PointerKind::Shared, PointerKind::Weak];
         for k in kinds {
             let _ = format!("{:?}", k);
         }
@@ -239,10 +237,7 @@ mod parser_ast_extended_tests {
 
     #[test]
     fn test_effect_variants() {
-        let effects = [
-            Effect::Pure,
-            Effect::Async,
-        ];
+        let effects = [Effect::Pure, Effect::Async];
         for e in effects {
             let _ = format!("{:?}", e);
         }
@@ -250,10 +245,7 @@ mod parser_ast_extended_tests {
 
     #[test]
     fn test_visibility_variants() {
-        let vis = [
-            Visibility::Private,
-            Visibility::Public,
-        ];
+        let vis = [Visibility::Private, Visibility::Public];
         for v in vis {
             let _ = format!("{:?}", v);
         }
@@ -261,10 +253,7 @@ mod parser_ast_extended_tests {
 
     #[test]
     fn test_mutability_variants() {
-        let muts = [
-            Mutability::Immutable,
-            Mutability::Mutable,
-        ];
+        let muts = [Mutability::Immutable, Mutability::Mutable];
         for m in muts {
             let _ = format!("{:?}", m);
         }
@@ -272,10 +261,7 @@ mod parser_ast_extended_tests {
 
     #[test]
     fn test_range_bound_variants() {
-        let bounds = [
-            RangeBound::Inclusive,
-            RangeBound::Exclusive,
-        ];
+        let bounds = [RangeBound::Inclusive, RangeBound::Exclusive];
         for b in bounds {
             let _ = format!("{:?}", b);
         }
@@ -283,10 +269,7 @@ mod parser_ast_extended_tests {
 
     #[test]
     fn test_move_mode_variants() {
-        let modes = [
-            MoveMode::Move,
-            MoveMode::Copy,
-        ];
+        let modes = [MoveMode::Move, MoveMode::Copy];
         for m in modes {
             let _ = format!("{:?}", m);
         }
@@ -352,10 +335,7 @@ mod parser_ast_extended_tests {
 // Compiler Tests
 // ============================================================================
 mod compiler_extended_tests {
-    use simple_compiler::{
-        ContractMode,
-        CompilerPipeline,
-    };
+    use simple_compiler::{CompilerPipeline, ContractMode};
 
     #[test]
     fn test_contract_mode_default() {
@@ -374,10 +354,7 @@ mod compiler_extended_tests {
 // Driver Extended Tests
 // ============================================================================
 mod driver_extended_tests {
-    use simple_driver::{
-        Runner, RunResult,
-        Interpreter,
-    };
+    use simple_driver::{Interpreter, RunResult, Runner};
 
     #[test]
     fn test_runner_new() {
@@ -406,9 +383,7 @@ mod driver_extended_tests {
 // Loader Extended Tests
 // ============================================================================
 mod loader_extended_tests {
-    use simple_loader::{
-        ModuleLoader, ModuleRegistry,
-    };
+    use simple_loader::{ModuleLoader, ModuleRegistry};
 
     #[test]
     fn test_module_loader_new() {
@@ -427,9 +402,7 @@ mod loader_extended_tests {
 // Package Manager Extended Tests
 // ============================================================================
 mod pkg_extended_tests {
-    use simple_pkg::{
-        Version, VersionReq,
-    };
+    use simple_pkg::{Version, VersionReq};
 
     #[test]
     fn test_version_new() {
@@ -466,20 +439,11 @@ mod pkg_extended_tests {
 // Common Types Extended Tests
 // ============================================================================
 mod common_extended_tests {
-    use simple_common::{
-        Target, TargetArch, TargetOS,
-        AbiVersion,
-        Message,
-        ConfigEnv,
-    };
+    use simple_common::{AbiVersion, ConfigEnv, Message, Target, TargetArch, TargetOS};
 
     #[test]
     fn test_target_arch_variants() {
-        let archs = [
-            TargetArch::X86_64,
-            TargetArch::Aarch64,
-            TargetArch::Riscv64,
-        ];
+        let archs = [TargetArch::X86_64, TargetArch::Aarch64, TargetArch::Riscv64];
         for a in archs {
             let _ = format!("{:?}", a);
         }
@@ -531,9 +495,7 @@ mod common_extended_tests {
 // Type Checker Tests
 // ============================================================================
 mod type_checker_tests {
-    use simple_type::{
-        Type, TypeChecker,
-    };
+    use simple_type::{Type, TypeChecker};
 
     #[test]
     fn test_type_int() {
@@ -564,10 +526,7 @@ mod type_checker_tests {
 // Dependency Tracker Tests
 // ============================================================================
 mod dep_tracker_tests {
-    use simple_dependency_tracker::{
-        ImportGraph,
-        SymbolKind,
-    };
+    use simple_dependency_tracker::{ImportGraph, SymbolKind};
 
     #[test]
     fn test_import_graph_new() {

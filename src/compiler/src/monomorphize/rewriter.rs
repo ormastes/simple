@@ -267,7 +267,8 @@ impl<'a> CallSiteRewriter<'a> {
                     if type_uses_param(ty, type_param) {
                         if let Some(arg) = args.get(i) {
                             // Rewriter doesn't have type context, use empty map
-                            if let Some(concrete) = infer_concrete_type(&arg.value, &HashMap::new()) {
+                            if let Some(concrete) = infer_concrete_type(&arg.value, &HashMap::new())
+                            {
                                 type_args.push(concrete);
                                 break;
                             }

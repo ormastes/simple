@@ -326,9 +326,9 @@ impl LlvmGpuBackend {
         ]);
 
         // Add to nvvm.annotations named metadata
-        module.add_global_metadata("nvvm.annotations", &annotation).map_err(|e| {
-            CompileError::Semantic(format!("Failed to add kernel metadata: {}", e))
-        })?;
+        module
+            .add_global_metadata("nvvm.annotations", &annotation)
+            .map_err(|e| CompileError::Semantic(format!("Failed to add kernel metadata: {}", e)))?;
 
         Ok(())
     }
@@ -363,7 +363,9 @@ impl LlvmGpuBackend {
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic("Thread ID intrinsic returned unexpected type".to_string()))
+            .ok_or_else(|| {
+                CompileError::Semantic("Thread ID intrinsic returned unexpected type".to_string())
+            })
     }
 
     /// Emit a call to get block ID for a dimension
@@ -396,7 +398,9 @@ impl LlvmGpuBackend {
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic("Block ID intrinsic returned unexpected type".to_string()))
+            .ok_or_else(|| {
+                CompileError::Semantic("Block ID intrinsic returned unexpected type".to_string())
+            })
     }
 
     /// Emit a call to get block dimension for a dimension
@@ -429,7 +433,9 @@ impl LlvmGpuBackend {
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic("Block dim intrinsic returned unexpected type".to_string()))
+            .ok_or_else(|| {
+                CompileError::Semantic("Block dim intrinsic returned unexpected type".to_string())
+            })
     }
 
     /// Emit a call to get grid dimension for a dimension
@@ -462,7 +468,9 @@ impl LlvmGpuBackend {
         call.try_as_basic_value()
             .left()
             .and_then(|v| v.into_int_value().into())
-            .ok_or_else(|| CompileError::Semantic("Grid dim intrinsic returned unexpected type".to_string()))
+            .ok_or_else(|| {
+                CompileError::Semantic("Grid dim intrinsic returned unexpected type".to_string())
+            })
     }
 
     /// Compute global thread ID: blockIdx * blockDim + threadIdx
@@ -477,9 +485,11 @@ impl LlvmGpuBackend {
         let thread_id = self.emit_thread_id(builder, dim)?;
 
         // global_id = block_id * block_dim + thread_id
-        let block_offset = builder.build_int_mul(block_id, block_dim, "block_offset")
+        let block_offset = builder
+            .build_int_mul(block_id, block_dim, "block_offset")
             .map_err(|e| CompileError::Semantic(format!("Failed to build mul: {}", e)))?;
-        let global_id = builder.build_int_add(block_offset, thread_id, "global_id")
+        let global_id = builder
+            .build_int_add(block_offset, thread_id, "global_id")
             .map_err(|e| CompileError::Semantic(format!("Failed to build add: {}", e)))?;
 
         Ok(global_id)
@@ -493,9 +503,9 @@ impl LlvmGpuBackend {
             .as_ref()
             .ok_or_else(|| CompileError::Semantic("Module not created".to_string()))?;
 
-        let func = module.get_function("llvm.nvvm.barrier0").ok_or_else(|| {
-            CompileError::Semantic("Barrier intrinsic not declared".to_string())
-        })?;
+        let func = module
+            .get_function("llvm.nvvm.barrier0")
+            .ok_or_else(|| CompileError::Semantic("Barrier intrinsic not declared".to_string()))?;
 
         builder.build_call(func, &[], "").map_err(|e| {
             CompileError::Semantic(format!("Failed to call barrier intrinsic: {}", e))
@@ -523,7 +533,10 @@ impl LlvmGpuBackend {
         };
 
         let func = module.get_function(intrinsic_name).ok_or_else(|| {
-            CompileError::Semantic(format!("Memory fence intrinsic {} not declared", intrinsic_name))
+            CompileError::Semantic(format!(
+                "Memory fence intrinsic {} not declared",
+                intrinsic_name
+            ))
         })?;
 
         builder.build_call(func, &[], "").map_err(|e| {
@@ -550,7 +563,11 @@ impl LlvmGpuBackend {
         let array_type = match element_type {
             BasicTypeEnum::IntType(t) => t.array_type(size),
             BasicTypeEnum::FloatType(t) => t.array_type(size),
-            _ => return Err(CompileError::Semantic("Unsupported shared memory element type".to_string())),
+            _ => {
+                return Err(CompileError::Semantic(
+                    "Unsupported shared memory element type".to_string(),
+                ))
+            }
         };
 
         // Create global variable in address space 3 (shared memory)
@@ -599,9 +616,8 @@ impl LlvmGpuBackend {
         let triple = TargetTriple::create(&self.get_target_triple());
 
         // Get target
-        let target = LlvmTarget::from_triple(&triple).map_err(|e| {
-            CompileError::Semantic(format!("Failed to get NVPTX target: {}", e))
-        })?;
+        let target = LlvmTarget::from_triple(&triple)
+            .map_err(|e| CompileError::Semantic(format!("Failed to get NVPTX target: {}", e)))?;
 
         // Create target machine
         let target_machine = target
@@ -613,7 +629,9 @@ impl LlvmGpuBackend {
                 RelocMode::Default,
                 CodeModel::Default,
             )
-            .ok_or_else(|| CompileError::Semantic("Failed to create NVPTX target machine".to_string()))?;
+            .ok_or_else(|| {
+                CompileError::Semantic("Failed to create NVPTX target machine".to_string())
+            })?;
 
         // Emit assembly (PTX)
         let buffer = target_machine

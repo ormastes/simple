@@ -6,7 +6,7 @@ use crate::error::CompileError;
 
 /// Type mapper for Simple → SPIR-V conversion
 pub struct TypeMapper {
-    // TODO: Add type ID mappings
+    // TODO: [codegen][P3] Add type ID mappings
 }
 
 impl TypeMapper {

@@ -44,9 +44,9 @@ fn test_mir_function_compilation() {
 fn test_mir_binop_compilation() {
     use crate::hir::{BinOp, TypeId as T};
     use crate::mir::effects::LocalKind;
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirModule;
     use crate::mir::{MirFunction, MirLocal};
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let target = Target::new(TargetArch::X86, TargetOS::Linux); // i686
@@ -176,8 +176,8 @@ fn test_mir_control_flow_compilation() {
 fn test_mir_float_const() {
     use super::helpers::create_test_backend;
     use crate::hir::TypeId as T;
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let backend = create_test_backend("float_test");
@@ -207,10 +207,10 @@ fn test_mir_float_const() {
 fn test_mir_unaryop() {
     use super::helpers::create_test_backend_with_arch;
     use crate::hir::{TypeId as T, UnaryOp};
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
-    use simple_parser::ast::Visibility;
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_common::target::TargetArch;
+    use simple_parser::ast::Visibility;
 
     let backend = create_test_backend_with_arch("unary_test", TargetArch::Aarch64);
 
@@ -250,10 +250,10 @@ fn test_mir_unaryop() {
 fn test_mir_memory_ops() {
     use super::helpers::create_test_backend_with_arch;
     use crate::hir::TypeId as T;
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
-    use simple_parser::ast::Visibility;
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_common::target::TargetArch;
+    use simple_parser::ast::Visibility;
 
     let backend = create_test_backend_with_arch("mem_test", TargetArch::RiscV64);
 
@@ -299,8 +299,8 @@ fn test_mir_memory_ops() {
 #[cfg(feature = "llvm")]
 fn test_mir_string_const() {
     use crate::hir::TypeId as T;
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let target = Target::new(TargetArch::X86, TargetOS::Linux); // i686
@@ -332,8 +332,8 @@ fn test_mir_string_const() {
 #[cfg(feature = "llvm")]
 fn test_mir_struct_ops() {
     use crate::hir::TypeId as T;
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -359,10 +359,7 @@ fn test_mir_struct_ops() {
     });
     func.blocks[0].instructions.push(MirInst::StructInit {
         dest: v2,
-        fields: vec![
-            ("x".to_string(), v0),
-            ("y".to_string(), v1),
-        ],
+        fields: vec![("x".to_string(), v0), ("y".to_string(), v1)],
         ty: T::I64,
     });
     func.blocks[0].instructions.push(MirInst::FieldGet {
@@ -388,8 +385,8 @@ fn test_mir_struct_ops() {
 #[cfg(feature = "llvm")]
 fn test_mir_array_tuple() {
     use crate::hir::TypeId as T;
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -407,14 +404,22 @@ fn test_mir_array_tuple() {
     let v4 = VReg(4); // index
     let v5 = VReg(5); // result
 
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 1 });
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v1, value: 2 });
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v2, value: 3 });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v0, value: 1 });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v1, value: 2 });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v2, value: 3 });
     func.blocks[0].instructions.push(MirInst::ArrayLit {
         dest: v3,
         elements: vec![v0, v1, v2],
     });
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v4, value: 1 });
+    func.blocks[0]
+        .instructions
+        .push(MirInst::ConstInt { dest: v4, value: 1 });
     func.blocks[0].instructions.push(MirInst::IndexGet {
         dest: v5,
         collection: v3,
@@ -436,8 +441,8 @@ fn test_mir_array_tuple() {
 #[cfg(feature = "llvm")]
 fn test_mir_symbol_const() {
     use crate::hir::TypeId as T;
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -469,8 +474,8 @@ fn test_mir_symbol_const() {
 #[cfg(feature = "llvm")]
 fn test_mir_function_call() {
     use crate::hir::TypeId as T;
-    use crate::mir::{CallTarget, MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
+    use crate::mir::{CallTarget, MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -485,8 +490,14 @@ fn test_mir_function_call() {
     let v1 = VReg(1); // const 20
     let v2 = VReg(2); // result
 
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 10 });
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v1, value: 20 });
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v0,
+        value: 10,
+    });
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v1,
+        value: 20,
+    });
     func.blocks[0].instructions.push(MirInst::Call {
         dest: Some(v2),
         target: CallTarget::Pure("add".to_string()),
@@ -508,8 +519,8 @@ fn test_mir_function_call() {
 #[cfg(feature = "llvm")]
 fn test_mir_interp_call() {
     use crate::hir::TypeId as T;
-    use crate::mir::{MirInst, Terminator, VReg};
     use crate::mir::MirFunction;
+    use crate::mir::{MirInst, Terminator, VReg};
     use simple_parser::ast::Visibility;
 
     let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
@@ -523,7 +534,10 @@ fn test_mir_interp_call() {
     let v0 = VReg(0); // const 42
     let v1 = VReg(1); // result
 
-    func.blocks[0].instructions.push(MirInst::ConstInt { dest: v0, value: 42 });
+    func.blocks[0].instructions.push(MirInst::ConstInt {
+        dest: v0,
+        value: 42,
+    });
     func.blocks[0].instructions.push(MirInst::InterpCall {
         dest: Some(v1),
         func_name: "complex_fn".to_string(),

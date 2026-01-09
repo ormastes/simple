@@ -301,7 +301,8 @@ impl IncrementalState {
 
     /// Mark a source as dirty (needs recompilation).
     pub fn mark_dirty(&self, path: &Path) {
-        self.status.insert(path.to_path_buf(), CompilationStatus::Dirty);
+        self.status
+            .insert(path.to_path_buf(), CompilationStatus::Dirty);
 
         // Also mark all dependents as dirty
         if let Some(deps) = self.dependents.get(path) {
@@ -315,18 +316,21 @@ impl IncrementalState {
 
     /// Mark a source as in progress.
     pub fn mark_in_progress(&self, path: &Path) {
-        self.status.insert(path.to_path_buf(), CompilationStatus::InProgress);
+        self.status
+            .insert(path.to_path_buf(), CompilationStatus::InProgress);
     }
 
     /// Mark a source as complete with artifact.
     pub fn mark_complete(&self, path: &Path, artifact: CachedArtifact) {
-        self.status.insert(path.to_path_buf(), CompilationStatus::Complete);
+        self.status
+            .insert(path.to_path_buf(), CompilationStatus::Complete);
         self.artifacts.insert(path.to_path_buf(), artifact);
     }
 
     /// Mark a source as failed.
     pub fn mark_failed(&self, path: &Path) {
-        self.status.insert(path.to_path_buf(), CompilationStatus::Failed);
+        self.status
+            .insert(path.to_path_buf(), CompilationStatus::Failed);
     }
 
     /// Get compilation status.
@@ -360,7 +364,8 @@ impl IncrementalState {
                 self.mark_dirty(source.key());
                 dirty.push(source.key().clone());
             } else {
-                self.status.insert(source.key().clone(), CompilationStatus::Clean);
+                self.status
+                    .insert(source.key().clone(), CompilationStatus::Clean);
             }
         }
 
@@ -409,6 +414,5 @@ impl Default for IncrementalState {
 pub struct IncrementalBuilder {
     state: Arc<IncrementalState>,
 }
-
 
 include!("incremental_builder.rs");

@@ -10,8 +10,7 @@ use std::path::PathBuf;
 // =============================================================================
 
 use simple_common::manual::{
-    Nat, BorrowState, ValidBorrowState, GcState,
-    borrow_state_valid, gc_state_safe,
+    borrow_state_valid, gc_state_safe, BorrowState, GcState, Nat, ValidBorrowState,
 };
 
 #[test]
@@ -234,8 +233,8 @@ fn test_gc_state_collect_safe() {
 // =============================================================================
 
 use simple_compiler::effects::{
-    is_blocking_operation, is_io_operation, is_fs_operation, is_net_operation,
-    has_side_effects, check_async_violation, check_pure_violation, check_effect_violations,
+    check_async_violation, check_effect_violations, check_pure_violation, has_side_effects,
+    is_blocking_operation, is_fs_operation, is_io_operation, is_net_operation,
 };
 
 #[test]
@@ -244,7 +243,7 @@ fn test_is_blocking_operation() {
     assert!(is_blocking_operation("sleep_blocking"));
     assert!(is_blocking_operation("recv_blocking"));
     assert!(is_blocking_operation("join_blocking"));
-    assert!(!is_blocking_operation("add"));  // Not a blocking op
+    assert!(!is_blocking_operation("add")); // Not a blocking op
     assert!(!is_blocking_operation("sleep")); // Non-blocking async version
 }
 
@@ -279,24 +278,24 @@ fn test_is_net_operation() {
 #[test]
 fn test_has_side_effects() {
     // io, fs, or net operations have side effects
-    assert!(has_side_effects("print"));      // io
+    assert!(has_side_effects("print")); // io
     assert!(has_side_effects("write_file")); // fs
-    assert!(has_side_effects("http_post"));  // net
-    assert!(!has_side_effects("add"));       // pure
+    assert!(has_side_effects("http_post")); // net
+    assert!(!has_side_effects("add")); // pure
 }
 
 #[test]
 fn test_check_async_violation_ok() {
     // No effects set, so no violation
     let result = check_async_violation("sleep");
-    assert!(result.is_ok());  // Without @async context, blocking is allowed
+    assert!(result.is_ok()); // Without @async context, blocking is allowed
 }
 
 #[test]
 fn test_check_pure_violation_ok() {
     // No effects set, so no violation
     let result = check_pure_violation("print");
-    assert!(result.is_ok());  // Without @pure context, side effects are allowed
+    assert!(result.is_ok()); // Without @pure context, side effects are allowed
 }
 
 #[test]
@@ -309,7 +308,7 @@ fn test_check_effect_violations_ok() {
 // MIR Instructions Coverage (compiler/src/mir/instructions.rs - 0%)
 // =============================================================================
 
-use simple_compiler::mir::{BlockId, VReg, MirInst};
+use simple_compiler::mir::{BlockId, MirInst, VReg};
 
 #[test]
 fn test_block_id_creation() {
@@ -337,25 +336,37 @@ fn test_vreg_equality() {
 
 #[test]
 fn test_mir_inst_const_int() {
-    let inst = MirInst::ConstInt { dest: VReg(0), value: 42 };
+    let inst = MirInst::ConstInt {
+        dest: VReg(0),
+        value: 42,
+    };
     assert!(matches!(inst, MirInst::ConstInt { value: 42, .. }));
 }
 
 #[test]
 fn test_mir_inst_const_float() {
-    let inst = MirInst::ConstFloat { dest: VReg(0), value: 3.14 };
+    let inst = MirInst::ConstFloat {
+        dest: VReg(0),
+        value: 3.14,
+    };
     assert!(matches!(inst, MirInst::ConstFloat { .. }));
 }
 
 #[test]
 fn test_mir_inst_const_bool() {
-    let inst = MirInst::ConstBool { dest: VReg(0), value: true };
+    let inst = MirInst::ConstBool {
+        dest: VReg(0),
+        value: true,
+    };
     assert!(matches!(inst, MirInst::ConstBool { value: true, .. }));
 }
 
 #[test]
 fn test_mir_inst_copy() {
-    let inst = MirInst::Copy { dest: VReg(1), src: VReg(0) };
+    let inst = MirInst::Copy {
+        dest: VReg(1),
+        src: VReg(0),
+    };
     assert!(matches!(inst, MirInst::Copy { .. }));
 }
 
@@ -364,7 +375,7 @@ fn test_mir_inst_copy() {
 // =============================================================================
 
 use simple_driver::doctest::{
-    Expected, DoctestExample, DoctestResult, DoctestStatus, is_definition_like,
+    is_definition_like, DoctestExample, DoctestResult, DoctestStatus, Expected,
 };
 
 #[test]
@@ -392,6 +403,7 @@ fn test_doctest_example_creation() {
         start_line: 10,
         commands: vec!["let x = 1".to_string()],
         expected: Expected::Empty,
+        section_name: None,
     };
     assert_eq!(example.start_line, 10);
     assert_eq!(example.commands.len(), 1);
@@ -416,6 +428,7 @@ fn test_doctest_result_creation() {
         start_line: 1,
         commands: vec!["1 + 1".to_string()],
         expected: Expected::Output("2".to_string()),
+        section_name: None,
     };
     let result = DoctestResult {
         example,
@@ -477,9 +490,7 @@ fn test_is_definition_like_comparison() {
 // Monomorphize Types Coverage (compiler/src/monomorphize/*.rs - 0%)
 // =============================================================================
 
-use simple_compiler::monomorphize::{
-    SpecializationKey, ConcreteType, MonomorphizationTable,
-};
+use simple_compiler::monomorphize::{ConcreteType, MonomorphizationTable, SpecializationKey};
 
 #[test]
 fn test_specialization_key_creation() {

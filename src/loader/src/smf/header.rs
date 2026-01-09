@@ -27,12 +27,12 @@ pub struct SmfHeader {
     pub source_hash: u64,
 
     // Startup optimization hints (using reserved space)
-    pub app_type: u8,          // Application type (0=cli, 1=tui, 2=gui, 3=service, 4=repl)
-    pub window_width: u16,     // Window width hint (GUI apps)
-    pub window_height: u16,    // Window height hint (GUI apps)
-    pub prefetch_hint: u8,     // Prefetch hint: 0=no, 1=yes (#1998)
+    pub app_type: u8, // Application type (0=cli, 1=tui, 2=gui, 3=service, 4=repl)
+    pub window_width: u16, // Window width hint (GUI apps)
+    pub window_height: u16, // Window height hint (GUI apps)
+    pub prefetch_hint: u8, // Prefetch hint: 0=no, 1=yes (#1998)
     pub prefetch_file_count: u8, // Expected number of files to prefetch
-    pub reserved: [u8; 1],     // Remaining reserved space
+    pub reserved: [u8; 1], // Remaining reserved space
 }
 
 impl SmfHeader {
@@ -100,7 +100,7 @@ impl SmfHeader {
             app_type: 0,        // Default to CLI
             window_width: 1280, // Default window size
             window_height: 720,
-            prefetch_hint: 0,   // No prefetch by default
+            prefetch_hint: 0, // No prefetch by default
             prefetch_file_count: 0,
             reserved: [0; 1],
         }
@@ -261,7 +261,10 @@ impl Arch {
 
     /// Check if this is a 64-bit architecture.
     pub fn is_64bit(self) -> bool {
-        matches!(self, Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 | Arch::Wasm64)
+        matches!(
+            self,
+            Arch::X86_64 | Arch::Aarch64 | Arch::Riscv64 | Arch::Wasm64
+        )
     }
 }
 

@@ -1,5 +1,5 @@
-use crate::token::TokenKind;
 use super::escapes::EscapeResult;
+use crate::token::TokenKind;
 
 impl<'a> super::Lexer<'a> {
     pub(super) fn scan_raw_string(&mut self) -> TokenKind {
@@ -123,7 +123,7 @@ impl<'a> super::Lexer<'a> {
         // Consume the three opening quotes
         self.advance(); // First "
         self.advance(); // Second "
-        // Third " was already consumed in scan_token
+                        // Third " was already consumed in scan_token
 
         // Read until we find three closing quotes
         while let Some(ch) = self.peek() {
@@ -278,5 +278,4 @@ impl<'a> super::Lexer<'a> {
             TokenKind::Error("Unterminated f-string".to_string())
         }
     }
-
 }

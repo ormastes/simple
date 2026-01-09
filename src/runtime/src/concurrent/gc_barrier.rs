@@ -98,7 +98,7 @@ impl GcWriteBarrier {
     /// are guaranteed to be scanned during the current GC cycle.
     #[inline(never)] // Keep barrier overhead minimal for common case
     fn mark_gray(_value: RuntimeValue) {
-        // TODO: Integrate with Abfall GC's marking interface
+        // TODO: [runtime][P3] Integrate with Abfall GC's marking interface
         // For now, this is a placeholder that prevents the value from being collected.
         //
         // In a full implementation, this would:

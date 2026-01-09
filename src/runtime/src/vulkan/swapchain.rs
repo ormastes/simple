@@ -1,7 +1,7 @@
 //! Vulkan swapchain management for presentation
 
-use super::error::{VulkanError, VulkanResult};
 use super::device::VulkanDevice;
+use super::error::{VulkanError, VulkanResult};
 use super::surface::Surface;
 use super::sync::Semaphore;
 use ash::vk;
@@ -68,14 +68,20 @@ impl VulkanSwapchain {
         )?;
 
         // Get swapchain loader
-        let swapchain_loader = device.swapchain_loader()
-            .ok_or(VulkanError::NotSupported("Swapchain extension not available".to_string()))?
+        let swapchain_loader = device
+            .swapchain_loader()
+            .ok_or(VulkanError::NotSupported(
+                "Swapchain extension not available".to_string(),
+            ))?
             .clone();
 
         // Get swapchain images
         let images = unsafe {
-            swapchain_loader.get_swapchain_images(swapchain)
-                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get swapchain images: {:?}", e)))?
+            swapchain_loader
+                .get_swapchain_images(swapchain)
+                .map_err(|e| {
+                    VulkanError::SurfaceError(format!("Failed to get swapchain images: {:?}", e))
+                })?
         };
 
         let actual_image_count = images.len() as u32;
@@ -97,12 +103,7 @@ impl VulkanSwapchain {
     }
 
     /// Recreate swapchain (e.g., on window resize)
-    pub fn recreate(
-        &mut self,
-        surface: &Surface,
-        width: u32,
-        height: u32,
-    ) -> VulkanResult<()> {
+    pub fn recreate(&mut self, surface: &Surface, width: u32, height: u32) -> VulkanResult<()> {
         // Wait for device to be idle before recreating
         self.device.wait_idle()?;
 
@@ -156,14 +157,18 @@ impl VulkanSwapchain {
 
         // Get new images
         self.images = unsafe {
-            self.swapchain_loader.get_swapchain_images(self.swapchain)
-                .map_err(|e| VulkanError::SurfaceError(format!("Failed to get swapchain images: {:?}", e)))?
+            self.swapchain_loader
+                .get_swapchain_images(self.swapchain)
+                .map_err(|e| {
+                    VulkanError::SurfaceError(format!("Failed to get swapchain images: {:?}", e))
+                })?
         };
 
         self.image_count = self.images.len() as u32;
 
         // Create new image views
-        self.image_views = Self::create_image_views(&self.device, &self.images, self.format.format)?;
+        self.image_views =
+            Self::create_image_views(&self.device, &self.images, self.format.format)?;
 
         tracing::info!("Swapchain recreated successfully");
 
@@ -181,18 +186,22 @@ impl VulkanSwapchain {
         image_count: u32,
         old_swapchain: vk::SwapchainKHR,
     ) -> VulkanResult<vk::SwapchainKHR> {
-        let swapchain_loader = device.swapchain_loader()
-            .ok_or(VulkanError::NotSupported("Swapchain extension not available".to_string()))?;
+        let swapchain_loader = device.swapchain_loader().ok_or(VulkanError::NotSupported(
+            "Swapchain extension not available".to_string(),
+        ))?;
 
         // Determine queue family indices
-        let graphics_family = device.graphics_queue_family()
+        let graphics_family = device
+            .graphics_queue_family()
             .ok_or(VulkanError::NoDeviceFound)?;
-        let present_family = device.present_queue_family()
-            .unwrap_or(graphics_family);
+        let present_family = device.present_queue_family().unwrap_or(graphics_family);
 
         // Queue family sharing mode
         let (sharing_mode, queue_families) = if graphics_family != present_family {
-            (vk::SharingMode::CONCURRENT, vec![graphics_family, present_family])
+            (
+                vk::SharingMode::CONCURRENT,
+                vec![graphics_family, present_family],
+            )
         } else {
             (vk::SharingMode::EXCLUSIVE, vec![])
         };
@@ -215,8 +224,11 @@ impl VulkanSwapchain {
             .old_swapchain(old_swapchain);
 
         unsafe {
-            swapchain_loader.create_swapchain(&create_info, None)
-                .map_err(|e| VulkanError::SurfaceError(format!("Failed to create swapchain: {:?}", e)))
+            swapchain_loader
+                .create_swapchain(&create_info, None)
+                .map_err(|e| {
+                    VulkanError::SurfaceError(format!("Failed to create swapchain: {:?}", e))
+                })
         }
     }
 
@@ -226,30 +238,40 @@ impl VulkanSwapchain {
         images: &[vk::Image],
         format: vk::Format,
     ) -> VulkanResult<Vec<vk::ImageView>> {
-        images.iter().map(|&image| {
-            let create_info = vk::ImageViewCreateInfo::default()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(format)
-                .components(vk::ComponentMapping {
-                    r: vk::ComponentSwizzle::IDENTITY,
-                    g: vk::ComponentSwizzle::IDENTITY,
-                    b: vk::ComponentSwizzle::IDENTITY,
-                    a: vk::ComponentSwizzle::IDENTITY,
-                })
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                });
+        images
+            .iter()
+            .map(|&image| {
+                let create_info = vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .components(vk::ComponentMapping {
+                        r: vk::ComponentSwizzle::IDENTITY,
+                        g: vk::ComponentSwizzle::IDENTITY,
+                        b: vk::ComponentSwizzle::IDENTITY,
+                        a: vk::ComponentSwizzle::IDENTITY,
+                    })
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
 
-            unsafe {
-                device.handle().create_image_view(&create_info, None)
-                    .map_err(|e| VulkanError::SurfaceError(format!("Failed to create image view: {:?}", e)))
-            }
-        }).collect()
+                unsafe {
+                    device
+                        .handle()
+                        .create_image_view(&create_info, None)
+                        .map_err(|e| {
+                            VulkanError::SurfaceError(format!(
+                                "Failed to create image view: {:?}",
+                                e
+                            ))
+                        })
+                }
+            })
+            .collect()
     }
 
     /// Acquire the next image from the swapchain
@@ -262,7 +284,9 @@ impl VulkanSwapchain {
         signal_semaphore: Option<&Semaphore>,
         timeout_ns: u64,
     ) -> VulkanResult<(u32, bool)> {
-        let semaphore = signal_semaphore.map(|s| s.handle()).unwrap_or(vk::Semaphore::null());
+        let semaphore = signal_semaphore
+            .map(|s| s.handle())
+            .unwrap_or(vk::Semaphore::null());
 
         unsafe {
             match self.swapchain_loader.acquire_next_image(
@@ -272,10 +296,11 @@ impl VulkanSwapchain {
                 vk::Fence::null(),
             ) {
                 Ok((index, suboptimal)) => Ok((index, suboptimal)),
-                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                    Err(VulkanError::SwapchainOutOfDate)
-                }
-                Err(e) => Err(VulkanError::SurfaceError(format!("Failed to acquire image: {:?}", e))),
+                Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => Err(VulkanError::SwapchainOutOfDate),
+                Err(e) => Err(VulkanError::SurfaceError(format!(
+                    "Failed to acquire image: {:?}",
+                    e
+                ))),
             }
         }
     }
@@ -283,14 +308,8 @@ impl VulkanSwapchain {
     /// Present an image to the swapchain
     ///
     /// Returns true if swapchain is out of date and needs recreation
-    pub fn present(
-        &self,
-        image_index: u32,
-        wait_semaphores: &[&Semaphore],
-    ) -> VulkanResult<bool> {
-        let wait_sems: Vec<vk::Semaphore> = wait_semaphores.iter()
-            .map(|s| s.handle())
-            .collect();
+    pub fn present(&self, image_index: u32, wait_semaphores: &[&Semaphore]) -> VulkanResult<bool> {
+        let wait_sems: Vec<vk::Semaphore> = wait_semaphores.iter().map(|s| s.handle()).collect();
 
         let swapchains = [self.swapchain];
         let image_indices = [image_index];
@@ -300,7 +319,9 @@ impl VulkanSwapchain {
             .swapchains(&swapchains)
             .image_indices(&image_indices);
 
-        let queue = self.device.present_queue()
+        let queue = self
+            .device
+            .present_queue()
             .ok_or(VulkanError::NoDeviceFound)?
             .lock();
 
@@ -310,7 +331,10 @@ impl VulkanSwapchain {
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     Ok(true) // Needs recreation
                 }
-                Err(e) => Err(VulkanError::SurfaceError(format!("Failed to present: {:?}", e))),
+                Err(e) => Err(VulkanError::SurfaceError(format!(
+                    "Failed to present: {:?}",
+                    e
+                ))),
             }
         }
     }
@@ -368,7 +392,8 @@ impl Drop for VulkanSwapchain {
             }
 
             // Destroy swapchain
-            self.swapchain_loader.destroy_swapchain(self.swapchain, None);
+            self.swapchain_loader
+                .destroy_swapchain(self.swapchain, None);
         }
         tracing::info!("Swapchain destroyed");
     }
@@ -409,7 +434,10 @@ mod tests {
         let present_family = 0u32;
 
         let (sharing_mode, queue_families) = if graphics_family != present_family {
-            (vk::SharingMode::CONCURRENT, vec![graphics_family, present_family])
+            (
+                vk::SharingMode::CONCURRENT,
+                vec![graphics_family, present_family],
+            )
         } else {
             (vk::SharingMode::EXCLUSIVE, vec![])
         };
@@ -425,7 +453,10 @@ mod tests {
         let present_family = 1u32;
 
         let (sharing_mode, queue_families) = if graphics_family != present_family {
-            (vk::SharingMode::CONCURRENT, vec![graphics_family, present_family])
+            (
+                vk::SharingMode::CONCURRENT,
+                vec![graphics_family, present_family],
+            )
         } else {
             (vk::SharingMode::EXCLUSIVE, vec![])
         };

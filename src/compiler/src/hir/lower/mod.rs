@@ -15,8 +15,8 @@ pub use parallel::{
     ParallelLowerConfig, ParallelModuleLowerer,
 };
 
-use simple_parser::Module;
 use super::types::HirModule;
+use simple_parser::Module;
 
 /// Convenience function to lower an AST module to HIR
 pub fn lower(module: &Module) -> LowerResult<HirModule> {

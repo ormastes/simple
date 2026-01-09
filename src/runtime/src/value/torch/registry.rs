@@ -65,10 +65,10 @@ pub(crate) fn next_handle() -> u64 {
 #[cfg(feature = "pytorch")]
 pub(crate) fn dtype_from_code(code: i32) -> Option<TchKind> {
     match code {
-        0 => Some(TchKind::Float),   // f32
-        1 => Some(TchKind::Double),  // f64
-        2 => Some(TchKind::Int),     // i32
-        3 => Some(TchKind::Int64),   // i64
+        0 => Some(TchKind::Float),  // f32
+        1 => Some(TchKind::Double), // f64
+        2 => Some(TchKind::Int),    // i32
+        3 => Some(TchKind::Int64),  // i64
         _ => None,
     }
 }

@@ -55,7 +55,9 @@ fn apply_network_isolation(
             tracing::debug!("Network: Blocking all access");
             if let Err(e) = create_empty_network_namespace() {
                 tracing::warn!("Failed to create network namespace: {}", e);
-                tracing::info!("Network isolation requires CAP_SYS_ADMIN or unprivileged user namespaces");
+                tracing::info!(
+                    "Network isolation requires CAP_SYS_ADMIN or unprivileged user namespaces"
+                );
             }
             Ok(())
         }
@@ -176,20 +178,17 @@ fn map_user_namespace() -> SandboxResult<()> {
 
     // Write uid_map
     let uid_map = format!("0 {} 1\n", uid);
-    fs::write("/proc/self/uid_map", uid_map).map_err(|e| {
-        SandboxError::Config(format!("Failed to write uid_map: {}", e))
-    })?;
+    fs::write("/proc/self/uid_map", uid_map)
+        .map_err(|e| SandboxError::Config(format!("Failed to write uid_map: {}", e)))?;
 
     // Disable setgroups (required before writing gid_map)
-    fs::write("/proc/self/setgroups", "deny\n").map_err(|e| {
-        SandboxError::Config(format!("Failed to write setgroups: {}", e))
-    })?;
+    fs::write("/proc/self/setgroups", "deny\n")
+        .map_err(|e| SandboxError::Config(format!("Failed to write setgroups: {}", e)))?;
 
     // Write gid_map
     let gid_map = format!("0 {} 1\n", gid);
-    fs::write("/proc/self/gid_map", gid_map).map_err(|e| {
-        SandboxError::Config(format!("Failed to write gid_map: {}", e))
-    })?;
+    fs::write("/proc/self/gid_map", gid_map)
+        .map_err(|e| SandboxError::Config(format!("Failed to write gid_map: {}", e)))?;
 
     Ok(())
 }
@@ -221,11 +220,8 @@ mod tests {
     #[test]
     fn test_read_only_paths() {
         use std::path::PathBuf;
-        
-        let config = SandboxConfig::new().with_read_paths(vec![
-            "/tmp".into(),
-            "/usr/lib".into(),
-        ]);
+
+        let config = SandboxConfig::new().with_read_paths(vec!["/tmp".into(), "/usr/lib".into()]);
 
         // Test config is constructed correctly
         assert_eq!(config.filesystem.read_paths.len(), 2);

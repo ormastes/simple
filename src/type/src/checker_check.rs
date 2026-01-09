@@ -441,7 +441,7 @@ impl TypeChecker {
                     fields,
                     methods,
                     required_traits: mixin.required_traits.clone(),
-                    required_methods: vec![], // TODO: Phase 2 Step 6
+                    required_methods: vec![], // TODO: [type][P3] Phase 2 Step 6
                 };
                 self.mixins.insert(mixin.name.clone(), info);
 

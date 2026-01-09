@@ -56,21 +56,27 @@ fn test_shared_interner_thread_safe() {
 fn test_interned_symbol_table() {
     let mut table = InternedSymbolTable::new();
 
-    let key1 = table.add_symbol("main", SymbolInfo {
-        binding: SymbolBinding::Global,
-        sym_type: SymbolType::Function,
-        section_index: 1,
-        value: 0x1000,
-        size: 100,
-    });
+    let key1 = table.add_symbol(
+        "main",
+        SymbolInfo {
+            binding: SymbolBinding::Global,
+            sym_type: SymbolType::Function,
+            section_index: 1,
+            value: 0x1000,
+            size: 100,
+        },
+    );
 
-    let key2 = table.add_symbol("helper", SymbolInfo {
-        binding: SymbolBinding::Local,
-        sym_type: SymbolType::Function,
-        section_index: 1,
-        value: 0x1100,
-        size: 50,
-    });
+    let key2 = table.add_symbol(
+        "helper",
+        SymbolInfo {
+            binding: SymbolBinding::Local,
+            sym_type: SymbolType::Function,
+            section_index: 1,
+            value: 0x1100,
+            size: 50,
+        },
+    );
 
     assert_eq!(table.len(), 2);
     assert!(table.contains("main"));
@@ -116,29 +122,38 @@ fn test_o1_comparison() {
 fn test_symbol_table_iteration_order() {
     let mut table = InternedSymbolTable::new();
 
-    table.add_symbol("first", SymbolInfo {
-        binding: SymbolBinding::Global,
-        sym_type: SymbolType::Function,
-        section_index: 1,
-        value: 0,
-        size: 0,
-    });
+    table.add_symbol(
+        "first",
+        SymbolInfo {
+            binding: SymbolBinding::Global,
+            sym_type: SymbolType::Function,
+            section_index: 1,
+            value: 0,
+            size: 0,
+        },
+    );
 
-    table.add_symbol("second", SymbolInfo {
-        binding: SymbolBinding::Global,
-        sym_type: SymbolType::Function,
-        section_index: 1,
-        value: 0,
-        size: 0,
-    });
+    table.add_symbol(
+        "second",
+        SymbolInfo {
+            binding: SymbolBinding::Global,
+            sym_type: SymbolType::Function,
+            section_index: 1,
+            value: 0,
+            size: 0,
+        },
+    );
 
-    table.add_symbol("third", SymbolInfo {
-        binding: SymbolBinding::Global,
-        sym_type: SymbolType::Function,
-        section_index: 1,
-        value: 0,
-        size: 0,
-    });
+    table.add_symbol(
+        "third",
+        SymbolInfo {
+            binding: SymbolBinding::Global,
+            sym_type: SymbolType::Function,
+            section_index: 1,
+            value: 0,
+            size: 0,
+        },
+    );
 
     let names: Vec<_> = table.iter().map(|(_, name, _)| name).collect();
     assert_eq!(names, vec!["first", "second", "third"]);

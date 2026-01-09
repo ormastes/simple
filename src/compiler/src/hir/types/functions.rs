@@ -63,10 +63,7 @@ impl HirFunction {
 
     /// Check if this function's layout is pinned (should not be moved by optimizer).
     pub fn is_layout_pinned(&self) -> bool {
-        self.layout_hint
-            .as_ref()
-            .map(|h| h.pinned)
-            .unwrap_or(false)
+        self.layout_hint.as_ref().map(|h| h.pinned).unwrap_or(false)
     }
 
     /// Get the ELF section suffix for this function based on its layout phase.

@@ -57,7 +57,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Parse optional expression before RBracket
-    pub(super) fn parse_optional_expr_before_bracket(&mut self) -> Result<Option<Box<Expr>>, ParseError> {
+    pub(super) fn parse_optional_expr_before_bracket(
+        &mut self,
+    ) -> Result<Option<Box<Expr>>, ParseError> {
         if self.check(&TokenKind::RBracket) {
             Ok(None)
         } else {

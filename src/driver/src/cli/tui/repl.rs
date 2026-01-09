@@ -80,11 +80,26 @@ pub fn run_tui_repl(version: &str, mut runner: Runner) -> i32 {
                             // Show the line that was just completed before switching to ... prompt
                             let last_line = editor.lines().last().map(|s| s.as_str()).unwrap_or("");
                             let mut stdout = io::stdout();
-                            queue!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine)).ok();
+                            queue!(
+                                stdout,
+                                cursor::MoveToColumn(0),
+                                Clear(ClearType::CurrentLine)
+                            )
+                            .ok();
 
                             // Use correct prompt: ">>>" for first line, "..." for continuation
-                            let line_prompt = if current_line_count == 1 { ">>> " } else { "... " };
-                            queue!(stdout, SetForegroundColor(Color::Green), Print(line_prompt), ResetColor).ok();
+                            let line_prompt = if current_line_count == 1 {
+                                ">>> "
+                            } else {
+                                "... "
+                            };
+                            queue!(
+                                stdout,
+                                SetForegroundColor(Color::Green),
+                                Print(line_prompt),
+                                ResetColor
+                            )
+                            .ok();
                             queue!(stdout, Print(last_line), Print("\r\n")).ok();
                             stdout.flush().ok();
                             // Update prev_line_count
@@ -96,11 +111,26 @@ pub fn run_tui_repl(version: &str, mut runner: Runner) -> i32 {
                         // Show the final line before moving to next line
                         let last_line = input.lines().last().unwrap_or("");
                         let mut stdout = io::stdout();
-                        queue!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine)).ok();
+                        queue!(
+                            stdout,
+                            cursor::MoveToColumn(0),
+                            Clear(ClearType::CurrentLine)
+                        )
+                        .ok();
 
                         // Determine which prompt to show
-                        let line_prompt = if input.lines().count() > 1 { "... " } else { ">>> " };
-                        queue!(stdout, SetForegroundColor(Color::Green), Print(line_prompt), ResetColor).ok();
+                        let line_prompt = if input.lines().count() > 1 {
+                            "... "
+                        } else {
+                            ">>> "
+                        };
+                        queue!(
+                            stdout,
+                            SetForegroundColor(Color::Green),
+                            Print(line_prompt),
+                            ResetColor
+                        )
+                        .ok();
                         queue!(stdout, Print(last_line), Print("\r\n")).ok();
                         stdout.flush().ok();
 
@@ -177,14 +207,26 @@ fn render_prompt(prompt: &str, editor: &LineEditor) -> io::Result<()> {
 
     // Debug: log rendering
     if std::env::var("TUI_DEBUG").is_ok() {
-        eprintln!("[DEBUG] RENDER: Clearing line, redrawing prompt + buffer '{}'", editor.buffer());
+        eprintln!(
+            "[DEBUG] RENDER: Clearing line, redrawing prompt + buffer '{}'",
+            editor.buffer()
+        );
     }
 
     // Move to start of line and clear
-    queue!(stdout, cursor::MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+    queue!(
+        stdout,
+        cursor::MoveToColumn(0),
+        Clear(ClearType::CurrentLine)
+    )?;
 
     // Print prompt
-    queue!(stdout, SetForegroundColor(Color::Green), Print(prompt), ResetColor)?;
+    queue!(
+        stdout,
+        SetForegroundColor(Color::Green),
+        Print(prompt),
+        ResetColor
+    )?;
 
     // Print buffer (spaces remain as spaces)
     queue!(stdout, Print(editor.buffer()))?;

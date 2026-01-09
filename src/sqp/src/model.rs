@@ -37,9 +37,7 @@ impl ColumnType {
         match self {
             ColumnType::Integer | ColumnType::Int32 => "INTEGER",
             ColumnType::Float | ColumnType::Double => "REAL",
-            ColumnType::Text | ColumnType::DateTime | ColumnType::Date | ColumnType::Time => {
-                "TEXT"
-            }
+            ColumnType::Text | ColumnType::DateTime | ColumnType::Date | ColumnType::Time => "TEXT",
             ColumnType::Boolean => "INTEGER",
             ColumnType::Blob => "BLOB",
             ColumnType::Json => "TEXT",
@@ -172,13 +170,17 @@ impl Column {
 
     /// Check if column is not null.
     pub fn is_not_null(&self) -> bool {
-        self.constraints.iter().any(|c| matches!(c, Constraint::NotNull))
+        self.constraints
+            .iter()
+            .any(|c| matches!(c, Constraint::NotNull))
             || self.is_primary_key()
     }
 
     /// Check if column is unique.
     pub fn is_unique(&self) -> bool {
-        self.constraints.iter().any(|c| matches!(c, Constraint::Unique))
+        self.constraints
+            .iter()
+            .any(|c| matches!(c, Constraint::Unique))
             || self.is_primary_key()
     }
 }
@@ -535,7 +537,11 @@ mod tests {
                     .primary_key()
                     .auto_increment(),
             )
-            .column(Column::new("full_name", ColumnType::Text).column("name").not_null());
+            .column(
+                Column::new("full_name", ColumnType::Text)
+                    .column("name")
+                    .not_null(),
+            );
 
         assert_eq!(model.name, "User");
         assert_eq!(model.table_name, "app_users");

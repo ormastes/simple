@@ -117,7 +117,7 @@ pub extern "C" fn doctest_walk_directory(
         };
 
         // Simple implementation: just walk and collect all files
-        // TODO: Implement glob pattern matching
+        // TODO: [runtime][P1] Implement glob pattern matching
         let mut files = Vec::new();
 
         if let Ok(entries) = walk_dir_recursive(&root) {

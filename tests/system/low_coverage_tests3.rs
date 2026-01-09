@@ -8,7 +8,7 @@ use std::path::PathBuf;
 // Parser Token Coverage (parser/src/token.rs)
 // =============================================================================
 
-use simple_parser::{Span, Token, TokenKind, NumericSuffix, FStringToken};
+use simple_parser::{FStringToken, NumericSuffix, Span, Token, TokenKind};
 
 #[test]
 fn test_span_new() {
@@ -75,16 +75,16 @@ fn test_token_kind_operators() {
     let _ = TokenKind::Minus;
     let _ = TokenKind::Star;
     let _ = TokenKind::Slash;
-    let _ = TokenKind::Eq;      // ==
-    let _ = TokenKind::NotEq;   // !=
+    let _ = TokenKind::Eq; // ==
+    let _ = TokenKind::NotEq; // !=
     let _ = TokenKind::Lt;
-    let _ = TokenKind::LtEq;    // <=
+    let _ = TokenKind::LtEq; // <=
     let _ = TokenKind::Gt;
-    let _ = TokenKind::GtEq;    // >=
+    let _ = TokenKind::GtEq; // >=
     let _ = TokenKind::And;
     let _ = TokenKind::Or;
     let _ = TokenKind::Not;
-    let _ = TokenKind::DoubleStar;  // **
+    let _ = TokenKind::DoubleStar; // **
     let _ = TokenKind::DoubleSlash; // //
 }
 
@@ -97,7 +97,7 @@ fn test_token_kind_delimiters() {
     let _ = TokenKind::LBrace;
     let _ = TokenKind::RBrace;
     let _ = TokenKind::Colon;
-    let _ = TokenKind::DoubleColon;  // ::
+    let _ = TokenKind::DoubleColon; // ::
     let _ = TokenKind::Comma;
     let _ = TokenKind::Dot;
     let _ = TokenKind::Arrow;
@@ -161,8 +161,8 @@ fn test_token_kind_raw_string() {
 // =============================================================================
 
 use simple_dependency_tracker::{
-    Segment, ModPath, FileKind, ResolutionResult, FileSystem,
-    resolve, to_file_path, to_dir_path, well_formed,
+    resolve, to_dir_path, to_file_path, well_formed, FileKind, FileSystem, ModPath,
+    ResolutionResult, Segment,
 };
 
 #[test]
@@ -302,7 +302,13 @@ fn test_resolve_found_file() {
     let root = std::path::Path::new("/project/src");
     let mp = ModPath::parse("foo.bar").unwrap();
     let result = resolve(&fs, root, &mp);
-    assert!(matches!(result, ResolutionResult::Unique { kind: FileKind::File, .. }));
+    assert!(matches!(
+        result,
+        ResolutionResult::Unique {
+            kind: FileKind::File,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -312,7 +318,13 @@ fn test_resolve_found_directory() {
     let root = std::path::Path::new("/project/src");
     let mp = ModPath::parse("foo.bar").unwrap();
     let result = resolve(&fs, root, &mp);
-    assert!(matches!(result, ResolutionResult::Unique { kind: FileKind::Directory, .. }));
+    assert!(matches!(
+        result,
+        ResolutionResult::Unique {
+            kind: FileKind::Directory,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -338,8 +350,8 @@ fn test_well_formed_empty() {
 // =============================================================================
 
 use simple_dependency_tracker::{
-    SymbolId, Symbol, ModDecl, DirManifest, ModuleContents, EffectiveVisibility,
-    effective_visibility, visibility_meet, ancestor_visibility, Visibility,
+    ancestor_visibility, effective_visibility, visibility_meet, DirManifest, EffectiveVisibility,
+    ModDecl, ModuleContents, Symbol, SymbolId, Visibility,
 };
 
 #[test]
@@ -452,22 +464,34 @@ fn test_effective_visibility_function() {
 
 #[test]
 fn test_visibility_meet_public_public() {
-    assert_eq!(visibility_meet(Visibility::Public, Visibility::Public), Visibility::Public);
+    assert_eq!(
+        visibility_meet(Visibility::Public, Visibility::Public),
+        Visibility::Public
+    );
 }
 
 #[test]
 fn test_visibility_meet_public_private() {
-    assert_eq!(visibility_meet(Visibility::Public, Visibility::Private), Visibility::Private);
+    assert_eq!(
+        visibility_meet(Visibility::Public, Visibility::Private),
+        Visibility::Private
+    );
 }
 
 #[test]
 fn test_visibility_meet_private_public() {
-    assert_eq!(visibility_meet(Visibility::Private, Visibility::Public), Visibility::Private);
+    assert_eq!(
+        visibility_meet(Visibility::Private, Visibility::Public),
+        Visibility::Private
+    );
 }
 
 #[test]
 fn test_visibility_meet_private_private() {
-    assert_eq!(visibility_meet(Visibility::Private, Visibility::Private), Visibility::Private);
+    assert_eq!(
+        visibility_meet(Visibility::Private, Visibility::Private),
+        Visibility::Private
+    );
 }
 
 #[test]
@@ -491,7 +515,9 @@ fn test_ancestor_visibility_with_private() {
 // Type Crate Coverage (type/src/lib.rs)
 // =============================================================================
 
-use simple_type::{Type, TypeScheme, Substitution, TypeChecker, TypeError, LeanTy, LeanExpr, lean_infer};
+use simple_type::{
+    lean_infer, LeanExpr, LeanTy, Substitution, Type, TypeChecker, TypeError, TypeScheme,
+};
 
 #[test]
 fn test_type_int() {
@@ -674,10 +700,7 @@ fn test_lean_expr_lit_str() {
 
 #[test]
 fn test_lean_expr_add() {
-    let e = LeanExpr::Add(
-        Box::new(LeanExpr::LitNat(1)),
-        Box::new(LeanExpr::LitNat(2)),
-    );
+    let e = LeanExpr::Add(Box::new(LeanExpr::LitNat(1)), Box::new(LeanExpr::LitNat(2)));
     assert!(matches!(e, LeanExpr::Add(_, _)));
 }
 
@@ -701,10 +724,7 @@ fn test_lean_infer_str() {
 
 #[test]
 fn test_lean_infer_add() {
-    let e = LeanExpr::Add(
-        Box::new(LeanExpr::LitNat(1)),
-        Box::new(LeanExpr::LitNat(2)),
-    );
+    let e = LeanExpr::Add(Box::new(LeanExpr::LitNat(1)), Box::new(LeanExpr::LitNat(2)));
     let result = lean_infer(&e);
     assert_eq!(result, Some(LeanTy::Nat));
 }

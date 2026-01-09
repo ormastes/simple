@@ -1,11 +1,12 @@
 //! Tests for async file I/O functionality
 
-use super::{native_async_file_create, native_async_file_start_loading,
-            native_async_file_is_ready, native_async_file_get_state,
-            native_async_file_wait, FileLoadState};
-use crate::value::{RuntimeValue, rt_string_new};
-use std::io::Write;
+use super::{
+    native_async_file_create, native_async_file_get_state, native_async_file_is_ready,
+    native_async_file_start_loading, native_async_file_wait, FileLoadState,
+};
+use crate::value::{rt_string_new, RuntimeValue};
 use std::fs::File;
+use std::io::Write;
 
 fn create_test_file(path: &str, content: &str) -> std::io::Result<()> {
     let mut file = File::create(path)?;
@@ -45,7 +46,10 @@ fn test_async_file_loading_lifecycle() {
     assert!(handle_id > 0);
 
     // Initial state should be Pending
-    assert_eq!(native_async_file_get_state(handle_id), FileLoadState::Pending as i32);
+    assert_eq!(
+        native_async_file_get_state(handle_id),
+        FileLoadState::Pending as i32
+    );
     assert_eq!(native_async_file_is_ready(handle_id), 0);
 
     // Start loading
@@ -61,7 +65,10 @@ fn test_async_file_loading_lifecycle() {
 
     // Should be ready now
     assert_eq!(native_async_file_is_ready(handle_id), 1);
-    assert_eq!(native_async_file_get_state(handle_id), FileLoadState::Ready as i32);
+    assert_eq!(
+        native_async_file_get_state(handle_id),
+        FileLoadState::Ready as i32
+    );
 
     // Clean up
     std::fs::remove_file(test_path).ok();
@@ -86,7 +93,10 @@ fn test_async_file_invalid_path() {
     assert_eq!(result.as_int(), 0);
 
     // State should be Failed
-    assert_eq!(native_async_file_get_state(handle_id), FileLoadState::Failed as i32);
+    assert_eq!(
+        native_async_file_get_state(handle_id),
+        FileLoadState::Failed as i32
+    );
 }
 
 #[test]
@@ -96,7 +106,10 @@ fn test_async_file_invalid_handle() {
 
     // Should return 0 for invalid handle
     assert_eq!(native_async_file_is_ready(invalid_handle), 0);
-    assert_eq!(native_async_file_get_state(invalid_handle), FileLoadState::Failed as i32);
+    assert_eq!(
+        native_async_file_get_state(invalid_handle),
+        FileLoadState::Failed as i32
+    );
 
     let result = native_async_file_wait(invalid_handle);
     assert_eq!(result.as_int(), 0);

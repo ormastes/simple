@@ -155,7 +155,8 @@ pub fn parse_di_config(toml: &toml::Value) -> Result<Option<DiConfig>, String> {
                     })?;
                 let predicate = predicate_parser::parse_predicate(predicate_raw)?;
                 // Validate that the predicate is legal for DI context
-                predicate.validate(PredicateContext::DependencyInjection)
+                predicate
+                    .validate(PredicateContext::DependencyInjection)
                     .map_err(|e| format!("invalid predicate for DI binding: {}", e))?;
 
                 let impl_type = binding
@@ -230,9 +231,7 @@ impl DiContainer {
         attrs: &[String],
     ) -> Result<Option<(String, DiScope)>, DiResolveError> {
         let ctx = create_di_match_context(type_name, module_path, attrs);
-        let binding = self
-            .config
-            .select_binding(&self.active_profile, &ctx)?;
+        let binding = self.config.select_binding(&self.active_profile, &ctx)?;
 
         Ok(binding.map(|b| (b.impl_type.clone(), b.scope)))
     }
@@ -488,8 +487,14 @@ bindings = []
     fn dependency_graph_implementations() {
         let mut graph = DependencyGraph::default();
 
-        graph.add_implementation("UserRepository".to_string(), "SqlUserRepository".to_string());
-        graph.add_implementation("UserRepository".to_string(), "MockUserRepository".to_string());
+        graph.add_implementation(
+            "UserRepository".to_string(),
+            "SqlUserRepository".to_string(),
+        );
+        graph.add_implementation(
+            "UserRepository".to_string(),
+            "MockUserRepository".to_string(),
+        );
 
         let impls = graph.get_implementations("UserRepository").unwrap();
         assert_eq!(impls.len(), 2);

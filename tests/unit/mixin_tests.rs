@@ -13,9 +13,13 @@ mixin Timestamp:
     updated_at: i64
 "#;
         let mut parser = Parser::new(source);
-        
+
         let result = parser.parse();
-        assert!(result.is_ok(), "Failed to parse simple mixin: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse simple mixin: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -28,9 +32,13 @@ mixin Auditable:
         self.modified_by = user
 "#;
         let mut parser = Parser::new(source);
-        
+
         let result = parser.parse();
-        assert!(result.is_ok(), "Failed to parse mixin with methods: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse mixin with methods: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -41,9 +49,13 @@ mixin Serializable<T>:
         return '{}'
 "#;
         let mut parser = Parser::new(source);
-        
+
         let result = parser.parse();
-        assert!(result.is_ok(), "Failed to parse generic mixin: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse generic mixin: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -54,9 +66,13 @@ mixin Comparable<T> where T: Ord:
         return 0
 "#;
         let mut parser = Parser::new(source);
-        
+
         let result = parser.parse();
-        assert!(result.is_ok(), "Failed to parse mixin with trait bounds: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse mixin with trait bounds: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -71,9 +87,13 @@ class User:
     name: str
 "#;
         let mut parser = Parser::new(source);
-        
+
         let result = parser.parse();
-        assert!(result.is_ok(), "Failed to parse class with mixin: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse class with mixin: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -91,9 +111,13 @@ class Document:
     content: str
 "#;
         let mut parser = Parser::new(source);
-        
+
         let result = parser.parse();
-        assert!(result.is_ok(), "Failed to parse class with multiple mixins: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse class with multiple mixins: {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -108,15 +132,19 @@ class Product:
     id: i64
 "#;
         let mut parser = Parser::new(source);
-        
+
         let result = parser.parse();
-        assert!(result.is_ok(), "Failed to parse class with generic mixin: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Failed to parse class with generic mixin: {:?}",
+            result.err()
+        );
     }
 }
 
 #[cfg(test)]
 mod mixin_type_tests {
-    use simple_type::{Type, MixinInfo};
+    use simple_type::{MixinInfo, Type};
 
     #[test]
     fn test_mixin_type_creation() {
@@ -158,18 +186,17 @@ mod mixin_type_tests {
         let mixin = MixinInfo {
             name: "Container".to_string(),
             type_params: vec!["T".to_string()],
-            fields: vec![
-                ("value".to_string(), Type::TypeParam("T".to_string())),
-            ],
+            fields: vec![("value".to_string(), Type::TypeParam("T".to_string()))],
             methods: vec![],
             required_traits: vec![],
             required_methods: vec![],
         };
 
         // Use instantiate method from MixinInfo
-        let instantiated = mixin.instantiate(&[Type::Int])
+        let instantiated = mixin
+            .instantiate(&[Type::Int])
             .expect("Instantiation should succeed");
-        
+
         assert_eq!(instantiated.fields[0].1, Type::Int);
     }
 }

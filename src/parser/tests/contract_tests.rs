@@ -21,13 +21,18 @@ fn parse_err(src: &str) {
 }
 
 /// Helper to validate function contract
-fn assert_function_contract(items: &[Node], name: &str, requires_count: usize, ensures_count: usize) {
+fn assert_function_contract(
+    items: &[Node],
+    name: &str,
+    requires_count: usize,
+    ensures_count: usize,
+) {
     assert_eq!(items.len(), 1);
-    
+
     if let Node::Function(func) = &items[0] {
         assert_eq!(func.name, name);
         assert!(func.contract.is_some());
-        
+
         let contract = func.contract.as_ref().unwrap();
         assert_eq!(contract.preconditions.len(), requires_count);
         assert_eq!(contract.postconditions.len(), ensures_count);

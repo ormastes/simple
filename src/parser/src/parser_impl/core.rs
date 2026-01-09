@@ -144,7 +144,10 @@ impl<'a> Parser<'a> {
     pub(crate) fn debug_enter(&mut self, name: &str) {
         if self.debug_mode != DebugMode::Off {
             let indent = "  ".repeat(self.debug_depth);
-            eprintln!("[PARSER] {}> {} (token: {:?})", indent, name, self.current.kind);
+            eprintln!(
+                "[PARSER] {}> {} (token: {:?})",
+                indent, name, self.current.kind
+            );
             self.debug_depth += 1;
         }
     }
@@ -164,16 +167,17 @@ impl<'a> Parser<'a> {
     /// Check for potential infinite loop in parsing
     /// Returns an error if iteration count exceeds MAX_LOOP_ITERATIONS
     #[inline]
-    pub(crate) fn check_loop_limit(&self, iterations: usize, context: &str) -> Result<(), ParseError> {
+    pub(crate) fn check_loop_limit(
+        &self,
+        iterations: usize,
+        context: &str,
+    ) -> Result<(), ParseError> {
         if iterations >= MAX_LOOP_ITERATIONS {
             Err(ParseError::syntax_error_with_span(
                 format!(
                     "Parser iteration limit exceeded in {} (possible infinite loop). \
                      Current token: {:?} at line {}, col {}",
-                    context,
-                    self.current.kind,
-                    self.current.span.line,
-                    self.current.span.column
+                    context, self.current.kind, self.current.span.line, self.current.span.column
                 ),
                 self.current.span,
             ))
@@ -244,15 +248,11 @@ impl<'a> Parser<'a> {
                 // Check if this is a type alias (type Name = ...) or expression (expect type to eq)
                 // Simple heuristic: type alias names are PascalCase (start with uppercase)
                 // Expression context uses lowercase like "expect type to eq"
-                let next = self
-                    .pending_tokens
-                    .front()
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let tok = self.lexer.next_token();
-                        self.pending_tokens.push_back(tok.clone());
-                        tok
-                    });
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
 
                 // Check if next token is an uppercase identifier (type alias pattern)
                 if let TokenKind::Identifier(name) = &next.kind {
@@ -286,14 +286,11 @@ impl<'a> Parser<'a> {
                 // Disambiguate between:
                 // - DI binding: `bind on pc{...} -> Impl`
                 // - Interface binding: `bind [static|dyn] Interface = ImplType`
-                let next = self.pending_tokens
-                    .front()
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let tok = self.lexer.next_token();
-                        self.pending_tokens.push_back(tok.clone());
-                        tok
-                    });
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
                 if matches!(next.kind, TokenKind::On) {
                     self.parse_di_binding().map(Node::DiBinding)
                 } else {
@@ -318,18 +315,17 @@ impl<'a> Parser<'a> {
             TokenKind::Context => {
                 // Check if this is a context statement (context expr:) or BDD DSL (context "string":)
                 // BDD DSL uses string literals after 'context' keyword
-                let next = self
-                    .pending_tokens
-                    .front()
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        let tok = self.lexer.next_token();
-                        self.pending_tokens.push_back(tok.clone());
-                        tok
-                    });
+                let next = self.pending_tokens.front().cloned().unwrap_or_else(|| {
+                    let tok = self.lexer.next_token();
+                    self.pending_tokens.push_back(tok.clone());
+                    tok
+                });
 
                 // If next token is a string literal, treat as BDD expression (no-paren call)
-                if matches!(&next.kind, TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_)) {
+                if matches!(
+                    &next.kind,
+                    TokenKind::String(_) | TokenKind::RawString(_) | TokenKind::FString(_)
+                ) {
                     self.parse_expression_or_assignment()
                 } else {
                     self.parse_context()

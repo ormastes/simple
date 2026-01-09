@@ -294,7 +294,11 @@ fn test_smf_header_read() {
     let bytes = fs::read(&smf_path).expect("read ok");
     let mut cursor = Cursor::new(bytes);
     let header = SmfHeader::read(&mut cursor);
-    assert!(header.is_ok(), "header read should succeed: {:?}", header.err());
+    assert!(
+        header.is_ok(),
+        "header read should succeed: {:?}",
+        header.err()
+    );
 }
 
 /// Test SmfHeader::is_executable()
@@ -401,7 +405,11 @@ fn test_runner_run_file() {
 
     let runner = Runner::new_no_gc();
     let result = runner.run_file(&src_path);
-    assert!(result.is_ok(), "run_file should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "run_file should succeed: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap(), 77);
 }
 
@@ -519,20 +527,29 @@ fn test_type_registry_new() {
 /// Test TypeRegistry::register()
 #[test]
 fn test_type_registry_register() {
-    use simple_compiler::hir::{HirType, TypeRegistry, Signedness};
+    use simple_compiler::hir::{HirType, Signedness, TypeRegistry};
 
     let mut registry = TypeRegistry::new();
-    let id = registry.register(HirType::Int { bits: 64, signedness: Signedness::Signed });
+    let id = registry.register(HirType::Int {
+        bits: 64,
+        signedness: Signedness::Signed,
+    });
     assert!(id.0 > 0 || id.0 == 0);
 }
 
 /// Test TypeRegistry::register_named()
 #[test]
 fn test_type_registry_register_named() {
-    use simple_compiler::hir::{HirType, TypeRegistry, Signedness};
+    use simple_compiler::hir::{HirType, Signedness, TypeRegistry};
 
     let mut registry = TypeRegistry::new();
-    let id = registry.register_named("MyType".to_string(), HirType::Int { bits: 64, signedness: Signedness::Signed });
+    let id = registry.register_named(
+        "MyType".to_string(),
+        HirType::Int {
+            bits: 64,
+            signedness: Signedness::Signed,
+        },
+    );
     assert!(id.0 >= 0);
 }
 
@@ -567,8 +584,8 @@ fn test_type_registry_lookup() {
 /// Test MirFunction::new()
 #[test]
 fn test_mir_function_new() {
-    use simple_compiler::mir::{MirFunction, Visibility};
     use simple_compiler::hir::TypeId;
+    use simple_compiler::mir::{MirFunction, Visibility};
 
     let func = MirFunction::new("test_func".to_string(), TypeId(0), Visibility::Public);
     assert_eq!(func.name, "test_func");
@@ -577,8 +594,8 @@ fn test_mir_function_new() {
 /// Test MirFunction::new_vreg()
 #[test]
 fn test_mir_function_new_vreg() {
-    use simple_compiler::mir::{MirFunction, Visibility};
     use simple_compiler::hir::TypeId;
+    use simple_compiler::mir::{MirFunction, Visibility};
 
     let mut func = MirFunction::new("vreg_test".to_string(), TypeId(0), Visibility::Public);
     let vreg1 = func.new_vreg();
@@ -589,8 +606,8 @@ fn test_mir_function_new_vreg() {
 /// Test MirFunction::new_block()
 #[test]
 fn test_mir_function_new_block() {
-    use simple_compiler::mir::{MirFunction, Visibility};
     use simple_compiler::hir::TypeId;
+    use simple_compiler::mir::{MirFunction, Visibility};
 
     let mut func = MirFunction::new("block_test".to_string(), TypeId(0), Visibility::Public);
     let block1 = func.new_block();
@@ -601,8 +618,8 @@ fn test_mir_function_new_block() {
 /// Test MirFunction::block()
 #[test]
 fn test_mir_function_block() {
-    use simple_compiler::mir::{MirFunction, Visibility};
     use simple_compiler::hir::TypeId;
+    use simple_compiler::mir::{MirFunction, Visibility};
 
     let mut func = MirFunction::new("block_access".to_string(), TypeId(0), Visibility::Public);
     let block_id = func.new_block();
@@ -614,8 +631,8 @@ fn test_mir_function_block() {
 /// Test MirFunction::block_mut()
 #[test]
 fn test_mir_function_block_mut() {
-    use simple_compiler::mir::{MirFunction, Visibility};
     use simple_compiler::hir::TypeId;
+    use simple_compiler::mir::{MirFunction, Visibility};
 
     let mut func = MirFunction::new("block_mut_test".to_string(), TypeId(0), Visibility::Public);
     let block_id = func.new_block();
@@ -631,7 +648,7 @@ fn test_mir_function_block_mut() {
 /// Test MirBlock::new()
 #[test]
 fn test_mir_block_new() {
-    use simple_compiler::mir::{MirBlock, BlockId};
+    use simple_compiler::mir::{BlockId, MirBlock};
 
     let block = MirBlock::new(BlockId(0));
     assert_eq!(block.id.0, 0);
@@ -730,7 +747,11 @@ fn test_lowerer_lower_module() {
 
     let lowerer = Lowerer::new();
     let result = lowerer.lower_module(&ast);
-    assert!(result.is_ok(), "lower_module should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "lower_module should succeed: {:?}",
+        result.err()
+    );
 }
 
 // =============================================================================
@@ -743,6 +764,10 @@ fn test_run_code_function() {
     use simple_driver::run_code;
 
     let result = run_code("main = 42", &[], "");
-    assert!(result.is_ok(), "run_code should succeed: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "run_code should succeed: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap().exit_code, 42);
 }

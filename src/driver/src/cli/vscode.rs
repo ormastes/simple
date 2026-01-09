@@ -44,7 +44,9 @@ pub fn vscode_build(source: &PathBuf, options: VsCodeBuildOptions) -> i32 {
     // Compile Simple to WASM
     println!("Compiling {} to WASM...", source.display());
 
-    let wasm_path = options.output_dir.join(format!("{}.wasm", options.extension_name));
+    let wasm_path = options
+        .output_dir
+        .join(format!("{}.wasm", options.extension_name));
 
     let wasm_result = compile_to_wasm(source, &wasm_path, options.optimize);
 
@@ -92,7 +94,10 @@ pub fn vscode_build(source: &PathBuf, options: VsCodeBuildOptions) -> i32 {
     println!("   Directory: {}", options.output_dir.display());
     println!("   WASM:      {}.wasm", options.extension_name);
     println!("   Entry:     extension.js");
-    println!("\n🚀 To test: code --extensionDevelopmentPath={}", options.output_dir.display());
+    println!(
+        "\n🚀 To test: code --extensionDevelopmentPath={}",
+        options.output_dir.display()
+    );
 
     0
 }
@@ -119,9 +124,7 @@ pub fn vscode_package(options: VsCodePackageOptions) -> i32 {
     println!("Packaging VSCode extension...");
 
     // Check if vsce is available
-    let vsce_check = Command::new("vsce")
-        .arg("--version")
-        .output();
+    let vsce_check = Command::new("vsce").arg("--version").output();
 
     if vsce_check.is_err() {
         eprintln!("error: vsce (Visual Studio Code Extension) not found");
@@ -133,7 +136,10 @@ pub fn vscode_package(options: VsCodePackageOptions) -> i32 {
     let result = Command::new("vsce")
         .arg("package")
         .arg("--out")
-        .arg(format!("{}-{}.vsix", options.extension_name, options.version))
+        .arg(format!(
+            "{}-{}.vsix",
+            options.extension_name, options.version
+        ))
         .current_dir(&options.source_dir)
         .status();
 
@@ -141,7 +147,8 @@ pub fn vscode_package(options: VsCodePackageOptions) -> i32 {
         Ok(status) if status.success() => {
             println!("✓ Packaged extension");
             println!("\n✅ Packaging complete!");
-            println!("   Output: {}/{}-{}.vsix",
+            println!(
+                "   Output: {}/{}-{}.vsix",
                 options.source_dir.display(),
                 options.extension_name,
                 options.version
@@ -204,7 +211,7 @@ pub fn vscode_publish(options: VsCodePublishOptions) -> i32 {
 // Helper functions
 
 fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize, String> {
-    // TODO: Integrate with existing WASM compiler
+    // TODO: [driver][P3] Integrate with existing WASM compiler
 
     // WASM magic number + version
     let mut wasm_bytes = vec![
@@ -218,8 +225,7 @@ fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize
 
     let size = wasm_bytes.len();
 
-    fs::write(output, &wasm_bytes)
-        .map_err(|e| format!("Failed to write WASM: {}", e))?;
+    fs::write(output, &wasm_bytes).map_err(|e| format!("Failed to write WASM: {}", e))?;
 
     Ok(size)
 }
@@ -246,7 +252,8 @@ fn generate_package_json(options: &VsCodeBuildOptions) -> String {
         r#""\*""#.to_string()
     };
 
-    format!(r#"{{
+    format!(
+        r#"{{
   "name": "{}",
   "displayName": "{}",
   "description": "{}",
@@ -287,13 +294,18 @@ fn generate_package_json(options: &VsCodeBuildOptions) -> String {
         options.display_name,
         options.description,
         options.version,
-        if options.publisher.is_empty() { "publisher" } else { &options.publisher },
+        if options.publisher.is_empty() {
+            "publisher"
+        } else {
+            &options.publisher
+        },
         activation_events
     )
 }
 
 fn generate_extension_js(options: &VsCodeBuildOptions) -> String {
-    format!(r#"// VSCode Extension Entry Point
+    format!(
+        r#"// VSCode Extension Entry Point
 const vscode = require('vscode');
 const fs = require('fs');
 const path = require('path');
@@ -310,11 +322,11 @@ async function loadWasm() {{
         env: {{
             // Commands API
             vscode_commands_register: (commandPtr, callbackId) => {{
-                // TODO: Register command
+                // TODO: [driver][P3] Register command
                 return callbackId;
             }},
             vscode_commands_execute: (commandPtr, argsJsonPtr) => {{
-                // TODO: Execute command
+                // TODO: [driver][P3] Execute command
                 return 0;
             }},
 
@@ -322,7 +334,7 @@ async function loadWasm() {{
             vscode_languages_register_completion: (languagePtr, callbackId) => {{
                 vscode.languages.registerCompletionItemProvider('simple', {{
                     provideCompletionItems(document, position) {{
-                        // TODO: Call WASM completion provider
+                        // TODO: [driver][P3] Call WASM completion provider
                         return [];
                     }}
                 }});
@@ -332,7 +344,7 @@ async function loadWasm() {{
             vscode_languages_register_hover: (languagePtr, callbackId) => {{
                 vscode.languages.registerHoverProvider('simple', {{
                     provideHover(document, position) {{
-                        // TODO: Call WASM hover provider
+                        // TODO: [driver][P3] Call WASM hover provider
                         return null;
                     }}
                 }});
@@ -345,7 +357,7 @@ async function loadWasm() {{
 
             // Window API
             vscode_window_show_message: (messagePtr, messageType) => {{
-                const message = ""; // TODO: Convert ptr to string
+                const message = ""; // TODO: [driver][P3] Convert ptr to string
                 if (messageType === 0) vscode.window.showInformationMessage(message);
                 else if (messageType === 1) vscode.window.showWarningMessage(message);
                 else if (messageType === 2) vscode.window.showErrorMessage(message);
@@ -357,7 +369,7 @@ async function loadWasm() {{
 
             // Workspace API
             vscode_workspace_get_configuration: (sectionPtr) => {{
-                // TODO: Get configuration
+                // TODO: [driver][P3] Get configuration
                 return 0;
             }},
         }}
@@ -398,11 +410,14 @@ module.exports = {{
     activate,
     deactivate
 }};
-"#, options.extension_name, options.display_name)
+"#,
+        options.extension_name, options.display_name
+    )
 }
 
 fn generate_readme(options: &VsCodeBuildOptions) -> String {
-    format!(r#"# {}
+    format!(
+        r#"# {}
 
 {}
 
@@ -433,5 +448,7 @@ Initial release
 This extension is built using the Simple programming language and compiled to WebAssembly for maximum performance.
 
 **Enjoy!**
-"#, options.display_name, options.description)
+"#,
+        options.display_name, options.description
+    )
 }

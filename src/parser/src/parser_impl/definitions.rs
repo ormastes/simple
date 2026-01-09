@@ -33,7 +33,10 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_enum_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    pub(super) fn parse_enum_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_enum()?;
         if let Node::Enum(ref mut e) = node {
             // Prefer leading doc comment, fall back to inline docstring from body
@@ -42,7 +45,10 @@ impl<'a> Parser<'a> {
         Ok(node)
     }
 
-    pub(super) fn parse_union_with_doc(&mut self, doc_comment: Option<DocComment>) -> Result<Node, ParseError> {
+    pub(super) fn parse_union_with_doc(
+        &mut self,
+        doc_comment: Option<DocComment>,
+    ) -> Result<Node, ParseError> {
         let mut node = self.parse_union()?;
         if let Node::Enum(ref mut e) = node {
             // Prefer leading doc comment, fall back to inline docstring from body

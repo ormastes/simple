@@ -6,10 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::error::CompileError;
 use crate::aop_config::{parse_aop_config, AopConfig};
 use crate::build_mode::DeterministicConfig;
 use crate::di::{parse_di_config, DiConfig};
+use crate::error::CompileError;
 use crate::hir::{LayoutAnchor, LayoutConfig, LayoutPhase};
 use crate::lint::{LintConfig, LintLevel, LintName};
 use crate::module_resolver::ModuleResolver;
@@ -181,7 +181,8 @@ impl ProjectContext {
             .map_err(|e| CompileError::Semantic(format!("invalid aop config: {}", e)))?;
 
         // Parse deterministic build configuration
-        let deterministic = if let Some(build_table) = toml.get("build").and_then(|v| v.as_table()) {
+        let deterministic = if let Some(build_table) = toml.get("build").and_then(|v| v.as_table())
+        {
             let enabled = build_table
                 .get("deterministic")
                 .and_then(|v| v.as_bool())
@@ -319,7 +320,9 @@ impl ProjectContext {
 
     /// Check if a function is an anchor point
     pub fn is_layout_anchor(&self, function_name: &str) -> Option<LayoutAnchor> {
-        self.layout_config.as_ref().and_then(|c| c.is_anchor(function_name))
+        self.layout_config
+            .as_ref()
+            .and_then(|c| c.is_anchor(function_name))
     }
 }
 

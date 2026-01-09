@@ -20,7 +20,7 @@ pub(super) fn clean_doc_comment(content: &str) -> String {
 
 impl<'a> super::Lexer<'a> {
     /// Parse nested block comment content with proper depth tracking
-    /// 
+    ///
     /// Returns the cleaned comment content. Used for both doc comments
     /// and regular block comments that support nesting.
     pub(super) fn parse_nested_comment(&mut self) -> String {

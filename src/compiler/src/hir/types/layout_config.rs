@@ -83,10 +83,10 @@ pub struct PhaseBudgets {
 impl Default for PhaseBudgets {
     fn default() -> Self {
         Self {
-            startup: 8,      // 32KB default for startup
-            first_frame: 4,  // 16KB default for first frame
-            steady: 0,       // Unlimited
-            cold: 0,         // Unlimited
+            startup: 8,     // 32KB default for startup
+            first_frame: 4, // 16KB default for first frame
+            steady: 0,      // Unlimited
+            cold: 0,        // Unlimited
         }
     }
 }
@@ -343,8 +343,7 @@ impl LayoutConfig {
             return Err(LayoutConfigError::NotFound(path.display().to_string()));
         }
 
-        let root = parse_file(path)
-            .map_err(|e| LayoutConfigError::ParseError(format!("{}", e)))?;
+        let root = parse_file(path).map_err(|e| LayoutConfigError::ParseError(format!("{}", e)))?;
 
         Self::from_sdn_value(&root, Some(path.display().to_string()))
     }
@@ -353,8 +352,7 @@ impl LayoutConfig {
     pub fn from_str(s: &str) -> Result<Self, LayoutConfigError> {
         use simple_sdn::{parse, SdnValue};
 
-        let root = parse(s)
-            .map_err(|e| LayoutConfigError::ParseError(format!("{}", e)))?;
+        let root = parse(s).map_err(|e| LayoutConfigError::ParseError(format!("{}", e)))?;
 
         Self::from_sdn_value(&root, None)
     }
@@ -444,7 +442,9 @@ impl LayoutConfig {
                             _ => 0,
                         };
 
-                        config.recorded.push(RecordedFunction::new(&name, phase, size, call_count));
+                        config
+                            .recorded
+                            .push(RecordedFunction::new(&name, phase, size, call_count));
                     }
                 }
             }
@@ -516,15 +516,26 @@ impl LayoutConfig {
         }
 
         // Merge patterns (append)
-        self.patterns.startup.extend(other.patterns.startup.iter().cloned());
-        self.patterns.first_frame.extend(other.patterns.first_frame.iter().cloned());
-        self.patterns.steady.extend(other.patterns.steady.iter().cloned());
-        self.patterns.cold.extend(other.patterns.cold.iter().cloned());
+        self.patterns
+            .startup
+            .extend(other.patterns.startup.iter().cloned());
+        self.patterns
+            .first_frame
+            .extend(other.patterns.first_frame.iter().cloned());
+        self.patterns
+            .steady
+            .extend(other.patterns.steady.iter().cloned());
+        self.patterns
+            .cold
+            .extend(other.patterns.cold.iter().cloned());
 
         // Merge anchor patterns
-        self.anchor_patterns.event_loop.extend(other.anchor_patterns.event_loop.iter().cloned());
+        self.anchor_patterns
+            .event_loop
+            .extend(other.anchor_patterns.event_loop.iter().cloned());
         for (name, patterns) in &other.anchor_patterns.custom {
-            self.anchor_patterns.custom
+            self.anchor_patterns
+                .custom
                 .entry(name.clone())
                 .or_insert_with(Vec::new)
                 .extend(patterns.iter().cloned());
@@ -550,7 +561,10 @@ impl LayoutConfig {
         // Budgets
         output.push_str("    budgets:\n");
         output.push_str(&format!("        startup: {}\n", self.budgets.startup));
-        output.push_str(&format!("        first_frame: {}\n", self.budgets.first_frame));
+        output.push_str(&format!(
+            "        first_frame: {}\n",
+            self.budgets.first_frame
+        ));
         output.push_str(&format!("        steady: {}\n", self.budgets.steady));
         output.push_str(&format!("        cold: {}\n\n", self.budgets.cold));
 
@@ -561,13 +575,22 @@ impl LayoutConfig {
         {
             output.push_str("    patterns:\n");
             if !self.patterns.startup.is_empty() {
-                output.push_str(&format!("        startup = [{}]\n", self.patterns.startup.join(", ")));
+                output.push_str(&format!(
+                    "        startup = [{}]\n",
+                    self.patterns.startup.join(", ")
+                ));
             }
             if !self.patterns.first_frame.is_empty() {
-                output.push_str(&format!("        first_frame = [{}]\n", self.patterns.first_frame.join(", ")));
+                output.push_str(&format!(
+                    "        first_frame = [{}]\n",
+                    self.patterns.first_frame.join(", ")
+                ));
             }
             if !self.patterns.cold.is_empty() {
-                output.push_str(&format!("        cold = [{}]\n", self.patterns.cold.join(", ")));
+                output.push_str(&format!(
+                    "        cold = [{}]\n",
+                    self.patterns.cold.join(", ")
+                ));
             }
             output.push('\n');
         }
@@ -655,7 +678,10 @@ mod tests {
         patterns.cold = vec!["help_*".to_string(), "debug_*".to_string()];
 
         assert_eq!(patterns.find_phase("init_app"), Some(LayoutPhase::Startup));
-        assert_eq!(patterns.find_phase("parse_args"), Some(LayoutPhase::Startup));
+        assert_eq!(
+            patterns.find_phase("parse_args"),
+            Some(LayoutPhase::Startup)
+        );
         assert_eq!(patterns.find_phase("help_message"), Some(LayoutPhase::Cold));
         assert_eq!(patterns.find_phase("run_loop"), None);
     }
@@ -689,8 +715,15 @@ mod tests {
         let mut config = LayoutConfig::new();
         config.patterns.startup = vec!["init_*".to_string()];
         config.patterns.cold = vec!["help_*".to_string()];
-        config.overrides.insert("special_func".to_string(), LayoutPhase::FirstFrame);
-        config.recorded.push(RecordedFunction::new("recorded_func", LayoutPhase::Startup, 100, 5));
+        config
+            .overrides
+            .insert("special_func".to_string(), LayoutPhase::FirstFrame);
+        config.recorded.push(RecordedFunction::new(
+            "recorded_func",
+            LayoutPhase::Startup,
+            100,
+            5,
+        ));
 
         // Override takes precedence
         assert_eq!(config.get_phase("special_func"), LayoutPhase::FirstFrame);
@@ -712,7 +745,9 @@ mod tests {
         config.budgets.startup = 10;
         config.patterns.startup = vec!["init_*".to_string()];
         config.anchor_patterns.event_loop = vec!["main_loop".to_string()];
-        config.recorded.push(RecordedFunction::new("main", LayoutPhase::Startup, 256, 1));
+        config
+            .recorded
+            .push(RecordedFunction::new("main", LayoutPhase::Startup, 256, 1));
 
         let sdn = config.to_sdn();
         assert!(sdn.contains("page_size: 4096"));

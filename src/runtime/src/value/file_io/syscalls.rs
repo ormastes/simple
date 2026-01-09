@@ -49,7 +49,11 @@ pub extern "C" fn sys_mmap(
 
         unsafe {
             let ptr = mmap(
-                if addr == 0 { std::ptr::null_mut() } else { addr as *mut libc::c_void },
+                if addr == 0 {
+                    std::ptr::null_mut()
+                } else {
+                    addr as *mut libc::c_void
+                },
                 length as libc::size_t,
                 prot,
                 flags,
@@ -69,7 +73,9 @@ pub extern "C" fn sys_mmap(
     {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-        use windows_sys::Win32::Storage::FileSystem::{FILE_MAP_READ, FILE_MAP_WRITE, FILE_MAP_COPY};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_MAP_COPY, FILE_MAP_READ, FILE_MAP_WRITE,
+        };
         use windows_sys::Win32::System::Memory::{
             CreateFileMappingW, MapViewOfFile, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
         };
@@ -86,12 +92,12 @@ pub extern "C" fn sys_mmap(
             let protect = if prot & 0x2 != 0 {
                 // PROT_WRITE
                 if flags & 0x2 != 0 {
-                    PAGE_WRITECOPY  // MAP_PRIVATE with write
+                    PAGE_WRITECOPY // MAP_PRIVATE with write
                 } else {
-                    PAGE_READWRITE  // MAP_SHARED with write
+                    PAGE_READWRITE // MAP_SHARED with write
                 }
             } else {
-                PAGE_READONLY  // Read-only
+                PAGE_READONLY // Read-only
             };
 
             // Create file mapping object
@@ -99,9 +105,9 @@ pub extern "C" fn sys_mmap(
                 file_handle,
                 std::ptr::null(),
                 protect,
-                (length >> 32) as u32,  // High DWORD of size
-                (length & 0xFFFFFFFF) as u32,  // Low DWORD of size
-                std::ptr::null(),  // No name (anonymous)
+                (length >> 32) as u32,        // High DWORD of size
+                (length & 0xFFFFFFFF) as u32, // Low DWORD of size
+                std::ptr::null(),             // No name (anonymous)
             );
 
             if map_handle == 0 || map_handle == INVALID_HANDLE_VALUE as isize {
@@ -114,14 +120,14 @@ pub extern "C" fn sys_mmap(
             } else if prot & 0x1 != 0 {
                 FILE_MAP_READ
             } else {
-                FILE_MAP_READ  // Default to read
+                FILE_MAP_READ // Default to read
             };
 
             let ptr = MapViewOfFile(
                 map_handle,
                 desired_access,
-                (offset >> 32) as u32,  // High DWORD of offset
-                (offset & 0xFFFFFFFF) as u32,  // Low DWORD of offset
+                (offset >> 32) as u32,        // High DWORD of offset
+                (offset & 0xFFFFFFFF) as u32, // Low DWORD of offset
                 length as usize,
             );
 
@@ -163,9 +169,7 @@ pub extern "C" fn sys_munmap(addr: i64, length: u64) -> i32 {
     {
         use libc::munmap;
 
-        unsafe {
-            munmap(addr as *mut libc::c_void, length as libc::size_t)
-        }
+        unsafe { munmap(addr as *mut libc::c_void, length as libc::size_t) }
     }
 
     #[cfg(target_family = "windows")]
@@ -175,9 +179,9 @@ pub extern "C" fn sys_munmap(addr: i64, length: u64) -> i32 {
         unsafe {
             // UnmapViewOfFile unmaps entire view (length parameter ignored)
             if UnmapViewOfFile(addr as *const std::ffi::c_void) != 0 {
-                0  // Success
+                0 // Success
             } else {
-                -1  // Failure
+                -1 // Failure
             }
         }
     }
@@ -219,18 +223,14 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
     {
         use libc::madvise;
 
-        unsafe {
-            madvise(addr as *mut libc::c_void, length as libc::size_t, advice)
-        }
+        unsafe { madvise(addr as *mut libc::c_void, length as libc::size_t, advice) }
     }
 
     #[cfg(all(target_family = "unix", not(target_os = "linux")))]
     {
         use libc::madvise;
 
-        unsafe {
-            madvise(addr as *mut libc::c_void, length as libc::size_t, advice)
-        }
+        unsafe { madvise(addr as *mut libc::c_void, length as libc::size_t, advice) }
     }
 
     #[cfg(target_family = "windows")]
@@ -249,11 +249,12 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
                     };
 
                     if PrefetchVirtualMemory(
-                        std::ptr::null_mut(),  // Current process
-                        1,  // One range
+                        std::ptr::null_mut(), // Current process
+                        1,                    // One range
                         &mut range as *mut WIN32_MEMORY_RANGE_ENTRY,
-                        0,  // No flags
-                    ) != 0 {
+                        0, // No flags
+                    ) != 0
+                    {
                         0
                     } else {
                         // Not fatal if unsupported (older Windows)
@@ -262,10 +263,7 @@ pub extern "C" fn sys_madvise(addr: i64, length: u64, advice: i32) -> i32 {
                 }
                 4 => {
                     // MADV_DONTNEED -> DiscardVirtualMemory (Windows 8.1+)
-                    if DiscardVirtualMemory(
-                        addr as *mut std::ffi::c_void,
-                        length as usize,
-                    ) != 0 {
+                    if DiscardVirtualMemory(addr as *mut std::ffi::c_void, length as usize) != 0 {
                         0
                     } else {
                         // Not fatal if unsupported
@@ -339,8 +337,8 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::Storage::FileSystem::{
-            CreateFileA, CREATE_ALWAYS, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
-            FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING,
+            CreateFileA, CREATE_ALWAYS, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ,
+            FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING, TRUNCATE_EXISTING,
         };
 
         unsafe {
@@ -352,7 +350,7 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
                 0 => {
                     // O_RDONLY
                     let disposition = if flags & 64 != 0 {
-                        OPEN_ALWAYS  // O_CREAT
+                        OPEN_ALWAYS // O_CREAT
                     } else {
                         OPEN_EXISTING
                     };
@@ -362,12 +360,12 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
                     // O_WRONLY
                     let disposition = if flags & 64 != 0 {
                         if flags & 512 != 0 {
-                            CREATE_ALWAYS  // O_CREAT | O_TRUNC
+                            CREATE_ALWAYS // O_CREAT | O_TRUNC
                         } else {
-                            OPEN_ALWAYS  // O_CREAT
+                            OPEN_ALWAYS // O_CREAT
                         }
                     } else if flags & 512 != 0 {
-                        TRUNCATE_EXISTING  // O_TRUNC
+                        TRUNCATE_EXISTING // O_TRUNC
                     } else {
                         OPEN_EXISTING
                     };
@@ -377,12 +375,12 @@ pub extern "C" fn sys_open(path_ptr: i64, flags: i32, mode: i32) -> i32 {
                     // O_RDWR
                     let disposition = if flags & 64 != 0 {
                         if flags & 512 != 0 {
-                            CREATE_ALWAYS  // O_CREAT | O_TRUNC
+                            CREATE_ALWAYS // O_CREAT | O_TRUNC
                         } else {
-                            OPEN_ALWAYS  // O_CREAT
+                            OPEN_ALWAYS // O_CREAT
                         }
                     } else if flags & 512 != 0 {
-                        TRUNCATE_EXISTING  // O_TRUNC
+                        TRUNCATE_EXISTING // O_TRUNC
                     } else {
                         OPEN_EXISTING
                     };
@@ -435,9 +433,7 @@ pub extern "C" fn sys_close(fd: i32) -> i32 {
     {
         use libc::close;
 
-        unsafe {
-            close(fd)
-        }
+        unsafe { close(fd) }
     }
 
     #[cfg(target_family = "windows")]
@@ -446,9 +442,9 @@ pub extern "C" fn sys_close(fd: i32) -> i32 {
 
         unsafe {
             if CloseHandle(fd as isize) != 0 {
-                0  // Success
+                0 // Success
             } else {
-                -1  // Failure
+                -1 // Failure
             }
         }
     }

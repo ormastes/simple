@@ -268,7 +268,15 @@ pub unsafe extern "C" fn simple_interp_call(
     // Look up and call the function
     let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
-            call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
+            call_interpreted_function(
+                &func,
+                args.clone(),
+                env,
+                funcs,
+                classes,
+                enums,
+                impl_methods,
+            )
         } else {
             Err(CompileError::Semantic(format!(
                 "function not found: {}",
@@ -506,7 +514,15 @@ unsafe extern "C" fn interp_call_handler(
     // Look up and call the function
     let result = with_interp_state(|env, funcs, classes, enums, impl_methods| {
         if let Some(func) = funcs.get(name).cloned() {
-            call_interpreted_function(&func, args.clone(), env, funcs, classes, enums, impl_methods)
+            call_interpreted_function(
+                &func,
+                args.clone(),
+                env,
+                funcs,
+                classes,
+                enums,
+                impl_methods,
+            )
         } else {
             tracing::error!("rt_interp_call: function not found: {}", name);
             Err(CompileError::Semantic(format!(

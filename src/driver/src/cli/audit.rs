@@ -1,6 +1,6 @@
 //! Build audit commands: spec coverage, build replay.
 
-use simple_compiler::{BuildLog, SpecCoverageReport, find_spec_file};
+use simple_compiler::{find_spec_file, BuildLog, SpecCoverageReport};
 use std::path::PathBuf;
 
 /// Show specification coverage report
@@ -27,7 +27,8 @@ pub fn run_spec_coverage(args: &[String]) -> i32 {
     // Parse options
     let by_category = args.iter().any(|a| a == "--by-category");
     let show_missing = args.iter().any(|a| a == "--missing");
-    let html_report = args.iter()
+    let html_report = args
+        .iter()
         .find(|a| a.starts_with("--report="))
         .and_then(|a| a.strip_prefix("--report="));
 
@@ -92,16 +93,24 @@ pub fn run_replay(args: &[String]) -> i32 {
             println!();
         }
 
-        println!("  Duration difference: {:+} ms", comparison.duration_difference_ms);
+        println!(
+            "  Duration difference: {:+} ms",
+            comparison.duration_difference_ms
+        );
         println!();
 
         if !comparison.phase_differences.is_empty() {
             println!("  Phase differences:");
             for diff in &comparison.phase_differences {
-                println!("    {}: {:+} ms{}",
+                println!(
+                    "    {}: {:+} ms{}",
                     diff.phase_name,
                     diff.duration_diff_ms,
-                    if diff.result_changed { " (result changed)" } else { "" }
+                    if diff.result_changed {
+                        " (result changed)"
+                    } else {
+                        ""
+                    }
                 );
             }
         } else {
@@ -139,7 +148,10 @@ pub fn run_replay(args: &[String]) -> i32 {
             };
 
             if let (Some(file), Some(line), Some(column)) = (&diag.file, diag.line, diag.column) {
-                println!("{}:{}:{}: {}: {}", file, line, column, level_str, diag.message);
+                println!(
+                    "{}:{}:{}: {}: {}",
+                    file, line, column, level_str, diag.message
+                );
             } else {
                 println!("{}: {}", level_str, diag.message);
             }
@@ -197,11 +209,16 @@ pub fn run_replay(args: &[String]) -> i32 {
             simple_compiler::PhaseResult::Failed => "✗",
             simple_compiler::PhaseResult::Skipped => "⊘",
         };
-        println!("  {} {}: {} ms{}",
+        println!(
+            "  {} {}: {} ms{}",
             result_str,
             phase.name,
             phase.duration_ms,
-            phase.error.as_ref().map(|e| format!(" ({})", e)).unwrap_or_default()
+            phase
+                .error
+                .as_ref()
+                .map(|e| format!(" ({})", e))
+                .unwrap_or_default()
         );
     }
     println!();
@@ -226,8 +243,16 @@ pub fn run_replay(args: &[String]) -> i32 {
 
     if !log.diagnostics.is_empty() {
         println!();
-        println!("Diagnostics: {} errors, {} warnings", log.error_count(), log.warning_count());
+        println!(
+            "Diagnostics: {} errors, {} warnings",
+            log.error_count(),
+            log.warning_count()
+        );
     }
 
-    if log.error_count() > 0 { 1 } else { 0 }
+    if log.error_count() > 0 {
+        1
+    } else {
+        0
+    }
 }

@@ -40,9 +40,11 @@ pub fn electron_build(source: &PathBuf, options: ElectronBuildOptions) -> i32 {
     // Compile Simple to WASM
     println!("Compiling {} to WASM...", source.display());
 
-    let wasm_path = options.output_dir.join(format!("{}.wasm", options.app_name));
+    let wasm_path = options
+        .output_dir
+        .join(format!("{}.wasm", options.app_name));
 
-    // TODO: Actually compile to WASM using existing compiler
+    // TODO: [driver][P3] Actually compile to WASM using existing compiler
     // For now, create placeholder
     let wasm_result = compile_to_wasm(source, &wasm_path, options.optimize);
 
@@ -89,7 +91,10 @@ pub fn electron_build(source: &PathBuf, options: ElectronBuildOptions) -> i32 {
     println!("   Directory: {}", options.output_dir.display());
     println!("   WASM:      {}.wasm", options.app_name);
     println!("   Entry:     main.js");
-    println!("\n🚀 To run: cd {} && npm install && npm start", options.output_dir.display());
+    println!(
+        "\n🚀 To run: cd {} && npm install && npm start",
+        options.output_dir.display()
+    );
 
     0
 }
@@ -98,8 +103,8 @@ pub fn electron_build(source: &PathBuf, options: ElectronBuildOptions) -> i32 {
 #[derive(Clone, Debug)]
 pub struct ElectronPackageOptions {
     pub source_dir: PathBuf,
-    pub platforms: Vec<String>,  // "win", "mac", "linux", "all"
-    pub arch: Vec<String>,        // "x64", "arm64", "all"
+    pub platforms: Vec<String>, // "win", "mac", "linux", "all"
+    pub arch: Vec<String>,      // "x64", "arm64", "all"
     pub app_name: String,
     pub version: String,
 }
@@ -120,9 +125,7 @@ pub fn electron_package(options: ElectronPackageOptions) -> i32 {
     println!("Packaging Electron app...");
 
     // Check if electron-builder is available
-    let builder_check = Command::new("electron-builder")
-        .arg("--version")
-        .output();
+    let builder_check = Command::new("electron-builder").arg("--version").output();
 
     if builder_check.is_err() {
         eprintln!("error: electron-builder not found");
@@ -163,7 +166,11 @@ pub fn electron_package(options: ElectronPackageOptions) -> i32 {
                 println!("✓ Packaged for {}", platform);
             }
             Ok(status) => {
-                eprintln!("error: Packaging failed for {} (exit code: {:?})", platform, status.code());
+                eprintln!(
+                    "error: Packaging failed for {} (exit code: {:?})",
+                    platform,
+                    status.code()
+                );
                 return 1;
             }
             Err(e) => {
@@ -182,7 +189,7 @@ pub fn electron_package(options: ElectronPackageOptions) -> i32 {
 // Helper functions
 
 fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize, String> {
-    // TODO: Integrate with existing WASM compiler
+    // TODO: [driver][P3] Integrate with existing WASM compiler
     // For now, create a minimal WASM module
 
     // WASM magic number + version
@@ -201,8 +208,7 @@ fn compile_to_wasm(source: &Path, output: &Path, optimize: bool) -> Result<usize
 
     let size = wasm_bytes.len();
 
-    fs::write(output, &wasm_bytes)
-        .map_err(|e| format!("Failed to write WASM: {}", e))?;
+    fs::write(output, &wasm_bytes).map_err(|e| format!("Failed to write WASM: {}", e))?;
 
     Ok(size)
 }
@@ -224,7 +230,8 @@ fn run_wasm_opt(wasm_path: &Path) -> Result<(), String> {
 }
 
 fn generate_package_json(options: &ElectronBuildOptions) -> String {
-    format!(r#"{{
+    format!(
+        r#"{{
   "name": "{}",
   "version": "{}",
   "description": "Electron app built with Simple",
@@ -239,11 +246,14 @@ fn generate_package_json(options: &ElectronBuildOptions) -> String {
     "electron": "^27.0.0"
   }}
 }}
-"#, options.app_name, options.version)
+"#,
+        options.app_name, options.version
+    )
 }
 
 fn generate_main_js(options: &ElectronBuildOptions) -> String {
-    format!(r#"// Electron Main Process
+    format!(
+        r#"// Electron Main Process
 const {{ app, Tray, powerMonitor, globalShortcut, clipboard, Notification }} = require('electron');
 const fs = require('fs');
 const path = require('path');
@@ -268,31 +278,31 @@ async function loadWasm() {{
                 return app.isReady() ? 1 : 0;
             }},
             electron_app_get_path: (namePtr) => {{
-                // TODO: Convert string ptr
+                // TODO: [driver][P3] Convert string ptr
                 return 0;
             }},
 
             // Tray FFI
             electron_tray_create: (titlePtr) => {{
-                // TODO: Create tray
+                // TODO: [driver][P3] Create tray
                 return 1;
             }},
             electron_tray_set_icon: (trayId, iconPathPtr) => {{
-                // TODO: Set tray icon
+                // TODO: [driver][P3] Set tray icon
             }},
 
             // Power monitor FFI
             electron_power_on: (eventPtr, callbackId) => {{
-                // TODO: Register power event
+                // TODO: [driver][P3] Register power event
             }},
             electron_power_get_battery_level: () => {{
-                // TODO: Get battery level
+                // TODO: [driver][P3] Get battery level
                 return 0.0;
             }},
 
             // Notification FFI
             electron_notification_show: (titlePtr, bodyPtr, optionsPtr) => {{
-                // TODO: Show notification
+                // TODO: [driver][P3] Show notification
                 return 1;
             }},
 
@@ -301,18 +311,18 @@ async function loadWasm() {{
                 return clipboard.readText();
             }},
             electron_clipboard_write_text: (textPtr) => {{
-                // TODO: Write to clipboard
+                // TODO: [driver][P3] Write to clipboard
             }},
 
             // Shortcuts FFI
             electron_shortcuts_register: (acceleratorPtr, callbackId) => {{
-                // TODO: Register shortcut
+                // TODO: [driver][P3] Register shortcut
                 return 1;
             }},
 
             // IPC FFI
             electron_ipc_send: (channelPtr, dataPtr) => {{
-                // TODO: Send IPC message
+                // TODO: [driver][P3] Send IPC message
             }},
         }}
     }};
@@ -348,5 +358,7 @@ app.on('window-all-closed', () => {{
 app.on('will-quit', () => {{
     // Cleanup
 }});
-"#, options.app_name)
+"#,
+        options.app_name
+    )
 }

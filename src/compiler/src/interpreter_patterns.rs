@@ -188,8 +188,17 @@ pub(crate) fn pattern_matches(
             }
         }
 
-        Pattern::Enum { name: enum_name, variant, payload } => {
-            if let Value::Enum { enum_name: ve, variant: vv, payload: value_payload } = value {
+        Pattern::Enum {
+            name: enum_name,
+            variant,
+            payload,
+        } => {
+            if let Value::Enum {
+                enum_name: ve,
+                variant: vv,
+                payload: value_payload,
+            } = value
+            {
                 if enum_name == ve && variant == vv {
                     // Both have no payload
                     if payload.is_none() && value_payload.is_none() {
@@ -233,7 +242,11 @@ pub(crate) fn pattern_matches(
         Pattern::Array(patterns) => match_sequence_pattern(value, patterns, bindings, enums, false),
 
         Pattern::Struct { name, fields } => {
-            if let Value::Object { class, fields: obj_fields } = value {
+            if let Value::Object {
+                class,
+                fields: obj_fields,
+            } = value
+            {
                 if class == name {
                     for (field_name, field_pat) in fields {
                         if let Some(field_val) = obj_fields.get(field_name) {
@@ -264,15 +277,13 @@ pub(crate) fn pattern_matches(
         Pattern::Typed { pattern, ty } => {
             let type_matches = match ty {
                 Type::Simple(name) => value.matches_type(name),
-                Type::Union(types) => {
-                    types.iter().any(|t| {
-                        if let Type::Simple(name) = t {
-                            value.matches_type(name)
-                        } else {
-                            true
-                        }
-                    })
-                }
+                Type::Union(types) => types.iter().any(|t| {
+                    if let Type::Simple(name) = t {
+                        value.matches_type(name)
+                    } else {
+                        true
+                    }
+                }),
                 _ => true,
             };
 
@@ -283,7 +294,11 @@ pub(crate) fn pattern_matches(
             }
         }
 
-        Pattern::Range { start, end, inclusive } => {
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => {
             // Range patterns only work with integers
             let Value::Int(val) = value else {
                 return Ok(false);
@@ -305,9 +320,7 @@ pub(crate) fn pattern_matches(
             }
         }
 
-        Pattern::Rest => {
-            Ok(true)
-        }
+        Pattern::Rest => Ok(true),
     }
 }
 

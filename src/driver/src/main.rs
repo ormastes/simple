@@ -33,6 +33,8 @@ use cli::audit::{run_replay, run_spec_coverage};
 use cli::basic::{create_runner, run_code, run_file, run_file_with_args, watch_file};
 use cli::code_quality::{run_fmt, run_lint};
 use cli::compile::{compile_file, list_linkers, list_targets};
+use cli::diagram_gen::{parse_diagram_args, print_diagram_help};
+use cli::doc_gen::{run_feature_gen, run_spec_gen, run_task_gen};
 use cli::gen_lean::run_gen_lean;
 use cli::help::{print_help, print_version, version};
 use cli::llm_tools::{run_context, run_diff, run_mcp};
@@ -42,7 +44,6 @@ use cli::test_runner;
 #[cfg(feature = "tui")]
 use cli::tui::run_tui_repl;
 use cli::web::{web_build, web_features, web_init, web_serve, WebBuildOptions, WebServeOptions};
-
 
 fn main() {
     // Check for --startup-metrics flag early (#1997)
@@ -57,7 +58,10 @@ fn main() {
     // PHASE 1: Early startup - parse args and start prefetching before runtime init
     let early_start = std::time::Instant::now();
     let early_config = simple_driver::parse_early_args(env::args().skip(1));
-    metrics.record(simple_driver::StartupPhase::EarlyArgParse, early_start.elapsed());
+    metrics.record(
+        simple_driver::StartupPhase::EarlyArgParse,
+        early_start.elapsed(),
+    );
 
     // Start prefetching input files in background (if enabled)
     let prefetch_start = std::time::Instant::now();
@@ -67,7 +71,10 @@ fn main() {
         None
     };
     if prefetch_handle.is_some() {
-        metrics.record(simple_driver::StartupPhase::FilePrefetch, prefetch_start.elapsed());
+        metrics.record(
+            simple_driver::StartupPhase::FilePrefetch,
+            prefetch_start.elapsed(),
+        );
     }
 
     // Pre-allocate resources based on app type
@@ -75,14 +82,20 @@ fn main() {
     let _resources = simple_driver::PreAllocatedResources::allocate(
         early_config.app_type,
         &early_config.window_hints,
-    ).ok();
-    metrics.record(simple_driver::StartupPhase::ResourceAllocation, resource_start.elapsed());
+    )
+    .ok();
+    metrics.record(
+        simple_driver::StartupPhase::ResourceAllocation,
+        resource_start.elapsed(),
+    );
 
     // PHASE 2: Normal initialization (happens in parallel with prefetching)
     cli::init::init_runtime(&mut metrics);
 
     // Reconstruct args from early config for compatibility with existing code
-    let args: Vec<String> = early_config.remaining_args.iter()
+    let args: Vec<String> = early_config
+        .remaining_args
+        .iter()
         .map(|s| s.to_string_lossy().to_string())
         .collect();
 
@@ -104,7 +117,10 @@ fn main() {
             eprintln!("warning: {}", e);
             eprintln!("Continuing without full sandboxing...");
         }
-        metrics.record(simple_driver::StartupPhase::SandboxSetup, sandbox_start.elapsed());
+        metrics.record(
+            simple_driver::StartupPhase::SandboxSetup,
+            sandbox_start.elapsed(),
+        );
     }
 
     // Filter out flags (GC and sandbox flags) and their values
@@ -407,11 +423,7 @@ fn main() {
                     let watch = !args.iter().any(|a| a == "--no-watch");
                     let open = args.iter().any(|a| a == "--open");
 
-                    let serve_options = WebServeOptions {
-                        port,
-                        watch,
-                        open,
-                    };
+                    let serve_options = WebServeOptions { port, watch, open };
 
                     std::process::exit(web_serve(&source, build_options, serve_options));
                 }
@@ -490,8 +502,53 @@ fn main() {
         "gen-lean" => {
             std::process::exit(run_gen_lean(&args));
         }
+        "feature-gen" => {
+            std::process::exit(run_feature_gen(&args));
+        }
+        "task-gen" => {
+            std::process::exit(run_task_gen(&args));
+        }
+        "spec-gen" => {
+            std::process::exit(run_spec_gen(&args));
+        }
         "replay" => {
             std::process::exit(run_replay(&args));
+        }
+        "diagram" => {
+            // Check for help
+            if args.iter().any(|a| a == "-h" || a == "--help") {
+                print_diagram_help();
+                std::process::exit(0);
+            }
+
+            // Parse diagram generation options
+            let diagram_args: Vec<String> = args[1..].to_vec();
+            let options = parse_diagram_args(&diagram_args);
+
+            // For now, diagram command generates from profile data or loads from file
+            // This is a placeholder - actual implementation would hook into test runner
+            // or load recorded profile data
+            println!("Diagram generation options:");
+            println!("  Types: {:?}", options.diagram_types);
+            println!("  Output: {}", options.output_dir.display());
+            println!("  Name: {}", options.test_name);
+            if !options.include_patterns.is_empty() {
+                println!("  Include: {:?}", options.include_patterns);
+            }
+            if !options.exclude_patterns.is_empty() {
+                println!("  Exclude: {:?}", options.exclude_patterns);
+            }
+
+            // TODO: Load profile data and generate diagrams
+            // For now, just show the help to indicate proper usage
+            println!();
+            println!("To generate diagrams, use with test command:");
+            println!("  simple test --seq-diagram my_test.spl");
+            println!();
+            println!("Or run profiler directly:");
+            println!("  simple diagram --help");
+
+            std::process::exit(0);
         }
         "init" => {
             let name = args.get(1).map(|s| s.as_str());
@@ -762,16 +819,20 @@ fn main() {
             let prefetch_wait_start = std::time::Instant::now();
             if let Some(handle) = prefetch_handle {
                 let _ = handle.wait(); // Ignore errors, prefetch is best-effort
-                metrics.record(simple_driver::StartupPhase::PrefetchWait, prefetch_wait_start.elapsed());
+                metrics.record(
+                    simple_driver::StartupPhase::PrefetchWait,
+                    prefetch_wait_start.elapsed(),
+                );
             }
 
             // Assume it's a file to run
             let path = PathBuf::from(first);
             if path.exists() {
                 // Collect remaining arguments to pass to the Simple program
-                let program_args: Vec<String> = args.iter()
-                    .skip(1)  // Skip the file path
-                    .filter(|a| !a.starts_with("--gc"))  // Skip GC flags
+                let program_args: Vec<String> = args
+                    .iter()
+                    .skip(1) // Skip the file path
+                    .filter(|a| !a.starts_with("--gc")) // Skip GC flags
                     .cloned()
                     .collect();
                 // Prepend the file path as argv[0]
@@ -781,7 +842,10 @@ fn main() {
                 // Record file execution phase
                 let exec_start = std::time::Instant::now();
                 let exit_code = run_file_with_args(&path, gc_log, gc_off, full_args);
-                metrics.record(simple_driver::StartupPhase::FileExecution, exec_start.elapsed());
+                metrics.record(
+                    simple_driver::StartupPhase::FileExecution,
+                    exec_start.elapsed(),
+                );
                 exit_with_metrics(exit_code, &metrics);
             } else {
                 eprintln!("error: file not found: {}", path.display());

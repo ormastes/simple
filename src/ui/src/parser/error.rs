@@ -3,7 +3,9 @@ use thiserror::Error;
 /// Parse error type
 #[derive(Debug, Clone, Error)]
 pub enum ParseError {
-    #[error("Unexpected token: expected {expected}, found {found} at line {line}, column {column}")]
+    #[error(
+        "Unexpected token: expected {expected}, found {found} at line {line}, column {column}"
+    )]
     UnexpectedToken {
         expected: String,
         found: String,

@@ -73,7 +73,8 @@ fn prefetch_files_unix<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHandle
     use std::os::unix::process::CommandExt;
 
     // Convert paths to owned for transfer to child
-    let file_paths: Vec<std::path::PathBuf> = files.iter().map(|p| p.as_ref().to_path_buf()).collect();
+    let file_paths: Vec<std::path::PathBuf> =
+        files.iter().map(|p| p.as_ref().to_path_buf()).collect();
 
     unsafe {
         match libc::fork() {
@@ -197,7 +198,8 @@ fn prefetch_files_windows<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHan
     use winapi::um::memoryapi::PrefetchVirtualMemory;
     use winapi::um::winnt::{HANDLE, WIN32_MEMORY_RANGE_ENTRY};
 
-    let file_paths: Vec<std::path::PathBuf> = files.iter().map(|p| p.as_ref().to_path_buf()).collect();
+    let file_paths: Vec<std::path::PathBuf> =
+        files.iter().map(|p| p.as_ref().to_path_buf()).collect();
 
     let thread = std::thread::spawn(move || {
         for path in &file_paths {
@@ -214,10 +216,12 @@ fn prefetch_files_windows<P: AsRef<Path>>(files: &[P]) -> io::Result<PrefetchHan
 fn prefetch_file_windows<P: AsRef<Path>>(path: P) -> io::Result<()> {
     use std::fs::OpenOptions;
     use std::os::windows::io::AsRawHandle;
-    use winapi::um::memoryapi::{CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile};
-    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
-    use winapi::um::winnt::{HANDLE, PAGE_READONLY, FILE_MAP_READ, WIN32_MEMORY_RANGE_ENTRY};
     use winapi::shared::minwindef::FALSE;
+    use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
+    use winapi::um::memoryapi::{
+        CreateFileMappingW, MapViewOfFile, PrefetchVirtualMemory, UnmapViewOfFile,
+    };
+    use winapi::um::winnt::{FILE_MAP_READ, HANDLE, PAGE_READONLY, WIN32_MEMORY_RANGE_ENTRY};
 
     let file = OpenOptions::new().read(true).open(path.as_ref())?;
     let metadata = file.metadata()?;
@@ -245,13 +249,7 @@ fn prefetch_file_windows<P: AsRef<Path>>(path: P) -> io::Result<()> {
         }
 
         // Map view of file
-        let view = MapViewOfFile(
-            mapping,
-            FILE_MAP_READ,
-            0,
-            0,
-            0,
-        );
+        let view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
 
         if view.is_null() {
             CloseHandle(mapping);
@@ -321,7 +319,9 @@ mod tests {
         let mut files = Vec::new();
         for i in 0..3 {
             let mut temp_file = NamedTempFile::new().unwrap();
-            temp_file.write_all(format!("File {}", i).as_bytes()).unwrap();
+            temp_file
+                .write_all(format!("File {}", i).as_bytes())
+                .unwrap();
             temp_file.flush().unwrap();
             files.push(temp_file);
         }

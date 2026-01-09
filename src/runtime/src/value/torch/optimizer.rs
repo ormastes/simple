@@ -28,7 +28,7 @@ use crate::value::torch::{rt_torch_free, rt_torch_grad, rt_torch_zero_grad};
 #[cfg(feature = "pytorch")]
 #[derive(Debug)]
 struct OptimizerState {
-    params: Vec<u64>,  // Parameter tensor handles
+    params: Vec<u64>, // Parameter tensor handles
     lr: f64,
     optimizer_type: OptimizerType,
 }
@@ -39,15 +39,15 @@ enum OptimizerType {
     SGD {
         momentum: f64,
         weight_decay: f64,
-        velocity: Vec<Option<u64>>,  // Momentum buffers (one per param)
+        velocity: Vec<Option<u64>>, // Momentum buffers (one per param)
     },
     Adam {
         beta1: f64,
         beta2: f64,
         eps: f64,
         weight_decay: f64,
-        m: Vec<Option<u64>>,  // First moment estimates
-        v: Vec<Option<u64>>,  // Second moment estimates
+        m: Vec<Option<u64>>, // First moment estimates
+        v: Vec<Option<u64>>, // Second moment estimates
         step: usize,
     },
     AdamW {
@@ -55,8 +55,8 @@ enum OptimizerType {
         beta2: f64,
         eps: f64,
         weight_decay: f64,
-        m: Vec<Option<u64>>,  // First moment estimates
-        v: Vec<Option<u64>>,  // Second moment estimates
+        m: Vec<Option<u64>>, // First moment estimates
+        v: Vec<Option<u64>>, // Second moment estimates
         step: usize,
     },
 }
@@ -75,12 +75,7 @@ fn next_optimizer_handle() -> u64 {
 
 /// Helper function to create an optimizer with common validation and registration logic
 #[cfg(feature = "pytorch")]
-fn create_optimizer<F>(
-    params_ptr: *const u64,
-    num_params: usize,
-    lr: f64,
-    create_type: F,
-) -> u64
+fn create_optimizer<F>(params_ptr: *const u64, num_params: usize, lr: f64, create_type: F) -> u64
 where
     F: FnOnce(usize) -> OptimizerType,
 {
@@ -108,9 +103,7 @@ where
     };
 
     let handle = next_optimizer_handle();
-    OPTIMIZER_REGISTRY
-        .lock()
-        .insert(handle, Arc::new(state));
+    OPTIMIZER_REGISTRY.lock().insert(handle, Arc::new(state));
 
     handle
 }
@@ -135,12 +128,10 @@ pub extern "C" fn rt_torch_sgd_new(
 ) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        let handle = create_optimizer(params_ptr, num_params, lr, |n| {
-            OptimizerType::SGD {
-                momentum,
-                weight_decay,
-                velocity: vec![None; n],
-            }
+        let handle = create_optimizer(params_ptr, num_params, lr, |n| OptimizerType::SGD {
+            momentum,
+            weight_decay,
+            velocity: vec![None; n],
         });
 
         if handle != 0 {
@@ -179,16 +170,14 @@ pub extern "C" fn rt_torch_adam_new(
 ) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        let handle = create_optimizer(params_ptr, num_params, lr, |n| {
-            OptimizerType::Adam {
-                beta1,
-                beta2,
-                eps,
-                weight_decay,
-                m: vec![None; n],
-                v: vec![None; n],
-                step: 0,
-            }
+        let handle = create_optimizer(params_ptr, num_params, lr, |n| OptimizerType::Adam {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            m: vec![None; n],
+            v: vec![None; n],
+            step: 0,
         });
 
         if handle != 0 {
@@ -229,16 +218,14 @@ pub extern "C" fn rt_torch_adamw_new(
 ) -> u64 {
     #[cfg(feature = "pytorch")]
     {
-        let handle = create_optimizer(params_ptr, num_params, lr, |n| {
-            OptimizerType::AdamW {
-                beta1,
-                beta2,
-                eps,
-                weight_decay,
-                m: vec![None; n],
-                v: vec![None; n],
-                step: 0,
-            }
+        let handle = create_optimizer(params_ptr, num_params, lr, |n| OptimizerType::AdamW {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            m: vec![None; n],
+            v: vec![None; n],
+            step: 0,
         });
 
         if handle != 0 {
@@ -328,9 +315,10 @@ pub extern "C" fn rt_torch_optimizer_step(optimizer_handle: u64) -> i32 {
                             // velocity = momentum * velocity + grad
                             let new_vel = &vel.0 * mom + &d_p;
                             let new_vel_handle = next_handle();
-                            TENSOR_REGISTRY
-                                .lock()
-                                .insert(new_vel_handle, Arc::new(TensorWrapper(new_vel.shallow_clone())));
+                            TENSOR_REGISTRY.lock().insert(
+                                new_vel_handle,
+                                Arc::new(TensorWrapper(new_vel.shallow_clone())),
+                            );
                             new_velocity[i] = Some(new_vel_handle);
                             d_p = new_vel;
                         } else {
@@ -371,7 +359,10 @@ pub extern "C" fn rt_torch_optimizer_step(optimizer_handle: u64) -> i32 {
                     }
                 }
 
-                tracing::debug!("rt_torch_optimizer_step: SGD optimizer={}", optimizer_handle);
+                tracing::debug!(
+                    "rt_torch_optimizer_step: SGD optimizer={}",
+                    optimizer_handle
+                );
                 TorchFfiError::Success as i32
             }
             OptimizerType::Adam {
@@ -496,7 +487,11 @@ pub extern "C" fn rt_torch_optimizer_step(optimizer_handle: u64) -> i32 {
                     *state = Arc::new(new_state);
                 }
 
-                tracing::debug!("rt_torch_optimizer_step: Adam optimizer={} step={}", optimizer_handle, current_step);
+                tracing::debug!(
+                    "rt_torch_optimizer_step: Adam optimizer={} step={}",
+                    optimizer_handle,
+                    current_step
+                );
                 TorchFfiError::Success as i32
             }
             OptimizerType::AdamW {
@@ -622,7 +617,11 @@ pub extern "C" fn rt_torch_optimizer_step(optimizer_handle: u64) -> i32 {
                     *state = Arc::new(new_state);
                 }
 
-                tracing::debug!("rt_torch_optimizer_step: AdamW optimizer={} step={}", optimizer_handle, current_step);
+                tracing::debug!(
+                    "rt_torch_optimizer_step: AdamW optimizer={} step={}",
+                    optimizer_handle,
+                    current_step
+                );
                 TorchFfiError::Success as i32
             }
         }
@@ -680,7 +679,11 @@ pub extern "C" fn rt_torch_optimizer_get_lr(optimizer_handle: u64) -> f64 {
         let lr = opt_state.lr;
         drop(opt_registry);
 
-        tracing::debug!("rt_torch_optimizer_get_lr: optimizer={} lr={}", optimizer_handle, lr);
+        tracing::debug!(
+            "rt_torch_optimizer_get_lr: optimizer={} lr={}",
+            optimizer_handle,
+            lr
+        );
         lr
     }
     #[cfg(not(feature = "pytorch"))]
@@ -705,35 +708,49 @@ pub extern "C" fn rt_torch_optimizer_set_lr(optimizer_handle: u64, new_lr: f64) 
             params: opt_state.params.clone(),
             lr: new_lr,
             optimizer_type: match &opt_state.optimizer_type {
-                OptimizerType::SGD { momentum, weight_decay, velocity } => {
-                    OptimizerType::SGD {
-                        momentum: *momentum,
-                        weight_decay: *weight_decay,
-                        velocity: velocity.clone(),
-                    }
-                }
-                OptimizerType::Adam { beta1, beta2, eps, weight_decay, m, v, step } => {
-                    OptimizerType::Adam {
-                        beta1: *beta1,
-                        beta2: *beta2,
-                        eps: *eps,
-                        weight_decay: *weight_decay,
-                        m: m.clone(),
-                        v: v.clone(),
-                        step: *step,
-                    }
-                }
-                OptimizerType::AdamW { beta1, beta2, eps, weight_decay, m, v, step } => {
-                    OptimizerType::AdamW {
-                        beta1: *beta1,
-                        beta2: *beta2,
-                        eps: *eps,
-                        weight_decay: *weight_decay,
-                        m: m.clone(),
-                        v: v.clone(),
-                        step: *step,
-                    }
-                }
+                OptimizerType::SGD {
+                    momentum,
+                    weight_decay,
+                    velocity,
+                } => OptimizerType::SGD {
+                    momentum: *momentum,
+                    weight_decay: *weight_decay,
+                    velocity: velocity.clone(),
+                },
+                OptimizerType::Adam {
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    m,
+                    v,
+                    step,
+                } => OptimizerType::Adam {
+                    beta1: *beta1,
+                    beta2: *beta2,
+                    eps: *eps,
+                    weight_decay: *weight_decay,
+                    m: m.clone(),
+                    v: v.clone(),
+                    step: *step,
+                },
+                OptimizerType::AdamW {
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                    m,
+                    v,
+                    step,
+                } => OptimizerType::AdamW {
+                    beta1: *beta1,
+                    beta2: *beta2,
+                    eps: *eps,
+                    weight_decay: *weight_decay,
+                    m: m.clone(),
+                    v: v.clone(),
+                    step: *step,
+                },
             },
         };
 
@@ -760,7 +777,10 @@ pub extern "C" fn rt_torch_optimizer_free(optimizer_handle: u64) -> i32 {
     {
         let mut opt_registry = OPTIMIZER_REGISTRY.lock();
         if opt_registry.remove(&optimizer_handle).is_some() {
-            tracing::debug!("rt_torch_optimizer_free: freed optimizer={}", optimizer_handle);
+            tracing::debug!(
+                "rt_torch_optimizer_free: freed optimizer={}",
+                optimizer_handle
+            );
             TorchFfiError::Success as i32
         } else {
             TorchFfiError::InvalidHandle as i32

@@ -21,8 +21,7 @@ impl CompilerPipeline {
         self.verification_violations.clear();
 
         // Type check
-        type_check(&ast_module.items)
-            .map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
+        type_check(&ast_module.items).map_err(|e| CompileError::Semantic(format!("{:?}", e)))?;
 
         // Lower AST to HIR
         let hir_module = hir::lower(ast_module)
@@ -59,10 +58,11 @@ impl CompilerPipeline {
             self.verification_violations = verifier.violations().to_vec();
 
             if self.verification_strict {
-                let msg = verifier
-                    .error_messages()
-                    .join("\n");
-                return Err(CompileError::Semantic(format!("Verification errors:\n{}", msg)));
+                let msg = verifier.error_messages().join("\n");
+                return Err(CompileError::Semantic(format!(
+                    "Verification errors:\n{}",
+                    msg
+                )));
             } else {
                 // Log warnings but continue
                 for violation in verifier.violations() {
@@ -73,8 +73,9 @@ impl CompilerPipeline {
 
         // Lower HIR to MIR with contract mode (and DI config if available)
         let di_config = self.project.as_ref().and_then(|p| p.di_config.clone());
-        let mut mir_module = mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
-            .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
+        let mut mir_module =
+            mir::lower_to_mir_with_mode_and_di(&hir_module, self.contract_mode, di_config)
+                .map_err(|e| CompileError::Semantic(format!("MIR lowering: {e}")))?;
 
         // Ghost erasure pass: remove ghost variables before codegen
         let (ghost_stats, ghost_errors) = mir::erase_ghost_from_module(&mut mir_module);
@@ -85,7 +86,10 @@ impl CompilerPipeline {
                 .map(|e| e.to_string())
                 .collect::<Vec<_>>()
                 .join("\n");
-            return Err(CompileError::Semantic(format!("Ghost erasure errors:\n{}", msg)));
+            return Err(CompileError::Semantic(format!(
+                "Ghost erasure errors:\n{}",
+                msg
+            )));
         }
 
         if ghost_stats.ghost_params_erased > 0 || ghost_stats.ghost_locals_erased > 0 {

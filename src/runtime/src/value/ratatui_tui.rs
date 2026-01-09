@@ -155,10 +155,10 @@ fn get_object(handle: u64) -> Option<RatatuiObject> {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct TuiEvent {
-    pub event_type: u32,  // 0=Key, 1=Mouse, 2=Resize
-    pub key_code: u32,    // ASCII or special key code
-    pub key_mods: u32,    // Shift=1, Ctrl=2, Alt=4
-    pub char_value: u32,  // Unicode character value (if printable)
+    pub event_type: u32, // 0=Key, 1=Mouse, 2=Resize
+    pub key_code: u32,   // ASCII or special key code
+    pub key_mods: u32,   // Shift=1, Ctrl=2, Alt=4
+    pub char_value: u32, // Unicode character value (if printable)
 }
 
 // ============================================================================
@@ -173,7 +173,7 @@ pub struct TuiEvent {
 #[cfg(feature = "ratatui-tui")]
 pub extern "C" fn ratatui_terminal_new() -> u64 {
     match enable_raw_mode() {
-        Ok(_) => {},
+        Ok(_) => {}
         Err(e) => {
             eprintln!("Failed to enable raw mode: {:?}", e);
             return 0;
@@ -544,7 +544,7 @@ pub extern "C" fn ratatui_read_event(event_out: *mut TuiEvent) -> i32 {
 
             unsafe {
                 *event_out = TuiEvent {
-                    event_type: 0,  // Key event
+                    event_type: 0, // Key event
                     key_code,
                     key_mods,
                     char_value,
@@ -556,7 +556,7 @@ pub extern "C" fn ratatui_read_event(event_out: *mut TuiEvent) -> i32 {
         Ok(CrosstermEvent::Resize(w, h)) => {
             unsafe {
                 *event_out = TuiEvent {
-                    event_type: 2,  // Resize event
+                    event_type: 2, // Resize event
                     key_code: w as u32,
                     key_mods: h as u32,
                     char_value: 0,
@@ -564,7 +564,7 @@ pub extern "C" fn ratatui_read_event(event_out: *mut TuiEvent) -> i32 {
             }
             1
         }
-        Ok(_) => 0,  // Ignore other events
+        Ok(_) => 0, // Ignore other events
         Err(_) => 0,
     }
 }
@@ -638,7 +638,10 @@ mod tests {
     #[cfg(feature = "ratatui-tui")]
     fn test_textbuffer_creation() {
         let handle = ratatui_textbuffer_new();
-        assert_ne!(handle, 0, "TextBuffer creation should return non-zero handle");
+        assert_ne!(
+            handle, 0,
+            "TextBuffer creation should return non-zero handle"
+        );
         ratatui_object_destroy(handle);
     }
 

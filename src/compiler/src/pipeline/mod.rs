@@ -18,31 +18,36 @@
 pub mod module_loader;
 pub mod script_detection;
 
-mod core;
-mod parsing;
-mod lowering;
 mod codegen;
+mod core;
 mod execution;
+mod lowering;
+mod parsing;
 
 // Re-export main types
 pub use core::CompilerPipeline;
-pub use execution::{generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object, generate_smf_from_object_for_target};
+pub use execution::{
+    generate_smf_bytes, generate_smf_bytes_for_target, generate_smf_from_object,
+    generate_smf_from_object_for_target,
+};
 
 // Re-export startup configuration types (#1979, #1986)
-pub use module_loader::{extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints};
+pub use module_loader::{
+    extract_startup_config, StartupAppType, StartupConfig, StartupWindowHints,
+};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::build_mode::BuildMode;
     use crate::elf_utils::{extract_elf_text_section, get_section_name};
     use crate::hir;
+    use crate::import_loader::has_script_statements;
     use crate::lint::{LintConfig, LintLevel, LintName};
     use crate::mir::{self, ContractMode};
     use crate::monomorphize::monomorphize_module;
-    use crate::import_loader::has_script_statements;
-    use crate::build_mode::BuildMode;
-    use simple_common::target::{Target, TargetArch, TargetOS};
     use crate::CompileError;
+    use simple_common::target::{Target, TargetArch, TargetOS};
     use std::path::Path;
 
     /// Debug helper to list ELF sections
@@ -96,8 +101,7 @@ mod tests {
             }
 
             let sh_name =
-                u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().unwrap())
-                    as usize;
+                u32::from_le_bytes(elf_data[sh_offset..sh_offset + 4].try_into().unwrap()) as usize;
 
             if let Some(name) = get_section_name(shstrtab, sh_name) {
                 let sec_offset = u64::from_le_bytes(
@@ -436,10 +440,7 @@ main = 0
         let errors = checker_mut.check_module(&nodes);
 
         // Should detect orphan rule violation
-        assert!(
-            !errors.is_empty(),
-            "Should detect orphan rule violation"
-        );
+        assert!(!errors.is_empty(), "Should detect orphan rule violation");
         assert!(matches!(
             errors[0],
             crate::trait_coherence::CoherenceError::OrphanImpl { .. }
@@ -479,9 +480,9 @@ main = 0
         let mut test_profile = DiProfile::default();
         // Add a test binding to simulate active test profile
         test_profile.bindings.push(DiBindingRule {
-            predicate: crate::predicate::Predicate::Selector(
-                crate::predicate::Selector::Within("*".to_string()),
-            ),
+            predicate: crate::predicate::Predicate::Selector(crate::predicate::Selector::Within(
+                "*".to_string(),
+            )),
             impl_type: "TestLogger".to_string(),
             scope: DiScope::Singleton,
             priority: 0,
@@ -520,9 +521,9 @@ main = 0
         let mut test_profile = DiProfile::default();
         // Add a test binding to simulate active test profile
         test_profile.bindings.push(DiBindingRule {
-            predicate: crate::predicate::Predicate::Selector(
-                crate::predicate::Selector::Within("*".to_string()),
-            ),
+            predicate: crate::predicate::Predicate::Selector(crate::predicate::Selector::Within(
+                "*".to_string(),
+            )),
             impl_type: "TestLogger".to_string(),
             scope: DiScope::Singleton,
             priority: 0,
@@ -602,10 +603,7 @@ main = 0
 
         // Should fail in release mode
         let result = pipeline.compile_source_to_memory(source);
-        assert!(
-            result.is_err(),
-            "Release mode should reject runtime AOP"
-        );
+        assert!(result.is_err(), "Release mode should reject runtime AOP");
 
         match result {
             Err(CompileError::Semantic(msg)) => {

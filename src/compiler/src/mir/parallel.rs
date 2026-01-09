@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use rayon::prelude::*;
 
 use super::function::MirModule;
-use super::lower::{lower_to_mir_with_mode, MirLowerResult, ContractMode};
+use super::lower::{lower_to_mir_with_mode, ContractMode, MirLowerResult};
 use crate::hir::HirModule;
 
 /// Configuration for parallel MIR lowering.
@@ -260,5 +260,4 @@ mod tests {
         let results = lower_modules_parallel(&modules);
         assert!(results.is_empty());
     }
-
 }

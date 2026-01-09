@@ -5,7 +5,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 /// Helper to send a DAP message
-fn send_message(stdin: &mut impl Write, seq: i64, command: &str, arguments: Option<serde_json::Value>) {
+fn send_message(
+    stdin: &mut impl Write,
+    seq: i64,
+    command: &str,
+    arguments: Option<serde_json::Value>,
+) {
     let message = json!({
         "type": "request",
         "seq": seq,
@@ -83,7 +88,9 @@ fn test_dap_initialize() {
     assert_eq!(response["type"], "response");
     assert_eq!(response["command"], "initialize");
     assert_eq!(response["success"], true);
-    assert!(response["body"]["supportsConfigurationDoneRequest"].as_bool().unwrap_or(false));
+    assert!(response["body"]["supportsConfigurationDoneRequest"]
+        .as_bool()
+        .unwrap_or(false));
 
     // Send disconnect
     send_message(&mut stdin, 2, "disconnect", None);
@@ -201,12 +208,7 @@ fn test_dap_threads_and_stack() {
     assert!(threads.as_array().unwrap().len() > 0);
 
     // Get stack trace
-    send_message(
-        &mut stdin,
-        4,
-        "stackTrace",
-        Some(json!({ "threadId": 1 })),
-    );
+    send_message(&mut stdin, 4, "stackTrace", Some(json!({ "threadId": 1 })));
     let response = read_message(&mut reader).expect("Failed to read stackTrace response");
 
     assert_eq!(response["command"], "stackTrace");

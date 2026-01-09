@@ -5,7 +5,7 @@
 // Parser More Statement Types
 // ============================================================================
 mod parser_more_stmt_tests {
-    use simple_parser::{ConstStmt, LoopStmt, ExternDef};
+    use simple_parser::{ConstStmt, ExternDef, LoopStmt};
 
     #[test]
     fn test_const_stmt_size() {
@@ -27,7 +27,7 @@ mod parser_more_stmt_tests {
 // Parser Use Statement Types
 // ============================================================================
 mod parser_use_stmt_tests {
-    use simple_parser::{CommonUseStmt, ExportUseStmt, AutoImportStmt};
+    use simple_parser::{AutoImportStmt, CommonUseStmt, ExportUseStmt};
 
     #[test]
     fn test_common_use_stmt_size() {
@@ -78,7 +78,9 @@ mod parser_contract_tests {
 // Parser Macro Extended Types
 // ============================================================================
 mod parser_macro_extended_tests {
-    use simple_parser::{MacroContractItem, MacroInject, MacroIntro, MacroParam, MacroReturns, MacroStmt};
+    use simple_parser::{
+        MacroContractItem, MacroInject, MacroIntro, MacroParam, MacroReturns, MacroStmt,
+    };
 
     #[test]
     fn test_macro_stmt_size() {
@@ -291,7 +293,7 @@ mod compiler_coverage_extended_tests {
 // Loader SMF Extended Types
 // ============================================================================
 mod loader_smf_extended_tests {
-    use simple_loader::smf::{SmfSection, SectionType, SmfRelocation, RelocationType};
+    use simple_loader::smf::{RelocationType, SectionType, SmfRelocation, SmfSection};
 
     #[test]
     fn test_smf_section_default() {
@@ -356,7 +358,7 @@ mod common_handle_tests {
 // Common Manual Memory Types
 // ============================================================================
 mod common_manual_extended_tests {
-    use simple_common::manual::{Nat, BorrowState, GcState};
+    use simple_common::manual::{BorrowState, GcState, Nat};
 
     #[test]
     fn test_nat_size() {

@@ -172,7 +172,10 @@ impl ConsoleMockSetup {
 
     /// Record a console call (used internally by WASM runtime)
     pub fn record_call(&mut self, method: ConsoleMethod, args: Vec<String>) {
-        self.calls.lock().unwrap().push(ConsoleCall { method, args });
+        self.calls
+            .lock()
+            .unwrap()
+            .push(ConsoleCall { method, args });
     }
 }
 
@@ -230,7 +233,11 @@ impl DomMockSetup {
     }
 
     /// Set the returned element's tag name
-    pub fn returns_element(&mut self, id: impl Into<String>, tag_name: impl Into<String>) -> &mut Self {
+    pub fn returns_element(
+        &mut self,
+        id: impl Into<String>,
+        tag_name: impl Into<String>,
+    ) -> &mut Self {
         let id_str = id.into();
         self.pending_element = Some((id_str.clone(), DomElement::new(&id_str, tag_name)));
         self
@@ -245,7 +252,11 @@ impl DomMockSetup {
     }
 
     /// Add attribute to the element
-    pub fn with_attribute(&mut self, key: impl Into<String>, value: impl Into<String>) -> &mut Self {
+    pub fn with_attribute(
+        &mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> &mut Self {
         if let Some((_, ref mut elem)) = self.pending_element {
             elem.attributes.insert(key.into(), value.into());
         }
@@ -348,7 +359,8 @@ impl FetchMockSetup {
     pub fn returns_json(&mut self, json: impl Into<String>) -> &mut Self {
         if let Some((_, ref mut resp)) = self.pending_response {
             resp.body = json.into();
-            resp.headers.insert("Content-Type".to_string(), "application/json".to_string());
+            resp.headers
+                .insert("Content-Type".to_string(), "application/json".to_string());
         }
         self
     }
@@ -469,7 +481,10 @@ impl ConsoleVerify {
         let matching_calls: Vec<_> = calls
             .iter()
             .filter(|call| {
-                let method_match = self.method_filter.as_ref().map_or(true, |m| &call.method == m);
+                let method_match = self
+                    .method_filter
+                    .as_ref()
+                    .map_or(true, |m| &call.method == m);
                 let args_match = self.args_filter.as_ref().map_or(true, |a| &call.args == a);
                 method_match && args_match
             })
@@ -509,7 +524,10 @@ impl DomVerify {
     pub fn has_text(&self, expected_text: &str) -> bool {
         if let Some(ref id) = self.element_id {
             if let Some(elem) = self.elements.lock().unwrap().get(id) {
-                return elem.text_content.as_ref().map_or(false, |t| t == expected_text);
+                return elem
+                    .text_content
+                    .as_ref()
+                    .map_or(false, |t| t == expected_text);
             }
         }
         false
@@ -566,7 +584,8 @@ mod tests {
         );
 
         let verify = BrowserVerify::new(&mock);
-        verify.console()
+        verify
+            .console()
             .log_was_called()
             .with_args(&["Hello", "World"])
             .times(1)
@@ -604,7 +623,8 @@ mod tests {
     #[test]
     fn test_browser_verify() {
         let mut mock = BrowserMock::new();
-        mock.console().record_call(ConsoleMethod::Log, vec!["test".to_string()]);
+        mock.console()
+            .record_call(ConsoleMethod::Log, vec!["test".to_string()]);
 
         let verify = BrowserVerify::new(&mock);
         verify.console().log_was_called().times(1).verify();

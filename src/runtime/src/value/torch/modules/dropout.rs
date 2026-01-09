@@ -3,10 +3,10 @@
 //! Randomly zeroes elements during training for regularization.
 
 #[cfg(feature = "pytorch")]
-use super::{ModuleState, MODULE_REGISTRY, next_module_handle};
+use super::{next_module_handle, ModuleState, MODULE_REGISTRY};
 
 #[cfg(feature = "pytorch")]
-use super::{TENSOR_REGISTRY, TensorWrapper, next_handle, rt_torch_clone};
+use super::{next_handle, rt_torch_clone, TensorWrapper, TENSOR_REGISTRY};
 
 /// Create a Dropout module
 /// p: probability of an element to be zeroed
@@ -25,7 +25,9 @@ pub extern "C" fn rt_torch_dropout_new(p: f64, inplace: i32) -> u64 {
         };
 
         let handle = next_module_handle();
-        MODULE_REGISTRY.lock().insert(handle, std::sync::Arc::new(module));
+        MODULE_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(module));
 
         tracing::debug!(
             "rt_torch_dropout_new: handle={} p={} inplace={}",
@@ -80,7 +82,9 @@ pub extern "C" fn rt_torch_dropout_forward(
         let result = input.0.dropout(*p, training != 0);
 
         let handle = next_handle();
-        TENSOR_REGISTRY.lock().insert(handle, std::sync::Arc::new(TensorWrapper(result)));
+        TENSOR_REGISTRY
+            .lock()
+            .insert(handle, std::sync::Arc::new(TensorWrapper(result)));
 
         tracing::debug!(
             "rt_torch_dropout_forward: module={} input={} output={} training={}",

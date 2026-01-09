@@ -1,14 +1,14 @@
 // Async, generator, and actor compilation for codegen.
 
-use std::collections::HashMap;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use cranelift_frontend::FunctionBuilder;
 use cranelift_module::Module;
+use std::collections::HashMap;
 
 use crate::mir::{BlockId, VReg};
 
-use super::{InstrContext, InstrResult};
 use super::super::shared::get_func_block_addr;
+use super::{InstrContext, InstrResult};
 
 pub(super) fn build_ctx_array<M: Module>(
     ctx: &mut InstrContext<'_, M>,
@@ -46,7 +46,13 @@ pub(super) fn compile_future_create<M: Module>(
     let future_new_id = ctx.runtime_funcs["rt_future_new"];
     let future_new_ref = ctx.module.declare_func_in_func(future_new_id, builder.func);
 
-    let body_ptr = get_func_block_addr(ctx.func_ids, ctx.module, &ctx.func.name, body_block, builder);
+    let body_ptr = get_func_block_addr(
+        ctx.func_ids,
+        ctx.module,
+        &ctx.func.name,
+        body_block,
+        builder,
+    );
     let ctx_val = build_ctx_array(ctx, builder, body_block);
     let call = builder.ins().call(future_new_ref, &[body_ptr, ctx_val]);
     let result = builder.inst_results(call)[0];
@@ -62,7 +68,13 @@ pub(super) fn compile_actor_spawn<M: Module>(
     let spawn_id = ctx.runtime_funcs["rt_actor_spawn"];
     let spawn_ref = ctx.module.declare_func_in_func(spawn_id, builder.func);
 
-    let body_ptr = get_func_block_addr(ctx.func_ids, ctx.module, &ctx.func.name, body_block, builder);
+    let body_ptr = get_func_block_addr(
+        ctx.func_ids,
+        ctx.module,
+        &ctx.func.name,
+        body_block,
+        builder,
+    );
     let ctx_val = build_ctx_array(ctx, builder, body_block);
     let call = builder.ins().call(spawn_ref, &[body_ptr, ctx_val]);
     let result = builder.inst_results(call)[0];
@@ -78,13 +90,24 @@ pub(super) fn compile_generator_create<M: Module>(
     let gen_new_id = ctx.runtime_funcs["rt_generator_new"];
     let gen_new_ref = ctx.module.declare_func_in_func(gen_new_id, builder.func);
 
-    let body_ptr = get_func_block_addr(ctx.func_ids, ctx.module, &ctx.func.name, body_block, builder);
+    let body_ptr = get_func_block_addr(
+        ctx.func_ids,
+        ctx.module,
+        &ctx.func.name,
+        body_block,
+        builder,
+    );
     let ctx_val = build_ctx_array(ctx, builder, body_block);
-    let slot_count = ctx.func.outlined_bodies.get(&body_block)
+    let slot_count = ctx
+        .func
+        .outlined_bodies
+        .get(&body_block)
         .map(|meta| meta.frame_slots.unwrap_or(0) as i64)
         .unwrap_or(0);
     let slots_val = builder.ins().iconst(types::I64, slot_count);
-    let call = builder.ins().call(gen_new_ref, &[body_ptr, slots_val, ctx_val]);
+    let call = builder
+        .ins()
+        .call(gen_new_ref, &[body_ptr, slots_val, ctx_val]);
     let result = builder.inst_results(call)[0];
     ctx.vreg_values.insert(dest, result);
 }
@@ -107,7 +130,9 @@ pub(super) fn compile_yield<M: Module>(
 
             let set_state_id = ctx.runtime_funcs["rt_generator_set_state"];
             let set_state_ref = ctx.module.declare_func_in_func(set_state_id, builder.func);
-            let next_state = builder.ins().iconst(types::I64, (state.state_id + 1) as i64);
+            let next_state = builder
+                .ins()
+                .iconst(types::I64, (state.state_id + 1) as i64);
             let _ = builder.ins().call(set_state_ref, &[gen_param, next_state]);
 
             let val = ctx.vreg_values[&value];
@@ -121,7 +146,9 @@ pub(super) fn compile_yield<M: Module>(
             return Ok(());
         }
     }
-    builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(2));
+    builder
+        .ins()
+        .trap(cranelift_codegen::ir::TrapCode::unwrap_user(2));
     Ok(())
 }
 
@@ -141,7 +168,9 @@ pub(super) fn compile_await<M: Module>(
             let async_param = builder.block_params(entry_block)[0];
 
             // Save live variables to async context
-            let get_ctx_id = ctx.runtime_funcs.get("rt_async_get_ctx")
+            let get_ctx_id = ctx
+                .runtime_funcs
+                .get("rt_async_get_ctx")
                 .or_else(|| ctx.runtime_funcs.get("rt_future_get_ctx"))
                 .copied();
             if let Some(get_ctx_id) = get_ctx_id {
@@ -159,19 +188,27 @@ pub(super) fn compile_await<M: Module>(
             }
 
             // Set next state (resume at next block)
-            let set_state_id = ctx.runtime_funcs.get("rt_async_set_state")
+            let set_state_id = ctx
+                .runtime_funcs
+                .get("rt_async_set_state")
                 .or_else(|| ctx.runtime_funcs.get("rt_future_set_state"))
                 .copied();
             if let Some(set_state_id) = set_state_id {
                 let set_state_ref = ctx.module.declare_func_in_func(set_state_id, builder.func);
-                let next_state = builder.ins().iconst(types::I64, (state.state_id + 1) as i64);
-                let _ = builder.ins().call(set_state_ref, &[async_param, next_state]);
+                let next_state = builder
+                    .ins()
+                    .iconst(types::I64, (state.state_id + 1) as i64);
+                let _ = builder
+                    .ins()
+                    .call(set_state_ref, &[async_param, next_state]);
             }
 
             // Return the future itself (suspended state)
             // Wrap as RuntimeValue for ABI compatibility
             let future_val = ctx.vreg_values[&future];
-            let wrap_id = ctx.runtime_funcs.get("rt_value_future")
+            let wrap_id = ctx
+                .runtime_funcs
+                .get("rt_value_future")
                 .or_else(|| ctx.runtime_funcs.get("rt_value_int")) // Fallback
                 .copied();
             if let Some(wrap_id) = wrap_id {
@@ -187,7 +224,9 @@ pub(super) fn compile_await<M: Module>(
     }
 
     // Fallback: no state machine, just call await directly (eager mode)
-    let await_id = ctx.runtime_funcs.get("rt_future_await")
+    let await_id = ctx
+        .runtime_funcs
+        .get("rt_future_await")
         .or_else(|| ctx.runtime_funcs.get("rt_await"))
         .copied();
     if let Some(await_id) = await_id {
@@ -197,7 +236,9 @@ pub(super) fn compile_await<M: Module>(
         let result = builder.inst_results(call)[0];
         ctx.vreg_values.insert(dest, result);
     } else {
-        builder.ins().trap(cranelift_codegen::ir::TrapCode::unwrap_user(3));
+        builder
+            .ins()
+            .trap(cranelift_codegen::ir::TrapCode::unwrap_user(3));
     }
     Ok(())
 }

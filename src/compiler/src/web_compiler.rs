@@ -27,10 +27,10 @@
 //! ```
 
 use crate::error::CompileError;
-use crate::pipeline::CompilerPipeline;
 use crate::hydration_manifest::{HydrationManifest, ManifestBuilder, ManifestMetadata};
+use crate::pipeline::CompilerPipeline;
 use simple_common::target::{Target, TargetArch, TargetOS, WasmRuntime};
-use simple_parser::sui_parser::{SuiParser, SuiFile, ClientBlock, ServerBlock};
+use simple_parser::sui_parser::{ClientBlock, ServerBlock, SuiFile, SuiParser};
 use std::path::Path;
 
 /// Result of compiling a .sui file
@@ -65,10 +65,14 @@ impl WebCompiler {
     }
 
     /// Compile a .sui file from source string
-    pub fn compile_sui_source(&mut self, source: &str) -> Result<SuiCompilationResult, CompileError> {
+    pub fn compile_sui_source(
+        &mut self,
+        source: &str,
+    ) -> Result<SuiCompilationResult, CompileError> {
         // Parse .sui file
         let mut parser = SuiParser::new(source.to_string());
-        let sui_file = parser.parse()
+        let sui_file = parser
+            .parse()
             .map_err(|e| CompileError::Parse(format!("Failed to parse .sui file: {}", e)))?;
 
         // Compile server and client blocks
@@ -76,7 +80,10 @@ impl WebCompiler {
     }
 
     /// Compile a .sui file from path
-    pub fn compile_sui_file(&mut self, path: impl AsRef<Path>) -> Result<SuiCompilationResult, CompileError> {
+    pub fn compile_sui_file(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<SuiCompilationResult, CompileError> {
         let source = std::fs::read_to_string(path.as_ref())
             .map_err(|e| CompileError::Io(format!("Failed to read .sui file: {}", e)))?;
 
@@ -84,9 +91,14 @@ impl WebCompiler {
     }
 
     /// Compile a parsed .sui file
-    fn compile_sui_file_parsed(&mut self, sui_file: SuiFile) -> Result<SuiCompilationResult, CompileError> {
+    fn compile_sui_file_parsed(
+        &mut self,
+        sui_file: SuiFile,
+    ) -> Result<SuiCompilationResult, CompileError> {
         // Extract all client exports
-        let client_exports = sui_file.client_blocks.iter()
+        let client_exports = sui_file
+            .client_blocks
+            .iter()
             .flat_map(|block| block.exports.iter().cloned())
             .collect::<Vec<_>>();
 
@@ -105,7 +117,9 @@ impl WebCompiler {
         };
 
         // Render templates (simple concatenation for now)
-        let mut template_html = sui_file.template_blocks.iter()
+        let mut template_html = sui_file
+            .template_blocks
+            .iter()
             .map(|block| block.template.clone())
             .collect::<Vec<_>>()
             .join("\n");
@@ -121,7 +135,7 @@ impl WebCompiler {
             template_html = self.inject_hydration_into_template(
                 &template_html,
                 &hydration_script,
-                "app" // Default module name
+                "app", // Default module name
             );
         }
 
@@ -143,7 +157,8 @@ impl WebCompiler {
         // Compile to host architecture (x64)
         let target = Target::host();
 
-        self.pipeline.compile_source_to_memory_for_target(&combined_code, target)
+        self.pipeline
+            .compile_source_to_memory_for_target(&combined_code, target)
     }
 
     /// Compile client blocks to wasm32 code
@@ -154,12 +169,14 @@ impl WebCompiler {
         // Compile to wasm32-unknown-unknown
         let target = Target::new_wasm(TargetArch::Wasm32, WasmRuntime::Browser);
 
-        self.pipeline.compile_source_to_memory_for_target(&combined_code, target)
+        self.pipeline
+            .compile_source_to_memory_for_target(&combined_code, target)
     }
 
     /// Combine server blocks into a single source string
     fn combine_blocks(&self, blocks: &[ServerBlock]) -> String {
-        blocks.iter()
+        blocks
+            .iter()
             .enumerate()
             .map(|(i, block)| {
                 let comment = if let Some(ref label) = block.label {
@@ -175,7 +192,8 @@ impl WebCompiler {
 
     /// Combine client blocks into a single source string
     fn combine_client_blocks(&self, blocks: &[ClientBlock]) -> String {
-        blocks.iter()
+        blocks
+            .iter()
             .enumerate()
             .map(|(i, block)| {
                 let comment = if let Some(ref label) = block.label {
@@ -190,11 +208,21 @@ impl WebCompiler {
     }
 
     /// Generate hydration manifest from client blocks
-    fn generate_hydration_manifest(&self, sui_file: &SuiFile, wasm_size: usize) -> HydrationManifest {
+    fn generate_hydration_manifest(
+        &self,
+        sui_file: &SuiFile,
+        wasm_size: usize,
+    ) -> HydrationManifest {
         let mut builder = ManifestBuilder::new();
 
         // Add all client exports
-        for export in &sui_file.client_blocks.iter().flat_map(|b| &b.exports).cloned().collect::<Vec<_>>() {
+        for export in &sui_file
+            .client_blocks
+            .iter()
+            .flat_map(|b| &b.exports)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             builder = builder.with_export(export);
         }
 
@@ -239,7 +267,7 @@ impl WebCompiler {
                 let before = &line[..pos];
                 let selector = if let Some(id_start) = before.rfind("getElementById(") {
                     let id_part = &before[id_start + 15..]; // Skip 'getElementById('
-                    // Find opening quote
+                                                            // Find opening quote
                     if let Some(quote_start) = id_part.find('"') {
                         let after_quote = &id_part[quote_start + 1..];
                         // Find closing quote
@@ -253,7 +281,7 @@ impl WebCompiler {
                     }
                 } else if let Some(qs_start) = before.rfind("querySelector(") {
                     let qs_part = &before[qs_start + 14..]; // Skip 'querySelector('
-                    // Find opening quote
+                                                            // Find opening quote
                     if let Some(quote_start) = qs_part.find('"') {
                         let after_quote = &qs_part[quote_start + 1..];
                         // Find closing quote
@@ -296,7 +324,12 @@ impl WebCompiler {
     ///
     /// If template has a </body> tag, inject before it.
     /// Otherwise, wrap template in a complete HTML document.
-    fn inject_hydration_into_template(&self, template: &str, hydration_script: &str, wasm_module_name: &str) -> String {
+    fn inject_hydration_into_template(
+        &self,
+        template: &str,
+        hydration_script: &str,
+        wasm_module_name: &str,
+    ) -> String {
         let wasm_loader = self.generate_wasm_loader(wasm_module_name, hydration_script);
 
         // Check if template has a closing </body> tag
@@ -318,7 +351,8 @@ impl WebCompiler {
 
     /// Generate WASM module loader script
     fn generate_wasm_loader(&self, module_name: &str, hydration_script: &str) -> String {
-        format!(r#"<script type="module">
+        format!(
+            r#"<script type="module">
 // WASM Module Loader and Hydration
 {}
 
@@ -351,12 +385,15 @@ if (document.readyState === 'loading') {{
 }} else {{
     init();
 }}
-</script>"#, hydration_script, module_name)
+</script>"#,
+            hydration_script, module_name
+        )
     }
 
     /// Wrap template in complete HTML document
     fn wrap_in_html_document(&self, template: &str, wasm_loader: &str) -> String {
-        format!(r#"<!DOCTYPE html>
+        format!(
+            r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -367,7 +404,9 @@ if (document.readyState === 'loading') {{
 {}
 {}
 </body>
-</html>"#, template, wasm_loader)
+</html>"#,
+            template, wasm_loader
+        )
     }
 }
 
@@ -557,13 +596,18 @@ fn on_click() -> i64:
         assert_eq!(compiled.hydration_manifest.version, 2);
 
         // Should have client exports
-        assert!(compiled.hydration_manifest.exports.contains(&"on_click".to_string()));
+        assert!(compiled
+            .hydration_manifest
+            .exports
+            .contains(&"on_click".to_string()));
 
         // State parsing not yet implemented in sui_parser, so state may be empty
         // This will work once SharedStateDecl parsing is complete
 
         // Should have hydration script
-        assert!(compiled.hydration_script.contains("export async function hydrate(wasm)"));
+        assert!(compiled
+            .hydration_script
+            .contains("export async function hydrate(wasm)"));
 
         // Should have metadata
         assert!(compiled.hydration_manifest.metadata.is_some());
@@ -611,7 +655,8 @@ dom.querySelector(".menu-item").addEventListener("mouseover", show_menu)
 </html>"#;
         let hydration_script = "export async function hydrate(wasm) { }";
 
-        let result = compiler.inject_hydration_into_template(template, hydration_script, "test_app");
+        let result =
+            compiler.inject_hydration_into_template(template, hydration_script, "test_app");
 
         assert!(result.contains("<h1>Hello</h1>"));
         assert!(result.contains("<script type=\"module\">"));
@@ -632,7 +677,8 @@ dom.querySelector(".menu-item").addEventListener("mouseover", show_menu)
 </html>"#;
         let hydration_script = "export async function hydrate(wasm) { }";
 
-        let result = compiler.inject_hydration_into_template(template, hydration_script, "test_app");
+        let result =
+            compiler.inject_hydration_into_template(template, hydration_script, "test_app");
 
         assert!(result.contains("<h1>Hello</h1>"));
         assert!(result.contains("<script type=\"module\">"));
@@ -649,7 +695,8 @@ dom.querySelector(".menu-item").addEventListener("mouseover", show_menu)
         let template = "<h1>Hello World</h1>";
         let hydration_script = "export async function hydrate(wasm) { }";
 
-        let result = compiler.inject_hydration_into_template(template, hydration_script, "test_app");
+        let result =
+            compiler.inject_hydration_into_template(template, hydration_script, "test_app");
 
         assert!(result.contains("<!DOCTYPE html>"));
         assert!(result.contains("<html lang=\"en\">"));
@@ -706,9 +753,13 @@ fn on_click() -> i64:
         assert!(!compiled.client_binary.is_empty());
 
         // Template should have injected script
-        assert!(compiled.template_html.contains("<button id=\"btn\">Click me</button>"));
+        assert!(compiled
+            .template_html
+            .contains("<button id=\"btn\">Click me</button>"));
         assert!(compiled.template_html.contains("<script type=\"module\">"));
-        assert!(compiled.template_html.contains("async function hydrate(wasm)"));
+        assert!(compiled
+            .template_html
+            .contains("async function hydrate(wasm)"));
         assert!(compiled.template_html.contains("fetch('./app.wasm')"));
 
         // Script should be before </body>
