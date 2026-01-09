@@ -14,6 +14,7 @@ For detailed guidance, use these skills (invoke with `/skill-name`):
 | `research` | Codebase exploration, documentation |
 | `debug` | Debugging interpreter/codegen, tracing, GC logging |
 | `stdlib` | Writing stdlib modules, variants, capabilities |
+| `todo` | TODO/FIXME comment format: `[area][priority] desc [#issue] [blocked:#n]` |
 
 Skills located in `.claude/skills/`.
 

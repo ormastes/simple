@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/types_spec.spl`
-> **Generated:** 2026-01-09 06:15:42
+> **Generated:** 2026-01-09 06:23:37
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -14,6 +14,8 @@
 **Keywords:** types, mutability, generics, type-inference
 **Last Updated:** 2025-12-28
 **Topics:** type-system
+**Symbols:** Type, TypeVar, Mutability, Generic
+**Module:** simple_type
 
 ## Quick Navigation
 
@@ -26,10 +28,17 @@
 
 Complete specification of Simple's type system, including primitives, composites, generics, and mutability rules.
 
+The type system provides:
+- Strong static typing with inference
+- Immutable-by-default data structures
+- Generic types with constraints
+- Unit types for dimensional analysis
+- Semantic type checking
+
 ## Related Specifications
 
 - **Syntax** - Type annotation syntax
-- **Units** - Semantic unit types
+- **Type Inference** - Hindley-Milner inference algorithm
 - **Data Structures** - Composite types
 - **Memory** - Ownership and reference types
 
@@ -41,24 +50,31 @@ Complete specification of Simple's type system, including primitives, composites
 |--------|---------------|
 | `APIs` | [12](#primitive_type_warnings_public_apis_16) |
 | `Access` | [6](#unit_types_and_literal_suffixes_6) |
+| `Actual` | [1](#fetch_user) |
 | `And` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
 | `Apis` | [12](#primitive_type_warnings_public_apis_16) |
+| `Async` | [1](#fetch_user) |
 | `BaseType` | [5](#unit_types_and_literal_suffixes_5), [9](#unit_types_and_literal_suffixes_9) |
 | `Calc` | [11](#internal_calc) |
 | `Celsius` | [9](#unit_types_and_literal_suffixes_9) |
+| `Class` | [3](#mutability_rules_3) |
 | `Color` | [3](#mutability_rules_3) |
 | `Comparisons` | [6](#unit_types_and_literal_suffixes_6) |
 | `Compile` | [10](#unit_types_and_literal_suffixes_10) |
 | `Compiler` | [8](#unit_types_and_literal_suffixes_8) |
 | `Cursor` | [2](#mutability_rules_2), [13](#type_inference_17) |
+| `Declared` | [1](#fetch_user) |
 | `ERROR` | [10](#unit_types_and_literal_suffixes_10) |
 | `Error` | [13](#type_inference_17) |
 | `Fahrenheit` | [9](#unit_types_and_literal_suffixes_9) |
 | `Fetch` | [1](#fetch_user) |
 | `FetchUser` | [1](#fetch_user) |
+| `Function` | [1](#fetch_user) |
+| `Immutable` | [2](#mutability_rules_2) |
 | `Inference` | [13](#type_inference_17) |
 | `Internal` | [11](#internal_calc) |
 | `InternalCalc` | [11](#internal_calc) |
+| `Links` | [1](#fetch_user), [2](#mutability_rules_2), [3](#mutability_rules_3) |
 | `Literal` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
 | `MAX` | [4](#mutability_rules_4) |
 | `Mutability` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4) |
@@ -75,12 +91,14 @@ Complete specification of Simple's type system, including primitives, composites
 | `Promise` | [1](#fetch_user) |
 | `Public` | [11](#internal_calc), [12](#primitive_type_warnings_public_apis_16) |
 | `Quantity` | [11](#internal_calc) |
+| `Related` | [1](#fetch_user), [3](#mutability_rules_3) |
 | `Rules` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4) |
 | `String` | [3](#mutability_rules_3) |
+| `Struct` | [2](#mutability_rules_2) |
 | `Suffixes` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
 | `Syntax` | [5](#unit_types_and_literal_suffixes_5), [9](#unit_types_and_literal_suffixes_9) |
 | `Total` | [11](#internal_calc) |
-| `Type` | [12](#primitive_type_warnings_public_apis_16), [13](#type_inference_17) |
+| `Type` | [1](#fetch_user), [12](#primitive_type_warnings_public_apis_16), [13](#type_inference_17) |
 | `TypeInference` | [13](#type_inference_17) |
 | `Types` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
 | `Unit` | [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), [7](#unit_types_and_literal_suffixes_7), [8](#unit_types_and_literal_suffixes_8), [9](#unit_types_and_literal_suffixes_9), ... (6 total) |
@@ -96,7 +114,7 @@ Complete specification of Simple's type system, including primitives, composites
 | `as_km` | [6](#unit_types_and_literal_suffixes_6) |
 | `as_m` | [6](#unit_types_and_literal_suffixes_6) |
 | `as_mile` | [6](#unit_types_and_literal_suffixes_6) |
-| `assert_compiles` | [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4), [5](#unit_types_and_literal_suffixes_5), [6](#unit_types_and_literal_suffixes_6), ... (11 total) |
+| `assert_compiles` | [1](#fetch_user), [2](#mutability_rules_2), [3](#mutability_rules_3), [4](#mutability_rules_4), [5](#unit_types_and_literal_suffixes_5), ... (12 total) |
 | `calc` | [11](#internal_calc) |
 | `calculate_total` | [11](#internal_calc) |
 | `deny` | [12](#primitive_type_warnings_public_apis_16) |
@@ -141,19 +159,19 @@ Complete specification of Simple's type system, including primitives, composites
 
 | # | Test | Section | Symbols |
 |---|------|---------|---------|
-| 1 | [fetch_user](#fetch_user) | Built-in Types | `fetch`, `user`, `User` +8 |
-| 2 | [mutability_rules_2](#mutability_rules_2) | Mutability Rules | `Mutability`, `rules`, `mutability_rules` +6 |
-| 3 | [mutability_rules_3](#mutability_rules_3) | Mutability Rules | `Mutability`, `rules`, `mutability_rules` +7 |
-| 4 | [mutability_rules_4](#mutability_rules_4) | Mutability Rules | `Mutability`, `rules`, `mutability_rules` +7 |
-| 5 | [unit_types_and_literal_suffixes_5](#unit_types_and_literal_suffixes_5) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +16 |
-| 6 | [unit_types_and_literal_suffixes_6](#unit_types_and_literal_suffixes_6) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +17 |
-| 7 | [unit_types_and_literal_suffixes_7](#unit_types_and_literal_suffixes_7) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +15 |
-| 8 | [unit_types_and_literal_suffixes_8](#unit_types_and_literal_suffixes_8) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +11 |
-| 9 | [unit_types_and_literal_suffixes_9](#unit_types_and_literal_suffixes_9) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +18 |
-| 10 | [unit_types_and_literal_suffixes_10](#unit_types_and_literal_suffixes_10) | Unit Types and Literal Suffixes | `Literal`, `UnitTypesAndLiteralSuffixes`, `suffixes` +12 |
-| 11 | [internal_calc](#internal_calc) | Primitive Type Warnings (Public APIs) | `internal_calc`, `internal`, `calc` +10 |
-| 12 | [primitive_type_warnings_public_apis_16](#primitive_type_warnings_public_apis_16) | Primitive Type Warnings (Public APIs) | `primitive_type_warnings_public_apis`, `Type`, `apis` +12 |
-| 13 | [type_inference_17](#type_inference_17) | Type Inference | `inference`, `Type`, `TypeInference` +7 |
+| 1 | [fetch_user](#fetch_user) | Built-in Types | `fetch`, `Fetch`, `user` +16 |
+| 2 | [mutability_rules_2](#mutability_rules_2) | Mutability Rules | `rules`, `mutability`, `Mutability` +9 |
+| 3 | [mutability_rules_3](#mutability_rules_3) | Mutability Rules | `rules`, `mutability`, `Mutability` +10 |
+| 4 | [mutability_rules_4](#mutability_rules_4) | Mutability Rules | `rules`, `mutability`, `Mutability` +7 |
+| 5 | [unit_types_and_literal_suffixes_5](#unit_types_and_literal_suffixes_5) | Unit Types and Literal Suffixes | `literal`, `and`, `UnitTypesAndLiteralSuffixes` +16 |
+| 6 | [unit_types_and_literal_suffixes_6](#unit_types_and_literal_suffixes_6) | Unit Types and Literal Suffixes | `literal`, `and`, `UnitTypesAndLiteralSuffixes` +17 |
+| 7 | [unit_types_and_literal_suffixes_7](#unit_types_and_literal_suffixes_7) | Unit Types and Literal Suffixes | `literal`, `and`, `UnitTypesAndLiteralSuffixes` +15 |
+| 8 | [unit_types_and_literal_suffixes_8](#unit_types_and_literal_suffixes_8) | Unit Types and Literal Suffixes | `literal`, `and`, `UnitTypesAndLiteralSuffixes` +11 |
+| 9 | [unit_types_and_literal_suffixes_9](#unit_types_and_literal_suffixes_9) | Unit Types and Literal Suffixes | `literal`, `and`, `UnitTypesAndLiteralSuffixes` +18 |
+| 10 | [unit_types_and_literal_suffixes_10](#unit_types_and_literal_suffixes_10) | Unit Types and Literal Suffixes | `literal`, `and`, `UnitTypesAndLiteralSuffixes` +12 |
+| 11 | [internal_calc](#internal_calc) | Primitive Type Warnings (Public APIs) | `internal_calc`, `internal`, `Internal` +10 |
+| 12 | [primitive_type_warnings_public_apis_16](#primitive_type_warnings_public_apis_16) | Primitive Type Warnings (Public APIs) | `type`, `primitive_type_warnings_public_apis`, `Type` +12 |
+| 13 | [type_inference_17](#type_inference_17) | Type Inference | `type`, `TypeInference`, `Type` +7 |
 
 ---
 
@@ -163,27 +181,37 @@ Complete specification of Simple's type system, including primitives, composites
 
 **Linked Symbols:**
 - `fetch`
+- `Fetch`
 - `user`
 - `User`
-- `Fetch`
 - `fetch_user`
 - `FetchUser`
-- `get`
 - `Using`
+- `Related`
 - `UserId`
-- `Promise`
-- ... and 1 more
+- `Links`
+- ... and 9 more
 
 **Code:**
 
 ```simple
-fn fetch_user(id: UserId) -> User:
-    let resp ~= http.get("/users/{id}")
-    return parse(resp)
+test "fetch_user":
+    """
+    Async functions return Promise types automatically.
+    
+    **Links:** Promise, Type::Function
+    **Related:** mutability_rules_2
+    """
+    # Declared return type: User
+    # Actual return type: Promise[User]
+    fn fetch_user(id: UserId) -> User:
+        let resp ~= http.get("/users/{id}")
+        return parse(resp)
 
-# Using the promise
-let user ~= fetch_user(1_uid)      # user: User (awaited)
-let promise = fetch_user(1_uid)     # promise: Promise[User]
+    # Using the promise
+    let user ~= fetch_user(1_uid)      # user: User (awaited)
+    let promise = fetch_user(1_uid)     # promise: Promise[User]
+    assert_compiles()
 ```
 
 ### Test 2: Mutability Rules {#mutability_rules_2}
@@ -191,22 +219,26 @@ let promise = fetch_user(1_uid)     # promise: Promise[User]
 **Test name:** `mutability_rules_2`
 
 **Linked Symbols:**
-- `Mutability`
 - `rules`
+- `mutability`
+- `Mutability`
+- `Rules`
 - `mutability_rules`
 - `MutabilityRules`
-- `mutability`
-- `Rules`
-- `assert_compiles`
 - `Point`
-- `Cursor`
+- `Links`
+- `assert_compiles`
+- `Immutable`
+- ... and 2 more
 
 **Code:**
 
 ```simple
 test "mutability_rules_2":
     """
-    Mutability Rules
+    Immutable vs mutable struct declarations.
+    
+    **Links:** Mutability, Struct
     """
     struct Point:
         x: f64
@@ -223,23 +255,27 @@ test "mutability_rules_2":
 **Test name:** `mutability_rules_3`
 
 **Linked Symbols:**
-- `Mutability`
 - `rules`
+- `mutability`
+- `Mutability`
+- `Rules`
 - `mutability_rules`
 - `MutabilityRules`
-- `mutability`
-- `Rules`
-- `assert_compiles`
-- `String`
-- `Color`
+- `Related`
 - `Person`
+- `Links`
+- `Class`
+- ... and 3 more
 
 **Code:**
 
 ```simple
 test "mutability_rules_3":
     """
-    Mutability Rules
+    Mutability applies to fields and behavior.
+    
+    **Links:** Mutability, Class
+    **Related:** mutability_rules_2
     """
     class Person:
         name: String
@@ -257,14 +293,14 @@ test "mutability_rules_3":
 **Test name:** `mutability_rules_4`
 
 **Linked Symbols:**
-- `Mutability`
 - `rules`
+- `mutability`
+- `Mutability`
+- `Rules`
 - `mutability_rules`
 - `MutabilityRules`
-- `mutability`
-- `Rules`
-- `assert_compiles`
 - `mutable`
+- `assert_compiles`
 - `variable`
 - `MAX`
 
@@ -290,15 +326,15 @@ test "mutability_rules_4":
 **Test name:** `unit_types_and_literal_suffixes_5`
 
 **Linked Symbols:**
-- `Literal`
-- `UnitTypesAndLiteralSuffixes`
-- `suffixes`
-- `Types`
-- `Unit`
-- `and`
 - `literal`
-- `Suffixes`
+- `and`
+- `UnitTypesAndLiteralSuffixes`
 - `unit_types_and_literal_suffixes`
+- `And`
+- `suffixes`
+- `Suffixes`
+- `Unit`
+- `Types`
 - `types`
 - ... and 9 more
 
@@ -340,15 +376,15 @@ test "unit_types_and_literal_suffixes_5":
 **Test name:** `unit_types_and_literal_suffixes_6`
 
 **Linked Symbols:**
-- `Literal`
-- `UnitTypesAndLiteralSuffixes`
-- `suffixes`
-- `Types`
-- `Unit`
-- `and`
 - `literal`
-- `Suffixes`
+- `and`
+- `UnitTypesAndLiteralSuffixes`
 - `unit_types_and_literal_suffixes`
+- `And`
+- `suffixes`
+- `Suffixes`
+- `Unit`
+- `Types`
 - `types`
 - ... and 10 more
 
@@ -381,15 +417,15 @@ test "unit_types_and_literal_suffixes_6":
 **Test name:** `unit_types_and_literal_suffixes_7`
 
 **Linked Symbols:**
-- `Literal`
-- `UnitTypesAndLiteralSuffixes`
-- `suffixes`
-- `Types`
-- `Unit`
-- `and`
 - `literal`
-- `Suffixes`
+- `and`
+- `UnitTypesAndLiteralSuffixes`
 - `unit_types_and_literal_suffixes`
+- `And`
+- `suffixes`
+- `Suffixes`
+- `Unit`
+- `Types`
 - `types`
 - ... and 8 more
 
@@ -422,15 +458,15 @@ test "unit_types_and_literal_suffixes_7":
 **Test name:** `unit_types_and_literal_suffixes_8`
 
 **Linked Symbols:**
-- `Literal`
-- `UnitTypesAndLiteralSuffixes`
-- `suffixes`
-- `Types`
-- `Unit`
-- `and`
 - `literal`
-- `Suffixes`
+- `and`
+- `UnitTypesAndLiteralSuffixes`
 - `unit_types_and_literal_suffixes`
+- `And`
+- `suffixes`
+- `Suffixes`
+- `Unit`
+- `Types`
 - `types`
 - ... and 4 more
 
@@ -457,15 +493,15 @@ test "unit_types_and_literal_suffixes_8":
 **Test name:** `unit_types_and_literal_suffixes_9`
 
 **Linked Symbols:**
-- `Literal`
-- `UnitTypesAndLiteralSuffixes`
-- `suffixes`
-- `Types`
-- `Unit`
-- `and`
 - `literal`
-- `Suffixes`
+- `and`
+- `UnitTypesAndLiteralSuffixes`
 - `unit_types_and_literal_suffixes`
+- `And`
+- `suffixes`
+- `Suffixes`
+- `Unit`
+- `Types`
 - `types`
 - ... and 11 more
 
@@ -494,15 +530,15 @@ test "unit_types_and_literal_suffixes_9":
 **Test name:** `unit_types_and_literal_suffixes_10`
 
 **Linked Symbols:**
-- `Literal`
-- `UnitTypesAndLiteralSuffixes`
-- `suffixes`
-- `Types`
-- `Unit`
-- `and`
 - `literal`
-- `Suffixes`
+- `and`
+- `UnitTypesAndLiteralSuffixes`
 - `unit_types_and_literal_suffixes`
+- `And`
+- `suffixes`
+- `Suffixes`
+- `Unit`
+- `Types`
 - `types`
 - ... and 5 more
 
@@ -531,14 +567,14 @@ test "unit_types_and_literal_suffixes_10":
 **Linked Symbols:**
 - `internal_calc`
 - `internal`
-- `calc`
 - `Internal`
+- `calc`
 - `InternalCalc`
 - `Calc`
-- `Total`
-- `Public`
 - `raw`
+- `from_raw`
 - `calculate_total`
+- `Total`
 - ... and 3 more
 
 **Code:**
@@ -558,16 +594,16 @@ pub fn calculate_total(price: Price, quantity: Quantity) -> Total:
 **Test name:** `primitive_type_warnings_public_apis_16`
 
 **Linked Symbols:**
+- `type`
 - `primitive_type_warnings_public_apis`
 - `Type`
 - `apis`
-- `Public`
-- `type`
 - `public`
-- `PrimitiveTypeWarningsPublicApis`
-- `Warnings`
 - `Apis`
+- `Primitive`
 - `warnings`
+- `PrimitiveTypeWarningsPublicApis`
+- `Public`
 - ... and 5 more
 
 **Code:**
@@ -592,16 +628,16 @@ test "primitive_type_warnings_public_apis_16":
 **Test name:** `type_inference_17`
 
 **Linked Symbols:**
-- `inference`
-- `Type`
-- `TypeInference`
 - `type`
+- `TypeInference`
+- `Type`
+- `inference`
 - `Inference`
 - `type_inference`
-- `assert_compiles`
 - `Point`
-- `Cursor`
+- `assert_compiles`
 - `Error`
+- `Cursor`
 
 **Code:**
 
