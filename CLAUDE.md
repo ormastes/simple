@@ -1,5 +1,24 @@
 # Simple Language Compiler - Development Guide
 
+## Skills Reference
+
+For detailed guidance, use these skills (invoke with `/skill-name`):
+
+| Skill | Purpose |
+|-------|---------|
+| `versioning` | Jujutsu (jj) workflow - **NOT git!** |
+| `test` | Test writing (Rust & Simple BDD) |
+| `coding` | Coding standards, Simple language rules |
+| `design` | Design patterns, type system, APIs |
+| `architecture` | Compiler architecture, crate structure |
+| `research` | Codebase exploration, documentation |
+| `debug` | Debugging interpreter/codegen, tracing, GC logging |
+| `stdlib` | Writing stdlib modules, variants, capabilities |
+
+Skills located in `.claude/skills/`.
+
+---
+
 **Key Features:**
 - **LLM-Friendly**: IR export, context packs, lint framework (15/40 implemented, 28/40 specified, 70% effective completion)
 - **Pattern Matching Safety**: Exhaustiveness checking, unreachable detection, strong enums (5/5 complete)
@@ -120,7 +139,61 @@ Simple language is designed to be self-hosting and practical for real-world appl
 - Use contracts for critical functions (`in:`, `out:`, `invariant:`)
 - Leverage AOP for cross-cutting concerns (logging, metrics, validation)
 
-See `simple/app/README.md` for complete details. 
+See `simple/app/README.md` for complete details.
+
+## Scripts Policy - IMPORTANT
+
+**⚠️ All scripts must be written in Simple language, NOT Python or Bash!**
+
+This project is designed to be self-hosting. All automation scripts, build tools, and utilities should be implemented in Simple (`.spl` files).
+
+### DO NOT Write Scripts In:
+- ❌ Python (`.py`)
+- ❌ Bash/Shell (`.sh`, `.bash`)
+- ❌ JavaScript/Node.js (`.js`)
+- ❌ Any other scripting language
+
+### DO Write Scripts In:
+- ✅ Simple language (`.spl`)
+
+### Why Simple-Only Scripts?
+
+1. **Self-Hosting:** Simple is designed to be practical for real-world tooling
+2. **Dogfooding:** Using Simple for our own tools helps identify language gaps
+3. **Consistency:** One language for all project code
+4. **Testing:** Scripts serve as integration tests for the interpreter
+5. **Documentation:** Scripts demonstrate language capabilities
+
+### Existing Scripts to Migrate
+
+Legacy scripts in `scripts/` directory should be rewritten in Simple when touched:
+- `*.sh` → `*.spl`
+- `*.py` → `*.spl`
+
+### Example Script Structure
+
+```simple
+# scripts/my_tool.spl
+import std.io
+import std.fs
+import std.args
+
+fn main():
+    let args = args.get_args()
+    if args.len() < 2:
+        io.println("Usage: simple scripts/my_tool.spl <arg>")
+        return 1
+
+    # Script logic here
+    io.println("Processing: {args[1]}")
+    return 0
+```
+
+### Running Scripts
+
+```bash
+./target/debug/simple scripts/my_tool.spl arg1 arg2
+```
 
 ## Bug Reports & Improvement Requests
 

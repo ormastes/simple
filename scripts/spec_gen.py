@@ -2,6 +2,13 @@
 """
 Spec Generator - Generate markdown documentation from _spec.spl files.
 
+Enhanced with:
+- Symbol linking (hybrid approach)
+- Test name to symbol conversion
+- Smart path resolution
+- Root TOC generation
+- Category organization
+
 Reads executable specification files (tests/specs/*_spec.spl) and generates
 formatted markdown documentation suitable for doc/spec/generated/
 
@@ -9,6 +16,7 @@ Usage:
     python scripts/spec_gen.py --input tests/specs/syntax_spec.spl
     python scripts/spec_gen.py --all
     python scripts/spec_gen.py --all --output doc/spec/generated/
+    python scripts/spec_gen.py --index  # Generate root TOC
 """
 
 import re
@@ -16,7 +24,8 @@ import sys
 import argparse
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
+from collections import defaultdict
 
 class SpecFile:
     """Represents a parsed _spec.spl file."""
@@ -34,6 +43,156 @@ class TestCase:
         self.line_number = line_num
         self.docstring = ""
         self.code = ""
+        self.symbols = []  # Linked symbols (hybrid detection)
+        self.related_tests = []  # Related test names
+
+# Category definitions for TOC organization
+CATEGORIES = {
+    "Core Language": ["syntax", "functions", "traits", "memory", "modules"],
+    "Type System": ["types", "type_inference"],
+    "Async/Concurrency": ["async_default", "suspension_operator", "concurrency"],
+    "Advanced Features": ["capability_effects", "metaprogramming", "macro"],
+    "Data Structures": ["data_structures"],
+    "Testing & Quality": ["sandboxing"],
+}
+
+def categorize_spec(spec_name: str) -> str:
+    """Determine category for a spec file."""
+    for category, specs in CATEGORIES.items():
+        if any(s in spec_name for s in specs):
+            return category
+    return "Miscellaneous"
+
+def convert_test_name_to_symbols(test_name: str) -> List[str]:
+    """Convert test name to potential symbol names.
+    
+    Examples:
+        type_inference_basic -> ["type_inference", "TypeInference"]
+        apply_subst_generic -> ["apply_subst", "ApplySubst"]
+    """
+    # Remove common prefixes
+    name = test_name.replace("test_", "").replace("_test", "")
+    
+    # Split by underscore
+    parts = name.split("_")
+    
+    # Filter out numbers and common suffixes
+    filtered = [p for p in parts if not p.isdigit() and p not in ("basic", "advanced", "simple", "complex")]
+    
+    if not filtered:
+        return []
+    
+    # Generate variations
+    symbols = []
+    
+    # Snake case (function name): type_inference
+    snake_case = "_".join(filtered)
+    symbols.append(snake_case)
+    
+    # Pascal case (type name): TypeInference
+    pascal_case = "".join(p.capitalize() for p in filtered)
+    symbols.append(pascal_case)
+    
+    # Also try each individual part
+    for part in filtered:
+        if len(part) > 2:  # Skip very short parts
+            symbols.append(part)
+            symbols.append(part.capitalize())
+    
+    return list(set(symbols))  # Remove duplicates
+
+def extract_symbols_from_docstring(docstring: str) -> Tuple[List[str], List[str]]:
+    """Extract explicit symbol links and related tests from docstring.
+    
+    Returns: (symbols, related_tests)
+    """
+    symbols = []
+    related = []
+    
+    # Extract **Links:** or **Symbols:**
+    link_patterns = [
+        r'\*\*Links?:\*\*\s*(.+)',
+        r'\*\*Symbols?:\*\*\s*(.+)',
+    ]
+    
+    for pattern in link_patterns:
+        matches = re.findall(pattern, docstring, re.MULTILINE)
+        for match in matches:
+            # Split by comma
+            parts = [p.strip() for p in match.split(',')]
+            symbols.extend(parts)
+    
+    # Extract **Related:**
+    related_match = re.search(r'\*\*Related:\*\*\s*(.+)', docstring)
+    if related_match:
+        parts = [p.strip() for p in related_match.group(1).split(',')]
+        related.extend(parts)
+    
+    return symbols, related
+
+def scan_code_for_symbols(code: str) -> Set[str]:
+    """Scan code for potential symbol references.
+    
+    Looks for:
+    - Function calls: symbol()
+    - Method calls: object.method()
+    - Type usage: Type::variant
+    - Constructors: Type::new()
+    """
+    symbols = set()
+    
+    # Pattern for qualified names: Type::method, module::Type
+    qualified = re.findall(r'([A-Z][a-zA-Z0-9_]*)::[a-z_][a-zA-Z0-9_]*', code)
+    symbols.update(qualified)
+    
+    # Pattern for function calls: function_name(
+    functions = re.findall(r'\b([a-z_][a-z0-9_]*)\s*\(', code)
+    symbols.update(functions)
+    
+    # Pattern for method calls: .method_name(
+    methods = re.findall(r'\.([a-z_][a-z0-9_]*)\s*\(', code)
+    symbols.update(methods)
+    
+    # Pattern for type names (capitalized)
+    types = re.findall(r'\b([A-Z][a-zA-Z0-9]*)\b', code)
+    symbols.update(types)
+    
+    # Filter out common keywords and very short names
+    filtered = {s for s in symbols if len(s) > 2 and s not in ('Int', 'Str', 'Bool', 'None', 'Some')}
+    
+    return filtered
+
+def extract_symbols_hybrid(test_case: TestCase, imports: Set[str]) -> List[str]:
+    """Extract symbols using hybrid approach:
+    1. Explicit docstring metadata
+    2. Test name conversion
+    3. Code scanning
+    """
+    all_symbols = []
+    
+    # Method 1: Explicit docstring links
+    doc_symbols, related = extract_symbols_from_docstring(test_case.docstring)
+    all_symbols.extend(doc_symbols)
+    test_case.related_tests = related
+    
+    # Method 2: Test name conversion
+    name_symbols = convert_test_name_to_symbols(test_case.name)
+    all_symbols.extend(name_symbols)
+    
+    # Method 3: Code scanning
+    code_symbols = scan_code_for_symbols(test_case.code)
+    all_symbols.extend(code_symbols)
+    
+    # Deduplicate and filter
+    unique_symbols = []
+    seen = set()
+    for sym in all_symbols:
+        if sym and sym not in seen:
+            seen.add(sym)
+            unique_symbols.append(sym)
+    
+    return unique_symbols
+
 
 def parse_spec_file(filepath: Path) -> SpecFile:
     """Parse a _spec.spl file and extract documentation."""
