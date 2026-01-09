@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/syntax_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -14,6 +14,13 @@
 **Keywords:** syntax, lexical, operators, execution-modes, indentation
 **Last Updated:** 2025-12-28
 **Topics:** syntax, type-system
+
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (21 tests)
+- [Source Code](#source-code)
 
 ## Overview
 
@@ -27,35 +34,137 @@ Comprehensive specification of Simple's syntax, execution modes, and lexical str
 
 ---
 
-## Test Cases (21 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [add](#test-1) | Execution Modes | ### Scenario: ### Compiler Mode (Native Codegen)... |
-| [add](#test-2) | Execution Modes | ### Scenario: ### Interpreter Mode... |
-| [syntax_overview_3](#test-3) | Syntax Overview |  |
-| [syntax_overview_4](#test-4) | Syntax Overview |  |
-| [literals_5](#test-5) | Literals |  |
-| [literals_6](#test-6) | Literals |  |
-| [literals_7](#test-7) | Literals |  |
-| [literals_8](#test-8) | Literals |  |
-| [string_literals_9](#test-9) | String Literals |  |
-| [string_literals_10](#test-10) | String Literals |  |
-| [string_literals_11](#test-11) | String Literals |  |
-| [string_literals_12](#test-12) | String Literals |  |
-| [string_literals_13](#test-13) | String Literals |  |
-| [operators_14](#test-14) | Operators |  |
-| [functional_update_syntax___15](#test-15) | Functional Update Syntax (`->`) |  |
-| [functional_update_syntax___16](#test-16) | Functional Update Syntax (`->`) |  |
-| [functional_update_syntax___17](#test-17) | Functional Update Syntax (`->`) | ### Scenario: 1. Immutable data transformations - When metho... |
-| [functional_update_syntax___18](#test-18) | Functional Update Syntax (`->`) | ### Scenario: 2. Builder patterns - When constructing object... |
-| [functional_update_syntax___19](#test-19) | Functional Update Syntax (`->`) | ### Scenario: 3. State machine transitions:...... |
-| [parsing_design_rationale_20](#test-20) | Parsing Design Rationale | ### Scenario: 1. No-parentheses calls restricted to statemen... |
-| [parsing_design_rationale_21](#test-21) | Parsing Design Rationale | ### Scenario: 2. Backslash-prefixed lambda parameters: Lambd... |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `Add` | [1](#add), [2](#add) |
+| `Alice` | [20](#parsing_design_rationale_20) |
+| `Backslashes` | [10](#string_literals_10) |
+| `Binary` | [5](#literals_5) |
+| `Braces` | [10](#string_literals_10) |
+| `Clear` | [21](#parsing_design_rationale_21) |
+| `Config` | [18](#functional_update_syntax___18) |
+| `Count` | [9](#string_literals_9) |
+| `Decimal` | [5](#literals_5) |
+| `Design` | [20](#parsing_design_rationale_20), [21](#parsing_design_rationale_21) |
+| `Discard` | [14](#operators_14) |
+| `ERROR` | [13](#string_literals_13) |
+| `Error` | [20](#parsing_design_rationale_20) |
+| `File` | [12](#string_literals_12) |
+| `Functional` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16), [17](#functional_update_syntax___17), [18](#functional_update_syntax___18), [19](#functional_update_syntax___19) |
+| `FunctionalUpdateSyntax` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16), [17](#functional_update_syntax___17), [18](#functional_update_syntax___18), [19](#functional_update_syntax___19) |
+| `Hello` | [9](#string_literals_9), [11](#string_literals_11) |
+| `Hexadecimal` | [5](#literals_5) |
+| `HttpUrl` | [13](#string_literals_13) |
+| `IDs` | [8](#literals_8) |
+| `Invalid` | [20](#parsing_design_rationale_20) |
+| `Item` | [4](#syntax_overview_4) |
+| `Iterating` | [4](#syntax_overview_4) |
+| `Literals` | [5](#literals_5), [6](#literals_6), [7](#literals_7), [8](#literals_8), [9](#string_literals_9), ... (9 total) |
+| `Multiple` | [4](#syntax_overview_4), [21](#parsing_design_rationale_21) |
+| `Network` | [12](#string_literals_12) |
+| `Octal` | [5](#literals_5) |
+| `Operators` | [14](#operators_14) |
+| `OrderId` | [8](#literals_8) |
+| `Overview` | [3](#syntax_overview_3), [4](#syntax_overview_4) |
+| `Parser` | [19](#functional_update_syntax___19) |
+| `Parsing` | [20](#parsing_design_rationale_20), [21](#parsing_design_rationale_21) |
+| `ParsingDesignRationale` | [20](#parsing_design_rationale_20), [21](#parsing_design_rationale_21) |
+| `Percentage` | [8](#literals_8) |
+| `Percentages` | [8](#literals_8) |
+| `Physical` | [8](#literals_8) |
+| `RGB` | [5](#literals_5) |
+| `Rationale` | [20](#parsing_design_rationale_20), [21](#parsing_design_rationale_21) |
+| `Result` | [9](#string_literals_9) |
+| `Same` | [11](#string_literals_11) |
+| `Semantic` | [8](#literals_8) |
+| `Socket` | [12](#string_literals_12) |
+| `String` | [9](#string_literals_9), [10](#string_literals_10), [11](#string_literals_11), [12](#string_literals_12), [13](#string_literals_13) |
+| `StringLiterals` | [9](#string_literals_9), [10](#string_literals_10), [11](#string_literals_11), [12](#string_literals_12), [13](#string_literals_13) |
+| `Suspending` | [14](#operators_14) |
+| `Syntax` | [3](#syntax_overview_3), [4](#syntax_overview_4), [15](#functional_update_syntax___15), [16](#functional_update_syntax___16), [17](#functional_update_syntax___17), ... (7 total) |
+| `SyntaxOverview` | [3](#syntax_overview_3), [4](#syntax_overview_4) |
+| `URLs` | [12](#string_literals_12) |
+| `Unix` | [5](#literals_5) |
+| `Update` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16), [17](#functional_update_syntax___17), [18](#functional_update_syntax___18), [19](#functional_update_syntax___19) |
+| `UserId` | [8](#literals_8) |
+| `Users` | [10](#string_literals_10), [12](#string_literals_12) |
+| `Valid` | [20](#parsing_design_rationale_20) |
+| `add` | [1](#add), [2](#add) |
+| `append` | [17](#functional_update_syntax___17) |
+| `assert_compiles` | [3](#syntax_overview_3), [4](#syntax_overview_4), [5](#literals_5), [6](#literals_6), [7](#literals_7), ... (19 total) |
+| `block` | [4](#syntax_overview_4) |
+| `design` | [20](#parsing_design_rationale_20), [21](#parsing_design_rationale_21) |
+| `done` | [14](#operators_14) |
+| `f32` | [7](#literals_7) |
+| `f64` | [7](#literals_7) |
+| `fetch_user` | [14](#operators_14) |
+| `filter` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16) |
+| `format` | [20](#parsing_design_rationale_20) |
+| `from_str` | [13](#string_literals_13) |
+| `functional` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16), [17](#functional_update_syntax___17), [18](#functional_update_syntax___18), [19](#functional_update_syntax___19) |
+| `functional_update_syntax__` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16), [17](#functional_update_syntax___17), [18](#functional_update_syntax___18), [19](#functional_update_syntax___19) |
+| `is_ready` | [14](#operators_14) |
+| `literals` | [5](#literals_5), [6](#literals_6), [7](#literals_7), [8](#literals_8), [9](#string_literals_9), ... (9 total) |
+| `load_data` | [15](#functional_update_syntax___15) |
+| `new` | [18](#functional_update_syntax___18), [19](#functional_update_syntax___19) |
+| `normalize` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16) |
+| `operators` | [14](#operators_14) |
+| `overview` | [3](#syntax_overview_3), [4](#syntax_overview_4) |
+| `parse_body` | [19](#functional_update_syntax___19) |
+| `parsing` | [20](#parsing_design_rationale_20), [21](#parsing_design_rationale_21) |
+| `parsing_design_rationale` | [20](#parsing_design_rationale_20), [21](#parsing_design_rationale_21) |
+| `paths` | [12](#string_literals_12) |
+| `proceed` | [14](#operators_14) |
+| `rationale` | [20](#parsing_design_rationale_20), [21](#parsing_design_rationale_21) |
+| `read_header` | [19](#functional_update_syntax___19) |
+| `reverse` | [17](#functional_update_syntax___17) |
+| `save` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16) |
+| `set_host` | [18](#functional_update_syntax___18) |
+| `set_port` | [18](#functional_update_syntax___18) |
+| `set_timeout` | [18](#functional_update_syntax___18) |
+| `sleep` | [14](#operators_14) |
+| `sort` | [17](#functional_update_syntax___17) |
+| `string` | [9](#string_literals_9), [10](#string_literals_10), [11](#string_literals_11), [12](#string_literals_12), [13](#string_literals_13) |
+| `string_literals` | [9](#string_literals_9), [10](#string_literals_10), [11](#string_literals_11), [12](#string_literals_12), [13](#string_literals_13) |
+| `syntax` | [3](#syntax_overview_3), [4](#syntax_overview_4), [15](#functional_update_syntax___15), [16](#functional_update_syntax___16), [17](#functional_update_syntax___17), ... (7 total) |
+| `syntax_overview` | [3](#syntax_overview_3), [4](#syntax_overview_4) |
+| `type` | [8](#literals_8) |
+| `update` | [15](#functional_update_syntax___15), [16](#functional_update_syntax___16), [17](#functional_update_syntax___17), [18](#functional_update_syntax___18), [19](#functional_update_syntax___19) |
+| `validate` | [19](#functional_update_syntax___19) |
 
 ---
 
-### Test 1: Execution Modes
+## Test Cases (21 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [add](#add) | Execution Modes | `add`, `Add` |
+| 2 | [add](#add) | Execution Modes | `add`, `Add` |
+| 3 | [syntax_overview_3](#syntax_overview_3) | Syntax Overview | `Overview`, `syntax_overview`, `Syntax` +4 |
+| 4 | [syntax_overview_4](#syntax_overview_4) | Syntax Overview | `Overview`, `syntax_overview`, `Syntax` +8 |
+| 5 | [literals_5](#literals_5) | Literals | `literals`, `Literals`, `assert_compiles` +6 |
+| 6 | [literals_6](#literals_6) | Literals | `literals`, `Literals`, `assert_compiles` |
+| 7 | [literals_7](#literals_7) | Literals | `literals`, `Literals`, `assert_compiles` +2 |
+| 8 | [literals_8](#literals_8) | Literals | `literals`, `Literals`, `assert_compiles` +8 |
+| 9 | [string_literals_9](#string_literals_9) | String Literals | `String`, `string`, `Literals` +7 |
+| 10 | [string_literals_10](#string_literals_10) | String Literals | `String`, `string`, `Literals` +7 |
+| 11 | [string_literals_11](#string_literals_11) | String Literals | `String`, `string`, `Literals` +6 |
+| 12 | [string_literals_12](#string_literals_12) | String Literals | `String`, `string`, `Literals` +10 |
+| 13 | [string_literals_13](#string_literals_13) | String Literals | `String`, `string`, `Literals` +7 |
+| 14 | [operators_14](#operators_14) | Operators | `Operators`, `operators`, `assert_compiles` +7 |
+| 15 | [functional_update_syntax___15](#functional_update_syntax___15) | Functional Update Syntax (`->`) | `FunctionalUpdateSyntax`, `functional`, `functional_update_syntax__` +10 |
+| 16 | [functional_update_syntax___16](#functional_update_syntax___16) | Functional Update Syntax (`->`) | `FunctionalUpdateSyntax`, `functional`, `functional_update_syntax__` +9 |
+| 17 | [functional_update_syntax___17](#functional_update_syntax___17) | Functional Update Syntax (`->`) | `FunctionalUpdateSyntax`, `functional`, `functional_update_syntax__` +9 |
+| 18 | [functional_update_syntax___18](#functional_update_syntax___18) | Functional Update Syntax (`->`) | `FunctionalUpdateSyntax`, `functional`, `functional_update_syntax__` +11 |
+| 19 | [functional_update_syntax___19](#functional_update_syntax___19) | Functional Update Syntax (`->`) | `FunctionalUpdateSyntax`, `functional`, `functional_update_syntax__` +11 |
+| 20 | [parsing_design_rationale_20](#parsing_design_rationale_20) | Parsing Design Rationale | `Parsing`, `Rationale`, `design` +11 |
+| 21 | [parsing_design_rationale_21](#parsing_design_rationale_21) | Parsing Design Rationale | `Parsing`, `Rationale`, `design` +8 |
+
+---
+
+### Test 1: Execution Modes {#add}
 
 **Test name:** `add`
 
@@ -70,6 +179,10 @@ Comprehensive specification of Simple's syntax, execution modes, and lexical str
 - Faster execution, suitable for production
 - Example:
 
+**Linked Symbols:**
+- `add`
+- `Add`
+
 **Code:**
 
 ```simple
@@ -77,7 +190,7 @@ fn add(a: i64, b: i64) -> i64:
       return a + b
 ```
 
-### Test 2: Execution Modes
+### Test 2: Execution Modes {#add}
 
 **Test name:** `add`
 
@@ -92,6 +205,10 @@ fn add(a: i64, b: i64) -> i64:
 - Better for prototyping and scripting
 - Example:
 
+**Linked Symbols:**
+- `add`
+- `Add`
+
 **Code:**
 
 ```simple
@@ -99,9 +216,18 @@ fn add(a, b):
       return a + b
 ```
 
-### Test 3: Syntax Overview
+### Test 3: Syntax Overview {#syntax_overview_3}
 
 **Test name:** `syntax_overview_3`
+
+**Linked Symbols:**
+- `Overview`
+- `syntax_overview`
+- `Syntax`
+- `overview`
+- `SyntaxOverview`
+- `syntax`
+- `assert_compiles`
 
 **Code:**
 
@@ -118,9 +244,22 @@ test "syntax_overview_3":
     assert_compiles()
 ```
 
-### Test 4: Syntax Overview
+### Test 4: Syntax Overview {#syntax_overview_4}
 
 **Test name:** `syntax_overview_4`
+
+**Linked Symbols:**
+- `Overview`
+- `syntax_overview`
+- `Syntax`
+- `overview`
+- `SyntaxOverview`
+- `syntax`
+- `assert_compiles`
+- `Multiple`
+- `Item`
+- `block`
+- ... and 1 more
 
 **Code:**
 
@@ -139,9 +278,20 @@ test "syntax_overview_4":
     assert_compiles()
 ```
 
-### Test 5: Literals
+### Test 5: Literals {#literals_5}
 
 **Test name:** `literals_5`
+
+**Linked Symbols:**
+- `literals`
+- `Literals`
+- `assert_compiles`
+- `Octal`
+- `RGB`
+- `Hexadecimal`
+- `Binary`
+- `Decimal`
+- `Unix`
 
 **Code:**
 
@@ -165,9 +315,14 @@ test "literals_5":
     assert_compiles()
 ```
 
-### Test 6: Literals
+### Test 6: Literals {#literals_6}
 
 **Test name:** `literals_6`
+
+**Linked Symbols:**
+- `literals`
+- `Literals`
+- `assert_compiles`
 
 **Code:**
 
@@ -183,9 +338,16 @@ test "literals_6":
     assert_compiles()
 ```
 
-### Test 7: Literals
+### Test 7: Literals {#literals_7}
 
 **Test name:** `literals_7`
+
+**Linked Symbols:**
+- `literals`
+- `Literals`
+- `assert_compiles`
+- `f32`
+- `f64`
 
 **Code:**
 
@@ -201,9 +363,22 @@ test "literals_7":
     assert_compiles()
 ```
 
-### Test 8: Literals
+### Test 8: Literals {#literals_8}
 
 **Test name:** `literals_8`
+
+**Linked Symbols:**
+- `literals`
+- `Literals`
+- `assert_compiles`
+- `Percentages`
+- `OrderId`
+- `Semantic`
+- `type`
+- `IDs`
+- `Physical`
+- `UserId`
+- ... and 1 more
 
 **Code:**
 
@@ -226,9 +401,21 @@ test "literals_8":
     assert_compiles()
 ```
 
-### Test 9: String Literals
+### Test 9: String Literals {#string_literals_9}
 
 **Test name:** `string_literals_9`
+
+**Linked Symbols:**
+- `String`
+- `string`
+- `Literals`
+- `literals`
+- `string_literals`
+- `StringLiterals`
+- `assert_compiles`
+- `Count`
+- `Hello`
+- `Result`
 
 **Code:**
 
@@ -244,9 +431,21 @@ test "string_literals_9":
     assert_compiles()
 ```
 
-### Test 10: String Literals
+### Test 10: String Literals {#string_literals_10}
 
 **Test name:** `string_literals_10`
+
+**Linked Symbols:**
+- `String`
+- `string`
+- `Literals`
+- `literals`
+- `string_literals`
+- `StringLiterals`
+- `assert_compiles`
+- `Users`
+- `Braces`
+- `Backslashes`
 
 **Code:**
 
@@ -261,9 +460,20 @@ test "string_literals_10":
     assert_compiles()
 ```
 
-### Test 11: String Literals
+### Test 11: String Literals {#string_literals_11}
 
 **Test name:** `string_literals_11`
+
+**Linked Symbols:**
+- `String`
+- `string`
+- `Literals`
+- `literals`
+- `string_literals`
+- `StringLiterals`
+- `assert_compiles`
+- `Same`
+- `Hello`
 
 **Code:**
 
@@ -276,9 +486,22 @@ test "string_literals_11":
     assert_compiles()
 ```
 
-### Test 12: String Literals
+### Test 12: String Literals {#string_literals_12}
 
 **Test name:** `string_literals_12`
+
+**Linked Symbols:**
+- `String`
+- `string`
+- `Literals`
+- `literals`
+- `string_literals`
+- `StringLiterals`
+- `assert_compiles`
+- `Socket`
+- `Users`
+- `File`
+- ... and 3 more
 
 **Code:**
 
@@ -305,9 +528,21 @@ test "string_literals_12":
     assert_compiles()
 ```
 
-### Test 13: String Literals
+### Test 13: String Literals {#string_literals_13}
 
 **Test name:** `string_literals_13`
+
+**Linked Symbols:**
+- `String`
+- `string`
+- `Literals`
+- `literals`
+- `string_literals`
+- `StringLiterals`
+- `assert_compiles`
+- `ERROR`
+- `from_str`
+- `HttpUrl`
 
 **Code:**
 
@@ -324,9 +559,21 @@ test "string_literals_13":
     assert_compiles()
 ```
 
-### Test 14: Operators
+### Test 14: Operators {#operators_14}
 
 **Test name:** `operators_14`
+
+**Linked Symbols:**
+- `Operators`
+- `operators`
+- `assert_compiles`
+- `Discard`
+- `Suspending`
+- `is_ready`
+- `proceed`
+- `sleep`
+- `fetch_user`
+- `done`
 
 **Code:**
 
@@ -351,9 +598,22 @@ test "operators_14":
     assert_compiles()
 ```
 
-### Test 15: Functional Update Syntax (`->`)
+### Test 15: Functional Update Syntax (`->`) {#functional_update_syntax___15}
 
 **Test name:** `functional_update_syntax___15`
+
+**Linked Symbols:**
+- `FunctionalUpdateSyntax`
+- `functional`
+- `functional_update_syntax__`
+- `syntax`
+- `Syntax`
+- `update`
+- `Functional`
+- `Update`
+- `assert_compiles`
+- `filter`
+- ... and 3 more
 
 **Code:**
 
@@ -369,9 +629,22 @@ test "functional_update_syntax___15":
     assert_compiles()
 ```
 
-### Test 16: Functional Update Syntax (`->`)
+### Test 16: Functional Update Syntax (`->`) {#functional_update_syntax___16}
 
 **Test name:** `functional_update_syntax___16`
+
+**Linked Symbols:**
+- `FunctionalUpdateSyntax`
+- `functional`
+- `functional_update_syntax__`
+- `syntax`
+- `Syntax`
+- `update`
+- `Functional`
+- `Update`
+- `assert_compiles`
+- `filter`
+- ... and 2 more
 
 **Code:**
 
@@ -384,7 +657,7 @@ test "functional_update_syntax___16":
     assert_compiles()
 ```
 
-### Test 17: Functional Update Syntax (`->`)
+### Test 17: Functional Update Syntax (`->`) {#functional_update_syntax___17}
 
 **Test name:** `functional_update_syntax___17`
 
@@ -393,6 +666,19 @@ test "functional_update_syntax___16":
 ### Scenario: 1. Immutable data transformations - When methods return new instances:...
 
 1. Immutable data transformations - When methods return new instances:
+
+**Linked Symbols:**
+- `FunctionalUpdateSyntax`
+- `functional`
+- `functional_update_syntax__`
+- `syntax`
+- `Syntax`
+- `update`
+- `Functional`
+- `Update`
+- `assert_compiles`
+- `append`
+- ... and 2 more
 
 **Code:**
 
@@ -407,7 +693,7 @@ test "functional_update_syntax___17":
     assert_compiles()
 ```
 
-### Test 18: Functional Update Syntax (`->`)
+### Test 18: Functional Update Syntax (`->`) {#functional_update_syntax___18}
 
 **Test name:** `functional_update_syntax___18`
 
@@ -416,6 +702,19 @@ test "functional_update_syntax___17":
 ### Scenario: 2. Builder patterns - When constructing objects step by step:...
 
 2. Builder patterns - When constructing objects step by step:
+
+**Linked Symbols:**
+- `FunctionalUpdateSyntax`
+- `functional`
+- `functional_update_syntax__`
+- `syntax`
+- `Syntax`
+- `update`
+- `Functional`
+- `Update`
+- `assert_compiles`
+- `set_timeout`
+- ... and 4 more
 
 **Code:**
 
@@ -429,7 +728,7 @@ test "functional_update_syntax___18":
     assert_compiles()
 ```
 
-### Test 19: Functional Update Syntax (`->`)
+### Test 19: Functional Update Syntax (`->`) {#functional_update_syntax___19}
 
 **Test name:** `functional_update_syntax___19`
 
@@ -438,6 +737,19 @@ test "functional_update_syntax___18":
 ### Scenario: 3. State machine transitions:...
 
 3. State machine transitions:
+
+**Linked Symbols:**
+- `FunctionalUpdateSyntax`
+- `functional`
+- `functional_update_syntax__`
+- `syntax`
+- `Syntax`
+- `update`
+- `Functional`
+- `Update`
+- `assert_compiles`
+- `validate`
+- ... and 4 more
 
 **Code:**
 
@@ -451,7 +763,7 @@ test "functional_update_syntax___19":
     assert_compiles()
 ```
 
-### Test 20: Parsing Design Rationale
+### Test 20: Parsing Design Rationale {#parsing_design_rationale_20}
 
 **Test name:** `parsing_design_rationale_20`
 
@@ -460,6 +772,19 @@ test "functional_update_syntax___19":
 ### Scenario: 1. No-parentheses calls restricted to statement level: Parentheses can only be o...
 
 1. No-parentheses calls restricted to statement level: Parentheses can only be omitted for the outermost method call in a statement:
+
+**Linked Symbols:**
+- `Parsing`
+- `Rationale`
+- `design`
+- `parsing_design_rationale`
+- `Design`
+- `rationale`
+- `parsing`
+- `ParsingDesignRationale`
+- `assert_compiles`
+- `Alice`
+- ... and 4 more
 
 **Code:**
 
@@ -477,7 +802,7 @@ test "parsing_design_rationale_20":
     assert_compiles()
 ```
 
-### Test 21: Parsing Design Rationale
+### Test 21: Parsing Design Rationale {#parsing_design_rationale_21}
 
 **Test name:** `parsing_design_rationale_21`
 
@@ -486,6 +811,19 @@ test "parsing_design_rationale_20":
 ### Scenario: 2. Backslash-prefixed lambda parameters: Lambda/block parameters use `\x` rather...
 
 2. Backslash-prefixed lambda parameters: Lambda/block parameters use `\x` rather than `|x|`. The backslash is unambiguous:
+
+**Linked Symbols:**
+- `Parsing`
+- `Rationale`
+- `design`
+- `parsing_design_rationale`
+- `Design`
+- `rationale`
+- `parsing`
+- `ParsingDesignRationale`
+- `assert_compiles`
+- `Multiple`
+- ... and 1 more
 
 **Code:**
 
@@ -502,6 +840,12 @@ test "parsing_design_rationale_21":
        pairs.map \a, b: a + b
     assert_compiles()
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [syntax_spec.spl](../../tests/specs/syntax_spec.spl)
 
 ---
 

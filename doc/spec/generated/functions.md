@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/functions_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -12,6 +12,13 @@
 **Status:** Reference
 **Feature IDs:** **Source:** functions.md
 **Note:** This is a test extraction file. For complete specification text,
+
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (24 tests)
+- [Source Code](#source-code)
 
 ## Overview
 
@@ -23,38 +30,177 @@ design rationale, and architecture, see doc/spec/functions.md
 
 ---
 
-## Test Cases (24 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [add](#test-1) | Functions | Functions in Simple are defined with the `fn` keyword. The s... |
-| [functions_2](#test-2) | Functions | Functions have an inferred async/sync effect based on their ... |
-| [functions_3](#test-3) | Functions | Simple supports first-class functions - you can assign funct... |
-| [lambdas_and_closures_4](#test-4) | Lambdas and Closures | An inline lambda uses a backslash to introduce parameters (i... |
-| [lambdas_and_closures_5](#test-5) | Lambdas and Closures | The backslash syntax was chosen for one-pass parsing - seein... |
-| [lambdas_and_closures_6](#test-6) | Lambdas and Closures | Lambdas capture variables from their enclosing scope: |
-| [lambdas_and_closures_7](#test-7) | Lambdas and Closures | Methods can accept trailing blocks for iteration or DSL cons... |
-| [pattern_matching_8](#test-8) | Pattern Matching | Pattern matching is a powerful feature enabling branching on... |
-| [pattern_matching_9](#test-9) | Pattern Matching | fn describe_token(tok: Token) -> String:... |
-| [pattern_matching_10](#test-10) | Pattern Matching | ```simple... |
-| [pattern_matching_11](#test-11) | Pattern Matching | ```simple... |
-| [pattern_matching_12](#test-12) | Pattern Matching | ```simple... |
-| [pattern_matching_13](#test-13) | Pattern Matching | ```simple... |
-| [pattern_matching_14](#test-14) | Pattern Matching | let p = Point(x: 5, y: 0)... |
-| [pattern_matching_15](#test-15) | Pattern Matching | All possibilities must be covered (exhaustive matching), oth... |
-| [constructor_polymorphism_16](#test-16) | Constructor Polymorphism | The `Constructor[T]` type represents any constructor that pr... |
-| [constructor_polymorphism_17](#test-17) | Constructor Polymorphism | ```simple... |
-| [constructor_polymorphism_18](#test-18) | Constructor Polymorphism | 1. Must accept all required parameters of parent constructor... |
-| [constructor_polymorphism_19](#test-19) | Constructor Polymorphism | \| Parent Constructor \| Child Constructor \| Valid? \| Reason \|... |
-| [constructor_polymorphism_20](#test-20) | Constructor Polymorphism | let factory = get_widget_factory("button")... |
-| [constructor_polymorphism_21](#test-21) | Constructor Polymorphism | Specify exact constructor signatures: |
-| [constructor_polymorphism_22](#test-22) | Constructor Polymorphism | Constructor polymorphism enables clean dependency injection: |
-| [constructor_polymorphism_23](#test-23) | Constructor Polymorphism | Use traits to define abstract constructor requirements: |
-| [semantic_types_in_function_signatures_24](#test-24) | Semantic Types in Function Signatures | Public functions should use semantic types (unit types, enum... |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `API` | [24](#semantic_types_in_function_signatures_24) |
+| `ASYNC` | [2](#functions_2) |
+| `Add` | [1](#add) |
+| `And` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), [7](#lambdas_and_closures_7) |
+| `Application` | [22](#constructor_polymorphism_22) |
+| `Bare` | [24](#semantic_types_in_function_signatures_24) |
+| `Base` | [18](#constructor_polymorphism_18) |
+| `Blue` | [15](#pattern_matching_15) |
+| `Button` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20) |
+| `Cancel` | [19](#constructor_polymorphism_19) |
+| `Click` | [17](#constructor_polymorphism_17) |
+| `Closures` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), [7](#lambdas_and_closures_7) |
+| `Color` | [15](#pattern_matching_15) |
+| `Compile` | [18](#constructor_polymorphism_18) |
+| `Config` | [22](#constructor_polymorphism_22) |
+| `Constructor` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20), ... (8 total) |
+| `ConstructorPolymorphism` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20), ... (8 total) |
+| `Creatable` | [23](#constructor_polymorphism_23) |
+| `Created` | [20](#constructor_polymorphism_20) |
+| `Creates` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17) |
+| `Data` | [2](#functions_2), [22](#constructor_polymorphism_22) |
+| `Dynamic` | [19](#constructor_polymorphism_19) |
+| `EOF` | [8](#pattern_matching_8) |
+| `ERROR` | [18](#constructor_polymorphism_18) |
+| `End` | [8](#pattern_matching_8) |
+| `Enums` | [24](#semantic_types_in_function_signatures_24) |
+| `Error` | [15](#pattern_matching_15) |
+| `Explicit` | [2](#functions_2) |
+| `Factory` | [19](#constructor_polymorphism_19) |
+| `Filtering` | [7](#lambdas_and_closures_7) |
+| `Function` | [24](#semantic_types_in_function_signatures_24) |
+| `Functions` | [2](#functions_2), [3](#functions_3) |
+| `GOOD` | [24](#semantic_types_in_function_signatures_24) |
+| `Generic` | [19](#constructor_polymorphism_19) |
+| `Green` | [15](#pattern_matching_15) |
+| `Hello` | [17](#constructor_polymorphism_17) |
+| `Help` | [19](#constructor_polymorphism_19) |
+| `Inferred` | [2](#functions_2) |
+| `InvalidChild` | [18](#constructor_polymorphism_18) |
+| `Item` | [7](#lambdas_and_closures_7) |
+| `Label` | [17](#constructor_polymorphism_17), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20) |
+| `Lambdas` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), [7](#lambdas_and_closures_7) |
+| `LambdasAndClosures` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), [7](#lambdas_and_closures_7) |
+| `Large` | [11](#pattern_matching_11) |
+| `Mapping` | [7](#lambdas_and_closures_7) |
+| `Matching` | [8](#pattern_matching_8), [9](#pattern_matching_9), [10](#pattern_matching_10), [11](#pattern_matching_11), [12](#pattern_matching_12), ... (8 total) |
+| `Minus` | [8](#pattern_matching_8) |
+| `MockService` | [22](#constructor_polymorphism_22) |
+| `Negative` | [11](#pattern_matching_11) |
+| `Non` | [12](#pattern_matching_12) |
+| `Normal` | [11](#pattern_matching_11) |
+| `Number` | [8](#pattern_matching_8), [14](#pattern_matching_14) |
+| `One` | [9](#pattern_matching_9) |
+| `Option` | [24](#semantic_types_in_function_signatures_24) |
+| `Origin` | [13](#pattern_matching_13) |
+| `Pass` | [17](#constructor_polymorphism_17) |
+| `Pattern` | [8](#pattern_matching_8), [9](#pattern_matching_9), [10](#pattern_matching_10), [11](#pattern_matching_11), [12](#pattern_matching_12), ... (8 total) |
+| `PatternMatching` | [8](#pattern_matching_8), [9](#pattern_matching_9), [10](#pattern_matching_10), [11](#pattern_matching_11), [12](#pattern_matching_12), ... (8 total) |
+| `Plus` | [8](#pattern_matching_8) |
+| `Point` | [13](#pattern_matching_13) |
+| `Polymorphism` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20), ... (8 total) |
+| `Production` | [22](#constructor_polymorphism_22) |
+| `ProductionService` | [22](#constructor_polymorphism_22) |
+| `Red` | [15](#pattern_matching_15) |
+| `SYNC` | [2](#functions_2) |
+| `Self` | [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [22](#constructor_polymorphism_22), [23](#constructor_polymorphism_23) |
+| `Semantic` | [24](#semantic_types_in_function_signatures_24) |
+| `SemanticTypesInFunctionSignatures` | [24](#semantic_types_in_function_signatures_24) |
+| `Service` | [22](#constructor_polymorphism_22) |
+| `Signatures` | [24](#semantic_types_in_function_signatures_24) |
+| `Slider` | [20](#constructor_polymorphism_20) |
+| `Small` | [10](#pattern_matching_10) |
+| `Somewhere` | [13](#pattern_matching_13) |
+| `Starts` | [14](#pattern_matching_14) |
+| `String` | [8](#pattern_matching_8) |
+| `Testing` | [22](#constructor_polymorphism_22) |
+| `Token` | [8](#pattern_matching_8) |
+| `Types` | [24](#semantic_types_in_function_signatures_24) |
+| `User` | [2](#functions_2), [24](#semantic_types_in_function_signatures_24) |
+| `UserId` | [2](#functions_2), [24](#semantic_types_in_function_signatures_24) |
+| `UserStatus` | [24](#semantic_types_in_function_signatures_24) |
+| `ValidChild` | [18](#constructor_polymorphism_18) |
+| `WARNING` | [24](#semantic_types_in_function_signatures_24) |
+| `Warning` | [24](#semantic_types_in_function_signatures_24) |
+| `Widget` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20), [21](#constructor_polymorphism_21), ... (6 total) |
+| `With` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5) |
+| `Zero` | [9](#pattern_matching_9), [12](#pattern_matching_12) |
+| `add` | [1](#add), [5](#lambdas_and_closures_5) |
+| `and` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), [7](#lambdas_and_closures_7) |
+| `apply` | [3](#functions_3) |
+| `assert_compiles` | [2](#functions_2), [3](#functions_3), [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), ... (23 total) |
+| `case` | [14](#pattern_matching_14) |
+| `closures` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), [7](#lambdas_and_closures_7) |
+| `compute` | [2](#functions_2) |
+| `constructor` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20), ... (8 total) |
+| `constructor_polymorphism` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20), ... (8 total) |
+| `create` | [23](#constructor_polymorphism_23) |
+| `create_many` | [19](#constructor_polymorphism_19) |
+| `create_widget` | [17](#constructor_polymorphism_17) |
+| `ctor` | [17](#constructor_polymorphism_17), [19](#constructor_polymorphism_19), [21](#constructor_polymorphism_21) |
+| `describe_token` | [8](#pattern_matching_8) |
+| `double` | [2](#functions_2) |
+| `empty` | [22](#constructor_polymorphism_22) |
+| `exact_factory` | [21](#constructor_polymorphism_21) |
+| `exactly` | [21](#constructor_polymorphism_21) |
+| `factory` | [16](#constructor_polymorphism_16), [19](#constructor_polymorphism_19) |
+| `fetch_user` | [2](#functions_2) |
+| `find_user` | [24](#semantic_types_in_function_signatures_24) |
+| `function` | [24](#semantic_types_in_function_signatures_24) |
+| `functions` | [2](#functions_2), [3](#functions_3) |
+| `get` | [2](#functions_2) |
+| `get_user_id` | [24](#semantic_types_in_function_signatures_24) |
+| `get_widget_factory` | [19](#constructor_polymorphism_19) |
+| `lambdas` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), [7](#lambdas_and_closures_7) |
+| `lambdas_and_closures` | [4](#lambdas_and_closures_4), [5](#lambdas_and_closures_5), [6](#lambdas_and_closures_6), [7](#lambdas_and_closures_7) |
+| `load_data` | [2](#functions_2) |
+| `matching` | [8](#pattern_matching_8), [9](#pattern_matching_9), [10](#pattern_matching_10), [11](#pattern_matching_11), [12](#pattern_matching_12), ... (8 total) |
+| `math_op` | [3](#functions_3) |
+| `name` | [15](#pattern_matching_15) |
+| `new` | [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [22](#constructor_polymorphism_22), [23](#constructor_polymorphism_23) |
+| `pattern` | [8](#pattern_matching_8), [9](#pattern_matching_9), [10](#pattern_matching_10), [11](#pattern_matching_11), [12](#pattern_matching_12), ... (8 total) |
+| `pattern_matching` | [8](#pattern_matching_8), [9](#pattern_matching_9), [10](#pattern_matching_10), [11](#pattern_matching_11), [12](#pattern_matching_12), ... (8 total) |
+| `polymorphism` | [16](#constructor_polymorphism_16), [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [19](#constructor_polymorphism_19), [20](#constructor_polymorphism_20), ... (8 total) |
+| `read_file` | [2](#functions_2) |
+| `scale` | [6](#lambdas_and_closures_6) |
+| `semantic` | [24](#semantic_types_in_function_signatures_24) |
+| `semantic_types_in_function_signatures` | [24](#semantic_types_in_function_signatures_24) |
+| `service_ctor` | [22](#constructor_polymorphism_22) |
+| `set_status` | [24](#semantic_types_in_function_signatures_24) |
+| `signatures` | [24](#semantic_types_in_function_signatures_24) |
+| `super` | [17](#constructor_polymorphism_17), [18](#constructor_polymorphism_18), [22](#constructor_polymorphism_22) |
+| `types` | [24](#semantic_types_in_function_signatures_24) |
 
 ---
 
-### Test 1: Functions
+## Test Cases (24 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [add](#add) | Functions | `add`, `Add` |
+| 2 | [functions_2](#functions_2) | Functions | `functions`, `Functions`, `assert_compiles` +13 |
+| 3 | [functions_3](#functions_3) | Functions | `functions`, `Functions`, `assert_compiles` +2 |
+| 4 | [lambdas_and_closures_4](#lambdas_and_closures_4) | Lambdas and Closures | `lambdas`, `Closures`, `Lambdas` +7 |
+| 5 | [lambdas_and_closures_5](#lambdas_and_closures_5) | Lambdas and Closures | `lambdas`, `Closures`, `Lambdas` +8 |
+| 6 | [lambdas_and_closures_6](#lambdas_and_closures_6) | Lambdas and Closures | `lambdas`, `Closures`, `Lambdas` +7 |
+| 7 | [lambdas_and_closures_7](#lambdas_and_closures_7) | Lambdas and Closures | `lambdas`, `Closures`, `Lambdas` +9 |
+| 8 | [pattern_matching_8](#pattern_matching_8) | Pattern Matching | `pattern`, `Pattern`, `matching` +12 |
+| 9 | [pattern_matching_9](#pattern_matching_9) | Pattern Matching | `pattern`, `Pattern`, `matching` +6 |
+| 10 | [pattern_matching_10](#pattern_matching_10) | Pattern Matching | `pattern`, `Pattern`, `matching` +5 |
+| 11 | [pattern_matching_11](#pattern_matching_11) | Pattern Matching | `pattern`, `Pattern`, `matching` +7 |
+| 12 | [pattern_matching_12](#pattern_matching_12) | Pattern Matching | `pattern`, `Pattern`, `matching` +6 |
+| 13 | [pattern_matching_13](#pattern_matching_13) | Pattern Matching | `pattern`, `Pattern`, `matching` +7 |
+| 14 | [pattern_matching_14](#pattern_matching_14) | Pattern Matching | `pattern`, `Pattern`, `matching` +7 |
+| 15 | [pattern_matching_15](#pattern_matching_15) | Pattern Matching | `pattern`, `Pattern`, `matching` +10 |
+| 16 | [constructor_polymorphism_16](#constructor_polymorphism_16) | Constructor Polymorphism | `Polymorphism`, `constructor`, `polymorphism` +8 |
+| 17 | [constructor_polymorphism_17](#constructor_polymorphism_17) | Constructor Polymorphism | `Polymorphism`, `constructor`, `polymorphism` +16 |
+| 18 | [constructor_polymorphism_18](#constructor_polymorphism_18) | Constructor Polymorphism | `Polymorphism`, `constructor`, `polymorphism` +12 |
+| 19 | [constructor_polymorphism_19](#constructor_polymorphism_19) | Constructor Polymorphism | `Polymorphism`, `constructor`, `polymorphism` +16 |
+| 20 | [constructor_polymorphism_20](#constructor_polymorphism_20) | Constructor Polymorphism | `Polymorphism`, `constructor`, `polymorphism` +9 |
+| 21 | [constructor_polymorphism_21](#constructor_polymorphism_21) | Constructor Polymorphism | `Polymorphism`, `constructor`, `polymorphism` +8 |
+| 22 | [constructor_polymorphism_22](#constructor_polymorphism_22) | Constructor Polymorphism | `Polymorphism`, `constructor`, `polymorphism` +17 |
+| 23 | [constructor_polymorphism_23](#constructor_polymorphism_23) | Constructor Polymorphism | `Polymorphism`, `constructor`, `polymorphism` +9 |
+| 24 | [semantic_types_in_function_signatures_24](#semantic_types_in_function_signatures_24) | Semantic Types in Function Signatures | `Types`, `Semantic`, `Signatures` +21 |
+
+---
+
+### Test 1: Functions {#add}
 
 *Source line: ~7*
 
@@ -64,6 +210,10 @@ design rationale, and architecture, see doc/spec/functions.md
 
 Functions in Simple are defined with the `fn` keyword. The syntax is inspired by Python's definition...
 
+**Linked Symbols:**
+- `add`
+- `Add`
+
 **Code:**
 
 ```simple
@@ -71,7 +221,7 @@ fn add(a: i64, b: i64) -> i64:
     return a + b
 ```
 
-### Test 2: Functions
+### Test 2: Functions {#functions_2}
 
 *Source line: ~18*
 
@@ -80,6 +230,19 @@ fn add(a: i64, b: i64) -> i64:
 **Description:**
 
 Functions have an inferred async/sync effect based on their body:
+
+**Linked Symbols:**
+- `functions`
+- `Functions`
+- `assert_compiles`
+- `Explicit`
+- `SYNC`
+- `User`
+- `get`
+- `fetch_user`
+- `load_data`
+- `Data`
+- ... and 6 more
 
 **Code:**
 
@@ -105,7 +268,7 @@ test "functions_2":
     assert_compiles()
 ```
 
-### Test 3: Functions
+### Test 3: Functions {#functions_3}
 
 *Source line: ~52*
 
@@ -114,6 +277,13 @@ test "functions_2":
 **Description:**
 
 Simple supports first-class functions - you can assign functions to variables or pass them as argume...
+
+**Linked Symbols:**
+- `functions`
+- `Functions`
+- `assert_compiles`
+- `apply`
+- `math_op`
 
 **Code:**
 
@@ -129,7 +299,7 @@ test "functions_3":
     assert_compiles()
 ```
 
-### Test 4: Lambdas and Closures
+### Test 4: Lambdas and Closures {#lambdas_and_closures_4}
 
 *Source line: ~7*
 
@@ -138,6 +308,18 @@ test "functions_3":
 **Description:**
 
 An inline lambda uses a backslash to introduce parameters (inspired by ML-family languages):
+
+**Linked Symbols:**
+- `lambdas`
+- `Closures`
+- `Lambdas`
+- `and`
+- `lambdas_and_closures`
+- `LambdasAndClosures`
+- `closures`
+- `And`
+- `assert_compiles`
+- `With`
 
 **Code:**
 
@@ -151,7 +333,7 @@ test "lambdas_and_closures_4":
     assert_compiles()
 ```
 
-### Test 5: Lambdas and Closures
+### Test 5: Lambdas and Closures {#lambdas_and_closures_5}
 
 *Source line: ~19*
 
@@ -160,6 +342,19 @@ test "lambdas_and_closures_4":
 **Description:**
 
 The backslash syntax was chosen for one-pass parsing - seeing `\` immediately signals a lambda, requ...
+
+**Linked Symbols:**
+- `lambdas`
+- `Closures`
+- `Lambdas`
+- `and`
+- `lambdas_and_closures`
+- `LambdasAndClosures`
+- `closures`
+- `And`
+- `assert_compiles`
+- `With`
+- ... and 1 more
 
 **Code:**
 
@@ -173,7 +368,7 @@ test "lambdas_and_closures_5":
     assert_compiles()
 ```
 
-### Test 6: Lambdas and Closures
+### Test 6: Lambdas and Closures {#lambdas_and_closures_6}
 
 *Source line: ~31*
 
@@ -182,6 +377,18 @@ test "lambdas_and_closures_5":
 **Description:**
 
 Lambdas capture variables from their enclosing scope:
+
+**Linked Symbols:**
+- `lambdas`
+- `Closures`
+- `Lambdas`
+- `and`
+- `lambdas_and_closures`
+- `LambdasAndClosures`
+- `closures`
+- `And`
+- `assert_compiles`
+- `scale`
 
 **Code:**
 
@@ -194,7 +401,7 @@ test "lambdas_and_closures_6":
     assert_compiles()
 ```
 
-### Test 7: Lambdas and Closures
+### Test 7: Lambdas and Closures {#lambdas_and_closures_7}
 
 *Source line: ~42*
 
@@ -203,6 +410,19 @@ test "lambdas_and_closures_6":
 **Description:**
 
 Methods can accept trailing blocks for iteration or DSL constructs:
+
+**Linked Symbols:**
+- `lambdas`
+- `Closures`
+- `Lambdas`
+- `and`
+- `lambdas_and_closures`
+- `LambdasAndClosures`
+- `closures`
+- `And`
+- `assert_compiles`
+- `Item`
+- ... and 2 more
 
 **Code:**
 
@@ -222,7 +442,7 @@ test "lambdas_and_closures_7":
     assert_compiles()
 ```
 
-### Test 8: Pattern Matching
+### Test 8: Pattern Matching {#pattern_matching_8}
 
 *Source line: ~7*
 
@@ -231,6 +451,19 @@ test "lambdas_and_closures_7":
 **Description:**
 
 Pattern matching is a powerful feature enabling branching on the structure of data. The `match` expr...
+
+**Linked Symbols:**
+- `pattern`
+- `Pattern`
+- `matching`
+- `PatternMatching`
+- `pattern_matching`
+- `Matching`
+- `assert_compiles`
+- `String`
+- `End`
+- `Token`
+- ... and 5 more
 
 **Code:**
 
@@ -255,7 +488,7 @@ test "pattern_matching_8":
     assert_compiles()
 ```
 
-### Test 9: Pattern Matching
+### Test 9: Pattern Matching {#pattern_matching_9}
 
 *Source line: ~30*
 
@@ -267,6 +500,17 @@ fn describe_token(tok: Token) -> String:
     match tok:
         case Number(val):
             return...
+
+**Linked Symbols:**
+- `pattern`
+- `Pattern`
+- `matching`
+- `PatternMatching`
+- `pattern_matching`
+- `Matching`
+- `assert_compiles`
+- `Zero`
+- `One`
 
 **Code:**
 
@@ -280,7 +524,7 @@ test "pattern_matching_9":
     assert_compiles()
 ```
 
-### Test 10: Pattern Matching
+### Test 10: Pattern Matching {#pattern_matching_10}
 
 *Source line: ~40*
 
@@ -296,6 +540,16 @@ match x:
         print "One"
 ```
 
+**Linked Symbols:**
+- `pattern`
+- `Pattern`
+- `matching`
+- `PatternMatching`
+- `pattern_matching`
+- `Matching`
+- `assert_compiles`
+- `Small`
+
 **Code:**
 
 ```simple
@@ -306,7 +560,7 @@ test "pattern_matching_10":
     assert_compiles()
 ```
 
-### Test 11: Pattern Matching
+### Test 11: Pattern Matching {#pattern_matching_11}
 
 *Source line: ~48*
 
@@ -319,6 +573,18 @@ match x:
     case 1 | 2 | 3:
         print "Small number"
 ```
+
+**Linked Symbols:**
+- `pattern`
+- `Pattern`
+- `matching`
+- `PatternMatching`
+- `pattern_matching`
+- `Matching`
+- `assert_compiles`
+- `Large`
+- `Negative`
+- `Normal`
 
 **Code:**
 
@@ -334,7 +600,7 @@ test "pattern_matching_11":
     assert_compiles()
 ```
 
-### Test 12: Pattern Matching
+### Test 12: Pattern Matching {#pattern_matching_12}
 
 *Source line: ~60*
 
@@ -349,6 +615,17 @@ match x:
     case n if n > 100:
 ...
 
+**Linked Symbols:**
+- `pattern`
+- `Pattern`
+- `matching`
+- `PatternMatching`
+- `pattern_matching`
+- `Matching`
+- `assert_compiles`
+- `Zero`
+- `Non`
+
 **Code:**
 
 ```simple
@@ -361,7 +638,7 @@ test "pattern_matching_12":
     assert_compiles()
 ```
 
-### Test 13: Pattern Matching
+### Test 13: Pattern Matching {#pattern_matching_13}
 
 *Source line: ~70*
 
@@ -376,6 +653,18 @@ match x:
     case _:
         print "Non-zero"
 ```
+
+**Linked Symbols:**
+- `pattern`
+- `Pattern`
+- `matching`
+- `PatternMatching`
+- `pattern_matching`
+- `Matching`
+- `assert_compiles`
+- `Point`
+- `Origin`
+- `Somewhere`
 
 **Code:**
 
@@ -398,7 +687,7 @@ test "pattern_matching_13":
     assert_compiles()
 ```
 
-### Test 14: Pattern Matching
+### Test 14: Pattern Matching {#pattern_matching_14}
 
 *Source line: ~89*
 
@@ -411,6 +700,18 @@ match p:
     case Point(x: 0, y: 0):
         print "Origin"
     case Point...
+
+**Linked Symbols:**
+- `pattern`
+- `Pattern`
+- `matching`
+- `PatternMatching`
+- `pattern_matching`
+- `Matching`
+- `assert_compiles`
+- `case`
+- `Starts`
+- `Number`
 
 **Code:**
 
@@ -425,7 +726,7 @@ test "pattern_matching_14":
     assert_compiles()
 ```
 
-### Test 15: Pattern Matching
+### Test 15: Pattern Matching {#pattern_matching_15}
 
 *Source line: ~102*
 
@@ -434,6 +735,19 @@ test "pattern_matching_14":
 **Description:**
 
 All possibilities must be covered (exhaustive matching), otherwise the code will not compile:
+
+**Linked Symbols:**
+- `pattern`
+- `Pattern`
+- `matching`
+- `PatternMatching`
+- `pattern_matching`
+- `Matching`
+- `assert_compiles`
+- `Red`
+- `Green`
+- `Color`
+- ... and 3 more
 
 **Code:**
 
@@ -452,7 +766,7 @@ test "pattern_matching_15":
     assert_compiles()
 ```
 
-### Test 16: Constructor Polymorphism
+### Test 16: Constructor Polymorphism {#constructor_polymorphism_16}
 
 *Source line: ~9*
 
@@ -461,6 +775,19 @@ test "pattern_matching_15":
 **Description:**
 
 The `Constructor[T]` type represents any constructor that produces an instance of `T` or a subtype:
+
+**Linked Symbols:**
+- `Polymorphism`
+- `constructor`
+- `polymorphism`
+- `Constructor`
+- `constructor_polymorphism`
+- `ConstructorPolymorphism`
+- `assert_compiles`
+- `Creates`
+- `factory`
+- `Button`
+- ... and 1 more
 
 **Code:**
 
@@ -472,7 +799,7 @@ test "constructor_polymorphism_16":
     assert_compiles()
 ```
 
-### Test 17: Constructor Polymorphism
+### Test 17: Constructor Polymorphism {#constructor_polymorphism_17}
 
 *Source line: ~17*
 
@@ -483,6 +810,19 @@ test "constructor_polymorphism_16":
 ```simple
 # Constructor[T] - type for constructors producing T or subtypes
 let factory: Constructor[...
+
+**Linked Symbols:**
+- `Polymorphism`
+- `constructor`
+- `polymorphism`
+- `Constructor`
+- `constructor_polymorphism`
+- `ConstructorPolymorphism`
+- `assert_compiles`
+- `Creates`
+- `Click`
+- `Button`
+- ... and 9 more
 
 **Code:**
 
@@ -510,7 +850,7 @@ test "constructor_polymorphism_17":
     assert_compiles()
 ```
 
-### Test 18: Constructor Polymorphism
+### Test 18: Constructor Polymorphism {#constructor_polymorphism_18}
 
 *Source line: ~47*
 
@@ -520,6 +860,19 @@ test "constructor_polymorphism_17":
 
 1. Must accept all required parameters of parent constructor
 2. Additional parameters must have defa...
+
+**Linked Symbols:**
+- `Polymorphism`
+- `constructor`
+- `polymorphism`
+- `Constructor`
+- `constructor_polymorphism`
+- `ConstructorPolymorphism`
+- `assert_compiles`
+- `Compile`
+- `ERROR`
+- `super`
+- ... and 5 more
 
 **Code:**
 
@@ -542,7 +895,7 @@ test "constructor_polymorphism_18":
     assert_compiles()
 ```
 
-### Test 19: Constructor Polymorphism
+### Test 19: Constructor Polymorphism {#constructor_polymorphism_19}
 
 *Source line: ~76*
 
@@ -552,6 +905,19 @@ test "constructor_polymorphism_18":
 
 | Parent Constructor | Child Constructor | Valid? | Reason |
 |-------------------|------------------...
+
+**Linked Symbols:**
+- `Polymorphism`
+- `constructor`
+- `polymorphism`
+- `Constructor`
+- `constructor_polymorphism`
+- `ConstructorPolymorphism`
+- `assert_compiles`
+- `Cancel`
+- `factory`
+- `create_many`
+- ... and 9 more
 
 **Code:**
 
@@ -575,7 +941,7 @@ test "constructor_polymorphism_19":
     assert_compiles()
 ```
 
-### Test 20: Constructor Polymorphism
+### Test 20: Constructor Polymorphism {#constructor_polymorphism_20}
 
 *Source line: ~96*
 
@@ -586,6 +952,19 @@ test "constructor_polymorphism_19":
 let factory = get_widget_factory("button")
 let w = factory("Dynamic Button")
 ```
+
+**Linked Symbols:**
+- `Polymorphism`
+- `constructor`
+- `polymorphism`
+- `Constructor`
+- `constructor_polymorphism`
+- `ConstructorPolymorphism`
+- `assert_compiles`
+- `Button`
+- `Widget`
+- `Slider`
+- ... and 2 more
 
 **Code:**
 
@@ -607,7 +986,7 @@ test "constructor_polymorphism_20":
     assert_compiles()
 ```
 
-### Test 21: Constructor Polymorphism
+### Test 21: Constructor Polymorphism {#constructor_polymorphism_21}
 
 *Source line: ~116*
 
@@ -616,6 +995,19 @@ test "constructor_polymorphism_20":
 **Description:**
 
 Specify exact constructor signatures:
+
+**Linked Symbols:**
+- `Polymorphism`
+- `constructor`
+- `polymorphism`
+- `Constructor`
+- `constructor_polymorphism`
+- `ConstructorPolymorphism`
+- `assert_compiles`
+- `exact_factory`
+- `exactly`
+- `Widget`
+- ... and 1 more
 
 **Code:**
 
@@ -631,7 +1023,7 @@ test "constructor_polymorphism_21":
     assert_compiles()
 ```
 
-### Test 22: Constructor Polymorphism
+### Test 22: Constructor Polymorphism {#constructor_polymorphism_22}
 
 *Source line: ~130*
 
@@ -640,6 +1032,19 @@ test "constructor_polymorphism_21":
 **Description:**
 
 Constructor polymorphism enables clean dependency injection:
+
+**Linked Symbols:**
+- `Polymorphism`
+- `constructor`
+- `polymorphism`
+- `Constructor`
+- `constructor_polymorphism`
+- `ConstructorPolymorphism`
+- `assert_compiles`
+- `MockService`
+- `service_ctor`
+- `super`
+- ... and 10 more
 
 **Code:**
 
@@ -673,7 +1078,7 @@ test "constructor_polymorphism_22":
     assert_compiles()
 ```
 
-### Test 23: Constructor Polymorphism
+### Test 23: Constructor Polymorphism {#constructor_polymorphism_23}
 
 *Source line: ~162*
 
@@ -682,6 +1087,19 @@ test "constructor_polymorphism_22":
 **Description:**
 
 Use traits to define abstract constructor requirements:
+
+**Linked Symbols:**
+- `Polymorphism`
+- `constructor`
+- `polymorphism`
+- `Constructor`
+- `constructor_polymorphism`
+- `ConstructorPolymorphism`
+- `create`
+- `assert_compiles`
+- `Creatable`
+- `new`
+- ... and 2 more
 
 **Code:**
 
@@ -699,7 +1117,7 @@ test "constructor_polymorphism_23":
     assert_compiles()
 ```
 
-### Test 24: Semantic Types in Function Signatures
+### Test 24: Semantic Types in Function Signatures {#semantic_types_in_function_signatures_24}
 
 *Source line: ~5*
 
@@ -708,6 +1126,19 @@ test "constructor_polymorphism_23":
 **Description:**
 
 Public functions should use semantic types (unit types, enums, Option) instead of bare primitives. S...
+
+**Linked Symbols:**
+- `Types`
+- `Semantic`
+- `Signatures`
+- `semantic_types_in_function_signatures`
+- `Function`
+- `signatures`
+- `types`
+- `semantic`
+- `SemanticTypesInFunctionSignatures`
+- `function`
+- ... and 14 more
 
 **Code:**
 
@@ -730,6 +1161,12 @@ test "semantic_types_in_function_signatures_24":
         ...
     assert_compiles()
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [functions_spec.spl](../../tests/specs/functions_spec.spl)
 
 ---
 

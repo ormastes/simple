@@ -2,7 +2,7 @@
 
 > **⚠️ GENERATED FILE** - Do not edit directly!
 > **Source:** `tests/specs/capability_effects_spec.spl`
-> **Generated:** 2026-01-09 04:37:07
+> **Generated:** 2026-01-09 06:15:42
 >
 > To update this file, edit the source _spec.spl file and run:
 > ```bash
@@ -12,36 +12,160 @@
 **Status:** 📋 Planned
 **Feature IDs:** **Keywords:**
 
+## Quick Navigation
+
+- [Overview](#overview)
+- [Symbols Reference](#symbols-reference)
+- [Test Cases](#test-cases) (14 tests)
+- [Source Code](#source-code)
+
 ## Overview
 
 Capability-based effect system that prevents LLMs from silently adding I/O or stateful behavior to pure code. Explicit effect markers (`@pure`, `@io`, `@net`, `@fs`) make side effects visible and checked at compile time.
 
 ---
 
-## Test Cases (14 total)
+## Symbols Reference
 
-| Test | Section | Description |
-|------|---------|-------------|
-| [features_1](#test-1) | Features |  |
-| [calculate](#test-2) | Features | ### Scenario: Capability Inheritance:...... |
-| [calculate_tax](#test-3) | Features |  |
-| [auto_inferred](#test-4) | Features | ### Scenario: Effect Inference:...  Effect Inference: |
-| [add](#test-5) | Features | ### Scenario: Pure by Default:...  Pure by Default: |
-| [double](#test-6) | Features |  |
-| [unnamed_test](#test-7) | Features | ### Scenario: Capability Requirements:...... |
-| [unnamed_test](#test-8) | Features | ### Scenario: Generic Effect Constraints:...... |
-| [calculate](#test-9) | Features |  |
-| [pure_func](#test-10) | Features | ### Scenario: Effect Mismatch Errors:...... |
-| [features_11](#test-11) | Features | ### Scenario: Capability Not Available:...... |
-| [println](#test-12) | Features |  |
-| [calculate_discount](#test-13) | Examples | ### Scenario: ### LLM-Safe Pure Module...... |
-| [handle_request](#test-14) | Examples | ### Scenario: ### Explicit I/O Boundaries...... |
+| Symbol | Used in Tests |
+|--------|---------------|
+| `Add` | [4](#auto_inferred), [5](#add) |
+| `Auto` | [4](#auto_inferred) |
+| `AutoInferred` | [4](#auto_inferred) |
+| `Calculate` | [2](#calculate), [3](#calculate_tax), [9](#calculate), [13](#calculate_discount) |
+| `CalculateDiscount` | [13](#calculate_discount) |
+| `CalculateTax` | [3](#calculate_tax) |
+| `Can` | [1](#features_1), [7](#unnamed_test) |
+| `Cannot` | [7](#unnamed_test) |
+| `Compiler` | [4](#auto_inferred) |
+| `Deterministic` | [12](#println) |
+| `Discount` | [13](#calculate_discount) |
+| `Done` | [7](#unnamed_test) |
+| `Double` | [6](#double) |
+| `E0420` | [9](#calculate) |
+| `E0421` | [10](#pure_func) |
+| `E0422` | [11](#features_11) |
+| `ERROR` | [1](#features_1), [3](#calculate_tax), [5](#add), [6](#double), [7](#unnamed_test), ... (9 total) |
+| `Effect` | [8](#unnamed_test) |
+| `Error` | [9](#calculate), [10](#pure_func), [11](#features_11) |
+| `Features` | [1](#features_1), [11](#features_11) |
+| `Func` | [10](#pure_func) |
+| `Function` | [4](#auto_inferred) |
+| `Handle` | [14](#handle_request) |
+| `HandleRequest` | [14](#handle_request) |
+| `Impure` | [6](#double) |
+| `Inferred` | [4](#auto_inferred), [8](#unnamed_test) |
+| `LLM` | [13](#calculate_discount) |
+| `Module` | [1](#features_1), [2](#calculate) |
+| `Multiple` | [3](#calculate_tax) |
+| `Network` | [3](#calculate_tax) |
+| `Println` | [12](#println) |
+| `Processing` | [7](#unnamed_test) |
+| `Pure` | [1](#features_1), [6](#double), [10](#pure_func), [14](#handle_request) |
+| `PureFunc` | [10](#pure_func) |
+| `Request` | [2](#calculate), [14](#handle_request) |
+| `Response` | [2](#calculate), [14](#handle_request) |
+| `Result` | [3](#calculate_tax), [12](#println) |
+| `String` | [3](#calculate_tax), [12](#println) |
+| `Tax` | [3](#calculate_tax) |
+| `Unnamed` | [7](#unnamed_test), [8](#unnamed_test) |
+| `Usage` | [8](#unnamed_test) |
+| `Uses` | [7](#unnamed_test) |
+| `Warning` | [4](#auto_inferred) |
+| `add` | [5](#add) |
+| `assert_compiles` | [1](#features_1), [11](#features_11) |
+| `auto` | [4](#auto_inferred) |
+| `auto_inferred` | [4](#auto_inferred) |
+| `calculate` | [2](#calculate), [3](#calculate_tax), [9](#calculate), [13](#calculate_discount) |
+| `calculate_discount` | [13](#calculate_discount), [14](#handle_request) |
+| `calculate_tax` | [3](#calculate_tax) |
+| `discount` | [13](#calculate_discount) |
+| `double` | [6](#double), [8](#unnamed_test) |
+| `download_and_save` | [3](#calculate_tax) |
+| `download_and_save_correct` | [3](#calculate_tax) |
+| `features` | [1](#features_1), [11](#features_11) |
+| `fetch_data` | [3](#calculate_tax) |
+| `fetch_multiplier` | [7](#unnamed_test) |
+| `format_response` | [14](#handle_request) |
+| `func` | [10](#pure_func) |
+| `get` | [3](#calculate_tax), [12](#println) |
+| `handle` | [14](#handle_request) |
+| `handle_request` | [2](#calculate), [14](#handle_request) |
+| `impure_func` | [10](#pure_func) |
+| `impure_mistake` | [5](#add) |
+| `impure_processor` | [7](#unnamed_test) |
+| `inferred` | [4](#auto_inferred) |
+| `log_and_double` | [6](#double) |
+| `map` | [8](#unnamed_test) |
+| `mistake` | [6](#double), [7](#unnamed_test) |
+| `module` | [2](#calculate) |
+| `multiply` | [6](#double) |
+| `post` | [12](#println) |
+| `print` | [12](#println) |
+| `print_and_double` | [8](#unnamed_test) |
+| `print_message` | [3](#calculate_tax) |
+| `println` | [3](#calculate_tax), [4](#auto_inferred), [5](#add), [6](#double), [7](#unnamed_test), ... (9 total) |
+| `process` | [2](#calculate) |
+| `process_with_logging` | [7](#unnamed_test) |
+| `processor` | [7](#unnamed_test) |
+| `properly_annotated` | [4](#auto_inferred) |
+| `pure` | [10](#pure_func) |
+| `pure_func` | [10](#pure_func) |
+| `pure_processor` | [7](#unnamed_test) |
+| `push` | [8](#unnamed_test) |
+| `randint` | [12](#println) |
+| `randint_seeded` | [12](#println) |
+| `read_file` | [12](#println) |
+| `read_line` | [12](#println) |
+| `request` | [14](#handle_request) |
+| `return` | [13](#calculate_discount) |
+| `sin` | [12](#println) |
+| `sqrt` | [12](#println) |
+| `tax` | [3](#calculate_tax) |
+| `unnamed` | [7](#unnamed_test), [8](#unnamed_test) |
+| `use_impure` | [8](#unnamed_test) |
+| `use_it` | [7](#unnamed_test) |
+| `use_pure` | [8](#unnamed_test) |
+| `validate_age` | [13](#calculate_discount) |
+| `version` | [12](#println) |
+| `write` | [3](#calculate_tax) |
+| `write_file` | [12](#println) |
 
 ---
 
-### Test 1: Features
+## Test Cases (14 total)
+
+| # | Test | Section | Symbols |
+|---|------|---------|---------|
+| 1 | [features_1](#features_1) | Features | `Features`, `features`, `assert_compiles` +4 |
+| 2 | [calculate](#calculate) | Features | `Calculate`, `calculate`, `Request` +5 |
+| 3 | [calculate_tax](#calculate_tax) | Features | `Calculate`, `calculate_tax`, `Tax` +15 |
+| 4 | [auto_inferred](#auto_inferred) | Features | `auto_inferred`, `Auto`, `inferred` +9 |
+| 5 | [add](#add) | Features | `add`, `Add`, `println` +2 |
+| 6 | [double](#double) | Features | `Double`, `double`, `println` +6 |
+| 7 | [unnamed_test](#unnamed_test) | Features | `Unnamed`, `unnamed`, `println` +13 |
+| 8 | [unnamed_test](#unnamed_test) | Features | `Unnamed`, `unnamed`, `println` +9 |
+| 9 | [calculate](#calculate) | Features | `Calculate`, `calculate`, `println` +3 |
+| 10 | [pure_func](#pure_func) | Features | `PureFunc`, `Func`, `pure_func` +7 |
+| 11 | [features_11](#features_11) | Features | `Features`, `features`, `assert_compiles` +3 |
+| 12 | [println](#println) | Features | `Println`, `println`, `String` +13 |
+| 13 | [calculate_discount](#calculate_discount) | Examples | `CalculateDiscount`, `Calculate`, `discount` +8 |
+| 14 | [handle_request](#handle_request) | Examples | `Handle`, `Request`, `request` +7 |
+
+---
+
+### Test 1: Features {#features_1}
 
 **Test name:** `features_1`
+
+**Linked Symbols:**
+- `Features`
+- `features`
+- `assert_compiles`
+- `ERROR`
+- `Can`
+- `Module`
+- `Pure`
 
 **Code:**
 
@@ -70,7 +194,7 @@ test "features_1":
     assert_compiles()
 ```
 
-### Test 2: Features
+### Test 2: Features {#calculate}
 
 **Test name:** `calculate`
 
@@ -79,6 +203,16 @@ test "features_1":
 ### Scenario: Capability Inheritance:...
 
 Capability Inheritance:
+
+**Linked Symbols:**
+- `Calculate`
+- `calculate`
+- `Request`
+- `handle_request`
+- `process`
+- `module`
+- `Module`
+- `Response`
 
 **Code:**
 
@@ -102,9 +236,22 @@ module app.api requires[io, net]:
         return Response::ok(result)
 ```
 
-### Test 3: Features
+### Test 3: Features {#calculate_tax}
 
 **Test name:** `calculate_tax`
+
+**Linked Symbols:**
+- `Calculate`
+- `calculate_tax`
+- `Tax`
+- `tax`
+- `calculate`
+- `CalculateTax`
+- `String`
+- `println`
+- `write`
+- `fetch_data`
+- ... and 8 more
 
 **Code:**
 
@@ -134,7 +281,7 @@ fn download_and_save_correct(url: String, path: String):
     fs.write(path, data)?          # OK
 ```
 
-### Test 4: Features
+### Test 4: Features {#auto_inferred}
 
 **Test name:** `auto_inferred`
 
@@ -143,6 +290,19 @@ fn download_and_save_correct(url: String, path: String):
 ### Scenario: Effect Inference:...
 
 Effect Inference:
+
+**Linked Symbols:**
+- `auto_inferred`
+- `Auto`
+- `inferred`
+- `AutoInferred`
+- `Inferred`
+- `auto`
+- `println`
+- `Warning`
+- `Compiler`
+- `Function`
+- ... and 2 more
 
 **Code:**
 
@@ -158,7 +318,7 @@ fn properly_annotated():
     println("hello")  # OK
 ```
 
-### Test 5: Features
+### Test 5: Features {#add}
 
 **Test name:** `add`
 
@@ -167,6 +327,13 @@ fn properly_annotated():
 ### Scenario: Pure by Default:...
 
 Pure by Default:
+
+**Linked Symbols:**
+- `add`
+- `Add`
+- `println`
+- `impure_mistake`
+- `ERROR`
 
 **Code:**
 
@@ -178,9 +345,20 @@ fn impure_mistake():
     println("oops")  # ERROR: println requires @io
 ```
 
-### Test 6: Features
+### Test 6: Features {#double}
 
 **Test name:** `double`
+
+**Linked Symbols:**
+- `Double`
+- `double`
+- `println`
+- `log_and_double`
+- `Impure`
+- `ERROR`
+- `mistake`
+- `multiply`
+- `Pure`
 
 **Code:**
 
@@ -200,7 +378,7 @@ fn log_and_double(x: i64) -> i64:
     return double(x)            # OK - can call pure functions
 ```
 
-### Test 7: Features
+### Test 7: Features {#unnamed_test}
 
 **Test name:** `unnamed_test`
 
@@ -209,6 +387,19 @@ fn log_and_double(x: i64) -> i64:
 ### Scenario: Capability Requirements:...
 
 Capability Requirements:
+
+**Linked Symbols:**
+- `Unnamed`
+- `unnamed`
+- `println`
+- `ERROR`
+- `Can`
+- `pure_processor`
+- `Processing`
+- `impure_processor`
+- `use_it`
+- `process_with_logging`
+- ... and 6 more
 
 **Code:**
 
@@ -238,7 +429,7 @@ fn mistake():
     process_with_logging(5, impure_processor)  # ERROR: @net not available
 ```
 
-### Test 8: Features
+### Test 8: Features {#unnamed_test}
 
 **Test name:** `unnamed_test`
 
@@ -247,6 +438,19 @@ fn mistake():
 ### Scenario: Generic Effect Constraints:...
 
 Generic Effect Constraints:
+
+**Linked Symbols:**
+- `Unnamed`
+- `unnamed`
+- `println`
+- `Inferred`
+- `use_impure`
+- `print_and_double`
+- `double`
+- `push`
+- `map`
+- `Effect`
+- ... and 2 more
 
 **Code:**
 
@@ -278,9 +482,17 @@ fn use_impure():
     let doubled = map(nums, print_and_double)  # Inferred as @io
 ```
 
-### Test 9: Features
+### Test 9: Features {#calculate}
 
 **Test name:** `calculate`
+
+**Linked Symbols:**
+- `Calculate`
+- `calculate`
+- `println`
+- `ERROR`
+- `E0420`
+- `Error`
 
 **Code:**
 
@@ -301,7 +513,7 @@ error[E0420]: forbidden effect in pure context
    = help: add @io to function or module requires[io]
 ```
 
-### Test 10: Features
+### Test 10: Features {#pure_func}
 
 **Test name:** `pure_func`
 
@@ -310,6 +522,18 @@ error[E0420]: forbidden effect in pure context
 ### Scenario: Effect Mismatch Errors:...
 
 Effect Mismatch Errors:
+
+**Linked Symbols:**
+- `PureFunc`
+- `Func`
+- `pure_func`
+- `pure`
+- `Pure`
+- `func`
+- `ERROR`
+- `E0421`
+- `impure_func`
+- `Error`
 
 **Code:**
 
@@ -335,7 +559,7 @@ error[E0421]: effect mismatch
            fn pure_func():
 ```
 
-### Test 11: Features
+### Test 11: Features {#features_11}
 
 **Test name:** `features_11`
 
@@ -344,6 +568,14 @@ error[E0421]: effect mismatch
 ### Scenario: Capability Not Available:...
 
 Capability Not Available:
+
+**Linked Symbols:**
+- `Features`
+- `features`
+- `assert_compiles`
+- `E0422`
+- `ERROR`
+- `Error`
 
 **Code:**
 
@@ -369,9 +601,22 @@ test "features_11":
     assert_compiles()
 ```
 
-### Test 12: Features
+### Test 12: Features {#println}
 
 **Test name:** `println`
+
+**Linked Symbols:**
+- `Println`
+- `println`
+- `String`
+- `post`
+- `randint_seeded`
+- `sqrt`
+- `get`
+- `read_file`
+- `sin`
+- `write_file`
+- ... and 6 more
 
 **Code:**
 
@@ -429,7 +674,7 @@ module std.random:
         ...
 ```
 
-### Test 13: Examples
+### Test 13: Examples {#calculate_discount}
 
 **Test name:** `calculate_discount`
 
@@ -438,6 +683,19 @@ module std.random:
 ### Scenario: ### LLM-Safe Pure Module...
 
 ### LLM-Safe Pure Module
+
+**Linked Symbols:**
+- `CalculateDiscount`
+- `Calculate`
+- `discount`
+- `Discount`
+- `calculate`
+- `calculate_discount`
+- `println`
+- `validate_age`
+- `ERROR`
+- `LLM`
+- ... and 1 more
 
 **Code:**
 
@@ -452,7 +710,7 @@ fn calculate_discount(price: i64, rate: f64) -> i64:
     # println("calculating")  # ERROR: @io not available
 ```
 
-### Test 14: Examples
+### Test 14: Examples {#handle_request}
 
 **Test name:** `handle_request`
 
@@ -461,6 +719,18 @@ fn calculate_discount(price: i64, rate: f64) -> i64:
 ### Scenario: ### Explicit I/O Boundaries...
 
 ### Explicit I/O Boundaries
+
+**Linked Symbols:**
+- `Handle`
+- `Request`
+- `request`
+- `handle_request`
+- `HandleRequest`
+- `handle`
+- `format_response`
+- `Pure`
+- `calculate_discount`
+- `Response`
 
 **Code:**
 
@@ -471,6 +741,12 @@ fn handle_request(req: Request) -> Response:
         let response_body = format_response(discount)     # Pure
         return Response::ok(response_body)                # I/O
 ```
+
+---
+
+## Source Code
+
+**View full specification:** [capability_effects_spec.spl](../../tests/specs/capability_effects_spec.spl)
 
 ---
 
