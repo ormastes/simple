@@ -30,6 +30,7 @@ This directory contains practical guides for:
 | [sspec_writing.md](sspec_writing.md) | **SSpec test guide** - BDD tests, document format, doctest integration, matchers, fixtures |
 | [architecture_writing.md](architecture_writing.md) | **Architecture guide** - Skeleton-first design, Lean verification workflow, diagram generation from tests |
 | [design_writing.md](design_writing.md) | **Design guide** - Draft diagrams replaced by test-generated class/sequence diagrams |
+| [application_writing.md](application_writing.md) | **Application guide** - Building apps with links to spec/generated manuals, GUI/TUI/Web/CLI patterns |
 
 **Key rules:** No primitives in public APIs, defaults everywhere, type inference for app code, explicit types for lib code, doctest for all public APIs, max 800 lines per file.
 
@@ -124,9 +125,10 @@ Covers:
 4. [basic_sample_check.md](basic_sample_check.md) - Verifying your setup
 
 **Building Applications:**
-1. [db.md](db.md) - Database integration
-2. [web_framework.md](web_framework.md) - Web applications
-3. [ui.md](ui.md) - User interfaces
+1. [application_writing.md](application_writing.md) - Application patterns with spec links
+2. [db.md](db.md) - Database integration
+3. [web_framework.md](web_framework.md) - Web applications
+4. [ui.md](ui.md) - User interfaces
 
 **Advanced Topics:**
 1. [architecture_writing.md](architecture_writing.md) - Skeleton-first architecture
@@ -173,4 +175,4 @@ When adding new guides:
 
 ---
 
-**Total:** 19 guide documents
+**Total:** 20 guide documents
