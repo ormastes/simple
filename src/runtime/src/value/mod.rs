@@ -24,6 +24,7 @@ mod channels;
 mod collections;
 mod contracts;
 mod core;
+pub mod diagram_ffi;
 mod dict;
 mod doctest_io;
 mod ffi;
