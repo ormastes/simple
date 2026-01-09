@@ -93,6 +93,37 @@ Verified completion of all 40 LLM-friendly features (#880-919) with full capabil
 
 **Documentation:** See `doc/llm_friendly/LLM_FEATURES_100_COMPLETE_2026-01-09.md`
 
+### Spec Migration Phase 2 Complete (2026-01-09)
+
+Completed migration of all 15 core language specifications to executable test files.
+
+**Phase 2 Results:**
+- Category A (Direct): 7 files fully migrated (54.6K, 137 examples)
+- Category B (Extract): 8 files extracted (72K, 157 examples)
+- Total: 126.6K content, 294 code examples → test cases
+- Success rate: 100% (15/15)
+
+**Files Migrated/Extracted:**
+- syntax, types, type_inference, async_default, suspension_operator, capability_effects, sandboxing
+- functions, traits, memory, modules, data_structures, concurrency, macro, metaprogramming
+
+**Tools Created:**
+- `scripts/migrate_spec_to_spl.py` - Category A full migration
+- `scripts/extract_tests_from_spec.py` - Category B extraction
+
+**Organization:**
+- All specs now in `tests/specs/*_spec.spl`
+- Original Category A .md files marked "MIGRATED"
+- Original Category B .md files marked "EXTRACTED" (kept as reference)
+- Updated `doc/spec/README.md` with migration section
+- Created `doc/spec/generated/` for future spec-gen output
+
+**Timeline:** Phase 1+2 complete in 2 sessions (vs 3 weeks estimated)
+
+**Status:** Phase 3 (Organization) in progress. Phases 4-5 pending.
+
+**Documentation:** See `doc/SPEC_MIGRATION_PLAN.md` and `doc/spec/MIGRATION_STATUS.md`
+
 ### Spec Migration Planning Complete (2026-01-09)
 
 Created comprehensive plan to migrate feature specifications from `doc/spec/*.md` to executable `tests/*_spec.spl` files.

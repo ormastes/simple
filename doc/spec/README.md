@@ -1,6 +1,52 @@
 # Simple Language Specification
 
-**Quick Links:** [Core](#core-language) | [Advanced](#advanced-features) | [Testing](#testing--quality) | [Tooling](#tooling--development) | [Parser](#parser-implementation) | [GPU](#gpu--graphics) | [UI](#ui--interfaces) | [Formats](#data-formats)
+> **🎯 MIGRATION COMPLETE:** Core language specifications have been migrated to executable test files!  
+> **See:** [tests/specs/](../../tests/specs/) for all _spec.spl files  
+> **Status:** [MIGRATION_STATUS.md](MIGRATION_STATUS.md) | **Guide:** [SPEC_GUIDELINES.md](SPEC_GUIDELINES.md)
+
+**Quick Links:** [Core](#core-language) | [Advanced](#advanced-features) | [Testing](#testing--quality) | [Tooling](#tooling--development) | [Parser](#parser-implementation) | [GPU](#gpu--graphics) | [UI](#ui--interfaces) | [Formats](#data-formats) | **[Migrated Specs](#migrated-specifications)**
+
+---
+
+## Migrated Specifications
+
+### ✅ Category A: Direct Migrations (Replaced)
+
+These specs have been completely migrated to executable test files. The original .md files remain for reference but are superseded by the _spec.spl files.
+
+| Original File | _spec.spl File | Status | Examples |
+|--------------|----------------|--------|----------|
+| [syntax.md](syntax.md) | [syntax_spec.spl](../../tests/specs/syntax_spec.spl) | ⚠️ Migrated | 21 |
+| [types.md](types.md) | [types_spec.spl](../../tests/specs/types_spec.spl) | ⚠️ Migrated | 17 |
+| [type_inference.md](type_inference.md) | [type_inference_spec.spl](../../tests/specs/type_inference_spec.spl) | ⚠️ Migrated | 24 |
+| [async_default.md](async_default.md) | [async_default_spec.spl](../../tests/specs/async_default_spec.spl) | ⚠️ Migrated | 37 |
+| [suspension_operator.md](suspension_operator.md) | [suspension_operator_spec.spl](../../tests/specs/suspension_operator_spec.spl) | ⚠️ Migrated | 24 |
+| [capability_effects.md](capability_effects.md) | [capability_effects_spec.spl](../../tests/specs/capability_effects_spec.spl) | ⚠️ Migrated | 14 |
+| [sandboxing.md](sandboxing.md) | [sandboxing_spec.spl](../../tests/specs/sandboxing_spec.spl) | ⚠️ Migrated | 0 |
+
+**Totals:** 7 specs migrated, 137 examples
+
+### 📤 Category B: Extracted Tests (Reference Kept)
+
+These specs remain as architectural reference documentation. Test cases have been extracted to _spec.spl files for validation.
+
+| Reference Doc | _spec.spl File | Status | Examples |
+|--------------|----------------|--------|----------|
+| [functions.md](functions.md) | [functions_spec.spl](../../tests/specs/functions_spec.spl) | 📤 Extracted | 24 |
+| [traits.md](traits.md) | [traits_spec.spl](../../tests/specs/traits_spec.spl) | 📤 Extracted | 36 |
+| [memory.md](memory.md) | [memory_spec.spl](../../tests/specs/memory_spec.spl) | 📤 Extracted | 17 |
+| [modules.md](modules.md) | [modules_spec.spl](../../tests/specs/modules_spec.spl) | 📤 Extracted | 0 |
+| [data_structures.md](data_structures.md) | [data_structures_spec.spl](../../tests/specs/data_structures_spec.spl) | 📤 Extracted | 32 |
+| [concurrency.md](concurrency.md) | [concurrency_spec.spl](../../tests/specs/concurrency_spec.spl) | 📤 Extracted | 24 |
+| [macro.md](macro.md) | [macro_spec.spl](../../tests/specs/macro_spec.spl) | 📤 Extracted | 0 |
+| [metaprogramming.md](metaprogramming.md) | [metaprogramming_spec.spl](../../tests/specs/metaprogramming_spec.spl) | 📤 Extracted | 24 |
+
+**Totals:** 8 specs extracted, 157 examples
+
+**See Also:**
+- [Migration Plan](../SPEC_MIGRATION_PLAN.md) - Complete migration strategy
+- [Migration Status](MIGRATION_STATUS.md) - Current progress
+- [Spec Guidelines](SPEC_GUIDELINES.md) - How to write _spec.spl files
 
 ---
 
