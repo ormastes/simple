@@ -11,6 +11,7 @@ use std::sync::RwLock;
 
 use simple_parser::ast::{ClassDef, Expr, FunctionDef, Node, Type, Visibility};
 use simple_parser::token::Span;
+use simple_runtime::value::diagram_ffi;
 
 use crate::error::CompileError;
 use crate::interpreter::{
@@ -301,6 +302,11 @@ fn call_interpreted_function(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Diagram tracing for interpreted function call via FFI bridge
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_call(&func.name);
+    }
+
     // Build local environment with arguments bound to parameters
     let mut local_env = env.clone();
     for (i, param) in func.params.iter().enumerate() {
@@ -503,6 +509,11 @@ unsafe extern "C" fn interp_call_handler(
         }
     };
 
+    // Diagram tracing for native interop call
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_call(name);
+    }
+
     // Convert arguments from RuntimeValue to interpreter Value
     let args: Vec<Value> = if argc > 0 && !argv.is_null() {
         let arg_slice = std::slice::from_raw_parts(argv, argc as usize);
@@ -546,6 +557,11 @@ unsafe extern "C" fn interp_call_handler(
 /// This is registered with the runtime via `init_interpreter_handlers()`.
 extern "C" fn interp_eval_handler(expr_index: i64) -> simple_runtime::RuntimeValue {
     use crate::value_bridge::value_to_runtime;
+
+    // Diagram tracing for native expression evaluation
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_call(&format!("<expr:{}>", expr_index));
+    }
 
     let result = EXPR_REGISTRY.with(|registry| {
         let registry = registry.borrow();

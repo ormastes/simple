@@ -6,6 +6,7 @@ use crate::error::CompileError;
 use crate::interpreter::{evaluate_expr, pattern_matches, EXTERN_FUNCTIONS, MODULE_GLOBALS};
 use crate::value::*;
 use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef, Node};
+use simple_runtime::value::diagram_ffi;
 use std::collections::HashMap;
 
 type Enums = HashMap<String, EnumDef>;
@@ -54,6 +55,11 @@ pub(super) fn exec_block_closure(
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
     use super::bdd::exec_block_value;
+
+    // Diagram tracing for block closure execution
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_call("<block>");
+    }
 
     let mut local_env = captured_env.clone();
     let mut last_value = Value::Nil;

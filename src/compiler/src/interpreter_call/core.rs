@@ -253,6 +253,11 @@ pub(crate) fn exec_lambda(
     use super::block_execution::exec_block_closure;
     use simple_parser::ast::Expr;
 
+    // Diagram tracing for lambda execution
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_call("<lambda>");
+    }
+
     let mut local_env = captured_env.clone();
     let mut positional_idx = 0usize;
 
