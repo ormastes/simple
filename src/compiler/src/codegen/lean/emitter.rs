@@ -393,6 +393,7 @@ mod tests {
             }),
             is_partial: false,
             doc: None,
+            termination_by: None,
         };
 
         emitter.emit_function(&func);
@@ -428,6 +429,7 @@ mod tests {
                     body: Some(LeanExpr::Sorry),
                     is_partial: false,
                     doc: Some("Calculate vector magnitude".to_string()),
+                    termination_by: None,
                 },
             ],
             theorems: vec![],

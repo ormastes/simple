@@ -255,6 +255,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         methods: s.methods.clone(),
                         parent: None,
                         visibility: s.visibility,
+                        effects: Vec::new(),
                         attributes: Vec::new(),
                         doc_comment: None,
                         invariant: None,
@@ -380,7 +381,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                 // Process macro contracts to register introduced symbols (#1303)
                 // Note: For now, contracts with const params need invocation-time processing
                 // But we can process non-parameterized contracts at definition time
-                // TODO: Full integration requires invocation-time symbol registration
+                // TODO: [compiler][P3] Full integration requires invocation-time symbol registration
             }
             Node::Trait(t) => {
                 // Register trait definition for use in impl checking
@@ -401,6 +402,7 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                         methods: a.methods.clone(),
                         parent: None,
                         visibility: a.visibility,
+                        effects: Vec::new(),
                         attributes: vec![],
                         doc_comment: None,
                         invariant: None,

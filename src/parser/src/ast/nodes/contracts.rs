@@ -41,6 +41,15 @@ use super::core::*;
 ///         result * b == a
 ///     return a / b
 /// ```
+///
+/// Termination (for Lean verification):
+/// ```simple
+/// fn factorial(n: i64) -> i64:
+///     requires: n >= 0
+///     decreases: n
+///     ensures: ret >= 1
+///     ...
+/// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ContractBlock {
     /// Preconditions (in: block) - must be true at function entry
@@ -58,6 +67,10 @@ pub struct ContractBlock {
     /// The binding name for error value (default: "err")
     pub error_postconditions: Vec<ContractClause>,
     pub error_binding: Option<String>,
+    /// Termination measure (decreases: block) - for Lean verification
+    /// Expression that must decrease on each recursive call
+    /// Not checked at runtime, only used for Lean termination_by
+    pub decreases: Option<ContractClause>,
 }
 
 impl ContractBlock {
@@ -67,6 +80,12 @@ impl ContractBlock {
             && self.invariants.is_empty()
             && self.postconditions.is_empty()
             && self.error_postconditions.is_empty()
+            && self.decreases.is_none()
+    }
+
+    /// Check if this contract has a termination measure
+    pub fn has_decreases(&self) -> bool {
+        self.decreases.is_some()
     }
 
     /// Legacy compatibility: get requires clauses

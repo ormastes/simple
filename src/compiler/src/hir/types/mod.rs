@@ -191,6 +191,7 @@ mod tests {
             effects: vec![],
             layout_hint: None,
             verification_mode: VerificationMode::default(),
+            is_ghost: false,
         };
 
         assert_eq!(func.name, "add");

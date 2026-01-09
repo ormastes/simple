@@ -86,13 +86,14 @@ impl<'a> Parser<'a> {
             self.expect(&TokenKind::Indent)?;
 
             // Parse optional contract block at the start of the function body
-            // (new: in/out/out_err/invariant, legacy: requires/ensures)
+            // (new: in/out/out_err/invariant/decreases, legacy: requires/ensures)
             let contract = if self.check(&TokenKind::In)
                 || self.check(&TokenKind::Invariant)
                 || self.check(&TokenKind::Out)
                 || self.check(&TokenKind::OutErr)
                 || self.check(&TokenKind::Requires)
                 || self.check(&TokenKind::Ensures)
+                || self.check(&TokenKind::Decreases)
             {
                 self.parse_contract_block()?
             } else {
@@ -176,7 +177,7 @@ impl<'a> Parser<'a> {
                 span,
                 type_param,
                 bounds: trait_bounds,
-                negative_bounds: vec![], // TODO: Parse !Trait syntax (#1151)
+                negative_bounds: vec![], // TODO: [parser][P2] Parse !Trait syntax (#1151)
             });
 
             // Check for comma to continue parsing more bounds

@@ -145,6 +145,7 @@ impl<'a> super::Lexer<'a> {
             "invariant" => TokenKind::Invariant,
             "old" => TokenKind::Old,
             "result" => TokenKind::Result,
+            "decreases" => TokenKind::Decreases,
             // Infix keywords (for BDD spec framework)
             "to" => TokenKind::To,
             "not_to" => TokenKind::NotTo,

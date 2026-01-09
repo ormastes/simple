@@ -27,6 +27,9 @@ pub struct HirContract {
     /// Captured "old" values - (local_index, snapshot_index)
     /// These are expressions evaluated at function entry for use in postconditions
     pub old_values: Vec<(usize, HirExpr)>,
+    /// Termination measure (decreases:) - for Lean verification
+    /// This is NOT checked at runtime, only used for Lean termination_by generation
+    pub decreases: Option<HirContractClause>,
 }
 
 impl HirContract {
@@ -36,6 +39,12 @@ impl HirContract {
             && self.invariants.is_empty()
             && self.postconditions.is_empty()
             && self.error_postconditions.is_empty()
+            && self.decreases.is_none()
+    }
+
+    /// Check if this contract has a termination measure
+    pub fn has_decreases(&self) -> bool {
+        self.decreases.is_some()
     }
 }
 
