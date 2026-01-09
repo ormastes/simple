@@ -56,15 +56,7 @@ pub fn resolve(manifest: &Manifest, project_dir: &Path) -> PkgResult<DependencyG
             }
         }
 
-        graph.add(resolved);
-    }
-
-    // Validate no cycles
-    if graph.has_cycle() {
-        let order_result = graph.topological_order();
-        if let Err(e) = order_result {
-            return Err(e);
-        }
+        graph.add(resolved)?;
     }
 
     Ok(graph)
@@ -270,18 +262,8 @@ version = "1.0.0"
         // Resolution should either:
         // 1. Return the graph, which will have a cycle
         // 2. Return an error if cycle is detected early
-        match resolve(&manifest, &temp) {
-            Ok(graph) => {
-                // Graph is built - cycle is detected during topological sort
-                assert!(graph.has_cycle());
-                let result = graph.topological_order();
-                assert!(matches!(result, Err(PkgError::CircularDependency(_))));
-            }
-            Err(e) => {
-                // Cycle was detected early
-                assert!(matches!(e, PkgError::CircularDependency(_)));
-            }
-        }
+        let result = resolve(&manifest, &temp);
+        assert!(matches!(result, Err(PkgError::CircularDependency(_))));
 
         let _ = fs::remove_dir_all(&temp);
     }

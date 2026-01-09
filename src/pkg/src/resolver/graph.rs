@@ -96,11 +96,17 @@ impl DependencyGraph {
     }
 
     /// Add a package to the graph
-    pub fn add(&mut self, pkg: ResolvedPackage) {
+    pub fn add(&mut self, pkg: ResolvedPackage) -> PkgResult<()> {
         let name = pkg.name.clone();
         let deps = pkg.dependencies.clone();
+
+        if let Some(cycle) = self.cycle_with_new_edges(&name, &deps) {
+            return Err(PkgError::CircularDependency(cycle.join(" -> ")));
+        }
+
         self.packages.insert(name.clone(), pkg);
         self.edges.insert(name, deps);
+        Ok(())
     }
 
     /// Get a package by name
@@ -226,6 +232,76 @@ impl DependencyGraph {
         None
     }
 
+    fn cycle_with_new_edges(&self, name: &str, deps: &[String]) -> Option<Vec<String>> {
+        if deps.iter().any(|dep| dep == name) {
+            return Some(vec![name.to_string(), name.to_string()]);
+        }
+
+        for dep in deps {
+            if let Some(path) = self.path_between(dep, name) {
+                let mut cycle = Vec::with_capacity(path.len() + 1);
+                cycle.push(name.to_string());
+                cycle.extend(path);
+                return Some(cycle);
+            }
+        }
+
+        None
+    }
+
+    fn path_between(&self, start: &str, target: &str) -> Option<Vec<String>> {
+        if start == target {
+            return Some(vec![start.to_string()]);
+        }
+
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        let mut prev: HashMap<&str, &str> = HashMap::new();
+
+        queue.push_back(start);
+        prev.insert(start, start);
+
+        while let Some(node) = queue.pop_front() {
+            if let Some(deps) = self.edges.get(node) {
+                for dep in deps {
+                    let dep = dep.as_str();
+                    if prev.contains_key(dep) {
+                        continue;
+                    }
+                    prev.insert(dep, node);
+                    if dep == target {
+                        return Some(self.reconstruct_path(&prev, start, target));
+                    }
+                    queue.push_back(dep);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn reconstruct_path(
+        &self,
+        prev: &HashMap<&str, &str>,
+        start: &str,
+        target: &str,
+    ) -> Vec<String> {
+        let mut path = Vec::new();
+        let mut current = target;
+        path.push(current.to_string());
+
+        while current != start {
+            if let Some(parent) = prev.get(current) {
+                current = parent;
+                path.push(current.to_string());
+            } else {
+                break;
+            }
+        }
+
+        path.reverse();
+        path
+    }
+
     fn find_cycle_dfs<'a>(
         &'a self,
         node: &'a str,
@@ -321,7 +397,7 @@ mod tests {
     #[test]
     fn test_add_and_get() {
         let mut graph = DependencyGraph::new();
-        graph.add(make_pkg("a", &[]));
+        graph.add(make_pkg("a", &[])).unwrap();
 
         assert!(graph.contains("a"));
         assert!(!graph.contains("b"));
@@ -333,9 +409,9 @@ mod tests {
     #[test]
     fn test_topological_order_simple() {
         let mut graph = DependencyGraph::new();
-        graph.add(make_pkg("a", &["b"]));
-        graph.add(make_pkg("b", &["c"]));
-        graph.add(make_pkg("c", &[]));
+        graph.add(make_pkg("a", &["b"])).unwrap();
+        graph.add(make_pkg("b", &["c"])).unwrap();
+        graph.add(make_pkg("c", &[])).unwrap();
 
         let order = graph.topological_order().unwrap();
         let names: Vec<_> = order.iter().map(|p| p.name.as_str()).collect();
@@ -352,9 +428,9 @@ mod tests {
     #[test]
     fn test_topological_order_independent() {
         let mut graph = DependencyGraph::new();
-        graph.add(make_pkg("a", &[]));
-        graph.add(make_pkg("b", &[]));
-        graph.add(make_pkg("c", &[]));
+        graph.add(make_pkg("a", &[])).unwrap();
+        graph.add(make_pkg("b", &[])).unwrap();
+        graph.add(make_pkg("c", &[])).unwrap();
 
         let order = graph.topological_order().unwrap();
         assert_eq!(order.len(), 3);
@@ -363,29 +439,35 @@ mod tests {
     #[test]
     fn test_cycle_detection() {
         let mut graph = DependencyGraph::new();
-        graph.add(make_pkg("a", &["b"]));
-        graph.add(make_pkg("b", &["a"]));
+        graph.add(make_pkg("a", &["b"])).unwrap();
+        let result = graph.add(make_pkg("b", &["a"]));
+        assert!(matches!(result, Err(PkgError::CircularDependency(_))));
+    }
 
-        assert!(graph.has_cycle());
+    #[test]
+    fn test_self_cycle_rejected() {
+        let mut graph = DependencyGraph::new();
+        let result = graph.add(make_pkg("a", &["a"]));
+        assert!(matches!(result, Err(PkgError::CircularDependency(_))));
+    }
 
-        let result = graph.topological_order();
-        assert!(result.is_err());
-
-        if let Err(PkgError::CircularDependency(msg)) = result {
-            assert!(msg.contains("a") && msg.contains("b"));
-        } else {
-            panic!("Expected CircularDependency error");
-        }
+    #[test]
+    fn test_cycle_detected_after_multiple_edges() {
+        let mut graph = DependencyGraph::new();
+        graph.add(make_pkg("a", &["b"])).unwrap();
+        graph.add(make_pkg("b", &["c"])).unwrap();
+        let result = graph.add(make_pkg("c", &["a"]));
+        assert!(matches!(result, Err(PkgError::CircularDependency(_))));
     }
 
     #[test]
     fn test_transitive_deps() {
         let mut graph = DependencyGraph::new();
-        graph.add(make_pkg("a", &["b"]));
-        graph.add(make_pkg("b", &["c", "d"]));
-        graph.add(make_pkg("c", &["e"]));
-        graph.add(make_pkg("d", &[]));
-        graph.add(make_pkg("e", &[]));
+        graph.add(make_pkg("a", &["b"])).unwrap();
+        graph.add(make_pkg("b", &["c", "d"])).unwrap();
+        graph.add(make_pkg("c", &["e"])).unwrap();
+        graph.add(make_pkg("d", &[])).unwrap();
+        graph.add(make_pkg("e", &[])).unwrap();
 
         let trans = graph.transitive_deps("a");
         assert!(trans.contains("b"));
@@ -398,9 +480,9 @@ mod tests {
     #[test]
     fn test_dependents() {
         let mut graph = DependencyGraph::new();
-        graph.add(make_pkg("a", &["c"]));
-        graph.add(make_pkg("b", &["c"]));
-        graph.add(make_pkg("c", &[]));
+        graph.add(make_pkg("a", &["c"])).unwrap();
+        graph.add(make_pkg("b", &["c"])).unwrap();
+        graph.add(make_pkg("c", &[])).unwrap();
 
         let dependents = graph.dependents("c");
         assert_eq!(dependents.len(), 2);
@@ -412,10 +494,10 @@ mod tests {
     fn test_complex_graph() {
         // Diamond dependency: a -> b, c; b -> d; c -> d
         let mut graph = DependencyGraph::new();
-        graph.add(make_pkg("a", &["b", "c"]));
-        graph.add(make_pkg("b", &["d"]));
-        graph.add(make_pkg("c", &["d"]));
-        graph.add(make_pkg("d", &[]));
+        graph.add(make_pkg("a", &["b", "c"])).unwrap();
+        graph.add(make_pkg("b", &["d"])).unwrap();
+        graph.add(make_pkg("c", &["d"])).unwrap();
+        graph.add(make_pkg("d", &[])).unwrap();
 
         let order = graph.topological_order().unwrap();
         let names: Vec<_> = order.iter().map(|p| p.name.as_str()).collect();
