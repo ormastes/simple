@@ -240,11 +240,12 @@ use simple_compiler::effects::{
 
 #[test]
 fn test_is_blocking_operation() {
-    // From BLOCKING_OPERATIONS: recv, join, await, sleep, read_file, write_file, print, println, input
-    assert!(is_blocking_operation("sleep"));
-    assert!(is_blocking_operation("recv"));
-    assert!(is_blocking_operation("join"));
+    // From BLOCKING_OPERATIONS: recv_blocking, join_blocking, sleep_blocking
+    assert!(is_blocking_operation("sleep_blocking"));
+    assert!(is_blocking_operation("recv_blocking"));
+    assert!(is_blocking_operation("join_blocking"));
     assert!(!is_blocking_operation("add"));  // Not a blocking op
+    assert!(!is_blocking_operation("sleep")); // Non-blocking async version
 }
 
 #[test]

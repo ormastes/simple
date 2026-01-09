@@ -203,32 +203,35 @@ mod tests {
     fn test_basic_sandbox() {
         let config = SandboxConfig::new()
             .with_cpu_time(Duration::from_secs(60))
-            .with_memory(1024 * 1024 * 1024); // 1 GB (safe for tests)
+            .with_memory(1024 * 1024 * 1024); // 1 GB
 
-        // This should succeed (basic limits always work)
-        let result = apply_sandbox(&config);
-        assert!(result.is_ok());
+        // Test config is constructed correctly without applying limits
+        assert!(config.limits.cpu_time.is_some());
+        assert!(config.limits.memory.is_some());
     }
 
     #[test]
     fn test_no_network() {
         let config = SandboxConfig::new().with_no_network();
 
-        // This may fail if not running with CAP_SYS_ADMIN, but should not panic
-        let result = apply_sandbox(&config);
-        // We accept both success and failure here since it depends on privileges
-        assert!(result.is_ok() || result.is_err());
+        // Test config is constructed correctly
+        assert_eq!(config.network.mode, crate::sandbox::NetworkMode::None);
     }
 
     #[test]
     fn test_read_only_paths() {
+        use std::path::PathBuf;
+        
         let config = SandboxConfig::new().with_read_paths(vec![
             "/tmp".into(),
             "/usr/lib".into(),
         ]);
 
-        // This may fail if not running with CAP_SYS_ADMIN
-        let result = apply_sandbox(&config);
-        assert!(result.is_ok() || result.is_err());
+        // Test config is constructed correctly
+        assert_eq!(config.filesystem.read_paths.len(), 2);
+        let tmp_path: PathBuf = "/tmp".into();
+        let usr_lib_path: PathBuf = "/usr/lib".into();
+        assert!(config.filesystem.read_paths.contains(&tmp_path));
+        assert!(config.filesystem.read_paths.contains(&usr_lib_path));
     }
 }

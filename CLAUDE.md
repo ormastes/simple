@@ -610,9 +610,28 @@ Tracked in `doc/features/feature.md` with archived features in `doc/features/don
 
 **ID Ranges:** #1-8 Infrastructure, #10-49 Core, #50-99 Extended, #100-199 Codegen, #200-299 Extended Features, #300-399 GPU/SIMD, #400-499 Contracts, #500-599 UI/Web, #600-699 SDN, #700-799 DB, #800-899 Build, #900-999 Verification.
 
+## Feature Documentation Reference
+
+**⚠️ IMPORTANT: Always read feature specifications before implementing!**
+
+Before implementing any feature, read the relevant specs in `doc/features/`:
+- `doc/features/feature.md` - Main feature catalog and status
+- `doc/features/*.md` - Individual feature specifications
+- `doc/features/done/` - Completed feature archives
+
 ## Test Strategy
 
 See `doc/guides/test.md`. Tests use `simple_mock_helper` for mock control and coverage tracking.
+
+**⚠️ CRITICAL: Never Ignore Tests Without User Confirmation**
+
+- ❌ NEVER add `#[ignore]` to tests without explicit user approval
+- ❌ NEVER skip failing tests as a "temporary fix"
+- ❌ NEVER comment out test code to make builds pass
+- ✅ ALWAYS fix failing tests or ask the user how to proceed
+- ✅ ALWAYS explain why a test is failing before proposing to ignore it
+
+**Reason:** Ignored tests are rarely revisited and become permanent blind spots in the test suite. If a test is worth writing, it's worth keeping enabled. If it's flaky or broken, fix the root cause rather than hiding the problem.
 
 **Current Test Count: 631+ tests**
 
@@ -702,6 +721,186 @@ cargo test -p simple-driver simple_stdlib_unit_ui_gui_theme_spec  # Theme tests
 SPL tests auto-link to Rust via `build.rs`. Files matching `*_spec.spl`/`*_test.spl` → `simple_stdlib_{path}` test names.
 
 Create in `simple/std_lib/test/{unit|system|integration}/`, use BDD syntax, rebuild with `cargo build -p simple-driver`.
+
+## SSpec Test Framework - Documentation Generation
+
+The Simple BDD spec framework (`sspec`) can generate Markdown documentation from test files.
+
+### Writing SSpec Tests
+
+```simple
+# my_feature_spec.spl
+import spec
+
+describe "MyFeature":
+    """
+    Feature documentation goes here.
+    This becomes the header description in generated docs.
+    """
+
+    context "when initialized":
+        it "should have default value":
+            let feature = MyFeature.new()
+            expect(feature.value).to(equal(0))
+
+        it "should accept custom value":
+            let feature = MyFeature.new(42)
+            expect(feature.value).to(equal(42))
+
+    context "with operations":
+        before_each:
+            self.feature = MyFeature.new(10)
+
+        it "should increment":
+            self.feature.increment()
+            expect(self.feature.value).to(equal(11))
+
+        it "should decrement":
+            self.feature.decrement()
+            expect(self.feature.value).to(equal(9))
+```
+
+### Generating Markdown Documentation
+
+```bash
+# Generate docs from a single spec file
+./target/debug/simple --spec-doc my_feature_spec.spl -o docs/my_feature.md
+
+# Generate docs from all specs in directory
+./target/debug/simple --spec-doc-dir simple/std_lib/test/ -o docs/
+
+# Options
+#   --spec-doc <file>      Generate doc from single spec
+#   --spec-doc-dir <dir>   Generate docs from all *_spec.spl files
+#   --format md|html       Output format (default: md)
+#   --include-source       Include source code snippets
+```
+
+### Generated Markdown Structure
+
+```markdown
+# MyFeature
+
+Feature documentation goes here.
+This becomes the header description in generated docs.
+
+## when initialized
+
+### should have default value
+- Status: Passing
+- Source: `my_feature_spec.spl:10`
+
+### should accept custom value
+- Status: Passing
+- Source: `my_feature_spec.spl:14`
+
+## with operations
+
+### should increment
+- Status: Passing
+
+### should decrement
+- Status: Passing
+```
+
+### SSpec Matchers Reference
+
+| Matcher | Usage | Description |
+|---------|-------|-------------|
+| `equal(val)` | `expect(x).to(equal(5))` | Exact equality |
+| `be_true()` | `expect(x).to(be_true())` | Boolean true |
+| `be_false()` | `expect(x).to(be_false())` | Boolean false |
+| `be_nil()` | `expect(x).to(be_nil())` | Nil/None check |
+| `be_greater_than(n)` | `expect(x).to(be_greater_than(5))` | Numeric comparison |
+| `be_less_than(n)` | `expect(x).to(be_less_than(10))` | Numeric comparison |
+| `contain(item)` | `expect(list).to(contain(5))` | Collection contains |
+| `have_length(n)` | `expect(list).to(have_length(3))` | Collection length |
+| `match_regex(pat)` | `expect(s).to(match_regex("\\d+"))` | Regex match |
+| `raise_error(type)` | `expect(fn).to(raise_error(ValueError))` | Exception check |
+
+## Lean 4 Script Generation
+
+Simple can generate Lean 4 proof scripts for formal verification of memory safety, type inference, and concurrency properties.
+
+### Generating Lean Scripts
+
+```bash
+# Generate Lean proof for a module
+./target/debug/simple --gen-lean module.spl -o verification/
+
+# Generate specific verification aspect
+./target/debug/simple --gen-lean module.spl --verify memory    # Memory safety
+./target/debug/simple --gen-lean module.spl --verify types     # Type inference
+./target/debug/simple --gen-lean module.spl --verify effects   # Effect tracking
+./target/debug/simple --gen-lean module.spl --verify all       # All aspects
+```
+
+### Verification Projects Structure
+
+```
+verification/
+├── manual_pointer_borrow/     # Borrow checker model
+│   ├── Basic.lean
+│   ├── BorrowChecker.lean
+│   └── lakefile.lean
+├── gc_manual_borrow/          # GC safety model
+├── async_compile/             # Effect tracking model
+├── nogc_compile/              # NoGC instruction model
+├── type_inference_compile/    # Type inference model
+├── memory_capabilities/       # Reference capability verification (#1104)
+└── memory_model_drf/          # SC-DRF memory model verification (#1105-1106)
+```
+
+### Writing Verifiable Simple Code
+
+Add verification annotations to enable Lean proof generation:
+
+```simple
+#[verify(memory)]
+fn safe_swap(a: mut ref Int, b: mut ref Int):
+    """Swap two values with verified memory safety."""
+    let temp = *a
+    *a = *b
+    *b = temp
+
+#[verify(effects)]
+async fn fetch_data(url: String) -> Result[Data, Error]:
+    """Async function with verified effect tracking."""
+    let response = await http.get(url)
+    return response.json()
+
+#[verify(types)]
+fn generic_map[T, U](items: List[T], f: fn(T) -> U) -> List[U]:
+    """Generic function with verified type inference."""
+    return [f(item) for item in items]
+```
+
+### Running Lean Proofs
+
+```bash
+# Build and check proofs
+cd verification/memory_capabilities
+lake build
+
+# Run specific proof
+lake exe check BorrowSafety
+
+# Interactive proof development
+lake env lean --server
+```
+
+### Lean Integration Points
+
+| Simple Feature | Lean Model | Verification Target |
+|----------------|------------|---------------------|
+| `mut ref T` | `MutRef` | Exclusive access |
+| `ref T` | `SharedRef` | Aliasing rules |
+| `iso T` | `IsoRef` | Isolation guarantee |
+| `actor` | `ActorState` | Message-passing safety |
+| `async/await` | `EffectMonad` | Effect composition |
+| `in:/out:` | `Contract` | Pre/postconditions |
+
+See `doc/formal_verification.md` for complete verification documentation.
 
 ## Code Quality Tools
 

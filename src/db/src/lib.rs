@@ -41,6 +41,8 @@ pub mod transaction;
 pub mod types;
 pub mod drivers;
 pub mod ffi;
+#[cfg(feature = "sdn-table")]
+pub mod sdn_table;
 
 // Re-export main types
 pub use connection::{Connection, Database};
@@ -53,6 +55,8 @@ pub use schema::{
     ColumnInfo, ColumnType, ForeignKeyInfo, IndexInfo, SchemaIntrospector, TableInfo,
     SqliteIntrospector, PostgresIntrospector,
 };
+#[cfg(feature = "sdn-table")]
+pub use sdn_table::{export_table_sdn, import_table_sdn};
 
 // Re-export FFI functions
 pub use ffi::*;

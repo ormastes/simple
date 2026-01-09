@@ -3,6 +3,7 @@ pub mod dependency_cache;
 pub mod doctest;
 pub mod early_startup;
 pub mod exec_core;
+pub mod feature_db;
 pub mod gpu_init;
 pub mod interpreter;
 pub mod jj;

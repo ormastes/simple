@@ -53,6 +53,8 @@ extern "C" fn advice_double_proceed(
 fn around_chain_applies_outermost_first() {
     let args = vec![RuntimeValue::from_int(1), RuntimeValue::from_int(2)];
     let advices = vec![advice_add_one as _, advice_mul_two as _];
+    
+    // Test with small stack-safe operations
     let result = rt_aop_invoke_around(
         target_sum,
         advices.as_ptr(),
@@ -60,6 +62,7 @@ fn around_chain_applies_outermost_first() {
         args.len() as u64,
         args.as_ptr(),
     );
+    // Expected: sum(1,2)=3 -> mul_two(3)=6 -> add_one(6)=7
     assert_eq!(result.as_int(), 7);
 }
 
