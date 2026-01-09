@@ -240,20 +240,15 @@ pub fn release_exclusive(s: BorrowState) -> BorrowState {
 
 /// Type-safe borrow state where the invariant is encoded in the type.
 /// Invalid states (exclusive AND shared) are unrepresentable.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ValidBorrowState {
     /// No active borrows
+    #[default]
     Unborrowed,
     /// One exclusive (mutable) borrow - cannot coexist with shared
     Exclusive,
     /// One or more shared (immutable) borrows - count is always >= 1
     Shared(std::num::NonZeroUsize),
-}
-
-impl Default for ValidBorrowState {
-    fn default() -> Self {
-        ValidBorrowState::Unborrowed
-    }
 }
 
 impl ValidBorrowState {

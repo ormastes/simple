@@ -433,19 +433,107 @@ struct Document:
 | Modules | snake_case | `user_service` |
 | Private | `_` prefix | `_internal_state` |
 
-### 5. Documentation
+### 5. Documentation with Doctest
+
+All public APIs must include doctest examples showing usage.
+
+**Function Documentation:**
 ```simple
-## Public API documentation (required for lib)
-# Short description on first line.
+## Calculate the factorial of a non-negative integer.
 #
-# Longer description if needed.
+# Factorial of n (n!) is the product of all positive integers <= n.
 #
-# @param name - User's display name
-# @returns Created user instance
-# @throws ValidationError - If name is empty
-fn create_user(name: UserName) -> Result[User, ValidationError]:
-    ...
+# ## Examples
+#
+# >>> factorial(0)
+# 1
+# >>> factorial(5)
+# 120
+# >>> factorial(10)
+# 3628800
+#
+# ## Edge Cases
+#
+# >>> factorial(-1)
+# Traceback:
+# ValueError: requires non-negative integer
+#
+# @param n - Non-negative integer
+# @returns n! (n factorial)
+# @raises ValueError - If n is negative
+fn factorial(n: Int) -> Int:
+    in: n >= 0, "requires non-negative integer"
+    if n <= 1: 1
+    else: n * factorial(n - 1)
 ```
+
+**Class Documentation:**
+```simple
+## A LIFO stack data structure.
+#
+# ## Usage
+#
+# >>> stack = Stack[Int].new()
+# >>> stack.push(10)
+# >>> stack.push(20)
+# >>> stack.pop()
+# 20
+# >>> stack.peek()
+# 10
+#
+# ## Thread Safety
+#
+# NOT thread-safe. Use `SyncStack` for concurrent access.
+#
+# ## Complexity
+#
+# | Operation | Time | Space |
+# |-----------|------|-------|
+# | push      | O(1) | O(1)  |
+# | pop       | O(1) | O(1)  |
+class Stack[T]:
+    items: List[T]
+
+    ## Create an empty stack.
+    #
+    # >>> Stack[Int].new().is_empty()
+    # True
+    fn new() -> Stack[T]:
+        Stack { items: [] }
+
+    ## Push item onto stack.
+    #
+    # >>> s = Stack[Int].new()
+    # >>> s.push(42)
+    # >>> s.peek()
+    # 42
+    fn push(mut self, item: T):
+        self.items.append(item)
+
+    ## Pop and return top item.
+    #
+    # >>> s = Stack[Int].new()
+    # >>> s.push(1); s.push(2)
+    # >>> s.pop()
+    # 2
+    fn pop(mut self) -> T:
+        self.items.pop()
+
+    ## Check if stack is empty.
+    #
+    # >>> Stack[Int].new().is_empty()
+    # True
+    fn is_empty(self) -> Bool:
+        self.items.len() == 0
+```
+
+**Doctest Markers:**
+| Marker | Purpose |
+|--------|---------|
+| `>>>` | Code to execute |
+| (next line) | Expected output |
+| `Traceback:` | Expected exception |
+| `# doctest: +SKIP` | Skip this example |
 
 ### 6. Test Organization
 ```simple
@@ -480,7 +568,9 @@ describe "UserService":
 
 ## Related Documentation
 
+- [sspec_writing.md](sspec_writing.md) - SSpec test writing guide with doctest
 - [coding.md](../../.claude/skills/coding.md) - Additional coding rules
 - [test.md](test.md) - Testing conventions
 - [module_system.md](module_system.md) - Module organization
 - [doc/spec/types.md](../spec/types.md) - Type system specification
+- [doc/spec/doctest_readme.md](../spec/doctest_readme.md) - README-based doctest spec

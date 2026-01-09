@@ -35,6 +35,8 @@ Skills located in `.claude/skills/`.
 
 ### Version Control
 - ❌ **NEVER use git** - use `jj` (see `/versioning`)
+- ❌ **NEVER create branches** - work directly on `main`
+- ✅ Always use `jj bookmark set main -r @` then `jj git push --bookmark main`
 
 ### Scripts
 - ❌ **NEVER write Python/Bash** - use Simple (`.spl`) only

@@ -274,7 +274,7 @@ impl TargetConfig {
     /// Get the maximum pointer value that can fit with tag bits.
     pub const fn max_tagged_ptr(&self) -> u64 {
         match self.arch.pointer_size() {
-            PointerSize::Bits64 => u64::MAX & !self.tag_mask(),
+            PointerSize::Bits64 => !self.tag_mask(),
             PointerSize::Bits32 => (u32::MAX as u64) & !self.tag_mask(),
         }
     }
@@ -455,10 +455,12 @@ impl Target {
                 "wasi" => Some(WasmRuntime::Wasi),
                 "unknown" => {
                     // Check third part for "emscripten"
-                    parts.get(2).and_then(|p| match p.to_lowercase().as_str() {
-                        "emscripten" => Some(WasmRuntime::Emscripten),
-                        _ => Some(WasmRuntime::Standalone),
-                    })
+                    Some(parts.get(2).map_or(WasmRuntime::Standalone, |p| {
+                        match p.to_lowercase().as_str() {
+                            "emscripten" => WasmRuntime::Emscripten,
+                            _ => WasmRuntime::Standalone,
+                        }
+                    }))
                 }
                 _ => Some(WasmRuntime::Standalone),
             })
