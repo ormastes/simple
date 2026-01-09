@@ -5,7 +5,7 @@
 use core::ptr;
 
 /// Runtime configuration.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct RuntimeConfig {
     /// Enable heap allocation.
     pub enable_heap: bool,
@@ -15,20 +15,16 @@ pub struct RuntimeConfig {
     pub heap_size: usize,
 }
 
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            enable_heap: false,
-            heap_start: 0,
-            heap_size: 0,
-        }
-    }
-}
-
 /// Embedded runtime state.
 pub struct EmbeddedRuntime {
     config: RuntimeConfig,
     initialized: bool,
+}
+
+impl Default for EmbeddedRuntime {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl EmbeddedRuntime {
@@ -205,6 +201,11 @@ pub extern "C" fn abort() -> ! {
 
 // Memory intrinsics that may be needed without std
 
+/// Copy `n` bytes from `src` to `dest`.
+///
+/// # Safety
+/// - `dest` and `src` must be valid for reads/writes of `n` bytes.
+/// - The memory regions must not overlap (use memmove for overlapping).
 #[no_mangle]
 pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     // Avoid calling into compiler-builtins memcpy to prevent recursion when the
@@ -217,6 +218,10 @@ pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: usize) -> *mut
     dest
 }
 
+/// Move `n` bytes from `src` to `dest`, handling overlapping regions.
+///
+/// # Safety
+/// - `dest` and `src` must be valid for reads/writes of `n` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mut u8 {
     // Handle overlap manually: choose direction based on pointer order.
@@ -236,6 +241,10 @@ pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: usize) -> *mu
     dest
 }
 
+/// Fill `n` bytes at `dest` with value `c`.
+///
+/// # Safety
+/// - `dest` must be valid for writes of `n` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
     let byte = c as u8;
@@ -247,6 +256,10 @@ pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: usize) -> *mut u8 {
     dest
 }
 
+/// Compare `n` bytes of `s1` and `s2`.
+///
+/// # Safety
+/// - `s1` and `s2` must be valid for reads of `n` bytes.
 #[no_mangle]
 pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     for i in 0..n {
@@ -259,6 +272,10 @@ pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: usize) -> i32 {
     0
 }
 
+/// Get the length of a null-terminated string.
+///
+/// # Safety
+/// - `s` must be a valid null-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn strlen(s: *const u8) -> usize {
     let mut len = 0;

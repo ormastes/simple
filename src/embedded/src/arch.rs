@@ -73,18 +73,12 @@ impl EmbeddedArch {
 
     /// Check if architecture has FPU.
     pub const fn has_fpu(&self) -> bool {
-        match self {
-            Self::CortexM4 | Self::CortexM7 => true,
-            _ => false,
-        }
+        matches!(self, Self::CortexM4 | Self::CortexM7)
     }
 
     /// Check if architecture has DSP extensions.
     pub const fn has_dsp(&self) -> bool {
-        match self {
-            Self::CortexM4 | Self::CortexM7 => true,
-            _ => false,
-        }
+        matches!(self, Self::CortexM4 | Self::CortexM7)
     }
 
     /// Get default stack alignment.
@@ -123,9 +117,15 @@ pub trait ArchInit {
     unsafe fn late_init();
 
     /// Enable interrupts.
+    ///
+    /// # Safety
+    /// Caller must ensure proper interrupt handling is set up.
     unsafe fn enable_interrupts();
 
     /// Disable interrupts.
+    ///
+    /// # Safety
+    /// Caller must ensure this does not cause deadlocks.
     unsafe fn disable_interrupts();
 
     /// Wait for interrupt (low power sleep).

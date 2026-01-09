@@ -354,6 +354,7 @@ cd verification/type_inference_compile && lake build
 
 ## See Also
 
+- **`doc/guide/architecture_writing.md`** - Architecture writing guide (Skeleton→Verify→Diagram workflow)
 - `doc/architecture/README.md` - Full architecture docs
 - `doc/codegen_technical.md` - Codegen details
 - `doc/codegen/status.md` - MIR coverage

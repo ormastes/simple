@@ -401,6 +401,7 @@ fn write_srec_record(
 }
 
 /// Calculate required output buffer size for Intel HEX.
+#[allow(clippy::manual_div_ceil)] // div_ceil is not const fn
 pub const fn intel_hex_size(data_len: usize) -> usize {
     // Each 16-byte chunk becomes ~45 bytes in hex
     // Plus extended address records and EOF
@@ -410,6 +411,7 @@ pub const fn intel_hex_size(data_len: usize) -> usize {
 }
 
 /// Calculate required output buffer size for S-Record.
+#[allow(clippy::manual_div_ceil)] // div_ceil is not const fn
 pub const fn srec_size(data_len: usize) -> usize {
     // Each 16-byte chunk becomes ~48 bytes in srec
     // Plus header and end records

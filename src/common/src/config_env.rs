@@ -195,8 +195,7 @@ impl ConfigEnv {
     /// Add environment variables with a prefix to this config.
     pub fn with_env_prefix(mut self, prefix: &str) -> Self {
         for (key, value) in env::vars() {
-            if key.starts_with(prefix) {
-                let stripped_key = &key[prefix.len()..];
+            if let Some(stripped_key) = key.strip_prefix(prefix) {
                 self.set(stripped_key, &value);
             }
         }
@@ -315,9 +314,9 @@ mod tests {
         let mut config = ConfigEnv::new();
         config.set("flag", "true");
 
-        assert_eq!(config.get_bool_or("flag", false), true);
-        assert_eq!(config.get_bool_or("missing", true), true);
-        assert_eq!(config.get_bool_or("missing", false), false);
+        assert!(config.get_bool_or("flag", false));
+        assert!(config.get_bool_or("missing", true));
+        assert!(!config.get_bool_or("missing", false));
     }
 
     #[test]

@@ -135,6 +135,8 @@ Design decisions go in:
 
 ## See Also
 
+- **`doc/guide/design_writing.md`** - Design writing guide (Draft→Test→Generate→Replace)
+- **`doc/guide/architecture_writing.md`** - Architecture writing guide (Skeleton→Verify→Diagram)
 - `doc/architecture/README.md` - Architecture overview
 - `doc/design/memory.md` - Memory model design
 - `doc/design/type_inference.md` - Type inference design

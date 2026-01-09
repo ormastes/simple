@@ -28,8 +28,14 @@ This directory contains practical guides for:
 |-------|-------------|
 | [coding_style.md](coding_style.md) | **Main coding guide** - Domain types, defaults, config patterns, type inference, keyword omission, Lean verification, AOP logging, doctest examples |
 | [sspec_writing.md](sspec_writing.md) | **SSpec test guide** - BDD tests, document format, doctest integration, matchers, fixtures |
+| [architecture_writing.md](architecture_writing.md) | **Architecture guide** - Skeleton-first design, Lean verification workflow, diagram generation from tests |
+| [design_writing.md](design_writing.md) | **Design guide** - Draft diagrams replaced by test-generated class/sequence diagrams |
 
 **Key rules:** No primitives in public APIs, defaults everywhere, type inference for app code, explicit types for lib code, doctest for all public APIs, max 800 lines per file.
+
+**Architecture workflow:** Skeleton → Verify → Test → Diagram
+
+**Design workflow:** Draft → Test → Generate → Replace
 
 ---
 
@@ -123,9 +129,11 @@ Covers:
 3. [ui.md](ui.md) - User interfaces
 
 **Advanced Topics:**
-1. [vulkan_backend.md](vulkan_backend.md) - GPU programming
-2. [context_sharing_usage_guide.md](context_sharing_usage_guide.md) - Advanced module patterns
-3. [llm_friendly.md](llm_friendly.md) - LLM integration
+1. [architecture_writing.md](architecture_writing.md) - Skeleton-first architecture
+2. [design_writing.md](design_writing.md) - Draft-to-generated diagrams
+3. [vulkan_backend.md](vulkan_backend.md) - GPU programming
+4. [context_sharing_usage_guide.md](context_sharing_usage_guide.md) - Advanced module patterns
+5. [llm_friendly.md](llm_friendly.md) - LLM integration
 
 ---
 
@@ -165,4 +173,4 @@ When adding new guides:
 
 ---
 
-**Total:** 17 guide documents
+**Total:** 19 guide documents

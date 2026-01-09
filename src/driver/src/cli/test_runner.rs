@@ -695,6 +695,21 @@ pub fn run_tests(options: TestOptions) -> TestRunResult {
         total_duration_ms: start.elapsed().as_millis() as u64,
     };
 
+    // Generate diagrams if enabled
+    if options.seq_diagram || options.class_diagram || options.arch_diagram || options.diagram_all {
+        if let Some(diagram_paths) = generate_test_diagrams(&options, &result.files, quiet) {
+            if !quiet {
+                println!("───────────────────────────────────────────────────────────────");
+                println!("Generated Diagrams");
+                println!("───────────────────────────────────────────────────────────────");
+                for path in &diagram_paths {
+                    println!("  {}", path.display());
+                }
+                println!("───────────────────────────────────────────────────────────────");
+            }
+        }
+    }
+
     // Save coverage if enabled
     if is_coverage_enabled() {
         if let Err(e) = save_global_coverage() {
