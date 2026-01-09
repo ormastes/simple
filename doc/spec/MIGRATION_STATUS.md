@@ -92,20 +92,35 @@ Reference documentation, tooling, frameworks:
 
 ## Current Status
 
-### ✅ Category A Migration Complete (2026-01-09)
+### ✅ Phase 2 Complete - All Core Specs Migrated (2026-01-09)
 
-**All 7 Category A files successfully migrated to tests/specs/*_spec.spl**
+**Category A + Category B: 15/15 files complete**
 
-Migration completed using `python scripts/migrate_spec_to_spl.py --all`
+Migration/extraction completed using automated tools:
+- `python scripts/migrate_spec_to_spl.py --all` (Category A)
+- `python scripts/extract_tests_from_spec.py --all` (Category B)
 
-**Results:**
-- 54.6K of specification content migrated
-- 137 code examples extracted and converted to test cases
-- All original .md files marked with migration notice
-- New specs ready for future implementation
+**Combined Results:**
+- 126.6K of specification content migrated/extracted
+- 294 code examples extracted and converted to test cases
+- All original .md files marked with appropriate notices
+- New specs ready for implementation and validation
 
-**Note on Compilation:**
-Several migrated specs contain code examples with unimplemented features (e.g., `~=` suspension operator, `@` decorators). This is expected - specs document planned features. Compilation errors indicate features to implement, not migration failures.
+**File Organization:**
+- `tests/specs/` - All 15 executable specification files
+- `doc/spec/` - Reference documentation (Category B) and legacy files (Category A)
+- `doc/spec/generated/` - Created for future spec-gen output
+
+### 🔄 Phase 3 In Progress - Organization (2026-01-09)
+
+**Completed:**
+- ✅ Updated doc/spec/README.md with migration section
+- ✅ Created doc/spec/generated/ directory
+- ✅ Updated AGENTS.md with Phase 2 completion
+
+**Remaining:**
+- ⏳ Update cross-references in remaining documentation
+- ⏳ Final review of all migration/extraction notices
 
 ---
 
@@ -147,10 +162,12 @@ Several migrated specs contain code examples with unimplemented features (e.g., 
 - [x] macro.md → macro_spec.spl (767 bytes, 0 examples)
 - [x] metaprogramming.md → metaprogramming_spec.spl (11K, 24 examples)
 
-### Phase 3: Organization ⏳
-- [ ] Update doc/spec/README.md
-- [ ] Reorganize doc/spec/ structure
-- [ ] Update cross-references
+### Phase 3: Organization 🔄 IN PROGRESS
+- [x] Update doc/spec/README.md with new structure
+- [x] Add generated/ directory for future spec-gen output
+- [x] Update AGENTS.md with Phase 2 completion
+- [ ] Update cross-references in remaining docs
+- [ ] Final review of migration notices
 
 ### Phase 4: Spec Generator ⏳
 - [ ] Implement `simple spec-gen` command

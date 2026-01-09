@@ -2,6 +2,7 @@
 # Extracts import/use statements and tracks symbol dependencies
 
 use core.*
+use mcp.simple_lang.parser.*
 use mcp.simple_lang.types.*
 
 # Dependency type
@@ -24,11 +25,13 @@ pub class DependencyGraph:
     pub internal_deps: List[Dependency]   # Dependencies within project
     pub external_deps: List[Dependency]   # Dependencies from stdlib/packages
     pub symbol_usage: Dict[String, List[String]]  # Symbol -> used in functions
+    pub module_name: String
 
 # Parse dependencies from Simple source code
 pub fn extract_dependencies(source: String) -> DependencyGraph:
     lines = source.split("\n")
     dependencies = []
+    import_aliases = {}
 
     for i in range(lines.len()):
         line = lines[i]
@@ -38,6 +41,9 @@ pub fn extract_dependencies(source: String) -> DependencyGraph:
         if stripped.starts_with("import ") or stripped.starts_with("pub import "):
             dep = parse_import(stripped, i + 1)
             dependencies.append(dep)
+            alias = parse_import_alias(stripped)
+            if alias != "":
+                import_aliases[dep.module_path] = alias
 
         # Parse use statements
         elif stripped.starts_with("use ") or stripped.starts_with("pub use "):
@@ -59,14 +65,16 @@ pub fn extract_dependencies(source: String) -> DependencyGraph:
         else:
             external_deps.append(dep)
 
-    # Extract symbol usage (simplified)
-    symbol_usage = {}  # TODO: Implement symbol usage tracking
+    # Extract symbol usage
+    symbol_usage = extract_symbol_usage(source, dependencies, import_aliases)
+    module_name = parse_module_name(source)
 
     return DependencyGraph:
         dependencies: dependencies
         internal_deps: internal_deps
         external_deps: external_deps
         symbol_usage: symbol_usage
+        module_name: module_name
 
 # Parse import statement
 fn parse_import(line: String, line_num: i64) -> Dependency:
@@ -90,6 +98,21 @@ fn parse_import(line: String, line_num: i64) -> Dependency:
         imported_symbols: []
         line_number: line_num
         is_public: is_public
+
+# Parse import alias (import foo as bar)
+fn parse_import_alias(line: String) -> String:
+    module_part = line
+    if line.starts_with("pub "):
+        module_part = line[11:]
+    else:
+        module_part = line[7:]
+
+    if module_part.contains(" as "):
+        idx = module_part.find(" as ")
+        alias = module_part[idx + 4:]
+        return alias.strip()
+
+    return ""
 
 # Parse use statement
 fn parse_use(line: String, line_num: i64) -> Dependency:
@@ -232,6 +255,131 @@ pub fn get_direct_dependencies(graph: DependencyGraph) -> List[String]:
 
 # Check for circular dependencies (simplified)
 pub fn detect_circular_dependencies(graph: DependencyGraph) -> List[String]:
-    # TODO: Implement proper cycle detection
-    # This is a stub for now
-    return []
+    cycles = []
+
+    if graph.module_name == "":
+        return cycles
+
+    for dep in graph.internal_deps:
+        if dep.module_path == graph.module_name:
+            cycles.append(graph.module_name + " -> " + graph.module_name)
+
+    return cycles
+
+# Extract module name from source (module foo.bar:)
+fn parse_module_name(source: String) -> String:
+    lines = source.split("\n")
+    for line in lines:
+        stripped = line.strip()
+        if stripped.starts_with("module "):
+            name_part = stripped.substring(7, stripped.len())
+            if name_part.contains(" requires"):
+                idx = name_part.find(" requires")
+                name_part = name_part.substring(0, idx)
+            if name_part.ends_with(":"):
+                name_part = name_part.substring(0, name_part.len() - 1)
+            return name_part.strip()
+    return ""
+
+# Extract symbol usage for dependency tracking
+fn extract_symbol_usage(
+    source: String,
+    dependencies: List[Dependency],
+    import_aliases: Dict[String, String]
+) -> Dict[String, List[String]]:
+    symbol_usage = {}
+    symbols = parse_file(source)
+
+    for symbol in symbols:
+        if symbol.kind != SymbolKind.Function:
+            continue
+        body = symbol.body
+        func_name = symbol.name
+
+        for dep in dependencies:
+            if dep.dep_type == DependencyType.Import:
+                if is_module_used(body, dep.module_path, import_aliases):
+                    record_usage(symbol_usage, dep.module_path, func_name)
+            elif dep.dep_type == DependencyType.Use:
+                if dep.imported_symbols.len() > 0:
+                    for sym in dep.imported_symbols:
+                        if contains_symbol(body, sym):
+                            record_usage(symbol_usage, sym, func_name)
+                else:
+                    if is_module_used(body, dep.module_path, {}):
+                        record_usage(symbol_usage, dep.module_path, func_name)
+            else:
+                for sym in dep.imported_symbols:
+                    if contains_symbol(body, sym):
+                        record_usage(symbol_usage, sym, func_name)
+
+    return symbol_usage
+
+fn record_usage(symbol_usage: Dict[String, List[String]], symbol: String, func_name: String):
+    if not symbol_usage.contains_key(symbol):
+        symbol_usage[symbol] = []
+    if not symbol_usage[symbol].contains(func_name):
+        symbol_usage[symbol].append(func_name)
+
+fn is_module_used(body: String, module_path: String, import_aliases: Dict[String, String]) -> bool:
+    if module_path == "":
+        return false
+
+    if body.contains(module_path + "."):
+        return true
+
+    if not module_path.contains(".") and contains_symbol(body, module_path):
+        return true
+
+    if import_aliases.contains_key(module_path):
+        alias = import_aliases.get(module_path)
+        if body.contains(alias + "."):
+            return true
+        if not alias.contains(".") and contains_symbol(body, alias):
+            return true
+
+    return false
+
+fn contains_symbol(text: String, symbol: String) -> bool:
+    if symbol.len() == 0:
+        return false
+    if text.len() < symbol.len():
+        return false
+
+    max_idx = text.len() - symbol.len()
+    i = 0
+    while i <= max_idx:
+        if text.substring(i, i + symbol.len()) == symbol:
+            prev_ok = true
+            next_ok = true
+
+            if i > 0:
+                prev = text.char_at(i - 1)
+                if is_identifier_char(prev):
+                    prev_ok = false
+
+            if i + symbol.len() < text.len():
+                next = text.char_at(i + symbol.len())
+                if is_identifier_char(next):
+                    next_ok = false
+
+            if prev_ok and next_ok:
+                return true
+
+        i = i + 1
+
+    return false
+
+fn is_identifier_char(ch: String) -> bool:
+    if ch.len() == 0:
+        return false
+    code = ch.ord()
+    if code >= 48 and code <= 57:
+        return true
+    if code >= 65 and code <= 90:
+        return true
+    if code >= 97 and code <= 122:
+        return true
+    if ch == "_":
+        return true
+    return false
