@@ -494,7 +494,7 @@ fn generate_arch_mermaid(events: &[CallEvent], arch_entities: &[String]) -> Stri
     for entity in arch_entities {
         if entity.contains('.') {
             let parts: Vec<&str> = entity.split('.').collect();
-            let short_name = parts.last().unwrap_or(&entity.as_str());
+            let short_name = parts.last().copied().unwrap_or(entity.as_str());
             output.push_str(&format!("    {}[{}]\n", entity.replace('.', "_"), short_name));
         } else {
             output.push_str(&format!("    {}\n", entity));
@@ -564,6 +564,80 @@ pub fn get_architectural_entities() -> Vec<String> {
 pub fn clear_diagram_data() {
     get_events().write().clear();
     get_arch_entities().write().clear();
+}
+
+/// Trace a function call (Rust API)
+pub fn trace_call(name: &str) {
+    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let event = CallEvent {
+        callee: name.to_string(),
+        callee_class: None,
+        arguments: vec![],
+        call_type: CallType::Function,
+        return_value: None,
+        timestamp_ns: now_nanos(),
+    };
+
+    get_events().write().push(event);
+}
+
+/// Trace a method call (Rust API)
+pub fn trace_method(class_name: &str, method_name: &str) {
+    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let event = CallEvent {
+        callee: method_name.to_string(),
+        callee_class: Some(class_name.to_string()),
+        arguments: vec![],
+        call_type: CallType::Method,
+        return_value: None,
+        timestamp_ns: now_nanos(),
+    };
+
+    get_events().write().push(event);
+}
+
+/// Trace a method call with arguments (Rust API)
+pub fn trace_method_with_args(class_name: &str, method_name: &str, args: &[String]) {
+    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let event = CallEvent {
+        callee: method_name.to_string(),
+        callee_class: Some(class_name.to_string()),
+        arguments: args.to_vec(),
+        call_type: CallType::Method,
+        return_value: None,
+        timestamp_ns: now_nanos(),
+    };
+
+    get_events().write().push(event);
+}
+
+/// Trace a return value (Rust API)
+pub fn trace_return(value: Option<&str>) {
+    if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let mut events = get_events().write();
+    if let Some(last) = events.last_mut() {
+        last.return_value = value.map(|s| s.to_string());
+    }
+}
+
+/// Mark an entity as architectural (Rust API)
+pub fn mark_architectural(entity: &str) {
+    let mut entities = get_arch_entities().write();
+    if !entities.iter().any(|e| e == entity) {
+        entities.push(entity.to_string());
+    }
 }
 
 #[cfg(test)]

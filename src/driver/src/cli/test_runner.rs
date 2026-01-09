@@ -478,6 +478,17 @@ fn run_md_doctests(options: &TestOptions, quiet: bool) -> Vec<TestFileResult> {
 pub fn run_tests(options: TestOptions) -> TestRunResult {
     let quiet = matches!(options.format, OutputFormat::Json);
 
+    // Enable diagram recording if any diagram option is enabled
+    let diagrams_enabled =
+        options.seq_diagram || options.class_diagram || options.arch_diagram || options.diagram_all;
+    if diagrams_enabled {
+        simple_runtime::value::diagram_ffi::enable_diagrams();
+        simple_runtime::value::diagram_ffi::clear_diagram_data();
+        if !quiet {
+            println!("Call flow diagram recording enabled");
+        }
+    }
+
     // Initialize coverage if enabled
     if is_coverage_enabled() {
         init_coverage();
@@ -860,25 +871,76 @@ pub fn parse_test_args(args: &[String]) -> TestOptions {
     options
 }
 
-/// Generate diagrams from test execution using the global profiler
+/// Generate diagrams from test execution using the global profiler and diagram_ffi
 fn generate_test_diagrams(
     options: &TestOptions,
     _results: &[TestFileResult],
     quiet: bool,
 ) -> Option<Vec<PathBuf>> {
     use std::fs;
+    use simple_runtime::value::diagram_ffi;
 
-    // Get the global profiler and extract events
+    // Get events from global profiler
     let profiler = global_profiler();
-    let events = profiler.get_sequence_events();
-    let architectural = profiler.get_architectural_entities();
+    let profiler_events = profiler.get_sequence_events();
+    let profiler_architectural = profiler.get_architectural_entities();
 
-    if events.is_empty() {
+    // Get events from diagram_ffi (interpreter tracing)
+    let ffi_events = diagram_ffi::get_recorded_events();
+    let ffi_architectural = diagram_ffi::get_architectural_entities();
+
+    // Disable diagram recording
+    diagram_ffi::disable_diagrams();
+
+    // Check if we have any events from either source
+    let has_profiler_events = !profiler_events.is_empty();
+    let has_ffi_events = !ffi_events.is_empty();
+
+    if !has_profiler_events && !has_ffi_events {
         if !quiet {
-            println!("No sequence events recorded. Profiling may not be enabled.");
-            println!("Hint: Enable profiling with ProfileConfig::combined()");
+            println!("No sequence events recorded.");
+            println!("Hint: Enable profiling with ProfileConfig::combined() or --diagram-all");
         }
         return None;
+    }
+
+    // Use FFI events if available, otherwise fall back to profiler events
+    let (events, architectural) = if has_ffi_events {
+        // Convert FFI events to profiler format
+        use simple_compiler::runtime_profile::{CallType as ProfileCallType, SequenceEvent};
+        use std::collections::HashSet;
+
+        let converted_events: Vec<_> = ffi_events
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| SequenceEvent {
+                sequence_num: idx as u64,
+                timestamp_ns: e.timestamp_ns,
+                caller: "Test".to_string(),
+                callee: e.callee.clone(),
+                caller_class: None,
+                callee_class: e.callee_class.clone(),
+                arguments: e.arguments.clone(),
+                return_value: e.return_value.clone(),
+                call_type: match e.call_type {
+                    diagram_ffi::CallType::Function => ProfileCallType::Direct,
+                    diagram_ffi::CallType::Method => ProfileCallType::Method,
+                    diagram_ffi::CallType::Constructor => ProfileCallType::Constructor,
+                    diagram_ffi::CallType::Return => ProfileCallType::Direct, // Return is tracked via is_return field
+                },
+                depth: 0,
+                is_return: matches!(e.call_type, diagram_ffi::CallType::Return),
+            })
+            .collect();
+        // Convert Vec to HashSet for architectural entities
+        let arch_set: HashSet<String> = ffi_architectural.into_iter().collect();
+        (converted_events, arch_set)
+    } else {
+        (profiler_events, profiler_architectural)
+    };
+
+    if !quiet && has_ffi_events {
+        println!("Using {} events from interpreter call tracing", ffi_events.len());
     }
 
     // Setup output directory

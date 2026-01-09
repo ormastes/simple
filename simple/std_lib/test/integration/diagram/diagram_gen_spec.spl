@@ -1,0 +1,153 @@
+# Diagram Generation Integration Tests
+#
+# Tests the diagram generation API with FFI tracing
+
+import std.spec.{describe, context, it, expect, eq, include_string}
+import std.spec.diagram.{
+    DiagramType, DiagramConfig,
+    trace_method, trace_call, trace_return, mark_architectural,
+    enable_ffi_recording, disable_ffi_recording, clear_ffi_recording,
+    generate_sequence_ffi, generate_class_ffi, generate_arch_ffi
+}
+
+describe "Diagram Generation":
+    context "FFI Recording":
+        it "enables and disables recording":
+            enable_ffi_recording()
+            disable_ffi_recording()
+            # No assertion needed - just verifies FFI calls work
+
+        it "clears recorded events":
+            enable_ffi_recording()
+            trace_method("TestClass", "testMethod", [])
+            clear_ffi_recording()
+            disable_ffi_recording()
+
+    context "Sequence Diagram":
+        it "generates mermaid sequence diagram":
+            clear_ffi_recording()
+            enable_ffi_recording()
+
+            # Trace some method calls
+            trace_method("UserService", "authenticate", ["user", "pass"])
+            trace_method("Database", "query", ["SELECT * FROM users"])
+            trace_return(Some("user_record"))
+
+            let diagram = generate_sequence_ffi()
+            disable_ffi_recording()
+
+            expect(diagram).to(include_string("sequenceDiagram"))
+            expect(diagram).to(include_string("UserService"))
+            expect(diagram).to(include_string("Database"))
+
+        it "captures method calls with arguments":
+            clear_ffi_recording()
+            enable_ffi_recording()
+
+            trace_method("Calculator", "add", ["1", "2"])
+            trace_method("Calculator", "multiply", ["3", "4"])
+
+            let diagram = generate_sequence_ffi()
+            disable_ffi_recording()
+
+            expect(diagram).to(include_string("Calculator"))
+            expect(diagram).to(include_string("add"))
+            expect(diagram).to(include_string("multiply"))
+
+    context "Class Diagram":
+        it "generates mermaid class diagram":
+            clear_ffi_recording()
+            enable_ffi_recording()
+
+            trace_method("OrderService", "createOrder", [])
+            trace_method("OrderService", "validateOrder", [])
+            trace_method("PaymentGateway", "charge", [])
+
+            let diagram = generate_class_ffi()
+            disable_ffi_recording()
+
+            expect(diagram).to(include_string("classDiagram"))
+            expect(diagram).to(include_string("class OrderService"))
+            expect(diagram).to(include_string("class PaymentGateway"))
+
+        it "extracts methods from calls":
+            clear_ffi_recording()
+            enable_ffi_recording()
+
+            trace_method("User", "save", [])
+            trace_method("User", "validate", [])
+            trace_method("User", "notify", [])
+
+            let diagram = generate_class_ffi()
+            disable_ffi_recording()
+
+            expect(diagram).to(include_string("+save()"))
+            expect(diagram).to(include_string("+validate()"))
+            expect(diagram).to(include_string("+notify()"))
+
+    context "Architecture Diagram":
+        it "generates flowchart for architectural entities":
+            clear_ffi_recording()
+            enable_ffi_recording()
+
+            mark_architectural("Gateway")
+            mark_architectural("Service")
+            mark_architectural("Database")
+
+            trace_method("Gateway", "receive", [])
+            trace_method("Service", "process", [])
+            trace_method("Database", "store", [])
+
+            let diagram = generate_arch_ffi()
+            disable_ffi_recording()
+
+            expect(diagram).to(include_string("flowchart TD"))
+            expect(diagram).to(include_string("Gateway"))
+            expect(diagram).to(include_string("Service"))
+            expect(diagram).to(include_string("Database"))
+
+        it "shows connections between components":
+            clear_ffi_recording()
+            enable_ffi_recording()
+
+            mark_architectural("API")
+            mark_architectural("Cache")
+            mark_architectural("DB")
+
+            trace_method("API", "request", [])
+            trace_method("Cache", "lookup", [])
+            trace_method("DB", "query", [])
+
+            let diagram = generate_arch_ffi()
+            disable_ffi_recording()
+
+            expect(diagram).to(include_string("-->"))
+
+    context "Real-World Example":
+        it "traces authentication flow":
+            clear_ffi_recording()
+            enable_ffi_recording()
+
+            # Simulate authentication flow
+            trace_method("LoginController", "handleLogin", ["email", "password"])
+            trace_method("AuthService", "authenticate", ["email", "password"])
+            trace_method("UserRepository", "findByEmail", ["email"])
+            trace_return(Some("User"))
+            trace_method("PasswordHasher", "verify", ["password", "hash"])
+            trace_return(Some("true"))
+            trace_method("TokenService", "generateToken", ["userId"])
+            trace_return(Some("jwt_token"))
+
+            let seq_diagram = generate_sequence_ffi()
+            let class_diagram = generate_class_ffi()
+
+            disable_ffi_recording()
+
+            # Verify sequence diagram
+            expect(seq_diagram).to(include_string("LoginController"))
+            expect(seq_diagram).to(include_string("AuthService"))
+            expect(seq_diagram).to(include_string("UserRepository"))
+
+            # Verify class diagram
+            expect(class_diagram).to(include_string("class LoginController"))
+            expect(class_diagram).to(include_string("class AuthService"))
