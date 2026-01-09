@@ -101,6 +101,8 @@ pub extern "C" fn rt_set_args(argc: i32, argv: *const *const u8) {
 /// # Example
 ///
 /// ```rust
+/// use simple_runtime::value::rt_set_args_vec;
+/// 
 /// // Driver code (exec_core.rs)
 /// let args = vec!["program".to_string(), "arg1".to_string()];
 /// rt_set_args_vec(&args);

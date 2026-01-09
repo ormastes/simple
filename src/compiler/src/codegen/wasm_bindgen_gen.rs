@@ -6,14 +6,14 @@
 //! # Example
 //!
 //! Simple code:
-//! ```simple
+//! ```text
 //! @extern("browser", "console_log")
 //! fn log(message: str):
 //!     pass
 //! ```
 //!
 //! Generated wasm-bindgen:
-//! ```rust
+//! ```rust,ignore
 //! #[wasm_bindgen]
 //! extern "C" {
 //!     #[wasm_bindgen(js_namespace = console, js_name = log)]

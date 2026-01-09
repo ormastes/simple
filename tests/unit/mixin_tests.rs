@@ -8,7 +8,7 @@ mod mixin_parser_tests {
     #[test]
     fn test_parse_simple_mixin() {
         let source = r#"
-mixin Timestamp
+mixin Timestamp:
     created_at: i64
     updated_at: i64
 "#;
@@ -21,10 +21,10 @@ mixin Timestamp
     #[test]
     fn test_parse_mixin_with_methods() {
         let source = r#"
-mixin Auditable
+mixin Auditable:
     modified_by: str
     
-    fn mark_modified(user: str)
+    fn mark_modified(user: str):
         self.modified_by = user
 "#;
         let mut parser = Parser::new(source);
@@ -36,9 +36,9 @@ mixin Auditable
     #[test]
     fn test_parse_generic_mixin() {
         let source = r#"
-mixin Serializable<T>
-    fn to_json() -> str
-        return "{}"
+mixin Serializable<T>:
+    fn to_json() -> str:
+        return '{}'
 "#;
         let mut parser = Parser::new(source);
         
@@ -49,8 +49,8 @@ mixin Serializable<T>
     #[test]
     fn test_parse_mixin_with_trait_bounds() {
         let source = r#"
-mixin Comparable<T> where T: Ord
-    fn compare(other: T) -> i32
+mixin Comparable<T> where T: Ord:
+    fn compare(other: T) -> i32:
         return 0
 "#;
         let mut parser = Parser::new(source);
@@ -62,10 +62,10 @@ mixin Comparable<T> where T: Ord
     #[test]
     fn test_parse_class_with_mixin() {
         let source = r#"
-mixin Timestamp
+mixin Timestamp:
     created_at: i64
 
-class User
+class User:
     use Timestamp
     id: i64
     name: str
@@ -79,13 +79,13 @@ class User
     #[test]
     fn test_parse_class_with_multiple_mixins() {
         let source = r#"
-mixin Timestamp
+mixin Timestamp:
     created_at: i64
 
-mixin Auditable
+mixin Auditable:
     modified_by: str
 
-class Document
+class Document:
     use Timestamp
     use Auditable
     content: str
@@ -99,11 +99,11 @@ class Document
     #[test]
     fn test_parse_class_with_generic_mixin() {
         let source = r#"
-mixin Serializable<T>
-    fn to_json() -> str
-        return "{}"
+mixin Serializable<T>:
+    fn to_json() -> str:
+        return '{}'
 
-class Product
+class Product:
     use Serializable<Product>
     id: i64
 "#;
@@ -159,7 +159,7 @@ mod mixin_type_tests {
             name: "Container".to_string(),
             type_params: vec!["T".to_string()],
             fields: vec![
-                ("value".to_string(), Type::Var(0)), // Type variable 0 represents T
+                ("value".to_string(), Type::TypeParam("T".to_string())),
             ],
             methods: vec![],
             required_traits: vec![],

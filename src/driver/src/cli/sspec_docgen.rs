@@ -21,6 +21,7 @@ pub struct SspecDoc {
     pub file_path: PathBuf,
     pub doc_blocks: Vec<DocBlock>,
     pub feature_title: Option<String>,
+    pub feature_ids: Vec<String>,
 }
 
 /// Parse sspec file and extract documentation blocks
@@ -30,11 +31,18 @@ pub fn parse_sspec_file(path: &Path) -> Result<SspecDoc, Box<dyn std::error::Err
     
     let mut doc_blocks = Vec::new();
     let mut feature_title = None;
+    let mut feature_ids = Vec::new();
     
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i].trim();
         
+        if line.starts_with("#[id(") {
+            if let Some(id) = parse_id_attr(line) {
+                feature_ids.push(id);
+            }
+        }
+
         // Check for doc block start
         if line == "\"\"\"" {
             let start_line = i;
@@ -80,6 +88,7 @@ pub fn parse_sspec_file(path: &Path) -> Result<SspecDoc, Box<dyn std::error::Err
         file_path: path.to_path_buf(),
         doc_blocks,
         feature_title,
+        feature_ids,
     })
 }
 
@@ -134,6 +143,14 @@ fn generate_feature_doc(
         "*Source: `{}`*\n\n",
         sspec_doc.file_path.display()
     ));
+    if !sspec_doc.feature_ids.is_empty() {
+        md.push_str("## Feature IDs\n\n");
+        for id in &sspec_doc.feature_ids {
+            let anchor = id.replace('.', "-");
+            md.push_str(&format!("- <a id=\"feature-{}\"></a>{}\n", anchor, id));
+        }
+        md.push_str("\n");
+    }
     md.push_str("---\n\n");
     
     // Add all documentation blocks
@@ -151,6 +168,15 @@ fn generate_feature_doc(
     file.write_all(md.as_bytes())?;
     
     Ok(())
+}
+
+fn parse_id_attr(line: &str) -> Option<String> {
+    let line = line.trim_start_matches("#[id(").trim_end_matches(")]").trim();
+    if line.starts_with('"') && line.ends_with('"') && line.len() >= 2 {
+        Some(line[1..line.len() - 1].to_string())
+    } else {
+        None
+    }
 }
 
 /// Generate index page for all features

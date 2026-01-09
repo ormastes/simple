@@ -5,7 +5,7 @@
 //!
 //! # Architecture
 //!
-//! ```
+//! ```text
 //! Server (SSR)           Client (WASM)          Hydration
 //! ──────────────        ──────────────         ──────────────
 //! <button id="btn">  →  fn on_click() {...}  → manifest.json

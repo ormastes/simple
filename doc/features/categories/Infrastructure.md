@@ -1,0 +1,15 @@
+# Infrastructure
+
+## Features
+
+| ID | Feature | Description | Modes | Platforms | Spec |
+|----|---------|-------------|-------|-----------|------|
+| 1 | Lexer | Tokenizes Simple language source code into a stream of tokens. Handles indentation-based syntax with INDENT/DEDENT tokens, string literals, numbers, identifiers, operators, and keywords. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [doc/spec/lexer_parser.md](../../../docs/spec/lexer_parser.md#feature-1) |
+| 2 | Parser | Transforms token stream into Abstract Syntax Tree (AST). Uses recursive descent for statements and Pratt parsing for expressions with operator precedence. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [doc/spec/lexer_parser.md](../../../docs/spec/lexer_parser.md#feature-2) |
+| 3 | AST | Abstract Syntax Tree for all Simple language constructs. Parses literals, expressions, statements, patterns, and type annotations into structured tree representation. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [doc/spec/lexer_parser.md](../../../docs/spec/lexer_parser.md#feature-3) |
+| 4 | HIR | High-level IR for type checking and semantic analysis. Performs type inference, mutability checking, and capability verification after AST parsing. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [docs/spec/README.md](../../../docs/spec/README.md#feature-4) |
+| 5 | MIR | Mid-level IR with 50+ instruction variants. Lowers HIR to basic blocks with explicit control flow. Handles arithmetic, memory, collections, patterns, async, and generators. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | - |
+| 6 | RuntimeValue | Tagged pointer value system with 64-bit encoding. Supports integers (61-bit), floats, booleans, nil, strings, arrays, dicts, and heap objects with type tagging. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [docs/spec/README.md](../../../docs/spec/README.md#feature-6) |
+| 7 | GC | Automatic memory management with tracing garbage collection. Handles allocation, collection cycles, and safe deallocation of heap objects. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [docs/spec/README.md](../../../docs/spec/README.md#feature-7) |
+| 8 | Package Manager | UV-style fast package management for Simple language. Supports simple.toml manifests, lock files, path/git dependencies, global cache, and dependency resolution. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [docs/spec/README.md](../../../docs/spec/README.md#feature-8) |
+| 9 | SMF | Simple Module Format - binary executable format for compiled Simple programs. Supports sections, symbols, relocations, and memory mapping for efficient loading and execution. | interpreter:supported, jit:supported, smf_cranelift:supported, smf_llvm:supported | - | [docs/spec/README.md](../../../docs/spec/README.md#feature-9) |

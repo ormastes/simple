@@ -366,7 +366,7 @@ impl<'a> Parser<'a> {
     /// Parse a predicate expression from a string (the content inside pc{...}).
     ///
     /// Grammar:
-    /// ```
+    /// ```text
     /// expr ::= or_expr
     /// or_expr ::= and_expr ('|' and_expr)*
     /// and_expr ::= not_expr ('&' not_expr)*

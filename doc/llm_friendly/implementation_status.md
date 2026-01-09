@@ -1,8 +1,8 @@
 # LLM-Friendly Features Implementation Status
 
-**Date:** 2025-12-24
+**Date:** 2026-01-09
 **Feature Range:** #880-919 (40 features)
-**Status:** 36/40 Complete (90.0%)
+**Status:** 40/40 Complete (100.0%)
 
 ## Executive Summary
 
@@ -12,51 +12,60 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 | Category | Features | Complete | In Progress | Planned |
 |----------|----------|----------|-------------|---------|
-| Capability-Based Effects | 5 | 0 | 0 | 5 |
-| AST/IR Export | 5 | 4 | 0 | 1 |
-| Context Pack Generator | 4 | 3 | 0 | 1 |
+| Capability-Based Effects | 5 | 5 | 0 | 0 |
+| AST/IR Export | 5 | 5 | 0 | 0 |
+| Context Pack Generator | 4 | 4 | 0 | 0 |
 | Property-Based Testing | 5 | 5 | 0 | 0 |
 | Snapshot/Golden Tests | 4 | 4 | 0 | 0 |
 | Lint Framework | 5 | 5 | 0 | 0 |
 | Canonical Formatter | 3 | 3 | 0 | 0 |
 | Build & Audit | 5 | 5 | 0 | 0 |
 | Sandboxed Execution | 4 | 4 | 0 | 0 |
-| **TOTAL** | **40** | **36** | **0** | **4** |
+| **TOTAL** | **40** | **40** | **0** | **0** |
 
-### Completion Rate: 90.0%
+### Completion Rate: 100.0%
 
-**Completed:** 36 features ✅
+**Completed:** 40 features ✅
 **In Progress:** 0 features
-**Remaining:** 4 features 📋  
+**Remaining:** 0 features  
 
 ---
 
 ## Category Details
 
-### 1. Capability-Based Effects (#880-884) 📋
+### 1. Capability-Based Effects (#880-884) ✅
 
 **Purpose:** Compile-time capability tracking for effect safety
 
-**Status:** 0/5 Complete (0%)
+**Status:** 5/5 Complete (100%)
 
 | Feature ID | Feature | Difficulty | Status | Documentation |
 |------------|---------|------------|--------|---------------|
-| #880 | `module requires[cap]` | 3 | 📋 | [capability_effects.md](../spec/capability_effects.md) |
-| #881 | `@pure` / `@io` / `@net` | 2 | 📋 | [capability_effects.md](../spec/capability_effects.md) |
-| #882 | Capability propagation | 4 | 📋 | [capability_effects.md](../spec/capability_effects.md) |
-| #883 | Forbidden effect errors | 2 | 📋 | [capability_effects.md](../spec/capability_effects.md) |
-| #884 | Stdlib effect annotations | 2 | 📋 | [capability_effects.md](../spec/capability_effects.md) |
+| #880 | `module requires[cap]` | 3 | ✅ | [capability_effects.md](../spec/capability_effects.md) |
+| #881 | `@pure` / `@io` / `@net` | 2 | ✅ | [capability_effects.md](../spec/capability_effects.md) |
+| #882 | Capability propagation | 4 | ✅ | [capability_effects.md](../spec/capability_effects.md) |
+| #883 | Forbidden effect errors | 2 | ✅ | [capability_effects.md](../spec/capability_effects.md) |
+| #884 | Stdlib effect annotations | 2 | ✅ | [capability_effects.md](../spec/capability_effects.md) |
 
-**Implementation Plan:**
-1. Extend lexer with `requires`, capability keywords
-2. Add AST nodes for capability declarations
-3. Implement capability checking in type system
-4. Add runtime effect tracking
-5. Annotate standard library
+**Completed Features:**
+- ✅ `requires [cap1, cap2]` syntax parsed in `__init__.spl` files
+- ✅ Effect annotations: `@pure`, `@io`, `@net`, `@fs`, `@unsafe`, `@verify`, `@trusted`
+- ✅ Capability enum with 6 types: Pure, Io, Net, Fs, Unsafe, Gc
+- ✅ Module-level capability validation in `DirectoryManifest`
+- ✅ Function effect validation against module capabilities
+- ✅ Capability inheritance and subsetting rules
+- ✅ Effect checking in compiler pipeline
+- ✅ Stdlib annotations in `simple/std_lib/src/host/async_nogc_mut/`
 
-**Blocked by:** None - ready to implement
+**Implementation:**
+- `src/parser/src/ast/nodes/effects.rs` - Effect and Capability enums
+- `src/parser/src/statements/module_system.rs` - `parse_requires_capabilities()`
+- `src/compiler/src/module_resolver/manifest.rs` - Capability validation
+- `src/compiler/src/effects.rs` - Effect checking runtime
+- `simple/std_lib/src/host/async_nogc_mut/io/term.spl` - Effect annotations
+- `simple/std_lib/src/host/async_nogc_mut/sys.spl` - Effect annotations
 
-**Estimated Effort:** 3-4 weeks (Medium-High difficulty)
+**Impact:** Prevents LLMs from silently adding I/O to pure code, enables formal verification
 
 ---
 
@@ -64,31 +73,22 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 **Purpose:** Export compiler intermediate representations for tooling
 
-**Status:** 4/5 Complete (80%)
+**Status:** 5/5 Complete (100%)
 
 | Feature ID | Feature | Difficulty | Status | Documentation |
 |------------|---------|------------|--------|---------------|
-| #885 | `--emit-ast` | 2 | ✅ | [LLM_FRIENDLY_IR_EXPORT.md](../LLM_FRIENDLY_IR_EXPORT.md) |
-| #886 | `--emit-hir` | 2 | ✅ | [LLM_FRIENDLY_IR_EXPORT.md](../LLM_FRIENDLY_IR_EXPORT.md) |
-| #887 | `--emit-mir` | 2 | ✅ | [LLM_FRIENDLY_IR_EXPORT.md](../LLM_FRIENDLY_IR_EXPORT.md) |
-| #888 | `--error-format=json` | 2 | ✅ | [LLM_FRIENDLY_JSON_ERRORS.md](../LLM_FRIENDLY_JSON_ERRORS.md) |
-| #889 | Semantic diff tool | 4 | 📋 | [semantic_diff.md](../spec/semantic_diff.md) |
+| #885 | `--emit-ast` | 2 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
+| #886 | `--emit-hir` | 2 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
+| #887 | `--emit-mir` | 2 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
+| #888 | `--error-format=json` | 2 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
+| #889 | Semantic diff tool | 4 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
 
 **Completed Features:**
 - ✅ AST export to JSON with full serialization
 - ✅ HIR export with type information
 - ✅ MIR export with instructions and basic blocks
 - ✅ JSON error format for diagnostics
-
-**Remaining:**
-- 📋 Semantic diff tool (#889) - compares AST/HIR instead of text
-
-**Next Steps:**
-1. Implement AST/HIR diffing algorithm
-2. Add CLI command `simple diff --semantic`
-3. Output semantic changes (type changes, control flow, etc.)
-
-**Estimated Effort:** 1 week
+- ✅ Semantic diff tool (AST-based comparison)
 
 ---
 
@@ -96,30 +96,20 @@ The LLM-Friendly Features initiative (#880-919) aims to optimize Simple for LLM-
 
 **Purpose:** Generate minimal context for LLM consumption (90% token reduction)
 
-**Status:** 3/4 Complete (75%)
+**Status:** 4/4 Complete (100%)
 
 | Feature ID | Feature | Difficulty | Status | Documentation |
 |------------|---------|------------|--------|---------------|
-| #890 | `simple context` command | 3 | ✅ | [LLM_FEATURES_COMPLETE_2025-12-24.md](./LLM_FEATURES_COMPLETE_2025-12-24.md) |
-| #891 | Dependency symbol extraction | 4 | 📋 | [llm_friendly.md](../features/llm_friendly.md) |
-| #892 | Markdown context format | 2 | ✅ | [LLM_FRIENDLY_CONTEXT_PACK.md](../LLM_FRIENDLY_CONTEXT_PACK.md) |
-| #893 | JSON context format | 2 | ✅ | [LLM_FRIENDLY_CONTEXT_PACK.md](../LLM_FRIENDLY_CONTEXT_PACK.md) |
+| #890 | `simple context` command | 3 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
+| #891 | Dependency symbol extraction | 4 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
+| #892 | Markdown context format | 2 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
+| #893 | JSON context format | 2 | ✅ | [ast_hir_mir_export.md](./ast_hir_mir_export.md) |
 
 **Completed Features:**
 - ✅ `simple context` CLI command
 - ✅ Markdown output format
 - ✅ JSON output format
-
-**Remaining:**
-- 📋 Dependency symbol extraction (#891) - extract only used symbols from dependencies
-
-**Next Steps:**
-1. Implement symbol usage analysis
-2. Track which functions/types are actually called
-3. Filter context to only include used symbols
-4. Add `--minimal` flag for maximum reduction
-
-**Estimated Effort:** 1-2 weeks
+- ✅ Dependency symbol extraction (via AST analysis)
 
 ---
 

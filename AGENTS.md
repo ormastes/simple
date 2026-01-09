@@ -28,6 +28,38 @@ jj git push
 
 ## Recent Completions
 
+### LLM-Friendly Features 100% Complete (2026-01-09)
+
+Verified completion of all 40 LLM-friendly features (#880-919) with full capability-based effect system.
+
+**Capability-Based Effects (#880-884):**
+- `requires [cap1, cap2]` syntax in `__init__.spl` files
+- Effect decorators: `@pure`, `@io`, `@net`, `@fs`, `@unsafe`, `@verify`, `@trusted`
+- Module-level capability validation with inheritance
+- Compile-time forbidden effect errors
+- Stdlib annotations (17+ functions in host/async_nogc_mut/)
+
+**Implementation:**
+- `src/parser/src/ast/nodes/effects.rs` - Effect & Capability enums
+- `src/parser/src/statements/module_system.rs` - parse_requires_capabilities()
+- `src/compiler/src/module_resolver/manifest.rs` - validate_function_effects()
+- `src/compiler/src/effects.rs` - Effect checking with operation lists
+- `simple/std_lib/src/host/async_nogc_mut/` - Effect annotations
+
+**AST/IR Export (#885-889):**
+- `--emit-ast`, `--emit-hir`, `--emit-mir` flags
+- `--error-format=json` for diagnostics
+- Semantic diff via AST comparison
+
+**Context Pack Generator (#890-893):**
+- `simple context` command with markdown/JSON output
+- Dependency symbol extraction via AST traversal
+- 90% token reduction for LLM consumption
+
+**Status:** 40/40 features complete (100%)
+
+**Documentation:** See `doc/llm_friendly/LLM_FEATURES_100_COMPLETE_2026-01-09.md`
+
 ### AST/HIR/MIR Export Complete (2025-12-24)
 
 Completed IR export functionality for LLM-friendly compiler introspection (#885-887).
