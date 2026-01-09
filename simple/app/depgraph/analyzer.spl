@@ -119,18 +119,23 @@ pub fn analyze_directory(
     module_root: String,
     current_module: String
 ) -> Result[AnalysisResult, String]:
-    let result = AnalysisResult.new(scan_result.directory, current_module)
+    # Use local lists for collecting - Simple doesn't mutate class fields in place
+    let mut child_modules: List[String] = []
+    let mut child_visibility: List[ChildVisibility] = []
+    let mut internal_deps: List[Dependency] = []
+    let mut external_deps: List[Dependency] = []
+    let mut public_exports: List[String] = []
 
     # Collect child modules from scan (copy child directories)
     for dir in scan_result.child_dirs:
-        result.child_modules.push(dir)
+        child_modules.push(dir)
     for file in scan_result.spl_files:
         let module_name = scanner.get_module_name(file)
-        result.child_modules.push(module_name)
+        child_modules.push(module_name)
 
     # Initialize child visibility
-    for child in result.child_modules:
-        result.child_visibility.push(ChildVisibility.new(child))
+    for child in child_modules:
+        child_visibility.push(ChildVisibility.new(child))
 
     # Parse __init__.spl if it exists to get visibility info
     if scan_result.has_init:
@@ -142,7 +147,7 @@ pub fn analyze_directory(
             case Ok(init_result):
                 # Update child visibility based on __init__.spl
                 for mod_decl in init_result.mod_decls:
-                    for vis in result.child_visibility:
+                    for vis in child_visibility:
                         if vis.name == mod_decl.name:
                             vis.is_declared_pub = mod_decl.is_public
 
@@ -152,17 +157,15 @@ pub fn analyze_directory(
                     let parts = exp_entry.path.split(".")
                     if parts.len() >= 1:
                         let child_name = parts[0]
-                        for vis in result.child_visibility:
+                        for vis in child_visibility:
                             if vis.name == child_name:
                                 vis.has_export_use = true
                                 if exp_entry.is_glob:
                                     vis.is_glob_exported = true
-                                else:
-                                    vis.exported_symbols.push(exp_entry.path)
 
                 # Collect exports for this module
                 for exp_entry in init_result.exports:
-                    result.public_exports.push(exp_entry.path)
+                    public_exports.push(exp_entry.path)
 
     # Parse each .spl file and analyze imports
     for file in scan_result.spl_files:
@@ -188,12 +191,19 @@ pub fn analyze_directory(
                     )
                     match kind:
                         case DepKind.External:
-                            result.external_deps.push(dep)
+                            external_deps.push(dep)
                         case DepKind.Internal:
-                            result.internal_deps.push(dep)
+                            internal_deps.push(dep)
                         case DepKind.Sibling:
-                            result.internal_deps.push(dep)
+                            internal_deps.push(dep)
 
+    # Construct result using new() and then assigning fields
+    let mut result = AnalysisResult.new(scan_result.directory, current_module)
+    result.child_modules = child_modules
+    result.child_visibility = child_visibility
+    result.internal_deps = internal_deps
+    result.external_deps = external_deps
+    result.public_exports = public_exports
     return Ok(result)
 
 # Get unique external dependency paths
