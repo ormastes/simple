@@ -23,6 +23,7 @@ mkdir -p simple/build/lsp
 mkdir -p simple/build/dap
 mkdir -p simple/build/sdn
 mkdir -p simple/build/lms
+mkdir -p simple/build/depgraph
 
 # Check if simple compiler is available
 if [ -f "./target/debug/simple" ]; then
@@ -91,16 +92,26 @@ $SIMPLE_COMPILER compile simple/app/lms/main.spl \
 
 echo "✓ LMS built: simple/bin_simple/simple_lms"
 
+# Build Dependency Graph Generator
+echo "Building Dependency Graph Generator..."
+$SIMPLE_COMPILER compile simple/app/depgraph/main.spl \
+    --output simple/bin_simple/simple_depgraph \
+    --build-dir simple/build/depgraph \
+    || { echo "Failed to build depgraph"; exit 1; }
+
+echo "✓ Depgraph built: simple/bin_simple/simple_depgraph"
+
 echo ""
 echo "=== Build Complete ==="
 echo ""
 echo "Executables:"
-echo "  simple/bin_simple/simple_fmt  - Formatter"
-echo "  simple/bin_simple/simple_lint - Linter"
-echo "  simple/bin_simple/simple_lsp  - Language Server Protocol server"
-echo "  simple/bin_simple/simple_dap  - Debug Adapter Protocol server"
-echo "  simple/bin_simple/simple_sdn  - SDN (Simple Data Notation) CLI"
-echo "  simple/bin_simple/simple_lms  - Language Model Server (MCP)"
+echo "  simple/bin_simple/simple_fmt      - Formatter"
+echo "  simple/bin_simple/simple_lint     - Linter"
+echo "  simple/bin_simple/simple_lsp      - Language Server Protocol server"
+echo "  simple/bin_simple/simple_dap      - Debug Adapter Protocol server"
+echo "  simple/bin_simple/simple_sdn      - SDN (Simple Data Notation) CLI"
+echo "  simple/bin_simple/simple_lms      - Language Model Server (MCP)"
+echo "  simple/bin_simple/simple_depgraph - Dependency Graph Generator"
 echo ""
 echo "Usage:"
 echo "  Formatter:"
@@ -130,6 +141,15 @@ echo "  LMS (Language Model Server):"
 echo "    ./simple/bin_simple/simple_lms"
 echo "    (Implements Anthropic's Model Context Protocol over stdin/stdout)"
 echo "    Set SIMPLE_LMS_DEBUG=1 for debug logging"
+echo ""
+echo "  Dependency Graph Generator:"
+echo "    ./simple/bin_simple/simple_depgraph <directory> [OPTIONS]"
+echo "    Options:"
+echo "      --recursive    Analyze subdirectories recursively"
+echo "      --verbose      Enable verbose AOP logging"
+echo "      --dry-run      Print analysis without writing files"
+echo "      --summary      Print summary report"
+echo "    Output: .__init__.spl (dot-prefixed dependency analysis)"
 echo ""
 echo "Documentation:"
 echo "  simple/app/README.md           - All tools overview"

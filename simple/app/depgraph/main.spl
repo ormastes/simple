@@ -1,0 +1,341 @@
+# Dependency Graph Generator - Main Entry Point
+# Generates .__init__.spl files with dependency analysis
+#
+# Usage:
+#   simple_depgraph <directory> [OPTIONS]
+#
+# Options:
+#   --recursive    Analyze subdirectories recursively
+#   --verbose      Enable verbose logging
+#   --no-comments  Omit comments from output
+#   --summary      Print summary report
+#   --dry-run      Print analysis without writing files
+#
+# Example:
+#   simple_depgraph ./src/mymodule --recursive --verbose
+
+import scanner
+import parser
+import analyzer
+import generator
+
+# Get command line arguments
+extern fn sys_get_args() -> List[String]
+
+# CLI options class
+class CliOptions:
+    directory: String
+    recursive: Bool
+    verbose: Bool
+    no_comments: Bool
+    summary: Bool
+    dry_run: Bool
+    show_help: Bool
+
+    fn new() -> CliOptions:
+        return CliOptions(
+            directory: "",
+            recursive: false,
+            verbose: false,
+            no_comments: false,
+            summary: false,
+            dry_run: false,
+            show_help: false
+        )
+
+# ============================================================================
+# AOP Logging Aspects
+# ============================================================================
+
+# Log function entry (before advice)
+fn log_scan_entry(dir: String, verbose: Bool):
+    if verbose:
+        print("[SCAN] Starting scan: {dir}")
+
+fn log_scan_exit(dir: String, file_count: Int, verbose: Bool):
+    if verbose:
+        print("[SCAN] Completed scan: {dir} ({file_count} files)")
+
+fn log_parse_entry(file: String, verbose: Bool):
+    if verbose:
+        print("[PARSE] Parsing: {file}")
+
+fn log_parse_exit(file: String, import_count: Int, verbose: Bool):
+    if verbose:
+        print("[PARSE] Parsed: {file} ({import_count} imports)")
+
+fn log_analyze_entry(dir: String, verbose: Bool):
+    if verbose:
+        print("[ANALYZE] Analyzing: {dir}")
+
+fn log_analyze_exit(dir: String, ext_count: Int, verbose: Bool):
+    if verbose:
+        print("[ANALYZE] Analyzed: {dir} ({ext_count} external deps)")
+
+fn log_generate_entry(dir: String, verbose: Bool):
+    if verbose:
+        print("[GEN] Generating: {dir}/.__init__.spl")
+
+fn log_generate_exit(path: String, verbose: Bool):
+    if verbose:
+        print("[GEN] Generated: {path}")
+
+fn log_error(msg: String):
+    print("[ERROR] {msg}")
+
+fn log_warn(msg: String):
+    print("[WARN] {msg}")
+
+fn log_info(msg: String):
+    print("[INFO] {msg}")
+
+# ============================================================================
+# AOP Advice Declarations
+# ============================================================================
+
+# Apply logging aspects to scanner operations
+on pc{ execution(* scanner.scan_directory(..)) } use log_scan_before before priority 100
+on pc{ execution(* scanner.scan_directory(..)) } use log_scan_after after_success priority 50
+
+# Apply logging aspects to parser operations
+on pc{ execution(* parser.parse_file(..)) } use log_parse_before before priority 100
+on pc{ execution(* parser.parse_file(..)) } use log_parse_after after_success priority 50
+
+# Apply logging aspects to analyzer operations
+on pc{ execution(* analyzer.analyze_directory(..)) } use log_analyze_before before priority 100
+on pc{ execution(* analyzer.analyze_directory(..)) } use log_analyze_after after_success priority 50
+
+# Apply logging aspects to generator operations
+on pc{ execution(* generator.write_dot_init(..)) } use log_generate_before before priority 100
+on pc{ execution(* generator.write_dot_init(..)) } use log_generate_after after_success priority 50
+
+# AOP logging interceptor implementations
+fn log_scan_before():
+    # Intercepted before scanner.scan_directory
+    return 0
+
+fn log_scan_after():
+    # Intercepted after scanner.scan_directory
+    return 0
+
+fn log_parse_before():
+    return 0
+
+fn log_parse_after():
+    return 0
+
+fn log_analyze_before():
+    return 0
+
+fn log_analyze_after():
+    return 0
+
+fn log_generate_before():
+    return 0
+
+fn log_generate_after():
+    return 0
+
+# ============================================================================
+# CLI Interface
+# ============================================================================
+
+fn print_usage():
+    print("Dependency Graph Generator")
+    print("==========================")
+    print("")
+    print("Generates .__init__.spl files with dependency analysis for Simple modules.")
+    print("Identifies external dependencies and enforces child module visibility rules.")
+    print("")
+    print("Usage:")
+    print("  simple_depgraph <directory> [OPTIONS]")
+    print("")
+    print("Options:")
+    print("  --recursive    Analyze subdirectories recursively")
+    print("  --verbose      Enable verbose logging")
+    print("  --no-comments  Omit comments from generated files")
+    print("  --summary      Print summary report after generation")
+    print("  --dry-run      Print analysis without writing files")
+    print("  --help         Show this help message")
+    print("")
+    print("Examples:")
+    print("  simple_depgraph ./src/mymodule")
+    print("  simple_depgraph ./src --recursive --verbose")
+    print("  simple_depgraph ./src/api --dry-run")
+    print("")
+    print("Output:")
+    print("  .__init__.spl  Generated dependency analysis file (dot-prefixed)")
+    print("                 Contains: external deps, child modules, visibility info")
+    print("")
+
+fn parse_args(args: List[String]) -> CliOptions:
+    let mut opts = CliOptions.new()
+    let args_rest = args.skip(1)
+
+    for arg in args_rest:
+        if arg == "--recursive":
+            opts.recursive = true
+        elif arg == "--verbose":
+            opts.verbose = true
+        elif arg == "--no-comments":
+            opts.no_comments = true
+        elif arg == "--summary":
+            opts.summary = true
+        elif arg == "--dry-run":
+            opts.dry_run = true
+        elif arg == "--help":
+            opts.show_help = true
+        elif not arg.starts_with("--"):
+            opts.directory = arg
+
+    return opts
+
+# ============================================================================
+# Main Processing
+# ============================================================================
+
+fn process_directory(
+    dir_path: String,
+    module_root: String,
+    current_module: String,
+    options: generator.GeneratorOptions,
+    dry_run: Bool,
+    verbose: Bool
+) -> Result[analyzer.AnalysisResult, String]:
+    # Scan directory
+    log_scan_entry(dir_path, verbose)
+    let scan_result = scanner.scan_directory(dir_path, false)
+    match scan_result:
+        case Err(e):
+            log_error(e)
+            return Err(e)
+        case Ok(scan):
+            log_scan_exit(dir_path, scan.spl_files.len(), verbose)
+
+            # Analyze directory
+            log_analyze_entry(dir_path, verbose)
+            let analysis_result = analyzer.analyze_directory(scan, module_root, current_module)
+            match analysis_result:
+                case Err(e):
+                    log_error(e)
+                    return Err(e)
+                case Ok(analysis):
+                    let externals = analyzer.get_unique_externals(analysis)
+                    log_analyze_exit(dir_path, externals.len(), verbose)
+
+                    # Generate or print
+                    if dry_run:
+                        generator.print_analysis(analysis)
+                    else:
+                        log_generate_entry(dir_path, verbose)
+                        let gen_result = generator.write_dot_init(analysis, options)
+                        match gen_result:
+                            case Err(e):
+                                log_error(e)
+                            case Ok(path):
+                                log_generate_exit(path, verbose)
+                                log_info("Generated: {path}")
+
+                    return Ok(analysis)
+
+fn process_recursive(
+    dir_path: String,
+    module_root: String,
+    current_module: String,
+    options: generator.GeneratorOptions,
+    dry_run: Bool,
+    verbose: Bool
+) -> List[analyzer.AnalysisResult]:
+    let mut results: List[analyzer.AnalysisResult] = []
+
+    # Process current directory
+    let result = process_directory(dir_path, module_root, current_module, options, dry_run, verbose)
+    match result:
+        case Err(e):
+            log_warn("Skipping {dir_path}: {e}")
+        case Ok(analysis):
+            results.push(analysis)
+
+            # Process child directories
+            for child in analysis.child_modules:
+                let child_path = dir_path + "/" + child
+                let child_module = if current_module == "": child else: current_module + "." + child
+
+                # Check if child is a directory
+                let child_scan = scanner.scan_directory(child_path, false)
+                match child_scan:
+                    case Ok(_):
+                        let child_results = process_recursive(
+                            child_path,
+                            module_root,
+                            child_module,
+                            options,
+                            dry_run,
+                            verbose
+                        )
+                        for cr in child_results:
+                            results.push(cr)
+                    case Err(_):
+                        0  # Not a directory, skip
+
+    return results
+
+# ============================================================================
+# Entry Point
+# ============================================================================
+
+async fn main() -> Int:
+    let args = sys_get_args()
+
+    if args.len() < 2:
+        print_usage()
+        return 1
+
+    let opts = parse_args(args)
+
+    if opts.show_help:
+        print_usage()
+        return 0
+
+    if opts.directory == "":
+        print_usage()
+        return 1
+
+    # Configure generator options
+    let gen_options = generator.GeneratorOptions.new()
+    if opts.no_comments:
+        gen_options.include_comments = false
+
+    # Extract module root from directory path
+    let parts = opts.directory.split("/")
+    let module_root = parts[parts.len() - 1]
+
+    log_info("Starting dependency analysis for: {opts.directory}")
+    if opts.recursive:
+        log_info("Mode: recursive")
+    else:
+        log_info("Mode: single directory")
+
+    # Process directories
+    let mut results: List[analyzer.AnalysisResult] = []
+    if opts.recursive:
+        let analyses = process_recursive(opts.directory, module_root, module_root, gen_options, opts.dry_run, opts.verbose)
+        for a in analyses:
+            results.push(a)
+    else:
+        let result = process_directory(opts.directory, module_root, module_root, gen_options, opts.dry_run, opts.verbose)
+        match result:
+            case Ok(analysis):
+                results.push(analysis)
+            case Err(e):
+                log_error(e)
+                return 1
+
+    # Print summary if requested
+    if opts.summary:
+        print("")
+        let summary_text = generator.generate_summary(results)
+        print(summary_text)
+
+    log_info("Completed. Generated {results.len()} .__init__.spl file(s).")
+    return 0

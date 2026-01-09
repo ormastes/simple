@@ -450,19 +450,7 @@ fn generate_category_docs(output_dir: &Path, records: &[&FeatureRecord]) -> Resu
             } else {
                 record.platforms.join(", ")
             };
-            let spec_link = if record.spec.is_empty() {
-                "-".to_string()
-            } else {
-                let stem = Path::new(&record.spec)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("spec");
-                let anchor = record.id.replace('.', "-");
-                format!(
-                    "[{}](../../../docs/spec/{}.md#feature-{})",
-                    record.spec, stem, anchor
-                )
-            };
+            let spec_link = spec_link_for_record(&path, record);
             md.push_str(&format!(
                 "| {} | {} | {} | {} | {} | {} |\n",
                 record.id, record.name, record.description, modes, platforms, spec_link
@@ -557,6 +545,62 @@ pub fn category_link(category: &str) -> String {
         link.push_str("/index.md");
     }
     link
+}
+
+fn spec_link_for_record(doc_path: &Path, record: &FeatureRecord) -> String {
+    if record.spec.is_empty() {
+        return "-".to_string();
+    }
+    let doc_dir = match doc_path.parent() {
+        Some(dir) => dir,
+        None => return record.spec.clone(),
+    };
+    let spec_path = Path::new(&record.spec);
+    if spec_path.is_absolute() || record.spec.contains("://") {
+        return record.spec.clone();
+    }
+    let relative = relative_path(doc_dir, spec_path);
+    let anchor = record.id.replace('.', "-");
+    format!("[{}]({}#feature-{})", record.spec, relative, anchor)
+}
+
+fn relative_path(from_dir: &Path, to: &Path) -> String {
+    let from_parts = normalized_parts(from_dir);
+    let to_parts = normalized_parts(to);
+    let mut common = 0usize;
+    while common < from_parts.len()
+        && common < to_parts.len()
+        && from_parts[common] == to_parts[common]
+    {
+        common += 1;
+    }
+    let mut rel_parts: Vec<String> = Vec::new();
+    for _ in common..from_parts.len() {
+        rel_parts.push("..".to_string());
+    }
+    rel_parts.extend_from_slice(&to_parts[common..]);
+    if rel_parts.is_empty() {
+        ".".to_string()
+    } else {
+        rel_parts.join("/")
+    }
+}
+
+fn normalized_parts(path: &Path) -> Vec<String> {
+    let mut parts = Vec::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::Normal(value) => {
+                parts.push(value.to_string_lossy().to_string());
+            }
+            std::path::Component::ParentDir => {
+                parts.pop();
+            }
+            std::path::Component::CurDir => {}
+            _ => {}
+        }
+    }
+    parts
 }
 
 fn slugify(value: &str) -> String {

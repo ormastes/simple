@@ -15,6 +15,7 @@ All tools in this directory are:
 2. **Linter** (`simple_lint`) - ✅ Implemented
 3. **Language Server** (`simple_lsp`) - 🔄 In Progress
 4. **Debug Adapter** (`simple_dap`) - 🔄 In Progress
+5. **Dependency Graph Generator** (`simple_depgraph`) - ✅ Implemented
 
 ## Structure
 
@@ -30,22 +31,31 @@ simple/
 │   │   ├── protocol.spl      # LSP protocol types 🔄
 │   │   ├── transport.spl     # JSON-RPC transport 🔄
 │   │   └── server.spl        # Server handlers 🔄
-│   └── dap/
-│       ├── main.spl          # DAP server 🔄
-│       ├── protocol.spl      # DAP protocol types 🔄
-│       ├── transport.spl     # JSON-RPC transport 🔄
-│       ├── server.spl        # Server handlers 🔄
-│       └── breakpoints.spl   # Breakpoint management 🔄
+│   ├── dap/
+│   │   ├── main.spl          # DAP server 🔄
+│   │   ├── protocol.spl      # DAP protocol types 🔄
+│   │   ├── transport.spl     # JSON-RPC transport 🔄
+│   │   ├── server.spl        # Server handlers 🔄
+│   │   └── breakpoints.spl   # Breakpoint management 🔄
+│   └── depgraph/
+│       ├── __init__.spl      # Module manifest ✅
+│       ├── main.spl          # Entry point with AOP logging ✅
+│       ├── scanner.spl       # Directory/file scanning ✅
+│       ├── parser.spl        # Import extraction ✅
+│       ├── analyzer.spl      # Dependency analysis ✅
+│       └── generator.spl     # .__init__.spl generation ✅
 ├── bin_simple/               # Compiled executables
 │   ├── simple_fmt           # Formatter binary ✅
 │   ├── simple_lint          # Linter binary ✅
 │   ├── simple_lsp           # LSP server binary 🔄
-│   └── simple_dap           # DAP server binary 🔄
+│   ├── simple_dap           # DAP server binary 🔄
+│   └── simple_depgraph      # Depgraph binary ✅
 ├── build/                    # Intermediate build files
 │   ├── formatter/           # Formatter .smf files
 │   ├── lint/                # Linter .smf files
 │   ├── lsp/                 # LSP .smf files 🔄
-│   └── dap/                 # DAP .smf files 🔄
+│   ├── dap/                 # DAP .smf files 🔄
+│   └── depgraph/            # Depgraph .smf files ✅
 └── build_tools.sh           # Build script for all tools
 ```
 
@@ -115,6 +125,63 @@ file.spl:25:0: error[S001]: Unused Result type (must use .unwrap(), .expect(), o
 Found 1 error(s) and 1 warning(s)
 ```
 
+### Dependency Graph Generator (`simple_depgraph`)
+
+Analyzes module dependencies and generates `.__init__.spl` (dot-prefixed) files with dependency information.
+
+**Features:**
+- ✅ Scans directories for .spl files and child modules
+- ✅ Extracts imports (use, export use, common use)
+- ✅ Identifies external dependencies (std.*, core.*, etc.)
+- ✅ Enforces child module visibility rules
+- ✅ AOP logging for all operations
+- ✅ Recursive directory analysis
+- ✅ Dry-run mode for preview
+
+**Usage:**
+```bash
+# Analyze single directory
+./simple/bin_simple/simple_depgraph ./src/mymodule
+
+# Recursive analysis with verbose logging
+./simple/bin_simple/simple_depgraph ./src --recursive --verbose
+
+# Dry run (print without writing)
+./simple/bin_simple/simple_depgraph ./src/api --dry-run --summary
+```
+
+**Options:**
+| Option | Description |
+|--------|-------------|
+| `--recursive` | Analyze subdirectories recursively |
+| `--verbose` | Enable verbose AOP logging |
+| `--no-comments` | Omit comments from output |
+| `--summary` | Print summary report |
+| `--dry-run` | Print analysis without writing files |
+
+**Example Output (`.__init__.spl`):**
+```simple
+# Auto-generated dependency analysis
+# DO NOT EDIT - regenerate with: simple_depgraph ./src/mymodule
+
+# External dependencies
+# external: std.io
+# external: core.json
+
+# Child modules
+pub mod api       # externally visible
+mod internal      # BLOCKED: no export use
+
+# Visibility Summary
+# Externally visible: api
+# Blocked (need export use): internal
+```
+
+**Child Visibility Rules:**
+A child module's exports are blocked unless:
+1. Parent's `__init__.spl` has `pub mod child`
+2. Parent's `__init__.spl` has `export use child.symbol`
+
 ## Building
 
 ### Prerequisites
@@ -138,7 +205,8 @@ This will compile all implemented tools:
 2. Compile `lint/main.spl` → `bin_simple/simple_lint` ✅
 3. Compile `lsp/main.spl` → `bin_simple/simple_lsp` 🔄 (when ready)
 4. Compile `dap/main.spl` → `bin_simple/simple_dap` 🔄 (when ready)
-5. Place intermediate files in `build/`
+5. Compile `depgraph/main.spl` → `bin_simple/simple_depgraph` ✅
+6. Place intermediate files in `build/`
 
 ### Manual Build
 
