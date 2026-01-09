@@ -126,6 +126,7 @@ pub fn init_interpreter_state(items: &[Node]) {
                         methods: s.methods.clone(),
                         parent: None,
                         visibility: Visibility::Public,
+                        effects: vec![],
                         attributes: vec![],
                         doc_comment: None,
                         invariant: None,

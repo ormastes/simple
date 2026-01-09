@@ -24,6 +24,9 @@ pub enum Effect {
     /// Trusted boundary - marks interface between verified and unverified code
     /// Must prove calling code satisfies contracts before crossing boundary
     Trusted,
+    /// Ghost declaration - exists only for verification, erased at runtime
+    /// Ghost functions/classes are included in Lean output but not in compiled code
+    Ghost,
 }
 
 impl Effect {
@@ -39,6 +42,7 @@ impl Effect {
             "unsafe" => Some(Effect::Unsafe),
             "verify" => Some(Effect::Verify),
             "trusted" => Some(Effect::Trusted),
+            "ghost" => Some(Effect::Ghost),
             _ => None,
         }
     }
@@ -54,12 +58,13 @@ impl Effect {
             Effect::Unsafe => "unsafe",
             Effect::Verify => "verify",
             Effect::Trusted => "trusted",
+            Effect::Ghost => "ghost",
         }
     }
 
     /// Check if this is a verification-related effect.
     pub fn is_verification(&self) -> bool {
-        matches!(self, Effect::Verify | Effect::Trusted)
+        matches!(self, Effect::Verify | Effect::Trusted | Effect::Ghost)
     }
 }
 
@@ -133,6 +138,7 @@ impl Capability {
             Effect::Async => None,   // Async is execution model, not capability
             Effect::Verify => None,  // Verify is verification mode marker
             Effect::Trusted => None, // Trusted is verification boundary marker
+            Effect::Ghost => None,   // Ghost is verification-only marker
         }
     }
 }

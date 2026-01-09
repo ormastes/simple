@@ -65,7 +65,7 @@ impl ArchRulesConfig {
                 // Parse the predicate text
                 let predicate = match crate::predicate_parser::parse_predicate(&hir_rule.predicate_text) {
                     Ok(pred) => pred,
-                    Err(_) => return None, // TODO: Collect parsing errors
+                    Err(_) => return None, // TODO: [compiler][P3] Collect parsing errors
                 };
 
                 Some(ArchRule {
@@ -173,7 +173,7 @@ impl ArchRulesChecker {
                         to,
                     },
                     source_file: module_name.to_string(),
-                    line: 0, // TODO: Track line numbers in HIR
+                    line: 0, // TODO: [compiler][P2] Track line numbers in HIR
                 });
             } else {
                 // Specific imports: use foo.bar.{Item1, Item2}
@@ -188,7 +188,7 @@ impl ArchRulesChecker {
                             to,
                         },
                         source_file: module_name.to_string(),
-                        line: 0, // TODO: Track line numbers in HIR
+                        line: 0, // TODO: [compiler][P2] Track line numbers in HIR
                     });
                 }
             }
@@ -205,7 +205,7 @@ impl ArchRulesChecker {
                             location: module_name.to_string(),
                         },
                         source_file: module_name.to_string(),
-                        line: 0, // TODO: Track line numbers
+                        line: 0, // TODO: [compiler][P2] Track line numbers
                     });
                 }
             }
@@ -218,7 +218,7 @@ impl ArchRulesChecker {
                         location: module_name.to_string(),
                     },
                     source_file: module_name.to_string(),
-                    line: 0, // TODO: Track line numbers
+                    line: 0, // TODO: [compiler][P2] Track line numbers
                 });
             }
 
@@ -231,7 +231,7 @@ impl ArchRulesChecker {
                             location: module_name.to_string(),
                         },
                         source_file: module_name.to_string(),
-                        line: 0, // TODO: Track line numbers
+                        line: 0, // TODO: [compiler][P2] Track line numbers
                     });
                 }
             }
@@ -308,7 +308,7 @@ impl ArchRulesChecker {
 
 /// Parse architecture rules from SDN-like configuration
 pub fn parse_arch_rules(config_str: &str) -> Result<ArchRulesConfig, String> {
-    // TODO: Implement proper SDN parsing
+    // TODO: [compiler][P1] Implement proper SDN parsing
     // For now, return an empty configuration
     let _ = config_str;
     Ok(ArchRulesConfig::disabled())
@@ -565,6 +565,7 @@ mod tests {
             effects: vec![],
             layout_hint: None,
             verification_mode: crate::hir::VerificationMode::default(),
+            is_ghost: false,
         };
 
         module.functions.push(func);

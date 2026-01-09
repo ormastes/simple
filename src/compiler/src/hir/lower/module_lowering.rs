@@ -174,7 +174,7 @@ impl Lowerer {
                 }
                 Node::MockDecl(mock) => {
                     // Convert MockExpectation to string representation for HIR
-                    // TODO: Update HIR to handle structured expectations
+                    // TODO: [compiler][P1] Update HIR to handle structured expectations
                     let expectations = mock
                         .expectations
                         .iter()
@@ -605,6 +605,7 @@ impl Lowerer {
             effects,
             layout_hint,
             verification_mode,
+            is_ghost: f.is_ghost(),
         })
     }
 
@@ -661,6 +662,16 @@ impl Lowerer {
         for clause in &contract.error_postconditions {
             let condition = self.lower_expr(&clause.condition, ctx)?;
             hir_contract.error_postconditions.push(HirContractClause {
+                condition,
+                message: clause.message.clone(),
+            });
+        }
+
+        // Lower decreases clause (for Lean termination_by generation)
+        // Note: This is NOT checked at runtime, only used for Lean output
+        if let Some(ref clause) = contract.decreases {
+            let condition = self.lower_expr(&clause.condition, ctx)?;
+            hir_contract.decreases = Some(HirContractClause {
                 condition,
                 message: clause.message.clone(),
             });

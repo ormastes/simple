@@ -27,6 +27,9 @@ pub struct LeanFunction {
     pub is_partial: bool,
     /// Documentation comment
     pub doc: Option<String>,
+    /// Termination measure for recursive functions (from decreases: clause)
+    /// Generates `termination_by` clause in Lean output
+    pub termination_by: Option<LeanExpr>,
 }
 
 impl LeanFunction {
@@ -70,6 +73,11 @@ impl LeanFunction {
             out.push_str(&format!("  {}\n", body.to_lean()));
         } else {
             out.push_str("  sorry\n");
+        }
+
+        // Termination measure (from decreases: clause)
+        if let Some(ref term_expr) = self.termination_by {
+            out.push_str(&format!("termination_by {}\n", term_expr.to_lean()));
         }
 
         out
@@ -150,6 +158,17 @@ impl<'a> FunctionTranslator<'a> {
         // Check if function is potentially non-terminating
         let is_partial = self.is_potentially_non_terminating(func);
 
+        // Translate termination measure from decreases: clause
+        let termination_by = if let Some(ref contract) = func.contract {
+            if let Some(ref decreases) = contract.decreases {
+                Some(expr_translator.translate(&decreases.condition)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(LeanFunction {
             name: self.to_lean_name(&func.name),
             type_params: vec![], // No generic support yet
@@ -158,6 +177,7 @@ impl<'a> FunctionTranslator<'a> {
             body,
             is_partial,
             doc: None, // No doc extraction yet
+            termination_by,
         })
     }
 
@@ -225,6 +245,7 @@ mod tests {
             }),
             is_partial: false,
             doc: Some("Add two integers".to_string()),
+            termination_by: None,
         };
 
         let output = func.to_lean();

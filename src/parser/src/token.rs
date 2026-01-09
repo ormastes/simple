@@ -156,6 +156,7 @@ pub enum TokenKind {
     Invariant, // invariant: (routine/class invariant)
     Old,       // old() (previous value in postconditions)
     Result,    // result (return value in ensures) - legacy
+    Decreases, // decreases: (termination measure for Lean verification)
 
     // Infix keywords (for BDD spec framework)
     // These parse as infix method calls: `A to B` → `A.to(B)`

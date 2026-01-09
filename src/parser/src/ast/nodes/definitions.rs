@@ -148,6 +148,38 @@ impl FunctionDef {
             .find(|d| matches!(&d.name, Expr::Identifier(name) if name == "generated_by"))
             .and_then(|d| d.args.as_ref())
     }
+
+    /// Check if this function is marked as ghost via @ghost effect.
+    /// Ghost functions exist only for verification and are erased at runtime.
+    /// They are included in Lean output but not in compiled code.
+    pub fn is_ghost(&self) -> bool {
+        self.effects.contains(&Effect::Ghost)
+    }
+
+    /// Check if this function is marked for verification via @verify effect.
+    /// Verified functions follow the verified subset (no unsafe, no reflection)
+    /// and generate Lean proofs.
+    pub fn is_verify(&self) -> bool {
+        self.effects.contains(&Effect::Verify)
+    }
+
+    /// Check if this function is a trusted boundary via @trusted effect.
+    /// Trusted functions mark the interface between verified and unverified code.
+    pub fn is_trusted(&self) -> bool {
+        self.effects.contains(&Effect::Trusted)
+    }
+
+    /// Check if this function has any verification-related effects.
+    /// Returns true if function is ghost, verify, or trusted.
+    pub fn is_verification_related(&self) -> bool {
+        self.effects.iter().any(|e| e.is_verification())
+    }
+
+    /// Check if this function has a termination measure (decreases clause).
+    /// Termination measures are used for Lean verification but not checked at runtime.
+    pub fn has_decreases(&self) -> bool {
+        self.contract.as_ref().map_or(false, |c| c.has_decreases())
+    }
 }
 
 // =============================================================================
@@ -299,6 +331,9 @@ pub struct ClassDef {
     pub methods: Vec<FunctionDef>,
     pub parent: Option<String>,
     pub visibility: Visibility,
+    /// Effect annotations: @ghost, @verify (similar to function effects)
+    /// Used primarily for verification-related effects on class definitions
+    pub effects: Vec<Effect>,
     /// Attributes applied to the class: #[deprecated]
     pub attributes: Vec<Attribute>,
     /// Documentation comment for API doc generation
@@ -316,6 +351,25 @@ impl ClassDef {
     /// Types with #[snapshot] have custom snapshot semantics for old() expressions.
     pub fn is_snapshot(&self) -> bool {
         self.attributes.iter().any(|attr| attr.name == "snapshot")
+    }
+
+    /// Check if this class is marked as ghost via @ghost effect.
+    /// Ghost classes exist only for verification and are erased at runtime.
+    /// They are included in Lean output but not in compiled code.
+    pub fn is_ghost(&self) -> bool {
+        self.effects.contains(&Effect::Ghost)
+    }
+
+    /// Check if this class is marked for verification via @verify effect.
+    /// Verified classes follow the verified subset and generate Lean proofs.
+    pub fn is_verify(&self) -> bool {
+        self.effects.contains(&Effect::Verify)
+    }
+
+    /// Check if this class has any verification-related effects.
+    /// Returns true if class is ghost or verify.
+    pub fn is_verification_related(&self) -> bool {
+        self.effects.iter().any(|e| e.is_verification())
     }
 }
 

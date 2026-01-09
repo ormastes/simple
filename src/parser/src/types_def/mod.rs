@@ -121,6 +121,7 @@ impl<'a> Parser<'a> {
             methods,
             parent,
             visibility: Visibility::Private,
+            effects: Vec::new(), // Effects are added via decorators during parsing
             attributes,
             doc_comment,
             invariant,

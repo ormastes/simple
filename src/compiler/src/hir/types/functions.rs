@@ -32,6 +32,10 @@ pub struct HirFunction {
     /// Verification mode for Lean proof generation (#1840-#1879)
     /// Determines if this function is subject to formal verification constraints.
     pub verification_mode: VerificationMode,
+    /// Whether this function is marked as ghost (@ghost effect).
+    /// Ghost functions exist only for verification and are completely erased at runtime.
+    /// They are included in Lean output but not in compiled code.
+    pub is_ghost: bool,
 }
 
 impl HirFunction {

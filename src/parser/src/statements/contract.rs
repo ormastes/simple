@@ -19,7 +19,7 @@ use crate::parser_impl::core::Parser;
 use crate::token::{Span, TokenKind};
 
 impl Parser<'_> {
-    /// Parse entry contract blocks (in:, invariant:, requires:) at the start of function body.
+    /// Parse entry contract blocks (in:, invariant:, requires:, decreases:) at the start of function body.
     ///
     /// New spec syntax:
     /// ```text
@@ -28,6 +28,8 @@ impl Parser<'_> {
     ///     a > 0
     /// invariant:
     ///     balance >= 0
+    /// decreases:
+    ///     n
     /// ```
     ///
     /// Legacy syntax:
@@ -50,7 +52,48 @@ impl Parser<'_> {
             self.parse_contract_clause_block(&mut contract.invariants)?;
         }
 
+        // Parse decreases: block (termination measure for Lean verification)
+        // This is not checked at runtime, only used for Lean termination_by
+        if self.check(&TokenKind::Decreases) {
+            self.advance();
+            contract.decreases = Some(self.parse_decreases_clause()?);
+        }
+
         Ok(contract)
+    }
+
+    /// Parse a single decreases clause (termination measure).
+    ///
+    /// Syntax:
+    /// ```text
+    /// decreases:
+    ///     n
+    /// ```
+    /// or inline:
+    /// ```text
+    /// decreases: n
+    /// ```
+    fn parse_decreases_clause(&mut self) -> Result<ContractClause, ParseError> {
+        self.debug_enter("parse_decreases_clause");
+        self.expect(&TokenKind::Colon)?;
+
+        // Check if it's inline (same line) or block (indented)
+        if self.check(&TokenKind::Newline) {
+            // Block style: decreases:\n    expr
+            self.advance();
+            self.expect(&TokenKind::Indent)?;
+            let clause = self.parse_contract_clause()?;
+            self.skip_newlines();
+            self.expect(&TokenKind::Dedent)?;
+            self.debug_exit("parse_decreases_clause");
+            Ok(clause)
+        } else {
+            // Inline style: decreases: expr
+            let clause = self.parse_contract_clause()?;
+            self.skip_newlines();
+            self.debug_exit("parse_decreases_clause");
+            Ok(clause)
+        }
     }
 
     /// Helper to parse an indented contract clause block
@@ -191,7 +234,7 @@ impl Parser<'_> {
         let start_span = self.current.span;
         let condition = self.parse_expression()?;
 
-        // TODO: Optional error message: condition, "message"
+        // TODO: [parser][P3] Optional error message: condition, "message"
         let message = None;
 
         Ok(ContractClause {
@@ -389,6 +432,48 @@ out(ret):
 "#;
         let contract = parse_contract(source).unwrap();
         assert_eq!(contract.preconditions.len(), 2);
+        assert_eq!(contract.postconditions.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_decreases_block() {
+        let source = r#"
+requires:
+    n >= 0
+decreases:
+    n
+"#;
+        let contract = parse_contract(source).unwrap();
+        assert_eq!(contract.preconditions.len(), 1);
+        assert!(contract.decreases.is_some());
+        assert!(contract.has_decreases());
+    }
+
+    #[test]
+    fn test_parse_decreases_inline() {
+        let source = r#"
+requires:
+    n >= 0
+decreases: n
+"#;
+        let contract = parse_contract(source).unwrap();
+        assert_eq!(contract.preconditions.len(), 1);
+        assert!(contract.decreases.is_some());
+    }
+
+    #[test]
+    fn test_parse_full_verification_contract() {
+        let source = r#"
+in:
+    n >= 0
+decreases:
+    n
+out(ret):
+    ret >= 1
+"#;
+        let contract = parse_contract(source).unwrap();
+        assert_eq!(contract.preconditions.len(), 1);
+        assert!(contract.decreases.is_some());
         assert_eq!(contract.postconditions.len(), 1);
     }
 }

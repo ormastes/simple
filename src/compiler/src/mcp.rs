@@ -555,6 +555,7 @@ mod tests {
             parent: None,
             generic_params: vec![],
             where_clause: vec![],
+            effects: vec![],
             attributes: vec![],
             doc_comment: None,
             invariant: None,
