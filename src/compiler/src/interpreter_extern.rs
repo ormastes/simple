@@ -13,6 +13,9 @@ type ImplMethods = HashMap<String, Vec<FunctionDef>>;
 // Import shared functions from parent module
 use super::{evaluate_expr, get_interpreter_args};
 
+// Import diagram tracing
+use simple_runtime::value::diagram_ffi;
+
 // Import native I/O and networking functions
 use super::interpreter_native_io::*;
 use super::interpreter_native_net::*;
@@ -116,6 +119,11 @@ pub(crate) fn call_extern_function(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    // Diagram tracing for extern function calls
+    if diagram_ffi::is_diagram_enabled() {
+        diagram_ffi::trace_call(name);
+    }
+
     let evaluated: Vec<Value> = args
         .iter()
         .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))

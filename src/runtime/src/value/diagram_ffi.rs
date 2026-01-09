@@ -3,12 +3,43 @@
 //! These functions allow Simple code to record method calls for
 //! generating sequence, class, and architecture diagrams.
 
+use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::OnceLock;
 
 use parking_lot::RwLock;
+
+// Thread-local call depth counter for proper nesting
+thread_local! {
+    static CALL_DEPTH: RefCell<u32> = const { RefCell::new(0) };
+}
+
+/// Get current call depth
+fn get_call_depth() -> u32 {
+    CALL_DEPTH.with(|d| *d.borrow())
+}
+
+/// Increment call depth and return new value
+fn push_call_depth() -> u32 {
+    CALL_DEPTH.with(|d| {
+        let mut depth = d.borrow_mut();
+        *depth += 1;
+        *depth
+    })
+}
+
+/// Decrement call depth
+fn pop_call_depth() -> u32 {
+    CALL_DEPTH.with(|d| {
+        let mut depth = d.borrow_mut();
+        if *depth > 0 {
+            *depth -= 1;
+        }
+        *depth
+    })
+}
 
 // ============================================================================
 // Diagram Recording State
@@ -38,6 +69,7 @@ pub struct CallEvent {
     pub call_type: CallType,
     pub return_value: Option<String>,
     pub timestamp_ns: u64,
+    pub depth: u32,
 }
 
 /// Call type enum
@@ -137,6 +169,7 @@ pub unsafe extern "C" fn rt_diagram_trace_call(name: *const c_char) {
         Err(_) => return,
     };
 
+    let depth = push_call_depth();
     let event = CallEvent {
         callee: name_str,
         callee_class: None,
@@ -144,6 +177,7 @@ pub unsafe extern "C" fn rt_diagram_trace_call(name: *const c_char) {
         call_type: CallType::Function,
         return_value: None,
         timestamp_ns: now_nanos(),
+        depth,
     };
 
     get_events().write().push(event);
@@ -177,6 +211,7 @@ pub unsafe extern "C" fn rt_diagram_trace_method(
         }
     };
 
+    let depth = push_call_depth();
     let event = CallEvent {
         callee: method_str,
         callee_class: class_str,
@@ -184,6 +219,7 @@ pub unsafe extern "C" fn rt_diagram_trace_method(
         call_type: CallType::Method,
         return_value: None,
         timestamp_ns: now_nanos(),
+        depth,
     };
 
     get_events().write().push(event);
@@ -227,6 +263,7 @@ pub unsafe extern "C" fn rt_diagram_trace_method_with_args(
         }
     };
 
+    let depth = push_call_depth();
     let event = CallEvent {
         callee: method_str,
         callee_class: class_str,
@@ -234,6 +271,7 @@ pub unsafe extern "C" fn rt_diagram_trace_method_with_args(
         call_type: CallType::Method,
         return_value: None,
         timestamp_ns: now_nanos(),
+        depth,
     };
 
     get_events().write().push(event);
@@ -248,6 +286,9 @@ pub unsafe extern "C" fn rt_diagram_trace_return(value: *const c_char) {
     if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
         return;
     }
+
+    // Pop the call depth when returning
+    pop_call_depth();
 
     let return_value = if value.is_null() {
         None
@@ -572,6 +613,7 @@ pub fn trace_call(name: &str) {
         return;
     }
 
+    let depth = push_call_depth();
     let event = CallEvent {
         callee: name.to_string(),
         callee_class: None,
@@ -579,6 +621,7 @@ pub fn trace_call(name: &str) {
         call_type: CallType::Function,
         return_value: None,
         timestamp_ns: now_nanos(),
+        depth,
     };
 
     get_events().write().push(event);
@@ -590,6 +633,7 @@ pub fn trace_method(class_name: &str, method_name: &str) {
         return;
     }
 
+    let depth = push_call_depth();
     let event = CallEvent {
         callee: method_name.to_string(),
         callee_class: Some(class_name.to_string()),
@@ -597,6 +641,7 @@ pub fn trace_method(class_name: &str, method_name: &str) {
         call_type: CallType::Method,
         return_value: None,
         timestamp_ns: now_nanos(),
+        depth,
     };
 
     get_events().write().push(event);
@@ -608,6 +653,7 @@ pub fn trace_method_with_args(class_name: &str, method_name: &str, args: &[Strin
         return;
     }
 
+    let depth = push_call_depth();
     let event = CallEvent {
         callee: method_name.to_string(),
         callee_class: Some(class_name.to_string()),
@@ -615,6 +661,7 @@ pub fn trace_method_with_args(class_name: &str, method_name: &str, args: &[Strin
         call_type: CallType::Method,
         return_value: None,
         timestamp_ns: now_nanos(),
+        depth,
     };
 
     get_events().write().push(event);
@@ -625,6 +672,9 @@ pub fn trace_return(value: Option<&str>) {
     if !DIAGRAM_ENABLED.load(Ordering::SeqCst) {
         return;
     }
+
+    // Pop the call depth when returning
+    pop_call_depth();
 
     let mut events = get_events().write();
     if let Some(last) = events.last_mut() {
@@ -643,9 +693,15 @@ pub fn mark_architectural(entity: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Mutex to serialize tests that use global diagram state
+    static TEST_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_diagram_enable_disable() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        rt_diagram_clear();
         rt_diagram_disable();
         assert!(!rt_diagram_is_enabled());
 
@@ -658,6 +714,7 @@ mod tests {
 
     #[test]
     fn test_trace_method() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         rt_diagram_clear();
         rt_diagram_enable();
 
@@ -679,6 +736,7 @@ mod tests {
 
     #[test]
     fn test_generate_sequence() {
+        let _guard = TEST_MUTEX.lock().unwrap();
         rt_diagram_clear();
         rt_diagram_enable();
 
