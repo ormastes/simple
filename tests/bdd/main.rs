@@ -77,6 +77,7 @@ async fn given_feature_db_with_categories(world: &mut MixinWorld, step: &cucumbe
             modes: ModeSupport::with_defaults(),
             platforms: Vec::new(),
             status: "planned".to_string(),
+            valid: true,
         };
         db.records.insert(id, record);
     }

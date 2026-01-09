@@ -70,6 +70,7 @@ pub struct FeatureRecord {
     pub modes: ModeSupport,
     pub platforms: Vec<String>,
     pub status: String,
+    pub valid: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +102,7 @@ pub fn parse_sspec_metadata(content: &str) -> Vec<SspecItem> {
     let mut items = Vec::new();
     let mut pending = PendingAttrs::default();
     let mut last_doc_block = String::new();
+    let mut pending_doc_lines: Vec<String> = Vec::new();
 
     let mut i = 0;
     while i < lines.len() {
@@ -118,6 +120,10 @@ pub fn parse_sspec_metadata(content: &str) -> Vec<SspecItem> {
                 i += 1;
             }
             last_doc_block = block.trim().to_string();
+            pending_doc_lines.clear();
+        } else if line.starts_with("///") {
+            let doc_line = line.trim_start_matches("///").trim().to_string();
+            pending_doc_lines.push(doc_line);
         } else if line.starts_with("#[") {
             parse_attr_line(line, &mut pending);
         } else if let Some(name) = parse_named_call(line, "describe")
@@ -125,6 +131,10 @@ pub fn parse_sspec_metadata(content: &str) -> Vec<SspecItem> {
             .or_else(|| parse_named_call(line, "test"))
             .or_else(|| parse_named_call(line, "it"))
         {
+            if !pending_doc_lines.is_empty() {
+                last_doc_block = pending_doc_lines.join("\n").trim().to_string();
+                pending_doc_lines.clear();
+            }
             if let Some(id) = pending.id.take() {
                 let mut modes = ModeSupport::with_defaults();
                 if !pending.only_modes.is_empty() {
@@ -147,6 +157,7 @@ pub fn parse_sspec_metadata(content: &str) -> Vec<SspecItem> {
             }
 
             pending = PendingAttrs::default();
+            last_doc_block = String::new();
         }
 
         i += 1;
@@ -239,6 +250,7 @@ pub fn update_feature_db_from_sspec(
         .iter()
         .map(|path| (path.display().to_string(), true))
         .collect();
+    let mut seen_ids: BTreeMap<String, String> = BTreeMap::new();
 
     for path in specs {
         let items = parse_sspec_file(path)?;
@@ -249,9 +261,19 @@ pub fn update_feature_db_from_sspec(
                     item.id
                 ));
             }
+            if let Some(existing) = seen_ids.insert(item.id.clone(), path.display().to_string()) {
+                return Err(format!(
+                    "feature id conflict: {} used in {} and {}",
+                    item.id, existing, path.display()
+                ));
+            }
             let failed = failed_set.contains_key(&path.display().to_string());
             db.upsert_from_sspec(&item, path, failed);
         }
+    }
+
+    for record in db.records.values_mut() {
+        record.valid = seen_ids.contains_key(&record.id);
     }
 
     save_feature_db(db_path, &db).map_err(|e| e.to_string())?;
@@ -271,19 +293,28 @@ impl FeatureDb {
     }
 
     pub fn upsert_from_sspec(&mut self, item: &SspecItem, path: &Path, failed: bool) {
+        let derived_category = derive_category_from_path(path);
         let entry = self.records.entry(item.id.clone()).or_insert_with(|| {
             FeatureRecord {
                 id: item.id.clone(),
-                category: "Uncategorized".to_string(),
+                category: derived_category
+                    .clone()
+                    .unwrap_or_else(|| "Uncategorized".to_string()),
                 name: item.name.clone(),
                 description: item.description.clone(),
                 spec: path.display().to_string(),
                 modes: ModeSupport::with_defaults(),
                 platforms: item.platforms.clone(),
                 status: "planned".to_string(),
+                valid: true,
             }
         });
 
+        if (entry.category.is_empty() || entry.category == "Uncategorized")
+            && derived_category.is_some()
+        {
+            entry.category = derived_category.unwrap_or_else(|| "Uncategorized".to_string());
+        }
         if entry.name.is_empty() {
             entry.name = item.name.clone();
         }
@@ -302,6 +333,7 @@ impl FeatureDb {
         } else if entry.status == "ignored" || entry.status == "failed" {
             entry.status = "planned".to_string();
         }
+        entry.valid = true;
     }
 }
 
@@ -347,6 +379,7 @@ fn parse_feature_db(doc: &SdnDocument) -> Result<FeatureDb, String> {
             modes: parse_modes(&row_map),
             platforms: parse_list_field(row_map.get("platforms")),
             status: row_map.get("status").cloned().unwrap_or_else(|| "planned".to_string()),
+            valid: parse_bool_field(row_map.get("valid")).unwrap_or(true),
         };
         db.records.insert(id, record);
     }
@@ -355,16 +388,30 @@ fn parse_feature_db(doc: &SdnDocument) -> Result<FeatureDb, String> {
 }
 
 pub fn generate_feature_docs(db: &FeatureDb, output_dir: &Path) -> Result<(), String> {
-    let mut records: Vec<&FeatureRecord> = db.records.values().collect();
-    records.sort_by(|a, b| a.id.cmp(&b.id));
+    let mut all_records: Vec<&FeatureRecord> = db.records.values().collect();
+    all_records.sort_by(|a, b| compare_feature_id(&a.id, &b.id));
+    let mut records: Vec<&FeatureRecord> = all_records
+        .iter()
+        .copied()
+        .filter(|record| record.valid)
+        .collect();
+    records.sort_by(|a, b| compare_feature_id(&a.id, &b.id));
+    let last_id = all_records
+        .last()
+        .map(|record| record.id.clone())
+        .unwrap_or_default();
 
-    generate_feature_index(output_dir, &records)?;
+    generate_feature_index(output_dir, &records, &last_id)?;
     generate_category_docs(output_dir, &records)?;
 
     Ok(())
 }
 
-fn generate_feature_index(output_dir: &Path, records: &[&FeatureRecord]) -> Result<(), String> {
+fn generate_feature_index(
+    output_dir: &Path,
+    records: &[&FeatureRecord],
+    last_id: &str,
+) -> Result<(), String> {
     let mut categories: BTreeMap<String, CategoryCounts> = BTreeMap::new();
     for record in records {
         let category = if record.category.is_empty() {
@@ -384,6 +431,9 @@ fn generate_feature_index(output_dir: &Path, records: &[&FeatureRecord]) -> Resu
 
     let mut md = String::new();
     md.push_str("# Feature Categories\n\n");
+    if !last_id.is_empty() {
+        md.push_str(&format!("Last ID: `{}`\n\n", last_id));
+    }
     md.push_str("| Category | Features | Skips | Ignores | Fails |\n");
     md.push_str("|----------|----------|-------|---------|-------|\n");
 
@@ -452,8 +502,14 @@ fn generate_category_docs(output_dir: &Path, records: &[&FeatureRecord]) -> Resu
             };
             let spec_link = spec_link_for_record(&path, record);
             md.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} |\n",
-                record.id, record.name, record.description, modes, platforms, spec_link
+                "| <a id=\"feature-{}\"></a>{} | {} | {} | {} | {} | {} |\n",
+                record.id.replace('.', "-"),
+                record.id,
+                record.name,
+                record.description,
+                modes,
+                platforms,
+                spec_link
             ));
         }
 
@@ -623,6 +679,7 @@ pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error
         "mode_smf_llvm".to_string(),
         "platforms".to_string(),
         "status".to_string(),
+        "valid".to_string(),
     ];
 
     let mut rows = Vec::new();
@@ -639,6 +696,7 @@ pub fn save_feature_db(path: &Path, db: &FeatureDb) -> Result<(), std::io::Error
         row.push(SdnValue::String(mode_status(&record.modes, "smf_llvm")));
         row.push(SdnValue::String(record.platforms.join(",")));
         row.push(SdnValue::String(record.status.clone()));
+        row.push(SdnValue::Bool(record.valid));
         rows.push(row);
     }
 
@@ -701,6 +759,10 @@ fn mode_status(modes: &ModeSupport, key: &str) -> String {
         .to_string()
 }
 
+fn parse_bool_field(value: Option<&String>) -> Option<bool> {
+    value.map(|v| v == "true")
+}
+
 fn sdn_value_to_string(value: &SdnValue) -> String {
     match value {
         SdnValue::Null => "".to_string(),
@@ -710,4 +772,60 @@ fn sdn_value_to_string(value: &SdnValue) -> String {
         SdnValue::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+fn compare_feature_id(left: &str, right: &str) -> std::cmp::Ordering {
+    let left_parts = parse_feature_id_parts(left);
+    let right_parts = parse_feature_id_parts(right);
+    left_parts.cmp(&right_parts)
+}
+
+fn parse_feature_id_parts(value: &str) -> Vec<FeatureIdPart> {
+    value
+        .split('.')
+        .map(|part| {
+            if let Ok(num) = part.parse::<u64>() {
+                FeatureIdPart::Number(num)
+            } else {
+                FeatureIdPart::Text(part.to_string())
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum FeatureIdPart {
+    Number(u64),
+    Text(String),
+}
+
+fn derive_category_from_path(path: &Path) -> Option<String> {
+    let parts: Vec<String> = path
+        .components()
+        .filter_map(|comp| match comp {
+            std::path::Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    let features_idx = parts.iter().position(|p| p == "features")?;
+    let category = parts.get(features_idx + 1)?.to_string();
+    Some(title_case_category(&category))
+}
+
+fn title_case_category(value: &str) -> String {
+    value
+        .split('_')
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => format!(
+                    "{}{}",
+                    first.to_ascii_uppercase(),
+                    chars.as_str().to_ascii_lowercase()
+                ),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<String>>()
+        .join(" ")
 }
