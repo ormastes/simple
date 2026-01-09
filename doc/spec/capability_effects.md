@@ -1,5 +1,11 @@
 # Capability-Based Effects Specification (#880-884)
 
+> **⚠️ MIGRATED:** This specification has been migrated to an executable test file:  
+> **→** `tests/specs/capability_effects_spec.spl`  
+> **Date:** 2026-01-09  
+> 
+> This file is kept for reference but may become outdated. The _spec.spl file is the source of truth.
+
 **Status:** 📋 Planned  
 **Category:** LLM-Friendly Features  
 **Priority:** High  

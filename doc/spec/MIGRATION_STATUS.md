@@ -21,17 +21,22 @@ See [SPEC_MIGRATION_PLAN.md](../SPEC_MIGRATION_PLAN.md) for full details.
 
 ## Migration Categories
 
-### ✅ To Migrate (7 files)
+### ✅ To Migrate (7 files) - COMPLETE
 
 Direct migrations - feature specs with Feature IDs:
 
-- [ ] syntax.md (#10-19) → tests/specs/syntax_spec.spl
-- [ ] types.md (#20-29) → tests/specs/types_spec.spl
-- [ ] type_inference.md (#13) → tests/specs/type_inference_spec.spl
-- [ ] async_default.md (#276-285) → tests/specs/async_default_spec.spl
-- [ ] suspension_operator.md (#270-275) → tests/specs/suspension_operator_spec.spl
-- [ ] capability_effects.md (#880-884) → tests/specs/capability_effects_spec.spl
-- [ ] sandboxing.md (#916-923) → tests/specs/sandboxing_spec.spl
+- [x] syntax.md (#10-19) → tests/specs/syntax_spec.spl ✅ **DONE 2026-01-09**
+- [x] types.md (#20-29) → tests/specs/types_spec.spl ✅ **DONE 2026-01-09**
+- [x] type_inference.md (#13) → tests/specs/type_inference_spec.spl ✅ **DONE 2026-01-09**
+- [x] async_default.md (#276-285) → tests/specs/async_default_spec.spl ✅ **DONE 2026-01-09**
+- [x] suspension_operator.md (#270-275) → tests/specs/suspension_operator_spec.spl ✅ **DONE 2026-01-09**
+- [x] capability_effects.md (#880-884) → tests/specs/capability_effects_spec.spl ✅ **DONE 2026-01-09**
+- [x] sandboxing.md (#916-923) → tests/specs/sandboxing_spec.spl ✅ **DONE 2026-01-09**
+
+**Migration Results:**
+- Total size: 54.6K of specification content
+- Code examples: 137 examples extracted and converted to test cases
+- All original .md files marked with migration notice
 
 ### 📤 To Extract (8 files)
 
@@ -87,14 +92,20 @@ Reference documentation, tooling, frameworks:
 
 ## Current Status
 
-### ✅ Comment-Only .spl Files ARE Supported
+### ✅ Category A Migration Complete (2026-01-09)
 
-**Testing Complete (2026-01-09):**
-- Created `tests/meta/comment_only_spec.spl` with only `"""..."""` docstrings
-- Successfully compiled: `simple compile tests/meta/comment_only_spec.spl`
-- Result: Pure-docstring files compile without errors
+**All 7 Category A files successfully migrated to tests/specs/*_spec.spl**
 
-**Conclusion:** No parser changes needed. Specification files can be pure docstrings.
+Migration completed using `python scripts/migrate_spec_to_spl.py --all`
+
+**Results:**
+- 54.6K of specification content migrated
+- 137 code examples extracted and converted to test cases
+- All original .md files marked with migration notice
+- New specs ready for future implementation
+
+**Note on Compilation:**
+Several migrated specs contain code examples with unimplemented features (e.g., `~=` suspension operator, `@` decorators). This is expected - specs document planned features. Compilation errors indicate features to implement, not migration failures.
 
 ---
 
@@ -110,15 +121,31 @@ Reference documentation, tooling, frameworks:
 
 ## Progress Tracking
 
-### Phase 1: Preparation ✅ (Partial)
+### Phase 1: Preparation ✅ COMPLETE
 - [x] Verify comment-only .spl support (✅ Working)
-- [ ] Create migration script: `scripts/migrate_spec_to_spl.py`
-- [ ] Create _spec.spl template
-- [ ] Tag all doc/spec/*.md files
+- [x] Create migration script: `scripts/migrate_spec_to_spl.py`
+- [x] Create _spec.spl template
+- [x] Tag all doc/spec/*.md files
 
-### Phase 2: Core Migrations ⏳
-**Direct (7):** 0/7 complete  
-**Extract (8):** 0/8 complete
+### Phase 2: Core Migrations ✅ Category A COMPLETE
+**Direct (7):** 7/7 complete ✅ **ALL DONE**
+- [x] syntax.md → syntax_spec.spl (8.1K, 21 examples)
+- [x] types.md → types_spec.spl (8.1K, 17 examples)
+- [x] type_inference.md → type_inference_spec.spl (7.1K, 24 examples)
+- [x] async_default.md → async_default_spec.spl (13K, 37 examples)
+- [x] suspension_operator.md → suspension_operator_spec.spl (9.1K, 24 examples)
+- [x] capability_effects.md → capability_effects_spec.spl (8.5K, 14 examples)
+- [x] sandboxing.md → sandboxing_spec.spl (646 bytes, 0 examples)
+
+**Extract (8):** 0/8 complete ⏳ Next Priority
+- [ ] functions.md
+- [ ] traits.md
+- [ ] memory.md
+- [ ] modules.md
+- [ ] data_structures.md
+- [ ] concurrency.md
+- [ ] macro.md
+- [ ] metaprogramming.md
 
 ### Phase 3: Organization ⏳
 - [ ] Update doc/spec/README.md

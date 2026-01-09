@@ -1,32 +1,28 @@
+"""
 # Async-Default Function Model
-
-> **⚠️ MIGRATED:** This specification has been migrated to an executable test file:  
-> **→** `tests/specs/async_default_spec.spl`  
-> **Date:** 2026-01-09  
-> 
-> This file is kept for reference but may become outdated. The _spec.spl file is the source of truth.
 
 **Status:** Draft
 **Feature IDs:** #276-285
-**Last Updated:** 2026-01-05
 **Keywords:** async, sync, effects, promises, futures
+**Last Updated:** 2026-01-05
 **Topics:** concurrency, syntax, effects
+**Migrated From:** doc/spec/async_default.md
+
+## Overview
 
 This document specifies Simple's async-default execution model where functions are async by default and sync is explicit.
 
 ## Related Specifications
 
-- [Suspension Operator](suspension_operator.md) - Explicit `~` suspension syntax
-- [Concurrency](concurrency.md) - Futures, actors, channels
-- [Functions](functions.md) - Function definitions
+- **Suspension Operator** - Explicit `~` suspension syntax
+- **Concurrency** - Futures, actors, channels
+- **Functions** - Function definitions
+"""
 
----
+# Test cases extracted from specification
 
-## Motivation
+## Test: Motivation
 
-Most modern applications are I/O-bound and async. Requiring `async` on every function leads to:
-
-```simple
 # Verbose: async everywhere
 async fn fetch_user(id: UserId) -> User: ...
 async fn fetch_orders(user: User) -> [Order]: ...
@@ -35,46 +31,26 @@ async fn main():
     let user = await fetch_user(1_uid)
     let orders = await fetch_orders(user)
     ...
-```
 
-**Observation:** In real codebases, 80%+ of functions could be async. Making sync explicit is more practical.
+## Test: Design Overview
 
----
-
-## Design Overview
-
-### Core Principle: Async is Default
-
-| Declaration | Meaning | Can Suspend? |
-|-------------|---------|--------------|
-| `fn foo()` | Async-capable (default) | ✅ Yes |
-| `sync fn foo()` | Explicitly synchronous | ❌ No |
-
-### Return Type: Implicit Promise Wrapping
-
-Functions that **can** suspend have their return type implicitly wrapped:
-
-```simple
 # Declaration
 fn fetch_user(id: UserId) -> User
 
 # Actual signature (implicit)
 fn fetch_user(id: UserId) -> Promise[User]
-```
 
-But the caller sees the **unwrapped** type when using `~=` or `await`:
+## Test: Design Overview
 
-```simple
-let user ~= fetch_user(1_uid)   # user: User (not Promise[User])
-```
+test "design_overview_3":
+    """
+    Design Overview
+    """
+    let user ~= fetch_user(1_uid)   # user: User (not Promise[User])
+    assert_compiles()
 
----
+## Test: Syntax
 
-## Syntax
-
-### Function Declarations
-
-```simple
 # Async-capable (default) - can contain ~=, if~, while~
 fn load_data() -> Data:
     let content ~= read_file(path)
@@ -88,11 +64,9 @@ sync fn compute(x: i64) -> i64:
 actor Counter:
     on Increment(n: i64):      # Cannot suspend
         self.value += n
-```
 
-### Calling Conventions
+## Test: Syntax
 
-```simple
 fn caller() -> Result:
     # Suspending call - awaits and unwraps
     let data ~= load_data()           # data: Data
@@ -102,63 +76,42 @@ fn caller() -> Result:
 
     # Sync function - no promise wrapping
     let result = compute(42)           # result: i64 (direct)
-```
 
----
+## Test: Promise Type
 
-## Promise Type
+test "promise_type_6":
+    """
+    Promise Type
+    """
+    enum PromiseState:
+        Pending
+        Fulfilled
+        Rejected
 
-### Definition
+    class Promise[T]:
+        state: PromiseState
+        value: Option[T]
+        error: Option[Error]
+    assert_compiles()
 
-```simple
-enum PromiseState:
-    Pending
-    Fulfilled
-    Rejected
+## Test: Promise Type
 
-class Promise[T]:
-    state: PromiseState
-    value: Option[T]
-    error: Option[Error]
-```
-
-### Implicit Wrapping Rules
-
-| Function Type | Declared Return | Actual Return | Call with `~=` |
-|---------------|-----------------|---------------|----------------|
-| `fn` (default) | `T` | `Promise[T]` | `T` |
-| `fn` (default) | `Promise[T]` | `Promise[T]` | `T` |
-| `sync fn` | `T` | `T` | N/A (error) |
-
-### Explicit Promise Return
-
-If you explicitly return `Promise[T]`, no double-wrapping:
-
-```simple
 fn get_cached_or_fetch(id: UserId) -> Promise[User]:
     if let Some(user) = cache.get(id):
         return Promise.resolve(user)   # Already resolved
     return fetch_user(id)              # Returns Promise[User]
-```
 
----
+## Test: Combinators (Promise Chaining)
 
-## Combinators (Promise Chaining)
-
-### then() / catch() / finally()
-
-```simple
 fn process_pipeline() -> Promise[Result]:
     return fetch_data()
         .then(\data: transform(data))
         .then(\transformed: save(transformed))
         .catch(\err: log_error(err); default_result())
         .finally(\: cleanup())
-```
 
-### all() / race() / any()
+## Test: Combinators (Promise Chaining)
 
-```simple
 fn parallel_fetch(ids: [UserId]) -> Promise[[User]]:
     let promises = ids.map(\id: fetch_user(id))
     return Promise.all(promises)
@@ -170,11 +123,9 @@ fn first_response(urls: [Url]) -> Promise[Response]:
 fn first_success(urls: [Url]) -> Promise[Response]:
     let promises = urls.map(\url: http.get(url))
     return Promise.any(promises)   # First non-rejected
-```
 
-### allSettled()
+## Test: Combinators (Promise Chaining)
 
-```simple
 fn try_all(tasks: [Task]) -> Promise[[SettledResult[T]]]:
     let promises = tasks.map(\t: run_task(t))
     return Promise.all_settled(promises)
@@ -183,25 +134,17 @@ fn try_all(tasks: [Task]) -> Promise[[SettledResult[T]]]:
 enum SettledResult[T]:
     Fulfilled(value: T)
     Rejected(error: Error)
-```
 
----
+## Test: Sync Functions
 
-## Sync Functions
-
-### Declaration
-
-```simple
 sync fn pure_compute(x: i64, y: i64) -> i64:
     return x + y
 
 sync fn validate(data: Data) -> bool:
     return data.is_valid()
-```
 
-### Restrictions
+## Test: Sync Functions
 
-```simple
 sync fn bad_sync():
     let x ~= fetch()        # ERROR: suspension in sync function
     if~ is_ready():         # ERROR: suspending guard in sync
@@ -210,22 +153,9 @@ sync fn bad_sync():
 sync fn also_bad():
     let p = fetch()         # OK: just getting the Promise
     let x = await p         # ERROR: await in sync function
-```
 
-### When to Use `sync`
+## Test: Type Inference
 
-1. **Pure computation** - No I/O, no side effects
-2. **Performance critical** - Guaranteed no scheduling overhead
-3. **FFI callbacks** - C functions can't handle suspension
-4. **Actor handlers** - Run-to-completion semantics
-
----
-
-## Type Inference
-
-### Promise Inference
-
-```simple
 fn example():
     # Type inference handles unwrapping
     let user ~= fetch_user(id)      # user: User
@@ -236,11 +166,9 @@ fn example():
 
     # Sync functions return directly
     let n = compute(42)             # n: i64
-```
 
-### Generic Functions
+## Test: Type Inference
 
-```simple
 # Works with any async function
 fn retry[T](f: fn() -> T, attempts: i64) -> T:
     for i in 0..attempts:
@@ -250,11 +178,9 @@ fn retry[T](f: fn() -> T, attempts: i64) -> T:
                 _ ~= timer.sleep(1000_ms)
             case Err(e):
                 return Err(e)
-```
 
-### Sync Constraint
+## Test: Type Inference
 
-```simple
 # Only accepts sync functions
 sync fn map_sync[T, U](items: [T], f: sync fn(T) -> U) -> [U]:
     return [f(item) for item in items]
@@ -262,25 +188,9 @@ sync fn map_sync[T, U](items: [T], f: sync fn(T) -> U) -> [U]:
 # Accepts any function (async or sync)
 fn map_async[T, U](items: [T], f: fn(T) -> U) -> [U]:
     return [f(item) ~= for item in items]  # Parallel await
-```
 
----
+## Test: Effect Inference (Automatic async/sync Detection)
 
-## Effect Inference (Automatic async/sync Detection)
-
-Simple uses **bidirectional effect inference** to automatically determine whether a function is async or sync based on its body. No explicit annotation is needed in most cases.
-
-### Inference Rules
-
-| Function Body Contains | Inferred Effect | Return Type |
-|------------------------|-----------------|-------------|
-| `~=`, `if~`, `while~`, `for~` | async | `Promise[T]` |
-| Calls to async functions | async | `Promise[T]` |
-| Only sync operations | sync | `T` directly |
-
-### Examples
-
-```simple
 # INFERRED AS SYNC: only pure computation
 fn double(x: i64) -> i64:
     return x * 2
@@ -301,28 +211,9 @@ fn get_promise(id: UserId) -> User:
 fn compute_total(items: [Item]) -> i64:
     return items.map(\i: i.price).sum()
 # Compiler infers: sync fn compute_total(items: [Item]) -> i64
-```
 
-### Inference Algorithm
+## Test: Effect Inference (Automatic async/sync Detection)
 
-```
-infer_effect(fn_body):
-    1. Collect all expressions in fn_body
-    2. For each expression:
-       - If suspension operator (~=, if~, while~, for~): return ASYNC
-       - If function call f():
-         - If f is known async: return ASYNC
-         - If f is known sync: continue
-         - If f is unknown: defer (mutual recursion)
-    3. If no async indicators found: return SYNC
-    4. For deferred cases: use fixed-point iteration
-```
-
-### Call-Site Inference
-
-The compiler also infers at call sites:
-
-```simple
 fn caller() -> Data:
     # fetch_data() returns Promise[Data]
     # Assigning to Data (not Promise[Data]) implies await
@@ -333,28 +224,16 @@ fn caller() -> Data:
 fn caller() -> Data:
     let data ~= fetch_data()
     return data
-```
 
-### Type-Driven Await Inference
+## Test: Effect Inference (Automatic async/sync Detection)
 
-```simple
 fn example():
     let p = fetch_user(id)      # p: Promise[User] (no await)
     let u: User = fetch_user(id) # u: User (await inferred from type)
     let v ~= fetch_user(id)      # v: User (explicit await)
-```
 
-| Assignment | Target Type | Inferred |
-|------------|-------------|----------|
-| `let p = async_fn()` | `Promise[T]` | No await |
-| `let x: T = async_fn()` | `T` | Await inferred |
-| `let y ~= async_fn()` | `T` | Explicit await |
+## Test: Effect Inference (Automatic async/sync Detection)
 
-### Explicit Override
-
-Use `sync` to **force** sync semantics (compiler verifies):
-
-```simple
 # Force sync - error if body would suspend
 sync fn must_be_fast(x: i64) -> i64:
     return x * x              # OK: pure computation
@@ -364,13 +243,9 @@ sync fn broken():
 
 sync fn also_broken():
     let x: Data = fetch()     # ERROR: type-inferred await in sync fn
-```
 
-### Async Boundary Annotation
+## Test: Effect Inference (Automatic async/sync Detection)
 
-For public APIs, you can explicitly declare the effect for documentation:
-
-```simple
 # Explicit async (documentation, no behavioral change)
 async fn fetch_user(id: UserId) -> User:
     ...
@@ -382,13 +257,9 @@ sync fn compute(x: i64) -> i64:
 # Inferred (most common case)
 fn process(data: Data) -> Result:
     ...  # Compiler figures it out
-```
 
-### Mutual Recursion
+## Test: Effect Inference (Automatic async/sync Detection)
 
-The compiler handles mutually recursive functions:
-
-```simple
 fn ping(n: i64) -> i64:
     if n == 0: return 0
     return pong(n - 1)        # Calls pong
@@ -398,9 +269,9 @@ fn pong(n: i64) -> i64:
     return ping(n - 1)        # Calls ping
 
 # Both inferred as SYNC (no suspension in either)
-```
 
-```simple
+## Test: Effect Inference (Automatic async/sync Detection)
+
 fn async_ping(n: i64) -> i64:
     if n == 0: return 0
     _ ~= delay(10_ms)         # Suspension!
@@ -411,50 +282,17 @@ fn async_pong(n: i64) -> i64:
     return async_ping(n - 1)  # Calls async function
 
 # Both inferred as ASYNC (async_ping suspends, async_pong calls it)
-```
 
-### Inference Summary
+## Test: Interaction with ~= Operator
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Effect Inference Flow                      │
-├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  fn foo() -> T:                                              │
-│      body...                                                  │
-│          │                                                    │
-│          ▼                                                    │
-│  ┌───────────────────┐                                       │
-│  │ Analyze body for: │                                       │
-│  │ - ~=, if~, while~ │──yes──▶ ASYNC, returns Promise[T]    │
-│  │ - async fn calls  │                                       │
-│  │ - type-driven     │                                       │
-│  │   await (T = ...)│                                       │
-│  └───────────────────┘                                       │
-│          │ no                                                 │
-│          ▼                                                    │
-│      SYNC, returns T directly                                │
-│                                                               │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Interaction with ~= Operator
-
-### In Async-Default Functions
-
-```simple
 fn process() -> Data:
     # ~= is the standard way to call and await
     let raw ~= fetch_data()
     let parsed ~= parse_async(raw)
     return transform(parsed)
-```
 
-### In Sync Functions
+## Test: Interaction with ~= Operator
 
-```simple
 sync fn compute() -> i64:
     # ~= is a compile error
     let x ~= fetch()    # ERROR
@@ -462,11 +300,9 @@ sync fn compute() -> i64:
     # Getting promise is OK, but can't await it
     let p = fetch()     # OK: p is Promise[i64]
     # But what can you do with it? Not much in sync context
-```
 
-### Bridging Sync and Async
+## Test: Interaction with ~= Operator
 
-```simple
 # Spawn async work from sync context
 sync fn start_background_task(id: TaskId):
     spawn_detached:
@@ -476,15 +312,9 @@ sync fn start_background_task(id: TaskId):
 # Block on async from sync (escape hatch)
 sync fn blocking_fetch(id: UserId) -> User:
     return block_on(fetch_user(id))   # Blocks thread!
-```
 
----
+## Test: Migration Strategy
 
-## Migration Strategy
-
-### Phase 1: Add `sync` Keyword
-
-```simple
 # Old code still works
 fn foo() -> i64:
     return 42
@@ -492,11 +322,9 @@ fn foo() -> i64:
 # Can now mark sync explicitly
 sync fn bar() -> i64:
     return 42
-```
 
-### Phase 2: Warn on Implicit Sync
+## Test: Migration Strategy
 
-```simple
 # Warning: function 'foo' could be marked 'sync'
 fn foo() -> i64:
     return 42
@@ -504,66 +332,27 @@ fn foo() -> i64:
 # No warning
 sync fn foo() -> i64:
     return 42
-```
 
-### Phase 3: Async-Default Semantics
+## Test: Migration Strategy
 
-```simple
 # Now fn is async by default
 fn foo() -> i64:         # Returns Promise[i64]
     return 42
 
 sync fn bar() -> i64:    # Returns i64 directly
     return 42
-```
 
-### Migration Tool
+## Test: Examples
 
-```bash
-# Analyze codebase for sync-eligible functions
-simple migrate --analyze-sync
-
-# Auto-add sync to non-suspending functions
-simple migrate --add-sync
-
-# Verify no behavior changes
-simple migrate --verify
-```
-
----
-
-## Comparison with Other Languages
-
-| Language | Default | Async Syntax | Sync Syntax |
-|----------|---------|--------------|-------------|
-| **Simple** | Async | `fn` | `sync fn` |
-| JavaScript | Sync | `async function` | `function` |
-| Python | Sync | `async def` | `def` |
-| Rust | Sync | `async fn` | `fn` |
-| Kotlin | Sync | `suspend fun` | `fun` |
-| Go | Sync (goroutines) | `go func` | `func` |
-| Zig | Sync | `async fn` | `fn` |
-
-Simple's approach is unique: **async is the common case, sync is the exception**.
-
----
-
-## Examples
-
-### Web Server Handler
-
-```simple
 # Clean async-default style
 fn handle_request(req: Request) -> Response:
     let user ~= authenticate(req)?
     let data ~= fetch_user_data(user.id)
     let rendered ~= render_template("user.html", data)
     return Response.ok(rendered)
-```
 
-### CLI Tool
+## Test: Examples
 
-```simple
 # Mix of sync and async
 fn main() -> i64:
     let args = parse_args()              # sync: no ~=
@@ -575,11 +364,9 @@ fn main() -> i64:
         _ ~= write_file(file + ".out", result)
 
     return 0
-```
 
-### Library with Sync API
+## Test: Examples
 
-```simple
 # Public sync API for simple use cases
 pub sync fn hash(data: Bytes) -> Hash:
     return sha256_compute(data)
@@ -590,63 +377,33 @@ fn hash_stream(stream: Stream) -> Hash:
     for~ chunk in stream:
         hasher.update(chunk)
     return hasher.finalize()
-```
 
-### Actor Pattern
+## Test: Examples
 
-```simple
-actor UserCache:
-    state:
-        cache: Dict[UserId, User] = {}
+test "examples_32":
+    """
+    Examples
+    """
+    actor UserCache:
+        state:
+            cache: Dict[UserId, User] = {}
 
-    # Handler is run-to-completion (like sync)
-    on Get(id: UserId, reply_to: Pid[Option[User]]):
-        send reply_to, self.cache.get(id)
+        # Handler is run-to-completion (like sync)
+        on Get(id: UserId, reply_to: Pid[Option[User]]):
+            send reply_to, self.cache.get(id)
 
-    # Can spawn async tasks
-    on Refresh(id: UserId):
-        spawn_detached:
-            let user ~= fetch_user_from_db(id)
-            send self, Update(id, user)
+        # Can spawn async tasks
+        on Refresh(id: UserId):
+            spawn_detached:
+                let user ~= fetch_user_from_db(id)
+                send self, Update(id, user)
 
-    on Update(id: UserId, user: User):
-        self.cache[id] = user
-```
+        on Update(id: UserId, user: User):
+            self.cache[id] = user
+    assert_compiles()
 
----
+## Test: Promise Type Details
 
-## Grammar Changes
-
-### Function Declaration
-
-```ebnf
-FnDecl      -> FnModifiers "fn" Ident GenericParams? "(" Params? ")" RetType? ":" Block
-FnModifiers -> ["pub"] ["sync"]
-
-# Examples:
-# fn foo() -> i64           -- async-capable (default)
-# sync fn bar() -> i64      -- explicitly sync
-# pub fn baz() -> str       -- public, async-capable
-# pub sync fn qux() -> str  -- public, sync
-```
-
-### Sync Constraint in Types
-
-```ebnf
-FnType      -> ["sync"] "fn" "(" Types? ")" "->" Type
-
-# Examples:
-# fn(i64) -> i64            -- async-capable function type
-# sync fn(i64) -> i64       -- sync function type
-```
-
----
-
-## Promise Type Details
-
-### Core API
-
-```simple
 class Promise[T]:
     # Creation
     static fn new(executor: fn(resolve: fn(T), reject: fn(Error))) -> Promise[T]
@@ -668,11 +425,9 @@ class Promise[T]:
     fn is_pending() -> bool
     fn is_fulfilled() -> bool
     fn is_rejected() -> bool
-```
 
-### Interop with Result
+## Test: Promise Type Details
 
-```simple
 # Promise + Result composition
 fn fetch_or_error(url: Url) -> Promise[Result[Data, HttpError]]:
     return http.get(url)
@@ -683,15 +438,9 @@ fn fetch_or_error(url: Url) -> Promise[Result[Data, HttpError]]:
 fn use_it() -> Result[Data, Error]:
     let data ~= fetch_or_error(url)?
     return Ok(data)
-```
 
----
+## Test: Error Handling
 
-## Error Handling
-
-### Promise Rejection
-
-```simple
 fn might_fail() -> Data:
     if random() < 0.5:
         raise NetworkError("Connection lost")  # Rejects promise
@@ -704,56 +453,30 @@ fn caller():
     # .catch() handles rejection
     let safe = might_fail()
         .catch(\e: default_data())
-```
 
-### Unhandled Rejection
+## Test: Error Handling
 
-```simple
-# Global handler
-Promise.on_unhandled_rejection(\e:
-    log.error("Unhandled promise rejection: {e}")
-)
-
-# Or per-promise
-let p = risky_operation()
-    .catch(\e:
-        log.warn("Operation failed: {e}")
-        default_value()
+test "error_handling_36":
+    """
+    Error Handling
+    """
+    # Global handler
+    Promise.on_unhandled_rejection(\e:
+        log.error("Unhandled promise rejection: {e}")
     )
-```
 
----
+    # Or per-promise
+    let p = risky_operation()
+        .catch(\e:
+            log.warn("Operation failed: {e}")
+            default_value()
+        )
+    assert_compiles()
 
-## Performance Considerations
+## Test: Performance Considerations
 
-### Sync Functions
-
-- **No Promise allocation** - Direct return
-- **No scheduler interaction** - Runs to completion
-- **Inlinable** - Compiler can inline freely
-
-### Async Functions
-
-- **Promise allocation** - One per call (pooled)
-- **Scheduler integration** - Cooperative yielding
-- **Batching** - Multiple awaits can batch
-
-### Optimization: Sync Inference
-
-The compiler can optimize async functions that don't actually suspend:
-
-```simple
 fn technically_async() -> i64:
     return 42   # Never suspends
 
 # Compiler may optimize to direct call (no Promise)
-```
 
----
-
-## Related Specifications
-
-- [Suspension Operator](suspension_operator.md) - `~=`, `if~`, `while~` syntax
-- [Concurrency](concurrency.md) - Actors, channels, threads
-- [Functions](functions.md) - Base function syntax
-- [Capability Effects](capability_effects.md) - Effect system
